@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Hardcodet.Wpf.TaskbarNotification;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -95,7 +96,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         App.AlertFailedJobLookbackMinutes = 60;
         App.AlertCooldownMinutes = 5;
         App.AlertDeliveryMode = AlertNotificationMode.Summary;
-        App.AlertPerEventMaxPerCycle = 10;
+        App.AlertPerEventMaxPerCycle = AlertDefaults.PerEventMax;
     }
 
     /* ---------------- fakes (adapter/store/deliverer — the engine sees Lite's REAL settings) ---------------- */
@@ -1024,9 +1025,9 @@ public partial class LiteAlertForwardingTests : IDisposable
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("THREADPOOL (900s in 10m), RESOURCE_SEMAPHORE (600s in 10m)", fired.CurrentValue);
-        Assert.Equal("600s accumulated over 10m (an average of 1 task(s) continuously waiting)", fired.ThresholdValue);
+        Assert.Equal("600s accumulated over 10m (an average of 1 task continuously waiting)", fired.ThresholdValue);
         Assert.Equal(
-            "[THREADPOOL] 900s of wait accumulated in the last 10 minutes across 30,000 waits — on average 1.5 task(s) continuously stuck",
+            "[THREADPOOL] 900s of wait accumulated in the last 10 minutes across 30,000 waits — on average 1.5 tasks continuously stuck",
             fired.ShortMessage);
         Assert.Equal(900_000d, fired.NumericCurrentValue);
         Assert.Equal(600_000d, fired.NumericThresholdValue);

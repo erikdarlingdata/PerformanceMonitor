@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using Microsoft.AspNetCore.Http;
 
 namespace PerformanceMonitor.Darling.Service.Hosting;
@@ -20,7 +21,9 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 ///
 /// <para><b>Seats.</b> The shared token (<see cref="Subject"/> null, edit — the pre-#2550 reach,
 /// unchanged); an OIDC admin (named, edit); an OIDC viewer (named, read-only); a named web token (#7735: named by its
-/// entry, <see cref="TokenName"/> set, read-only or edit as the entry's role says, decided from the live set on every request); and
+/// entry, <see cref="TokenName"/> set, read-only or edit as the entry's role says, decided from the live set on every request); a scoped
+/// reader (a named reader whose entry carries <c>allowedTagIds</c>: <see cref="AllowedTagIds"/> set from the live set on every request, the
+/// scope never in the cookie, and every server read held to the servers under those tags); and
 /// <see cref="ReadsOnly"/> (<see cref="Subject"/> null, read-only), which the host stores for every request on a dashboard that
 /// <c>web.allowTokenlessLoopback</c> serves with no token, and for a shared-token session when the token is under
 /// the length floor.</para>
@@ -39,7 +42,9 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// sessions and a role change applies to them. <see cref="TryResolveSeat"/> hands such a cookie back read-only with
 /// <see cref="TokenName"/> set, and the middleware's lookup decides the rest.</para>
 /// </summary>
-internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? OwnerKey = null, string? TokenName = null)
+/// <param name="AllowedTagIds">The scoped reader's server tag ids, or null for every other seat. The tag tree and the tag map are read
+/// on each request, so a tag change applies to the next request without a new sign-in.</param>
+internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? OwnerKey = null, string? TokenName = null, IReadOnlyList<int>? AllowedTagIds = null, Guid? GroupId = null, Guid? GroupGeneration = null)
 {
     /// <summary>The shared-token seat: full edit reach, exactly what the token granted before per-user identity
     /// existed.</summary>
@@ -168,6 +173,9 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     /// <summary>Encodes a named web token's seat for the session cookie's subject slot (#7735): <c>t1:{name}</c>.</summary>
     internal static string EncodeTokenCookieSubject(string name) => TokenPrefix + name;
 
+    internal static string EncodeGroupCookieSubject(Guid groupId, Guid generation) =>
+        "g1:" + groupId.ToString("N") + ":" + generation.ToString("N");
+
     /// <summary>
     /// Resolves a validated session cookie's subject slot to a seat. Null (the two-segment shared-token
     /// cookie) is the shared-token seat; a recognized <c>o1:</c> or <c>o2:</c> encoding is that OIDC seat (<c>o1</c> with no owner key); a
@@ -182,6 +190,19 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
         {
             seat = SharedToken;
             return true;
+        }
+
+        if (cookieSubject.StartsWith("g1:", StringComparison.Ordinal))
+        {
+            var parts=cookieSubject.Split(':');
+            if(parts.Length==3 && Guid.TryParseExact(parts[1],"N",out var group) && group!=Guid.Empty &&
+                Guid.TryParseExact(parts[2],"N",out var generation) && generation!=Guid.Empty)
+            {
+                seat=new DarlingWebSeat(null,false,GroupId:group,GroupGeneration:generation);
+                return true;
+            }
+            seat=ReadsOnly;
+            return false;
         }
 
         if (cookieSubject.StartsWith(TokenPrefix, StringComparison.Ordinal) && cookieSubject.Length > TokenPrefix.Length)

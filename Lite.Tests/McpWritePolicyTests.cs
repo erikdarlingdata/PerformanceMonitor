@@ -126,7 +126,7 @@ public sealed class McpWritePolicyTests
 
     /// <summary>The host's own registration (<see cref="McpHostService.RegisterMcpServer"/>) and JSON guard behind a
     /// test web server: what a client reaches when it calls a tool on the real endpoint.</summary>
-    private static async Task<TestServer> BuildServer(bool allowWrites)
+    private static async Task<TestServer> BuildServer(bool allowWrites, McpHostService.McpServing? serving = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -146,7 +146,7 @@ public sealed class McpWritePolicyTests
             builder.Services.AddSingleton(serviceType, _ => null!);
         }
 
-        McpHostService.RegisterMcpServer(builder.Services, allowWrites);
+        McpHostService.RegisterMcpServer(builder.Services, allowWrites, serving: serving);
 
         var app = builder.Build();
         McpHostService.UseJsonPostGuard(app);
@@ -232,7 +232,7 @@ public sealed class McpWritePolicyTests
         Assert.Equal(all.Count, writesServed.Count);
         Assert.Equal(McpWritePolicy.WriteTools.Count, all.Count - defaultServed.Count);
 
-        /* #5820: the four investigation tools are served only by their own setting (McpInvestigationPolicy), so the default
+        /* #5820, #8461: the two tools that claim and report are served only by their own setting (McpInvestigationPolicy), so the default
            count leaves them out too. */
         var defaultCount = defaultServed.Count - McpInvestigationPolicy.InvestigationTools.Count;
 
@@ -301,6 +301,32 @@ public sealed class McpWritePolicyTests
         Assert.Equal(allowWrites, !instructions.Contains("in the catalog", StringComparison.Ordinal));
     }
 
+    /* #8610: the census used to say "`mcp_allow_writes` is off" whenever the write tools were absent. With the switch on, they are also absent
+       when the tokenless opt-out leaves no token or the token is under the floor, and a client told the switch is off could not tell the
+       operator what to change. Each state is run through the host's own decision (DecideServing) and registration. */
+    private const string UsableToken = "0123456789abcdefghij";
+
+    [Theory]
+    [InlineData(false, false, UsableToken, "`mcp_allow_writes` is off, so the")]
+    [InlineData(true, true, null, "`mcp_allow_writes` is on, but `mcp_allow_tokenless_loopback` is on too and the write tools need an MCP token")]
+    [InlineData(true, false, "short", "`mcp_allow_writes` is on, but the MCP token is not usable (it needs a token of at least")]
+    [InlineData(true, false, "aaaaaaaaaaaaaaaaaaaaaaaa", "`mcp_allow_writes` is on, but the MCP token is not usable (it needs a token of at least")]
+    public async Task InitializeInstructions_SayWhyTheWriteToolsAreNotServed_ForEachState(
+        bool allowWrites, bool tokenless, string? token, string expected)
+    {
+        var serving = McpHostService.DecideServing(token, tokenless, allowWrites, allowInvestigations: false);
+        Assert.False(serving.Writes);
+        using var server = await BuildServer(serving.Writes, serving);
+
+        var initBody = await PostAsync(server,
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"," +
+            "\"capabilities\":{},\"clientInfo\":{\"name\":\"state-test\",\"version\":\"1.0\"}}}");
+        var instructions = ResultOf(initBody).GetProperty("instructions").GetString() ?? "";
+
+        Assert.Contains(expected, instructions, StringComparison.Ordinal);
+        Assert.Equal(!allowWrites, instructions.Contains("`mcp_allow_writes` is off", StringComparison.Ordinal));
+    }
+
     /// <summary>#5789 correction: no sentence of the rendered instructions points a client at a tool this server
     /// does not serve. Every backticked name that is a Lite tool must be in the served set, writes off and on.</summary>
     [Theory]
@@ -321,23 +347,27 @@ public sealed class McpWritePolicyTests
         Assert.True(unserved.Count == 0, "the instructions name tools this configuration does not serve: " + string.Join(", ", unserved));
     }
 
-    /// <summary>#5820 L5c: the investigation paragraph appears exactly when the investigation tools are served (the setting
-    /// on and the writes off), and with them off the rendered text names none of the four tools, in the paragraph or the census.</summary>
+    /// <summary>#5820 L5c, #8461: the investigation paragraph is always rendered, because the two investigation reads are served in
+    /// every configuration and the paragraph names them and the setting that serves the rest; the tools that claim and report are named
+    /// only when the setting serves them, so the text never points a client at a tool <c>tools/list</c> lacks.</summary>
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void RenderedInstructions_CarryTheInvestigationParagraph_OnlyWhenTheInvestigationToolsAreServed(bool investigationsServed)
+    public void RenderedInstructions_AlwaysNameTheInvestigationReads_AndTheToolsThatClaimAndReport_OnlyWhenServed(bool investigationsServed)
     {
         var all = RegisteredTools();
-        var catalog = McpWritePolicy.ToolNames(all).Where(n => investigationsServed || !McpInvestigationPolicy.IsInvestigationTool(n)).ToList();
+        var catalog = McpWritePolicy.ToolNames(all).Where(n => investigationsServed || !McpInvestigationPolicy.IsStateChanging(n)).ToList();
         var served = catalog.Where(n => !McpWritePolicy.IsWrite(n)).ToList();
         var text = McpInstructions.Build(catalog, served);
 
-        Assert.Equal(investigationsServed, text.Contains("### Investigation requests", StringComparison.Ordinal));
-        Assert.Equal(investigationsServed, text.Contains("mcp_allow_investigations", StringComparison.Ordinal));
-        foreach (var name in McpInvestigationPolicy.InvestigationTools)
+        Assert.Contains("### Investigation requests", text, StringComparison.Ordinal);
+        Assert.Contains("mcp_allow_investigations", text, StringComparison.Ordinal);
+        Assert.Contains("`list_investigation_requests`", text, StringComparison.Ordinal);
+        Assert.Contains("`get_investigation_reports`", text, StringComparison.Ordinal);
+        foreach (var name in McpInvestigationPolicy.StateChangingTools)
         {
-            Assert.Equal(investigationsServed, text.Contains($"`{name}`", StringComparison.Ordinal));
+            Assert.True(investigationsServed == text.Contains($"`{name}`", StringComparison.Ordinal),
+                $"`{name}` is named in the instructions exactly when it is served (served: {investigationsServed})");
         }
     }
 

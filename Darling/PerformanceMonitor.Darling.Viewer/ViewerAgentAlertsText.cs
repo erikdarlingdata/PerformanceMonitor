@@ -49,19 +49,20 @@ public static class ViewerAgentAlertsText
 
     /// <summary>
     /// The status line: the alert setup word, the alerts defined and when the newest capture was taken. The capture time is stored
-    /// naive UTC and belongs to the picked server, so it reads in the display mode's zone on that server's <paramref name="clock"/> (#7343).
+    /// naive UTC and is stamped to the second with its zone's label on the same clock as the tab's "Last refreshed" stamp (#8576), through
+    /// <see cref="ViewerTimeHelper.FormatFleetWide(DateTime, string, TimeDisplayMode)"/>: this machine's zone in Local mode, UTC in every
+    /// other mode. It used to read the server's own offset next to a refresh stamp in UTC, so one tab showed two clocks.
     /// </summary>
-    public static string StatusLine(ViewerAgentAlertsRead read, ServerClock clock)
+    public static string StatusLine(ViewerAgentAlertsRead read)
     {
         ArgumentNullException.ThrowIfNull(read);
-        ArgumentNullException.ThrowIfNull(clock);
         if (read.Read is not { HasCapture: true } capture || read.InstanceStatus is null)
         {
             return read.Message ?? NoCapture;
         }
 
         var captured = capture.NewestCapture is { } t
-            ? ViewerTimeHelper.FormatForDisplay(t, ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, clock), "g")
+            ? ViewerTimeHelper.FormatFleetWide(t, "yyyy-MM-dd HH:mm:ss", ViewerTimeHelper.CurrentDisplayMode)
             : Dash;
         return string.Create(CultureInfo.InvariantCulture,
             $"Alert setup: {SetupWord(read.InstanceStatus)}   Alerts defined: {capture.Alerts.Count}   Captured: {captured}");

@@ -45,6 +45,8 @@ public static class DarlingOwnedSecrets
         "DARLING_OUTPUT_FORMAT",
         "DARLING_STOPPED_MARKER",
         "DOTNET_RUNNING_IN_CONTAINER",
+        /* Npgsql reads it when a connection string has no Password, so it holds the store owner's password. */
+        "PGPASSWORD",
         "SystemDrive",
         "USERPROFILE",
     };

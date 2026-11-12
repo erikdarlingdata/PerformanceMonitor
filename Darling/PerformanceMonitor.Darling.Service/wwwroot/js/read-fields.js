@@ -164,8 +164,55 @@ export const READ_FIELDS = {
       rowsKey: "trend",
       xKey: "time",
       format: "int",
-      emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
+      emptyText: "No deadlocks in this window: an empty trend here means none happened, not that nothing was collected.",
       series: [{ key: "count", label: "Deadlocks" }],
+    },
+  },
+  /* #8553: the PostgreSQL deadlock reads a deadlock alert's notebook carries on a PostgreSQL target. The columns are the
+     Activity tab's (PG_DEADLOCK_COLUMNS, PG_DEADLOCK_GRAPH_COLUMNS in server-tabs/pg-activity.js). */
+  get_pg_deadlocks: {
+    table: {
+      rowsKey: "deadlocks",
+      emptyText: "No deadlock in this window. If you expected one, the server log may not be readable.",
+      noteKey: "truncation_note",
+      columns: [
+        { key: "occurred_at", label: "When", format: "time" },
+        { key: "victim_pid", label: "Victim PID", format: "id" },
+        { key: "participant_count", label: "Sessions", format: "int" },
+        { key: "lock_modes", label: "Lock Modes" },
+        { key: "resources", label: "Resources" },
+        { key: "victim_statement", label: "Victim Statement", wrap: true },
+        { key: "times_seen", label: "Sightings", format: "int" },
+      ],
+    },
+  },
+  get_pg_deadlock_detail: {
+    table: {
+      rowsKey: "deadlocks",
+      emptyText: "No deadlock graph stored for this server.",
+      columns: [
+        { key: "occurred_at", label: "When", format: "time" },
+        { key: "victim_pid", label: "Victim PID", format: "id" },
+        { key: "graph", label: "Graph", wrap: true },
+      ],
+    },
+  },
+  /* #8584: the PostgreSQL blocking notebook cell. One row per sampled chain, worst first by victim count. */
+  get_pg_blocking: {
+    table: {
+      rowsKey: "chains",
+      emptyText: "No blocking was sampled in this window. Captures are periodic, so a shorter episode leaves no trace.",
+      columns: [
+        { key: "captured_at", label: "Captured", format: "time" },
+        { key: "root_pid", label: "Root PID", format: "int" },
+        { key: "root_application", label: "Application" },
+        { key: "root_state", label: "Root State" },
+        { key: "total_victims", label: "Victims", format: "int" },
+        { key: "worst_victim_wait_ms", label: "Worst Wait", format: "ms" },
+        { key: "root_xact_duration_ms", label: "Root Xact", format: "ms" },
+        { key: "root_query", label: "Root Query", wrap: true },
+        { key: "recommended_action", label: "Action", wrap: true },
+      ],
     },
   },
   get_pg_wait_stats: {
@@ -239,6 +286,23 @@ export const READ_FIELDS = {
       format: "num1",
       emptyText: "No samples of this wait in this window.",
       series: [{ key: "wait_time_ms_per_second", label: "Wait ms/s" }],
+    },
+  },
+  get_pg_top_queries: {
+    table: {
+      rowsKey: "queries",
+      emptyText: "No query shapes in this window. pg_stat_statements needs at least two collections to difference.",
+      noteKey: "truncation_note",
+      columns: [
+        { key: "database_name", label: "Database", name: true },
+        { key: "query_text", label: "Query", wrap: true },
+        { key: "calls", label: "Calls", format: "int" },
+        { key: "total_exec_time_ms", label: "Total Time", format: "ms" },
+        { key: "avg_exec_time_ms", label: "Avg Time", format: "ms" },
+        { key: "max_exec_time_ms", label: "Max Time", format: "ms" },
+        { key: "pct_of_total_time", label: "% of Total", format: "num1" },
+        { key: "rows_returned", label: "Rows", format: "int" },
+      ],
     },
   },
   get_pg_wraparound_risk: {
@@ -584,8 +648,10 @@ export const READ_FIELDS = {
         { key: "alert_time", label: "Time", format: "time" },
         { key: "server_name", label: "Server" },
         { key: "metric_name", label: "Metric" },
-        { key: "current_value", label: "Value", format: "num2" },
-        { key: "threshold_value", label: "Threshold", format: "num2" },
+        /* stateZeroDash: a state-only row's stored 0 (the row's state_only: a resolution, Database State, Agent Not Running) is not a
+           reading and shows as the dash Alert History shows, not 0.00; a measured row keeps its number. */
+        { key: "current_value", label: "Value", format: "num2", stateZeroDash: true },
+        { key: "threshold_value", label: "Threshold", format: "num2", stateZeroDash: true },
         { key: "notification_type", label: "Notification" },
         { key: "muted", label: "Muted", format: "bool" },
         { key: "detail_text", label: "Detail", wrap: true, localizeAlertDetail: true },
@@ -796,7 +862,9 @@ export const READ_FIELDS = {
       columns: [
         { key: "opened_at", label: "Opened", format: "time" },
         { key: "state", label: "State" },
-        { key: "server_name", label: "Server" },
+        /* #8578: the registry's display name, which every row carries (it falls back to the name the request was opened with). server_name is the
+           label the opening alert or finding carried, so requests opened before that was one name show one server under two. */
+        { key: "display_name", label: "Server" },
         { key: "first_metric", label: "Metric" },
         { key: "family", label: "Family" },
         { key: "alert_count", label: "Alerts", format: "int" },
@@ -823,20 +891,30 @@ export const READ_FIELDS = {
 
 /**
  * #7670: a table cell that carries its own columns (a Custom View built from a sample read keeps only key, label and format) still says its
- * collector notes in the words the catalog's column for the same read and key uses ("shred gated: 1", not "shred_gated=1"). Only `plain` and
- * `localizeText` come across, and only for a column that sets neither and has no format.
+ * collector notes in the words the catalog's column for the same read and key uses ("shred gated: 1", not "shred_gated=1"). `plain` and
+ * `localizeText` come across only for a column that sets neither and has no format. `stateZeroDash` (#8492: an alert-history value column
+ * whose stored 0 on a state-only row is not a reading) comes across to a column of the same key whatever its format, so a saved view's
+ * Value and Threshold columns show the dash Alert History shows rather than 0.00. A cell that is not a table, or has no columns of its
+ * own, comes back as it is.
  */
-function withCatalogWords(cell) {
+export function withCatalogWords(cell) {
+  if (!cell || cell.viz !== "table" || !(Array.isArray(cell.columns) && cell.columns.length)) return cell;
   const entry = READ_FIELDS[cell.read];
   const known = entry ? [...((entry.table && entry.table.columns) || []), ...((entry.tableFleet && entry.tableFleet.columns) || [])] : [];
   if (!known.length) return cell;
   let changed = false;
   const columns = cell.columns.map((c) => {
-    if (!c || c.format || c.plain !== undefined || c.localizeText !== undefined) return c;
-    const same = known.find((k) => k.key === c.key && k.plain);
-    if (!same) return c;
-    changed = true;
-    return { ...c, plain: same.plain, localizeText: same.localizeText };
+    if (!c) return c;
+    let next = c;
+    if (!c.format && c.plain === undefined && c.localizeText === undefined) {
+      const words = known.find((k) => k.key === c.key && k.plain);
+      if (words) next = { ...next, plain: words.plain, localizeText: words.localizeText };
+    }
+    if (c.stateZeroDash === undefined && known.some((k) => k.key === c.key && k.stateZeroDash === true)) {
+      next = { ...next, stateZeroDash: true };
+    }
+    if (next !== c) changed = true;
+    return next;
   });
   return changed ? { ...cell, columns } : cell;
 }
@@ -849,7 +927,7 @@ export function resolveReadTable(cell) {
   if (!cell) return cell;
   const field = cell.viz === "line" ? "series" : cell.viz === "stat" ? "stats" : cell.viz === "table" ? "columns" : null;
   if (!field) return cell;
-  if (Array.isArray(cell[field]) && cell[field].length) return cell.viz === "table" ? withCatalogWords(cell) : cell;
+  if (Array.isArray(cell[field]) && cell[field].length) return withCatalogWords(cell);
   const entry = READ_FIELDS[cell.read];
   const fleet = cell.viz === "table" && entry && entry.tableFleet && !(cell.params && cell.params.collector_name);
   const part = entry && (fleet ? entry.tableFleet : entry[cell.viz]);

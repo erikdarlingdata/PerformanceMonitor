@@ -88,6 +88,7 @@ globalThis.clearTimeout = (handle) => { timers.delete(handle); };
 const fireDueTimers = () => { for (const [handle, t] of [...timers]) if (t.at <= now) { timers.delete(handle); t.run(); } };
 
 let fetches = 0; let renders = 0; const fetchLog = [];
+let fleetAnswers = false; // #8633: when set, /api/fleet answers with one card (every other read keeps failing)
 let fetchDelayMs = 0; // simulated time a read takes: each fetch holds open until the clock passes this
 let pending = [];
 globalThis.fetch = (url) => {
@@ -95,6 +96,15 @@ globalThis.fetch = (url) => {
      page read, so it is neither counted nor held open by the simulated read time: the page then starts as it always did. */
   if (String(url).split("?")[0] === "/api/session") {
     return Promise.resolve({ ok: true, status: 200, json: async () => ({ can_edit: false }), text: async () => JSON.stringify({ can_edit: false }) });
+  }
+  if (fleetAnswers && String(url).split("?")[0] === "/api/fleet") {
+    fetches++; fetchLog.push(Math.round((now - 1000000) / 1000) + ' ' + url);
+    const body = JSON.stringify({ total_servers: 1, critical_count: 0, warning_count: 0, offline_count: 0, offline_servers: 0, tags: [], worst_servers: [],
+      additional_problem_count: 0, generated_at: "2026-11-11T12:00:00Z", cards: [{ server_id: 1, display_name: "alpha", server_name: "alpha", band: "Healthy",
+      band_label: "Healthy", is_online: true, status: "ok", last_collection: null, tags: [], is_silenced: false, metric_count: 0, measured_metric_count: 0 }] });
+    return new Promise((resolve) => {
+      pending.push({ at: now + fetchDelayMs, done: () => resolve({ ok: true, status: 200, json: async () => JSON.parse(body), text: async () => body }) });
+    });
   }
   fetches++; if (String(url).includes('get_server_summary')) renders++; fetchLog.push(Math.round((now - 1000000) / 1000) + ' ' + url);
   return new Promise((resolve) => {
@@ -192,6 +202,7 @@ out.next5m = await secondsToNextRead("5m");
 {
   await fresh("off");
   await advance(2);
+  await settle(); // the first load's Overview reads go two at a time (#8554), so it takes a few rounds to end: the button is idle only then
   fetchDelayMs = 5000;
   const log0 = fetchLog.length; const r0 = renders;
   const btn = brand.find((x) => x.attrs.id === "page-refresh-now");
@@ -200,7 +211,7 @@ out.next5m = await secondsToNextRead("5m");
   out.doubleClickViews = views();
   out.doubleClickRenders = renders - r0;
   out.busyWhileReading = btn.disabled === true && btn.attrs["aria-busy"] === "true" && btn.attrs.title === "Refreshing…";
-  await advance(10);
+  await advance(25); // the render's reads take the fleet read's 5 s, then three gated rounds of 5 s
   out.doubleClickRenders = renders - r0;
   out.idleAfterSettle = btn.disabled === false && btn.getAttribute("aria-busy") === null;
   fetchDelayMs = 0;
@@ -231,13 +242,14 @@ out.next5m = await secondsToNextRead("5m");
 }
 
 // 30 s under backoff: reads that take 20 s (> half the interval) push the next page render out to 4x the render
-// time (rather than 30 s), and a render never starts while the previous one's reads are outstanding.
+// time (rather than 30 s), and a render never starts while the previous one's reads are outstanding. The Overview's heavy reads
+// go two at a time (#8554), so a render lasts a few read times longer and the window is 900 s, enough for three renders.
 {
   bootDelay = 20000;
   await fresh("30s");
   const starts = [];
   let hintSlow = false;
-  for (let s = 0; s < 300; s++) {
+  for (let s = 0; s < 900; s++) {
     const r = renders;
     await advance(1);
     if (renders > r) starts.push(s + 1);
@@ -247,8 +259,10 @@ out.next5m = await secondsToNextRead("5m");
   out.backoffGaps = starts.slice(1).map((v, i) => v - starts[i]);
   out.backoffHintSaysSlow = hintSlow;
   bootDelay = 100000; // reads outlast many 30 s intervals
-  await fresh("30s");
+  /* Counted from before the boot: the page's first render starts its reads with the page (#8554), not after the fleet card, so it is
+     one of the renders this counts, and a second one inside the window would be a stacked render. */
   const b = renders;
+  await fresh("30s");
   await advance(150);
   out.stackedRenders = renders - b;
   bootDelay = 0;
@@ -317,22 +331,38 @@ out.next5m = await secondsToNextRead("5m");
   const fleetReads = (from) => fetchLog.slice(from).filter((l) => l.includes("/api/fleet")).length;
   const repeated = (from) => { const seen = new Map(); for (const l of fetchLog.slice(from)) { const u = l.slice(l.indexOf(" ") + 1); seen.set(u, (seen.get(u) || 0) + 1); } return [...seen].filter(([, n]) => n > 1).map(([u]) => u); };
   await fresh("1m", "#/server/alpha");
-  // The boot render's fleet read answers at the first tick and its panel reads at the second, so the page is due 62 s after boot
-  // and the shell 60 s after. Ticks run to 59 s with nothing due; the next one lands three seconds late and finds both due.
+  // The boot render's fleet read answers at the first tick and its panel reads end after the gate's rounds (#8554: two at a time, so
+  // about four ticks), so the page is due about 64 s after boot and the shell 60 s after. Ticks run to 59 s with nothing due; the
+  // next one lands seven seconds late and finds both due.
   await advance(59);
   fetchDelayMs = 5000; // this pass's reads take 5 s, so the ticks that follow land while the render's reads are in flight
   const log0 = fetchLog.length; const r0 = renders;
-  now += 3000; releaseDue(); await drain(); tick(); await drain();
+  now += 7000; releaseDue(); await drain(); tick(); await drain();
   out.tickShellReads = fetchLog.slice(log0).filter((l) => l.includes("/api/views")).length;
   out.tickFleetReads = fleetReads(log0);
   // The page's panel reads follow the fleet answer: let the pass's reads answer with no tick in between, so a render that started
   // in the pass shows now and one that waited for a later tick does not.
   now += 5000; releaseDue(); await drain();
   out.tickRendersBeforeTick = renders - r0;
-  await advance(12); // the panel reads answer at 70 s; ticks at 66 to 74 s see the render in flight, then settled
+  await advance(30);
   out.tickRendersAfter = renders - r0;
   out.tickFleetReadsAfter = fleetReads(log0);
   out.tickRepeatedReads = repeated(log0);
+  fetchDelayMs = 0;
+}
+
+// #8633: an idle Fleet Overview. The page's poll re-render trails the shell's refresh by the length of its last render (its next poll is
+// counted from where that render settled, the shell's from where its refresh began), so the sidebar's /api/fleet had landed before the
+// page's poll asked again: two roll-ups per tick. The page's poll now takes the sidebar's, so each tick reads it once.
+{
+  fleetAnswers = true;
+  fetchDelayMs = 1000; // the roll-up takes 1 s to come back
+  await fresh("1m", "#/fleet");
+  await advance(10); // the first render settles
+  const log0 = fetchLog.length;
+  await advance(130); // two idle ticks
+  out.idleFleetTickReads = fetchLog.slice(log0).filter((l) => l.includes("/api/fleet")).length;
+  fleetAnswers = false;
   fetchDelayMs = 0;
 }
 

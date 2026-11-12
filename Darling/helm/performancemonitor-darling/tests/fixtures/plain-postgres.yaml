@@ -1,0 +1,89 @@
+# The external store of the kind tests (tests/kind-tests.sh): a plain postgres:17, no TimescaleDB, whose database `darling`
+# is owned by the login `darling`, which is NOT a superuser (a managed or CloudNativePG-style owner). The init SQL makes both
+# on the first start of an empty data directory; the data directory is an emptyDir, so a scale from 0 to 1 starts empty again.
+# Test-only: the passwords below exist only in this throwaway fixture.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: plain-postgres
+type: Opaque
+stringData:
+  superuser-password: fixture-superuser-only
+  password: fixture-darling-only
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: plain-postgres-init
+data:
+  10-darling-owner.sql: |
+    CREATE ROLE darling LOGIN PASSWORD 'fixture-darling-only' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+    CREATE DATABASE darling OWNER darling;
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plain-postgres
+  labels:
+    app: plain-postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: plain-postgres
+  template:
+    metadata:
+      labels:
+        app: plain-postgres
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        - name: postgres
+          image: postgres:17
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: plain-postgres
+                  key: superuser-password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          # The image's init process listens on the socket only, so a TCP check answers only from the real server.
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-U", "darling", "-d", "darling"]
+            periodSeconds: 5
+            failureThreshold: 60
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: init
+          configMap:
+            name: plain-postgres-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: plain-postgres
+  labels:
+    app: plain-postgres
+spec:
+  selector:
+    app: plain-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres

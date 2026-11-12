@@ -917,7 +917,7 @@ public sealed class WorkerLoopTimerClockStepTests
     [InlineData("NextCustomAlertSweep", "s_customAlertSweepInterval", "DateTime.UtcNow.Add(s_customAlertSweepInterval)")]
     [InlineData("NextAlertSweep", "s_alertSweepInterval", "DateTime.UtcNow.Add(s_alertSweepInterval)")]
     [InlineData("NextPileupSweep", "s_alertSweepInterval", "DateTime.UtcNow.Add(s_alertSweepInterval)")]
-    [InlineData("NextAnalysisDue", "TimeSpan.FromMinutes(analysisIntervalMinutes)", "DateTime.UtcNow.AddMinutes(analysisIntervalMinutes)")]
+    [InlineData("NextAnalysisDue", "TimeSpan.FromMinutes(analysisIntervalMinutes)", "nowUtc.AddMinutes(analysisIntervalMinutes)")]
     [InlineData("FirstSweepDueUtc", "TimeSpan.FromSeconds(ColdStartSpreadSeconds)", null)]
     public void APerServerTimer_IsReadThroughStampIsDue_WithTheSpanItsStampIsWrittenWith(string stamp, string span, string? writer)
     {

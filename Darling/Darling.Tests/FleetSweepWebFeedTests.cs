@@ -139,6 +139,35 @@ public sealed class FleetSweepWebFeedTests
 
     /* ---- the wire shapes: FleetSweepPresentation ------------------------------------------------------- */
 
+    /// <summary>
+    /// A sweep's detail node carries every server's verdict, band and reason included, so the stored document's
+    /// <c>critical_servers</c> (the critical verdicts' names and reasons again) is not embedded beside them: the detail
+    /// is read by the web feed, the Viewer and get_sweep_reports' latest and by-id answers, and the three ship the list once.
+    /// A timeline entry has no verdicts beside it, so its embedded document keeps the list. The stored row is never touched.
+    /// </summary>
+    [Fact]
+    public void TheDetailNode_DropsCriticalServersFromTheEmbed_BecauseItsVerdictsCarryThem()
+    {
+        var run = Run() with
+        {
+            ReportJson = "{\"fleet\":{\"bands\":{\"Healthy\":1,\"Critical\":1}},\"critical_servers\":[{\"server\":\"server-b\",\"reason\":\"cpu pinned\"}]}",
+        };
+        var verdicts = new List<FleetSweepServerVerdict>
+        {
+            new(1, "server-a", "Healthy", "Healthy", null, null),
+            new(2, "server-b", "Critical", "Healthy", "cpu pinned", "{\"cpu\":99}"),
+        };
+
+        var detail = FleetSweepPresentation.BuildSweepDetailNode(run, verdicts, new List<FleetSweepWouldHavePagedEntry>());
+        var report = Assert.IsType<JsonObject>(detail["report"]);
+        Assert.False(report.ContainsKey("critical_servers"), "the detail embeds the list its verdicts already carry");
+        Assert.Equal("Critical", ((JsonArray)detail["verdicts"]!).OfType<JsonObject>().Single(v => v["server"]!.GetValue<string>() == "server-b")["band"]!.GetValue<string>());
+        Assert.Equal(1, ((JsonObject)report["fleet"]!["bands"]!)["Critical"]!.GetValue<int>());
+
+        var entry = Assert.IsType<JsonObject>(FleetSweepPresentation.BuildRunNode(run)["report"]);
+        Assert.Equal("server-b", ((JsonArray)entry["critical_servers"]!)[0]!["server"]!.GetValue<string>());
+    }
+
     private static FleetSweepRun Run(bool alertsEnabled = true, bool instrumentsAlive = true) => new(
         SweepId: 638600000000000000,
         SweptAtUtc: new DateTime(2026, 9, 15, 12, 0, 0, DateTimeKind.Utc),

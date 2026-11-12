@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -191,7 +192,7 @@ public static class DarlingPgLoggingAudit
         var rdsParameters = byName.Keys.Count(n => n.StartsWith("rds.", StringComparison.Ordinal));
         var managed = rdsParameters > 0;
         var hostingEvidence = managed
-            ? $"{rdsParameters} rds.* parameter(s) in the snapshot, which only RDS and Aurora carry - remedies are "
+            ? $"{CountText.Plural(rdsParameters, "rds.* parameter")} in the snapshot, which only RDS and Aurora carry - remedies are "
               + "worded for a parameter group, where ALTER SYSTEM is refused."
             : "no rds.* parameter in the snapshot, so this is not RDS or Aurora - remedies are worded as ALTER "
               + "SYSTEM plus a reload. If this server IS managed by a provider that hides its own parameters, "
@@ -241,7 +242,7 @@ public static class DarlingPgLoggingAudit
         {
             Instrumented =>
                 "0 logs EVERY statement the server runs, with its text. That is the capture-everything shape "
-                + "#2565 measured for auto_explain at 31 percent of throughput and 772 MB of log in 20 seconds "
+                + "Measured for auto_explain at 31 percent of throughput and 772 MB of log in 20 seconds "
                 + "(pgbench, 8 clients). The statement log at 0 emits one entry per statement exactly as "
                 + "auto_explain at 0 does - smaller entries with no plan body, but no fewer of them. Move to a "
                 + "millisecond threshold; the fast statements are the volume and nobody reads them.",
@@ -267,7 +268,7 @@ public static class DarlingPgLoggingAudit
                      + "get_pg_top_queries: per-SHAPE aggregates that can say a shape averages 200 ms and "
                      + "never that one execution took 40 seconds at 03:07 - the log line is the only record "
                      + "of the individual slow execution.",
-            Consumer: "PLANNED - no Darling family reads statement-duration lines yet; #3601's log pipeline is "
+            Consumer: "PLANNED - no Darling family reads statement-duration lines yet; the planned log pipeline is "
                       + "where they would land, and the statement text carries literals, so the same redaction "
                       + "pass plan capture applies before storage is a precondition of storing them at all. "
                       + "get_pg_top_queries is the aggregate the lines would sharpen. Until then the line is "
@@ -302,7 +303,7 @@ public static class DarlingPgLoggingAudit
                      + "the ENGINE-recorded record of lock waits. What this product has instead is get_pg_blocking "
                      + "from pg_blocking, which SAMPLES pg_locks and pg_stat_activity on a cadence: a wait that "
                      + "starts and ends between two samples is invisible to it and would be in this line.",
-            Consumer: "PLANNED - #3601 names lock-wait reports among the families the log pipeline would "
+            Consumer: "PLANNED - the log pipeline names lock-wait reports among the families the log pipeline would "
                       + "classify. get_pg_blocking is the sampled read that exists today, and its own response "
                       + "says how many samples its 'no blocking' rests on.",
             Recommended: "on.",
@@ -359,7 +360,7 @@ public static class DarlingPgLoggingAudit
                      + "(get_pg_top_queries). Between them you can know a database spilled and that a shape "
                      + "spills - never that THIS execution spilled 4 GB at 03:07, which is the question when a "
                      + "disk fills.",
-            Consumer: "SHIPPED - #3602: get_pg_log_events with family temp_file stores one event per spilled "
+            Consumer: "SHIPPED - get_pg_log_events with family temp_file stores one event per spilled "
                       + "file with its exact bytes and the fingerprint of the statement that spilled (the "
                       + "statement itself is never stored - plan capture's redaction pass runs first). "
                       + "get_pg_database_stats still carries the spill FINDING from the counters.",
@@ -426,7 +427,7 @@ public static class DarlingPgLoggingAudit
                      + "elapsed time - what the run COST. What this product has instead is pg_stat_user_tables "
                      + "through get_pg_autovacuum_health: whether autovacuum ran and when, never what it cost, "
                      + "so a run that takes 40 minutes of I/O in the business peak reads as healthy there.",
-            Consumer: "SHIPPED - #3603: get_pg_log_events with family autovacuum stores one event per completed "
+            Consumer: "SHIPPED - get_pg_log_events with family autovacuum stores one event per completed "
                       + "run with its duration, pages, tuples, buffers and WAL lifted, and get_pg_autovacuum_health "
                       + "shows them per table as recent_runs beside the whether-it-ran catalog half.",
             Recommended: "0 (every run).",
@@ -455,7 +456,7 @@ public static class DarlingPgLoggingAudit
                      + "checkpoint. What this product has instead is get_pg_write_stats over the checkpointer "
                      + "counters: timed versus requested and buffers written across a window, never the "
                      + "duration of one checkpoint.",
-            Consumer: "PLANNED - #3601's log pipeline. get_pg_write_stats reads the checkpoint counters today.",
+            Consumer: "PLANNED - the log pipeline. get_pg_write_stats reads the checkpoint counters today.",
             Recommended: "on - PostgreSQL 15 made it the default.",
             CostNote: verdict == Unknown ? UnknownNote(row)
                 : "One or two lines per checkpoint, and a checkpoint happens at most every "
@@ -491,7 +492,7 @@ public static class DarlingPgLoggingAudit
                      + "product has instead is pg_stat_database's numbackends, a gauge, and its sessions "
                      + "counter, a cumulative total: neither says who connected when, or that 400 connections "
                      + "arrived in the minute before the incident.",
-            Consumer: "PLANNED - #3601 names connection churn among the log pipeline's families.",
+            Consumer: "PLANNED - the log pipeline names connection churn among the log pipeline's families.",
             Recommended: "on (PostgreSQL 18: 'all', or a list such as receipt,authentication).",
             CostNote: verdict == Unknown ? UnknownNote(row)
                 : "On a POOLED workload connections are rare and this costs nothing. On an unpooled one - a "
@@ -520,7 +521,7 @@ public static class DarlingPgLoggingAudit
             Unlocks: "A LOG line per session end WITH the session's duration - the half that turns connection "
                      + "lines into session lifetimes, so a churning application shows as thousands of "
                      + "two-second sessions rather than as a connection count that looks stable.",
-            Consumer: "PLANNED - #3601, beside log_connections.",
+            Consumer: "PLANNED - the log pipeline, beside log_connections.",
             Recommended: "on, together with log_connections.",
             CostNote: verdict == Unknown ? UnknownNote(row)
                 : "The same profile as log_connections: one line per session end, nothing on a pooled "
@@ -656,8 +657,8 @@ public static class DarlingPgLoggingAudit
         "user" or "database" or "database user" =>
             $"source is '{row.Source}': this value came from a per-role or per-database override that the "
             + "monitoring connection resolved, so the server-wide value may differ, and every other backend "
-            + "logs under its OWN resolved value. get_pg_server_config shows the setting's source; ALTER ROLE "
-            + "/ ALTER DATABASE ... RESET removes the override.",
+            + "logs under its OWN resolved value. get_pg_server_config shows the setting's source; a scoped RESET "
+            + "(ALTER DATABASE ... RESET, or the same statement for a role) removes the override.",
         _ => null,
     };
 

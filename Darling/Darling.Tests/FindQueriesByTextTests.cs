@@ -96,6 +96,51 @@ public sealed class FindQueriesByTextTests
     public void EscapeLike_EscapesTheBackslashThePercentAndTheUnderscore() =>
         Assert.Equal(@"a\\b\%c\_d", DarlingMcpFindQueriesByTextTools.EscapeLike(@"a\b%c_d"));
 
+    /// <summary>A raw window whose floor was taken two seconds before <c>now</c>: the Query Store source runs between the two readings of the
+    /// clock, so the window the spans tile is always a hair longer than the raw tier.</summary>
+    private static (DateTime Floor, DateTime Now) RawWindow(TimeSpan length)
+    {
+        var now = new DateTime(2026, 11, 9, 12, 0, 2, DateTimeKind.Unspecified);
+        return (now.AddSeconds(-2) - length, now);
+    }
+
+    [Fact]
+    public void RawTierSpans_TileTheWindowNewestFirst_HalfOpenAndContiguous()
+    {
+        var (floor, now) = RawWindow(TimescaleSupport.RawRetentionSpan);
+        var spans = DarlingMcpFindQueriesByTextTools.RawTierSpans(floor, now);
+
+        Assert.Equal(now.AddDays(1), spans[0].Ceiling);
+        Assert.Equal(floor, spans[^1].Floor);
+        for (var i = 1; i < spans.Count; i++)
+        {
+            Assert.Equal(spans[i - 1].Floor, spans[i].Ceiling);
+            Assert.True(spans[i].Floor < spans[i].Ceiling);
+        }
+    }
+
+    /// <summary>Four completed spans of the four-day tier are the newest day, a hair over 24 hours once the Query Store source's time is
+    /// in the window, so the number renders "1" and the word has to follow the rendered number. One span of a sixteen-hour window is the
+    /// hour the same rule covers.</summary>
+    [Theory]
+    [InlineData(96, 1, "6 hours")]
+    [InlineData(96, 4, "1 day")]
+    [InlineData(96, 16, "4 days")]
+    [InlineData(16, 1, "1 hour")]
+    public void DescribeSearched_RendersTheNumber_ThenPicksTheUnitsWordFromIt(int windowHours, int completedSpans, string expected)
+    {
+        var (floor, now) = RawWindow(TimeSpan.FromHours(windowHours));
+        Assert.Equal(expected, DarlingMcpFindQueriesByTextTools.DescribeSearched(completedSpans, floor, now));
+    }
+
+    [Fact]
+    public void DescribeSearched_EverySpan_IsTheWholeRawTier()
+    {
+        var (floor, now) = RawWindow(TimescaleSupport.RawRetentionSpan);
+        var spans = DarlingMcpFindQueriesByTextTools.RawTierSpans(floor, now);
+        Assert.Equal("4 days", DarlingMcpFindQueriesByTextTools.DescribeSearched(spans.Count, floor, now));
+    }
+
     /// <summary>T15 names this whole (a bcp, then a -P value), but the piece 100 characters before the secret holds no bcp, so a cut taken before the judge shows the secret.</summary>
     private const string Secret = "hunter2secret";
 

@@ -526,6 +526,14 @@ public sealed partial class DarlingCollectorRunner
             : string.Format(CultureInfo.InvariantCulture, s_queryStoreIntervalMissNote, misses);
 
     /// <summary>
+    /// #8541: the note for a <c>query_store_hints</c> cycle that stored no row and skipped at least one database as a readable
+    /// secondary: every database whose Query Store is on was one. Null otherwise. The readable-secondary judgment reads it from
+    /// the run's row, so the answer does not depend on a <c>query_store_health</c> capture that retention removes.
+    /// </summary>
+    internal static string? QueryStoreSecondaryNote(int secondaryDatabases, long rowsWritten) =>
+        secondaryDatabases > 0 && rowsWritten == 0 ? PerformanceMonitor.Collectors.CollectorRuntimePrecondition.QueryStoreAllSecondaryRunNote : null;
+
+    /// <summary>
     /// One attempt at the batch on a store connection of its own, borrowed for the attempt and returned
     /// when it ends (#3099). Both the re-attempt and a first attempt whose shared connection is already
     /// broken route through here, so "a fresh connection" is one named method with one body rather than two

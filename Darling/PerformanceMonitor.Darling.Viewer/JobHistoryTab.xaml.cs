@@ -50,7 +50,7 @@ public partial class JobHistoryTab : UserControl
         InitializeComponent();
         /* #5562: the shared picker; the old combo defaulted to the last 24 hours and offered 7, 30 and 90 days, which are
            one click away in the picker's presets (1w, 1mo) and a typed "90d". */
-        TimeRangePickerControl.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
+        TimeRangePickerControl.ZoneProvider = PickerZone;
         TimeRangePickerControl.Value = TimeRangePresets.Find("1d")!;
         /* R8: the old "Last Year" (365 days). The parser has no year unit, so "1y" cannot be typed; this choice is the way to a year. */
         TimeRangePickerControl.SetLongestChoice(ViewerTimeRangeWindow.JobHistoryLongestChoice, "Last Year");
@@ -96,14 +96,49 @@ public partial class JobHistoryTab : UserControl
     internal static Task ShowJobHistoryDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc, IEnumerable<ViewerJobHistoryRow> read) =>
         ViewerServerTab.ShowEventDataStartAsync(banner, probe, "Job History", startUtc, read.Select(r => r.RunDateTimeUtc), RowCap);
 
-    /// <summary>Sets the picker's "Data starts ..." note from the data-start probe the tab already awaited (#5562 R7): the floor its
-    /// "Showing since" banner reads, fed by <see cref="ViewerServerTab.UpdateTruncationBanner"/>. No query of its own.</summary>
-    internal void RecordDataStart(DateTime? floor)
+    /// <summary>The scope (a server id, or null for All Servers) the picker's "Data starts" note was last read for, when, and what it
+    /// read, so a load within the read's life writes the note again: a failed read on another scope hides it in between.</summary>
+    private int? _oldestRetainedScope;
+    private DateTime _oldestRetainedReadUtc = DateTime.MinValue;
+    private DateTime? _oldestRetainedUtc;
+
+    /// <summary>
+    /// Points the picker's "Data starts" note at the oldest job history the store holds for the scope on screen (the picked server's
+    /// own, or the fleet's at All Servers, <see cref="ViewerDataService.GetJobHistoryOldestRetainedAsync"/>). The note previews
+    /// whatever range a reader types, so it cannot take the "Showing since" probe's floor: a probe reads the oldest row inside the
+    /// window it was asked about, which for a covered window is the window's own start, not where the data starts. One read per
+    /// scope, at most once per <see cref="ViewerServerTab.ServerDataStartMaxAge"/>, as the server tab keeps its data start: the
+    /// start only moves later, when old rows are purged. A read that fails hides the note (null makes no claim) and leaves the read
+    /// time old, so the next load reads again. A load a newer one has superseded writes nothing.
+    /// </summary>
+    private async Task RefreshPickerDataStartAsync(int? serverId, int gen)
     {
-        if (TimeRangePickerControl.DataStartUtc != floor)
+        if (_dataService == null) return;
+        if (_oldestRetainedScope == serverId && DateTime.UtcNow - _oldestRetainedReadUtc < ViewerServerTab.ServerDataStartMaxAge)
         {
-            TimeRangePickerControl.DataStartUtc = floor;
+            TimeRangePickerControl.DataStartUtc = _oldestRetainedUtc;
+            return;
         }
+
+        DateTime? oldest;
+        try
+        {
+            oldest = await _dataService.GetJobHistoryOldestRetainedAsync(serverId);
+        }
+        catch
+        {
+            /* The note only previews where a typed range would run out of data. A read that failed makes no claim, so the note is
+               hidden rather than trust a start the failed read could not confirm; the read time stays old, so the next load tries again. */
+            if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+            TimeRangePickerControl.DataStartUtc = null;
+            return;
+        }
+
+        if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+        _oldestRetainedScope = serverId;
+        _oldestRetainedReadUtc = DateTime.UtcNow;
+        _oldestRetainedUtc = oldest;
+        TimeRangePickerControl.DataStartUtc = oldest;
     }
 
     /// <summary>
@@ -143,7 +178,7 @@ public partial class JobHistoryTab : UserControl
         try
         {
             var (windowStartUtc, windowEndUtc, windowIsLive) = ViewerTimeRangeWindow.Window(
-                TimeRangePickerControl.Value, DateTime.UtcNow, ViewerTimeHelper.CurrentDisplayZone());
+                TimeRangePickerControl.Value, DateTime.UtcNow, PickerZone());
             int? serverId = GetSelectedServerId();
             /* #4966: the window's start is worked out once, and the read and the data-start probe both take it. The probe starts
                beside the read; its answer is awaited only after the rows are on screen, so a probe that fails costs the note and
@@ -155,7 +190,7 @@ public partial class JobHistoryTab : UserControl
             /* The choices are keyed on what identifies the window and the server (JobHistoryChoicesKey), not on its span: a live window
                with a fixed start (Today, Month to Date, "since X") grows its span on every refresh, which would read them every time. */
             var choicesKey = JobHistoryChoicesKey.For(
-                ViewerTimeRangeWindow.StartSlides(TimeRangePickerControl.Value, DateTime.UtcNow, ViewerTimeHelper.CurrentDisplayZone()),
+                ViewerTimeRangeWindow.StartSlides(TimeRangePickerControl.Value, DateTime.UtcNow, PickerZone()),
                 windowStartUtc, windowEndUtc, windowIsLive, serverId);
             var refreshChoices = _choicesFreshness.NeedsRead(choicesKey, DateTime.UtcNow);
             using var readFanOut = ViewerReadFanOut.Of(4);
@@ -173,7 +208,8 @@ public partial class JobHistoryTab : UserControl
             /* The two reads start side by side, here, where the width is declared; JoinChoicesAsync only waits for both. */
             var serversTask = refreshChoices ? ReadHalfAsync("servers", "server", () => service.GetJobHistoryServersAsync(), choicesKey) : null;
             var categoriesTask = refreshChoices
-                ? ReadHalfAsync("categories", "category", () => service.GetJobHistoryCategoriesAsync(windowStartUtc, windowIsLive ? null : windowEndUtc, serverId: serverId), choicesKey)
+                ? ReadHalfAsync("categories", "category", () => _categoryCache.GetAsync(choicesKey, DateTime.UtcNow,
+                    () => service.GetJobHistoryCategoriesAsync(windowStartUtc, windowIsLive ? null : windowEndUtc, serverId: serverId)), choicesKey)
                 : null;
             var choicesTask = serversTask is null || categoriesTask is null ? null : JoinChoicesAsync(serversTask, categoriesTask);
             /* #8133: at All Servers every server with runs in the window is guaranteed its share of the cap, so one busy server cannot fill
@@ -183,6 +219,10 @@ public partial class JobHistoryTab : UserControl
             await ViewerServerTab.AwaitReadWatchingProbeAsync(readTask, dataStartTask, "Job History");
             var all = await readTask;
             readFanOut.Release();
+            foreach (var read in all)
+            {
+                if (read.Clock is { } readClock) _rowClocks[read.ServerId] = readClock;
+            }
 
             /* The last supersede check and the bind sit in one synchronous run (JobHistoryLoadSteps.BindWhenCurrentAsync): a load that
                was current at the check cannot be superseded before it binds, so an older load never binds over a newer one. The
@@ -201,7 +241,7 @@ public partial class JobHistoryTab : UserControl
             var choicesApplied = ApplyKnownChoicesAsync(choicesTask, choicesKey, gen, all);
 
             var displayCount = JobHistoryDataGrid.Items.Count;
-            NoJobsMessage.Text = EmptyNote(IsAzureSqlDatabaseSelected());
+            NoJobsMessage.Text = EmptyNote(GetSelectedServerId(), _servers);
             NoJobsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
             RunTimeHeaderText.Text = TimeColumnTitle.For("Run Time", ViewerTimeHelper.CurrentDisplayMode, all.Any(r => r.MixedServers)); // D5: the column names its clock
             DataGridHeaderFit.Apply(JobHistoryDataGrid); // #6136: the longer title ("Run Time (server)") widens its column
@@ -216,6 +256,10 @@ public partial class JobHistoryTab : UserControl
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
 
+            /* The rows are on screen, so the tab is refreshed. The agent-status, data-start and choices reads below are best effort
+               and report their own failures; a failure line one of them raises after this stamp stands. */
+            StatusChanged?.Invoke($"job history: refreshed {ViewerTimeHelper.RefreshedStamp()}");
+
             await UpdateAgentStatusAsync(serverId);
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
@@ -226,6 +270,7 @@ public partial class JobHistoryTab : UserControl
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             await ShowJobHistoryDataStartAsync(JobHistoryTruncationBanner, dataStartTask, sinceUtc, all);
+            await RefreshPickerDataStartAsync(serverId, gen);
             await choicesApplied;
         }
         catch (Exception ex)
@@ -297,6 +342,16 @@ public partial class JobHistoryTab : UserControl
     /// <summary>When the choices are read again: for a different window or server, or after <see cref="ChoicesLifetime"/>.</summary>
     private readonly JobHistoryChoicesFreshness _choicesFreshness = new(ChoicesLifetime);
 
+    /// <summary>How long a category list stays current for its window and server (#8549). Longer than <see cref="ChoicesLifetime"/>: the
+    /// read is the slowest statement of the tab on a large store, and a category that appears later still reaches the drop-down through
+    /// the runs the grid reads.</summary>
+    private static readonly TimeSpan CategoriesLifetime = TimeSpan.FromMinutes(30);
+
+    /// <summary>The category lists read this session, per window and server, with one read in flight per key (#8549): a load that was
+    /// superseded while the read ran, a refresh after <see cref="ChoicesLifetime"/> and a return to a window already read all take the
+    /// same answer instead of running the statement again.</summary>
+    private readonly JobHistoryCategoryCache _categoryCache = new(CategoriesLifetime);
+
     /// <summary>Failed choices reads, logged once per window (the next refresh still reads again).</summary>
     private readonly ChoicesFailureLogGate<JobHistoryChoicesKey> _choicesFailures = new();
 
@@ -356,7 +411,7 @@ public partial class JobHistoryTab : UserControl
         if (servers is not null)
         {
             _knownServers = servers.Choices;
-            _azureServerIds = servers.AzureSqlDatabaseIds;
+            _servers = servers;
         }
 
         StartCategoriesOverWhenServerChanged();
@@ -369,23 +424,44 @@ public partial class JobHistoryTab : UserControl
         PopulateCategoryFilter(rows);
 
         /* #6391: the empty-grid sentence follows the picked server, and the engine list may have arrived after the grid bound. */
-        NoJobsMessage.Text = EmptyNote(IsAzureSqlDatabaseSelected());
+        NoJobsMessage.Text = EmptyNote(GetSelectedServerId(), _servers);
     }
 
     /// <summary>The Azure SQL Database servers among the Server choices, as the last read found them (they have no SQL Agent, so they never have rows).</summary>
-    private IReadOnlySet<int> _azureServerIds = new HashSet<int>();
+    private ViewerDataService.JobHistoryServers? _servers;
 
     /// <summary>The server the Category drop-down was last built for (null is All Servers), so a different pick starts the list over.</summary>
     private int? _categoryListServerId;
 
-    /// <summary>What the empty grid says (#6391): the plain no-SQL-Agent sentence the web's Job History uses for an Azure SQL Database, else the usual note.</summary>
-    internal static string EmptyNote(bool azureSqlDatabase) =>
-        azureSqlDatabase ? AzureNoAgentLine : "No job runs recorded in the selected time range";
+    /// <summary>
+    /// What the empty grid says (#6391): the plain no-SQL-Agent sentence the web's Job History uses for an Azure SQL Database, and the engine's own
+    /// sentence for a PostgreSQL target (#8564: the collector is written for SQL Server and never runs against another engine), else the usual note.
+    /// At All Servers the usual note gives way to the engine's sentence only when every registered server is such a target, so a fleet with no
+    /// SQL Server in it does not read as a true negative.
+    /// </summary>
+    internal static string EmptyNote(int? pickedServerId, ViewerDataService.JobHistoryServers? servers)
+    {
+        if (servers is null)
+        {
+            return UsualEmptyNote;
+        }
+
+        if (pickedServerId is int id)
+        {
+            return servers.AzureSqlDatabaseIds.Contains(id) ? AzureNoAgentLine
+                : servers.EngineGapNotes is { } picked && picked.TryGetValue(id, out var note) ? note
+                : UsualEmptyNote;
+        }
+
+        return servers.EngineGapNotes is { Count: > 0 } all && all.Count == servers.Choices.Count
+            ? all[servers.Choices[0].ServerId]
+            : UsualEmptyNote;
+    }
+
+    private const string UsualEmptyNote = "No job runs recorded in the selected time range";
 
     /// <summary>The web Job History's sentence for an Azure SQL Database (job-history.js AZURE_NO_AGENT_LINE).</summary>
     internal const string AzureNoAgentLine = "Azure SQL Database has no SQL Agent, so it has no job history.";
-
-    private bool IsAzureSqlDatabaseSelected() => GetSelectedServerId() is int id && _azureServerIds.Contains(id);
 
     private void PopulateServerFilter(List<ViewerJobHistoryRow> rows)
     {
@@ -523,6 +599,14 @@ public partial class JobHistoryTab : UserControl
     }
 
 
+    /// <summary>The clock each server's runs carried in the reads so far (#8645), so the picker words a range in the zone the rows beside it use.</summary>
+    private readonly Dictionary<int, PerformanceMonitor.Analysis.Baselines.ServerClock> _rowClocks = new();
+
+    /// <summary>The zone the range picker reads typed times in, and the window is worked out in (#8645): the picked server's clock, else, for
+    /// All Servers, the one clock a view of several servers reads on. Never the active server tab's (<see cref="ViewerTimeHelper.ListZoneFor"/>).</summary>
+    private TimeZoneInfo PickerZone() =>
+        ViewerTimeHelper.ListZoneFor(ViewerTimeHelper.CurrentDisplayMode, GetSelectedServerId(), _rowClocks, TimeZoneInfo.Local);
+
     private int? GetSelectedServerId()
     {
         return JobHistoryFilterChoices.ServerFilter(ServerFilterComboBox.SelectedIndex, (ServerFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string);
@@ -564,7 +648,7 @@ public partial class JobHistoryTab : UserControl
 
         ColumnFilterState? existingFilter = null;
         _filterManager?.Filters.TryGetValue(columnName, out existingFilter);
-        _filterPopupContent!.Initialize(columnName, existingFilter);
+        _filterPopupContent!.Initialize(columnName, existingFilter, columnHeader: ColumnFilterPopup.ColumnHeaderFor(button));
 
         _filterPopup.PlacementTarget = button;
         _filterPopup.IsOpen = true;
@@ -639,7 +723,7 @@ public partial class JobHistoryTab : UserControl
             CategoryFilterComboBox.SelectionChanged += Filter_SelectionChanged;
         }
 
-        NoJobsMessage.Text = EmptyNote(IsAzureSqlDatabaseSelected());
+        NoJobsMessage.Text = EmptyNote(GetSelectedServerId(), _servers);
 
         if (IsLoaded)
         {

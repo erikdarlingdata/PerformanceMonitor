@@ -134,9 +134,22 @@ internal static class PgDisplay
             return NotApplicableText;
         }
 
-        return ms < 1000
-            ? $"{ms:N0} ms"
-            : TimeSpan.FromMilliseconds(ms).ToString(ms < 3_600_000 ? @"mm\:ss" : @"d\.hh\:mm\:ss", CultureInfo.CurrentCulture);
+        if (ms < 1000)
+        {
+            return $"{ms:N0} ms";
+        }
+
+        /* #8564: ONE labelled format from a second to many days, the one the Running Jobs tab speaks ("2m 5s", "1h 5m"). The
+           clock-style text this replaced ("02:05", "1.08:23:10") put "41 ms" and a bare time in one column, and "02:05" read as
+           hours and minutes as easily as minutes and seconds. */
+        var span = TimeSpan.FromMilliseconds(ms);
+        return span.TotalDays >= 1
+            ? string.Create(CultureInfo.CurrentCulture, $"{(long)span.TotalDays}d {span.Hours}h {span.Minutes}m")
+            : span.TotalHours >= 1
+                ? string.Create(CultureInfo.CurrentCulture, $"{span.Hours}h {span.Minutes}m")
+                : span.TotalMinutes >= 1
+                    ? string.Create(CultureInfo.CurrentCulture, $"{span.Minutes}m {span.Seconds}s")
+                    : string.Create(CultureInfo.CurrentCulture, $"{span.Seconds}s");
     }
 
     internal static string Timestamp(DateTime? utc) =>
@@ -1309,7 +1322,7 @@ internal static class PgDisplay
         var caveats = new List<string>();
         if (r.StateWasRedacted)
         {
-            caveats.Add("state columns REDACTED — the monitoring login lacks pg_monitor here");
+            caveats.Add("state columns REDACTED: the monitoring login lacks pg_monitor here");
         }
 
         if (r.CaptureWasTruncated)
@@ -1341,7 +1354,7 @@ internal static class PgDisplay
             StatementText = r.LastQueryId is null or 0 ? "" : r.LastQueryText ?? "(statement text not captured yet)",
             PeakHorizonAge = r.PeakHorizonAge < 0
                 ? PinsNothingText
-                : string.Create(CultureInfo.CurrentCulture, $"{r.PeakHorizonAge:N0} transactions"),
+                : CountText.Plural(r.PeakHorizonAge, "transaction"),
             /* These two keep the ordinary dash. They are the components of the horizon age above, and an
                absent one is the narrower statement "this session held no snapshot" / "no transaction id" —
                which the horizon column has already said in words. */
@@ -1461,10 +1474,10 @@ internal static class PgDisplay
                 "Cleaning rounds that stopped early because bgwriter_lru_maxpages was reached. Sustained "
                 + "non-zero means the background writer is CAPPED rather than idle."),
             Metric("Background Writer", "Buffers Allocated", row.BuffersAlloc,
-                "Buffers handed out — the denominator for how hard the pool is being churned."),
+                "Buffers handed out: the denominator for how hard the pool is being churned."),
             Metric("Background Writer", "Buffers Written By Backends", row.BuffersBackend,
                 "Queries writing their own buffers because nothing else kept up. Blank on PostgreSQL 17+, "
-                + "which moved this to pg_stat_io — see the grid above, not a zero here."),
+                + "which moved this to pg_stat_io; see the grid above, not a zero here."),
             Metric("Background Writer", "Backend fsyncs", row.BuffersBackendFsync,
                 "Blank on PostgreSQL 17+ for the same reason."),
             Metric("WAL", "Records", row.WalRecords, "WAL records generated."),
@@ -1610,6 +1623,10 @@ internal static class PgDisplay
         CaptureTimeUtc = row.CaptureTime,
     };
 
+    /// <summary>The lead of the predicate statistics note: the predicate count and the sample rate the rows were taken at.</summary>
+    internal static string PredicateStatsSummary(int predicates, double sampled) =>
+        string.Create(CultureInfo.InvariantCulture, $"{CountText.Plural(predicates, "predicate")}, sampled at {sampled * 100:N2}% of executions");
+
     /// <summary>How many wait rows are attributed to a statement. A null query id is a target that does not report
     /// one (#6836) and 0 is work belonging to no statement, so neither counts: a lifted <c>null != 0</c> is true
     /// and would call every row of a PostgreSQL 13 target attributed (#6849).</summary>
@@ -1629,7 +1646,7 @@ internal static class PgDisplay
     {
         ArgumentNullException.ThrowIfNull(rows);
 
-        return $"{rows.Count:N0} wait event(s), {WaitSamplingAttributedCount(rows):N0} attributed to a query. "
+        return string.Create(CultureInfo.InvariantCulture, $"{CountText.Plural(rows.Count, "wait event")}, {WaitSamplingAttributedCount(rows):N0} attributed to a query. ")
             + (serviceTier
                 ? $"Instrument: SERVICE SAMPLER, the service polling pg_stat_activity {cadence}. "
                   + PgWaitInstrument.ServiceSampledCaveat + " "
@@ -1926,6 +1943,35 @@ internal static class PgDisplay
         public string PendingRestart { get; init; } = "";
     }
 
+    /* #8664: the audit's wording is shared with the MCP reply, which names its own tools and fields. The Viewer has none of
+       those, so each is swapped for the tab or column that shows the same thing. The settings grid sits above the audit on
+       the same Overview tab. */
+    private static readonly (string Tool, string Place)[] s_viewerPlaces =
+    [
+        ("get_pg_server_config's pending_restart_settings", "the settings grid above"),
+        ("get_pg_server_config", "the settings grid above"),
+        ("get_pg_plan_capture_readiness", "Vacuum panel 5"),
+        ("get_pg_top_queries", "Activity > Query Shapes"),
+        ("get_pg_blocking", "Activity > Blocking"),
+        ("get_pg_write_stats", "the I/O tab"),
+        ("get_pg_database_stats", "the per-database counters on Activity > Query Shapes"),
+        ("get_pg_database_trend", "Activity > Trends"),
+        ("get_pg_autovacuum_health", "Vacuum panel 3"),
+        ("get_pg_log_events", "the log events read"),
+        ("cost_note", "the Cost column"),
+    ];
+
+    /// <summary>The audit's text as the Viewer shows it: the MCP tool and field names it carries become the Viewer's own places.</summary>
+    internal static string ViewerWording(string text)
+    {
+        foreach (var (tool, place) in s_viewerPlaces)
+        {
+            text = text.Replace(tool, place, StringComparison.Ordinal);
+        }
+
+        return text;
+    }
+
     internal static LoggingAuditRow LoggingAudit(DarlingPgLoggingAudit.Facet f) => new()
     {
         Setting = f.Setting,
@@ -1934,11 +1980,11 @@ internal static class PgDisplay
         Unit = f.Unit,
         Source = f.Source,
         ChangeNeeds = f.ChangeNeeds,
-        Unlocks = f.Unlocks,
-        Recommended = f.Recommended,
-        CostNote = f.CostNote,
-        Remedy = f.Remedy,
-        PendingRestart = f.PendingRestart ? (f.RestartNote ?? "yes") : string.Empty,
+        Unlocks = ViewerWording(f.Unlocks),
+        Recommended = ViewerWording(f.Recommended),
+        CostNote = ViewerWording(f.CostNote),
+        Remedy = ViewerWording(f.Remedy),
+        PendingRestart = f.PendingRestart ? ViewerWording(f.RestartNote ?? "yes") : string.Empty,
     };
 
     /// <summary>One relation of the Buffer Usage grid. All rows are one collection, so the time is the same on each.</summary>

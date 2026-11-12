@@ -45,6 +45,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public sealed partial class InvestigationRequestStore : IInvestigationRequestStore, IInvestigationNoteStore
 {
+    /// <summary>Optional mandatory server IDs for request and report reads.</summary>
+    public IReadOnlyList<int>? ReadServerIds { get; init; }
+
     /// <summary>The first key of the route lock, <c>pg_advisory_xact_lock(5632, route_id)</c>.</summary>
     public const int RouteLockKey = 5632;
 
@@ -142,11 +145,14 @@ WHERE route_id = $1
   AND trigger_kind <> 'chat'
   AND opened_at > $2 - interval '1 day'";
 
+    /* #8578: server_name is the registry's display name for server_id when the server is registered, else the name the caller passed. An alert
+       carries the display name or the host name and an analysis finding the storage name (host[:database][:RO]), so one server opened its requests
+       under two names. server_id 0 (an external source) has no registry row and keeps the caller's label, which is also its join key (FindJoinSql). */
     internal static readonly string OpenSql = @"
 INSERT INTO config.investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, first_dedup_key, story_path_hash,
      first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes, autonomy_level, max_severity, trigger_kind)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + " + GroupingWindowSql + @", $10, $10 + make_interval(mins => $11), $12,
+VALUES ($1, $2, $3, COALESCE((SELECT COALESCE(sv.display_name, sv.server_name) FROM collect.servers AS sv WHERE sv.server_id = $3), $4), $5, $6, $7, $8, $9, $9, $9 + " + GroupingWindowSql + @", $10, $10 + make_interval(mins => $11), $12,
         " + StampLevelSql(6, 13) + ", $14, $15)";
 
     internal const string AlertRowsSql = @"
@@ -459,6 +465,7 @@ FROM (
     LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
     WHERE ($3::integer IS NULL OR r.server_id = $3)
       AND ($4::text IS NULL OR r.family = $4)
+      AND ($6::integer[] IS NULL OR r.server_id = ANY($6))
 ) AS s
 WHERE ($2::text IS NULL OR s.effective_state = $2)
 ORDER BY s.opened_at DESC, s.request_id
@@ -528,6 +535,7 @@ RETURNING source_request_id, server_id, decided_at";
 WHERE ($2::uuid IS NULL OR r.request_id = $2)
   AND ($3::integer IS NULL OR r.server_id = $3)
   AND ($2::uuid IS NOT NULL OR r.opened_at >= $4)
+  AND ($6::integer[] IS NULL OR r.server_id = ANY($6))
 ORDER BY r.opened_at DESC, r.request_id
 LIMIT $5";
 
@@ -1160,7 +1168,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = Command(connection, null, ReportsRequestsSql,
             P(Now()), new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid },
-            new NpgsqlParameter<int?> { TypedValue = null, NpgsqlDbType = NpgsqlDbType.Integer }, P(DateTime.MinValue), P(1));
+            new NpgsqlParameter<int?> { TypedValue = null, NpgsqlDbType = NpgsqlDbType.Integer }, P(DateTime.MinValue), P(1), ReadServerScopeParameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -1199,7 +1207,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         string? brief = null;
         await using (var command = Command(connection, null, ReportsRequestsSql,
             P(Now()), new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid },
-            new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer }, P(sinceUtc), P(limit + 1)))
+            new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer }, P(sinceUtc), P(limit + 1), ReadServerScopeParameter()))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
@@ -1249,7 +1257,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
         /* #5913: the people's feedback on these reports, and (for a window, not one request) the false-positive counts per family
            over the same window and server. The V191 table is SELECT-able by every role that reads these tables. */
-        var feedbackStore = new InvestigationFeedbackStore(_dataSource, _commandTimeoutSeconds);
+        var feedbackStore = new InvestigationFeedbackStore(_dataSource, _commandTimeoutSeconds) { ReadServerIds = ReadServerIds };
         var feedback = await feedbackStore.ReadAsync(connection, ids, cancellationToken);
         var familyCounts = requestId is null ? await feedbackStore.FamilyCountsAsync(connection, sinceUtc, serverId, cancellationToken) : null;
         return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, journalTruncated, feedback, familyCounts, EvidenceByBasis: true);
@@ -1326,7 +1334,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = Command(connection, null, ListSql,
             P(Now()), PNullable(state), new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
-            PNullable(family), P(limit));
+            PNullable(family), P(limit), ReadServerScopeParameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var rows = new List<InvestigationRequestRow>();
         while (await reader.ReadAsync(cancellationToken))
@@ -1811,6 +1819,9 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             new NpgsqlParameter<int?> { TypedValue = routeId, NpgsqlDbType = NpgsqlDbType.Integer },
             new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
             P(journalEvent), P(actor), PNullable(reason), PNullable(detailJson), PNullable(onceKey));
+
+    private NpgsqlParameter ReadServerScopeParameter() =>
+        new() { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = (object?)ReadServerIds?.ToArray() ?? DBNull.Value };
 
     private NpgsqlCommand Command(NpgsqlConnection connection, NpgsqlTransaction? transaction, string sql, params NpgsqlParameter[] parameters)
     {

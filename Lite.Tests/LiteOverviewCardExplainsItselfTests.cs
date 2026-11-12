@@ -39,6 +39,7 @@ namespace PerformanceMonitorLite.Tests;
 /// a CONNECTION word, so a card in real metric trouble reads a green "Online" while its border is red, and its
 /// amber "Warning" is about failing collectors and says nothing about the metrics at all.</para>
 /// </summary>
+[Collection("application-theme")] // #8395: reads a card brush off the STA thread
 public sealed class LiteOverviewCardExplainsItselfTests
 {
     /* Every fixture leaves OtherProcessCpuPercent null on purpose. CpuPercentForAlert reads the process-wide
@@ -78,8 +79,8 @@ public sealed class LiteOverviewCardExplainsItselfTests
 
         foreach (var card in EveryState())
         {
-            /* Offline is the documented exception and is checked on its own below: the card draws a dimming
-               overlay over those rows because the numbers under it are pre-blackout. */
+            /* Offline is the documented exception and is checked on its own below: the card's Blocking and
+               Deadlocks rows read "--" in grey there, because the numbers behind them are pre-blackout. */
             if (card.IsOffline)
             {
                 continue;
@@ -139,15 +140,16 @@ public sealed class LiteOverviewCardExplainsItselfTests
     {
         var tooltip = Healthy().StatusTooltip;
 
-        Assert.Contains("Online — the last connection check succeeded", tooltip, StringComparison.Ordinal);
+        Assert.Contains("Online: the last connection check succeeded", tooltip, StringComparison.Ordinal);
         Assert.Contains("Every metric on this card is inside its threshold", tooltip, StringComparison.Ordinal);
         Assert.DoesNotContain("Needs attention", tooltip, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// An offline card is not told to act on the numbers behind its own blackout overlay. Those are the last
-    /// values collected before the server went dark; the card dims them for that reason, and a tooltip
-    /// demanding attention for them would contradict the card while the reader is looking at it.
+    /// An offline card is not told to act on the numbers from before its own blackout. Those are the last
+    /// values collected before the server went dark; its Blocking and Deadlocks rows read "--" for that reason
+    /// (#8304), and a tooltip demanding attention for them would contradict the card while the reader is
+    /// looking at it.
     /// </summary>
     [Fact]
     public void TheTooltip_OnAnOfflineCard_DoesNotDemandActionOnPreBlackoutNumbers()
@@ -156,13 +158,15 @@ public sealed class LiteOverviewCardExplainsItselfTests
         var tooltip = card.StatusTooltip;
 
         Assert.True(card.IsOffline);
-        Assert.Contains("Offline — the last connection check failed", tooltip, StringComparison.Ordinal);
+        Assert.Contains("Offline: the last connection check failed", tooltip, StringComparison.Ordinal);
         Assert.DoesNotContain("Needs attention", tooltip, StringComparison.Ordinal);
         Assert.DoesNotContain("CPU", tooltip, StringComparison.Ordinal);
 
         /* The reason itself is still computed — the omission is a tooltip decision, made in one place, not a
-           hole in what the card knows. */
-        Assert.Equal("SQL CPU 96%, Deadlocks 2", card.StatusReason);
+           hole in what the card knows. It quotes the rows as they read: the Deadlocks row shows "--" on a dark
+           server (#8304), so the reason does not name it. */
+        Assert.Equal("--", card.DeadlockDisplay);
+        Assert.Equal("SQL CPU 96%", card.StatusReason);
     }
 
     /// <summary>"Unknown" is the one word with nothing behind it: no connection check has run. Not knowing
@@ -172,7 +176,7 @@ public sealed class LiteOverviewCardExplainsItselfTests
     {
         var tooltip = NotYetChecked().StatusTooltip;
 
-        Assert.Contains("Unknown — this server has not been connection-checked yet", tooltip, StringComparison.Ordinal);
+        Assert.Contains("Connecting: the first connection check has not finished yet", tooltip, StringComparison.Ordinal);
         Assert.Contains("Needs attention: SQL CPU 62%", tooltip, StringComparison.Ordinal);
     }
 
@@ -186,7 +190,7 @@ public sealed class LiteOverviewCardExplainsItselfTests
             var tooltip = card.StatusTooltip;
 
             Assert.NotEqual(card.StatusDisplay, tooltip);
-            Assert.Contains(card.StatusDisplay + " — ", tooltip, StringComparison.Ordinal);
+            Assert.Contains(card.StatusDisplay + ": ", tooltip, StringComparison.Ordinal);
             Assert.EndsWith("Double-click the card to open this server's tab", tooltip, StringComparison.Ordinal);
         }
     }
@@ -259,7 +263,7 @@ public sealed class LiteOverviewCardExplainsItselfTests
         notChecked.HasCollectorErrors = true;
 
         Assert.Equal(ServerCardStatus.Unknown, notChecked.CardStatus);
-        Assert.Equal("Unknown", notChecked.StatusDisplay);
+        Assert.Equal("Connecting", notChecked.StatusDisplay);
         Assert.DoesNotContain("collectors", notChecked.StatusTooltip, StringComparison.Ordinal);
         Assert.Equal(neutral, notChecked.CardBorderBrush.Color);
 

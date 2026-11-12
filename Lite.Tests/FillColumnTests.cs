@@ -50,7 +50,7 @@ public class FillColumnTests
             grid.Height = 300;
             var window = new Window { Content = new Canvas { Children = { grid } }, Width = ScreenProofWindowWidth, Height = 400 };
             window.Resources.MergedDictionaries.Add(Theme(theme));
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ClippedTextProbe.Settle(window);

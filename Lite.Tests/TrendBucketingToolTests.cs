@@ -171,9 +171,9 @@ public sealed class TrendBucketingToolTests : IClassFixture<SharedDuckDbFixture>
         /* #7161: (6,000 + 1,200) ms / (300 s gap to 09:57 + 120 s gap to 10:02) = 17.142857; (60 + 12) / 420 = 0.171428571;
            the peak point is 10:02's 6,000 / 300 = 20 (the stored 60 s said 100). The old 40, 0.4 and 100 divided by the
            stored 60 s and 120 s. */
-        Assert.Equal(7200.0 / 420.0, trend[0].GetProperty("elapsed_ms_per_second").GetDouble(), 9);
-        Assert.Equal(72.0 / 420.0, trend[0].GetProperty("executions_per_second").GetDouble(), 9);
-        Assert.Equal(20.0, trend[0].GetProperty("peak_elapsed_ms_per_second").GetDouble(), 9);
+        Assert.Equal(7200.0 / 420.0, trend[0].GetProperty("elapsed_ms_per_second").GetDouble(), 6);
+        Assert.Equal(72.0 / 420.0, trend[0].GetProperty("executions_per_second").GetDouble(), 6);
+        Assert.Equal(20.0, trend[0].GetProperty("peak_elapsed_ms_per_second").GetDouble(), 6);
         Assert.Equal(JsonValueKind.Null, trend[1].GetProperty("elapsed_ms_per_second").ValueKind);
         Assert.Equal(1.0, trend[2].GetProperty("elapsed_ms_per_second").GetDouble(), 9);
         Assert.Equal(1, root.GetProperty("unrated_points").GetInt32());

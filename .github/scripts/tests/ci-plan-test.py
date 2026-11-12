@@ -190,6 +190,11 @@ check("legs: a push of 131 minutes is 10", cp.leg_count(131, "push"), 10)
 check("legs: a push is capped at 10", cp.leg_count(500, "push"), cp.DEV_PUSH_MAX_LEGS)
 check("legs: the push maximum is 10", cp.DEV_PUSH_MAX_LEGS, 10)
 check("legs: a push with no tests is 0", cp.leg_count(0, "push"), 0)
+check("legs: a narrowed push takes the PR count, no floor (#7819)", cp.leg_count(0.02, "push", narrowed=True), 1)
+check("legs: a narrowed push follows the estimate", cp.leg_count(cp.MINUTES_PER_LEG * 3 - 0.1, "push", narrowed=True), 3)
+check("legs: a narrowed push keeps the push cap", cp.leg_count(500, "push", narrowed=True), cp.DEV_PUSH_MAX_LEGS)
+check("legs: a dispatch gets the push floor", cp.leg_count(0.02, "workflow_dispatch"), cp.DEV_PUSH_MIN_LEGS)
+check("legs: a dispatch is capped at 10", cp.leg_count(500, "workflow_dispatch"), cp.DEV_PUSH_MAX_LEGS)
 
 r = run(["Darling/X.cs"], cat=big)
 check("big suite: capped legs", (r["legs"], r["legs_json"]), ("16", json.dumps(list(range(1, 17)), separators=(",", ":"))))
@@ -256,7 +261,7 @@ check("classes: docs + one test class: areas", r["areas"], "classes")
 check("classes: docs + one test class: scope", (r["darling_scope"], r["lite_scope"]), ("classes", "none"))
 check("classes: docs + one test class: the class", r["darling_classes"], "D1")
 check("classes: docs + one test class: build and legs", (r["build"], r["legs"], r["legs_json"]), ("true", "1", "[1]"))
-check("classes: a file with two classes", cc([DT + "D3Tests.cs"])["darling_classes"], "D3,D4")
+check("classes: a file with two classes, then the Darling Guard class (#8355)", cc([DT + "D3Tests.cs"])["darling_classes"], "D3,D4,D1")
 check("classes: a file with two classes runs one leg", cc([DT + "D3Tests.cs"])["legs"], "1")
 r = cc(["README.md"] + [DT + f"B{i}Tests.cs" for i in range(14)], big_cc)
 check("classes: docs + 14 test classes: scope", (r["areas"], r["darling_scope"]), ("classes", "classes"))
@@ -301,7 +306,7 @@ with tempfile.TemporaryDirectory() as hroot:
     check("helper file: only the test class is a test", (h_row["tests"], h_row["safe"]), (["WithHelperTests"], True))
     h_cat = {**catalog, "files": h_tbl}
     r = run(["README.md", DT + "WithHelperTests.cs"], cat=h_cat)
-    check("helper file: the picks name only the test class", (r["areas"], r["darling_classes"]), ("classes", "WithHelperTests"))
+    check("helper file: the picks name only the test class, then the Guard class", (r["areas"], r["darling_classes"]), ("classes", "WithHelperTests,D1"))
 
 # The real file table: a class file maps to its classes, a helper and a missing map do not narrow.
 real_cat = cp.load_catalog()
@@ -321,7 +326,8 @@ check("draft: product file + changed test file: areas", r.get("areas"), "classes
 check("draft: product file + changed test file: scope", (r.get("darling_scope"), r.get("lite_scope")), ("classes", "none"))
 check("draft: product file + changed test file: the class and the Guard classes", r.get("darling_classes"), "D3,D4,D1")
 check("draft: product file + changed test file: minutes and legs", (r.get("test_minutes"), r.get("legs")), ("3.0", "1"))
-check("draft: the why line names the rule", "a draft runs only its own test classes and the Guard classes" in r.get("why", ""), True)
+check("draft: the why line names the rule",
+      "a draft runs only its own test classes and the Stage=Guard classes of each suite in its scope" in r.get("why", ""), True)
 r = draft_run([SERVICE])
 check("draft: product file only: Guard classes only", (r.get("areas"), r.get("darling_scope"), r.get("darling_classes")), ("classes", "classes", "D1"))
 check("draft: product file only: no Lite", (r.get("lite_scope"), r.get("lite_classes"), r.get("build")), ("none", "", "true"))
@@ -334,6 +340,68 @@ r = draft_run([LITE_SRC])
 check("draft: a Lite-only product file: Darling Guard, no Lite", (r.get("areas"), r.get("darling_classes"), r.get("lite_scope")), ("classes", "D1", "none"))
 r = draft_run([LITE_SRC, LT + "L1Tests.cs"])
 check("draft: a Lite product file + Lite test: both", (r.get("darling_classes"), r.get("lite_classes")), ("D1", "L1"))
+# #8355: a draft runs the Lite Stage=Guard classes that hold a test whenever its Lite scope is not none, as it runs Darling's.
+# LG1 and LG2 are Lite Guard classes with tests; LGHelper carries the trait and holds no test, so it is never named.
+lg_cls = {"darling": d_cls, "lite": {**l_cls, "LG1": {"Stage=Guard"}, "LG2": {"Stage=Guard"}, "LGHelper": {"Stage=Guard", cs.NO_TESTS_TRAIT}}}
+lg_cat = {**cc_cat, "classes": lg_cls, "lite_weights": {**cc_cat["lite_weights"], "LG1": 60, "LG2": 60}}
+r = draft_run([LITE_SRC, LT + "L1Tests.cs"], cat=lg_cat)
+check("draft lite guard: a Lite product file + Lite test: its class, then every Lite Guard class that holds a test", r.get("lite_classes"), "L1,LG1,LG2")
+check("draft lite guard: the Darling side is as before", (r.get("darling_scope"), r.get("darling_classes")), ("classes", "D1"))
+r = draft_run([SERVICE, LITE_SRC, DT + "D3Tests.cs", LT + "L2Tests.cs"], cat=lg_cat)
+check("draft lite guard: both suites", (r.get("darling_classes"), r.get("lite_classes")), ("D3,D4,D1", "L2,LG1,LG2"))
+r = draft_run([LITE_SRC], cat=lg_cat)
+check("draft lite guard: a Lite product file with no changed test file runs the Guard classes of both suites",
+      (r.get("darling_classes"), r.get("lite_scope"), r.get("lite_classes")), ("D1", "classes", "LG1,LG2"))
+r = draft_run([SERVICE], cat=lg_cat)
+check("draft lite guard: a Darling file that Lite classes read (Lite scope reads) runs the Lite Guard classes",
+      (r.get("darling_classes"), r.get("lite_scope"), r.get("lite_classes")), ("D1", "classes", "LG1,LG2"))
+r = draft_run(["Darling/X.cs"], cat=lg_cat)
+check("draft lite guard: a Lite scope of none picks no Lite class", (r.get("darling_classes"), r.get("lite_scope"), r.get("lite_classes")), ("D1", "none", ""))
+check("draft lite guard: the why line names both suites' Guard classes",
+      "a draft runs only its own test classes and the Stage=Guard classes of each suite in its scope" in r.get("why", ""), True)
+lg_files = {**cc_files, LT + "LG1Tests.cs": {"suite": "lite", "classes": ["LG1"], "tests": ["LG1"], "safe": True}}
+r = draft_run([LITE_SRC, LT + "LG1Tests.cs"], cat={**lg_cat, "files": lg_files})
+check("draft lite guard: a changed Lite Guard class is picked once", r.get("lite_classes"), "LG1,LG2")
+# #7744: a Guard class the test host does not list never reaches a plan, in either suite.
+r = cp.plan("pull_request", "dev", "feature/x", [], [LITE_SRC, LT + "L1Tests.cs"], rules, {**lg_cat, "listed": lambda suite, name: name not in ("LG2", "D1")}, draft=True)
+check("draft lite guard: a Guard class the host does not list is dropped, in either suite",
+      (r.get("darling_scope"), r.get("darling_classes"), r.get("lite_classes")), ("none", "", "L1,LG1"))
+# #8355: a test-only change (rule 6) runs the changed classes with the Stage=Guard classes of each suite in its scope, on a draft and
+# on a ready pull request alike. Most Guard classes scan the test sources, so a change to a test file is one that can trip them.
+# Rule 6 is already narrow, so the Guard classes only add to it; documentation alone stays docs-only.
+for flag in (True, False):
+    r = draft_run(["README.md", LT + "L1Tests.cs"], draft=flag, cat=lg_cat)
+    check(f"test-only guard (draft={flag}): a Lite test file lists its class, then every Lite Guard class that holds a test",
+          (r.get("areas"), r.get("darling_scope"), r.get("darling_classes"), r.get("lite_classes")), ("classes", "none", "", "L1,LG1,LG2"))
+    r = draft_run([DT + "D3Tests.cs"], draft=flag, cat=lg_cat)
+    check(f"test-only guard (draft={flag}): a Darling test file lists its classes, then every Darling Guard class, and the Lite Guard "
+          "classes of Lite's reads scope",
+          (r.get("areas"), r.get("darling_classes"), r.get("lite_scope"), r.get("lite_classes")), ("classes", "D3,D4,D1", "classes", "LG1,LG2"))
+    check(f"test-only guard (draft={flag}): the why line names the rule",
+          "only documentation and test classes changed, so those classes run with the Stage=Guard classes of each suite in its scope"
+          in r.get("why", ""), True)
+    r = draft_run(["README.md"], draft=flag, cat=lg_cat)
+    check(f"test-only guard (draft={flag}): documentation only lists no class",
+          (r.get("areas"), r.get("darling_classes"), r.get("lite_classes")), ("docs-only", "", ""))
+r = cp.plan("pull_request", "dev", "feature/x", [], [LT + "L1Tests.cs"], rules, {**lg_cat, "listed": lambda suite, name: name != "LG2"})
+check("test-only guard: a Guard class the host does not list is dropped", r.get("lite_classes"), "L1,LG1")
+r = draft_run([LT + "L1Tests.cs", DT + "D1Tests.cs"], cat=lg_cat)
+check("test-only guard: a changed Guard class is listed once", (r.get("darling_classes"), r.get("lite_classes")), ("D1", "L1,LG1,LG2"))
+# The Lite Guard classes join a selection that is already narrow and never narrow a draft on their own: a draft that changes only a
+# Lite file no test class or Darling class answers for (a manifest, a config file the app reads at run time) runs the Lite suite in
+# full, as it does when it is ready for review.
+for lone in ("Lite/app.manifest", "Lite/config/collection_schedule.json"):
+    r = draft_run([lone], cat=lg_cat)
+    ready = draft_run([lone], draft=False, cat=lg_cat)
+    check(f"draft lite guard: {lone} alone runs the Lite suite in full",
+          (r.get("areas"), r.get("darling_scope"), r.get("lite_scope"), r.get("lite_classes")), ("lite", "none", "full", ""))
+    check(f"draft lite guard: {lone} alone: the areas, scopes and legs of a ready pull request",
+          (r.get("areas"), r.get("darling_scope"), r.get("lite_scope"), r.get("legs")),
+          (ready.get("areas"), ready.get("darling_scope"), ready.get("lite_scope"), ready.get("legs")))
+    check(f"draft lite guard: {lone} alone: the why line says no class is selected", "no class is selected" in r.get("why", ""), True)
+r = draft_run(["Lite/app.manifest", LT + "L1Tests.cs"], cat=lg_cat)
+check("draft lite guard: the same file with a changed Lite test file is narrow, and the Lite Guard classes join",
+      (r.get("areas"), r.get("darling_scope"), r.get("lite_classes")), ("classes", "none", "L1,LG1,LG2"))
 # A changed test file that is not safe: the whole pull request runs as it does today, and the why line says so.
 r = draft_run([SERVICE, DT + "Helpers.cs"])
 check("draft: an unsafe test file: full", (r.get("areas"), r.get("darling_scope")), ("darling", "full"))
@@ -351,7 +419,7 @@ check("ready: the why line has no draft rule", "draft runs only" in draft_run([S
 for flag in (True, False):
     check(f"draft={flag}: docs-only", draft_run(["README.md"], draft=flag).get("areas"), "docs-only")
     r = draft_run(["README.md", DT + "D3Tests.cs"], draft=flag)
-    check(f"draft={flag}: test-only has no Guard classes", (r.get("areas"), r.get("darling_classes")), ("classes", "D3,D4"))
+    check(f"draft={flag}: test-only runs its classes and the Darling Guard class (#8355)", (r.get("areas"), r.get("darling_classes")), ("classes", "D3,D4,D1"))
     check(f"draft={flag}: a dev push is every area", draft_run([SERVICE], draft=flag, event="push").get("darling_scope"), "full")
     check(f"draft={flag}: a base other than dev is every area",
           draft_run([SERVICE], draft=flag, base="main").get("areas"), "all")
@@ -363,7 +431,10 @@ check("draft: parse_bool", [cp.parse_bool(x) for x in ("true", "True", "false", 
 tbl = real_cat["files"]
 one = next(f for f, e in sorted(tbl.items()) if e["suite"] == "darling" and e["safe"] and len(e["classes"]) == 1)
 r = cp.plan("pull_request", "dev", "x", [], ["README.md", one], live_rules := cs.Rules(), real_cat)
-check("real table: one class file narrows", (r["areas"], r["darling_classes"]), ("classes", tbl[one]["classes"][0]))
+real_guard = sorted(c for c, t in real_cat["classes"]["darling"].items() if "Stage=Guard" in t and cs.NO_TESTS_TRAIT not in t)
+check("real table: one class file narrows to its class and the Darling Guard classes (#8355)",
+      (r["areas"], r["darling_classes"].split(",")[0], sorted(set(r["darling_classes"].split(",")) - {tbl[one]["classes"][0]})),
+      ("classes", tbl[one]["classes"][0], [c for c in real_guard if c != tbl[one]["classes"][0]]))
 check("real table: every row has a class", all(e["classes"] for e in tbl.values()), True)
 no_test = {(s, c) for s, m in real_cat["classes"].items() for c, t in m.items() if cs.NO_TESTS_TRAIT in t}
 check("real table: no picked name is a class without tests",
@@ -526,12 +597,32 @@ check("shared: the Ui theme loader is a registration file",
 r = ready_run([SERVICE], draft=True)
 check("map: a draft keeps its rule", (r.get("areas"), r.get("darling_classes"), "a draft runs only" in r.get("why", "")), ("classes", "D1", True))
 check("map: a draft never uses the map", "nightly test map" in ready_run([SERVICE], draft=True).get("why", ""), False)
+# #7819, rule 10: a dev push with the map picks its classes as a ready pull request does; without the map, or as the hourly
+# workflow_dispatch run, it runs every area. full_suite says which runs set the `CI full suite` status.
 r = ready_run([SERVICE], event="push")
-check("map: a dev push is FULL", (r.get("areas"), r.get("darling_scope"), r.get("lite_scope")), ("all", "full", "full"))
+check("map: a dev push with the map picks its classes", (r.get("areas"), r.get("darling_classes"), r.get("lite_scope")), ("classes", "D1,D2", "none"))
+check("map: a dev push with the map: the pull request leg count, not the push floor", (r.get("legs"), r.get("full_suite")), ("1", "false"))
+check("map: a dev push's why line names the push", "a dev push runs the classes the nightly test map selects" in r.get("why", ""), True)
+r = ready_run([SERVICE], event="push", selection={"map": None, "error": "no nightly run has a test-map artifact", "now": NOW})
+check("map: a dev push without a readable map runs its areas in full, as rule 5 says", (r.get("areas"), r.get("darling_scope"), r.get("legs"), r.get("full_suite")), ("darling", "full", "6", "false"))
+check("map: a dev push without a readable map: the why line", "A dev push picks its classes from the nightly test map, but no nightly run has a test-map artifact" in r.get("why", ""), True)
+r = ready_run(["tools/odd.txt"], event="push", selection={"map": None, "error": "no nightly run has a test-map artifact", "now": NOW}, cat=full)
+check("map: a dev push of a path no area knows, without a map, is the full suite", (r.get("areas"), r.get("legs"), r.get("full_suite")), ("all", "10", "true"))
+r = ready_run([SERVICE, "global.json"], event="push")
+check("map: a dev push of a keep-full file is FULL", (r.get("areas"), r.get("full_suite")), ("all", "true"))
+check("map: a dev push of documentation only builds nothing", (ready_run(["README.md"], event="push").get("areas"), ready_run(["README.md"], event="push").get("build")), ("docs-only", "false"))
+check("map: a dev push of a path the workflow marked unknown is FULL", ready_run(["unknown/push-was-forced"], event="push").get("areas"), "all")
+check("map: a dev push with an empty file list is FULL", ready_run([], event="push").get("areas"), "all")
+check("map: a dev push without the map input is FULL", (run([SERVICE], event="push").get("areas"), run([SERVICE], event="push").get("full_suite")), ("all", "true"))
+r = run([SERVICE], event="workflow_dispatch", cat=full)
+check("map: the hourly dispatch runs every area", (r.get("outcome"), r.get("areas"), r.get("legs"), r.get("full_suite")), ("run", "all", "10", "true"))
+check("map: a dispatch given the map still runs every area", ready_run([SERVICE], event="workflow_dispatch").get("areas"), "all")
+check("map: a pull request that runs every area says full_suite too", run(["tools/odd.txt"]).get("full_suite"), "true")
+check("map: a mapped pull request is not the full suite", ready_run([SERVICE]).get("full_suite"), "false")
 check("map: a base other than dev is FULL", ready_run([SERVICE], base="main").get("areas"), "all")
 check("map: docs-only stays docs-only", ready_run(["README.md"]).get("areas"), "docs-only")
 r = ready_run(["README.md", DT + "D3Tests.cs"])
-check("map: test-only stays test-only (no Guard class)", (r.get("areas"), r.get("darling_classes")), ("classes", "D3,D4"))
+check("map: test-only stays test-only, its classes and the Guard class, not the map's (#8355)", (r.get("areas"), r.get("darling_classes")), ("classes", "D3,D4,D1"))
 r = ready_run([SERVICE, "no-such-area/odd.bin"])
 check("map: a path no area knows is every area", r.get("areas"), "all")
 
@@ -669,6 +760,71 @@ check("leg extras: no self-test leg writes the script tests and no self-test fil
       (os.path.exists(os.path.join(tmp, "e2", "script-tests.txt")), os.path.exists(os.path.join(tmp, "e2", "self-test.txt"))), (True, False))
 cp.write_leg_extras(os.path.join(tmp, "e3"), run([SERVICE]))
 check("leg extras: an ordinary plan writes none", os.path.exists(os.path.join(tmp, "e3")), False)
+
+# --- the WPF smoke harness restore (#8529) -----------------------------------------------------------------------
+# pr.yml's plan job asks ci-select.py whether the build job restores tools/ui-smoke-wpf in locked mode. The harness is
+# outside the solution and referenced by no test project, so that restore is the one a pull request has for its lock file.
+if not hasattr(cs, "harness_restore") or not hasattr(cs, "restore_input"):
+    failures.append("harness restore: ci-select.py has no harness_restore and restore_input")
+    print("\n".join(failures))
+    sys.exit(1)
+HARNESS = "tools/ui-smoke-wpf/"
+LITE_SOURCE = "Lite/Services/LocalDataService.cs"
+SOLUTION_LOCKS = [d + "/packages.lock.json" for d in (
+    "Lite", "Lite.Tests", "Darling/Darling.Tests", "Darling/PerformanceMonitor.Darling.Viewer",
+    "Exporter/PerformanceMonitor.Exporter", "Exporter/PerformanceMonitor.Exporter.Tests")]
+
+
+def harness(files, event="pull_request", base="dev", areas="classes"):
+    return cs.harness_restore(event, base, areas, files)
+
+
+for name, files in (
+        ("the central package versions alone", ["Directory.Packages.props"]),
+        ("the central package versions with the solution's lock files", ["Directory.Packages.props"] + SOLUTION_LOCKS),
+        ("one solution lock file among sources", [LITE_SOURCE, "Lite/packages.lock.json"]),
+        ("the harness lock file alone", [HARNESS + "packages.lock.json"]),
+        ("a harness source file", [HARNESS + "LiteWalkTests.cs"]),
+        ("the harness project file", [HARNESS + "UiSmokeWpf.csproj"]),
+        ("the Lite project file", ["Lite/PerformanceMonitorLite.csproj"]),
+        ("a shared library's project file", ["PerformanceMonitor.Common/PerformanceMonitor.Common.csproj"]),
+        ("global.json", ["global.json"]),
+        ("NuGet.Config in mixed case", ["NuGet.Config"]),
+        ("Directory.Build.props", ["Directory.Build.props"]),
+        ("Directory.Build.targets", ["Directory.Build.targets"]),
+        ("a props file in a project folder", ["Lite/Version.props"]),
+        ("a targets file in a project folder", ["Darling/Build/Publish.targets"]),
+        ("the solution", ["PerformanceMonitor.sln"]),
+        ("an slnx solution", ["PerformanceMonitor.slnx"]),
+        ("an empty file list", []),
+        ("a file list that cannot be trusted", ["unknown/over-the-cap"])):
+    check(f"harness restore: {name} restores", harness(files), True)
+for name, files in (
+        ("a Lite source file", [LITE_SOURCE]),
+        ("a test class", ["Darling/Darling.Tests/OneTests.cs"]),
+        ("a docs change", ["README.md"]),
+        ("a file that only names the harness folder further down its path", ["docs/" + HARNESS + "notes.md"]),
+        ("a file whose name only starts like a lock file", ["Lite/packages.lock.json.orig"])):
+    check(f"harness restore: {name} does not restore", harness(files), False)
+check("harness restore: a plan of every area restores", harness([LITE_SOURCE], areas="all"), True)
+check("harness restore: a pull request into main restores", harness([LITE_SOURCE], base="main"), True)
+check("harness restore: a dispatch restores", harness([LITE_SOURCE], event="workflow_dispatch"), True)
+check("harness restore: a dev push with a source file does not restore", harness([LITE_SOURCE], event="push"), False)
+check("harness restore: a dev push with a restore input restores", harness(["Directory.Packages.props"], event="push"), True)
+# The file kinds, one by one: the gate reads the same names and suffixes as the slow-class skip, so dropping one there for
+# that rule's sake has to show up here.
+for name in ("Directory.Build.props", "Directory.Build.targets", "Directory.Packages.props", "global.json", "nuget.config",
+             "packages.lock.json"):
+    check(f"harness restore: {name} is a restore input at the root and in a folder",
+          (cs.restore_input(name), cs.restore_input("Some/Folder/" + name)), (True, True))
+for suffix in (".csproj", ".props", ".targets", ".sln", ".slnx"):
+    check(f"harness restore: a {suffix} file is a restore input", cs.restore_input("Some/Folder/Thing" + suffix), True)
+check("harness restore: a source file under the harness folder is not itself a restore input",
+      cs.restore_input(HARNESS + "LiteWalkTests.cs"), False)
+# The three Directory.* names end in a listed suffix too, so restore_input answers the same with one of them gone and no
+# row above can fail for it. These read the set, so each of the eleven names and suffixes has a row that fails without it.
+for name in ("directory.build.props", "directory.build.targets", "directory.packages.props"):
+    check(f"harness restore: {name} is listed by name", name in cs._BUILD_INPUT_NAMES, True)
 
 # --- the real filters, three stable paths ----------------------------------------------------------------------
 live = cs.Rules()

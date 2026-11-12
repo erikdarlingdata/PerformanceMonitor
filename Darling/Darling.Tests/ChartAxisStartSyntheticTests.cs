@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// Blocking tab's charts, whose zero baselines and padded series reach back to the picked start. Each of them left the axis at the
 /// picked start (a full day for a server with three hours of history) before the baselines stopped counting.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ChartAxisStartSyntheticTests
 {
     private static readonly string[] LaneNames = ["CpuChart", "WaitStatsChart", "BlockingChart", "MemoryChart", "FileIoChart"];
@@ -118,7 +119,7 @@ public sealed class ChartAxisStartSyntheticTests
                     new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
                     new DarlingServer(1, "axis-start-test", "axis-start-test", true, null));
                 var window = new Window { Content = tab, Width = 1800, Height = 1000 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var picker = tab.FindName("RangePicker")!;

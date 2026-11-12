@@ -18,6 +18,7 @@ using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using static PerformanceMonitor.Ui.WaitDrillDownHelper;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 using PerformanceMonitor.PlanAnalysis;
 
@@ -136,7 +137,7 @@ public partial class WaitDrillDownWindow : Window
 
         var timeRange = GetTimeRangeDescription(data, _displayZone);
         var truncated = data.Count >= 500 ? " (limited to 500 rows)" : "";
-        SummaryText.Text = $"{data.Count} snapshot(s) | {classification.Description} | {timeRange}{truncated}";
+        SummaryText.Text = $"{CountText.Plural(data.Count, "snapshot")} | {classification.Description} | {timeRange}{truncated}";
 
         // Set initial sort on the DataGrid
         ApplyInitialSort(classification.SortProperty);
@@ -159,7 +160,7 @@ public partial class WaitDrillDownWindow : Window
 
         var timeRange = GetTimeRangeDescription(data, _displayZone);
         var truncated = data.Count >= 500 ? " (limited to 500 rows)" : "";
-        SummaryText.Text = $"{data.Count} snapshot(s) | {classification.Description} | {timeRange}{truncated}";
+        SummaryText.Text = $"{CountText.Plural(data.Count, "snapshot")} | {classification.Description} | {timeRange}{truncated}";
 
         ApplyInitialSort(classification.SortProperty);
     }
@@ -191,7 +192,7 @@ public partial class WaitDrillDownWindow : Window
             // No chain found — fall back to showing the waiters directly
             _filterManager!.UpdateData(waiters);
             var timeRange = GetTimeRangeDescription(waiters, _displayZone);
-            SummaryText.Text = $"{waiters.Count} snapshot(s) | {classification.Description} | {timeRange} | No blocking chains found, showing waiters";
+            SummaryText.Text = $"{CountText.Plural(waiters.Count, "snapshot")} | {classification.Description} | {timeRange} | No blocking chains found, showing waiters";
             return;
         }
 
@@ -217,7 +218,7 @@ public partial class WaitDrillDownWindow : Window
             // Head blockers not found in snapshots — show waiters instead
             _filterManager!.UpdateData(waiters);
             var timeRange = GetTimeRangeDescription(waiters, _displayZone);
-            SummaryText.Text = $"{waiters.Count} snapshot(s) | {classification.Description} | {timeRange} | Head blockers not in snapshots, showing waiters";
+            SummaryText.Text = $"{CountText.Plural(waiters.Count, "snapshot")} | {classification.Description} | {timeRange} | Head blockers not in snapshots, showing waiters";
             return;
         }
 
@@ -227,7 +228,7 @@ public partial class WaitDrillDownWindow : Window
         _filterManager!.UpdateData(headBlockerRows);
 
         var timeRangeDesc = GetTimeRangeDescription(headBlockerRows, _displayZone);
-        SummaryText.Text = $"{headBlockerRows.Count} head blocker(s) from {waiters.Count} waiting session(s) | " +
+        SummaryText.Text = $"{CountText.Plural(headBlockerRows.Count, "head blocker")} from {CountText.Plural(waiters.Count, "waiting session")} | " +
                            $"{classification.Description} | {timeRangeDesc}";
     }
 
@@ -412,7 +413,7 @@ public partial class WaitDrillDownWindow : Window
         _filterPopupContent.FilterCleared += FilterPopup_FilterCleared;
 
         _filterManager.Filters.TryGetValue(columnName, out var existingFilter);
-        _filterPopupContent.Initialize(columnName, existingFilter);
+        _filterPopupContent.Initialize(columnName, existingFilter, columnHeader: ColumnFilterPopup.ColumnHeaderFor(button));
 
         _filterPopup!.PlacementTarget = button;
         _filterPopup.IsOpen = true;

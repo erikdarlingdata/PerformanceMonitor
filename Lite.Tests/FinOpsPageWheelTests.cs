@@ -28,6 +28,7 @@ namespace PerformanceMonitorLite.Tests;
 /// height instead of stretching the page by its whole length. The real tab is hosted on the shared STA thread with the theme merged,
 /// the wheel is raised over the grid the way the input system raises it, and the page's offset is read.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class FinOpsPageWheelTests
 {
     public static IEnumerable<object[]> Pages()
@@ -46,7 +47,7 @@ public sealed class FinOpsPageWheelTests
             var tab = new FinOpsTab();
             FillGrids(tab);
             var window = new Window { Content = tab, Width = 1000, Height = 600, Left = 0, Top = 0, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var tabs = ChartLayoutProbe.Logical<TabControl>(tab).First();

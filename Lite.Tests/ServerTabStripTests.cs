@@ -55,7 +55,7 @@ public sealed class ServerTabStripTests
                 typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = width, Height = height, Left = 0, Top = 0 };
                 window.Resources.MergedDictionaries.Add(LoadTheme(theme));
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     StaTestThread.Settle(window);

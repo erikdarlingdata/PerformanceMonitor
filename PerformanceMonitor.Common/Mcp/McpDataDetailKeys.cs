@@ -112,6 +112,8 @@ public static class McpDataDetailKeys
             // Definitions: a custom alert rule's definition and an index's (a partial index's predicate holds its
             // literals), from get_custom_alert_rule, get_pg_index_usage and the FinOps index analysis.
             "definition", "index_definition", "original_index_definition",
+            // Schema history (#7643): a check constraint's text, a computed column's and a default's expression, an index filter and a view's text.
+            "check_definition", "computed_definition", "default_definition", "filter_definition", "view_definition",
         }),
         (McpDataDetailClass.ParameterValue, new[]
         {

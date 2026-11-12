@@ -51,7 +51,10 @@ public sealed class ViewerQueriesSqlTests
         Assert.True(rankedRead >= 0, "the ranked CTE must aggregate the base query_stats table");
         /* #5309: the text is ONE lookup for every ranked group; it resolves the dimension itself (what
            v_query_stats' COALESCE does) for the newest row of each group only. */
-        Assert.DoesNotContain("LATERAL", sql, StringComparison.Ordinal);
+        var textSql = sql.Replace(ViewerDataService.TopQueriesModuleCte, string.Empty, StringComparison.Ordinal);
+        /* The module CTE (#8549) probes idx_procedure_stats_time with a LATERAL ... LIMIT 1 once per ranked handle, an index probe and
+           never a scan. It is the module lookup, not the text lookup #5309 is about, so it is cut out before the text checks below. */
+        Assert.DoesNotContain("LATERAL", textSql, StringComparison.Ordinal);
         Assert.DoesNotContain("FROM v_query_stats", sql, StringComparison.Ordinal);
         Assert.True(dimRead > lookupAt && lookupAt > rankedRead,
             "the base-table aggregate comes first; the dimension is read by the one latest-text lookup");
@@ -87,9 +90,11 @@ public sealed class ViewerQueriesSqlTests
     public void TopQueriesSql_FetchesTheLatestNonNullQueryText_ViaLateralJoin_WithPlanPresenceFlag()
     {
         var sql = ViewerDataService.TopQueriesSql;
-        Assert.DoesNotContain("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);   /* #5309: one lookup, not one per row */
+        /* The module CTE's per-handle LATERAL ... LIMIT 1 index probe (#8549) is cut out: these pins are about the text lookup. */
+        var textSql = sql.Replace(ViewerDataService.TopQueriesModuleCte, string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain("LEFT JOIN LATERAL", textSql, StringComparison.Ordinal);   /* #5309: one lookup, not one per row */
         Assert.Contains("q.query_text IS NOT NULL", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 1", textSql, StringComparison.Ordinal);
         /* #8136: which row's text is picked (the newest that carries one, the row collected last on a tie, inline before
            digest) and that it resolves through the #1767 dimension are pinned by TopQueriesTextOneScanLiveTests through the
            rows both readers return. The lookup still fetches only query_text (never the multi-KB plan); the plan is surfaced
@@ -144,13 +149,12 @@ public sealed class ViewerQueriesSqlTests
     public void TopQueriesSql_StitchesModuleByHandle_DedupsToLatest_LeftJoinsForAdHocFallback()
     {
         /* #1568: read-time attribution. A dedicated CTE picks ONE procedure_stats identity per sql_handle
-           (latest collection_time, via ROW_NUMBER + WHERE rn = 1 — Postgres has no QUALIFY), then a LEFT
+           (latest collection_time; #8549 finds it with a hash aggregate and a lateral probe, not a ROW_NUMBER, and
+           TopQueriesModuleLiveTests runs it against the old statement's answers), then a LEFT
            JOIN on the shared normalized handle surfaces db.schema.object; unmatched rows stay ad hoc. */
         var sql = ViewerDataService.TopQueriesSql;
-        Assert.Contains("module AS (", sql, StringComparison.Ordinal);
+        Assert.Contains("module AS", sql, StringComparison.Ordinal);
         Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("ROW_NUMBER() OVER (PARTITION BY sql_handle ORDER BY collection_time DESC) AS rn", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);
         Assert.Contains("LEFT JOIN module AS m ON m.sql_handle = r.sql_handle", sql, StringComparison.Ordinal);
         Assert.Contains("m.object_name AS module_object_name", sql, StringComparison.Ordinal);
         Assert.Contains("m.schema_name AS module_schema_name", sql, StringComparison.Ordinal);
@@ -242,7 +246,10 @@ public sealed class ViewerQueriesSqlTests
     [Theory]
     [InlineData(nameof(ViewerDataService.QueryStoreTopSql))]
     [InlineData(nameof(ViewerDataService.QueryStoreComparisonSql))]
-    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql))]
+    /* #8549: QueryStoreSlicerSql left this row. Its dedupe is DISTINCT ON now, and this pin's rule for it was the window
+       function's spelling (PARTITION BY ... AS rn ... WHERE rn = 1). What the row stood for, a latest-snapshot-per-interval
+       dedupe whose key holds the interval identity and breaks ties on execution_count, NULL count first, is bounded by
+       QueryStoreSlicerCompressedLiveTests, which runs the statement on rows that tie. */
     [InlineData(nameof(ViewerDataService.QueryStoreRegressionsSql))]
     public void QueryStoreAggregates_DedupToTheLatestSnapshotPerInterval_BeforeAggregating(string sqlName)
     {
@@ -341,10 +348,10 @@ public sealed class ViewerQueriesSqlTests
     /// caller asked for; the delta slicers never had the problem because for them the two are one column.
     /// </param>
     [Theory]
-    [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)", "date_trunc('hour', collection_time)", "collection_time")]
-    [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)", "date_trunc('hour', collection_time)", "collection_time")]
-    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(DISTINCT query_id)", "date_trunc('hour', COALESCE(interval_start_time_utc, collection_time))", "COALESCE(interval_start_time_utc, collection_time)")]
-    public void SlicerSql_BucketsByHour_SevenColumnShape(string sqlName, string table, string distinctCount, string bucketExpression, string windowFilter)
+    [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time")]
+    [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time")]
+    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(query_id) FILTER (WHERE qrn = 1)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), TIMESTAMP '2000-01-01 00:00:00')", "COALESCE(interval_start_time_utc, collection_time)")]
+    public void SlicerSql_BucketsAtTheWindowsWidth_SevenColumnShape(string sqlName, string table, string distinctCount, string bucketExpression, string windowFilter)
     {
         var sql = SqlByName(sqlName);
         Assert.Contains(bucketExpression, sql, StringComparison.Ordinal);
@@ -946,12 +953,13 @@ public sealed class ViewerQueriesLivePostgresTests
 
         await using var viewer = new ViewerDataService(cs!);
 
-        /* One hour bucket, so the slicer assertion is about dedup rather than bucket boundaries. */
+        /* One hour bucket, so the slicer assertion is about dedup rather than bucket boundaries: the window is over two hours
+           long, the length at which the slicer keeps the hour (SlicerBuckets), and every seeded row sits in its last hour. */
         var bucketStart = TruncateToSeconds(DateTime.UtcNow).AddHours(-3);
         bucketStart = bucketStart.AddMinutes(-bucketStart.Minute).AddSeconds(-bucketStart.Second);
         var firstExecA = bucketStart.AddMinutes(1);
         var firstExecB = bucketStart.AddMinutes(2);
-        var start = bucketStart.AddMinutes(-1);
+        var start = bucketStart.AddHours(-2);
         var end = bucketStart.AddMinutes(59);
 
         var bodySucceeded = false;

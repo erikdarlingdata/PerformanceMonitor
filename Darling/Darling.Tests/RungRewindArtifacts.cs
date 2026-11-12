@@ -747,6 +747,50 @@ ALTER TABLE IF EXISTS config.investigation_requests DROP COLUMN IF EXISTS chat_t
         // fallback view, so the rewind drops whichever shape stands (the product's own discriminating drop), and a re-run of V255 or the
         // ensure sweep creates it again. Safe on a store that never had it.
         new(255, "hasWaitStatsCadenceBaseline", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.WaitStatsCadenceBaselineView)),
+        // V256 (#7643): the schema tracking tables. The probe's sentinel is the object table, so the rewind drops all seven (the four child tables
+        // reference it, so they go first) and a re-run of V256 makes them again. Safe on a store that never had them.
+        new(256, "hasSchemaTracking",
+            @"DROP TABLE IF EXISTS collect.schema_triggers;
+DROP TABLE IF EXISTS collect.schema_constraints;
+DROP TABLE IF EXISTS collect.schema_indexes;
+DROP TABLE IF EXISTS collect.schema_columns;
+DROP TABLE IF EXISTS collect.schema_objects;
+DROP TABLE IF EXISTS collect.schema_capture_state;
+DROP TABLE IF EXISTS collect.schema_capture_passes;"),
+        // V257 (#8464): the status-leading collection_log index. The probe's sentinel is the index itself, so the rewind drops it and a re-run
+        // of V257 makes it again. Safe on a store that never had it.
+        new(257, "hasCollectionLogStatusTimeIndex", "DROP INDEX IF EXISTS collect.idx_collection_log_status_time;"),
+        // V258 (#8567): the oversized-plan backlog's dropped-row index. The probe's sentinel is the index itself, so the rewind drops it and a
+        // re-run of V258 makes it again. Safe on a store that never had it.
+        new(258, "hasOversizedPlanBacklogDroppedIndex", "DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_dropped;"),
+        // V259 (#8549): the daily wait totals. The probe's sentinel is the relation itself, a continuous aggregate or the plain view, so the
+        // rewind drops whichever shape stands (the product's own discriminating drop), and a re-run of V259 or the ensure sweep makes it
+        // again. Safe on a store that never had it.
+        new(259, "hasWaitStatsDaily", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.WaitStatsDailyView)),
+        // V260 (#8570): the oversized-plan backlog's two median indexes. The probe's sentinel is the first of them, so the rewind drops both and
+        // a re-run of V260 makes them again. Safe on a store that never had them.
+        new(260, "hasOversizedPlanBacklogMedianIndexes", "DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_server_bytes; DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_collector_bytes;"),
+        new(261, "hasWebAccessGroups", """
+            DROP TRIGGER IF EXISTS web_access_tag_deleted ON config.server_tags;
+            DROP TABLE IF EXISTS config.web_access_group_tags, config.web_access_group_events, config.web_access_groups CASCADE;
+            DROP FUNCTION IF EXISTS config.manage_web_access_group(text,uuid,bigint,text,text,integer[],uuid,text,boolean,text);
+            DROP FUNCTION IF EXISTS config.activate_web_access_group(uuid,bigint,uuid,text);
+            DROP FUNCTION IF EXISTS config.web_access_snapshot(uuid);
+            DROP FUNCTION IF EXISTS config.web_access_tag_deleted();
+            DROP FUNCTION IF EXISTS config.web_access_owner_guard();
+            DROP FUNCTION IF EXISTS config.harden_web_access_groups();
+            """),
+        new(262, "hasAdvancedWebAccess", """
+            DROP FUNCTION IF EXISTS config.set_web_access_advanced(boolean);
+            DROP FUNCTION IF EXISTS config.harden_web_access_advanced();
+            DROP TABLE IF EXISTS config.web_access_advanced;
+            """),
+        // V263 (#8549): the oldest-run rollup under the Job History note. The probe's sentinel is the relation itself, so the rewind drops whichever shape stands and a re-run of V263 or the ensure sweep makes it again. Safe on a store that never had it.
+        new(263, "hasJobHistoryOldestDaily", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.JobHistoryOldestDailyView)),
+        // V264 (#8691): the per-hour drop counts of the oversized-plan backlog. A new table; the rewind drops it and a re-run of V264 makes it again.
+        new(264, "hasOversizedPlanBacklogDropCounts", "DROP TABLE IF EXISTS collect.oversized_plan_backlog_drops;"),
+        // V265 (#8549): the hourly summary of job_history's categories and its coverage table. Two new tables; the rewind drops both and a re-run of V265 makes them again.
+        new(265, "hasJobHistoryCategoryHourly", "DROP TABLE IF EXISTS collect.job_history_category_hourly; DROP TABLE IF EXISTS collect.job_history_category_coverage;"),
     ];
 
     /// <summary>

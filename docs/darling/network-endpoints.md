@@ -208,7 +208,7 @@ Give **one** form, never more than one: a PKCS#12 bundle, a PEM pair or a [Windo
 
 The product **consumes** a certificate and does not manage a PKI — no ACME, and deliberately no self-signed fallback, which would buy encryption without authentication and train you to click through the warning. An internal CA is the normal answer on a LAN. Loading **fails closed**: a certificate that is missing, unreadable, ambiguous, or **expired** keeps the dashboard loopback-only (the token is still required on that loopback listener) with a Critical log line rather than quietly serving the LAN over HTTP — and because an expired certificate takes the dashboard down, the service warns for the last 30 days before that happens. The listener negotiates TLS 1.2 and 1.3 only. A TLS-terminating reverse proxy in front of the port remains a perfectly good alternative. MCP has its own `tls` block, described in the MCP section above.
 
-**Behind a reverse proxy, list the proxy in `trustedProxies`.** The connection from the proxy to this host is plain HTTP, so without it the session cookie is not marked `Secure` and an OIDC `redirect_uri` is built as `http://` (which an IdP refuses). With `"trustedProxies": ["10.0.0.5"]` (IPs or CIDRs) the host honors `X-Forwarded-Proto`, `X-Forwarded-For` and `X-Forwarded-Host` **from those addresses only** — from anyone else the headers are ignored. Two consequences: `allowFrom` is then checked against the forwarded client address, so it has to cover your operators rather than the proxy; and the sign-in throttle counts per client instead of per proxy. Set `web.publicBaseUrl` to the name the proxy serves so the Host allowlist admits it. Set it too when the proxy rewrites the `Host` header (nginx's `proxy_pass` does by default): a sign-in POST from a browser that does not send `Sec-Fetch-Site` is accepted only when its `Origin` or `Referer` names the host the request was addressed to, the `X-Forwarded-Host` a trusted proxy sent, or `web.publicBaseUrl`'s host (Unicode and punycode spellings of a name are the same name). A browser that sends `Sec-Fetch-Site: same-origin` needs none of that. An entry that does not parse keeps the dashboard loopback-only with a Critical line. `Strict-Transport-Security` is **off by default**. Set `"hsts": true` in the `network` block, once the dashboard is reached over HTTPS only, and responses to a request that came over HTTPS (the listener's own, or a trusted proxy's) carry it (one year, no subdomains). HSTS is kept per host name and ignores the port: once a browser has reached the dashboard over HTTPS by name, it uses HTTPS for every port of that same name for a year, including other services on that name that speak plain HTTP. The proxy must append the client's address to `X-Forwarded-For` or overwrite it, and `trustedProxies` must not cover clients that connect directly. Only the address of the connection itself can be loopback for `allowFrom`: a forwarded `127.0.0.1` or `::1` is judged against `allowFrom` like any other address.
+**Behind a reverse proxy, list the proxy in `trustedProxies`.** The connection from the proxy to this host is plain HTTP, so without it the session cookie is not marked `Secure` and an OIDC `redirect_uri` is built as `http://` (which an IdP refuses). With `"trustedProxies": ["10.0.0.5"]` (IPs or CIDRs) the host honors `X-Forwarded-Proto`, `X-Forwarded-For` and `X-Forwarded-Host` **from those addresses only** — from anyone else the headers are ignored. Two consequences: `allowFrom` is then checked against the forwarded client address, so it has to cover your operators rather than the proxy; and the sign-in throttle counts per client instead of per proxy. Set `web.publicBaseUrl` to the name the proxy serves so the Host allowlist admits it. Set it too when the proxy rewrites the `Host` header (nginx's `proxy_pass` does by default): a sign-in POST from a browser that does not send `Sec-Fetch-Site` is accepted only when its `Origin` or `Referer` names the host the request was addressed to, the `X-Forwarded-Host` a trusted proxy sent, or `web.publicBaseUrl`'s host (Unicode and punycode spellings of a name are the same name). A browser that sends `Sec-Fetch-Site: same-origin` needs none of that. Behind a proxy that rewrites `Host`, the service cannot tell a browser on the LAN from one on this machine without one of those two settings: every upstream request carries the proxy's own address, so the `Cross-Origin-Opener-Policy` header, and anything else that reads the request's host, follows that address until either `trustedProxies` names the proxy and the proxy sends `X-Forwarded-Host` and `X-Forwarded-Proto` (which are what that header and HSTS read), or `web.publicBaseUrl` names the origin browsers use. With `web.publicBaseUrl` set, the opener policy is sent only when that origin is https or loopback and the request's own origin is too. An entry that does not parse keeps the dashboard loopback-only with a Critical line. `Strict-Transport-Security` is **off by default**. Set `"hsts": true` in the `network` block, once the dashboard is reached over HTTPS only, and responses to a request that came over HTTPS (the listener's own, or a trusted proxy's) carry it (one year, no subdomains). HSTS is kept per host name and ignores the port: once a browser has reached the dashboard over HTTPS by name, it uses HTTPS for every port of that same name for a year, including other services on that name that speak plain HTTP. The proxy must append the client's address to `X-Forwarded-For` or overwrite it, and `trustedProxies` must not cover clients that connect directly. Only the address of the connection itself can be loopback for `allowFrom`: a forwarded `127.0.0.1` or `::1` is judged against `allowFrom` like any other address.
 
 ### Certificate from the Windows certificate store
 
@@ -300,3 +300,69 @@ A front door (see [The front door](front-door.md)) opens its own connections to 
 - When a store serves `https` with a certificate from an internal authority, the system's trust decides. For a self-signed certificate, set `certificateSha256` for that store in the front door's `frontDoor` block. The front door then accepts only that exact certificate.
 - A plain `http` address to a host that is not the front door's own machine works. The front door logs one warning for it, because the store's token crosses the network in clear text.
 - The front door follows no redirects.
+
+## The health port
+
+The health port is for Kubernetes and other orchestrators ([#8184](https://github.com/erikdarlingdata/PerformanceMonitor/issues/8184)). It is off by default. Turn it on with a `health` block in `darling.json`, and restart the service. See [`health`](configuration.md#health-object-optional) for the three settings (`enabled`, `port` 5154 and `listen`).
+
+```json
+"health": { "enabled": true }
+```
+
+With `listen` empty, the port binds `0.0.0.0` inside a container and `127.0.0.1` everywhere else. `0.0.0.0` is IPv4 only: on an IPv6 single-stack cluster, set `listen` to `::`. The port serves two routes, one word each:
+
+| Route | HTTP | Body | When |
+|---|---|---|---|
+| `GET /livez` | 200 | `ok`, `starting`, `degraded` or `stopped` | Always. The word is the current state. A stopped service is still alive. |
+| `GET /readyz` | 200 | `ok` | The collection loop is running. |
+| `GET /readyz` | 503 | `starting` | The service has not reached a verdict yet. |
+| `GET /readyz` | 503 | `degraded` | A startup step failed and the service retries it. |
+| `GET /readyz` | 503 | `stopped` | A startup step failed for good, or the configuration has problems. |
+
+The body is `text/plain; charset=utf-8` and holds only that word. The words are the `status` values of [`/api/ping`](web-dashboard.md). A front door (see [The front door](front-door.md)) runs no collector, so its `/readyz` answers what its `/api/ping` answers: 503 `stopped` when its own `darling.json` was refused, 503 `degraded` when every store is unusable, and 200 `ok` otherwise. Its `/livez` is still 200.
+
+The routes are matched the way ASP.NET Core routing matches every route: case-insensitively, with a trailing slash and a query string ignored, after percent-decoding and after `..` segments are resolved. So `/LIVEZ`, `/livez/`, `/livez?x=1` and `/%6civez` answer the same as `/livez`, and `/livez/../readyz` answers as `/readyz`. Any other path gets a 404 with an empty body. Any method other than GET on the two routes gets a 405 with an empty body.
+
+### What the port never returns
+
+No server name, no database name, no step name, no failure detail, no attempt count, no version, no metric and no store content. There is no JSON, no cookie, no `Server` header, and no header beyond the few Kestrel always adds (such as `Date`).
+
+The listener is tight because it has no token and, in a container, listens on every interface: HTTP/1 only (a kubelet probe is an HTTP/1.1 GET), no `Server` header, at most 64 connections, a 15 second keep-alive, a 10 second limit to send the request headers, 8 KB of headers and no request body. When the port binds an address that is not loopback, the service logs one Warning that names why: `health.listen` when it is set, or `DOTNET_RUNNING_IN_CONTAINER` when `listen` is empty and the container default applied.
+
+### Why it has no token and no `allowFrom`
+
+A kubelet cannot hold a secret, and probes come from the node, not from a client you can list. So the port does not use the token gate, `allowFrom`, TLS or the bind ladder that the MCP and web endpoints use. The answer is one word that says whether the service is up and collecting, and nothing else. Keep the port off the networks you do not trust: in Kubernetes it is reachable by pods in the cluster unless a network policy blocks it, and the Dockerfile does not `EXPOSE` it.
+
+### It starts before migrations
+
+The listener starts before the worker, so before the store migrations and before any ownership check. A long migration answers `/livez` 200 and `/readyz` 503 `starting`, so a startup probe on `/livez` never kills it. A start that is refused (for example, a configuration with problems) answers `/livez` 200 and `/readyz` 503 `stopped`.
+
+### What the port cannot cover
+
+The listener reads only its own `health` block, `frontDoor.enabled`, `web.port` and `mcp.port`, and resolves no `env:` or `file:` reference. So a configuration with problems, or a store connection string whose secret cannot be resolved, still opens the port, and `/readyz` answers what the service is doing about it (`degraded` while it retries, `stopped` once it gives up).
+
+One case is left: **a `darling.json` that cannot be read or parsed at all** (missing, empty, unreadable, access-denied or not valid JSON). The listener cannot know its own block, so the port stays off and the service logs one Error line that says why. The listener does not retry, so the port stays off for the life of that process. Restart the service after you fix the file.
+
+### When the port does not open
+
+Two more cases leave the port off. In both, collection keeps running:
+
+- **A bad `health` block.** A port outside 1 to 65535, a port equal to `web.port` or `mcp.port`, or a `listen` that is not an IP address. The service logs one Critical line that names the setting. It is not a configuration problem, so it never stops collection.
+- **A bind failure.** The port is taken by another process, or `health.listen` is an IP address that is not on this machine. The service logs one Error line that names the address and port.
+
+### Kubernetes probes
+
+```yaml
+startupProbe:
+  httpGet: { path: /livez, port: 5154 }
+  periodSeconds: 5
+  failureThreshold: 60
+livenessProbe:
+  httpGet: { path: /livez, port: 5154 }
+  periodSeconds: 10
+readinessProbe:
+  httpGet: { path: /readyz, port: 5154 }
+  periodSeconds: 10
+```
+
+Never use `/readyz` for liveness. A service that stopped on a configuration problem answers `/readyz` 503 `stopped` until someone fixes the file. A liveness probe on it would restart the pod in a loop, and the restart cannot fix the file.

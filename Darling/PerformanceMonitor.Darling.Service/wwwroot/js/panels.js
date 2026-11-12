@@ -52,6 +52,9 @@ import {
   bandClass,
   sevClass,
   windowFromHours,
+  readPinWindow,
+  pinnedWindowText,
+  pinRangeLabel,
   dbScopeChip,
   dbFilteredEmptyText,
   sourceSpan,
@@ -66,6 +69,7 @@ import {
   localizeAlertDetail,
   noValuesText,
   SAMPLED_BLOCKING_SOURCE,
+  isStateZero,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
 import { bucketMsOf } from "./chart-gaps.js";
@@ -129,11 +133,35 @@ export function emptyHeadline(desc, res) {
  * `extensionMissingLine` says what is not collected uses that sentence for a missing extension.
  */
 export function panelEmptyStrip(desc, res) {
+  /* #8577: a read pinned with `as_of` words its window in the message ("in the last 4 hours"), which says "ending now"; name the pinned one. */
+  const pin = desc.asOfIgnored ? null : readPinWindow(desc.params, res.keptHours != null ? res.keptHours : desc.windowHours);
+  if (pin && typeof res.message === "string") res = { ...res, message: pinnedWindowText(res.message, pin) };
   if (emptyHeadline(desc, res) !== res.message) return emptyStrip(emptyHeadline(desc, res));
   /* A panel with `emptyLine` says that plain sentence for a true negative and keeps the tool's own text behind "More detail" (#7410). */
   if (desc.emptyLine && res.status === "empty") return plainEmptyStrip(res, desc.emptyLine === true ? desc.emptyText : desc.emptyLine);
   const extension = res.hints && res.hints.reason === "extension_missing" ? desc.extensionMissingLine : undefined;
   return plainEmptyStrip(res, shortEmptyLine(res, extension));
+}
+
+/**
+ * #8577: the "Pinned: start → end" pill a read cell shows when its `as_of` puts its window in the past, the same pill and label a composed
+ * cell with a `range` shows (pinRangeLabel). The window is the one the read answered for: the cell's hours, or the kept hours a retry narrowed it to.
+ * Null for a read that ends now.
+ */
+export function readPinStrip(desc, res) {
+  const win = readPinWindow(desc.params, res && res.keptHours != null ? res.keptHours : desc.windowHours);
+  if (!win) return null;
+  /* #8630: a read whose tool takes no `as_of` (`desc.asOfIgnored`, set where the catalog is at hand) answers for the present whatever
+     the cell names, so it says that instead of claiming the pinned window. */
+  if (desc.asOfIgnored) {
+    return el("div", { class: "cell-pin-strip" }, [
+      el("span", { class: "pin-badge pin-badge-current", title: "This read has no end time to pin. It shows the state now, not the state at the time of the alert.", text: "Current state, not pinned" }),
+    ]);
+  }
+  const label = pinRangeLabel({ windowStart: new Date(win.windowStart).toISOString(), windowEnd: new Date(win.windowEnd).toISOString() });
+  return el("div", { class: "cell-pin-strip" }, [
+    el("span", { class: "pin-badge", title: "This cell reads the window that ends at its pinned time, not the last hours before now. Open live shows the window that ends now.", text: "Pinned: " + label }),
+  ]);
 }
 
 /**
@@ -230,7 +258,9 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
        (#2780). Shared with the server-tab composites so the whole page degrades the same way. A window refusal
        only reaches it now when the one retry above could not settle it. */
     /* #7257: the "pick a shorter range" notice gets no Retry button, since the same range gives the same notice. */
-    mount(body, onRetry && !isWindowTooWide(res.message) ? [readErrorStrip(res.message), retryButton(onRetry)] : readErrorStrip(res.message));
+    /* #8323: the engine's own text, when the answer put a plain sentence in front of it, sits behind "More detail". */
+    const detail = res.detail ? disclosure("More detail", res.detail, { title: "What the store said, in full" }) : null;
+    mount(body, onRetry && !isWindowTooWide(res.message) ? [readErrorStrip(res.message), detail, retryButton(onRetry)] : [readErrorStrip(res.message), detail]);
     return;
   }
   const kept = keptWindowStrip(res);
@@ -251,7 +281,7 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
        window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a
        new server's empty week does not read as a quiet one. windowFloorStrip is null for a chart and for an envelope
        without the note. */
-    mount(body, [kept, windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), panelEmptyStrip(desc, res)]);
+    mount(body, [kept, readPinStrip(desc, res), windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), panelEmptyStrip(desc, res)]);
     return;
   }
 
@@ -296,6 +326,7 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
 
     mount(body, [
       kept,
+      readPinStrip(desc, res),
       floor,
       typeof note === "string" && note.trim() ? noteStrip(desc, note, res.data) : null,
       ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noteStrip(desc.noteQuiet === true ? { noteQuiet: true } : null, n) : null)),
@@ -545,7 +576,9 @@ function gridTools(desc, cols, tbody) {
       .map((c, i) => {
         if (c.csv === false) return null;
         const hasCopy = typeof c.copyValue === "function";
-        const raw = objs.map((r) => (r ? (hasCopy ? c.copyValue(r) : getPath(r, c.key)) : undefined));
+        /* A state-only row's stored zero in a stateZeroDash column exports as the dash its cell shows (util.js's isStateZero), as Alert
+           History's own export does; every other value is the stored one. */
+        const raw = objs.map((r) => (r ? (hasCopy ? c.copyValue(r) : c.stateZeroDash === true && isStateZero(r, c.key) ? "—" : getPath(r, c.key)) : undefined));
         if (raw.some(isListValue)) return null;
         const textOnly = (typeof c.render === "function" || typeof c.display === "function") && raw.every((v) => v === undefined);
         return { i, c, raw, textOnly };
@@ -1401,9 +1434,13 @@ function cell(row, c) {
      "n/a (log service)" for the log file of a Hyperscale database). The server wrote the sentence; the page only
      shows it in place of the bare em dash. */
   const why = raw == null && c.nullKey ? getPath(row, c.nullKey) : null;
+  /* stateZeroDash: an alert-history value column whose stored 0 on a state-only row is not a reading (util.js's isStateZero, the
+     rule the Alert History page applies) shows the dash instead of a formatted 0. */
   const shownPlain =
     why != null && why !== ""
       ? String(why)
+      : c.stateZeroDash === true && isStateZero(row, c.key)
+        ? "—"
       : typeof c.display === "function"
         ? String(c.display(row) ?? "—")
         : c.format
@@ -1632,7 +1669,7 @@ function vizLine(data, desc) {
      width is the panel's own `hours` param — `windowHours` when a fanout injects it (a fanout spec carries no
      params) or when loadPanelBody narrowed the read to the history it keeps, else desc.params.hours. Absent ⇒
      null ⇒ the chart keeps its data-extent domain, unchanged. */
-  const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours);
+  const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours, desc.asOfIgnored ? null : desc.params && desc.params.as_of);
   /* Drag-to-zoom over the loaded points (zoomableLineChart, charts.js). The zoom is held under this chart's
      identity (title, read and series) and the page's scope (server + tab + preset range), so the poll's rebuild
      draws it again and a different server, tab or range does not. */

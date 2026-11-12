@@ -297,6 +297,8 @@ public sealed class InvestigationNamedTokenHostLiveTests
     [InlineData("invalid", false)]
     [InlineData("unclaimed", true)]
     [InlineData("unclaimed", false)]
+    [InlineData("legacy-token", true)]
+    [InlineData("Legacy-Token", false)]
     public async Task TheLegacyToken_UsingAReservedPlaceholderAsItsAgentId_IsRefused_AndJournaledAsInvalid(string reserved, bool serveNamed)
     {
         await RunAsync(async c =>
@@ -322,6 +324,8 @@ public sealed class InvestigationNamedTokenHostLiveTests
             Assert.Equal("9", await JournalRowsAsync(c, InvestigationRules.InvalidAgentId));
             Assert.Equal("0", await ScalarAsync(c.Connection,
                 $"SELECT count(*) FROM config.investigation_journal WHERE actor = 'agent:unclaimed' AND event IN ('refused', 'claimed')", c.Ct));
+            Assert.Equal("0", await ScalarAsync(c.Connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE lower(actor) = 'agent:legacy-token'", c.Ct));
         }, serveNamed);
     }
 }

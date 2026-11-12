@@ -118,7 +118,7 @@ public partial class AddMultipleServersDialog : Window
         {
             AddButton.IsEnabled = false;
             TestAllButton.IsEnabled = false;
-            StatusText.Text = "Not connected to a Darling store — server changes are unavailable.";
+            StatusText.Text = "Not connected to a Darling store: server changes are unavailable.";
         }
         else if (_dataService.IsReadOnly)
         {
@@ -227,7 +227,7 @@ public partial class AddMultipleServersDialog : Window
         int badCount = rows.Count(r => !r.IsValid);
         StatusText.Text = rows.Count == 0
             ? ""
-            : $"{newCount} new server(s), {dupCount} duplicate(s), {badCount} invalid line(s).";
+            : $"{CountText.Plural(newCount, "new server")}, {CountText.Plural(dupCount, "duplicate")}, {CountText.Plural(badCount, "invalid line")}.";
     }
 
     // ── Test All (SEQUENTIAL sweep through the service; Cancel stops between rows) ────────────────────────
@@ -405,8 +405,8 @@ public partial class AddMultipleServersDialog : Window
                 FailedCount = failed;
                 CollidedCount = 0;
                 StatusText.Text = firstError != null
-                    ? $"No servers added — {firstError}."
-                    : $"No new servers to add ({skipped} duplicate(s) skipped).";
+                    ? $"No servers added: {firstError}."
+                    : $"No new servers to add ({CountText.Plural(skipped, "duplicate")} skipped).";
                 return;
             }
 
@@ -465,7 +465,7 @@ public partial class AddMultipleServersDialog : Window
                 return;
             }
 
-            StatusText.Text = $"No servers added ({skipped} duplicate(s), {collided} collided, {failed} failed).";
+            StatusText.Text = $"No servers added ({CountText.Plural(skipped, "duplicate")}, {collided} collided, {failed} failed).";
         }
         catch (Exception ex)
         {
@@ -735,7 +735,7 @@ public partial class AddMultipleServersDialog : Window
     {
         if (result is null)
         {
-            return "Still running on the service — try again in a moment.";
+            return "Still running on the service. Try again in a moment.";
         }
 
         if (result.Status == ViewerDataService.StatusSucceeded)
@@ -784,7 +784,7 @@ public partial class AddMultipleServersDialog : Window
             }
 
             /* #6254: the Query Store replica's own result, after the primary's. */
-            return string.Join(" — ", parts) + "." + (ViewerDataService.ProbeReplicaNote(root) is { } replicaNote ? " " + replicaNote : "") + (ViewerDataService.ProbeMissingGrantsNote(root) is { } grantsNote ? " " + grantsNote : "");
+            return string.Join(", ", parts) + "." + (ViewerDataService.ProbeReplicaNote(root) is { } replicaNote ? " " + replicaNote : "") + (ViewerDataService.ProbeMissingGrantsNote(root) is { } grantsNote ? " " + grantsNote : "");
         }
         catch (JsonException)
         {

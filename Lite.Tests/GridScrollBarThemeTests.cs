@@ -44,7 +44,7 @@ public class GridScrollBarThemeTests
         ScrollBar Horizontal,
         ScrollViewer Scroll,
         Color ThumbCenter,
-        Color ThemeBorder,
+        Color ThemeThumb,
         int ArrowButtons,
         double ColumnsTotal,
         int MeasuresAfterSettle,
@@ -84,7 +84,7 @@ public class GridScrollBarThemeTests
             var window = new Window { Content = new Canvas { Children = { grid } }, Width = 600, Height = 400 };
             window.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = ThemeUri(theme) });
             grid.Style = (Style)window.FindResource(typeof(DataGrid));
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ClippedTextProbe.Settle(window);
@@ -126,8 +126,8 @@ public class GridScrollBarThemeTests
                         || b.Command == ScrollBar.LineLeftCommand || b.Command == ScrollBar.LineRightCommand));
 
                 var lastRight = grid.Columns.Sum(c => c.ActualWidth);
-                var border = (SolidColorBrush)grid.FindResource("BorderBrush");
-                return new Laid(grid, vertical, horizontal, scroll, thumbColor, border.Color, arrows, lastRight, afterSettle, grid.Measures,
+                var thumbBrush = (SolidColorBrush)grid.FindResource("ScrollBarThumbBrush");
+                return new Laid(grid, vertical, horizontal, scroll, thumbColor, thumbBrush.Color, arrows, lastRight, afterSettle, grid.Measures,
                     fillBefore.Zip(grid.Columns.Select(c => c.ActualWidth), (a, b) => b - a).ToArray(), scroll.CanContentScroll);
             }
             finally
@@ -169,7 +169,7 @@ public class GridScrollBarThemeTests
         Assert.Equal(0, laid.ArrowButtons);
         Assert.True(laid.Vertical.ActualWidth <= 14, $"a thin scroll bar, got {laid.Vertical.ActualWidth}");
         Assert.Equal(255, laid.ThumbCenter.A);
-        Assert.Equal((laid.ThemeBorder.R, laid.ThemeBorder.G, laid.ThemeBorder.B), (laid.ThumbCenter.R, laid.ThumbCenter.G, laid.ThumbCenter.B));
+        Assert.Equal((laid.ThemeThumb.R, laid.ThemeThumb.G, laid.ThemeThumb.B), (laid.ThumbCenter.R, laid.ThumbCenter.G, laid.ThumbCenter.B));
     }
 
     [Theory]

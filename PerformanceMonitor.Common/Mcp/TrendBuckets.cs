@@ -101,6 +101,14 @@ internal static class TrendBuckets
     /// <summary><c>get_file_io_trend</c>: about 220 bytes a point.</summary>
     public const int FileIoMaxPoints = 1000;
 
+    /// <summary><c>get_file_io_trend</c>'s own MCP auto-sizing target (#8568), narrower than the shared
+    /// <see cref="McpPointBudget"/> for the same reason as <see cref="PgIoMcpAutoPoints"/>: a point measured about
+    /// 240 bytes with its envelope on a production store, so a day across six databases at the shared target's
+    /// hourly points (150) answered 35.7 KB, over <see cref="McpResponseBudget.DefaultBytes"/> (32 KB). 120 keeps
+    /// the answer under about 29 KB at any window: a day across six databases is two-hour points, across one
+    /// database 15-minute ones, and an hour or less still auto-sizes to one-minute points for a single database.</summary>
+    public const int FileIoMcpAutoPoints = 120;
+
     /// <summary><c>get_lock_wait_trend</c>: about 120 bytes a point.</summary>
     public const int LockWaitMaxPoints = 2000;
 
@@ -123,6 +131,14 @@ internal static class TrendBuckets
     /// <summary><c>get_pg_database_trend</c>: about 270 bytes a point.</summary>
     public const int PgDatabaseMaxPoints = 1000;
 
+    /// <summary><c>get_pg_database_trend</c>'s own MCP auto-sizing target (#8568), narrower than the shared
+    /// <see cref="McpPointBudget"/> for the same reason as <see cref="PgIoMcpAutoPoints"/>: a point measured about
+    /// 280 bytes with its envelope on a production store, so a day at the shared target's 10-minute points (145)
+    /// answered 41 KB, over <see cref="McpResponseBudget.DefaultBytes"/> (32 KB). 90 keeps the answer under about
+    /// 26 KB at any window: a day is 30-minute points, four hours 5-minute ones, and an hour or less still
+    /// auto-sizes to one-minute points.</summary>
+    public const int PgDatabaseMcpAutoPoints = 90;
+
     /* The rest of the trend family (#3960), sized the same way. */
 
     /// <summary><c>get_wait_trend</c>: about 170 bytes a point.</summary>
@@ -133,6 +149,14 @@ internal static class TrendBuckets
 
     /// <summary><c>get_tempdb_trend</c>: about 300 bytes a point.</summary>
     public const int TempDbMaxPoints = 800;
+
+    /// <summary><c>get_tempdb_trend</c>'s own MCP auto-sizing target (#8568), narrower than the shared
+    /// <see cref="McpPointBudget"/> for the same reason as <see cref="PgIoMcpAutoPoints"/>: a point measured about
+    /// 305 bytes with its envelope on a production store, so a day at the shared target's 10-minute points (144)
+    /// answered 44 KB, over <see cref="McpResponseBudget.DefaultBytes"/> (32 KB). 90 keeps the answer under about
+    /// 28 KB at any window: a day is 30-minute points, four hours 5-minute ones, and an hour or less still
+    /// auto-sizes to one-minute points.</summary>
+    public const int TempDbMcpAutoPoints = 90;
 
     /// <summary><c>get_memory_trend</c>: about 200 bytes a point.</summary>
     public const int MemoryMaxPoints = 1200;
@@ -146,9 +170,27 @@ internal static class TrendBuckets
     /// <summary><c>get_pg_query_duration_trend</c>: about 170 bytes a point.</summary>
     public const int PgQueryDurationMaxPoints = 1500;
 
+    /// <summary><c>get_pg_wait_trend</c> (#8319): about 170 bytes a point (a stamp, a count, a rate and its peak, a nullable
+    /// backend count and a flag), so a day at one-minute points stays under 256 KB.</summary>
+    public const int PgWaitTrendMaxPoints = 1500;
+
+    /// <summary><c>get_pg_wait_trend</c>'s own MCP auto-sizing target (#8319), narrower than the shared <see cref="McpPointBudget"/>
+    /// for the same reason as <see cref="PgIoMcpAutoPoints"/>: with its envelope (the two instrument notes run to about 3 KB) a
+    /// window whose ladder rung lands near 200 points (33 hours at 10-minute buckets is 199) would pass
+    /// <see cref="McpResponseBudget.DefaultBytes"/> (32 KB). 120 keeps every window under about 24 KB: a day is 15-minute points
+    /// (at most 97), four hours 5-minute ones, a week 2-hour ones, and an hour or less still auto-sizes to one-minute points.</summary>
+    public const int PgWaitTrendMcpAutoPoints = 120;
+
     /// <summary><c>get_pg_cpu_utilization</c> (#4193): about 500 bytes a point, the widest of the family — the
     /// CPU/ACU pair (each with its own peak), the capacity trio and the six V136 host-memory columns.</summary>
     public const int PgCpuMaxPoints = 500;
+
+    /// <summary><c>get_pg_cpu_utilization</c>'s own MCP auto-sizing target (#8568), narrower than the shared
+    /// <see cref="McpPointBudget"/> for the same reason as <see cref="PgIoMcpAutoPoints"/>: at about 500 bytes a
+    /// point the read's default four hours at the shared target's two-minute points (121) answered 60 KB, over
+    /// <see cref="McpResponseBudget.DefaultBytes"/> (32 KB). 55 keeps the answer under about 28 KB at any window:
+    /// four hours are 5-minute points, a day 30-minute ones, and an hour 2-minute ones.</summary>
+    public const int PgCpuMcpAutoPoints = 55;
 
     /// <summary>Lite's <c>get_query_trend</c> (#7907): about 330 bytes a point, sixteen fields of one query's summed
     /// deltas, weighted averages, DOP pair and plan facts.</summary>
@@ -275,7 +317,7 @@ internal static class TrendBuckets
             var across = seriesCount > 1 ? $" across {seriesCount} series" : string.Empty;
             return McpHelpers.Refusal(
                 "bucket_minutes",
-                $"bucket_minutes {width} over {hoursBack} hour(s){across} is up to {points.ToString(CultureInfo.InvariantCulture)} points, over this read's {budget.MaxPoints.ToString(CultureInfo.InvariantCulture)}-point cap. Use bucket_minutes {fits} or wider, or narrow hours_back (as_of moves the window) for finer points.");
+                $"bucket_minutes {width} over {CountText.Plural(hoursBack, "hour")}{across} is up to {points.ToString(CultureInfo.InvariantCulture)} points, over this read's {budget.MaxPoints.ToString(CultureInfo.InvariantCulture)}-point cap. Use bucket_minutes {fits} or wider, or narrow hours_back (as_of moves the window) for finer points.");
         }
 
         return null;
@@ -286,7 +328,7 @@ internal static class TrendBuckets
     private static string WidestOverCapRefusal(int hoursBack, int windowMinutes, int seriesCount, TrendBudget budget, string narrowHint) =>
         McpHelpers.Refusal(
             "hours_back",
-            $"{hoursBack} hour(s) across {seriesCount} series is up to {PointsFor(windowMinutes, MaxBucketMinutes, seriesCount).ToString(CultureInfo.InvariantCulture)} points even at the widest bucket ({MaxBucketMinutes} minutes), over this read's {budget.MaxPoints.ToString(CultureInfo.InvariantCulture)}-point cap, so no bucket_minutes can serve it. {narrowHint}");
+            $"{CountText.Plural(hoursBack, "hour")} across {seriesCount} series is up to {PointsFor(windowMinutes, MaxBucketMinutes, seriesCount).ToString(CultureInfo.InvariantCulture)} points even at the widest bucket ({MaxBucketMinutes} minutes), over this read's {budget.MaxPoints.ToString(CultureInfo.InvariantCulture)}-point cap, so no bucket_minutes can serve it. {narrowHint}");
 
     /// <summary>The points an automatic width serves when it could not meet the auto target (the widest bucket still holds more
     /// than <paramref name="autoTarget"/>), else null (#7877). The payload names the miss instead of claiming the target.</summary>
@@ -370,7 +412,7 @@ internal static class TrendBuckets
     /// </summary>
     public static string AggregateNote(int bucketMinutes, bool requested, int budgetPoints) =>
         $"Each point summarizes the collections in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start (the first point at the window's start). "
-        + "Counts are summed across the bucket, and rates and ratios are recomputed from those sums over the seconds the collections covered — never averaged from per-collection values — so a bucket the window cuts short holds smaller counts but a true rate. "
+        + "Counts are summed across the bucket, and rates and ratios are recomputed from those sums over the seconds the collections covered, never averaged from per-collection values, so a bucket the window cuts short holds smaller counts but a true rate. "
         + "peak_* and worst_* are the single most extreme collection inside the bucket, so a spike survives the rollup. "
         + Sizing(requested, budgetPoints);
 
@@ -400,8 +442,8 @@ internal static class TrendBuckets
     /// <summary>The closing sentence the notes share: where the width came from, and how to ask for another.</summary>
     public static string Sizing(bool requested, int budgetPoints, int? pointsOverTarget = null) =>
         pointsOverTarget is int served
-            ? $"The width is the widest bucket ({MaxBucketMinutes} minutes), and even that could not bring this answer near {budgetPoints.ToString(CultureInfo.InvariantCulture)} points: it serves {served.ToString(CultureInfo.InvariantCulture)}. Narrow hours_back for fewer points."
+            ? $"The width is the widest bucket ({MaxBucketMinutes} minutes), and even that could not bring this answer near {budgetPoints.ToString("N0", CultureInfo.InvariantCulture)} points: it serves {served.ToString("N0", CultureInfo.InvariantCulture)}. Narrow hours_back for fewer points."
         : requested
             ? "The width is the bucket_minutes you passed."
-            : $"The width was chosen to keep this answer near {budgetPoints.ToString(CultureInfo.InvariantCulture)} points; pass bucket_minutes (1-{MaxBucketMinutes}) for another width, or narrow hours_back for finer points.";
+            : $"The width was chosen to keep this answer near {budgetPoints.ToString("N0", CultureInfo.InvariantCulture)} points; pass bucket_minutes (1-{MaxBucketMinutes}) for another width, or narrow hours_back for finer points.";
 }

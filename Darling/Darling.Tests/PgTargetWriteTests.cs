@@ -371,7 +371,7 @@ public sealed class PgTargetWriteTests
         var knob = Config(PgTargetFactKeys.ConfigMaxWalSize, 1024, notApplicable: true);
 
         var pressureBlock = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(pressure, knob))!;
-        Assert.Equal("Checkpoint pressure is not applicable on Aurora — the storage layer owns checkpointing", pressureBlock.Headline);
+        Assert.Equal("Checkpoint pressure is not applicable on Aurora: the storage layer owns checkpointing", pressureBlock.Headline);
         Assert.Contains("60 timed checkpoints an hour", pressureBlock.Investigation, StringComparison.Ordinal);
         Assert.Contains("requested share of 0 %", pressureBlock.Investigation, StringComparison.Ordinal);
         Assert.Contains("get_pg_write_stats", pressureBlock.Remediation, StringComparison.Ordinal);
@@ -379,13 +379,13 @@ public sealed class PgTargetWriteTests
         Assert.DoesNotContain("checkpoint_completion_target", pressureBlock.Remediation, StringComparison.Ordinal);
 
         var knobBlock = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigMaxWalSize, Lookup(pressure, knob))!;
-        Assert.Equal("max_wal_size is 1 GB — not a finding on Aurora, where the engine does not consult it", knobBlock.Headline);
+        Assert.Equal("max_wal_size is 1 GB, not a finding on Aurora, where the engine does not consult it", knobBlock.Headline);
         Assert.Contains("does not govern", knobBlock.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("shipped default", knobBlock.Investigation, StringComparison.Ordinal);
 
         /* Stock PostgreSQL's blocks are lane 2's, untouched: the same facts without the flag compose the sizing arithmetic. */
         var stockBlock = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigMaxWalSize, Lookup(Pressure(0.0, 240), Config(PgTargetFactKeys.ConfigMaxWalSize, 1024)))!;
-        Assert.Equal("max_wal_size is 1 GB — the shipped default", stockBlock.Headline);
+        Assert.Equal("max_wal_size is 1 GB: the shipped default", stockBlock.Headline);
     }
 
     [Fact]
@@ -432,7 +432,7 @@ public sealed class PgTargetWriteTests
         anomaly.Metadata["baseline_ratio"] = 9.2 / 1.05;   /* peak over the robust centre (the median), as the detector stamps it */
 
         var leading = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyWalVolume, Lookup(anomaly, Pressure(0.1, 48)))!;
-        Assert.Equal("WAL volume spiked to 9.2 MB/s — 7 times its usual variation above its normal level for this time of week", leading.Headline);
+        Assert.Equal("WAL volume spiked to 9.2 MB/s: 7 times its usual variation above its normal level for this time of week", leading.Headline);
         Assert.Contains("7 times its usual variation above its 1.1 MB/s normal level", leading.Investigation, StringComparison.Ordinal);
         Assert.Contains("8.76× the 1.1 MB/s this server routinely writes", leading.Investigation, StringComparison.Ordinal);
         Assert.Contains("leading edge", leading.Investigation, StringComparison.Ordinal);
@@ -510,14 +510,9 @@ public sealed class PgTargetWriteTests
             using (var doc = JsonDocument.Parse(json))
             {
                 var root = doc.RootElement;
-                Assert.Equal("findings", root.GetProperty("status").GetString());
-                var findings = root.GetProperty("findings").EnumerateArray().ToList();
-                string RootKey(JsonElement f) => f.GetProperty("root_fact").GetProperty("key").GetString()!;
-                /* shared_buffers at its default is the ONE advisory; the write chain roots nothing and is in no path. */
-                var only = Assert.Single(findings);
-                Assert.Equal(PgTargetFactKeys.ConfigSharedBuffers, RootKey(only));
-                Assert.DoesNotContain(PgTargetFactKeys.CheckpointPressure, only.GetProperty("story_path").GetString()!, StringComparison.Ordinal);
-                Assert.DoesNotContain(PgTargetFactKeys.ConfigMaxWalSize, only.GetProperty("story_path").GetString()!, StringComparison.Ordinal);
+                /* #8322: shared_buffers at the initdb figure is the service's value on Aurora, so no advisory roots there
+                   either; with the write chain rooting nothing, the Aurora target at defaults is an all-clear. */
+                Assert.Equal("empty", root.GetProperty("status").GetString());
             }
 
             var factsJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, AuroraServerName, 4, PgTargetSources.WriteSource, as_of: asOf);
@@ -562,8 +557,12 @@ public sealed class PgTargetWriteTests
                 Assert.Equal(1, checkpointTimeout.GetProperty("metadata").GetProperty("not_applicable").GetDouble());
                 Assert.Equal(1, checkpointTimeout.GetProperty("metadata").GetProperty("not_applicable_on_aurora").GetDouble());
 
+                /* #8322: the same stamp on shared_buffers, which the service sizes from the instance's capacity on Aurora. */
                 var sharedBuffers = doc.RootElement.GetProperty("facts").EnumerateArray().Single(f => f.GetProperty("key").GetString() == PgTargetFactKeys.ConfigSharedBuffers);
-                Assert.Equal(0.4, sharedBuffers.GetProperty("base_severity").GetDouble(), precision: 6);
+                Assert.Equal(128, sharedBuffers.GetProperty("value").GetDouble());
+                Assert.Equal(0, sharedBuffers.GetProperty("base_severity").GetDouble());
+                Assert.Equal(1, sharedBuffers.GetProperty("metadata").GetProperty("not_applicable").GetDouble());
+                Assert.Equal(1, sharedBuffers.GetProperty("metadata").GetProperty("not_applicable_on_aurora").GetDouble());
             }
 
             bodySucceeded = true;
@@ -888,7 +887,7 @@ public sealed class PgTargetWriteTests
         var restarted = Pressure(0.6, 10);
         restarted.Metadata["postmaster_restart_count"] = 2;
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(restarted))!;
-        Assert.Contains("PostgreSQL restarted 2 time(s) inside the window; a shutdown checkpoint counts as requested and its own write and sync phases land in the same counters", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("PostgreSQL restarted 2 times inside the window; a shutdown checkpoint counts as requested and its own write and sync phases land in the same counters", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("left out of the requested count and the checkpoint write and sync time rather than read as WAL pressure", block.Investigation, StringComparison.Ordinal);
 
         var steady = Pressure(0.6, 10);

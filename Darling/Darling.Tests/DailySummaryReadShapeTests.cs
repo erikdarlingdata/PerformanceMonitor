@@ -312,7 +312,8 @@ public sealed class DailySummaryReadShapeLiveTests
     private const int ServerId = -390501;
     private const string ServerName = "read-shape-3905";
 
-    /// <summary>The pre-#3905 <c>queries</c> CTE, raw and routed, verbatim but for its comments. Placeholders:
+    /// <summary>The pre-#3905 <c>queries</c> CTE, raw and routed, verbatim but for its comments and the one rule #8651 added to its raw
+    /// reads: a restart row (<c>sample_interval_seconds = 0</c>) does not count its hash, so the two texts still differ in exactly the lines #3905 changed. Placeholders:
     /// the routed relation (the daily tier ignores <paramref name="hourlyRelation"/>, as
     /// <see cref="DailySummarySql.RangeSqlFor(RetentionTier, string)"/> does), its registered source, the
     /// source's time column and the source filter.</summary>
@@ -326,6 +327,7 @@ public sealed class DailySummaryReadShapeLiveTests
                     SELECT date_trunc('day', collection_time) AS d, COUNT(DISTINCT query_hash) AS c
                     FROM v_query_stats
                     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+                      AND sample_interval_seconds IS DISTINCT FROM 0
                     GROUP BY 1
                 ),
                 """;
@@ -337,6 +339,11 @@ public sealed class DailySummaryReadShapeLiveTests
         var target = TimescaleSupport.RollupCoverageProbeTargets.Single(t => t.View == relation);
         var filter = TimescaleSupport.MaterializationHoleSourceFilterFor(target.CreateSql);
         var sourceFilter = filter.Length == 0 ? string.Empty : " AND " + filter;
+
+        /* #8651: the raw tail leaves restart rows out. The legacy daily's closed days are the exception: DailySummarySql reads them from the
+           legacy hourly (#8549), which has no column that tells a restart row apart, so on this seed, where that hourly holds D4's restart
+           row, the Daily tier still counts it and its oracle keeps the row. */
+        var tailFilter = tier == RetentionTier.Daily ? string.Empty : " AND sample_interval_seconds IS DISTINCT FROM 0";
         return $"""
             queries_ceiling AS (
                 SELECT date_trunc('day', max(bucket)) AS last_day
@@ -352,7 +359,7 @@ public sealed class DailySummaryReadShapeLiveTests
                 SELECT date_trunc('day', collection_time) AS d, COUNT(DISTINCT query_hash) AS c
                 FROM v_query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-                  AND collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)
+                  AND collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2){tailFilter}
                 GROUP BY 1
                 UNION ALL
                 SELECT b.d, NULL::bigint AS c
@@ -409,7 +416,8 @@ public sealed class DailySummaryReadShapeLiveTests
 
         /* Not vacuous: the forms reach the cases the changed lines decide. The legacy hourly names its skipped
            day (D2); the NULL hash is skipped (D3 counts the 4 hashes, not the NULL); the successor's ceiling is
-           D3, so D4 onward is its raw tail, restart row included. On the daily tier D2 is absent rather than
+           D3, so D4 onward is its raw tail, which leaves D4's restart row out (#8651: no credited execution, so no day), where the legacy hourly
+           holds that row and counts it. On the daily tier D2 is absent rather than
            NULL: its source, the legacy hourly, skipped the day too, so nothing witnesses it (the hole scan's
            rule), and D8 comes from the raw tail past the daily's ceiling. */
         string Day(int n) => days[n].ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
@@ -418,7 +426,8 @@ public sealed class DailySummaryReadShapeLiveTests
         Assert.Contains(legacy, row => row.StartsWith(Day(3) + "|", StringComparison.Ordinal) && row.Split('|')[3] == "4");
         Assert.DoesNotContain(legacy, row => row.StartsWith(Day(1) + "|", StringComparison.Ordinal));
         var successor = answers[RetentionTier.Hourly + "/" + TimescaleSupport.QueryStatsIntervalHourlyView];
-        Assert.Contains(successor, row => row.StartsWith(Day(4) + "|", StringComparison.Ordinal) && row.Split('|')[3] == "1");
+        Assert.DoesNotContain(successor, row => row.StartsWith(Day(4) + "|", StringComparison.Ordinal));
+        Assert.Contains(legacy, row => row.StartsWith(Day(4) + "|", StringComparison.Ordinal) && row.Split('|')[3] == "1");
         var daily = answers[RetentionTier.Daily + "/" + TimescaleSupport.QueryStatsHourlyView];
         Assert.DoesNotContain(daily, row => row.StartsWith(Day(2) + "|", StringComparison.Ordinal));
         Assert.Contains(daily, row => row.StartsWith(Day(8) + "|", StringComparison.Ordinal) && row.Split('|')[3] == "1");
@@ -459,8 +468,11 @@ public sealed class DailySummaryReadShapeLiveTests
             .Single(n => n.TryGetProperty("Subplan Name", out var name) && name.GetString() == "CTE queries");
         var inQueries = Walk(queries).ToArray();
         Assert.DoesNotContain(inQueries, n => NodeType(n) == "Materialize");
+        /* #8651: the credited-pairs shape probes idx_query_stats_server_hash_time once per restart-only pair, a per-pair probe the rule
+           (the not-carried probes run once per day, not once per row) does not cover, so a join with that probe beneath it is left out. */
         Assert.DoesNotContain(inQueries, n => NodeType(n) == "Nested Loop"
-            && n.TryGetProperty("Join Type", out var join) && join.GetString() is "Semi" or "Anti");
+            && n.TryGetProperty("Join Type", out var join) && join.GetString() is "Semi" or "Anti"
+            && !Walk(n).Any(c => c.TryGetProperty("Index Name", out var index) && (index.GetString() ?? string.Empty).EndsWith("idx_query_stats_server_hash_time", StringComparison.Ordinal)));
 
         /* The legacy hourly's ceiling is D5 (the seed materializes D0, D3, D4 and D5); every window day at or
            below it is a candidate, and the ones the rollup holds no row for are probed at the source. */

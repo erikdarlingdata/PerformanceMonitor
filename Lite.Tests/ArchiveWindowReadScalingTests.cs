@@ -420,18 +420,22 @@ VALUES ({_nextId++}, {Ts(Whole(NowUtc.AddDays(-10)))}, {ServerId}, 'TestSrv', 'D
 
         /* The write lock is thread-affine (#2463): a hold across an await can resume on another thread, throw on dispose and leave the static
            lock held for every later test. So it is taken, held and released on one dedicated thread, with no await inside. The thread bumps
-           the generation only once the reader is parked on the lock (a deterministic signal, not a sleep) and every wait is bounded. */
+           the generation only once the reader is parked on the lock (a deterministic signal, not a sleep) and every wait is bounded.
+           The lock is also process-wide, and the classes running alongside take it while they build their own databases. A budgeted
+           writer polls for it with no queue position for all but the last second of its budget (#7256), and the writers those classes
+           park on the lock win every handoff, so the holder here parks for its whole budget instead: it holds the lock as soon as the
+           current holder releases, and its budget is the only bound on the wait (#8142). */
+        _duckDb.WriteLockParkTail = waitBudget;
         var holder = DuckDbLockThread.RunAsync(() =>
         {
             using (_duckDb.AcquireWriteLock(waitBudget))
             {
-                var waitingBefore = DuckDbInitializer.WaitingReadCountForTests;
                 writeLockTaken.Set();
                 if (!startReader.Wait(waitBudget))
                 {
                     return "the test never started the reader";
                 }
-                if (!TestWait.TryWaitUntil(() => DuckDbInitializer.WaitingReadCountForTests > waitingBefore, waitBudget, TimeSpan.FromMilliseconds(1)))
+                if (!TestWait.TryWaitUntil(() => _duckDb.WaitingReaderCountForTests > 0, waitBudget, TimeSpan.FromMilliseconds(1)))
                 {
                     return "the read never reached the lock wait";
                 }
@@ -444,7 +448,13 @@ VALUES ({_nextId++}, {Ts(Whole(NowUtc.AddDays(-10)))}, {ServerId}, 'TestSrv', 'D
             }
         });
 
-        Assert.True(writeLockTaken.Wait(waitBudget, TestContext.Current.CancellationToken), "the write lock was not taken");
+        if (!writeLockTaken.Wait(waitBudget, TestContext.Current.CancellationToken))
+        {
+            /* The holder's budget is this wait's, so its StoreLockTimeoutException, which names who held the lock and for how long
+               from the holder registry, is due a moment later. Surface that instead of a bare "not taken". */
+            await holder.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.Fail("the write lock was not taken, and the holder thread did not say why");
+        }
         run = Task.Run(() => Collect(facts), TestContext.Current.CancellationToken);
         startReader.Set();
         var holderResult = await holder.WaitAsync(waitBudget + waitBudget, TestContext.Current.CancellationToken);

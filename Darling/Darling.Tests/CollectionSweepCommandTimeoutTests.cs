@@ -173,6 +173,51 @@ public sealed class CollectionSweepCommandTimeoutTests
        (NewestDatabaseStateFallbackProbeSql); both are built on the borrowed store connection and carry the sweep deadline. */
     private const int ExpectedSweepCommandSites = 17;
 
+    /// <summary>
+    /// #8361: sweep-body members that hand their store command to a factory in the Storage project instead of building it.
+    /// The deadline travels as an argument, so the construction scan above cannot see it: each (file, member, factory) is
+    /// scanned for the factory's calls, and every call must carry <see cref="ServiceCommandDeadlines.CollectionSweepSeconds"/>.
+    /// QueryStoreHintsStandsDownAsync runs inside RunDueCollectorsAsync at every query_store_hints slot and asks the store
+    /// through DarlingQueryStoreReadableSecondary, which sets the command's timeout from the seconds it is given.
+    /// </summary>
+    private static readonly (string File, string Member, string Factory)[] s_sweepHandoffMembers =
+    {
+        ("DarlingWorker.Targets.cs", "QueryStoreHintsStandsDownAsync", "DarlingQueryStoreReadableSecondary"),
+    };
+
+    /// <summary>The factory calls the handoff members make, pinned like <see cref="ExpectedSweepCommandSites"/>.</summary>
+    private const int ExpectedSweepHandoffSites = 1;
+
+    [Fact]
+    public void EverySweepBodyStoreHandoff_PassesTheCollectionSweepDeadline()
+    {
+        var offenders = new List<string>();
+        var total = 0;
+        foreach (var (file, member, factory) in s_sweepHandoffMembers)
+        {
+            var path = SourcePath(file);
+            var text = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", file);
+            var code = CSharpSourceWalker.StripCommentsAndStrings(MemberBody(text, member, path));
+            foreach (Match call in Regex.Matches(code, Regex.Escape(factory) + @"\s*\.\s*\w+Async\s*\("))
+            {
+                total++;
+                var end = code.IndexOf(';', call.Index);
+                var statement = code.Substring(call.Index, (end < 0 ? code.Length : end) - call.Index);
+                if (!statement.Contains(nameof(ServiceCommandDeadlines) + "." + nameof(ServiceCommandDeadlines.CollectionSweepSeconds), System.StringComparison.Ordinal))
+                {
+                    offenders.Add($"{file} {member} +{LineOf(code, call.Index)}");
+                }
+            }
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            $"{offenders.Count} collection-sweep store handoff(s) carry another deadline instead of "
+            + $"{nameof(ServiceCommandDeadlines)}.{nameof(ServiceCommandDeadlines.CollectionSweepSeconds)}: "
+            + string.Join(", ", offenders));
+        Assert.Equal(ExpectedSweepHandoffSites, total);
+    }
+
     /// <summary>The two COPY writers, counted for the same reason: the collector runner's, and RdsCopyWriter's.
     /// Five from #3601 until #7222, when the four RDS ingestors' character-identical copies became the one
     /// RdsCopyWriter.WriteAsync. It was looked at by a person — the same shared start deadline, the same sweep

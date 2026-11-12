@@ -358,7 +358,8 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(sqlserver_cpu_utilization) AS peak_cpu,
        AVG(sqlserver_cpu_utilization) AS avg_cpu,
        COUNT(*) AS sample_count,
-       arg_max(collection_time, (sqlserver_cpu_utilization, collection_time)) FILTER (WHERE sqlserver_cpu_utilization IS NOT NULL) AS peak_time
+       arg_max(collection_time, (sqlserver_cpu_utilization, collection_time)) FILTER (WHERE sqlserver_cpu_utilization IS NOT NULL) AS peak_time,
+       " + WindowTiles.CoverageColumnsSql + @"
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2 AND collection_time < $3
@@ -563,13 +564,22 @@ WITH per_collection AS (
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_wait_time_ms >= 0
     GROUP BY collection_time
+),
+collected AS (
+    /* #8293: every collection the collector wrote in the window, whatever its rows measured, so the coverage
+       columns count collector instants; a collection with no rated row joins as NULL and is not a sample. */
+    SELECT DISTINCT collection_time
+    FROM v_wait_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 )
 SELECT {WindowTiles.LocalHourSql} AS local_hour,
        MAX(ms_per_sec) AS peak_ms_per_sec,
        AVG(ms_per_sec) AS avg_ms_per_sec,
        SUM(total_wait_ms) AS total_wait_ms,
-       COUNT(*) FILTER (WHERE ms_per_sec IS NOT NULL) AS sample_count
-FROM per_collection
+       COUNT(*) FILTER (WHERE ms_per_sec IS NOT NULL) AS sample_count,
+       {WindowTiles.CoverageColumnsSql}
+FROM collected
+LEFT JOIN per_collection USING (collection_time)
 GROUP BY local_hour
 ORDER BY local_hour";
                 rateCmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -960,6 +970,20 @@ FROM (SELECT (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("
                slice this read AVG ALONE for read/write; MAX was added THEN so a single file's stall burst
                fires the way CPU or batch requests would — this slice keeps that PEAK/MEAN pair, per tile. */
             cmd.CommandText = @"
+WITH active AS (
+    /* The read-or-write-bearing file rows: the statistic's row set. */
+    SELECT collection_time, file_type, database_name, delta_reads, delta_writes, delta_stall_read_ms, delta_stall_write_ms
+    FROM v_file_io_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   (delta_reads > 0 OR delta_writes > 0)
+),
+collected AS (
+    /* #8293: every collection the collector wrote, so the coverage columns count collector instants; a collection
+       with no active file row joins as NULL and is not a sample on either side. */
+    SELECT DISTINCT collection_time
+    FROM v_file_io_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+)
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat,
        AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat,
@@ -969,10 +993,10 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        COUNT(*) FILTER (WHERE delta_writes > 0 AND (file_type = 'LOG' OR lower(database_name) = 'tempdb')) AS write_sample_count,
        /* #7417: the I/O OPERATIONS behind each side over this same window (the sample counts above count file rows, not I/Os), for IoVolumeFloor. */
        CAST(COALESCE(SUM(delta_reads), 0) AS BIGINT) AS read_ops,
-       CAST(COALESCE(SUM(delta_writes) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb'), 0) AS BIGINT) AS write_ops
-FROM v_file_io_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-AND   (delta_reads > 0 OR delta_writes > 0)
+       CAST(COALESCE(SUM(delta_writes) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb'), 0) AS BIGINT) AS write_ops,
+       " + WindowTiles.CoverageColumnsSql + @"
+FROM collected
+LEFT JOIN active USING (collection_time)
 GROUP BY local_hour
 ORDER BY local_hour";
 
@@ -1178,14 +1202,13 @@ ORDER BY local_hour";
                metadata key reads one). $4..$6 bind map.WindowClock, never the cached baseline clock. */
             cmd.CommandText = @"
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
-       MAX(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS peak_batch,
-       AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS avg_batch,
-       COUNT(*) AS sample_count
+       MAX(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) FILTER (WHERE delta_cntr_value >= 0 AND sample_interval_seconds > 0) AS peak_batch,
+       AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) FILTER (WHERE delta_cntr_value >= 0 AND sample_interval_seconds > 0) AS avg_batch,
+       COUNT(*) FILTER (WHERE delta_cntr_value >= 0 AND sample_interval_seconds > 0) AS sample_count,
+       " + WindowTiles.CoverageColumnsSql + @"
 FROM v_perfmon_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   counter_name = 'Batch Requests/sec'
-AND   delta_cntr_value >= 0
-AND   sample_interval_seconds > 0
 GROUP BY local_hour
 ORDER BY local_hour";
 
@@ -1313,12 +1336,29 @@ WITH per_collection AS (
     FROM v_session_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     GROUP BY collection_time
+),
+collected AS (
+    /* #8293: the collector's runs. The session collector groups by program name and leaves its own sessions out, so a
+       collection with no other user session writes no session_stats row at all, and its SUCCESS run in collection_log
+       is the witness that the collector was there. Binned to the minute, because a run's log time and its rows'
+       collection_time are stamped apart; a run with no rows joins as NULL and is not a sample. */
+    SELECT DISTINCT date_trunc('minute', collection_time) AS minute
+    FROM v_collection_log
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   collector_name = 'session_stats'
+    AND   status = 'SUCCESS'
+),
+instants AS (
+    SELECT coalesce(p.collection_time, c.minute) AS collection_time, p.total_connections
+    FROM collected AS c
+    FULL OUTER JOIN per_collection AS p ON date_trunc('minute', p.collection_time) = c.minute
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_connections) AS peak_connections,
        AVG(total_connections) AS avg_connections,
-       COUNT(*) AS sample_count
-FROM per_collection
+       COUNT(total_connections) AS sample_count,
+       " + WindowTiles.CoverageColumnsSql + @"
+FROM instants
 GROUP BY local_hour
 ORDER BY local_hour";
 
@@ -1443,18 +1483,35 @@ ORDER BY local_hour";
             cmd.CommandText = @"
 WITH per_collection AS (
     SELECT collection_time,
-           SUM(delta_elapsed_time)::DOUBLE PRECISION AS total_elapsed
+           /* #8293: the activity filter rides on the aggregate, so an idle collection (rows without executions)
+              still yields a row, with a NULL total, and the coverage columns count it; it is not a sample. */
+           SUM(delta_elapsed_time) FILTER (WHERE delta_execution_count > 0 AND delta_elapsed_time >= 0)::DOUBLE PRECISION AS total_elapsed
     FROM v_query_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-    AND   delta_execution_count > 0
-    AND   delta_elapsed_time >= 0
     GROUP BY collection_time
+),
+collected AS (
+    /* #8293: the collector's runs. The query stats collector keeps only statements run in the last ten minutes, so an
+       idle collection writes no query_stats row at all, and its SUCCESS run in collection_log is the witness that the
+       collector was there. Binned to the minute, because a run's log time and its rows' collection_time are stamped
+       apart; a run with no rows joins as NULL and is not a sample. */
+    SELECT DISTINCT date_trunc('minute', collection_time) AS minute
+    FROM v_collection_log
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   collector_name = 'query_stats'
+    AND   status = 'SUCCESS'
+),
+instants AS (
+    SELECT coalesce(p.collection_time, c.minute) AS collection_time, p.total_elapsed
+    FROM collected AS c
+    FULL OUTER JOIN per_collection AS p ON date_trunc('minute', p.collection_time) = c.minute
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_elapsed) AS peak_elapsed,
        AVG(total_elapsed) AS avg_elapsed,
-       COUNT(*) AS sample_count
-FROM per_collection
+       COUNT(total_elapsed) AS sample_count,
+       " + WindowTiles.CoverageColumnsSql + @"
+FROM instants
 GROUP BY local_hour
 ORDER BY local_hour";
 
@@ -1577,12 +1634,12 @@ ORDER BY local_hour";
                metadata key reads one). $4..$6 bind map.WindowClock, never the cached baseline clock. */
             cmd.CommandText = @"
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
-       MAX(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS peak_pressure,
-       AVG(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS avg_pressure,
-       COUNT(*) AS sample_count
+       MAX(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) FILTER (WHERE target_server_memory_mb > 0) AS peak_pressure,
+       AVG(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) FILTER (WHERE target_server_memory_mb > 0) AS avg_pressure,
+       COUNT(*) FILTER (WHERE target_server_memory_mb > 0) AS sample_count,
+       " + WindowTiles.CoverageColumnsSql + @"
 FROM v_memory_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-AND   target_server_memory_mb > 0
 GROUP BY local_hour
 ORDER BY local_hour";
 

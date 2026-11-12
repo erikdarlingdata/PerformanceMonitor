@@ -394,7 +394,7 @@ public sealed class TimescaleSupportTests
         Assert.Equal(StuckPolicyJobArm.NextStartNegativeInfinity, arm);
         Assert.Equal(TimescaleSupport.NextStartNegativeInfinityCrashBackoffReason, reason);
         Assert.Contains("crash backoff", reason, StringComparison.Ordinal);
-        Assert.Contains("#9360", reason, StringComparison.Ordinal);
+        Assert.Contains("retry_period", reason, StringComparison.Ordinal);
         Assert.Contains("2.26.4", reason, StringComparison.Ordinal);
         Assert.DoesNotContain("never", reason, StringComparison.Ordinal);
 
@@ -1443,13 +1443,13 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
             /* And therefore the converge is a no-op against a FRESH store too, not only a settled one. */
             Assert.Equal(0, await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct));
 
-            /* ---- (8) SCOPE: the DAILY tier keeps its 3-day window and its finish-to-start schedule. ---- */
+            /* ---- (8) SCOPE: the DAILY tier keeps its 4-day window and its finish-to-start schedule. ---- */
             var daily = await RefreshPolicyStateAsync(connection, Daily, ct);
             Assert.NotNull(daily);
-            Assert.Equal(TimeSpan.FromDays(3).TotalSeconds, daily!.StartOffsetSeconds);
+            Assert.Equal(TimescaleSupport.DailyRefreshStartSpan.TotalSeconds, daily!.StartOffsetSeconds);
             Assert.False(daily.FixedSchedule, "the daily tier is deliberately left on finish-to-start scheduling");
 
-            /* Deliberately AFTER a converge has run and reported 0: "the daily policy is still on 3 days" is
+            /* Deliberately AFTER a converge has run and reported 0: "the daily policy is still on 4 days" is
                trivially true if the converge never looked at anything, so the check has to follow a pass that
                did look at the hourly policies and chose not to touch this one. */
             await ExecAsync(connection,
@@ -2197,6 +2197,9 @@ AND   j.hypertable_name = '" + relation + "'", connection) { CommandTimeout = Po
     .Concat(TimescaleSupport.BaselineAggregates.Select(a => a.View))
     /* #3893: the off-grid fleet collection-health rollup carries its own 8-day leaf policy. 21 relations. */
     .Concat(TimescaleSupport.OffGridAggregates.Select(a => a.View))
+    /* #8549: the oldest-run rollup under the Job History note is off-grid too but carries NO retention policy: DarlingRetention purges it
+       with job_history at that table's own (configurable) horizon, so it is not in RetentionPolicies. 25 relations before it, 24 policies. */
+    .Where(view => view != TimescaleSupport.JobHistoryOldestDailyView)
     .ToArray();
 
     /// <summary>The policy set EnsureRetentionPoliciesAsync attaches, derived so the two cannot drift.</summary>

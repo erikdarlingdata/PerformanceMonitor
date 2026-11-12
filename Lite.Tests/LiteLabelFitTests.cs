@@ -25,6 +25,7 @@ namespace PerformanceMonitorLite.Tests;
 /// Utilization CPU card, so both are laid out at the 1366x768 width with Lite's own theme: the CPU labels show in full and the Calendar list
 /// keeps each label clear of its duration.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public class LiteLabelFitTests
 {
     private const double ScreenWidth = 1366;
@@ -71,7 +72,7 @@ public class LiteLabelFitTests
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = ScreenWidth, Height = ScreenHeight };
             window.Resources.MergedDictionaries.Add(Theme());
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ((FrameworkElement)tab.FindName("UtilizationContent")).Visibility = Visibility.Visible;
@@ -144,7 +145,7 @@ public class LiteLabelFitTests
             };
             var window = new Window { Content = picker, Width = ScreenWidth, Height = ScreenHeight };
             window.Resources.MergedDictionaries.Add(Theme());
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             var found = new List<string>();
             try
             {

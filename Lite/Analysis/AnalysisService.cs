@@ -179,7 +179,7 @@ public class AnalysisService
     /// does not persist — see <see cref="AnalysisContext.PersistFindings"/>.</param>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1068:CancellationToken parameters must come last",
         Justification = "The token is at position 4 and the scheduler passes it POSITIONALLY. Moving asOfUtc ahead " +
-                        "of it to satisfy the rule would silently rebind that call site's arguments — a compiling " +
+                        "of it to satisfy the rule would silently rebind that call site's arguments: a compiling " +
                         "change of meaning on the one caller that matters. Appending is the only edit that cannot " +
                         "do that, and the Darling twin keeps the same order so the two stay transplantable.")]
     public async Task<List<AnalysisFinding>> AnalyzeAsync(
@@ -340,7 +340,7 @@ public class AnalysisService
                 AppLogger.Warn("AnalysisService",
                     $"No observed collection in the analysis window for {context.ServerName} " +
                     $"({context.TimeRangeStart:o} to {context.TimeRangeEnd:o}) " +
-                    $"despite {dataSpanHours:F1}h of total history — collection may be down ({facts.Count} point-in-time fact(s) only)");
+                    $"despite {dataSpanHours:F1}h of total history: collection may be down ({facts.Count} point-in-time fact(s) only)");
 
                 LastAnalysisTime = DateTime.UtcNow;
                 return [];
@@ -373,7 +373,7 @@ public class AnalysisService
                 AppLogger.Info("AnalysisService",
                     $"The collector observed the analysis window for {context.ServerName} " +
                     $"({context.TimeRangeStart:o} to {context.TimeRangeEnd:o}) " +
-                    $"but emitted no fact over it — {context.Coverage!.Describe()}; nothing rose to a fact, and an all-clear from this pass rests on that coverage");
+                    $"but emitted no fact over it: {context.Coverage!.Describe()}; nothing rose to a fact, and an all-clear from this pass rests on that coverage");
             }
 
             if (context.Coverage is { IsPartial: true } partial)
@@ -381,7 +381,7 @@ public class AnalysisService
                 /* Logged, not just carried: a scheduled pass has no payload to put the caveat in, and
                    the persisted findings from this pass were rated against the observed hours. */
                 AppLogger.Warn("AnalysisService",
-                    $"Partial collection coverage for {context.ServerName}: {partial.Describe()} — " +
+                    $"Partial collection coverage for {context.ServerName}: {partial.Describe()}, " +
                     "rates in this pass are per observed time, and the COLLECTION_GAP fact records the hole");
             }
 
@@ -505,7 +505,7 @@ public class AnalysisService
             AppLogger.Info("AnalysisService",
                 $"Analysis complete for {context.ServerName}: {findings.Count} finding(s), " +
                 $"highest severity {(findings.Count > 0 ? findings.Max(f => f.Severity) : 0):F2}" +
-                (context.PersistFindings ? string.Empty : " (anchored window — exploratory, not persisted)"));
+                (context.PersistFindings ? string.Empty : " (anchored window, exploratory, not persisted)"));
 
             _passFailures.Succeeded(context.ServerId);
             return findings;
@@ -529,7 +529,7 @@ public class AnalysisService
                AnalysisShutdown.IsExpectedAbandon discipline — signalled token AND a shape the
                cancellation really produces — narrowed to the one shape that arises here. */
             AppLogger.Info("AnalysisService",
-                $"Analysis abandoned for {context.ServerName} — this pass's findings are lost by design; the next pass recomputes them ({ex.Message})");
+                $"Analysis abandoned for {context.ServerName}: this pass's findings are lost by design; the next pass recomputes them ({ex.Message})");
             return [];
         }
         catch (Exception ex)
@@ -1053,7 +1053,7 @@ ORDER BY event_time";
             AppLogger.Info("AnalysisService",
                 $"Configuration change attributed for {context.ServerName} ({latest.Families}): {string.Join(ConfigChangeAttribution.SettingSeparator, latest.Changes.Select(c => c.Name))} " +
                 $"{(anchor is null ? "first observed at" : "changed at")} {anchorTime:u} ({(anchor is null ? "configuration snapshot" : "default trace, msg 15457")}), " +
-                $"compare over ±{ConfigChangeAttribution.CompareWindowHours} h ({windows.AfterHoursObserved:0.#} h after so far) — " +
+                $"compare over ±{ConfigChangeAttribution.CompareWindowHours} h ({windows.AfterHoursObserved:0.#} h after so far), " +
                 $"{worse} worse, {better} better{(notYetComparable > 0 ? $", {notYetComparable} not yet comparable" : string.Empty)}, {compare?.Stable ?? 0} stable{(compare is null ? " (compare unavailable this pass)" : string.Empty)}");
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
@@ -1295,14 +1295,26 @@ WHERE server_id = $1";
     /// the caller can put "state unavailable: why" on every target rather than fail the read or — worse —
     /// let the verdict read as eligible by silence. An abandonment is not swallowed (#2443).
     /// </summary>
-    public async Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> TryGetForcePlanTargetStatesAsync(
-        int serverId, IEnumerable<AnalysisFinding> findings, CancellationToken cancellationToken = default)
+    public Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> TryGetForcePlanTargetStatesAsync(
+        int serverId, IEnumerable<AnalysisFinding> findings, CancellationToken cancellationToken = default) =>
+        ReadForcePlanTargetStatesAsync(_duckDb, serverId, findings, cancellationToken);
+
+    /// <summary>
+    /// The same read for a caller that holds the store and no analysis service: the Recommendations
+    /// cards, through <see cref="FindingStore.TryGetForcePlanTargetStatesAsync"/> (#8542).
+    /// </summary>
+    internal static async Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> ReadForcePlanTargetStatesAsync(
+        DuckDbInitializer duckDb, int serverId, IEnumerable<AnalysisFinding> findings, CancellationToken cancellationToken = default)
     {
         var targets = new List<ForcePlanTarget>();
         foreach (var finding in findings)
         {
             if (finding.Remediation?.Targets is { Count: > 0 } ts)
                 targets.AddRange(ts);
+            else
+                /* #8542: a finding with no persisted action renders its statements from its drill-down, so
+                   its targets are read from there, through the extraction the renderer uses. */
+                targets.AddRange(FactRemediation.ExtractPlanRegressionTargets(finding));
         }
 
         if (targets.Count == 0)
@@ -1312,17 +1324,21 @@ WHERE server_id = $1";
         {
             /* #7256: a table whose archive holds nothing in the lookback is read as its hot table. */
             var nowUtc = DateTime.UtcNow;
-            var plan = await _duckDb.PlanArchiveReadAsync(cancellationToken,
+            var plan = await duckDb.PlanArchiveReadAsync(cancellationToken,
                 [.. ForcePlanTargetStateReader.ArchivedTables.Select(t => new ArchiveWindow(t, "collection_time", nowUtc - ForcePlanTargetState.Lookback))]);
-            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-            using var connection = _duckDb.CreateConnection();
+            using var readLock = duckDb.AcquireReadLock(cancellationToken);
+            using var connection = duckDb.CreateConnection();
             await connection.OpenAsync(cancellationToken);
             using var command = connection.CreateCommand();
             return (await ForcePlanTargetStateReader.ReadAsync(command, serverId, targets, nowUtc, plan, cancellationToken), null);
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
         {
-            return (null, $"the forcing and automatic-plan-correction state read failed ({ex.GetType().Name}: {ex.Message}); eligible reflects only the finding's own evidence. Check get_plan_corrections and sys.query_store_plan before forcing.");
+            /* The fault's message goes to the log. The reason carries the exception's type only, as Darling's
+               reader does (#4316): it is written into the command text a card shows and a notification
+               sends, and a DuckDB message can name the store's path. */
+            AppLogger.Warn("AnalysisService", $"The forcing and automatic-plan-correction state read failed for server {serverId}: {ex.Message}");
+            return (null, $"the forcing and automatic-plan-correction state read failed ({ex.GetType().Name}). Check get_plan_corrections and sys.query_store_plan before forcing.");
         }
     }
 }

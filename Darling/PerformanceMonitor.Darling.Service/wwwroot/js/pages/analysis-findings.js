@@ -30,7 +30,7 @@
  * R4 (XSS): every value, the fix script included, reaches the DOM through el()'s text path.
  */
 
-import { getSession } from "../views-api.js";
+import { getSession, peekSession } from "../views-api.js";
 import { el, apiGet, apiWrite, listOnlyNote, readToolWithinKeptHistory, keptWindowStrip, noticeStrip, readErrorStrip, emptyStrip, loadingStrip, localTime, bandClass, dbScopeChip, storeHash } from "../util.js";
 
 /** The desktop's severity cutoffs: >= 1.5 Critical, >= 0.75 Warning, else Info. */
@@ -511,7 +511,8 @@ function card(server, f, showTitle) {
   }
   const actions = [];
   if (f.remediation_command) actions.push(copyButton(f.remediation_command));
-  actions.push(askAiButton(server, f));
+  /* A scoped session gets no Ask AI button: the prompt read behind it is not one a scoped token is served. */
+  if (!peekSession()?.scoped) actions.push(askAiButton(server, f));
   const tab = findingTab(f);
   if (tab) {
     actions.push(el("a", { class: "btn small", href: storeHash("#/server/") + encodeURIComponent(server) + "/" + tab.id, text: "Open " + tab.label + " tab" }));

@@ -395,7 +395,7 @@ public sealed class ConfigChangeAttributionTests
         var young = ConfigChangeAttribution.BuildFact(1, MaxdopEvent(T0, T0.AddHours(-30)), 0,
             ConfigChangeAttribution.WindowsFor(T0, T0.AddHours(1)), compare, FullCoverage(), FullCoverage());
         var youngAdvice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { young }.ToFactLookup())!;
-        Assert.Contains("the 1 h after it that exist so far — the after half is still filling in, and later passes complete it", youngAdvice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the 1 h after it that exist so far: the after half is still filling in, and later passes complete it", youngAdvice.Investigation, StringComparison.Ordinal);
         Assert.Contains("longer than the 4 h before-window", youngAdvice.Investigation, StringComparison.Ordinal);
         Assert.Contains("may already reflect the new value and a null result here does not mean the change had no effect", youngAdvice.Investigation, StringComparison.Ordinal);
 
@@ -455,7 +455,7 @@ public sealed class ConfigChangeAttributionTests
         Assert.Equal(1.0, fact.Metadata[ConfigChangeAttribution.MetaAfterCoverageFraction]);
 
         var advice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!;
-        Assert.EndsWith("— effect not yet comparable", advice.Headline, StringComparison.Ordinal);
+        Assert.EndsWith(", effect not yet comparable", advice.Headline, StringComparison.Ordinal);
         Assert.DoesNotContain("moved beyond band", advice.Headline, StringComparison.Ordinal);
         Assert.DoesNotContain("resolved", advice.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("(better)", advice.Investigation, StringComparison.Ordinal);
@@ -888,7 +888,7 @@ public sealed class ConfigChangeAttributionTests
         var fact = ConfigChangeAttribution.BuildFact(1, evt, 0, ConfigChangeAttribution.WindowsFor(changedAt, T0), compare, FullCoverage(), FullCoverage(), anchor);
         var advice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!;
 
-        Assert.Contains($"`{Maxdop}` 0 → 8 — changed at 2026-09-17 10:48 UTC (default trace: the sp_configure line, msg 15457).", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains($"`{Maxdop}` 0 → 8, changed at 2026-09-17 10:48 UTC (default trace: the sp_configure line, msg 15457).", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("The configuration snapshot (taken on connect) first observed it 27.2 h later, at 2026-09-18 14:00 UTC; the compare below is anchored on the trace's time, not on that observation.", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("compared the 4 h before the change with the 4 h after it", advice.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("first observed by the configuration snapshot", advice.Investigation, StringComparison.Ordinal);
@@ -1299,8 +1299,8 @@ public sealed class ConfigChangeAttributionTests
 
         var advice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!;
 
-        Assert.StartsWith($"Database configuration changed: the recovery model of `{Db}` changed from FULL to SIMPLE — 1 metric moved beyond band after it", advice.Headline, StringComparison.Ordinal);
-        Assert.Contains($"the recovery model of `{Db}` changed from FULL to SIMPLE — first observed by the configuration snapshot at 2026-09-18 14:00 UTC.", advice.Investigation, StringComparison.Ordinal);
+        Assert.StartsWith($"Database configuration changed: the recovery model of `{Db}` changed from FULL to SIMPLE, 1 metric moved beyond band after it", advice.Headline, StringComparison.Ordinal);
+        Assert.Contains($"the recovery model of `{Db}` changed from FULL to SIMPLE: first observed by the configuration snapshot at 2026-09-18 14:00 UTC.", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("landed somewhere in the 23 h since the previous snapshot", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("WRITELOG", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("(better)", advice.Investigation, StringComparison.Ordinal);
@@ -1341,8 +1341,8 @@ public sealed class ConfigChangeAttributionTests
         var traceFact = ConfigChangeAttribution.BuildFact(1, traceEvent, 0, ConfigChangeAttribution.WindowsFor(T0, T0.AddHours(4)), compare, FullCoverage(), FullCoverage());
 
         var traceAdvice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { traceFact }.ToFactLookup())!;
-        Assert.StartsWith("Trace flags changed: 2 trace flags changed together — nothing moved beyond band", traceAdvice.Headline, StringComparison.Ordinal);
-        Assert.Contains("trace flag 1222 disabled (was GLOBAL), trace flag 4199 enabled (GLOBAL) — first observed by the configuration snapshot at", traceAdvice.Investigation, StringComparison.Ordinal);
+        Assert.StartsWith("Trace flags changed: 2 trace flags changed together, nothing moved beyond band", traceAdvice.Headline, StringComparison.Ordinal);
+        Assert.Contains("trace flag 1222 disabled (was GLOBAL), trace flag 4199 enabled (GLOBAL): first observed by the configuration snapshot at", traceAdvice.Investigation, StringComparison.Ordinal);
         Assert.Contains("No metric in the compare moved beyond its dispersion band", traceAdvice.Investigation, StringComparison.Ordinal);
         Assert.Contains("the trace flag history lists the change", traceAdvice.Remediation, StringComparison.Ordinal);
         Assert.Contains("the trace flag list shows what is on now", traceAdvice.Remediation, StringComparison.Ordinal);
@@ -1351,15 +1351,15 @@ public sealed class ConfigChangeAttributionTests
         var single = ConfigChangeAttribution.BuildFact(1,
             Assert.Single(TraceFlagEvents([new(T0.AddHours(-2), 3226, true, true, false), new(T0, 3226, true, true, false), new(T0, 4199, true, true, false)], T0.AddHours(-4), T0.AddHours(1))),
             0, ConfigChangeAttribution.WindowsFor(T0, T0.AddHours(4)), null, null, null);
-        Assert.StartsWith("Trace flag changed: trace flag 4199 enabled (GLOBAL) — effect not yet compared", FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { single }.ToFactLookup())!.Headline, StringComparison.Ordinal);
+        Assert.StartsWith("Trace flag changed: trace flag 4199 enabled (GLOBAL), effect not yet compared", FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { single }.ToFactLookup())!.Headline, StringComparison.Ordinal);
 
         /* Folded across families: the headline says observed together, the body names both in order, and the
            remediation lists both families' history reads and both graders. */
         var folded = Assert.Single(ConfigChangeAttribution.MergeSameConnectEvents([MaxdopEvent(T0.AddSeconds(-2), T0.AddHours(-2)), traceEvent]));
         var foldedFact = ConfigChangeAttribution.BuildFact(1, folded, 0, ConfigChangeAttribution.WindowsFor(T0, T0.AddHours(4)), compare, FullCoverage(), FullCoverage());
         var foldedAdvice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { foldedFact }.ToFactLookup())!;
-        Assert.StartsWith("Configuration changed: 3 configuration changes observed together — nothing moved beyond band", foldedAdvice.Headline, StringComparison.Ordinal);
-        Assert.Contains($"`{Maxdop}` 0 → 8, trace flag 1222 disabled (was GLOBAL), trace flag 4199 enabled (GLOBAL) — first observed", foldedAdvice.Investigation, StringComparison.Ordinal);
+        Assert.StartsWith("Configuration changed: 3 configuration changes observed together, nothing moved beyond band", foldedAdvice.Headline, StringComparison.Ordinal);
+        Assert.Contains($"`{Maxdop}` 0 → 8, trace flag 1222 disabled (was GLOBAL), trace flag 4199 enabled (GLOBAL): first observed", foldedAdvice.Investigation, StringComparison.Ordinal);
         Assert.Contains("the changes are the first suspect: the server configuration history / the trace flag history list the change", foldedAdvice.Remediation, StringComparison.Ordinal);
         Assert.Contains("the configuration audit grades the new value against guidance; the trace flag list shows what is on now", foldedAdvice.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("earlier configuration change", foldedAdvice.Investigation, StringComparison.Ordinal);

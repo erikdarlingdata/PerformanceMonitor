@@ -327,17 +327,15 @@ public static class DarlingQueryStoreClutterReader
         ),
         per_database AS
         (
+            /* #8570: the first and last collection of a database are the earliest first sighting and the latest last
+               sighting over its plans, so they come from per_plan and the window's rows are read once here. The
+               number of distinct collection times (the part that needs the rows again) is PlanChurnCollectionsSql. */
             SELECT
                 server_id,
                 database_name,
-                MIN(collection_time) AS first_collection,
-                MAX(collection_time) AS last_collection,
-                COUNT(*) AS collections_observed
-            FROM
-            (
-                SELECT DISTINCT server_id, database_name, collection_time
-                FROM rows_in_window
-            ) AS collections
+                MIN(first_seen) AS first_collection,
+                MAX(last_seen) AS last_collection
+            FROM per_plan
             GROUP BY server_id, database_name
         ),
         plan_facts AS
@@ -370,7 +368,6 @@ public static class DarlingQueryStoreClutterReader
             d.database_name,
             d.first_collection,
             d.last_collection,
-            d.collections_observed::int,
             q.distinct_queries::int,
             p.distinct_plans::int,
             q.plans_per_query_p95::int,
@@ -387,13 +384,84 @@ public static class DarlingQueryStoreClutterReader
         ORDER BY d.server_id, d.database_name
         """;
 
+    /// <summary>
+    /// #8570: the number of distinct <c>collection_time</c> values that carried rows, per (server, database), over the same window
+    /// and database choice as <see cref="PlanChurnSql"/> ($1 to $4 mean the same). It was the second pass of one statement that read
+    /// the window's index entries twice, one pass after the other. It is its own statement now so
+    /// <see cref="GetPlanChurnAsync"/> can run it beside <see cref="PlanChurnSql"/> on a second connection: on a cold cache the two
+    /// passes' page reads overlap and the call waits for the slower one, not for the sum. The values are the ones the single
+    /// statement produced: <c>COUNT(*)</c> over <c>SELECT DISTINCT server_id, database_name, collection_time</c>.
+    /// </summary>
+    public const string PlanChurnCollectionsSql = """
+        SELECT
+            server_id,
+            database_name,
+            COUNT(*) AS collections_observed
+        FROM
+        (
+            SELECT DISTINCT server_id, database_name, collection_time
+            FROM query_store_stats
+            WHERE server_id = ANY($1::int[])
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        ) AS collections
+        GROUP BY server_id, database_name
+        """;
+
     /// <param name="databases">#5244: the chosen databases (optional, so the Viewer's calls compile unchanged).</param>
     public static async Task<List<PlanChurnRow>> GetPlanChurnAsync(
         NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases = default, DateTime? asOfUtc = null,
         ICollection<string>? omittedDatabases = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
+        /* #8570: the two statements read the window's index entries independently, so they run together on two pooled
+           connections. A statement on a connection of its own cannot share a transaction with the other, and each one is a
+           single read, so there is no snapshot to keep consistent between them beyond the window both name. */
+        var collectionsTask = ReadChurnCollectionsAsync(postgres, serverIds, startUtc, endUtc, databases, cancellationToken);
         var rows = new List<PlanChurnRow>();
-        await using var command = postgres.CreateCommand(PlanChurnSql);
+        try
+        {
+            await using var command = postgres.CreateCommand(PlanChurnSql);
+            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+            AddServers(command, serverIds);
+            AddTimestamp(command, startUtc);
+            AddTimestamp(command, endUtc);
+            command.Parameters.Add(databases.Parameter());
+            var facts = new List<(int ServerId, string Database, DateTime First, DateTime Last, int Queries, int Plans, int P95, int Max, int Once, int AfterFirst)>();
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    facts.Add((reader.GetInt32(0), reader.GetString(1), reader.GetDateTime(2), reader.GetDateTime(3), reader.GetInt32(4),
+                        reader.GetInt32(5), reader.GetInt32(6), reader.GetInt32(7), reader.GetInt32(8), reader.GetInt32(9)));
+                }
+            }
+
+            var collections = await collectionsTask;
+            foreach (var f in facts)
+            {
+                rows.Add(new PlanChurnRow(
+                    f.ServerId, f.Database, f.First, f.Last, collections.GetValueOrDefault((f.ServerId, f.Database)),
+                    f.Queries, f.Plans, f.P95, f.Max, f.Once, f.AfterFirst));
+            }
+        }
+        catch
+        {
+            /* the second statement must not be left running (and unobserved) when the first one fails */
+            try { await collectionsTask; } catch (Exception) { /* the first failure is the one reported */ }
+            throw;
+        }
+
+        /* #5633 item 4: a database the server no longer has (absent from the newest database_states snapshot) is left out when no
+           database was chosen, so it cannot carry a verdict, a count or a recommendation. See CurrentDatabaseScope. */
+        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, r => r.LastCollection, asOfUtc, omittedDatabases, logger, cancellationToken);
+    }
+
+    private static async Task<Dictionary<(int ServerId, string Database), int>> ReadChurnCollectionsAsync(
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases, CancellationToken cancellationToken)
+    {
+        var counts = new Dictionary<(int ServerId, string Database), int>();
+        await using var command = postgres.CreateCommand(PlanChurnCollectionsSql);
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         AddServers(command, serverIds);
         AddTimestamp(command, startUtc);
@@ -402,23 +470,10 @@ public static class DarlingQueryStoreClutterReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new PlanChurnRow(
-                reader.GetInt32(0),
-                reader.GetString(1),
-                reader.GetDateTime(2),
-                reader.GetDateTime(3),
-                reader.GetInt32(4),
-                reader.GetInt32(5),
-                reader.GetInt32(6),
-                reader.GetInt32(7),
-                reader.GetInt32(8),
-                reader.GetInt32(9),
-                reader.GetInt32(10)));
+            counts[(reader.GetInt32(0), reader.GetString(1))] = (int)reader.GetInt64(2);
         }
 
-        /* #5633 item 4: a database the server no longer has (absent from the newest database_states snapshot) is left out when no
-           database was chosen, so it cannot carry a verdict, a count or a recommendation. See CurrentDatabaseScope. */
-        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, r => r.LastCollection, asOfUtc, omittedDatabases, logger, cancellationToken);
+        return counts;
     }
 
     /* ─────────────────────────── (c) configuration ─────────────────────────── */

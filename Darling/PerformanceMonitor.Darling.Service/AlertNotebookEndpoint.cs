@@ -20,6 +20,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
@@ -110,6 +111,7 @@ internal static partial class AlertNotebookEndpoint
 
             var fleetLevelStore = DarlingTriageEndpoint.IsFleetLevelStoreServer(serverQuery)
                 || DarlingTriageEndpoint.IsFleetLevelStoreMetric(metric);
+            var isExternal = IsExternalMetric(metric);
 
             int? serverId = null;
             string? serverName = serverQuery;
@@ -130,6 +132,13 @@ internal static partial class AlertNotebookEndpoint
                         notes.Add((JsonNode)(DarlingWebFailureLog.IsStatementTimeoutSentence(error)
                             ? DarlingWebFailureLog.TimeoutMessage
                             : DarlingWebFailureLog.GenericMessage));
+                    }
+                    else if (isExternal)
+                    {
+                        /* #8555: an External:<source>:<key> alert's server is whatever its submitter named. When that is not a monitored
+                           server the row sits in the no-server bucket: no per-server cell can answer for it and the resolver's "Could not
+                           resolve server" is no news, so the page keeps the alert's own card, the way a store self-alert does (#2768). */
+                        fleetLevelStore = true;
                     }
                     else
                     {
@@ -362,6 +371,15 @@ internal static partial class AlertNotebookEndpoint
             var authoredContext = ShouldPrefetch(authored, kind)
                 ? await PrefetchAsync(kind, trimmedMetric!, serverId, anchor, postgres, analysis, logger, notes, ct)
                 : AuthoredContext.Empty;
+
+            /* #8323: a context template also learns the resolved server's engine, so the High CPU template emits that
+               engine's gauge and drill-downs only. One registry read by primary key; a failure leaves the engine
+               unknown and the template engine-blind, never a failed notebook. */
+            if (authored.BuildCellsWithContext is not null && serverId is { } engineServerId)
+            {
+                authoredContext = authoredContext with { EngineKind = await ReadEngineKindAsync(postgres, engineServerId, logger, ct) };
+            }
+
             var authoredCells = authored.Invoke(
                 metric, serverName, asOf, windowStart, windowEnd, matchedIncident, matchedRow, status, authoredContext);
             return (authoredCells, authored.Id, authored.Version);
@@ -374,12 +392,102 @@ internal static partial class AlertNotebookEndpoint
             StatusCell(status),
         };
 
-        foreach (var section in sections)
+        /* #8553, #8584: the Deadlocks, Blocking and Long-Running Queries Cleared notebooks are mechanical (the alias shares the
+           firing metric's SQL Server reads), so they learn the resolved server's engine here, as the firing templates do
+           through their context (#8323's pattern): a PostgreSQL target gets the PostgreSQL cells and no SQL Server read, an
+           engine that cannot be resolved gets both. Only these metrics pay the registry read; a SQL Server target's cells
+           are exactly what they were.
+           #8555: the CPU Resolved notebook does the same, so a SQL Server target has no Instance CPU (Performance Insights) cell
+           and a PostgreSQL target has no SQL Server CPU read. */
+        var resolvedFiring = trimmedMetric is null ? null : ResolvedMetricOf(trimmedMetric);
+        var enginePickedMetric = EnginePickedResolutionMetric(resolvedFiring);
+        var isCpuResolution = string.Equals(resolvedFiring, CpuFiringMetric, StringComparison.Ordinal);
+        CollectorTargetEngine? resolutionEngine = null;
+        if ((enginePickedMetric is not null || isCpuResolution) && serverId is { } resolutionServerId)
         {
-            mechanicalCells.Add(ReadCell(section, serverName, asOf, lookbackHours));
+            resolutionEngine = MonitoredEngineKind.EngineOf(await ReadEngineKindAsync(postgres, resolutionServerId, logger, ct));
+        }
+
+        /* #8555: an External:<source>:<key> alert with no resolved server (its source is not a monitored server) has nothing a
+           per-server read could answer for: the page keeps the alert's own card and status and draws no read cell. */
+        var noServerReads = serverId is null && IsExternalMetric(trimmedMetric);
+
+        if (!noServerReads && (enginePickedMetric is null || resolutionEngine is null or CollectorTargetEngine.SqlServer))
+        {
+            foreach (var section in sections)
+            {
+                if (isCpuResolution && resolutionEngine is not null && !CpuSectionAppliesTo(section, resolutionEngine.Value))
+                {
+                    continue;
+                }
+
+                mechanicalCells.Add(ReadCell(section, serverName, asOf, lookbackHours));
+            }
+        }
+
+        if (!noServerReads && enginePickedMetric is not null && resolutionEngine is null or CollectorTargetEngine.PostgreSql)
+        {
+            PgResolutionCells(mechanicalCells, enginePickedMetric!, serverName, asOf);
+        }
+
+        if (isCpuResolution && resolutionEngine is CollectorTargetEngine.PostgreSql)
+        {
+            /* The PostgreSQL target's drill-down the High CPU template draws (pg_stat_statements has no CPU column). */
+            mechanicalCells.Add(AuthoredReadCell("get_pg_top_queries", "Top queries by execution time", serverName, asOf,
+                ("hours", "24"), ("limit", "10")));
         }
 
         return (mechanicalCells, "mechanical/" + (trimmedMetric ?? "default"), MechanicalTemplateVersion);
+    }
+
+    /// <summary>#8553, #8584: the firing metric a mechanical Cleared notebook's engine pick keys on, or null when the resolved
+    /// metric has no PostgreSQL cells of its own. The alert engine's recovery title resolves through
+    /// <see cref="ResolvedMetricOf"/> to the firing metric, and only these firing metrics have an authored PostgreSQL read
+    /// set: Deadlocks Detected, Blocking Detected, Blocking Wait Time and Long-Running Query.</summary>
+    private static string? EnginePickedResolutionMetric(string? resolvedMetric)
+    {
+        foreach (var candidate in new[] { DeadlocksFiringMetric, "Blocking Detected", "Blocking Wait Time", "Long-Running Query" })
+        {
+            if (string.Equals(resolvedMetric, candidate, StringComparison.Ordinal))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>#8553, #8584: the PostgreSQL cells a Cleared notebook carries for <paramref name="firingMetric"/>, over the 4h
+    /// window the mechanical sections use.</summary>
+    private static void PgResolutionCells(JsonArray cells, string firingMetric, string? serverName, string? asOf)
+    {
+        if (string.Equals(firingMetric, DeadlocksFiringMetric, StringComparison.Ordinal))
+        {
+            PgDeadlockCells(cells, serverName, asOf, listHours: "4");
+        }
+        else if (string.Equals(firingMetric, "Long-Running Query", StringComparison.Ordinal))
+        {
+            PgLongRunningQueryCells(cells, serverName, asOf, hours: "4");
+        }
+        else
+        {
+            PgBlockingCells(cells, serverName, asOf, chainHours: "4", sessionHours: "4");
+        }
+    }
+
+    /// <summary>#8323: the registry's engine kind for <paramref name="serverId"/>, or null when the registry has not
+    /// stamped one or the read fails (logged at Debug: the notebook still builds, engine-blind).</summary>
+    internal static async Task<string?> ReadEngineKindAsync(NpgsqlDataSource postgres, int serverId, ILogger? logger, CancellationToken ct)
+    {
+        try
+        {
+            return (await DarlingEngineCapability.ReadServerEngineAsync(postgres, serverId, ct)).EngineKind;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(ex, "The alert notebook could not read server {ServerId}'s engine kind; the template keeps both engines' cells.", serverId);
+            return null;
+        }
     }
 
     /// <summary>The header cell every mechanical template opens with: a markdown-shaped read-only summary of
@@ -489,8 +597,11 @@ internal static partial class AlertNotebookEndpoint
 
     /// <summary>The pre-fetched, immutable data an authored template's context builder gets to read — never
     /// the store itself (#4223). A missing rule or finding (deleted since the firing) is an honest empty
-    /// context, per #2710's degrade rule: the missing flag is set, never an exception.</summary>
-    internal sealed record AuthoredContext(CustomAlertRule? CustomRule, bool CustomRuleMissing, AnalysisFinding? Finding, bool FindingMissing)
+    /// context, per #2710's degrade rule: the missing flag is set, never an exception. <paramref name="EngineKind"/> (#8323) is
+    /// the resolved server's engine kind (<c>MonitoredEngineKind</c>), read from the registry for every context template
+    /// when the notebook has a server; null for a fleet-level store, a server the registry has not stamped, or a registry
+    /// read that failed, and a template that reads it then keeps its engine-blind shape.</summary>
+    internal sealed record AuthoredContext(CustomAlertRule? CustomRule, bool CustomRuleMissing, AnalysisFinding? Finding, bool FindingMissing, string? EngineKind = null)
     {
         /// <summary>The context every no-context family gets — no rule, no finding, nothing missing.</summary>
         public static readonly AuthoredContext Empty = new(null, false, null, false);
@@ -567,19 +678,19 @@ internal static partial class AlertNotebookEndpoint
     internal static readonly (string[] Metrics, AuthoredTemplateEntry Entry)[] s_authoredTemplates =
     {
         (new[] { "Blocking Detected", "Blocking Wait Time" },
-            new AuthoredTemplateEntry("authored/blocking", BlockingTemplateVersion, BuildBlockingCells)),
+            new AuthoredTemplateEntry("authored/blocking", BlockingTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildBlockingCells)),
         (new[] { "Collection Stopped", "Capture Down", "Collector Cost Regression" },
             new AuthoredTemplateEntry("authored/self-monitor", SelfMonitorTemplateVersion, BuildSelfMonitorCells)),
         (new[] { "Deadlocks Detected" },
-            new AuthoredTemplateEntry("authored/deadlocks", DeadlocksTemplateVersion, BuildDeadlockCells)),
+            new AuthoredTemplateEntry("authored/deadlocks", DeadlocksTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildDeadlockCells)),
         (new[] { "Failed Agent Job", "Long-Running Job", "Agent Not Running" },
             new AuthoredTemplateEntry("authored/agent-job", AgentJobTemplateVersion, BuildAgentJobCells)),
         (new[] { "Forced Plan Failing" },
             new AuthoredTemplateEntry("authored/forced-plan-failing", ForcedPlanFailingTemplateVersion, BuildForcedPlanFailingCells)),
         (new[] { "High CPU" },
-            new AuthoredTemplateEntry("authored/cpu", CpuTemplateVersion, BuildCpuCells)),
+            new AuthoredTemplateEntry("authored/cpu", CpuTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildCpuCells)),
         (new[] { "Long-Running Query" },
-            new AuthoredTemplateEntry("authored/long-running-query", LongRunningQueryTemplateVersion, BuildLongRunningQueryCells)),
+            new AuthoredTemplateEntry("authored/long-running-query", LongRunningQueryTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildLongRunningQueryCells)),
         (new[] { "Poison Wait" },
             new AuthoredTemplateEntry("authored/poison-wait", PoisonWaitTemplateVersion, BuildPoisonWaitCells)),
         (new[] { "PostgreSQL Replication Slot Retention" },
@@ -1164,7 +1275,21 @@ internal static partial class AlertNotebookEndpoint
         ("AG Database Suspended", "AG Data Movement Resumed"),
         ("AG Sync Fell Behind", "AG Sync Recovered"),
         ("Server Unreachable", "Server Restored"),
+        /* #8555: the self-monitor pair. A capture that comes back writes "Capture Restored", and one that is cleared without its
+           session coming back (the engine does not run it, or its collector is off) writes "Capture Cleared"; both close the
+           "Capture Down" that fired. "Collection Resumed" closes "Collection Stopped" the same way. */
+        ("Capture Down", "Capture Restored"),
+        ("Capture Down", "Capture Cleared"),
+        ("Collection Stopped", "Collection Resumed"),
     };
+
+    /// <summary>The suffix an external alert's resolution row carries after its fire's name (<see cref="ExternalAlertDrain.ResolvedMetricNameFor"/>).</summary>
+    private const string ExternalResolvedSuffix = " Resolved";
+
+    /// <summary>#8555: is this an <c>External:&lt;source&gt;:&lt;key&gt;</c> alert, the name a submitter's alert is delivered and recorded under?</summary>
+    internal static bool IsExternalMetric(string? metric) =>
+        !string.IsNullOrWhiteSpace(metric)
+        && metric.TrimStart().StartsWith(AlertFamily.ExternalMetricPrefix, StringComparison.Ordinal);
 
     /// <summary>The stored <c>metric_name</c>s that resolve <paramref name="metric"/> (#4755): every alias in
     /// <see cref="DarlingTriageEndpoint.ResolutionAliases"/> whose canonical name is this metric, plus the
@@ -1194,6 +1319,13 @@ internal static partial class AlertNotebookEndpoint
             {
                 names.Add(recovery);
             }
+        }
+
+        /* #8555: an external alert's clear is recorded under its fire's name and " Resolved" (ExternalAlertDrain.ResolvedMetricNameFor),
+           a name no table lists because the source and key are the submitter's. */
+        if (IsExternalMetric(trimmedMetric) && !trimmedMetric.EndsWith(ExternalResolvedSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            names.Add(trimmedMetric + ExternalResolvedSuffix);
         }
 
         return names;
@@ -1403,6 +1535,9 @@ internal static partial class AlertNotebookEndpoint
             ["metric_name"] = row.MetricName,
             ["current_value"] = row.CurrentValue,
             ["threshold_value"] = row.ThresholdValue,
+            /* The flag get_alert_history carries: a row whose alert reports a state, not a measurement (a resolution, Database State,
+               Agent Not Running), so its stored 0 is not a reading and the header shows the dash Alert History shows for it. */
+            ["state_only"] = AlertMetricClassifier.IsStateOnly(row.MetricName),
             ["detail_text"] = row.DetailText,
             /* #7918: whether an operator dismissed this firing, so the page can show the card as a dismissed one. */
             ["dismissed"] = row.Dismissed,

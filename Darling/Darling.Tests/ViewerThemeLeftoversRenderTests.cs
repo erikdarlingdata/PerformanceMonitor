@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// shown in every theme. Every check builds the real control under the Dark theme, switches the theme at run time the way Settings does
 /// (<see cref="ThemeManager.Apply"/>), and reads the color from the element that rendered.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerThemeLeftoversRenderTests
 {
     private static T Themed<T>(Func<Application, T> body) =>
@@ -91,7 +92,7 @@ public sealed class ViewerThemeLeftoversRenderTests
             var darkHeader = Resource(app, "ViewerGridHeaderBrush");   // the grid's own header style (DarkGridHeader) reads it
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 800 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var grid = (DataGrid)tab.FindName("FinOpsRecommendationsDataGrid");
@@ -121,7 +122,7 @@ public sealed class ViewerThemeLeftoversRenderTests
         {
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 800 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var grid = (DataGrid)tab.FindName("FinOpsRecommendationsDataGrid");
@@ -156,7 +157,7 @@ public sealed class ViewerThemeLeftoversRenderTests
             var darkGrid = StyleBackground(app, typeof(DataGrid));
             var tab = new AvailabilityGroupsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 800 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 tab.Render(Topology());
@@ -234,7 +235,7 @@ public sealed class ViewerThemeLeftoversRenderTests
         {
             var tab = new AvailabilityGroupsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 800 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 tab.Render(Topology());
@@ -328,7 +329,7 @@ public sealed class ViewerThemeLeftoversRenderTests
             var border = new Border { BorderThickness = new Thickness(2), Width = 100, Height = 100, DataContext = item };
             border.SetBinding(Border.BorderBrushProperty, nameof(ServerSummaryItem.CardBorderBrush));
             var window = new Window { Content = border, Width = 200, Height = 200 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ClippedTextProbe.Settle(window);
@@ -388,7 +389,7 @@ public sealed class ViewerThemeLeftoversRenderTests
             panel.Children.Add(b);
             panel.Children.Add(t);
             var window = new Window { Content = panel, Width = 300, Height = 200 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ThemeManager.Apply(theme);
@@ -423,7 +424,7 @@ public sealed class ViewerThemeLeftoversRenderTests
         {
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 900 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var content = (FrameworkElement)tab.FindName("FinOpsUtilizationContent");
@@ -461,7 +462,7 @@ public sealed class ViewerThemeLeftoversRenderTests
                 new DarlingServer(1, "theme-test", "theme-test", true, null));
             typeof(ViewerServerTab).GetField("_suppressDrillDownAutoRefresh", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(tab, true);
             var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var inner = (TabControl)tab.FindName("InnerTabs");

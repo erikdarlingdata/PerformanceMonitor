@@ -75,7 +75,8 @@ public partial class ViewerServerTab : UserControl
         EmptyState.SetText(ProcedureStatsGrid, "No procedure executions in the selected time window.");
         EmptyState.SetText(BlockedProcessReportGrid, "No blocked process reports in the selected time window.");
         EmptyState.SetText(DeadlockGrid, "No deadlocks in the selected time window.");
-        EmptyState.SetText(PlanCorrectionGrid, "No plan corrections in the selected time window.");
+        /* The two plan-correction grids are worded by the server's registered version. */
+        ApplyPlanCorrectionEmptyTexts(PlanCorrectionTarget());
         EmptyState.SetText(QueryStoreRegressionsGrid, QueryStoreRegressionsEmptyText);
         _querySnapshotsFilterMgr = new DataGridFilterManager<ViewerQuerySnapshotRow>(QuerySnapshotsGrid);
         _queryStatsFilterMgr = new DataGridFilterManager<ViewerQueryStatsRow>(QueryStatsGrid);
@@ -140,6 +141,17 @@ public partial class ViewerServerTab : UserControl
         _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
         _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
         _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
+        /* #8576: each Query Store row says how old it is once it is older than its collector's cadence. The interval read follows the
+           fan-out and is skipped when no row exists to carry it. */
+        if (queryStoreHealthTask.Result.Count > 0)
+        {
+            var healthInterval = await _dataService.GetQueryStoreHealthIntervalMinutesAsync(_server.ServerId);
+            foreach (var healthRow in queryStoreHealthTask.Result)
+            {
+                healthRow.CollectorIntervalMinutes = healthInterval;
+            }
+        }
+
         _queryStoreHealthFilterMgr!.UpdateData(queryStoreHealthTask.Result);
         _automaticTuningFilterMgr!.UpdateData(automaticTuningTask.Result);
         _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);

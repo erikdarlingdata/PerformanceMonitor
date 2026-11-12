@@ -60,26 +60,26 @@ public sealed class DarlingMcpAgTools
         "availability and failover mode, endpoint) and its per-database secondary state (synchronization state, " +
         "log-send and redo queue sizes in KB, send/redo rates in KB/s, estimated drain minutes, secondary lag " +
         "seconds, and whether data movement is suspended and why). Each group is one monitored server's VIEW of " +
-        "an AG and names that server, so an AG with several monitored replicas appears once per replica — compare " +
+        "an AG and names that server, so an AG with several monitored replicas appears once per replica: compare " +
         "them to reconcile perspectives (operational_state and recovery_health are populated only for the LOCAL " +
-        "replica, connected_state only from the primary — the perspectives genuinely differ by design). " +
+        "replica, connected_state only from the primary, the perspectives genuinely differ by design). " +
         "Severities are computed server-side and restate the DMVs' OWN verdicts " +
         "(states and health strings) only: lag and queue depth are NOT banded, so a badly lagging asynchronous " +
-        "secondary whose replica health still reads HEALTHY carries a healthy severity — read secondary_lag_seconds " +
+        "secondary whose replica health still reads HEALTHY carries a healthy severity, read secondary_lag_seconds " +
         "and the queue sizes yourself, and read lag together with is_suspended (the DMV reports 0 lag while data " +
         "movement is suspended). Each group carries its collection_time: the collectors write NO row for a server " +
-        "with no AGs, so a server whose AGs were dropped keeps returning its last non-empty snapshot until then — " +
+        "with no AGs, so a server whose AGs were dropped keeps returning its last non-empty snapshot until then, " +
         "an old collection_time on a group is that case, not a live reading. Returns an empty result on a fleet " +
         "with no Availability Groups. Groups come back MOST SEVERE FIRST then by the largest " +
-        "secondary_lag_seconds/queue depth in the group, so a cut never hides a problem — an uncapped fleet-wide " +
+        "secondary_lag_seconds/queue depth in the group, so a cut never hides a problem: an uncapped fleet-wide " +
         "call measured 265,794 characters on a 43-server production fleet with several many-database AGs, well " +
         "over an MCP client's typical per-result limit. Default: as many views as fit ~32 KB, one view of each AG first, then most-severe-first, " +
         "tracking each group's actual width instead of a fixed count; limit is an upper bound on top of that. " +
-        "groups_truncated (with groups_truncated_note) flags when the scope held more than came back — " +
+        "groups_truncated (with groups_truncated_note) flags when the scope held more than came back: " +
         "groups_total/groups_returned say how many, and the fix is to scope by server_name or raise limit.")]
     public static async Task<string> GetAgHealth(
         NpgsqlDataSource postgres,
-        [Description("Server name or display name to limit the topology to one monitored server's view. Optional — omit for the whole fleet.")] string? server_name = null,
+        [Description("Server name or display name to limit the topology to one monitored server's view. Optional: omit for the whole fleet.")] string? server_name = null,
         [Description("Upper bound on groups, most severe first. Default/range 11/1-1000; also capped to ~32 KB, whichever is smaller. groups_truncated flags either cut.")] int limit = DefaultGroupLimit,
         CancellationToken cancellationToken = default)
     {

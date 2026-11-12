@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -51,14 +52,14 @@ public partial class ExcludedDatabasesDialog : Window
         if (xeSessionsMode)
         {
             Title = "Databases for Extended Events Sessions";
-            HeaderText.Text = $"Databases for Extended Events Sessions — {displayName}";
+            HeaderText.Text = $"Databases for Extended Events Sessions: {displayName}";
             DescriptionText.Text = "Applies to Azure SQL Database only. Azure caps database-scoped Extended Events sessions per pool, and Darling makes up to four per database "
                 + "(deadlock, blocked process, client timeout, long query completions). Check the databases that should get sessions. Leave every box clear to give every "
                 + "database a session. Excluded Databases still apply and win. Sessions that already exist in unchecked databases are left in place; drop them yourself if you no longer need them. The old long query session from before Darling named its sessions is still removed everywhere.";
         }
         else
         {
-            HeaderText.Text = $"Excluded Databases — {displayName}";
+            HeaderText.Text = $"Excluded Databases: {displayName}";
         }
 
         Loaded += async (_, _) => await LoadAsync();
@@ -123,8 +124,8 @@ public partial class ExcludedDatabasesDialog : Window
         DatabasesItemsControl.ItemsSource = _items;
 
         StatusText.Text = collectedCount > 0
-            ? $"{collectedCount} collected database(s), {existing.Count} currently excluded."
-            : $"No collected databases for this server yet — add names to exclude. {existing.Count} currently excluded.";
+            ? $"{CountText.Plural(collectedCount, "collected database")}, {existing.Count} currently excluded."
+            : $"No collected databases for this server yet. Add names to exclude. {existing.Count} currently excluded.";
     }
 
     /// <summary>
@@ -203,7 +204,7 @@ public partial class ExcludedDatabasesDialog : Window
         {
             /* Already listed (collected or previously added) — just tick it. */
             match.IsExcluded = true;
-            StatusText.Text = $"'{name}' is already in the list — marked excluded.";
+            StatusText.Text = $"'{name}' is already in the list; marked excluded.";
         }
         else
         {

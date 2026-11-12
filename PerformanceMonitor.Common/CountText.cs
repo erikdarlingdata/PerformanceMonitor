@@ -28,4 +28,15 @@ public static class CountText
     /// </summary>
     public static string Plural(int count, string singular, string plural) =>
         count == 1 ? $"1 {singular}" : $"{count.ToString("N0", CultureInfo.InvariantCulture)} {plural}";
+
+    /// <summary>The <see cref="Plural(int, string)"/> form for a count the store returns as a 64-bit integer.</summary>
+    public static string Plural(long count, string singular) => Plural(count, singular, singular + "s");
+
+    /// <summary>A bare count inside a sentence, with its thousands separators and no culture: 2196 is "2,196" (#8572). Every count of four
+    /// digits or more that a reply or a note puts in prose goes through here or <see cref="Plural(long, string)"/>.</summary>
+    public static string Grouped(long count) => count.ToString("N0", CultureInfo.InvariantCulture);
+
+    /// <summary>The <see cref="Plural(int, string, string)"/> form for a count the store returns as a 64-bit integer.</summary>
+    public static string Plural(long count, string singular, string plural) =>
+        count == 1 ? $"1 {singular}" : $"{count.ToString("N0", CultureInfo.InvariantCulture)} {plural}";
 }

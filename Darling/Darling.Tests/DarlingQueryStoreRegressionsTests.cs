@@ -623,7 +623,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.Equal("empty", noRecent.GetProperty("status").GetString());
             var noRecentText = noRecent.GetProperty("message").GetString()!;
             Assert.Contains("database_name 'AppDb'", noRecentText, StringComparison.Ordinal);
-            Assert.Contains("nothing of it collected IN the last 24 hour(s)", noRecentText, StringComparison.Ordinal);
+            Assert.Contains("nothing of it collected IN the last 24 hours", noRecentText, StringComparison.Ordinal);
             Assert.Contains("NOT the all-clear", noRecentText, StringComparison.Ordinal);
             Assert.DoesNotContain("this is the all-clear", noRecentText, StringComparison.Ordinal);
 

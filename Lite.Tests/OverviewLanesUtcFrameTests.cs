@@ -7,9 +7,12 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using Darling.Tests;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Controls;
 using Xunit;
@@ -23,7 +26,7 @@ namespace PerformanceMonitorLite.Tests;
 /// the mode therefore relabels the lanes and moves no point, a sample from before a clock change sits where it
 /// happened, and the two readings of the repeated autumn hour are two points.
 ///
-/// <para>The lanes and the tab are WPF controls this suite does not instantiate, so the frame is held by source pins
+/// <para>Most of the frame is held by source pins
 /// with comments stripped first, so a sentence that names the old shape cannot fail a pin. The window arithmetic is
 /// tested on its own in <c>OverviewComparisonWindowOffsetTests</c> and <c>TimeWindowsTests</c>.</para>
 /// </summary>
@@ -95,19 +98,45 @@ public sealed class OverviewLanesUtcFrameTests
     }
 
     /// <summary>
-    /// All four axes the lanes draw (the blocking, CPU and generic lanes, and the empty lane) use the UTC-instant
-    /// ticks, in the zone the tab hands <c>Initialize</c>, which is read again on each render so a mode switch
-    /// relabels the axis.
+    /// Every lane that has rows draws its ticks in the zone the tab hands <c>Initialize</c>: in a zone half an hour off UTC the
+    /// whole-hour ticks of the wall clock sit at :30 past the UTC hour. A lane with no rows is the empty look (#8644): the one muted
+    /// sentence, no axes and no ticks, so it has no zone to draw in; it gets its UTC axis back the moment rows arrive.
     /// </summary>
     [Fact]
-    public void EveryLaneAxis_DrawsItsTicksInTheDisplayZone()
-    {
-        var code = CodeOnly(ReadControl("CorrelatedTimelineLanesControl.xaml.cs"));
+    public void EveryLaneWithRows_DrawsItsTicksInTheDisplayZone_AndAnEmptyLaneDrawsNone() =>
+        StaTestThread.Run(() =>
+        {
+            var zone = TimeZoneInfo.CreateCustomTimeZone("test+5:30", TimeSpan.FromMinutes(330), "test+5:30", "test+5:30");
+            var lanes = new CorrelatedTimelineLanesControl();
+            lanes.Initialize(null!, 1, () => zone);
 
-        Assert.Equal(4, Regex.Matches(code, Regex.Escape(".Plot.Axes.DateTimeTicksBottomUtc(_displayZone);")).Count);
-        Assert.Contains("private Func<TimeZoneInfo> _displayZone", code, StringComparison.Ordinal);
-        Assert.Contains("_displayZone = displayZone;", code, StringComparison.Ordinal);
-    }
+            var to = DateTime.UtcNow;
+            var from = to.AddHours(-6);
+            List<(double Time, double Value)> Rows(double low, double high) =>
+                Enumerable.Range(0, 24).Select(i => (from.ToOADate() + (to - from).TotalDays * i / 23.0, low + (high - low) * i / 23.0)).ToList();
+            lanes.UpdateCpuLane(Rows(5, 90), Rows(8, 95));
+            lanes.UpdateLane(lanes.WaitStatsChart, "Wait", Rows(150, 900), "#FFB74D");
+            lanes.UpdateBlockingLane(Rows(1, 6), Rows(0, 2));
+            lanes.UpdateLane(lanes.MemoryChart, "Buffer Pool", Rows(2000, 9000), "#4FC3F7");
+            lanes.UpdateLane(lanes.FileIoChart, "I/O", [], "#81C784");
+            lanes.SyncXAxes(6, null, null);
+
+            foreach (var chart in new[] { lanes.CpuChart, lanes.WaitStatsChart, lanes.BlockingChart, lanes.MemoryChart })
+            {
+                chart.Plot.RenderInMemory(600, 200);
+                var generator = Assert.IsType<DisplayZoneTickGenerator>(chart.Plot.Axes.Bottom.TickGenerator);
+                var majors = generator.Ticks.Where(t => t.IsMajor).Select(t => DateTime.FromOADate(t.Position)).ToList();
+                Assert.NotEmpty(majors);
+                Assert.True(majors.All(t => (t.Minute % 30) == 0), "the ticks are at whole half hours of the zone");
+                Assert.True(majors.Any(t => t.Minute == 30), "the ticks are at whole wall-clock times of the zone, not of UTC");
+            }
+
+            var empty = lanes.FileIoChart;
+            Assert.False(empty.Plot.Axes.Bottom.IsVisible);
+            Assert.False(empty.Plot.Axes.Left.IsVisible);
+            Assert.False(empty.Plot.Grid.IsVisible);
+            Assert.Contains(empty.Plot.GetPlottables<ScottPlot.Plottables.Annotation>(), a => a.LabelText.Replace("\n", " ") == "No I/O Latency data in this window");
+        });
 
     /// <summary>
     /// Initialize takes the display zone and gives it to the crosshair manager BEFORE the first lane is added: the

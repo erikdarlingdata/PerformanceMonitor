@@ -268,7 +268,7 @@ internal static class McpRuntimePrecondition
         }
 
         var message = CollectorRuntimePrecondition.QueryStoreDisabledMessage(serverName, states, observedUtc);
-        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
+        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.QueryStoreDisabledStatusWord(states), message);
     }
 
     /// <summary>
@@ -278,14 +278,22 @@ internal static class McpRuntimePrecondition
     public static async Task<string?> QueryStoreReadableSecondaryStatusAsync(
         LocalDataService dataService, int serverId, string serverName)
     {
+        var message = await QueryStoreReadableSecondaryMessageAsync(dataService, serverId, serverName);
+        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.NotCollectedStatusWord, message);
+    }
+
+    /// <summary>The one-line reason a Query Store read on this server is empty because it is a readable secondary, or null when it
+    /// is not or the read fails. The wording of the <c>not_collected</c> answer above and of the note a data answer carries.</summary>
+    public static async Task<string?> QueryStoreReadableSecondaryMessageAsync(
+        LocalDataService dataService, int serverId, string serverName)
+    {
         try
         {
             var (role, healthDatabases, healthSecondary) = await dataService.GetReadableSecondaryFactsAsync(serverId);
-            var message = CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
+            return CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
                 serverName, role, healthDatabases, healthSecondary, replicaConfigured: false,
                 "Lite collects Query Store only from a server that is not a readable secondary. " +
                 "Add the primary to Lite to read its Query Store.");
-            return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.NotCollectedStatusWord, message);
         }
         catch (Exception)
         {

@@ -29,9 +29,31 @@ public enum AlertSeverityLevel
 internal static class AlertSeverity
 {
     /// <summary>The tier a notification route's severity filter sees for an alert (#6928): the tier graded at the fire site
-    /// when it carries one, else the metric's own badge (red is Critical, every other badge is Warning).</summary>
-    public static AlertSeverityLevel RouteLevelOf(string metricName, AlertSeverityLevel? overrideLevel) =>
-        overrideLevel ?? (ForMetric(metricName).HexColor == "#DC2626" ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning);
+    /// when it carries one, else the metric's own badge (red is Critical, every other badge is Warning).
+    /// <para>#8525: a recovery the product delivers as an alert of its own (<see cref="AlertFamily.RecoveryPairs"/>) has no tier
+    /// of its own, its badge is RESOLVED green, so with no tier handed in it routes exactly as a tierless firing of the name it
+    /// closes does: one badge rule for both edges, and the recovery lands where that firing did. The tier the firing was in fact
+    /// delivered at comes in through <see cref="RouteTierOf"/> when the sender has it on record.</para></summary>
+    public static AlertSeverityLevel RouteLevelOf(string metricName, AlertSeverityLevel? overrideLevel)
+    {
+        if (overrideLevel is { } fireSite)
+        {
+            return fireSite;
+        }
+
+        if (AlertFamily.RecoveryPairs.TryGetValue(metricName, out var firing))
+        {
+            return RouteLevelOf(firing, null);
+        }
+
+        return ForMetric(metricName).HexColor == "#DC2626" ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning;
+    }
+
+    /// <summary>The tier the senders hand a route's severity filter for an alert (#8525): the route-only tier the context carries
+    /// (<see cref="AlertContext.RouteSeverity"/>, the tier a recovery's firing was delivered at) when it has one, else
+    /// <see cref="RouteLevelOf"/> over the fire site's tier (<see cref="AlertContext.SeverityOverride"/>) and the badge.</summary>
+    public static AlertSeverityLevel RouteTierOf(string metricName, AlertContext? context) =>
+        context?.RouteSeverity ?? RouteLevelOf(metricName, context?.SeverityOverride);
 
     /// <param name="overrideLevel">
     /// When non-null, forces the tier regardless of <paramref name="metricName"/> — for metrics
@@ -132,6 +154,8 @@ internal static class AlertSeverity
                is wrong — so WARNING, with Store Disk Pressure owning the page if it ever reaches the volume. */
             "Refresh Job Stuck" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Retention Job Stuck" => ("#D97706", "WARNING", "\U0001F7E0"),
+            /* #8302: a daily rollup behind its source fires at Warning and replays as one. */
+            "Daily Rollup Stale" => ("#D97706", "WARNING", "\U0001F7E0"),
             /* #3816: the total_failures arm is the fourth deliberate INFO arm, on the digest's reasoning —
                a policy job that fails and retries is alive, and the useful response is to read the
                PostgreSQL log rather than to wake anybody. Fired with no severity override so this arm

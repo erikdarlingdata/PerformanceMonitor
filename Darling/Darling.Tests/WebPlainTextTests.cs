@@ -250,7 +250,7 @@ public sealed class WebPlainTextTests
     {
         var o = Run(
         [
-            "Each point averages the samples in one 5-minute bucket and is stamped at the bucket's start. A level is averaged, never summed, so a spike inside a bucket is smoothed into its average; narrow the bucket to see it. The width was chosen to keep this answer near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.",
+            "Each point averages the samples in one 5-minute bucket and is stamped at the bucket's start. A level is averaged, never summed, so a spike inside a bucket is smoothed into its average; narrow the bucket to see it. The width was chosen to keep this answer near 1,500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.",
             "wait_time_ms_per_second is recomputed from the summed wait time over the seconds the collections covered.",
             "collisions_per_second is recomputed from the summed delta.",
             "The session counts are levels, averaged, never summed; top_application_name, top_application_connections, top_host_name and top_host_connections are the newest collection's own values in the bucket.",
@@ -340,10 +340,10 @@ public sealed class WebPlainTextTests
     {
         var o = Run(
         [
-            "The width was chosen to keep this answer near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.",
+            "The width was chosen to keep this answer near 1,500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.",
             "TRUNCATED: 300 indexes match and 200 were returned. Rows are ordered by total wait time descending; raise limit to see more.",
-            "TRUNCATED: 9 indexes match database 'x' and 5 were returned. This says nothing about databases outside the filter — raise limit to see more.",
-            "TRUNCATED: 9 indexes match and 5 were returned. This is not evidence that a database was not collected — pass database_name to ask about one, or raise limit.",
+            "TRUNCATED: 9 indexes match database 'x' and 5 were returned. This says nothing about databases outside the filter: raise limit to see more.",
+            "TRUNCATED: 9 indexes match and 5 were returned. This is not evidence that a database was not collected: pass database_name to ask about one, or raise limit.",
             " truncated: 5 of 9 returned; raise limit (now 5) for more.",
             "The row limit of 50 was REACHED: databases[] holds the 50 biggest spillers and the totals above still cover every database - raise limit to see the rest of the rows.",
             "At least one database's statistics WERE reset in this window - see stats_reset_count per database, and raise limit if none of the databases returned shows one - so its totals are lower bounds.",
@@ -354,7 +354,7 @@ public sealed class WebPlainTextTests
             "No long-running query completions found in the specified time range. The monitor's own statements are left out. Pass include_monitor=true to include them.",
         ], out _);
 
-        Assert.Equal("The width was chosen to keep this answer near 1500 points; narrow the time range for finer points.", o[0]);
+        Assert.Equal("The width was chosen to keep this answer near 1,500 points; narrow the time range for finer points.", o[0]);
         Assert.Equal("TRUNCATED: 300 indexes match and 200 were returned. Rows are ordered by total wait time descending.", o[1]);
         Assert.EndsWith("outside the filter.", o[2]);
         Assert.EndsWith("filter by database to ask about one.", o[3]);
@@ -585,11 +585,11 @@ public sealed class WebPlainTextTests
     {
         var extensions = "Per DATABASE, not per cluster: installed_version describes the database the row names. 'available' means the files are present and CREATE EXTENSION would work "
             + "— usually a one-line fix for an empty panel elsewhere. Rows are the PRODUCT of databases and extension names, so this row list outgrows any row limit on a "
-            + "multi-database host — read install_census for what is installed where, because it is aggregated per extension and no limit touches it.";
+            + "multi-database host: read install_census for what is installed where, because it is aggregated per extension and no limit touches it.";
         var waitTrend = "No wait event gained samples on srv in the last 24 hour(s), so there is nothing to follow. This server is on the service_sampled tier "
             + "(the pg_wait_sampling extension is not installed), so \"none to sample\" was measured over one-second polls in a 30-second window each cycle.";
         var bloat = "median absolute error is 2.79 percentage points and p90 is 6.63, which is close enough to decide WHICH index to act on and not close enough to "
-            + "justify a REINDEX on its own — use exact_measurement_command for that, on the one index concerned.";
+            + "justify a REINDEX on its own: use exact_measurement_command for that, on the one index concerned.";
 
         var o = Run([extensions, waitTrend, bloat], out _);
 

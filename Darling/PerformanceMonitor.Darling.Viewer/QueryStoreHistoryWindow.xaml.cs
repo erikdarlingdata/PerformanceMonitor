@@ -91,7 +91,7 @@ public partial class QueryStoreHistoryWindow : Window
                 var planCount = _historyData.Select(r => r.PlanId).Distinct().Count();
                 var first = ViewerTimeHelper.FormatForDisplay(_historyData.First().CollectionTime, "MM/dd HH:mm");
                 var last = ViewerTimeHelper.FormatForDisplay(_historyData.Last().CollectionTime, "MM/dd HH:mm");
-                SummaryText.Text = $"{_historyData.Count} samples from {first} to {last} | " +
+                SummaryText.Text = $"{PerformanceMonitor.Ui.HistorySampleSummary.Span(_historyData.Count, first, last)} | " +
                                    $"Total Executions: {totalExec:N0} | " +
                                    (planCount > 1 ? $"{planCount} different plans" : "Single plan");
             }
@@ -263,8 +263,8 @@ public partial class QueryStoreHistoryWindow : Window
 
         if (string.IsNullOrEmpty(planXml))
         {
-            MessageBox.Show(this, "No Query Store plan was captured in the collected data for this plan ID.",
-                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(this, "No Plan Available",
+                "No Query Store plan was captured in the collected data for this plan ID.");
             return;
         }
 
@@ -344,7 +344,7 @@ public partial class QueryStoreHistoryWindow : Window
         _filterPopupContent.FilterCleared += FilterPopup_FilterCleared;
 
         _filterManager.Filters.TryGetValue(columnName, out var existingFilter);
-        _filterPopupContent.Initialize(columnName, existingFilter);
+        _filterPopupContent.Initialize(columnName, existingFilter, columnHeader: ColumnFilterPopup.ColumnHeaderFor(button));
 
         _filterPopup!.PlacementTarget = button;
         _filterPopup.IsOpen = true;

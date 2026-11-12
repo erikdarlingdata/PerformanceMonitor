@@ -71,11 +71,12 @@ public sealed record SweepPressureReport(SweepPressure Pressure, IReadOnlyList<H
         effectiveIntervalMinutes >= DailyCollectorIntervalMinutes;
 
     /// <summary>#4999: whether a collector runs detached from its server's sequential pass BY NAME: query_store (#2700),
-    /// plan_correction (#2717) and pg_wait_sampling.</summary>
+    /// plan_correction (#2717), pg_wait_sampling and schema_objects (#7643).</summary>
     public static bool IsDetachedByName(string name) =>
         string.Equals(name, QueryStoreCollector.Instance.Name, StringComparison.OrdinalIgnoreCase)
         || string.Equals(name, PlanCorrectionCollector.Instance.Name, StringComparison.OrdinalIgnoreCase)
-        || string.Equals(name, PgWaitSamplingCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
+        || string.Equals(name, PgWaitSamplingCollector.Instance.Name, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(name, SchemaObjectsCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>#4999: THE test for whether a collector's scheduled run leaves its server's sequential pass: the three
     /// detached by name and every daily collector by cadence. The worker's dispatch and this roll-up both use it, so they

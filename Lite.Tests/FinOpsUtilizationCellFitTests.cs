@@ -25,6 +25,7 @@ namespace PerformanceMonitorLite.Tests;
 /// it, given rows with nine- to twelve-digit counts, and laid out at 1280 px: every numeric cell's realized TextBlock must have the room
 /// its whole formatted value needs. The Darling Viewer's twin is ViewerFinOpsUtilizationCellFitTests in Darling.Tests.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class FinOpsUtilizationCellFitTests
 {
     /// <summary>WPF formats a binding's StringFormat in the element's language, en-US unless an app overrides it, not the thread culture.</summary>
@@ -37,7 +38,7 @@ public sealed class FinOpsUtilizationCellFitTests
         {
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 900 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ((FrameworkElement)tab.FindName("UtilizationContent")).Visibility = Visibility.Visible;

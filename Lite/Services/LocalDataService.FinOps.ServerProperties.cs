@@ -163,7 +163,7 @@ SELECT
                 IsClustered = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)) == 1,
                 HostOsVersion = HostOsText.Clean(reader.IsDBNull(13) ? null : reader.GetString(13)),
                 AgReplicaRole = reader.IsDBNull(14) ? "Standalone" : reader.GetString(14),
-                LastUpdated = DateTime.Now
+                LastUpdated = DateTime.UtcNow
             };
         }
 
@@ -186,13 +186,18 @@ SELECT
         }
         catch (SqlException ex)
         {
-            result.HardwareUnavailableReason =
-                "Hardware inventory (CPU, memory, sockets) unavailable - the monitoring login likely lacks VIEW DATABASE STATE on this database.";
+            result.HardwareUnavailableReason = HardwareUnavailableNote;
             AppLogger.Warn("FinOps", $"Hardware inventory unavailable for '{connection.DataSource}': {ex.Message}");
         }
 
         return result;
     }
+
+    /// <summary>The Hardware Note of an inventory row whose hardware read was denied: set here when the live read's
+    /// sys.dm_os_sys_info query fails, and by <see cref="FinOpsServerInventory.FromCollected"/> for a collected row the
+    /// collector stored with no CPU count and no memory, which is what it stores after the same denial.</summary>
+    internal const string HardwareUnavailableNote =
+        "Hardware inventory (CPU, memory, sockets) unavailable - the monitoring login likely lacks VIEW DATABASE STATE on this database.";
 
     /// <summary>
     /// The relation a newest-row lookup reads for the servers in <paramref name="serverIds"/> (#7014): the hot <paramref name="table"/>, plus the
@@ -465,7 +470,7 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
     /// inputs over the same window (<see cref="FinOpsHealthCalculator.Score"/>): the 24-hour p95 CPU, the newest memory row's buffer pool over
     /// its physical memory, and the free share of the newest database-size snapshot. This used to be built from the 24-hour AVERAGE CPU and a
     /// fixed memory and storage term, so every server of similar CPU read the same number beside a Utilization score that differed.
-    /// Null (a dash) when the window holds no CPU sample or the server has no memory row (no Utilization card either). Ordinals: 1 avg CPU,
+    /// Null (the cell says Not collected) when the window holds no CPU sample or the server has no memory row (no Utilization card either). Ordinals: 1 avg CPU,
     /// 5 p95 CPU, 14 physical memory, 15 buffer pool, 16 memory row time, 17 allocated MB, 18 free MB.
     /// </summary>
     internal static int? FleetHealthScoreFor(System.Data.Common.DbDataReader reader)
@@ -488,7 +493,7 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
     ///
     /// <para>Null, not a verdict from zeros: with nothing to average, <c>Evaluate</c> reads 0% CPU and calls
     /// the server OVER_PROVISIONED — a server that has sent no CPU sample is told to shrink. The Server
-    /// Inventory grid already shows a null status as blank. A server WITH CPU samples gets the same verdict as
+    /// Inventory grid shows a null status as Not collected. A server WITH CPU samples gets the same verdict as
     /// before, except that a logical server's master gets the N/A verdict. Ordinals match the fleet SELECT: 1 avg CPU,
     /// 4 max CPU, 5 p95 CPU, 6 max workers, 7 current workers, 8 grant waiters, 9 grant timeouts, 10 forced grants,
     /// 11 grant utilization, 12 engine edition, 13 edition, 15 buffer pool, 19 CPU sample count, 20 total server memory, 21 the AG replica role (a secondary gets NOT_JUDGED_SECONDARY, #7705). Under

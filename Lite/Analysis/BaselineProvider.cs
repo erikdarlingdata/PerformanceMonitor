@@ -146,7 +146,7 @@ public class BaselineProvider
         AppLogger.Warn(
             "Baselines",
             $"{collector} is retained for {days} days but the {metricName} baseline window is " +
-            $"{BaselineMath.BaselineWindowDays} days — baselines for {metricName} are computed from " +
+            $"{BaselineMath.BaselineWindowDays} days: baselines for {metricName} are computed from " +
             $"{days} days of history, so anomaly thresholds are degraded. Raise {collector}'s retention to " +
             $"at least {BaselineMath.BaselineWindowDays} days, or expect less reliable detection.");
     }

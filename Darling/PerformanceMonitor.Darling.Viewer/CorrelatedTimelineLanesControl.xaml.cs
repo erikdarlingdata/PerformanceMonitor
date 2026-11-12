@@ -70,8 +70,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
            reasons (tab virtualization, layout rebuilds) and Dispose() clears
            the crosshair manager's lane list, permanently breaking the crosshair
            until the ServerTab is rebuilt. The manager holds only managed state
-           (a Popup + lane references) — letting GC clean it up with the control
-           is fine. */
+           (a Popup + lane references) and listens to the theme only while this
+           control is loaded (FollowThemeWhileLoaded, in Initialize), so no static
+           event holds it — letting GC clean it up with the control is fine. */
     }
 
     /// <summary>
@@ -90,15 +91,20 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         {
             var chart = charts[lane];
             ApplyTheme(chart);
-            /* #8086: until the first read comes back a lane shows the empty chart's sentence, not ScottPlot's default -10 to 10
-               axes. The first update resets the chart, which drops this. */
+            /* #8086: until the first read comes back a lane has the empty chart's look, not ScottPlot's default -10 to 10 axes. Its
+               sentence says the lane is loading, not that the window holds no data: the store may hold the window's samples while
+               the first read waits on it. The first update resets the chart, which drops this. */
             emptyLook.RefreshEmptyChart(chart, laneNames[lane], "");
+            foreach (var sentence in chart.Plot.GetPlottables<ScottPlot.Plottables.Text>())
+                sentence.LabelText = LoadingSentence(laneNames[lane]);
+            chart.Refresh();
             // Disable zoom/pan/drag but keep mouse events for crosshair
             chart.UserInputProcessor.UserActionResponses.Clear();
             SetupLaneDrillDown(chart);
         }
 
         _crosshairManager = new CorrelatedCrosshairManager { DisplayZoneProvider = ViewerTimeHelper.CurrentDisplayZone };
+        _crosshairManager.FollowThemeWhileLoaded(this);
         _crosshairManager.AddLane(CpuChart, "SQL CPU", "%");
         _crosshairManager.AddLane(WaitStatsChart, "Wait Stats", "ms/sec");
         _crosshairManager.AddLane(BlockingChart, "Blocking", PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit);
@@ -173,7 +179,12 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     /// usual. The return value names the reads that failed (<see cref="OverviewLaneReadFailures.Summary"/>), so the host does not
     /// call the tab refreshed; null when all ten completed.</para>
     /// </summary>
-    public async Task<string?> RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    /// <param name="hoursBack">The preset window, in hours back from now.</param>
+    /// <param name="fromDate">A custom window's start, or null.</param>
+    /// <param name="toDate">A custom window's end, or null.</param>
+    /// <param name="timer">#8549: the load's phase clock. Each of the ten reads is booked on it by name, the lane drawing as client steps, so a slow
+    /// Overview's SlowLoad line says which read or which lane was slow. Null for a refresh that is not an inner-tab load.</param>
+    public async Task<string?> RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, ViewerLoadTimer? timer = null)
     {
         if (_dataService == null || _isRefreshing) return null;
         _isRefreshing = true;
@@ -194,19 +205,19 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                Declared here, before the first task, so every one of the ten inherits it. */
             using var readFanOut = ViewerReadFanOut.Of(10);
 
-            var cpuTask = _dataService.GetCpuUtilizationAsync(_serverId, startUtc, endUtc);
-            var waitTask = _dataService.GetTotalWaitTrendAsync(_serverId, startUtc, endUtc);
-            var blockingTask = _dataService.GetBlockingTrendAsync(_serverId, startUtc, endUtc);
-            var deadlockTask = _dataService.GetDeadlockTrendAsync(_serverId, startUtc, endUtc);
-            var memoryTask = _dataService.GetMemoryTrendAsync(_serverId, startUtc, endUtc);
-            var fileIoTask = _dataService.GetFileIoOverviewLatencyTrendAsync(_serverId, startUtc, endUtc);
+            var cpuTask = ViewerServerTab.Timed(timer, "CPU read", _dataService.GetCpuUtilizationAsync(_serverId, startUtc, endUtc));
+            var waitTask = ViewerServerTab.Timed(timer, "wait read", _dataService.GetTotalWaitTrendAsync(_serverId, startUtc, endUtc));
+            var blockingTask = ViewerServerTab.Timed(timer, "blocking read", _dataService.GetBlockingTrendAsync(_serverId, startUtc, endUtc));
+            var deadlockTask = ViewerServerTab.Timed(timer, "deadlock read", _dataService.GetDeadlockTrendAsync(_serverId, startUtc, endUtc));
+            var memoryTask = ViewerServerTab.Timed(timer, "memory read", _dataService.GetMemoryTrendAsync(_serverId, startUtc, endUtc));
+            var fileIoTask = ViewerServerTab.Timed(timer, "file I/O read", _dataService.GetFileIoOverviewLatencyTrendAsync(_serverId, startUtc, endUtc));
 
             // Fetch baselines for band rendering — chart-unit-matched metrics. #7644: each lane's band is one step per local
             // hour of the window (the web Overview's shape), and each point is judged against its own hour's step.
-            var cpuBaselineTask = _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.Cpu, startUtc, endUtc);
-            var waitBaselineTask = _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.WaitMsPerSec, startUtc, endUtc);
-            var ioBaselineTask = _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.IoLatencyChart, startUtc, endUtc);
-            var blockingBaselineTask = _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.BlockingPerMinute, startUtc, endUtc);
+            var cpuBaselineTask = ViewerServerTab.Timed(timer, "CPU baseline read", _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.Cpu, startUtc, endUtc));
+            var waitBaselineTask = ViewerServerTab.Timed(timer, "wait baseline read", _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.WaitMsPerSec, startUtc, endUtc));
+            var ioBaselineTask = ViewerServerTab.Timed(timer, "I/O baseline read", _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.IoLatencyChart, startUtc, endUtc));
+            var blockingBaselineTask = ViewerServerTab.Timed(timer, "blocking baseline read", _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.BlockingPerMinute, startUtc, endUtc));
 
             try
             {
@@ -236,15 +247,15 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var totalSeries = measuredTotals.Count == 0
                     ? sqlSeries
                     : measuredTotals.Select(d => (d.SampleTime.ToOADate(), d.TotalCpu!.Value)).ToList();
-                UpdateCpuLane(sqlSeries, totalSeries, cpuBaseline);
+                ViewerServerTab.ClientStep(timer, "CPU lane draw", () => UpdateCpuLane(sqlSeries, totalSeries, cpuBaseline));
             }
             else
                 ShowFailed(CpuChart, "CPU %");
 
             if (waitTask.IsCompletedSuccessfully)
-                UpdateLane(WaitStatsChart, "Wait ms/sec",
+                ViewerServerTab.ClientStep(timer, "wait lane draw", () => UpdateLane(WaitStatsChart, "Wait ms/sec",
                     waitTask.Result.Select(d => (d.CollectionTime.ToOADate(), d.WaitTimeMsPerSecond)).ToList(),
-                    "#FFB74D", baseline: waitBaseline, minAnomalyValue: 100);
+                    "#FFB74D", baseline: waitBaseline, minAnomalyValue: 100));
             else
                 ShowFailed(WaitStatsChart, "Wait ms/sec");
 
@@ -258,16 +269,16 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var blockingUnit = blockingTask.IsCompletedSuccessfully
                     ? PerformanceMonitor.Ui.BlockingTrendLabels.UnitFor(blockingTask.Result.Select(d => d.Source))
                     : PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit;
-                UpdateBlockingLane(blockingData, deadlockData, blockingBaseline, (endUtc - startUtc).TotalDays, blockingUnit);
+                ViewerServerTab.ClientStep(timer, "blocking lane draw", () => UpdateBlockingLane(blockingData, deadlockData, blockingBaseline, (endUtc - startUtc).TotalDays, blockingUnit));
                 /* The lane draws the series that read; a series that did not is not "no events", so the lane says so. */
                 if (!blockingTask.IsCompletedSuccessfully || !deadlockTask.IsCompletedSuccessfully)
                     MarkFailed(BlockingChart);
             }
 
             if (memoryTask.IsCompletedSuccessfully)
-                UpdateLane(MemoryChart, "Buffer Pool MB",
+                ViewerServerTab.ClientStep(timer, "memory lane draw", () => UpdateLane(MemoryChart, "Buffer Pool MB",
                     memoryTask.Result.Select(d => (d.CollectionTime.ToOADate(), d.BufferPoolMb)).ToList(),
-                    "#CE93D8");
+                    "#CE93D8"));
             else
                 ShowFailed(MemoryChart, "Memory MB");
 
@@ -282,8 +293,8 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var (ioReads, ioMinReads) = OverviewIoReadFloor.LaneInputs(
                     ioPoints.Select(d => (d.CollectionTime, d.Reads, d.BucketMinutes)).ToList(),
                     PgTargetScorer.IoBaselineBucketMinimumReads);
-                UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2,
-                    pointReads: ioReads, minPointReads: ioMinReads);
+                ViewerServerTab.ClientStep(timer, "I/O lane draw", () => UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2,
+                    pointReads: ioReads, minPointReads: ioMinReads));
             }
             else
                 ShowFailed(FileIoChart, "I/O ms");
@@ -291,7 +302,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             /* VLines must be re-attached before SyncXAxes so they're part of
                the render set when the chart refreshes. */
             _crosshairManager?.ReattachVLines();
-            SyncXAxes(hoursBack, fromDate, toDate);
+            ViewerServerTab.ClientStep(timer, "lane axis sync", () => SyncXAxes(hoursBack, fromDate, toDate));
 
             /* #4966: the blocking chart draws event counts, so an empty stretch reads as "nothing happened" and the chart says where
                its data starts. The note comes last, after the charts are drawn and synced, and on its own: the two coverage probes start only after the ten reads above have
@@ -300,7 +311,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             await ShowBlockingLaneDataStartAsync(
                 startUtc, endUtc,
                 blockingTask.IsCompletedSuccessfully ? blockingTask.Result.Select(d => d.Time) : [],
-                deadlockTask.IsCompletedSuccessfully ? deadlockTask.Result.Select(d => d.Time) : []);
+                deadlockTask.IsCompletedSuccessfully ? deadlockTask.Result.Select(d => d.Time) : [], timer);
 
             /* The reads that failed, named in lane order for the host's status line; null when every lane read. A failed baseline
                read alone is logged and is not a failed refresh: its lane drew, and only the band is missing. */
@@ -335,7 +346,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     /// (<see cref="ViewerServerTab.UpdateTruncationBanner"/>), so it uses the charts' own clock, to the second.
     /// </summary>
     private async Task ShowBlockingLaneDataStartAsync(
-        DateTime startUtc, DateTime endUtc, IEnumerable<DateTime> blockingBars, IEnumerable<DateTime> deadlockBars)
+        DateTime startUtc, DateTime endUtc, IEnumerable<DateTime> blockingBars, IEnumerable<DateTime> deadlockBars, ViewerLoadTimer? timer = null)
     {
         var probed = endUtc - startUtc > DurationTrendRouting.TruncationSlack;
         var blockingProbe = probed
@@ -344,6 +355,12 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         var deadlockProbe = probed
             ? _dataService!.GetDeadlocksDataStartAsync(_serverId, startUtc, endUtc)
             : Task.FromResult<DateTime?>(null);
+        /* #8549: the probes are store reads after the ten, so a slow one is named instead of counted as client work. */
+        if (probed)
+        {
+            _ = timer?.Track("blocking data start read", blockingProbe);
+            _ = timer?.Track("deadlock data start read", deadlockProbe);
+        }
 
         var start = await ViewerBlockingLaneDataStart.ChooseAsync(blockingProbe, deadlockProbe, blockingBars, deadlockBars);
         ViewerServerTab.UpdateTruncationBanner(BlockingLaneDataStartBanner, start, startUtc);
@@ -644,6 +661,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         foreach (var chart in charts)
             chart.Plot.Axes.SetLimitsX(xMin, xMax);
 
+        /* #8307: a lane's plot is flush with the lane's top edge, so a Y tick at the top of the range would have its label cut
+           there. Each lane's range is given the headroom its top tick label needs, before the gutters are measured from the
+           labels the final range gets. */
+        LaneTopTickHeadroom.Apply(charts);
+
         /* #2533: every lane's Y limits and X limits are final by now, so this is the one place that can
            see all five gutters at once and hand them the widest. It has to run on EVERY refresh, not
            once at Initialize: ClearChart() calls WpfPlot.Reset(), which swaps in a fresh Plot and takes
@@ -662,42 +684,46 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         chart.Plot.Clear();
     }
 
-    /* Render an empty lane as a live, gridded chart instead of a dead black box. This is most often
-       the Blocking/Deadlocking lane on a healthy server (no events = good news), so make it match the
-       populated lanes: keep the grid and show a 0-1 Y axis. We no longer blank the axes or add the old
-       "No Data" text (which SyncXAxes pushed off-screen anyway). X limits and the vertical gridlines are
-       set afterward by SyncXAxes so the time axis aligns with the other lanes; the left axis keeps its
-       default numeric ticks, so 0/1 labels and horizontal gridlines render. The title arg is retained
+    /* An empty lane looks as every empty chart does (#8644): the one muted sentence the other charts use and nothing else, with no
+       default axes and no gridlines. The sentence is pinned to the lane's center in pixels, not to a data point, so the X limits
+       SyncXAxes sets afterwards (all five lanes share one time ruler) do not carry it off the screen. The title arg is retained
        for call-site readability. */
-    private void ShowEmpty(ScottPlot.WPF.WpfPlot chart, string title)
-    {
-        chart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        // Only the bottom (File I/O) lane shows time labels; the upper lanes hide them (matches UpdateLane).
-        if (chart != FileIoChart)
-            chart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
+    private void ShowEmpty(ScottPlot.WPF.WpfPlot chart, string title) =>
+        new ChartRenderHelper().RefreshEmptyChart(chart, LaneName(chart), "", pinToPlotCenter: true);
 
-        ReapplyAxisColors(chart);
+    /// <summary>The sentence a lane shows until its first read comes back.</summary>
+    internal static string LoadingSentence(string laneName) => $"Loading {laneName} data...";
 
-        chart.Plot.Title("");
-        chart.Plot.YLabel("");
-        chart.Plot.Legend.IsVisible = false;
-        chart.Plot.Axes.Margins(bottom: 0);
-        if (chart == BlockingChart) ChartStyle.UseCountAxis(chart); // #8224: an empty count lane still labels whole numbers
-        chart.Plot.Axes.SetLimitsY(0, 1);
+    /// <summary>The sentence an empty lane shows, the one the other charts use.</summary>
+    private string EmptySentence(ScottPlot.WPF.WpfPlot chart) => $"No {LaneName(chart)} data in this window";
 
-        chart.Refresh();
-    }
+    /// <summary>The lane's name in its empty sentence, the one Initialize uses before the first read.</summary>
+    private string LaneName(ScottPlot.WPF.WpfPlot chart) =>
+        chart == CpuChart ? "SQL CPU"
+        : chart == WaitStatsChart ? "Wait Stats"
+        : chart == BlockingChart ? "Blocking"
+        : chart == MemoryChart ? "Buffer Pool"
+        : "I/O Latency";
 
-    /* A lane whose read failed is drawn as the empty lane is, then says so over it, so it cannot pass for a quiet healthy lane. */
+    /* A lane whose read failed is drawn as the empty lane is (no axes, no grid) and says only that the read failed, so it cannot
+       pass for a quiet healthy lane. The lane is cleared first, as the data paths clear it: the series the last refresh drew would
+       otherwise stay under the note, the crosshair would still read their values, and a lane that fails again would carry two notes. */
     private void ShowFailed(ScottPlot.WPF.WpfPlot chart, string title)
     {
+        ClearChart(chart);
+        ApplyTheme(chart);
+        _crosshairManager?.ClearLane(chart);
         ShowEmpty(chart, title);
         MarkFailed(chart);
     }
 
-    /* The note is anchored to the lane's pixels, not its axes, so SyncXAxes leaves it where it is. */
-    private static void MarkFailed(ScottPlot.WPF.WpfPlot chart)
+    /* A failed read says only that it failed: the empty sentence the lane may already carry would claim the window holds no data,
+       which a read that did not return cannot establish, so it goes before the note is added. The note is anchored to the lane's
+       pixels, not its axes, so SyncXAxes leaves it where it is. */
+    private void MarkFailed(ScottPlot.WPF.WpfPlot chart)
     {
+        foreach (var empty in chart.Plot.GetPlottables<ScottPlot.Plottables.Annotation>().Where(a => a.LabelText == EmptySentence(chart)).ToList())
+            chart.Plot.Remove(empty);
         var note = chart.Plot.Add.Annotation("read failed", ScottPlot.Alignment.MiddleCenter);
         note.LabelFontColor = ChartStyle.GetThemeColors().Text;
         note.LabelFontSize = 11;

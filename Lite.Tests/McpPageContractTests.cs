@@ -468,6 +468,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
                 "routing_reason",
                 /* #7084 part 4: the engine alert an analysis finding was attached to; null on every other row. */
                 "attached_to", "detail_text",
+                /* #8568: detail_text is a preview by default; these say whether it was cut and how long the whole text is. */
+                "detail_text_truncated", "detail_text_length",
                 /* #5642: the newest sample the alert judged and its age at fire time, read from the persisted context. */
                 "newest_sample",
             },

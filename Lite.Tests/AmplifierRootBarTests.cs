@@ -111,12 +111,12 @@ public class AmplifierRootBarTests
             () => [Wait("LCK_M_S", 0.10)]),
         ["latch_tempdb"] = new(
             () => Wait("LATCH_EX", 0.30),
-            "TempDB usage elevated — latch contention",
+            "TempDB usage elevated: latch contention",
             () => [TempDb(0.000673, 2.75)],
             () => [TempDb(0.80, 4000)]),
         ["disk_space_tempdb"] = new(
             () => new Fact { Source = "disk", Key = "DISK_SPACE", Value = 0.07, Metadata = new() },
-            "TempDB usage elevated — growing TempDB",
+            "TempDB usage elevated: growing TempDB",
             () => [TempDb(0.000673, 2.75)],
             () => [TempDb(0.80, 4000)]),
         ["plan_regression_cpu_percent"] = new(
@@ -132,22 +132,22 @@ public class AmplifierRootBarTests
             () => [Cpu("CPU_SPIKE", 90)]),
         ["cpu_spike_sos"] = new(
             () => Cpu("CPU_SPIKE", 90),
-            "SOS_SCHEDULER_YIELD elevated — scheduler pressure during CPU spike",
+            "SOS_SCHEDULER_YIELD elevated: scheduler pressure during CPU spike",
             () => [Wait("SOS_SCHEDULER_YIELD", 0.01)],
             () => [Wait("SOS_SCHEDULER_YIELD", 0.40)]),
         ["memory_grant_semaphore"] = new(
             () => Memory("MEMORY_GRANT_PENDING", 3),
-            "RESOURCE_SEMAPHORE waits present — memory grant pressure",
+            "RESOURCE_SEMAPHORE waits present: memory grant pressure",
             () => [Wait("RESOURCE_SEMAPHORE", 0.0001)],
             () => [Wait("RESOURCE_SEMAPHORE", 0.02)]),
         ["memory_anomaly_semaphore"] = new(
             MemoryAnomaly,
-            "RESOURCE_SEMAPHORE waits present — grant pressure visible in wait stats",
+            "RESOURCE_SEMAPHORE waits present: grant pressure visible in wait stats",
             () => [Wait("RESOURCE_SEMAPHORE", 0.0001)],
             () => [Wait("RESOURCE_SEMAPHORE", 0.02)]),
         ["spills_semaphore"] = new(
             () => Query("QUERY_SPILLS", 300),
-            "RESOURCE_SEMAPHORE waits — grant pressure",
+            "RESOURCE_SEMAPHORE waits: grant pressure",
             () => [Wait("RESOURCE_SEMAPHORE", 0.0001)],
             () => [Wait("RESOURCE_SEMAPHORE", 0.02)]),
         ["compile_semaphore"] = new(

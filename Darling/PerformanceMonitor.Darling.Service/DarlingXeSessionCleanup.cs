@@ -163,6 +163,7 @@ public static class DarlingXeSessionCleanup
             AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, installId, AlwaysOnXeSessionKind.Deadlock),
             AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, installId, AlwaysOnXeSessionKind.BlockedProcess),
             AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, installId, AlwaysOnXeSessionKind.Attention),
+            SchemaChangesXeSession.NameFor(installId),
         };
     }
 
@@ -178,6 +179,9 @@ public static class DarlingXeSessionCleanup
 
     private static string PerInstallPattern(string sharedName) =>
         "PerformanceMonitor[_]%[_]" + sharedName.Substring(SharedNamePrefix.Length);
+
+    /* The schema-changes session (#7643) has no shared name, so its shape is cut from its suffix. */
+    private static readonly string SchemaChangesPattern = "PerformanceMonitor[_]%[_]" + SchemaChangesXeSession.SessionSuffix.Substring(1);
 
     /// <summary>
     /// True when <paramref name="name"/> is the exact shape of another install's session (<c>PerformanceMonitor_{Lite|Darling}_{id}_</c>
@@ -196,7 +200,8 @@ public static class DarlingXeSessionCleanup
         var shaped = LongQueryCompletionsCollector.IsInstallSessionName(name)
             || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.Deadlock)
             || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.BlockedProcess)
-            || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.Attention);
+            || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.Attention)
+            || SchemaChangesXeSession.IsInstallSessionName(name);
         return shaped && !InstallSessionNames(installId).Contains(name, StringComparer.OrdinalIgnoreCase);
     }
 
@@ -220,7 +225,7 @@ public static class DarlingXeSessionCleanup
             DeadlocksCollector.XeSessionName,
             BlockedProcessReportCollector.XeSessionName,
             AlwaysOnXeSessions.AttentionXeSessionName,
-        }.Select(PerInstallPattern).ToList();
+        }.Select(PerInstallPattern).Append(SchemaChangesPattern).ToList();
 
         var conditions = string.Join(Environment.NewLine + "OR ", patterns.Select(pattern => $"{alias}.name LIKE N'{pattern}'"));
         return $@"
@@ -304,6 +309,7 @@ WHERE {conditions};";
         : name == BlockedProcessReportCollector.XeSessionName || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.BlockedProcess) ? "blocked processes"
         : name == AlwaysOnXeSessions.AttentionXeSessionName || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.Attention) ? "client timeouts"
         : name == LongQueryCompletionsCollector.LegacyXeSessionName || LongQueryCompletionsCollector.IsInstallSessionName(name) ? "long query completions"
+        : SchemaChangesXeSession.IsInstallSessionName(name) ? "schema changes"
         : null;
 
     /// <summary>
@@ -318,7 +324,7 @@ WHERE {conditions};";
     {
         ArgumentNullException.ThrowIfNull(dropped);
 
-        var order = new[] { "deadlocks", "blocked processes", "client timeouts", "long query completions" };
+        var order = new[] { "deadlocks", "blocked processes", "client timeouts", "long query completions", "schema changes" };
         var captures = dropped
             .Select(d => CapturePhrase(d.Name))
             .OfType<string>()
@@ -423,6 +429,11 @@ WHERE {alias}.name IN ({literals});";
             || LongQueryCompletionsCollector.IsInstallSessionName(sessionName))
         {
             return LongQueryCompletionsCollector.BuildStopSessionSql(sessionName);
+        }
+
+        if (SchemaChangesXeSession.IsInstallSessionName(sessionName))
+        {
+            return SchemaChangesXeSession.BuildStopSql(sessionName);
         }
 
         foreach (var kind in new[] { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess, AlwaysOnXeSessionKind.Attention })
@@ -598,7 +609,7 @@ END;";
             DeadlocksCollector.XeSessionName,
             BlockedProcessReportCollector.XeSessionName,
             AlwaysOnXeSessions.AttentionXeSessionName,
-        }.Select(PerInstallPattern).ToList();
+        }.Select(PerInstallPattern).Append(SchemaChangesPattern).ToList();
         for (var i = 0; i < patterns.Count; i++)
         {
             yield return (i == 0 ? "WHERE " : "OR ") + $"{alias}.name LIKE N'{patterns[i]}'";

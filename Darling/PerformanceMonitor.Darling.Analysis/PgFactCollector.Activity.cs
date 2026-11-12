@@ -18,7 +18,11 @@ public sealed partial class PgFactCollector
 {
     /* #5320: no statement text. The fact is keyed on the query hash and carries only numbers, so the read used to
        fetch a 200-character cut of the text for nothing, and a cut text read here would have been judged as a prefix.
-       The text is read, judged whole and then cut where an answer prints it (the BAD_ACTOR drill-down). */
+       The text is read, judged whole and then cut where an answer prints it (the BAD_ACTOR drill-down).
+       #8403: every row of the window counts, including a row whose execution delta is 0 while its CPU and reads
+       deltas are not. The store holds such rows, and the BAD_ACTOR drill-down and the totals already sum them, so
+       the fact sums the same rows and the finding's headline average and the drill-down beside it describe the
+       same work. The execution bar in HAVING still gates on the execution sum, and the ordering guards its divisor. */
     public const string BadActorSql = @"
 SELECT
     database_name,
@@ -41,7 +45,6 @@ FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-AND   delta_execution_count > 0
 GROUP BY database_name, query_hash
 HAVING SUM(delta_execution_count) >= 100
 ORDER BY SUM(delta_worker_time)::DOUBLE PRECISION / GREATEST(SUM(delta_execution_count), 1) *
@@ -65,6 +68,10 @@ LIMIT 5";
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
+            /* #8317: the read ranks (database, hash) pairs, so one hash running in several databases can take
+               more than one of the five rows, and the key carries the hash alone. One fact per hash, for the
+               first row the ranking returns that is worth a fact: the highest-scoring database. */
+            var seenHashes = new HashSet<string>(StringComparer.Ordinal);
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
             {
@@ -81,6 +88,7 @@ LIMIT 5";
 
                 // Skip low-impact queries — need meaningful per-execution cost
                 if (avgCpuMs < 10 && avgReads < 1000) continue;
+                if (!seenHashes.Add(queryHash)) continue;
 
                 facts.Add(new Fact
                 {

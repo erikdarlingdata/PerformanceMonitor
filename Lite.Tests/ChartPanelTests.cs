@@ -47,7 +47,7 @@ public sealed class ChartPanelTests
             {
                 var panel = make();
                 var window = new Window { Content = panel, Width = 600, Height = 340, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     ClippedTextProbe.Settle(window);
@@ -144,6 +144,24 @@ public sealed class ChartPanelTests
         Assert.True(setShown);
         Assert.Equal("last 6 hours", setText);
         Assert.Equal(11, setSize);
+    }
+
+    [Fact]
+    public void ALongSubtitle_WrapsInsteadOfEndingInAnEllipsis()
+    {
+        /* #8645: the 7-Day Provisioning Trend description ended "...the six whole days before t..." at 900 px. */
+        var longText = string.Join(" ", Enumerable.Repeat("each row is one calendar day judged on its CPU, memory grants and stolen memory", 4));
+        var (lines, fits) = Shown(
+            () => new ChartPanel { Title = "7-Day Provisioning Trend", Subtitle = longText, Content = new Border { MinHeight = 40 } },
+            panel =>
+            {
+                var subtitle = Part(panel, "PART_Subtitle");
+                var oneLine = Math.Ceiling(subtitle.FontSize * subtitle.FontFamily.LineSpacing);
+                return (Math.Round(subtitle.ActualHeight / oneLine), subtitle.ActualWidth <= panel.ActualWidth);
+            });
+
+        Assert.True(lines > 1, $"the subtitle is one line tall ({lines}), so it is trimmed rather than wrapped");
+        Assert.True(fits);
     }
 
     [Theory]

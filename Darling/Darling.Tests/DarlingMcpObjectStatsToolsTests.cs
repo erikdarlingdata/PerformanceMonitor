@@ -70,7 +70,6 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
     }
 
     [Theory]
-    [InlineData("get_table_index_sizes")]
     [InlineData("get_database_sizes")]
     public void ParamContract_ServerNameThenDatabaseName_Optional(string toolName)
     {
@@ -78,6 +77,20 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
         var p = McpParams(toolName);
         Assert.Equal(new[] { "server_name", "database_name" }, p.Select(x => x.Name).ToArray());
         Assert.All(p, x => Assert.True(x.Optional));
+    }
+
+    /// <summary>
+    /// <c>get_table_index_sizes</c> pages its largest-first table list by <c>offset</c> (#8655), so a caller can read
+    /// past the first page the response budget and the 100-table cap end. <c>offset</c> sits before
+    /// <c>database_name</c>, which stays last on both products (#5244), and every parameter stays optional, so
+    /// an existing caller that passes only <c>server_name</c> behaves as before.
+    /// </summary>
+    [Fact]
+    public void TableIndexSizes_TakesAnOffset_Optional()
+    {
+        var p = McpParams("get_table_index_sizes");
+        Assert.Equal(new[] { "server_name", "offset", "database_name" }, p.Select(x => x.Name).ToArray());
+        Assert.All(p, x => Assert.True(x.Optional, $"{x.Name} must stay optional — existing callers pass only server_name"));
     }
 
     /// <summary>

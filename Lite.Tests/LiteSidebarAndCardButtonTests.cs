@@ -59,11 +59,8 @@ public sealed class LiteSidebarAndCardButtonTests
         {
             var problems = StaTestThread.Run(() => WithTheme(theme, () =>
             {
-                /* The window reads these three paths when it is built; point them at a folder of the test's own. */
-                foreach (var (name, value) in new[] { ("DatabasePath", Path.Combine(dir, "monitor.duckdb")), ("ConfigDirectory", dir), ("SharedConfigDirectory", dir) })
-                {
-                    typeof(App).GetProperty(name, BindingFlags.Static | BindingFlags.Public)!.SetValue(null, value);
-                }
+                /* The window reads these three paths when it is built; point them at a folder of the test's own, and put them back before the folder is deleted. */
+                using var paths = new AppPathsScope(dir);
 
                 var main = new MainWindow();
                 var found = new List<string>();
@@ -261,7 +258,7 @@ public sealed class LiteSidebarAndCardButtonTests
     private static Window Open(FrameworkElement content, int width, int height)
     {
         var window = new Window { Content = content, Width = width, Height = height, Left = 0, Top = 0, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         window.UpdateLayout();
         ClippedTextProbe.Settle(window);
         return window;

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -26,6 +27,13 @@ namespace Darling.Tests;
 /// The one own-statement test that needs a login other than the service's (#7567). It creates and drops the role
 /// <c>pm7567_app</c>, a cluster-wide object under a fixed name, so it runs in the <c>pg-cluster-roles</c> collection
 /// that runs alone (<see cref="PgClusterObjectCensusTests"/>). The seeding helpers are the sibling class's.
+/// <para>The chain reads its own statements back from <c>pg_stat_statements</c>, whose hash table is cluster-wide and
+/// holds <c>pg_stat_statements.max</c> entries. When a new statement needs a slot in a full table, the module evicts
+/// the least-used five percent of the entries, and a statement run once is the least used there is: the chain's own
+/// entries can go between the statements and the read, and the read then finds nothing. So the chain first makes sure
+/// the table has room for every entry it adds (nothing else runs beside this collection, so the room stays), and it
+/// checks the module's eviction counter around its statements, so a pass that ran meanwhile is named instead of
+/// showing up as an empty read.</para>
 /// </summary>
 /* #1776 own-store: not [Collection("live-postgres")]. The test migrates the store itself and cleans by server id, so it needs
    nothing from LivePostgresStoreFixture. */
@@ -46,16 +54,110 @@ public sealed class PgOwnStatementRoleLiveTests
     {
         var cs = PgOwnStatementLiveTests.ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the own-statement tests.");
+        await RunChainAsync(cs!, TestContext.Current.CancellationToken, beforeStatements: null);
+    }
+
+    /// <summary>
+    /// The same chain on a statement table with one free slot, the state a long test run leaves the shared cluster in: the
+    /// chain's entries must survive its own statements, and no eviction pass may run between the statements and the read.
+    /// Fills the table with statements run twice each, so every filler is better used than the chain's once-run
+    /// statements and an eviction pass would take the chain's entries first.
+    /// </summary>
+    [Fact]
+    public async Task TheRealTextFetch_OnAStatementTableWithOneFreeSlot_RunsWithoutAnEvictionPass_AndStillMatches()
+    {
+        var cs = PgOwnStatementLiveTests.ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the own-statement tests.");
+        await RunChainAsync(cs!, TestContext.Current.CancellationToken, beforeStatements: FillToOneFreeSlotAsync);
+    }
+
+    /// <summary>
+    /// The one-free-slot fill with an eviction pass inside one of its batches. A pass takes entries, the batch's own among
+    /// them, so the count read after the batch can stand exactly where it stood before the batch, which is also what a
+    /// module that ignores the session's statements leaves. The fill judges a batch by the module's eviction counter as
+    /// well as by the count, carries on from the count the pass left, and still reaches one free slot.
+    /// </summary>
+    [Fact]
+    public async Task TheOneFreeSlotFill_WhenAnEvictionPassLandsInsideABatch_CarriesOnFromTheCountThePassLeft_AndReachesOneFreeSlot()
+    {
+        var cs = PgOwnStatementLiveTests.ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the own-statement tests.");
         var ct = TestContext.Current.CancellationToken;
 
+        /* #1776 own-store: a scratch database of its own, since CREATE EXTENSION would leave residue in the shared store. */
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct, emptyStore: true);
+        await using var target = new NpgsqlConnection(scratch.ConnectionString);
+        await target.OpenAsync(ct);
+        try
+        {
+            await DarlingMcpTestData.ExecAsync(target, ct, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements");
+            await using var probe = new NpgsqlCommand("SELECT count(*) FROM pg_stat_statements", target);
+            await probe.ExecuteScalarAsync(ct);
+        }
+        catch (PostgresException ex) when (ex.SqlState is "55000" or "58P01" or "0A000" or "42501")
+        {
+            Assert.Skip("pg_stat_statements is not available on this server: " + ex.Message);
+        }
+
+        var max = await MaxEntriesAsync(target, ct);
+        Assert.SkipWhen(max > MaxEntriesTheFillerCanFill,
+            $"pg_stat_statements.max is {max}, more than the {MaxEntriesTheFillerCanFill} the one-free-slot test fills.");
+
+        /* A table a pass has just run on holds five percent less than its width, so the fill's first batch brings it to one
+           free slot. The pass the window below brings on leaves the same five percent free, and single statements then bring
+           the count back to exactly where the batch started: the count alone cannot tell this batch from one the module ignored. */
+        await PgStatementTable.ForcePassAsync(target, ct);
+
+        /* On a narrow table a pass frees about one forcing batch, which the rest of that batch fills again: with fewer than
+           two slots free the fill runs no batch, and there is no window to land a pass in. The count read runs once first:
+           its first run takes a slot the view leaves out until that run completes, so only a second run counts every slot
+           the fill will see. */
+        await EntryCountAsync(target, ct);
+        var freeAfterPass = max - await EntryCountAsync(target, ct);
+        Assert.SkipWhen(freeAfterPass < 2,
+            $"pg_stat_statements.max is {max}: the forced pass left {freeAfterPass} free slot(s), so the fill runs no batch.");
+
+        var batches = 0;
+        await FillToOneFreeSlotAsync(target, ct, async before =>
+        {
+            if (++batches > 1)
+            {
+                return;
+            }
+
+            /* Shapes of the headroom family far past the few dozen a headroom fill runs, so each one is a new entry of this database. */
+            var n = 1_000;
+            var dealloc = await DeallocAsync(target, ct);
+            while (await DeallocAsync(target, ct) == dealloc)
+            {
+                await DarlingMcpTestData.ExecAsync(target, ct, PgStatementTable.HeadroomShape(n++));
+            }
+
+            while (await EntryCountAsync(target, ct) < before)
+            {
+                await DarlingMcpTestData.ExecAsync(target, ct, PgStatementTable.HeadroomShape(n++));
+            }
+        });
+
+        /* The fill went on past the pass's batch and finished at one free slot (or none, when another session took the last). */
+        Assert.True(batches >= 2, $"the fill ran {batches} batch(es): it stopped at the batch the pass landed in.");
+        Assert.InRange(max - await EntryCountAsync(target, ct), 0, 1);
+    }
+
+    /// <summary>
+    /// Runs the chain against the store at <paramref name="cs"/> and a scratch target of its own. <paramref name="beforeStatements"/>
+    /// runs on the target after the extension and the role are in place and before the marked statements.
+    /// </summary>
+    private static async Task RunChainAsync(string cs, CancellationToken ct, Func<NpgsqlConnection, CancellationToken, Task>? beforeStatements)
+    {
         /* #1776 own-store: the target is a scratch database of its own (CREATE EXTENSION would leave residue in the shared
            store); the store tables the fetch writes and the readers read are the shared store's, cleaned by server id. */
-        var scratch = await ScratchPostgres.CreateAsync(cs!, ct, emptyStore: true);
+        var scratch = await ScratchPostgres.CreateAsync(cs, ct, emptyStore: true);
         await using var store = new NpgsqlConnection(cs);
         await store.OpenAsync(ct);
         await PgMigrations.MigrateAsync(store, ct);
         await PgOwnStatementLiveTests.DeleteRowsAsync(store, ct);
-        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        await using var dataSource = NpgsqlDataSource.Create(cs);
         var bodySucceeded = false;
         try
         {
@@ -76,6 +178,14 @@ public sealed class PgOwnStatementRoleLiveTests
                 {
                     Assert.Skip("pg_stat_statements or role setup is not available on this server: " + ex.Message);
                 }
+
+                if (beforeStatements is not null)
+                {
+                    await beforeStatements(target, ct);
+                }
+
+                await EnsureStatementTableHeadroomAsync(target, ct);
+                var deallocBefore = await DeallocAsync(target, ct);
 
                 /* The service's statement: marked, run by the connecting login. The application's: unmarked, run under another login.
                    The shared one is both: the same statement shape (one queryid) from both logins, two entries. */
@@ -147,6 +257,11 @@ public sealed class PgOwnStatementRoleLiveTests
                     }
                 }
 
+                /* An eviction pass between the statements and the read takes the least-used entries, the chain's own among them. */
+                var deallocAfter = await DeallocAsync(target, ct);
+                Assert.True(deallocBefore == deallocAfter,
+                    $"pg_stat_statements ran {deallocAfter - deallocBefore} eviction pass(es) between the chain's statements and its read (dealloc {deallocBefore} -> {deallocAfter}); the read found {entries.Count} of its entries.");
+
                 var service = Assert.Single(entries, e => e.Name == "pm7567own_service");
                 var app = Assert.Single(entries, e => e.Name == "pm7567own_app");
                 var shared = entries.Where(e => e.Name == "pm7567own_shared").ToArray();
@@ -205,7 +320,7 @@ public sealed class PgOwnStatementRoleLiveTests
         }
         finally
         {
-            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            await LiveStoreCleanup.RunAsync(cs, bodySucceeded, async (cleanup, cleanupCt) =>
                 await PgOwnStatementLiveTests.DeleteRowsAsync(cleanup, cleanupCt));
             await scratch.DisposeAsync();
             /* Roles are cluster-wide, so the scratch database going does not take it. */
@@ -213,5 +328,191 @@ public sealed class PgOwnStatementRoleLiveTests
             await admin.OpenAsync(ct);
             await DarlingMcpTestData.ExecAsync(admin, ct, "DROP ROLE IF EXISTS pm7567_app");
         }
+    }
+
+    /// <summary>
+    /// The free slots the chain secures before its statements: it adds about fifteen entries (the role setup, the four
+    /// statements under two logins, the fetch, the store's register and upsert, and the read), and the margin covers
+    /// whatever a background worker on the cluster runs meanwhile.
+    /// </summary>
+    internal const int ChainEntries = 64;
+
+    /// <summary>
+    /// Makes sure <c>pg_stat_statements</c> has at least <see cref="ChainEntries"/> free slots. When it has fewer, runs
+    /// small batches of distinct shapes until the module's eviction pass frees five percent of the table; a cluster whose
+    /// pass frees less than the chain needs skips with its <c>pg_stat_statements.max</c>. The shapes are a family of
+    /// their own (differences, not sums), so none of them lands on an entry the one-free-slot filler already made.
+    /// </summary>
+    private static async Task EnsureStatementTableHeadroomAsync(NpgsqlConnection target, CancellationToken ct)
+    {
+        const int batchSize = 8;
+        var max = await MaxEntriesAsync(target, ct);
+        var free = max - await EntryCountAsync(target, ct);
+        var next = 0;
+        while (free < ChainEntries && next < ChainEntries + 2 * batchSize)
+        {
+            var batch = new StringBuilder();
+            for (var i = 0; i < batchSize; i++)
+            {
+                batch.Append(HeadroomStatement(next++)).Append(';');
+            }
+
+            await DarlingMcpTestData.ExecAsync(target, ct, batch.ToString());
+            free = max - await EntryCountAsync(target, ct);
+        }
+
+        Assert.SkipWhen(free < ChainEntries,
+            $"pg_stat_statements.max is {max}: an eviction pass leaves {free} free slots, fewer than the {ChainEntries} the chain needs.");
+    }
+
+    /// <summary>
+    /// The <paramref name="n"/>-th shape of the headroom family: two to nine columns, each <c>1</c> less one to eight more
+    /// <c>1</c>s, under one of eight WHERE/LIMIT/OFFSET suffixes. Every shape has at least one subtraction and two columns,
+    /// so the family shares no entry with <see cref="FillerStatement"/>'s products, with a bare <c>SELECT 1</c>, or with the
+    /// chain's own single-column statements.
+    /// </summary>
+    internal static string HeadroomStatement(int n)
+    {
+        var variant = n & 7;
+        var rest = n >> 3;
+        var items = rest / 8 + 2;
+        var terms = rest % 8 + 1;
+        var item = "1" + string.Concat(Enumerable.Repeat("-1", terms));
+        var suffix = ((variant & 1) != 0 ? " WHERE true" : string.Empty)
+            + ((variant & 2) != 0 ? " LIMIT 1" : string.Empty)
+            + ((variant & 4) != 0 ? " OFFSET 0" : string.Empty);
+        return "SELECT " + string.Join(",", Enumerable.Repeat(item, items)) + suffix;
+    }
+
+    /// <summary>The largest table the filler fills; a cluster set wider than this skips the one-free-slot test.</summary>
+    private const int MaxEntriesTheFillerCanFill = 20_000;
+
+    /// <summary>
+    /// The eviction passes from other sessions a fill carries on past. Each one frees five percent of the table, which the
+    /// fill then fills again; a fill that sees more than this is not going to reach one free slot on this cluster.
+    /// </summary>
+    private const int MaxPassesInsideTheFill = 5;
+
+    /// <summary>
+    /// Fills <c>pg_stat_statements</c> until one slot is free, with a distinct statement shape per entry, each batch run
+    /// twice so that every filler is better used than a statement run once. A batch is judged by the entry count and the
+    /// module's eviction counter together: a pass inside the batch's window voids its count, and the fill carries on from
+    /// the count the pass left; a count that stands still with no pass is the module not tracking the session.
+    /// </summary>
+    private static Task FillToOneFreeSlotAsync(NpgsqlConnection target, CancellationToken ct) => FillToOneFreeSlotAsync(target, ct, afterEachBatch: null);
+
+    /// <summary>
+    /// <see cref="FillToOneFreeSlotAsync(NpgsqlConnection, CancellationToken)"/> with <paramref name="afterEachBatch"/> run
+    /// between a batch's statements and the reads that judge it, given the entries the table held before the batch; a test
+    /// lands an eviction pass in that window with it.
+    /// </summary>
+    internal static async Task FillToOneFreeSlotAsync(NpgsqlConnection target, CancellationToken ct, Func<int, Task>? afterEachBatch)
+    {
+        var max = await MaxEntriesAsync(target, ct);
+        Assert.SkipWhen(max > MaxEntriesTheFillerCanFill,
+            $"pg_stat_statements.max is {max}, more than the {MaxEntriesTheFillerCanFill} the one-free-slot test fills.");
+
+        var side = (int)Math.Ceiling(Math.Sqrt((max + 1) / 8.0)) + 1;
+        var next = 0;
+        var passes = 0;
+
+        /* The fill's own reads are entries too, and a pass takes the least-used entries first. Run once or twice, the reads
+           would go before the fill's shapes, which run twice; each read would then make itself an entry again after the count
+           it took part in, and the next batch would run a shape or two past the table's width and bring on a pass of the
+           fill's own making, batch after batch. Run three times before the first batch, the reads outrank every shape the
+           fill adds and everything older in the table. */
+        for (var warm = 0; warm < 2; warm++)
+        {
+            await EntryCountAsync(target, ct);
+            await DeallocAsync(target, ct);
+        }
+
+        var free = max - await EntryCountAsync(target, ct);
+        var deallocAtStart = await DeallocAsync(target, ct);
+        var dealloc = deallocAtStart;
+        while (free > 1)
+        {
+            var size = Math.Min(free - 1, 400);
+            var batch = new StringBuilder();
+            for (var i = size; i > 0; i--)
+            {
+                batch.Append(FillerStatement(next++, side)).Append(';');
+            }
+
+            await DarlingMcpTestData.ExecAsync(target, ct, batch.ToString());
+            await DarlingMcpTestData.ExecAsync(target, ct, batch.ToString());
+            if (afterEachBatch is not null)
+            {
+                await afterEachBatch(max - free);
+            }
+
+            /* The count is read before the counter, so a pass that moved the count has moved the counter by the time it is
+               read. A pass inside the window takes entries, the batch's own among them, so the count says nothing about the
+               batch: the fill carries on from the count the pass left, for up to MaxPassesInsideTheFill passes. Without a
+               pass, a batch of new shapes that leaves the count where it was means the module is not tracking this session's
+               statements (pg_stat_statements.track is none for the cluster or for this login), or that the batch's shapes
+               were in the table already; the next batch would add nothing either, so the fill stops here instead of running
+               until the job's timeout. */
+            var afterBatch = max - await EntryCountAsync(target, ct);
+            var deallocAfter = await DeallocAsync(target, ct);
+            if (deallocAfter != dealloc)
+            {
+                passes++;
+                Assert.True(passes <= MaxPassesInsideTheFill,
+                    $"{passes} eviction passes landed inside the fill's batches (dealloc {deallocAtStart} -> {deallocAfter}), and the table holds {max - afterBatch} of {max} entries after the last one: the fill is not reaching one free slot on this cluster.");
+                dealloc = deallocAfter;
+            }
+            else if (afterBatch == free)
+            {
+                Assert.Fail($"A batch of {size} new statement shapes left pg_stat_statements at {max - free} of {max} entries, with no eviction pass inside the batch (dealloc {dealloc}): the module is not tracking this session's statements, or the batch's shapes were already in the table.");
+            }
+
+            free = afterBatch;
+        }
+    }
+
+    /// <summary>
+    /// The <paramref name="n"/>-th distinct statement shape of the filler's family: two or more columns of <c>1</c>, each a
+    /// product of one or more <c>1</c>s, under one of eight WHERE/LIMIT/OFFSET suffixes. Constants and aliases do not enter
+    /// the module's query id, so a shape has to differ in structure to get an entry of its own, and a single-column shape
+    /// would be the chain's own <c>SELECT $1 * $2</c>; <paramref name="side"/> bounds the columns and the terms, and the
+    /// family holds <c>8 * side * (side + 1)</c> shapes. The operator keeps the family apart from the other fills that run
+    /// on the same database: <see cref="PgStatementTable.Shape"/> builds sums and the headroom families build differences.
+    /// The chain's fill is followed by the headroom step on its own database, and the pass test's forcing fill, this fill
+    /// and its hook all run on one scratch database; a shape already present there adds no entry, and this fill counts its
+    /// entries after each batch.
+    /// </summary>
+    internal static string FillerStatement(int n, int side)
+    {
+        var variant = n & 7;
+        var rest = n >> 3;
+        var items = rest / (side + 1) + 2;
+        var terms = rest % (side + 1);
+        var item = "1" + string.Concat(Enumerable.Repeat("*1", terms + 1));
+        var suffix = ((variant & 1) != 0 ? " WHERE true" : string.Empty)
+            + ((variant & 2) != 0 ? " LIMIT 1" : string.Empty)
+            + ((variant & 4) != 0 ? " OFFSET 0" : string.Empty);
+        return "SELECT " + string.Join(",", Enumerable.Repeat(item, items)) + suffix;
+    }
+
+    /// <summary><c>pg_stat_statements.max</c>, a server setting readable from any database once the library is preloaded.</summary>
+    private static async Task<int> MaxEntriesAsync(NpgsqlConnection target, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT current_setting('pg_stat_statements.max')::int", target);
+        return (int)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>How many entries the module's hash table holds right now, without loading the query texts.</summary>
+    private static async Task<int> EntryCountAsync(NpgsqlConnection target, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT count(*)::int FROM pg_stat_statements(false)", target);
+        return (int)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>The module's eviction counter, <c>pg_stat_statements_info.dealloc</c>: how many passes have run since the last full reset.</summary>
+    private static async Task<long> DeallocAsync(NpgsqlConnection target, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT dealloc FROM pg_stat_statements_info", target);
+        return (long)(await command.ExecuteScalarAsync(ct))!;
     }
 }

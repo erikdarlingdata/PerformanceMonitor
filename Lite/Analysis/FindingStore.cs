@@ -129,6 +129,15 @@ public class FindingStore
     }
 
     /// <summary>
+    /// The read-time forcing and automatic-plan-correction state of the findings' force-plan targets
+    /// (#8542), over this store's database, for a reader that renders a finding's copy-paste command.
+    /// Returns the dictionary and a null reason on success, and null with the reason when the read fails.
+    /// </summary>
+    public Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> TryGetForcePlanTargetStatesAsync(
+        int serverId, IEnumerable<AnalysisFinding> findings, CancellationToken cancellationToken = default) =>
+        AnalysisService.ReadForcePlanTargetStatesAsync(_duckDb, serverId, findings, cancellationToken);
+
+    /// <summary>
     /// #2455: finding and mute ids come from the shared process-wide
     /// <see cref="CollectionIdGenerator"/> rather than a per-instance counter.
     ///
@@ -313,8 +322,8 @@ public class FindingStore
                announcing a completed analysis for a set the store does not have, and it is the
                behaviour this store has always had. Only the diagnostic is new. */
             AppLogger.Error("AnalysisService", everyRowAccepted
-                ? $"Finding batch for {context.ServerName} had all {findings.Count} row(s) accepted and then failed to COMMIT them, so the batch was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {ex.Message}"
-                : $"Finding batch for {context.ServerName} failed at row {row} of {findings.Count} and was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {ex.Message}");
+                ? $"Finding batch for {context.ServerName} had all {CountText.Plural(findings.Count, "row")} accepted and then failed to COMMIT them, so the batch was rolled back, this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {ex.Message}"
+                : $"Finding batch for {context.ServerName} failed at row {row} of {findings.Count} and was rolled back, this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {ex.Message}");
             throw;
         }
 
@@ -896,7 +905,7 @@ ORDER BY local_bucket, story_path_hash";
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
             AppLogger.Warn("FindingStore",
-                $"GetPriorOccurrencesAsync failed — this pass's findings are persisted unlabelled and the next pass reads the same history: {ex.Message}");
+                $"GetPriorOccurrencesAsync failed, this pass's findings are persisted unlabelled and the next pass reads the same history: {ex.Message}");
             return PriorOccurrenceRead.Empty;
         }
     }

@@ -67,10 +67,12 @@ public static class CustomAlertTemplates
         new CustomAlertTemplate(
             "pg-connection-saturation",
             "PostgreSQL: connection count high",
-            "Fires when the total session count stays high: approaching max_connections means new connections "
-            + "start failing. Starter: warn at 200 sessions, critical at 500 (absolute, since the catalog does "
-            + "not carry max_connections); set both to a fraction of your configured max_connections.",
-            "{\"metric\":{\"source\":\"pg_session_states\",\"measure\":\"pg_sess_total_sessions\",\"aggregate\":\"max\",\"unit\":\"count\",\"hours\":0.25}," +
+            "Fires when the connected backend count stays high: approaching max_connections means new connections "
+            + "start failing. It adds up the backends connected to every database at each capture, so it reads on "
+            + "every capture, not only when a session holds an old transaction. Starter: warn at 200 backends, "
+            + "critical at 500 (absolute, since the catalog does not carry max_connections); set both to a "
+            + "fraction of your configured max_connections.",
+            "{\"metric\":{\"source\":\"pg_database_stats\",\"measure\":\"pg_db_connected_backends\",\"aggregate\":\"max\",\"unit\":\"count\",\"hours\":0.25}," +
             "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":200,\"criticalThreshold\":500}," +
             "\"hysteresis\":{\"breachSamples\":3,\"clearSamples\":2}}"),
 
@@ -89,7 +91,7 @@ public static class CustomAlertTemplates
             "PostgreSQL: replication slot retaining WAL",
             "Fires when a replication slot's retained WAL stays large: a disconnected or slow consumer holds "
             + "WAL that cannot be recycled, and the disk fills for the WHOLE instance. This is the storage risk "
-            + "#3282 flags (PostgreSQL has no database-size gauge to threshold directly). Starter: warn at ~10 GB "
+            + "this alert guards (PostgreSQL has no database-size gauge to threshold directly). Starter: warn at ~10 GB "
             + "retained, critical at ~50 GB. Set below your free disk headroom.",
             "{\"metric\":{\"source\":\"pg_replication_slot_stats\",\"measure\":\"pg_slot_retained_wal_bytes\",\"aggregate\":\"max\",\"unit\":\"mb\",\"hours\":1}," +
             "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":10240,\"criticalThreshold\":51200}," +

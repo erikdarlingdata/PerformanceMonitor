@@ -453,6 +453,24 @@ public sealed class ViewerPostgresTabsTests
     }
 
     /// <summary>
+    /// #8564: one labelled duration format in a column, from milliseconds to days. The clock-style text it replaced ("02:05", "1.08:23:10")
+    /// sat beside "41 ms" in the Backend Age column and read as hours and minutes as easily as minutes and seconds.
+    /// </summary>
+    [Theory]
+    [InlineData(41L, "41 ms")]
+    [InlineData(999L, "999 ms")]
+    [InlineData(1_000L, "1s")]
+    [InlineData(59_999L, "59s")]
+    [InlineData(125_000L, "2m 5s")]
+    [InlineData(3_600_000L, "1h 0m")]
+    [InlineData(3_900_000L, "1h 5m")]
+    [InlineData(116_590_000L, "1d 8h 23m")]
+    public void Milliseconds_ReadsInOneLabelledFormat(long ms, string expected)
+    {
+        Assert.Equal(expected, PgDisplay.Milliseconds(ms));
+    }
+
+    /// <summary>
     /// A size never renders expressed in its own next unit. The unit is chosen against the quotient and the
     /// quotient is then ROUNDED, so one byte short of a megabyte would otherwise print "1024.0 KB" — a
     /// number that reads as a typo rather than as a size, on every column built over bytes.
@@ -600,6 +618,46 @@ public sealed class ViewerPostgresTabsTests
         var pinned = PgDisplay.SessionState(SessionRow(peakHorizonAge: 4_200_000));
         Assert.Contains("4,200,000", pinned.PeakHorizonAge, StringComparison.Ordinal);
         Assert.Contains("transactions", pinned.PeakHorizonAge, StringComparison.Ordinal);
+    }
+
+    /// <summary>#8664: a count of one is "1 transaction", not "1 transactions", and zero and many keep the plural.</summary>
+    [Theory]
+    [InlineData(0L, "0 transactions")]
+    [InlineData(1L, "1 transaction")]
+    [InlineData(2L, "2 transactions")]
+    [InlineData(4_200_000L, "4,200,000 transactions")]
+    public void APinnedHorizonAge_AgreesWithItsCountInNumber(long age, string expected)
+    {
+        Assert.Equal(expected, PgDisplay.SessionState(SessionRow(peakHorizonAge: age)).PeakHorizonAge);
+    }
+
+    /// <summary>#8664: the logging audit is shared with the MCP reply, but the Viewer has no tool and no field of those names.</summary>
+    [Fact]
+    public void TheLoggingAuditRows_NameNoMcpToolAndNoMcpField()
+    {
+        var names = new[] { "log_min_duration_statement", "log_lock_waits", "log_temp_files", "log_autovacuum_min_duration", "log_checkpoints", "auto_explain.log_min_duration" };
+        var audits = new List<DarlingPgLoggingAudit.Result>
+        {
+            /* A snapshot that holds none of the six settings: every verdict is unknown, which has its own wording. */
+            DarlingPgLoggingAudit.Audit([new DarlingPgLoggingAuditReader.PgLoggingSettingRow("work_mem", "4096", "kB", "user", "default", "4096", false, DateTime.UtcNow)]),
+        };
+        foreach (var (setting, restart) in new[] { ("off", true), ("on", false), ("-1", false), ("0", false), ("1000", false), ("garbled", false) })
+        {
+            audits.Add(DarlingPgLoggingAudit.Audit(names
+                .Select(name => new DarlingPgLoggingAuditReader.PgLoggingSettingRow(name, setting, null, "superuser", "user", "off", restart, DateTime.UtcNow))
+                .ToList()));
+        }
+
+        foreach (var audit in audits)
+        {
+            foreach (var row in audit.Facets.Select(PgDisplay.LoggingAudit))
+            {
+                foreach (var text in new[] { row.Unlocks, row.Recommended, row.CostNote, row.Remedy, row.PendingRestart })
+                {
+                    Assert.DoesNotMatch("get_pg_|cost_note|pending_restart_settings", text);
+                }
+            }
+        }
     }
 
     /// <summary>

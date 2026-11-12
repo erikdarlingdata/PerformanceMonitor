@@ -46,7 +46,7 @@ public sealed partial class PgTargetRelationshipGraph
     private partial void BuildWriteEdges()
     {
         AddEdge(PgTargetFactKeys.CheckpointPressure, PgTargetFactKeys.ConfigMaxWalSize, "checkpoint_pressure",
-            "max_wal_size at the shipped default — the ceiling the requested checkpoints are hitting was never sized",
+            "max_wal_size at the shipped default: the ceiling the requested checkpoints are hitting was never sized",
             facts => facts.TryGetValue(PgTargetFactKeys.ConfigMaxWalSize, out var knob) && knob.BaseSeverity > 0);
 
         /* Lane 5's wait edges into this chain (#3542 step 5). The WAL waits are the SYMPTOM a backend feels of
@@ -63,10 +63,10 @@ public sealed partial class PgTargetRelationshipGraph
            (BaseSeverity > 0 — a PostgreSQL wait fact scores 0 below its concerning bar, so "fired" means "a
            finding"); the bars are PgTargetScorer.Waits.cs's with their lineage. */
         AddEdge(PgTargetFactKeys.WaitKey("IO", "WALSync"), PgTargetFactKeys.CheckpointPressure, "checkpoint_pressure",
-            "Requested checkpoints dominate — the full-page images forced checkpoints re-arm are the WAL these fsyncs are waiting on",
+            "Requested checkpoints dominate: the full-page images forced checkpoints re-arm are the WAL these fsyncs are waiting on",
             facts => facts.TryGetValue(PgTargetFactKeys.CheckpointPressure, out var pressure) && pressure.BaseSeverity > 0);
         AddEdge(PgTargetFactKeys.WaitKey("LWLock", "WALWrite"), PgTargetFactKeys.CheckpointPressure, "checkpoint_pressure",
-            "Requested checkpoints dominate — WAL volume is forcing checkpoints, and every commit is queued behind the same WAL",
+            "Requested checkpoints dominate: WAL volume is forcing checkpoints, and every commit is queued behind the same WAL",
             facts => facts.TryGetValue(PgTargetFactKeys.CheckpointPressure, out var pressure) && pressure.BaseSeverity > 0);
     }
 }

@@ -245,6 +245,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'DbA', $6, 'SELECT 1', $7)",
     public async Task LongQueries_UnfilteredEmpty_KeepsTheOriginalWording()
     {
         await SeedLongQueryAsync("DbA", 9, 5);
+        await SeedLongQueryRunAsync();
 
         var root = Parse(await McpLongQueryTools.GetLongQueryCompletions(
             _service, _serverManager, ServerName, 1, 30, as_of: DateTime.UtcNow.AddDays(-3).ToString("o")));
@@ -365,8 +366,9 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
         {
             var unfiltered = Parse(await McpLongQueryTools.GetLongQueryCompletions(
                 _service, _serverManager, ServerName, 24, 30, database_name: blank));
-            Assert.Equal("empty", unfiltered.GetProperty("status").GetString());
-            Assert.Contains("opt-in (default OFF)", unfiltered.GetProperty("message").GetString(), StringComparison.Ordinal);
+            /* #8571: a server with no completions and no logged run is the never-ran state. */
+            Assert.Equal("not_collected", unfiltered.GetProperty("status").GetString());
+            Assert.Contains("has never run for it", unfiltered.GetProperty("message").GetString(), StringComparison.Ordinal);
             Assert.Equal(JsonValueKind.Null, unfiltered.GetProperty("database_name").ValueKind);
         }
     }
@@ -378,6 +380,7 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
     [Fact]
     public async Task LongQueries_EmptyAnswer_NamesTheOptInSwitchOnlyWhenTheCollectorIsOff()
     {
+        await SeedLongQueryRunAsync();
         var server = _serverManager.GetAllServers().Single();
         var schedules = new ScheduleManager(_configDir);
         var runTimes = new McpCollectorRunTimes(schedules, _serverManager);
@@ -414,9 +417,10 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
             new() { Name = "long_query_completions", Enabled = false, FrequencyMinutes = 1, RetentionDays = 30 },
         });
 
+        /* #8571: no row and no logged run is the never-ran state, which says the collector is off and how to turn it on. */
         var noRows = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerName, 24, 30, database_name: "DbB", runTimes: runTimes));
-        Assert.Equal("empty", noRows.GetProperty("status").GetString());
-        Assert.Contains("opt-in (default OFF)", noRows.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Equal("not_collected", noRows.GetProperty("status").GetString());
+        Assert.Contains("has never run for it", noRows.GetProperty("message").GetString(), StringComparison.Ordinal);
 
         await SeedLongQueryAsync("DbA", 9, 5);
         var otherRows = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerName, 24, 30, database_name: "DbB", runTimes: runTimes));
@@ -454,13 +458,57 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
         var filtered = Parse(await McpLongQueryTools.GetLongQueryCompletions(
             _service, _serverManager, ServerName, 24, 30, database_name: "DbA"));
 
-        Assert.Equal("empty", filtered.GetProperty("status").GetString());
-        Assert.Equal("No long-running query completions found in the specified time range for the database DbA"
-            + ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data. The monitor's own statements are left out. Pass include_monitor=true to include them.",
-            filtered.GetProperty("message").GetString());
+        /* #8571: no row and no logged run is the never-ran state: not_collected, which says it is off by default and how to turn it on. */
+        Assert.Equal("not_collected", filtered.GetProperty("status").GetString());
+        Assert.Contains("has never run for it", filtered.GetProperty("message").GetString(), StringComparison.Ordinal);
         Assert.Equal("DbA", filtered.GetProperty("database_name").GetString());
-        Assert.False(filtered.GetProperty("hints").TryGetProperty("effective_start", out var start) && start.ValueKind != JsonValueKind.Null,
-            "the notice must carry no effective_start on an empty store; that is what keeps the opt-in sentence");
+    }
+
+    /// <summary>#8571: a collector that never ran is not_collected, so a test of the empty answer records one recent run that found nothing.</summary>
+    private Task SeedLongQueryRunAsync() => ExecuteAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, rows_collected)
+VALUES ($1, $2, $3, 'long_query_completions', $4, 'SUCCESS', 0)",
+        _nextId++, _serverId, ServerName, Naive(DateTime.UtcNow.AddMinutes(-5)));
+
+    /// <summary>#8571 item 3, Darling's twin: a collector that never ran is not_collected with the enable step; one that ran and found nothing stays empty.</summary>
+    [Fact]
+    public async Task LongQueries_ACollectorThatNeverRan_IsNotCollected_AndOneThatRanFoundNothingIsEmpty()
+    {
+        var never = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerName, 24, 30));
+        Assert.Equal("not_collected", never.GetProperty("status").GetString());
+        Assert.Contains("has never run for it", never.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        await SeedLongQueryRunAsync();
+        var ran = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerName, 24, 30));
+        Assert.Equal("empty", ran.GetProperty("status").GetString());
+    }
+
+    /// <summary>
+    /// #8571, Darling's twin: a collector that never ran, with its schedule ON (just enabled, before its first pass), is not_collected and is told
+    /// to read again, not to enable what is already enabled. The same server with the schedule OFF gets the enable step.
+    /// </summary>
+    [Fact]
+    public async Task LongQueries_ACollectorThatNeverRan_WithTheScheduleOn_IsNotCollected_WithoutTheEnableStep()
+    {
+        var server = _serverManager.GetAllServers().Single();
+        var schedules = new ScheduleManager(_configDir);
+        var runTimes = new McpCollectorRunTimes(schedules, _serverManager);
+
+        foreach (var (enabled, expectEnableStep) in new[] { (true, false), (false, true) })
+        {
+            schedules.SetScheduleForServer(server.Id, new System.Collections.Generic.List<CollectorSchedule>
+            {
+                new() { Name = "long_query_completions", Enabled = enabled, FrequencyMinutes = 1, RetentionDays = 30 },
+            });
+
+            var root = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerName, 24, 30, database_name: "DbA", runTimes: runTimes));
+
+            Assert.Equal("not_collected", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.Equal(expectEnableStep, message.Contains("turn it on in the collector schedule", StringComparison.Ordinal));
+            Assert.Equal(!expectEnableStep, message.Contains("has not run its first pass yet; read again after it does", StringComparison.Ordinal));
+            Assert.Equal("DbA", root.GetProperty("database_name").GetString());
+        }
     }
 
     /// <summary>

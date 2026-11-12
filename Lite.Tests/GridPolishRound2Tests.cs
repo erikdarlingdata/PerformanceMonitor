@@ -62,21 +62,28 @@ public sealed class GridPolishRound2Tests
                 views.AddRange(StaTestThread.Run(() => WithTheme(theme, () =>
                 {
                     var tab = BuildTab(tabKind, duckDb);
-
-                    var found = new List<View>();
-                    foreach (var c in cases)
+                    try
                     {
-                        var grid = GridColumnLayoutProbe.Detach(tab, c.Grid);
-                        foreach (var window in WindowWidths)
+                        var found = new List<View>();
+                        foreach (var c in cases)
                         {
-                            var rows = GridPolishProbe.Rows(c.Row, 3, c.Values);
-                            var cols = GridPolishProbe.Measure(grid, rows, GridWidth(window), GridPolishProbe.PngPath(tabKind, c.Grid, theme, window));
-                            var filler = GridPolishProbe.MeasureFiller(grid, rows, GridWidth(window));
-                            found.Add(new View($"{theme} {window:0}", c.Grid, window, GridWidth(window), cols, filler));
+                            var grid = GridColumnLayoutProbe.Detach(tab, c.Grid);
+                            foreach (var window in WindowWidths)
+                            {
+                                var rows = GridPolishProbe.Rows(c.Row, 3, c.Values);
+                                var cols = GridPolishProbe.Measure(grid, rows, GridWidth(window), GridPolishProbe.PngPath(tabKind, c.Grid, theme, window));
+                                var filler = GridPolishProbe.MeasureFiller(grid, rows, GridWidth(window));
+                                found.Add(new View($"{theme} {window:0}", c.Grid, window, GridWidth(window), cols, filler));
+                            }
                         }
-                    }
 
-                    return found;
+                        return found;
+                    }
+                    finally
+                    {
+                        /* The tab is never shown, so no window's Closed stops its auto-refresh timer (#8367); stop it here. */
+                        (tab as ServerTab)?.StopRefresh();
+                    }
                 })));
             }
         }
@@ -262,17 +269,21 @@ public sealed class GridPolishRound2Tests
             {
                 var previous = ThemeManager.CurrentTheme;
                 ThemeManager.ThemeUriProvider = name => new Uri($"pack://application:,,,/PerformanceMonitorLite;component/Themes/{name}Theme.xaml");
+                ServerTab? tab = null;
                 try
                 {
                     /* As the app starts: the theme comes in through ThemeManager.Apply (with the shared styles), then the tab is built. */
                     ThemeManager.Apply("Dark");
-                    var grid = GridColumnLayoutProbe.Detach(BuildTab("Server", duckDb), "ServerConfigGrid");
+                    tab = (ServerTab)BuildTab("Server", duckDb);
+                    var grid = GridColumnLayoutProbe.Detach(tab, "ServerConfigGrid");
                     var rows = GridPolishProbe.Rows(typeof(ServerConfigRow), 3, new Dictionary<string, object?> { ["ValueConfigured"] = 5L, ["ValueInUse"] = 5L });
                     return GridPolishProbe.HeaderLooksAfterThemeSwitches(grid, rows, GridWidth(1280), "Dark", new[] { "Light", "CoolBreeze" },
                         theme => GridPolishProbe.PngPath("Server", "ServerConfigGrid-after-switch", theme, 1280));
                 }
                 finally
                 {
+                    /* The tab is never shown, so no window's Closed stops its auto-refresh timer (#8367); stop it here. */
+                    tab?.StopRefresh();
                     ThemeManager.Apply(previous);
                     ThemeManager.ThemeUriProvider = ThemeManager.ThemeUri;
                 }
@@ -380,7 +391,7 @@ public sealed class GridPolishRound2Tests
                 parent.Children.Remove(list);
                 var window = new Window { Content = list, Width = 280, Height = 400, Left = 0, Top = 0 };
                 list.ItemsSource = new[] { new SelectableItem { DisplayName = LongName, IsSelected = false } };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     ClippedTextProbe.Settle(window);
@@ -427,7 +438,7 @@ public sealed class GridPolishRound2Tests
         {
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 900 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var row = (UtilizationEfficiencyRow)GridPolishProbe.Rows(typeof(UtilizationEfficiencyRow), 1, new Dictionary<string, object?>

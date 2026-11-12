@@ -48,6 +48,13 @@ using Xunit;
 /// to the leg's log.
 /// </para>
 /// <para>
+/// <b>The Application (#8433).</b> The same start-up creates the process's one <see cref="Application"/>, on this thread, before the first body,
+/// and <see cref="ApplicationThemeGuard"/> watches its merged dictionaries from then on. A body's <c>Application.Current ?? new Application { ... }</c>
+/// therefore always finds it, and a theme dictionary any body merges, even one it removes again before returning, is recorded against that body's
+/// test. A first body that created the <see cref="Application"/> itself would merge before the collection could be watched, and a merge it removed
+/// again before returning would leave nothing to see.
+/// </para>
+/// <para>
 /// <b>Where it stuck (#6216).</b> .NET Core cannot capture another thread's stack, so the timeout message carries what can be read from
 /// outside: the last step the body named with <see cref="Step"/>, how many dispatcher operations ran (a loop that never settles starts
 /// them without end; one that never finishes leaves one running; a pump waiting on a frame starts none), and the thread's state and CPU
@@ -63,7 +70,7 @@ using Xunit;
 /// </summary>
 internal static class StaTestThread
 {
-    private static readonly StaHost s_host = new();
+    private static readonly StaHost s_host = new() { CreatesApplication = true };
 
     /// <summary>How long a body (and its drain) may take before the calling test fails. Settable so a test can shorten it.</summary>
     internal static TimeSpan HangGuard { get => s_host.HangGuard; set => s_host.HangGuard = value; }
@@ -134,12 +141,66 @@ internal static class StaTestThread
     /// #6333: shows the window and lets the dispatcher reach application idle, with the wait bounded. Replaces the unbounded
     /// <c>PushFrame</c> each WPF test class copied: a frame that is never woken left the body, and with it the shared thread, waiting
     /// until the hang guard (60 s then, 180 s now) stranded every later WPF test in the process (a Lite shard lost a whole class that way).
+    /// A window that is not showing yet is shown with <see cref="ShowOffScreen"/>; one the test already showed is left where the test put it (#8289).
     /// </summary>
     internal static void Settle(Window window)
     {
-        Step("Settle: Show() on the window");
-        window.Show();
+        Step("Settle: showing the window off-screen unless it is showing already");
+        if (!window.IsVisible)
+        {
+            ShowOffScreen(window);
+        }
+
         WaitForIdle(window.Dispatcher, IdleLimit);
+    }
+
+    /// <summary>
+    /// #8289: how a test shows a window. A test window exists so WPF lays out and renders its content; no person looks at it. Shown with WPF's
+    /// defaults, each one landed on the developer's screen at the default cascade position with a taskbar button and took keyboard focus: a run of
+    /// the 89 WPF classes of Darling.Tests put 143 windows on screen (median 76 ms each) and took the foreground 144 times, so typing in the editor
+    /// during a local run was interrupted about 150 times. Here the window is placed past the right edge of the virtual screen (see
+    /// <see cref="PlaceOffScreen"/>), is not activated and gets no taskbar button. Width and Height stay the test's own, so a test that measures at a
+    /// real window size (#7478) measures the same; the test executables carry no DPI manifest, so the window's DPI does not follow its position.
+    /// <para>A <c>Popup</c> (a menu, a drop-down, a tooltip) is still moved onto a monitor by WPF, so it can flash, but it never takes focus. A test
+    /// that checks where a popup opens next to its window needs the window on a monitor: <see cref="ShowOnAMonitor"/>.</para>
+    /// <para><c>Window.Show()</c> is banned in both test projects (BannedSymbols.txt), so a new test cannot bring the windows back.</para>
+    /// </summary>
+    internal static void ShowOffScreen(Window window)
+    {
+        PlaceOffScreen(window);
+        ShowUnactivated(window);
+    }
+
+    /// <summary>
+    /// #8289: places a window past the right edge of the virtual screen, so off every monitor whatever its width (a fixed <c>Left = -4000</c> still
+    /// lands on a monitor to the left of the primary), with no taskbar button, without showing it. For a window the code under test shows itself
+    /// (a dialog's <c>ShowDialog()</c>): set its Owner and place it here first. A dialog centred on its owner is moved back onto the monitor by WPF.
+    /// </summary>
+    internal static void PlaceOffScreen(Window window)
+    {
+        window.ShowInTaskbar = false;
+        window.WindowStartupLocation = WindowStartupLocation.Manual;
+        window.Left = SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth + 100;
+        window.Top = SystemParameters.VirtualScreenTop;
+    }
+
+    /// <summary>
+    /// #8289: shows a window where the test placed it, on a monitor, without activating it and with no taskbar button. Only for a test that checks
+    /// where a popup opens beside its window: WPF moves a popup onto a monitor, so beside an off-screen window it cannot open where it would for a
+    /// person (the sidebar More menu opened left of its button, not right of it). The window flashes on the screen but never takes keyboard focus.
+    /// </summary>
+    internal static void ShowOnAMonitor(Window window)
+    {
+        window.ShowInTaskbar = false;
+        ShowUnactivated(window);
+    }
+
+    private static void ShowUnactivated(Window window)
+    {
+        window.ShowActivated = false;
+#pragma warning disable RS0030 // The one Window.Show() in test code: every test window is shown through here (#8289).
+        window.Show();
+#pragma warning restore RS0030
     }
 
     /// <summary>
@@ -229,6 +290,14 @@ internal sealed class StaHost
     /// guard of 300 ms must never have to cover it. Settable so a test can force the overrun.
     /// </summary>
     internal TimeSpan StartUpGuard { get; set; } = TimeSpan.FromSeconds(180);
+
+    /// <summary>
+    /// #8433: whether this host's start-up creates the process's <see cref="Application"/> on its own thread, ahead of the first body, so the theme
+    /// guard can watch the application's merged dictionaries before any body merges. True for the suites' shared host. False for a host a test makes
+    /// for itself: its thread is shut down when the test ends, and an <see cref="Application"/> whose dispatcher has ended would still be
+    /// <see cref="Application.Current"/> for the rest of the process, with every window the shared thread makes after that outside its window list.
+    /// </summary>
+    internal bool CreatesApplication { get; init; }
 
     /// <summary>
     /// #7600: when given, the start-up does not return until this is set, after its window has shown and closed, so a host test can make the start-up
@@ -380,6 +449,10 @@ internal sealed class StaHost
             var engineLoadedAtStart = StaThreadProbe.RenderEngineLoaded();
             _step = "(the body named no step)";
             Interlocked.Exchange(ref _stepTick, began);
+            /* #8395: a theme change inside the body is recorded against the calling test. The shared host's start-up created the Application
+               (#8433), so the hook exists before the first body; the count after the body covers a host that leaves the body to create it. */
+            var applicationExistedBefore = Application.Current is not null;
+            ApplicationThemeGuard.Observe();
             var finished = dispatcher.InvokeAsync(() => Job(body, e => error = e)).Task.Unwrap();
             if (!finished.Wait(HangGuard))
             {
@@ -396,6 +469,7 @@ internal sealed class StaHost
                     + DescribeStuckBody(opsAtStart, engineLoadedAtStart));
             }
 
+            ApplicationThemeGuard.ObserveAfterBody(applicationExistedBefore);
             error?.Throw();
             lock (_strays)
             {
@@ -703,6 +777,9 @@ internal sealed class StaHost
     /// the five stalled ones, the thread waiting in <c>wpfgfx_cor3!MilComposition_SyncFlush</c> for the render thread) and every later WPF test was fast.
     /// Showing and closing one window makes the first MediaContext, loads the engine, starts its render thread and makes the first composition round
     /// trip, so that cost is paid once per process, here, before any body, and never inside a test's hang guard. The duration goes to the leg's log.
+    /// <para>#8433: the suites' shared host also creates the process's <see cref="Application"/> here, on this thread, with the shutdown mode every
+    /// body's own <c>new Application</c> sets, and hands it to <see cref="ApplicationThemeGuard"/>, so the guard watches its merged dictionaries before
+    /// the first body can merge into them. The window shown next is the application's first and main window until it closes.</para>
     /// </summary>
     private void StartRenderEngine()
     {
@@ -711,8 +788,14 @@ internal sealed class StaHost
         Step("starting WPF's render engine: showing and closing one window before the first test body");
         try
         {
-            var window = new Window { Width = 50, Height = 50, ShowInTaskbar = false };
-            window.Show();
+            if (CreatesApplication)
+            {
+                _ = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+                ApplicationThemeGuard.Observe();
+            }
+
+            var window = new Window { Width = 50, Height = 50 };
+            StaTestThread.ShowOffScreen(window);
             window.Close();
             Console.WriteLine(
                 $"StaTestThread: WPF's render engine {(loaded ? "was already loaded, and a first window showed and closed" : "started, with a first window shown and closed,")} "

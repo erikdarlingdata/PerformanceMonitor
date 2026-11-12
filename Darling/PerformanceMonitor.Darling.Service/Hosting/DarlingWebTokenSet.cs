@@ -21,8 +21,9 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 internal sealed class DarlingWebTokenSet
 {
     /// <summary>One served named token. <see cref="Role"/> is the normalized word (<see cref="WebTokenEntry.NormalizeRole"/>), and
-    /// <see cref="CanEdit"/> is what it grants: <c>operator</c> edits, <c>reader</c> reads.</summary>
-    internal sealed record Entry(string Name, string Token, string Role)
+    /// <see cref="CanEdit"/> is what it grants: <c>operator</c> edits, <c>reader</c> reads. <see cref="AllowedTagIds"/> is a reader's
+    /// server tag grant (distinct, positive ids), or null for a reader who sees every server and for every operator.</summary>
+    internal sealed record Entry(string Name, string Token, string Role, IReadOnlyList<int>? AllowedTagIds = null)
     {
         internal bool CanEdit => string.Equals(Role, WebTokenEntry.OperatorRole, StringComparison.Ordinal);
     }
@@ -42,6 +43,9 @@ internal sealed class DarlingWebTokenSet
 
     /// <summary>True when at least one named token is served.</summary>
     internal bool HasNamed => Named.Count > 0;
+
+    /// <summary>Whether any served entry is a scoped reader (carries <c>allowedTagIds</c>).</summary>
+    internal bool HasScoped => Named.Any(entry => entry.AllowedTagIds is not null);
 
     /// <summary>
     /// The entry a presented token is, or null when it matches none. Every served token is compared, each in constant time, and the
@@ -117,7 +121,7 @@ internal sealed class DarlingWebTokenSet
             if (IsReservedName(entry.Name))
             {
                 problems.Add(label + " is named " + entry.Name + ", which is reserved: web, mcp, cli and viewer (in any case) are the names the " +
-                    "dashboard, the MCP surface, the command line and the Viewer stamp their own writes with, and invalid and unclaimed are the " +
+                    "dashboard, the MCP surface, the command line and the Viewer stamp their own writes with, and invalid, unclaimed and legacy-token are the " +
                     "mcp.tokens placeholders. A token so named would make a person's edits read as one of those. Rename the token. The token is not served.");
                 continue;
             }
@@ -150,7 +154,14 @@ internal sealed class DarlingWebTokenSet
                 continue;
             }
 
-            candidates.Add(new Entry(entry.Name!, token, role));
+            if (entry.AllowedTagIds is { } tagIds &&
+                (role != WebTokenEntry.ReaderRole || tagIds.Count == 0 || tagIds.Any(id => id <= 0)))
+            {
+                problems.Add(label + " must use the reader role and a nonempty list of positive allowedTagIds. The token is not served.");
+                continue;
+            }
+
+            candidates.Add(new Entry(entry.Name!, token, role, entry.AllowedTagIds?.Distinct().ToArray()));
         }
 
         var duplicateNames = candidates.GroupBy(c => c.Name, StringComparer.Ordinal).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet(StringComparer.Ordinal);

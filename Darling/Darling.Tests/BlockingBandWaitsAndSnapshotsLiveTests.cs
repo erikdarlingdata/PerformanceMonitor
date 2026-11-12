@@ -104,7 +104,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             /* 2 XE waits in hour A plus 3 DMV waits in hour B. The old whole window rule (any XE report in the
                window hides every DMV wait) would give 2. */
             Assert.Equal(5, card.BlockingCount);
-            Assert.Equal(5 / 24.0, card.BlockingRatePerHour);
+            /* #8572: the card publishes the rate rounded by the one rate rule: 5 / 24 is 0.21 to two places. */
+            Assert.Equal(TrendPayloads.RoundRate(5 / 24.0, 2), card.BlockingRatePerHour);
             /* The banded count is the shown count. */
             Assert.Equal(card.BlockingCount, card.ToHealthMetrics().BlockingCount);
             /* The longest wait is the longest of the CHOSEN waits: hour B's 4000 ms, not the hidden 9000 ms. */

@@ -70,7 +70,7 @@ internal static class GridColumnLayoutProbe
     internal static List<string> Shown(DataGrid grid, IList rows, Func<DataGrid, List<string>> measure)
     {
         var window = new Window { Content = grid, Width = Viewport, Height = 800, Left = 0, Top = 0 };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         try
         {
             ClippedTextProbe.Settle(window);

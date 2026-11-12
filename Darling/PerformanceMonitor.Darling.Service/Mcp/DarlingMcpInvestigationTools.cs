@@ -65,7 +65,7 @@ public sealed partial class DarlingMcpInvestigationTools
         DateTime sinceUtc, IReadOnlyCollection<int>? routeIds, int limit, CancellationToken cancellationToken);
 
     private static InvestigationRequestStore Store(NpgsqlDataSource postgres) =>
-        new(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+        new(postgres, ServiceCommandDeadlines.SerialLoopSeconds) { ReadServerIds = DarlingServerResolver.WebAllowedServerIds };
 
     [McpServerTool(Name = "list_investigation_requests"), Description(
         "Lists the investigation requests alerts opened for your agent, newest first, with state, lease and expiry. Writes " +
@@ -129,7 +129,7 @@ public sealed partial class DarlingMcpInvestigationTools
         "claims_exhausted, evidence_ready, follow_up, deadlock_digest) and answers each with its request's id, server and " +
         "family. Writes nothing. status ok or empty. Call again with the cursor it answers; claim with " +
         "claim_investigation_request. <<GUIDE>> " +
-        "A long poll (#5822): the MCP transport is stateless, so the server cannot push a notification; this call is how an " +
+        "A long poll: the MCP transport is stateless, so the server cannot push a notification; this call is how an " +
         "agent hears of a new request, and of what happens to one, without listing on a timer. It answers at once when an " +
         "event was journaled on route_ids after the cursor; otherwise it waits up to timeout_seconds (0-25, default 20; capped " +
         "at 25 so a proxy or a client's request timeout never cuts the call) for one, and at the timeout answers empty with the " +
@@ -415,7 +415,7 @@ public sealed partial class DarlingMcpInvestigationTools
             else if (DarlingAgentActionGate.IsRefusedLegacyAgentId(namedAgentNames, agent_id))
             {
                 /* The legacy token's agent_id is free text. One that is a named agent's name would put the claim, and the plan changes after it,
-                   in that agent's journal, and one that is a reserved placeholder (invalid, unclaimed) would make the claim's rows read as a
+                   in that agent's journal, and one that is a reserved placeholder (invalid, unclaimed, legacy-token) would make the claim's rows read as a
                    refusal's, so it is refused and journaled under no agent's name. */
                 await store.RecordRefusalAsync(requestId, InvestigationRules.InvalidAgentId, "claim", AgentIdIsNamedToken, null, cancellationToken);
                 return InvestigationToolCore.Status(AgentIdIsNamedToken, AgentIdIsNamedTokenMessage(agent_id));

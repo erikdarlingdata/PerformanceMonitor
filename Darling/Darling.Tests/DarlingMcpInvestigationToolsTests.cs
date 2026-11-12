@@ -122,6 +122,30 @@ public sealed class DarlingMcpInvestigationToolsTests
         Assert.Empty(off.Lines);
     }
 
+    /// <summary>#8611: the start line typed two tool names by hand and left out the rest of what the arm serves. It is built from the policy's own
+    /// sets now: every state-changing investigation tool by name, and the Level 2 action tools the arm offers by their count, so a tool added
+    /// to either set is in the line with no second edit.</summary>
+    [Fact]
+    public void Start_Served_NamesEveryToolTheArmServes_FromThePolicySet()
+    {
+        var on = new McpConfig { AllowInvestigations = true };
+        var served = DarlingMcpWritePolicy.ResolveForStart(on, Token, out var problem);
+        var logger = new CapturingTestLogger();
+
+        DarlingMcpHostService.LogInvestigationsGate(logger, on, served, problem);
+
+        var line = logger.Joined;
+        foreach (var tool in DarlingMcpWritePolicy.InvestigationTools)
+            Assert.Contains(tool, line, StringComparison.Ordinal);
+
+        var armActionTools = DarlingMcpWritePolicy.AgentActionTools.Where(t => served.Offers(t)).ToArray();
+        Assert.NotEmpty(armActionTools);
+        Assert.True(
+            armActionTools.All(t => line.Contains(t, StringComparison.Ordinal))
+            || line.Contains(armActionTools.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) + " agent action tools", StringComparison.Ordinal),
+            "the line names every action tool the arm serves, or all " + armActionTools.Length + " as a counted family: " + line);
+    }
+
     [Fact]
     public void Annotations_ClaimAndSubmit_AreNeitherReadOnlyNorDestructive_TheReadsAreReadOnly()
     {
@@ -185,8 +209,11 @@ public sealed class DarlingMcpInvestigationToolsTests
     [Fact]
     public void Instructions_NameTheInvestigationSwitch_AndTheWritesOffCondition()
     {
+        /* #8463: the parenthetical lists every tool in InvestigationTools, in ordinal order, so a tool added to the set
+           appears here without an edit to the text. */
+        var names = string.Join(", ", DarlingMcpWritePolicy.InvestigationTools.OrderBy(n => n, StringComparer.Ordinal));
         Assert.Contains(
-            "Investigation tools (claim_investigation_request, submit_investigation_report) write only investigation state and are " +
+            "Investigation tools (" + names + ") write only investigation state and are " +
             "served when darling.json sets mcp.allowInvestigations with a token and mcp.allowWrites is off.",
             DarlingMcpInstructions.Text, StringComparison.Ordinal);
     }

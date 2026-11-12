@@ -57,7 +57,39 @@ export const FAMILIES = [
 export const LIST_LIMIT = 100;
 
 /** The list's columns, from READ_FIELDS (once, for the page and for a notebook cell). claimed_by is the agent id; lease_until is when its live lease ends (the claim time itself is in the journal). */
-export const REQUEST_COLUMNS = READ_FIELDS.list_investigation_requests.table.columns;
+const REQUEST_CATALOG_COLUMNS = READ_FIELDS.list_investigation_requests.table.columns;
+
+/** #8578: the name one request's Server cell and pane heading show: the registry's display name, or server_name for a row that has none. */
+export function serverLabel(row) {
+  return (row && (row.display_name || row.server_name)) || "";
+}
+
+/** #8578: the host name a request was opened with, when it is not the name shown: for the Server cell's title and the pane. Otherwise "". */
+export function openedAsName(row) {
+  const label = serverLabel(row);
+  return row && row.server_name && row.server_name !== label ? String(row.server_name) : "";
+}
+
+/* #8578: the Server cell is one line under the stylesheet's name-cell cap (a 60 character host name made the table 1658 px wide in 978), with the
+   host name the request was opened with in its title. Sort, Copy and the CSV read the same label the cell shows. */
+const serverColumn = (c) => ({
+  ...c,
+  sortValue: serverLabel,
+  copyValue: serverLabel,
+  cellClass: () => "name-cell",
+  render: (row) => {
+    const label = serverLabel(row);
+    const host = openedAsName(row);
+    return el("span", { class: "clamp-text", title: label ? (host ? label + " (opened as " + host + ")" : label) : null, text: label || "—" });
+  },
+});
+
+/* #8578: ten columns did not fit a 1280 px window (the grid was wider than its box by a screenful, so Agent, Lease until, Reported and Route were off
+   screen). The grids that outgrow a window keep their less-read columns behind a column group: Lease until and Route sit in "Lease and route", off
+   until its toggle is pressed, and Copy and the CSV carry them either way. */
+export const LEASE_GROUP = "Lease and route";
+export const REQUEST_COLUMNS = REQUEST_CATALOG_COLUMNS.map((c) =>
+  c.key === "display_name" ? serverColumn(c) : c.key === "lease_until" || c.key === "route_id" ? { ...c, group: LEASE_GROUP } : c);
 
 /** The journal's columns, in the order the read gave them (newest first): the read's own, then the detail the page draws as text. */
 export const JOURNAL_COLUMNS = [...READ_FIELDS.get_investigation_reports.table.columns, { key: "detail_text", label: "Detail", wrap: true }];
@@ -71,6 +103,24 @@ export function valueText(v) {
   } catch {
     return String(v);
   }
+}
+
+/**
+ * The text of one evidence item. An agent sends key_numbers as a string, and the string is often JSON of its own, so printing the
+ * item as JSON shows it with a second layer of escapes ("{\"sql_cpu\":...}", "-\u003E"). A key_numbers string that parses to an
+ * object or an array is drawn as that object. One that does not parse is drawn as plain text on its own line, as typed.
+ */
+export function evidenceText(item) {
+  if (item == null || typeof item !== "object" || Array.isArray(item) || typeof item.key_numbers !== "string") return valueText(item);
+  let parsed = null;
+  try {
+    parsed = JSON.parse(item.key_numbers);
+  } catch {
+    parsed = null;
+  }
+  if (parsed !== null && typeof parsed === "object") return valueText({ ...item, key_numbers: parsed });
+  const { key_numbers: typed, ...rest } = item;
+  return valueText(rest) + "\nkey_numbers: " + typed;
 }
 
 /** When the request was claimed: the newest "claimed" event of its journal, or null when it was never claimed. */
@@ -216,7 +266,7 @@ function reportBlock(rep) {
   for (const [title, list] of evidenceLists) {
     const items = Array.isArray(list) ? list : [];
     if (items.length) {
-      parts.push(el("div", {}, [el("strong", { text: title + " (" + items.length + "): " }), ...items.map((e) => el("pre", { class: "jh-detail-message", text: valueText(e) }))]));
+      parts.push(el("div", {}, [el("strong", { text: title + " (" + items.length + "): " }), ...items.map((e) => el("pre", { class: "jh-detail-message", text: evidenceText(e) }))]));
     }
   }
   const queries = Array.isArray(rep.queries_run) ? rep.queries_run : [];
@@ -240,11 +290,14 @@ function detailPane(row, data, access, single, offNote) {
   ].join(" · ");
   const parts = [
     el("div", { class: "jh-detail-head" }, [
-      el("strong", { text: "Request on " + (row.server_name || "?") + " (" + (row.family || "?") + ")" }),
+      el("strong", { class: "jh-detail-title", tabindex: "-1", text: "Request on " + (serverLabel(row) || "?") + " (" + (row.family || "?") + ")" }),
       single ? null : el("button", { type: "button", class: "jh-detail-close", text: "Close", onClick: () => { choices.requestId = null; closeDraft = null; mount(slot, []); } }),
     ].filter(Boolean)),
     el("div", { class: "muted", text: facts }),
   ];
+  /* #8578: the name the request was opened with, when it is not the name the heading shows (the Server cell keeps it in its title). */
+  const opened = openedAsName(row);
+  if (opened) parts.push(el("div", { class: "muted", text: "Opened as " + opened }));
 
   const closer = closeForm(row, access, offNote);
   if (closer) parts.push(closer);
@@ -271,7 +324,16 @@ function detailPane(row, data, access, single, offNote) {
 let slot = null;
 let reloadList = null;
 
-async function loadDetail(row) {
+/* #8578: a picked request's pane sits under a list that can be most of the window tall, so a pick scrolled nothing into view and the pane
+   appeared below the fold. After a pick the pane's heading is scrolled to and takes the focus; the poll's rebuild of an open pane does not. */
+function revealPane() {
+  const heading = slot && typeof slot.querySelector === "function" ? slot.querySelector(".jh-detail-title") : null;
+  if (!heading) return;
+  heading.focus({ preventScroll: true });
+  if (typeof heading.scrollIntoView === "function") heading.scrollIntoView({ block: "start" });
+}
+
+async function loadDetail(row, reveal = false) {
   const ticket = ++detailSeq;
   if (detailAbort) detailAbort.abort();
   const signal = (detailAbort = new AbortController()).signal;
@@ -284,6 +346,7 @@ async function loadDetail(row) {
   try {
     mount(slot, detailPane(row, res.data || {}, writeAccess(session), false, closeOffNote(session)));
     focusCloseReason();
+    if (reveal) revealPane();
   } catch (e) {
     mount(slot, [errorStrip("Could not draw this request: " + (e && e.message ? e.message : String(e)))]);
   }
@@ -417,13 +480,13 @@ export function renderInvestigations(main, requestId) {
       makeActivatable(tr, () => {
         if (closeDraft && String(closeDraft.requestId) !== String(r.request_id)) closeDraft = null;
         choices.requestId = r.request_id;
-        loadDetail(r);
+        loadDetail(r, true);
       });
     };
     const parts = [];
     if (data.truncated) parts.push(noticeStrip("Showing the newest " + rows.length + " requests; older ones are not listed. Narrow the state or family."));
     parts.push(el("div", { class: "muted", text: rows.length + " requests shown" }));
-    parts.push(VIZ.table(data, { id: "investigations", rowsKey: "requests", columns: REQUEST_COLUMNS, onRow, emptyText: "No investigation requests." }));
+    parts.push(VIZ.table(data, { id: "investigations", rowsKey: "requests", columns: REQUEST_COLUMNS, groups: [LEASE_GROUP], defaultGroups: [], onRow, emptyText: "No investigation requests." }));
     mount(body, parts);
     const keep = choices.requestId ? rows.find((r) => String(r.request_id) === String(choices.requestId)) : null;
     if (keep) loadDetail(keep);

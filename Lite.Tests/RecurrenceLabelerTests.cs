@@ -61,7 +61,7 @@ public class RecurrenceLabelerTests
     /// <summary>A prior RUNNING_JOBS-rooted row at an arbitrary local bucket whose frozen headline names <paramref name="jobName"/>.</summary>
     private static PriorOccurrence JobRow(DateTime localBucket, string? jobName) =>
         new("job-hash", RecurrenceLabeler.JobKey, localBucket, FactAdvice.SerializeForStoryText(new AdviceBlock(
-            jobName is null ? "2 Agent jobs running well past normal — likely stuck, not busy" : $"Agent job `{jobName}` running well past normal — likely stuck, not busy",
+            jobName is null ? "2 Agent jobs running well past normal, likely stuck, not busy" : $"Agent job `{jobName}` running well past normal, likely stuck, not busy",
             "job investigation.", "job remediation.")));
 
     private static PriorOccurrenceRead Read(params PriorOccurrence[] rows) => new(Offset, ReferenceLocal, rows);

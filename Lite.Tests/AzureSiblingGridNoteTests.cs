@@ -109,12 +109,12 @@ VALUES ($1, $2, $3, 'GridSrv', $4, $5, $6, 'ROWS', $7, $8, $9, $10)";
         var sibling = Row(null, AzureSiblingDatabaseSize.FileName);
 
         var withSibling = DatabaseSizeRow.Caption([file, sibling], scope);
-        Assert.Equal("2 file(s). " + AzureSiblingDatabaseSize.GridCaption, withSibling);
+        Assert.Equal("2 files. " + AzureSiblingDatabaseSize.GridCaption, withSibling);
         /* The scope note says a connection sees one database; a grid with a sibling row shows more, so it is left out. */
         Assert.DoesNotContain("scope words", withSibling, StringComparison.Ordinal);
 
-        Assert.Equal("1 file(s)" + scope, DatabaseSizeRow.Caption([file], scope));
-        Assert.Equal("1 file(s)", DatabaseSizeRow.Caption([file], ""));
+        Assert.Equal("1 file" + scope, DatabaseSizeRow.Caption([file], scope));
+        Assert.Equal("1 file", DatabaseSizeRow.Caption([file], ""));
         Assert.Equal("", DatabaseSizeRow.Caption([], scope));
     }
 

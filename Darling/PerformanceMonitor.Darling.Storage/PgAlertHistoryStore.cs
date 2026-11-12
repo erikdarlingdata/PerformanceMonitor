@@ -362,7 +362,8 @@ LIMIT " + StandingRowCap.ToString(CultureInfo.InvariantCulture), connection) { C
     /// <summary>
     /// #5825: an open alert's delivered fire rows, so its clear can go where the fire went after a service restart emptied
     /// the deliverer's memory. "Open" is after the alert's last resolution row (a resolution row is stored under its title),
-    /// so an episode that already cleared is never cleared twice. Delivered is <c>alert_sent</c>, not muted, not a digest;
+    /// under any title the alert closes with (<see cref="AlertClosingTitles.For"/>: Capture Down closes as "Capture Restored" or
+    /// "Capture Cleared"), so an episode that already cleared is never cleared twice. Delivered is <c>alert_sent</c>, not muted, not a digest;
     /// the caller reads each row's <c>Route</c> record for the channels that delivered. The first-fire time comes from
     /// every row in the episode, before the row cap. Seeks <c>idx_config_alert_log_time</c> (server_id, metric_name,
     /// alert_time) for both halves.
@@ -386,13 +387,13 @@ AND   metric_name = $2
 AND   alert_sent
 AND   NOT muted" + DigestExclusionFilter + @"
 AND   alert_time > COALESCE(
-          (SELECT MAX(r.alert_time) FROM config_alert_log AS r WHERE r.server_id = $1 AND r.metric_name = $3),
+          (SELECT MAX(r.alert_time) FROM config_alert_log AS r WHERE r.server_id = $1 AND r.metric_name = ANY($3)),
           '-infinity'::timestamp)
 ORDER BY alert_time DESC
 LIMIT $4", connection) { CommandTimeout = _commandTimeoutSeconds };
         command.Parameters.AddWithValue(sid.Value);
         command.Parameters.AddWithValue(metricName);
-        command.Parameters.AddWithValue(resolutionTitle);
+        command.Parameters.AddWithValue(AlertClosingTitles.For(metricName, resolutionTitle));
         command.Parameters.AddWithValue(OpenDeliveredFireRowCap);
         var rows = new System.Collections.Generic.List<DeliveredFireRow>();
         DateTime? firstFired = null;

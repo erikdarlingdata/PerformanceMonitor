@@ -66,7 +66,8 @@ internal sealed class SystemHealthChartRenderer
         double max = 0;
         if (data.Count == 0)
         {
-            AddNoDataText(chart, xMin, xMax);
+            _chartHelper.RefreshEmptyChart(chart, label, label); // #8644: the one empty look, not a sentence over default axes
+            return;
         }
         else
         {
@@ -110,18 +111,24 @@ internal sealed class SystemHealthChartRenderer
         double max = 0;
         var typeCount = 0;
         var spinlockTypes = new List<string>();
-        if (data.Count == 0)
+        /* #8307: a record with zero backoffs, or one that names no spinlock, is not a sick spinlock; a window of only those is drawn as
+           an empty one, not as a flat zero series with a legend entry for it. A record with no count still plots as 1. */
+        var sick = data
+            .Where(d => (d.SpinlockBackoffs ?? 1) > 0 && !string.IsNullOrEmpty(d.SickSpinlockType) && !string.Equals(d.SickSpinlockType, "none", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (sick.Count == 0)
         {
-            AddNoDataText(chart, xMin, xMax);
+            _chartHelper.RefreshEmptyChart(chart, "Sick Spinlocks", "Spinlock Backoffs"); // #8644: the one empty look, not a sentence over default axes
+            return;
         }
         else
         {
-            (spinlockTypes, typeCount) = TopSickSpinlockTypes(data, SickSpinlockSeriesLimit);
+            (spinlockTypes, typeCount) = TopSickSpinlockTypes(sick, SickSpinlockSeriesLimit);
 
             int colorIdx = 0;
             foreach (var spinlockType in spinlockTypes)
             {
-                var typeData = data.Where(d => d.SickSpinlockType == spinlockType).ToList();
+                var typeData = sick.Where(d => d.SickSpinlockType == spinlockType).ToList();
                 if (typeData.Count == 0)
                     continue;
 
@@ -148,7 +155,15 @@ internal sealed class SystemHealthChartRenderer
         chart.Plot.Axes.SetLimitsX(xMin, xMax);
         chart.Plot.YLabel(SickSpinlocksYLabel(spinlockTypes.Count, typeCount));
         ChartStyle.UseCountAxis(chart); // #7606: a count, whole-number ticks
-        ChartStyle.SetChartYLimitsWithLegendPadding(chart, 0, max);
+        if (sick.Count == 0)
+        {
+            chart.Plot.Axes.SetLimitsY(0, 1); // the no-data sentence sits at 0.5
+        }
+        else
+        {
+            ChartStyle.SetChartYLimitsWithLegendPadding(chart, 0, max);
+        }
+
         chart.Refresh();
     }
 
@@ -175,7 +190,7 @@ internal sealed class SystemHealthChartRenderer
 
     /// <summary>
     /// SQL CPU vs System CPU: two percent series over event time on a fixed 0-100 axis with a bottom legend
-    /// (System CPU on the cycling accent, SQL CPU on the shared SqlCpu identity color).
+    /// (System CPU on the shared TotalCpu identity color and SQL CPU on SqlCpu, the pair the CPU chart draws, so the two never share a hue).
     /// </summary>
     internal void RenderCpuComparisonChart(
         ScottPlot.WPF.WpfPlot chart, ChartHoverHelper? hover, List<SystemHealthRecord> data, double xMin, double xMax)
@@ -186,7 +201,8 @@ internal sealed class SystemHealthChartRenderer
 
         if (data.Count == 0)
         {
-            AddNoDataText(chart, xMin, xMax);
+            _chartHelper.RefreshEmptyChart(chart, "CPU Comparison", "CPU %"); // #8644: the one empty look, not a sentence over default axes
+            return;
         }
         else
         {
@@ -198,7 +214,7 @@ internal sealed class SystemHealthChartRenderer
             if (systemCpu.Any(v => !double.IsNaN(v)))
             {
                 var sysScatter = chart.Plot.Add.TimeSeries(xs, systemCpu);
-                sysScatter.Color = ScottPlot.Color.FromHex(ChartPalette.CyclingColor(0));
+                sysScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("TotalCpu"));
                 ChartStyle.StyleScatter(sysScatter);
                 sysScatter.LegendText = "System CPU %";
                 hover?.Add(sysScatter, "System CPU %");
@@ -224,14 +240,4 @@ internal sealed class SystemHealthChartRenderer
     /// <summary>A CPU reading per snapshot as plot values: a missing reading is NaN (a gap), never 0 (#7416 item 1).</summary>
     internal static double[] CpuSeriesValues(IEnumerable<long?> readings) =>
         readings.Select(v => v.HasValue ? (double)v.Value : double.NaN).ToArray();
-
-    /// <summary>Centered "No data for selected time range" annotation for an empty counter chart.</summary>
-    private static void AddNoDataText(ScottPlot.WPF.WpfPlot chart, double xMin, double xMax)
-    {
-        double xCenter = xMin + (xMax - xMin) / 2;
-        var text = chart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
-        text.LabelFontSize = 14;
-        text.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
-        text.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
-    }
 }

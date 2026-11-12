@@ -103,7 +103,7 @@ public partial class QueryStoreHistoryWindow : Window
                 var zone = _displayZone();
                 var first = ServerTimeHelper.FormatInstant(_historyData.First().CollectionTime, zone, "MM/dd HH:mm");
                 var last = ServerTimeHelper.FormatInstant(_historyData.Last().CollectionTime, zone, "MM/dd HH:mm");
-                SummaryText.Text = $"{_historyData.Count} samples from {first} to {last} | " +
+                SummaryText.Text = $"{PerformanceMonitor.Ui.HistorySampleSummary.Span(_historyData.Count, first, last)} | " +
                                    $"Total Executions: {totalExec:N0} | " +
                                    (planCount > 1 ? $"{planCount} different plans" : "Single plan");
             }
@@ -264,7 +264,7 @@ public partial class QueryStoreHistoryWindow : Window
         _filterPopupContent.FilterCleared += FilterPopup_FilterCleared;
 
         _filterManager.Filters.TryGetValue(columnName, out var existingFilter);
-        _filterPopupContent.Initialize(columnName, existingFilter);
+        _filterPopupContent.Initialize(columnName, existingFilter, columnHeader: ColumnFilterPopup.ColumnHeaderFor(button));
 
         _filterPopup!.PlacementTarget = button;
         _filterPopup.IsOpen = true;

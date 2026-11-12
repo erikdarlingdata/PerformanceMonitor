@@ -214,8 +214,8 @@ public sealed class PgTargetBufferDrillDownTests
     internal const string ExpectedCapturedSentence =
         "Composition: the pool is 94 % full (15,400 of 16,384 buffers, 128 MB); `orders_idx` (index, appdb) alone holds 30.5 %; " +
         "of the resident buffers, indexes hold 37.6 %, heaps 48.9 %, TOAST 7.5 %, other databases and shared catalogs 6 %; " +
-        "10.1 % of the pool is dirty; 33.8 % of resident buffers sit in relations whose average usage count is at or below 1 — the clock sweep evicts those first. " +
-        "Captured at 2026-09-19 10:30:00 UTC — a level, not the window's counters; pg_buffer_usage collects hourly. " +
+        "10.1 % of the pool is dirty; 33.8 % of resident buffers sit in relations whose average usage count is at or below 1: the clock sweep evicts those first. " +
+        "Captured at 2026-09-19 10:30:00 UTC: a level, not the window's counters; pg_buffer_usage collects hourly. " +
         "The drill-down carries the top 10 of 20 resident relations; get_pg_buffer_usage lists the rest.";
 
     [Fact]
@@ -254,12 +254,12 @@ public sealed class PgTargetBufferDrillDownTests
             PgTargetAdvice.BufferCompositionSentence(none with { LastCaptureHoursBeforeWindow = -2 }));
 
         var available = PgTargetAdvice.BufferCompositionSentence(Empty(PgTargetBufferCompositionStatus.ExtensionAvailable));
-        Assert.StartsWith("Composition: what the cache holds cannot be shown yet — pg_buffercache is offered by this server but not installed", available, StringComparison.Ordinal);
+        Assert.StartsWith("Composition: what the cache holds cannot be shown yet: pg_buffercache is offered by this server but not installed", available, StringComparison.Ordinal);
         Assert.Contains("one CREATE EXTENSION pg_buffercache away", available, StringComparison.Ordinal);
         Assert.Contains("pg_extension_availability", available, StringComparison.Ordinal);
 
         var absent = PgTargetAdvice.BufferCompositionSentence(Empty(PgTargetBufferCompositionStatus.ExtensionAbsent));
-        Assert.StartsWith("Composition: what the cache holds cannot be shown — pg_buffercache is not offered by this server", absent, StringComparison.Ordinal);
+        Assert.StartsWith("Composition: what the cache holds cannot be shown: pg_buffercache is not offered by this server", absent, StringComparison.Ordinal);
         Assert.Contains("the pressure counters above stand on their own", absent, StringComparison.Ordinal);
         Assert.DoesNotContain("CREATE EXTENSION pg_buffercache away", absent, StringComparison.Ordinal);
 
@@ -309,7 +309,7 @@ public sealed class PgTargetBufferDrillDownTests
             HitRatioSuppressed = true,
         };
         var foldedDominant = PgTargetAdvice.WithBufferComposition(block, dominant);
-        Assert.Contains("`orders_idx` (index, appdb) holds 54.9 % of the pool on its own — before the knob, look at what reads it (get_pg_top_queries", foldedDominant.Remediation, StringComparison.Ordinal);
+        Assert.Contains("`orders_idx` (index, appdb) holds 54.9 % of the pool on its own, before the knob, look at what reads it (get_pg_top_queries", foldedDominant.Remediation, StringComparison.Ordinal);
         Assert.Contains("62 % of resident buffers sit in relations whose average usage count is at or below 1", foldedDominant.Remediation, StringComparison.Ordinal);
         Assert.Contains("raising it buys little here and still pays the counter-objective named above", foldedDominant.Remediation, StringComparison.Ordinal);
         Assert.Contains("The pool is only 75 % full: shared_buffers is not the constraint while it has room", foldedDominant.Remediation, StringComparison.Ordinal);

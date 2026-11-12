@@ -304,13 +304,13 @@ public sealed class DarlingMcpHostService : BackgroundService
                     break;
 
                 case McpSupervisorAction.Stop:
-                    _logger.LogInformation("MCP server disabled via the control plane — stopping (no restart needed)");
+                    _logger.LogInformation("MCP server disabled via the control plane: stopping (no restart needed)");
                     await StopServerAsync(stoppingToken);
                     break;
 
                 case McpSupervisorAction.Restart:
                     _logger.LogInformation(
-                        "MCP port changed via the control plane ({Old} -> {New}) — rebinding", _runningPort, toggle.Port);
+                        "MCP port changed via the control plane ({Old} -> {New}): rebinding", _runningPort, toggle.Port);
                     await StopServerAsync(stoppingToken);
                     if (!await TryStartServerAsync(config, toggle, stoppingToken))
                     {
@@ -497,7 +497,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                     else if (floor.Problem is not null)
                     {
                         _logger.LogCritical(
-                            "MCP network token (mcp.network.token / mcp.network.encryptedToken) {Problem} — refusing to expose; binding loopback-only.",
+                            "MCP network token (mcp.network.token / mcp.network.encryptedToken) {Problem}: refusing to expose; binding loopback-only.",
                             floor.Problem);
                         networkMode = floor.NetworkMode;
                         bearerToken = token!;
@@ -508,7 +508,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                         if (usedPlaintext)
                         {
                             _logger.LogWarning(
-                                "mcp.network.token is set in plaintext (dev convenience) — prefer mcp.network.encryptedToken " +
+                                "mcp.network.token is set in plaintext (dev convenience): prefer mcp.network.encryptedToken " +
                                 "(produced by --encrypt-password). This token gates ALL MCP network access.");
                         }
                     }
@@ -611,53 +611,13 @@ public sealed class DarlingMcpHostService : BackgroundService
             {
                 /* The named-token lines further down say what is served. */
             }
-            else if (config.Mcp.AllowWrites)
-            {
-                if (!writes.Writes && writeTokenProblem is not null)
-                {
-                    _logger.LogCritical(
-                        "MCP bearer token (mcp.network.token / mcp.network.encryptedToken) {Problem} — the MCP write tools stay off.",
-                        writeTokenProblem);
-                }
-                else if (!writes.Writes)
-                {
-                    _logger.LogCritical(
-                        "{Setting} is on but no usable bearer token is available — the MCP write tools stay off. Set mcp.network.encryptedToken " +
-                        "(via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters; every MCP request, loopback " +
-                        "included, must then present it.",
-                        DarlingMcpWritePolicy.WritesSetting,
-                        DarlingHostBinding.MinimumTokenLength);
-                }
-                else
-                {
-                    _logger.LogWarning(
-                        "MCP write tools are ON ({Setting}; add_servers/edit_server/remove_server {ServerAdmin}) — every MCP request, " +
-                        "loopback included, must present the bearer token.",
-                        DarlingMcpWritePolicy.WritesSetting,
-                        writes.ServerAdmin ? "on via " + DarlingMcpWritePolicy.ServerAdminSetting : "off");
-
-                    if (writes.ServerAdmin && config.Mcp.AllowWindowsAuthOverUnverifiedTls)
-                    {
-                        _logger.LogWarning(
-                            "{Setting} is on: add_servers accepts Windows authentication with trust_server_certificate or " +
-                            "optional encryption, so a caller can point this service's own account at a server it cannot verify.",
-                            DarlingMcpAddServersPolicy.UnverifiedWindowsAuthSetting);
-                    }
-                }
-            }
             else
             {
-                /* One line at every start, because an install that used the write tools before the switch
-                   existed loses them on upgrade until the operator turns it on. */
-                _logger.LogInformation(
-                    "MCP write tools are off (the default): tools that change monitoring configuration are not served. " +
-                    "To serve them set {Setting}=true in darling.json plus a bearer token (mcp.network.encryptedToken or " +
-                    "mcp.network.token); add_servers/edit_server/remove_server also need {ServerAdminSetting}=true.",
-                    DarlingMcpWritePolicy.WritesSetting,
-                    DarlingMcpWritePolicy.ServerAdminSetting);
+                LogWritesGate(_logger, config.Mcp, writes, writeTokenProblem);
             }
 
-            /* #5632 Phase A, ruling R2: the investigation tools (claim_investigation_request, submit_investigation_report)
+            /* #5632 Phase A, ruling R2: the investigation tools (DarlingMcpWritePolicy.InvestigationTools:
+               claim_investigation_request, post_investigation_message and submit_investigation_report)
                write only investigation state and need the same token gate as the writes, but never WITH the writes: one
                token cannot tell an agent from a person. Both settings on: they stay off and this one Critical line says
                why. The token gate (requireTokenWhenLoopbackOnly) and the wrong-token throttle (DarlingSignInThrottle) in
@@ -698,7 +658,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                bail here reports nothing about the firewall. */
             if (await PortUtilityService.IsTcpPortListeningAsync(effectivePort, primaryBind, stoppingToken))
             {
-                _logger.LogError("Port {Port} is already in use — MCP server not started this attempt; will retry", effectivePort);
+                _logger.LogError("Port {Port} is already in use: MCP server not started this attempt; will retry", effectivePort);
                 await DisposeFailedStartAsync();
                 return false;
             }
@@ -847,7 +807,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             if (_registryState.Read() is null)
             {
                 _logger.LogDebug(
-                    "MCP starting before the worker's first registry publish — live plan fetch resolves from darling.json until it arrives (self-healing; store-registered servers reach the resolver on the worker's next reload).");
+                    "MCP starting before the worker's first registry publish: live plan fetch resolves from darling.json until it arrives (self-healing; store-registered servers reach the resolver on the worker's next reload).");
             }
 
             var planFetcher = new PgPlanFetcher(
@@ -920,7 +880,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             else if (!declaredPeers.IsEmpty)
             {
                 _logger.LogInformation(
-                    "MCP peer disclosure active: {PeerCount} declared peer store(s){Coverage}. Disclosure only — this service never contacts a peer.",
+                    "MCP peer disclosure active: {PeerCount} declared peer store(s){Coverage}. Disclosure only: this service never contacts a peer.",
                     declaredPeers.Peers.Count,
                     declaredPeers.ThisStoreCovers.Length > 0 ? $"; this store covers {declaredPeers.ThisStoreCovers}" : "");
             }
@@ -1050,6 +1010,65 @@ public sealed class DarlingMcpHostService : BackgroundService
     }
 
     /// <summary>
+    /// The start's log lines for the write tools, one decision for the start and the tests. <c>mcp.allowWrites</c> on with a usable token:
+    /// one Warning that every request must present the token, naming the server admin tools (built from
+    /// <see cref="DarlingMcpWritePolicy.ServerAdminTools"/>, so one added to the set is named without an edit here) and whether they are on.
+    /// On with no usable token: a Critical line. Off: one Information line saying what to set.
+    /// </summary>
+    internal static void LogWritesGate(
+        ILogger logger, McpConfig mcp, DarlingMcpWritePolicy.Effective writes, string? writeTokenProblem)
+    {
+        if (mcp.AllowWrites)
+        {
+            if (!writes.Writes && writeTokenProblem is not null)
+            {
+                logger.LogCritical(
+                    "MCP bearer token (mcp.network.token / mcp.network.encryptedToken) {Problem}: the MCP write tools stay off.",
+                    writeTokenProblem);
+            }
+            else if (!writes.Writes)
+            {
+                logger.LogCritical(
+                    "{Setting} is on but no usable bearer token is available: the MCP write tools stay off. Set mcp.network.encryptedToken " +
+                    "(via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters with at least {MinimumDistinct} different ones; " +
+                    "every MCP request, loopback included, must then present it.",
+                    DarlingMcpWritePolicy.WritesSetting,
+                    DarlingHostBinding.MinimumTokenLength,
+                    DarlingHostBinding.MinimumDistinctTokenCharacters);
+            }
+            else
+            {
+                logger.LogWarning(
+                    "MCP write tools are ON ({Setting}; {ServerAdminTools} {ServerAdmin}): every MCP request, " +
+                    "loopback included, must present the bearer token.",
+                    DarlingMcpWritePolicy.WritesSetting,
+                    DarlingMcpWritePolicy.ServerAdminToolList,
+                    writes.ServerAdmin ? "on via " + DarlingMcpWritePolicy.ServerAdminSetting : "off");
+
+                if (writes.ServerAdmin && mcp.AllowWindowsAuthOverUnverifiedTls)
+                {
+                    logger.LogWarning(
+                        "{Setting} is on: add_servers accepts Windows authentication with trust_server_certificate or " +
+                        "optional encryption, so a caller can point this service's own account at a server it cannot verify.",
+                        DarlingMcpAddServersPolicy.UnverifiedWindowsAuthSetting);
+                }
+            }
+        }
+        else
+        {
+            /* One line at every start, because an install that used the write tools before the switch
+               existed loses them on upgrade until the operator turns it on. */
+            logger.LogInformation(
+                "MCP write tools are off (the default): tools that change monitoring configuration are not served. " +
+                "To serve them set {Setting}=true in darling.json plus a bearer token (mcp.network.encryptedToken or " +
+                "mcp.network.token); {ServerAdminTools} also need {ServerAdminSetting}=true.",
+                DarlingMcpWritePolicy.WritesSetting,
+                DarlingMcpWritePolicy.ServerAdminToolList,
+                DarlingMcpWritePolicy.ServerAdminSetting);
+        }
+    }
+
+    /// <summary>
     /// The start's log lines for the investigation tools (#5632 Phase A, ruling R2), one decision for the start and the
     /// tests. Both <c>mcp.allowInvestigations</c> and <c>mcp.allowWrites</c> on: exactly one Critical line,
     /// <see cref="DarlingMcpWritePolicy.InvestigationConflictLine"/>, and the tools stay off. Investigations on with no
@@ -1069,19 +1088,34 @@ public sealed class DarlingMcpHostService : BackgroundService
             {
                 logger.LogCritical(
                     "{Setting} is on but no usable bearer token is available{Problem}: the investigation tools stay off. Set " +
-                    "mcp.network.encryptedToken (via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters.",
+                    "mcp.network.encryptedToken (via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters with at least {MinimumDistinct} different ones.",
                     DarlingMcpWritePolicy.InvestigationsSetting,
                     tokenProblem is null ? "" : " (the token " + tokenProblem + ")",
-                    DarlingHostBinding.MinimumTokenLength);
+                    DarlingHostBinding.MinimumTokenLength,
+                    DarlingHostBinding.MinimumDistinctTokenCharacters);
             }
             else
             {
                 logger.LogWarning(
-                    "MCP investigation tools are ON ({Setting}): claim_investigation_request and submit_investigation_report " +
-                    "write investigation state; every MCP request, loopback included, must present the bearer token.",
-                    DarlingMcpWritePolicy.InvestigationsSetting);
+                    "MCP investigation tools are ON ({Setting}): {Tools} write investigation state; every MCP request, loopback included, " +
+                    "must present the bearer token.",
+                    DarlingMcpWritePolicy.InvestigationsSetting,
+                    DescribeInvestigationArmTools(served));
             }
         }
+    }
+
+    /// <summary>
+    /// What the start line says the investigations arm serves (#8611), built from the policy's own sets so it cannot drift from the gate: every
+    /// state-changing investigation tool by name (<see cref="DarlingMcpWritePolicy.InvestigationTools"/>), then the Level 2 agent action tools the
+    /// arm offers (<see cref="DarlingMcpWritePolicy.AgentActionTools"/> through <c>served.Offers</c>) as a counted family, not 16 names. The four
+    /// mute rule tools are among those action tools: the arm also serves them without an agent_action, which the line says in a clause.
+    /// </summary>
+    internal static string DescribeInvestigationArmTools(DarlingMcpWritePolicy.Effective served)
+    {
+        var actionCount = DarlingMcpWritePolicy.AgentActionTools.Count(served.Offers);
+        return string.Join(", ", DarlingMcpWritePolicy.InvestigationTools.OrderBy(t => t, StringComparer.Ordinal))
+            + $", and {actionCount} agent action tools (each with an agent_action; the mute rule tools also work without one)";
     }
 
     /// <summary>
@@ -1544,6 +1578,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpFindDatabaseTools>()
             /* #7610: find_queries_by_text, which statements on one server contain a piece of text (Query Store text and the raw tier's plan-cache text). */
             .WithGeminiCompatibleTools<DarlingMcpFindQueriesByTextTools>()
+            /* #7643: get_object_definition, get_schema_changes and find_schema_objects, the table and view definitions the schema_objects collector keeps and what changed in them. */
+            .WithGeminiCompatibleTools<DarlingMcpSchemaTools>()
             /* #7609: get_query_fleet_summary, one statement's cost on every server. */
             .WithGeminiCompatibleTools<DarlingMcpQueryFleetSummaryTools>()
             /* #5983: get_resource_use_by_tag, resource use rolled up by query tag (wave 2 of #5971). */
@@ -2140,7 +2176,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             if (usedPlaintext)
             {
                 logger.LogWarning(
-                    "mcp.network.token is set in plaintext (dev convenience) — prefer mcp.network.encryptedToken " +
+                    "mcp.network.token is set in plaintext (dev convenience): prefer mcp.network.encryptedToken " +
                     "(produced by --encrypt-password). This token gates ALL MCP access, loopback included.");
             }
 
@@ -2359,7 +2395,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                             totalHold
                                 ? $"requests are held for {seconds} more second(s): {DarlingSignInThrottle.GlobalMaxAttempts} wrong bearer tokens arrived within the hour from several addresses, so no token is compared from an address that has not presented a correct one recently; restarting the service clears it, and the failing client is in this log with its 401 lines (fix its token or take it out of allowFrom)"
                                 : $"requests from this source are held for {seconds} more second(s) after repeated wrong bearer tokens; no token is compared during the wait, and restarting the service clears it",
-                            now);
+                            now,
+                            state: totalHold ? "held-total" : "held-source");
                         context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
                         context.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
                         context.Response.ContentType = "text/plain; charset=utf-8";
@@ -2410,11 +2447,13 @@ public sealed class DarlingMcpHostService : BackgroundService
                        testing only it reported "nothing was presented" about a client that presented
                        a malformed header - collapsing precisely the ambiguity this exists to resolve.
                        None of the three says anything about what the token IS. */
+                    var refusal = DescribeBearerRefusal(authorization);
                     refusals.Report(
                         _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized,
                         remote,
-                        DescribeBearerRefusal(authorization),
-                        now);
+                        refusal,
+                        now,
+                        state: refusal);
                     context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                     context.Response.Headers.WWWAuthenticate = "Bearer";
                     return;
@@ -2647,21 +2686,21 @@ public sealed class DarlingMcpHostService : BackgroundService
         {
             case McpBindReason.ListenInvalid:
                 _logger.Log(level.Value,
-                    "MCP network exposure requested but mcp.network.listen '{Listen}' is not a valid IP address — " +
+                    "MCP network exposure requested but mcp.network.listen '{Listen}' is not a valid IP address: " +
                     "refusing to expose; binding loopback-only. Use a specific IP (e.g. 192.168.1.205), or 0.0.0.0 for all interfaces.",
                     mcp.Network?.Listen);
                 break;
 
             case McpBindReason.TokenMissing:
                 _logger.Log(level.Value,
-                    "MCP network exposure requested (mcp.network.listen is non-loopback) but no bearer token is set — " +
+                    "MCP network exposure requested (mcp.network.listen is non-loopback) but no bearer token is set: " +
                     "refusing to expose; binding loopback-only. Set mcp.network.encryptedToken (via --encrypt-password) or mcp.network.token.");
                 break;
 
             case McpBindReason.AllowFromInvalid:
                 _logger.Log(level.Value,
                     "MCP network exposure requested but mcp.network.allowFrom '{AllowFrom}' is not a valid CIDR list or an " +
-                    "entry's address family does not match mcp.network.listen — refusing to expose; binding loopback-only. " +
+                    "entry's address family does not match mcp.network.listen: refusing to expose; binding loopback-only. " +
                     "Use one CIDR (e.g. 192.168.1.0/24) or several, separated by commas " +
                     "(e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 " +
                     "address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same " +
@@ -2738,7 +2777,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
         }
 
-        _logger.LogError("MCP server not started: the managed Postgres mcp-role credential never appeared — see the worker log for the bootstrap failure");
+        _logger.LogError("MCP server not started: the managed Postgres mcp-role credential never appeared, see the worker log for the bootstrap failure");
         return null;
     }
 

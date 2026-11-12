@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -77,9 +78,9 @@ public static class BenefitScorer
 
             var msg = new System.Text.StringBuilder();
             msg.Append(wait.WaitType);
-            msg.Append(" Observed ").Append(wait.WaitTimeMs.ToString("N0")).Append(" ms");
+            msg.Append(" Observed ").Append(wait.WaitTimeMs.ToString("N0", CultureInfo.InvariantCulture)).Append(" ms");
             if (wait.WaitCount > 0)
-                msg.Append(" across ").Append(wait.WaitCount.ToString("N0")).Append(" wait").Append(wait.WaitCount == 1 ? "" : "s");
+                msg.Append(" across ").Append(wait.WaitCount.ToString("N0", CultureInfo.InvariantCulture)).Append(" wait").Append(wait.WaitCount == 1 ? "" : "s");
             msg.Append('.');
 
             if (WaitStatsConfig.ShowAverageWaitTime(wait.WaitType) && wait.WaitCount > 0)
@@ -114,10 +115,10 @@ public static class BenefitScorer
 
     private static string FormatWaitLatency(double ms)
     {
-        if (ms >= 1000) return $"{ms / 1000:N2} s";
-        if (ms >= 10) return $"{ms:N0} ms";
-        if (ms >= 1) return $"{ms:N1} ms";
-        return $"{ms * 1000:N0} \u00b5s";
+        if (ms >= 1000) return string.Create(CultureInfo.InvariantCulture, $"{ms / 1000:N2} s");
+        if (ms >= 10) return string.Create(CultureInfo.InvariantCulture, $"{ms:N0} ms");
+        if (ms >= 1) return string.Create(CultureInfo.InvariantCulture, $"{ms:N1} ms");
+        return string.Create(CultureInfo.InvariantCulture, $"{ms * 1000:N0} \u00b5s");
     }
 
     private static void ScoreStatementWarnings(PlanStatement stmt)

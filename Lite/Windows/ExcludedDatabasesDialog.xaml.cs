@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using System.Net.Sockets;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
@@ -42,6 +43,12 @@ public partial class ExcludedDatabasesDialog : Window
 
     public bool ExclusionsModified { get; private set; }
 
+    /// <summary>
+    /// Reads the server's user databases. Tests set a reader that fails, so the dialog's own wording of a failed load can be
+    /// checked without a server to fail against.
+    /// </summary>
+    internal Func<Task<List<string>>>? DatabaseListReader { get; set; }
+
     public ExcludedDatabasesDialog(ServerManager serverManager, ServerConnection server, bool xeSessionsMode = false)
     {
         InitializeComponent();
@@ -51,7 +58,7 @@ public partial class ExcludedDatabasesDialog : Window
         if (xeSessionsMode)
         {
             Title = "Databases for Extended Events Sessions";
-            HeaderText.Text = $"Databases for Extended Events Sessions — {server.DisplayNameWithIntent}";
+            HeaderText.Text = $"Databases for Extended Events Sessions: {server.DisplayNameWithIntent}";
             DescriptionText.Text = "Applies to Azure SQL Database only. Azure caps database-scoped Extended Events sessions per pool, and Lite makes up to four per database "
                 + "(deadlock, blocked process, client timeout, long query completions). Check the databases that should get sessions. "
                 + "Leave every box clear to give every database a session. Excluded Databases still apply and win. "
@@ -59,11 +66,13 @@ public partial class ExcludedDatabasesDialog : Window
         }
         else
         {
-            HeaderText.Text = $"Excluded Databases — {server.DisplayNameWithIntent}";
+            HeaderText.Text = $"Excluded Databases: {server.DisplayNameWithIntent}";
         }
 
         Loaded += async (_, _) => await LoadAsync();
     }
+
+    internal Task LoadForTestAsync() => LoadAsync();
 
     private async Task LoadAsync()
     {
@@ -73,7 +82,8 @@ public partial class ExcludedDatabasesDialog : Window
 
         try
         {
-            var liveDatabases = await GetUserDatabasesAsync();
+            var read = DatabaseListReader ?? new Func<Task<List<string>>>(GetUserDatabasesAsync);
+            var liveDatabases = await read();
             var existingExclusions = (_xeSessionsMode ? _server.XeSessionDatabases : _server.ExcludedDatabases) ?? new List<string>();
 
             var liveSet = new HashSet<string>(liveDatabases, StringComparer.OrdinalIgnoreCase);
@@ -111,19 +121,46 @@ public partial class ExcludedDatabasesDialog : Window
             StatusText.Text = _masterUnreachableFellBackToConnectedDb
                 ? "Server firewall blocks reading the full list from master (Azure database-level rule); showing only the connected database."
                 : _xeSessionsMode
-                    ? $"{liveDatabases.Count} database(s) on this server, {existingExclusions.Count} on the list (none = every database)."
-                    : $"{liveDatabases.Count} database(s) on this server, {existingExclusions.Count} currently excluded.";
+                    ? $"{CountText.Plural(liveDatabases.Count, "database")} on this server, {existingExclusions.Count} on the list (none = every database)."
+                    : $"{CountText.Plural(liveDatabases.Count, "database")} on this server, {existingExclusions.Count} currently excluded.";
         }
         catch (Exception ex)
         {
-            StatusText.Text = $"Failed to load: {ex.Message}";
-            MessageBox.Show(this,
-                $"Could not read database list from '{_server.DisplayNameWithIntent}':\n\n{ex.Message}",
-                "Load Failed",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            /* One message, in the dialog's own status line: the exception's text goes to the log, not to the person. */
+            AppLogger.Error("ExcludedDatabasesDialog", $"Could not read the database list from {_server.DisplayNameWithIntent}", ex);
+            StatusText.Text = LoadFailureText(_server.DisplayNameWithIntent, ex);
         }
     }
+
+    /// <summary>
+    /// The status line for a database list that could not be read, in plain words that say what to do: a server that cannot be
+    /// reached, a login the server refused, or any other failure, which points at the log. The exception's own text never
+    /// reaches the dialog.
+    /// </summary>
+    internal static string LoadFailureText(string serverName, Exception ex)
+    {
+        var sql = ex as SqlException ?? ex.InnerException as SqlException;
+        var unreachable = ex is SocketException or TimeoutException
+            || ex.InnerException is SocketException or TimeoutException
+            || (sql is not null && sql.Number is not (18456 or 18452 or 4060) && SqlErrorClassification.IsConnectionFailure(sql.Number));
+        if (unreachable)
+        {
+            return $"{serverName} can't be reached, so its database list can't load. Check that the server is up and that this computer can connect to it, then open this window again.";
+        }
+
+        if (sql is not null && sql.Number is 18456 or 18452 or 4060)
+        {
+            return $"{serverName} refused the login, so its database list can't load. Check the server's credentials in Edit SQL Server, then open this window again.";
+        }
+
+        return $"The database list for {serverName} could not be read. The log has the details.";
+    }
+
+    /// <summary>
+    /// Runs the database-list query against a connection string. Tests set a query that fails, so the fallback below is exercised
+    /// with no server to fail against.
+    /// </summary>
+    internal Func<string, Task<List<string>>>? DatabaseQuery { get; set; }
 
     private async Task<List<string>> GetUserDatabasesAsync()
     {
@@ -136,38 +173,53 @@ public partial class ExcludedDatabasesDialog : Window
 
         try
         {
-            using var connection = new SqlConnection(builder.ConnectionString);
-            await connection.OpenAsync();
-
-            using var cmd = new SqlCommand(@"
-SELECT d.name
-FROM sys.databases AS d
-WHERE d.database_id > 4
-AND   d.state_desc = N'ONLINE'
-AND   d.database_id < 32761 /*exclude contained AG system databases*/
-ORDER BY d.name;", connection);
-            cmd.CommandTimeout = 30;
-
-            var names = new List<string>();
-            using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                names.Add(reader.GetString(0));
-            }
-            return names;
+            var query = DatabaseQuery ?? new Func<string, Task<List<string>>>(QueryUserDatabasesAsync);
+            return await query(builder.ConnectionString);
         }
         catch (SqlException ex) when (SqlErrorClassification.ShouldFallBackToSingleDatabase(ex.Number))
         {
             /* Azure database-level firewall (or a contained login without master rights): master cannot be
                enumerated, but the connected database is reachable. Fall back to it instead of failing the
                picker outright, mirroring the collectors' single-database fallback (#1631). The connected
-               database is the connection string's own catalog. */
-            _masterUnreachableFellBackToConnectedDb = true;
+               database is the connection string's own catalog. A connection that names no database, or
+               master, has nothing to fall back to: a refused login there is a failure for the status line to
+               word, not a one-database list. */
             var connectedDb = new SqlConnectionStringBuilder(connectionString).InitialCatalog;
-            return string.IsNullOrWhiteSpace(connectedDb)
-                ? new List<string>()
-                : new List<string> { connectedDb };
+            if (!CanFallBackToConnectedDatabase(connectedDb))
+            {
+                throw;
+            }
+
+            _masterUnreachableFellBackToConnectedDb = true;
+            return new List<string> { connectedDb };
         }
+    }
+
+    /// <summary>True when the connection's own catalog is a user database the picker can offer on its own; false for none or master.</summary>
+    internal static bool CanFallBackToConnectedDatabase(string? connectedDb) =>
+        !string.IsNullOrWhiteSpace(connectedDb) && !string.Equals(connectedDb, "master", StringComparison.OrdinalIgnoreCase);
+
+    private static async Task<List<string>> QueryUserDatabasesAsync(string connectionString)
+    {
+        using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        using var cmd = new SqlCommand(@"
+SELECT d.name
+FROM sys.databases AS d
+WHERE d.database_id > 4
+AND   d.state_desc = N'ONLINE'
+AND   d.database_id < 32761 /*exclude contained AG system databases*/
+ORDER BY d.name;", connection);
+        cmd.CommandTimeout = 30;
+
+        var names = new List<string>();
+        using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            names.Add(reader.GetString(0));
+        }
+        return names;
     }
 
     /// <summary>

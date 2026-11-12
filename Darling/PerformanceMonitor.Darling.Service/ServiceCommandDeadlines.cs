@@ -157,6 +157,16 @@ public static class ServiceCommandDeadlines
     public const int PostAnalysisForcePlanSeconds = 5;
 
     /// <summary>
+    /// The forcing and automatic-plan-correction state read a notification makes for its lead finding's
+    /// force-plan targets (#8542). The worker awaits it inside the analysis pass and the pileup pass
+    /// while the message is built, so it is the statement the force-plan bot issues from the same place
+    /// and takes the bot's bound, <see cref="PostAnalysisForcePlanSeconds"/>, not an interactive read's.
+    /// A read that runs out of it does not hold the page: the reason comes back and the advice T-SQL
+    /// opens by saying the store was not checked.
+    /// </summary>
+    public const int NotificationForcePlanStateSeconds = PostAnalysisForcePlanSeconds;
+
+    /// <summary>
     /// The store reads and writes the CLI verbs perform — <c>--enable-mcp</c>/<c>--disable-mcp</c>/
     /// <c>--enable-web</c>/<c>--disable-web</c>'s <c>config_service</c> update, <c>--configure-firewall</c>'s
     /// endpoint-toggle read, <c>--recompress-plan-dim</c>'s plan-codec preflight, and the two reads

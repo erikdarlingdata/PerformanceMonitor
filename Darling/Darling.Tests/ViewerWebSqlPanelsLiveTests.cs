@@ -198,7 +198,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
 
     /// <summary>
     /// #6388 part B: the Viewer's Table &amp; Index Sizes and Extension Install Census return what <c>get_table_index_sizes</c> and
-    /// <c>get_pg_extensions</c> return for the same server. The store holds three index snapshots (30 days, 8 days, now), so a read
+    /// <c>get_pg_extensions</c> return for the same server. The store holds three index snapshots (30 days, 7 days, now), so a read
     /// that took the wrong baseline, kept a temp table or ignored the database filter would differ from the tool.
     /// </summary>
     [Fact]
@@ -221,8 +221,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
             await DarlingMcpTestData.RegisterServerAsync(connection, EmptyServerId, EmptyServerName, ct);
             var latest = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddHours(-1);
-            var past7 = latest.AddDays(-8);
-            var past30 = latest.AddDays(-31);
+            var past7 = latest.AddDays(-7);
+            var past30 = latest.AddDays(-30);
 
             /* Big grows 50 -> 80 -> 100; Small exists only now (no baseline); #tmp is a temp table the read leaves out; Other is in a second database. */
             foreach (var (at, db, table, reserved) in new[]
@@ -259,7 +259,7 @@ VALUES ($1::bigint, $2::timestamp, $3::integer, $4::text, $5::text, $6::text,
             /* Table & Index Sizes vs get_table_index_sizes' tables, with and without a database filter. */
             foreach (var filter in new string?[] { null, "otherdb" })
             {
-                using var doc = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, ServerName, filter, ct));
+                using var doc = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, ServerName, database_name: filter, cancellationToken: ct));
                 var web = doc.RootElement.GetProperty("tables").EnumerateArray().ToList();
                 var rows = await viewer.GetTableSizesAsync(ServerId, filter is null ? null : new[] { filter }, ct);
                 Assert.Equal(web.Count, rows.Count);

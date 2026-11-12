@@ -247,7 +247,7 @@ public sealed class LiteEmptyAndCountTextTests
                     Shoot(window, $"FinOpsLocking-{theme}-{width}x{height}.png");
 
                     /* Index Analysis: the input has a label, and the lower grid shows the one empty sentence. */
-                    var input = Find<TextBox>(tab, "IndexAnalysisDatabaseInput");
+                    var input = Find<ComboBox>(tab, "IndexAnalysisDatabaseInput");
                     Reveal(input);
                     Settle(window);
                     var inputBounds = Bounds(input, tab);
@@ -259,8 +259,9 @@ public sealed class LiteEmptyAndCountTextTests
                         found.Add($"{at}: the Index Analysis database box has no label beside it");
                     }
 
-                    var lower = Find<DataGrid>(tab, "IndexAnalysisDetailGrid");
                     var sentence = Find<TextBlock>(tab, "IndexAnalysisNoDataMessage");
+                    /* #8621: before a run both grids are collapsed and the one message covers their whole area, so it sits inside that area. */
+                    var lower = (FrameworkElement)sentence.Parent;
                     found.AddRange(Muted(sentence, tab, muted, $"{at}: IndexAnalysisNoDataMessage", weight: false));
                     found.AddRange(Inside(sentence, lower, tab, $"{at}: IndexAnalysisNoDataMessage"));
                     Shoot(window, $"FinOpsIndexAnalysis-{theme}-{width}x{height}.png");
@@ -437,7 +438,7 @@ public sealed class LiteEmptyAndCountTextTests
     private static Window Open(FrameworkElement content, int width, int height)
     {
         var window = new Window { Content = content, Width = width, Height = height, Left = 0, Top = 0, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         Settle(window);
         return window;
     }
@@ -533,7 +534,7 @@ public sealed class LiteEmptyAndCountTextTests
     }
 
     /// <summary><paramref name="sentence"/> lies wholly inside <paramref name="grid"/>'s bounds.</summary>
-    private static List<string> Inside(TextBlock sentence, DataGrid grid, FrameworkElement tab, string what)
+    private static List<string> Inside(TextBlock sentence, FrameworkElement grid, FrameworkElement tab, string what)
     {
         var problems = new List<string>();
         if (!sentence.IsVisible)

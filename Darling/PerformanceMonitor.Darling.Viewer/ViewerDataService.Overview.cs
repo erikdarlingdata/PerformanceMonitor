@@ -43,7 +43,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// the card's status from COLLECTION FRESHNESS instead — how old the newest <c>v_collection_log</c> row
 /// is (see <see cref="ServerSummaryItem.ClassifyFreshness"/>): fresh → Online (green), stale (older than
 /// twice the fastest collector's cadence) → Warning (amber), and no collection / long-dead → Offline
-/// (the red overlay). (2) The Dashboard's health card live-queries currently-blocked sessions / current
+/// (the red border and status word). (2) The Dashboard's health card live-queries currently-blocked sessions / current
 /// scheduler state; the viewer reads the newest COLLECTED snapshot instead (the freshness band already
 /// answers "is this server reporting"). The severity BANDS themselves are reproduced verbatim from
 /// <c>ServerHealthStatus</c> so a viewer card colours a metric exactly as the Dashboard would.</para>
@@ -249,7 +249,10 @@ FROM
 ) AS sampled";
 
     /// <summary>
-    /// Newest collection time across all collectors for one server. $1 server_id.
+    /// Newest successful collection time across all collectors for one server. $1 server_id. #8464: only a
+    /// <c>SUCCESS</c> row counts (<see cref="CollectionRunSql.SuccessfulCollectorRun"/>). Every attempt writes a row, a failed
+    /// one included, so a read over every row moved this stamp, and the freshness band under it, forward on each failed
+    /// attempt, and a dark server read fresh. Collection Health and the alert notebook already counted SUCCESS rows only.
     ///
     /// <para><b>#3976: <c>ORDER BY collection_time DESC LIMIT 1</c>, not <c>MAX(collection_time)</c>.</b> Same
     /// answer — <c>ExecuteScalarAsync</c> reads null identically whether MAX found no matching row or LIMIT 1
@@ -265,7 +268,7 @@ FROM
 SELECT collection_time
 FROM v_collection_log
 WHERE server_id = $1
-AND   {CollectionCycleRow.NotCycleRowSql}
+AND   {CollectionRunSql.SuccessfulCollectorRun}
 ORDER BY collection_time DESC
 LIMIT 1";
 
@@ -593,8 +596,11 @@ LIMIT 1";
 
         var identityCapacity = await GetIdentityCapacityCardAsync(serverId, nowUtc, cancellationToken);
         var databaseStates = await GetDatabaseStatesAsync(serverId, nowUtc, cancellationToken);
+        /* #8645: the card reads on its own server's clock, never the active server tab's (every card took that one clock). */
+        var cardClock = ViewerTimeHelper.ClockForServerOrMachine(await _alertClocks.GetAsync(cancellationToken), serverId, TimeZoneInfo.Local, nowUtc);
         return new ServerSummaryItem
         {
+            Clock = cardClock,
             IdentityCapacity = identityCapacity,
             DatabaseStates = databaseStates,
             DisplayName = displayName,
@@ -763,6 +769,10 @@ WHERE id = 1";
 /// </summary>
 public sealed class ServerSummaryItem
 {
+    /// <summary>This card's own server's clock (#8645), read from the fleet's held clocks, else the viewer machine's. <see cref="LastCollectionDisplay"/>
+    /// converts on it in Server Time. Null on a hand-built card, which reads on the machine's clock.</summary>
+    public PerformanceMonitor.Analysis.Baselines.ServerClock? Clock { get; init; }
+
     /// <summary>The identity columns at the warning bar or past it (#6875), the same worst band and count the web fleet card's "Identity capacity" chip
     /// carries. Null when none is, and on a server that never scans. Shown as its own row and never changes the card's band.</summary>
     public IdentityCapacityCard? IdentityCapacity { get; set; }
@@ -836,7 +846,7 @@ public sealed class ServerSummaryItem
     /// <summary>
     /// True when no collection has EVER landed for this server (<see cref="ServerFreshness.NeverCollected"/>):
     /// the service hasn't reached it yet — a registered-but-queued server during bootstrap, not a dead one.
-    /// Drives the amber "Awaiting first collection" status instead of the red Offline overlay.
+    /// Drives the amber "Awaiting first collection" status instead of the red Offline status.
     /// </summary>
     public bool AwaitingFirstCollection { get; set; }
 
@@ -1083,6 +1093,11 @@ public sealed class ServerSummaryItem
     /// </summary>
     public DateTime? RegisteredAt { get; set; }
 
+    /// <summary>#8464: whether any collector has run against this server, a failed attempt included, copied from the registry row the card
+    /// was built from. With no successful collection, <see cref="ApplyFreshness(DateTime)"/> bands a tried-and-refused server Offline and a
+    /// server no collector has reached yet as awaiting its first collection.</summary>
+    public bool Attempted { get; set; }
+
     /// <summary>When the service's connect to this server first failed (UTC), or null (#7590). Copied from the registry row the card was built
     /// from; set, <see cref="ApplyFreshness(DateTime)"/> bands the card Offline and <see cref="FleetRollup.BuildReason"/> says why.</summary>
     public DateTime? ConnectDownSince { get; set; }
@@ -1203,7 +1218,7 @@ public sealed class ServerSummaryItem
 
                 var of = $"of {PgBlockingCapturesTotal} sampled";
                 return BlockingRatePerHour.HasValue
-                    ? $"{BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr, {of}"
+                    ? $"{DailyHealthBandCalculator.RatePerHourText(BlockingRatePerHour.Value)}/hr, {of}"
                     : of;
             }
 
@@ -1211,7 +1226,7 @@ public sealed class ServerSummaryItem
             {
                 var max = $"max: {MaxBlockedSeconds:F0}s";
                 return BlockingRatePerHour.HasValue
-                    ? $"{BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr, {max}"
+                    ? $"{DailyHealthBandCalculator.RatePerHourText(BlockingRatePerHour.Value)}/hr, {max}"
                     : max;
             }
 
@@ -1246,7 +1261,7 @@ public sealed class ServerSummaryItem
             var parts = new List<string>(2);
             if (DeadlockRatePerHour.HasValue)
             {
-                parts.Add($"{DeadlockRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr");
+                parts.Add($"{DailyHealthBandCalculator.RatePerHourText(DeadlockRatePerHour.Value)}/hr");
             }
 
             if (LastDeadlockMinutesAgo.HasValue)
@@ -1281,7 +1296,7 @@ public sealed class ServerSummaryItem
     /// stale collector counts, and they are not "OK" — they are unmeasured. The verdict keys only on the
     /// FAILING count (a stale collector is neither healthy nor failing, so it stays 0 and reads a green "OK"
     /// while the server is dark). Rather than invent a stale-count threshold, reuse the reachability signal the
-    /// card already carries (<see cref="IsOffline"/>, the same one that drives the offline overlay): an offline
+    /// card already carries (<see cref="IsOffline"/>, the same one that greys the metric rows): an offline
     /// server's collectors read a neutral "Stale", never a green "OK".
     ///
     /// <para>#3539 A6: a REACHABLE server with no collector banded at all reads "--" — the card's word for a
@@ -1327,13 +1342,28 @@ public sealed class ServerSummaryItem
     /// The stored collection_time is naive UTC; the viewer shows it in the viewer machine's local time
     /// (the viewer convention — Lite used its per-server offset helper instead).
     ///
-    /// <para>With no collection to show, "Never" only when the card is awaiting its first one. A card that
-    /// reads Offline with nothing to show is a server whose history retention has dropped (#3967): something
-    /// was collected, and none of it is retained, which is what the row says.</para>
+    /// <para>With no collection to show, "None retained" only for a server registered before the collection log's
+    /// retention horizon (#3967, <see cref="HistoryAgedOut"/>): it had time to collect before everything the store
+    /// keeps, so what it collected is gone. Every other such card reads "Never", whatever its band.</para>
     /// </summary>
     public string LastCollectionDisplay => LastCollectionTime.HasValue
-        ? FormatLastCollect(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayZone(), DateTime.UtcNow)
-        : IsOnline == false ? "None retained" : "Never";
+        ? LastCollectLabelled(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.MachineClock(), DateTime.UtcNow)
+        : HistoryAgedOut(RegisteredAt, DateTime.UtcNow) ? "None retained" : "Never";
+
+    /// <summary>
+    /// The card's Last Collect text for <paramref name="mode"/> on <paramref name="clock"/>: the time
+    /// <see cref="FormatLastCollect"/> words in that mode's zone, and in Server Time the clock's offset after it,
+    /// "09:56:40 (UTC-04:00)" (<see cref="ViewerTimeHelper.WithServerZoneLabel"/>), so the card says whose clock it reads.
+    /// </summary>
+    internal static string LastCollectLabelled(DateTime lastCollectionUtc, TimeDisplayMode mode, PerformanceMonitor.Analysis.Baselines.ServerClock clock, DateTime nowUtc) =>
+        ViewerTimeHelper.WithServerZoneLabel(
+            FormatLastCollect(lastCollectionUtc, ViewerTimeHelper.DisplayZoneFor(mode, clock), nowUtc), mode, clock, lastCollectionUtc);
+
+    /// <summary>#3967, #8464: true when <paramref name="registeredAtUtc"/> precedes the collection log's retention horizon at
+    /// <paramref name="nowUtc"/>, so a server with no retained collection collected before everything the store keeps. The
+    /// Overview card and Manage Servers word their empty Last Collect from this alone; the band is a separate question.</summary>
+    public static bool HistoryAgedOut(DateTime? registeredAtUtc, DateTime nowUtc) =>
+        registeredAtUtc is { } registered && registered < DarlingRetentionHorizons.CollectionLogHorizon(nowUtc);
 
     /// <summary>
     /// The Last Collect time as the card words it (D4 of the final walk, the twin of Lite's
@@ -1518,7 +1548,7 @@ public sealed class ServerSummaryItem
     /// Critical when the FAILING share of <see cref="CollectorCount"/> passes the collector-health
     /// classifier's 20% bar, and Unknown again when <see cref="CollectorCount"/> is zero with nothing
     /// failing — a reachable server nothing has banded yet (#3539 A6), which the offline arm here does not
-    /// cover. Offline is already painted by the card border / overlay, so this governs only
+    /// cover. Offline is already painted by the card border and status word, so this governs only
     /// the per-metric dot: it must not show a green "healthy" dot on a dark server. The overall metric band
     /// reads the counts straight from ToHealthMetrics(), not this property, so the neutral offline reading
     /// never leaks into the card's worst-band or fleet score.
@@ -1526,7 +1556,7 @@ public sealed class ServerSummaryItem
     public HealthSeverity CollectorSeverity =>
         IsOffline ? HealthSeverity.Unknown : ServerHealthClassifier.CollectorSeverity(FailedCollectorCount, CollectorCount);
 
-    /// <summary>The card's worst metric band (offline handled separately by the border / overlay).</summary>
+    /// <summary>The card's worst metric band (offline handled separately by the border and status word).</summary>
     public HealthSeverity OverallMetricSeverity => ServerHealthClassifier.OverallMetricSeverity(ToHealthMetrics());
 
     /// <summary>
@@ -1665,9 +1695,16 @@ public sealed class ServerSummaryItem
         ServerHealthClassifier.ClassifyFreshness(
             lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc, connectDownSinceUtc);
 
+    /// <summary>The rule above with the log's failed rows folded in (#8464): a server any collector has run against and none has
+    /// collected from is Offline, not awaiting its first collection. The card, the sidebar dot and the server tab's header call this one.</summary>
+    public static ServerFreshness ClassifyFreshness(
+        DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, DateTime? connectDownSinceUtc, bool attempted) =>
+        ServerHealthClassifier.ClassifyFreshness(
+            lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc, connectDownSinceUtc, attempted);
+
     /// <summary>
     /// Maps the freshness band onto the card's three status flags, taking the live-ping's place: Fresh →
-    /// Online, Stale → the amber Warning state, Offline → the red Offline overlay, NeverCollected → the amber
+    /// Online, Stale → the amber Warning state, Offline → the red Offline status, NeverCollected → the amber
     /// "Awaiting first collection" state (IsOnline stays null: the truth is "unknown, not reached yet", not
     /// "was up and died").
     ///
@@ -1680,7 +1717,7 @@ public sealed class ServerSummaryItem
     {
         /* #7590: as on the sidebar row, a collection newer than the first failed connect makes the stored flag stale. */
         ConnectDownSince = ServerHealthClassifier.EffectiveConnectDownSince(LastCollectionTime, ConnectDownSince);
-        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, RegisteredAt, nowUtc, ConnectDownSince));
+        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, RegisteredAt, nowUtc, ConnectDownSince, Attempted));
         IsOnline = flags.IsOnline;
         CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;
@@ -1694,15 +1731,9 @@ public sealed class ServerSummaryItem
         _ => s_unknownBrush,
     };
 
-    /// <summary>Human "N ago" rendering of an elapsed minutes count — verbatim from ServerHealthStatus.</summary>
-    private static string FormatMinutesAgo(int minutes)
-    {
-        if (minutes < 1) return "just now";
-        if (minutes < 60) return $"{minutes}m ago";
-        if (minutes < 1440) return $"{minutes / 60}h ago";   // 24 hours
-        if (minutes < 10080) return $"{minutes / 1440}d ago"; // 7 days
-        return $"{minutes / 10080}w ago";
-    }
+    /// <summary>Human "N ago" rendering of an elapsed minutes count: <see cref="MinutesAgoText"/>, the wording Lite's card
+    /// shares (#8465).</summary>
+    private static string FormatMinutesAgo(int minutes) => MinutesAgoText.Format(minutes);
 
     private static SolidColorBrush MakeBrush(string hex)
     {

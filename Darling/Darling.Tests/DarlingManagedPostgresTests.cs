@@ -1903,8 +1903,8 @@ public sealed class DarlingManagedPostgresTests
         Assert.Contains("effective_cache_size = 24576MB", block, StringComparison.Ordinal);  /* 75% of 32 GB (was 11.86 GB = 75% of 16 GB) */
         Assert.Contains("maintenance_work_mem = 1638MB", block, StringComparison.Ordinal);   /* 5% of 32 GB, past the 1536 floor, under the 2 GB cap */
         Assert.Contains("work_mem = 64MB", block, StringComparison.Ordinal);                 /* RAM/512 = 64 MB, exactly the ceiling */
-        Assert.Contains("timescaledb.max_background_workers = 145", block, StringComparison.Ordinal);  /* 32 GB x 16 = 512, clamped to the ceiling 40 + 3 x 29 aggregates + 2 + 16, #5633 item 14 */
-        Assert.Contains("max_worker_processes = 156", block, StringComparison.Ordinal);      /* 3 + 145 + 8 */
+        Assert.Contains("timescaledb.max_background_workers = 151", block, StringComparison.Ordinal);  /* 32 GB x 16 = 512, clamped to the ceiling 40 + 3 x 31 aggregates + 2 + 16 (30 since V259, 31 since V263, #8549), #5633 item 14 */
+        Assert.Contains("max_worker_processes = 162", block, StringComparison.Ordinal);      /* 3 + 151 + 8 */
     }
 
     /// <summary>

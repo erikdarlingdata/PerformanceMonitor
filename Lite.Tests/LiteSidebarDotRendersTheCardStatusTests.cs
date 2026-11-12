@@ -40,6 +40,9 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
     private static ServerConnection Connection(bool? isOnline, bool? hasCollectorErrors) =>
         new() { ServerName = "srv", IsOnline = isOnline, HasCollectorErrors = hasCollectorErrors };
 
+    /// <summary>The tooltip's headline: its second line, after the server's name.</summary>
+    private static string HeadlineLine(ServerConnection connection) => connection.DotTooltip.Split('\n')[1];
+
     private static ServerSummaryItem Card(bool? isOnline, bool hasCollectorErrors) =>
         new() { ServerName = "srv", IsOnline = isOnline, HasCollectorErrors = hasCollectorErrors };
 
@@ -60,7 +63,8 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
 
                 Assert.Equal(card.CardStatus, dot.CardStatus);
                 Assert.Equal(card.StatusDisplay, dot.DotStatus);
-                Assert.StartsWith(dot.DotTooltip.Split('\n')[0], card.StatusTooltip, StringComparison.Ordinal);
+                /* The dot's tooltip opens on the server's name, since the rail shows the dot alone; its second line is the card's first. */
+                Assert.StartsWith(dot.DotTooltip.Split('\n')[1], card.StatusTooltip, StringComparison.Ordinal);
             }
         }
     }
@@ -76,7 +80,7 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
         Assert.Equal("Online", Connection(true, false).DotStatus);
         Assert.Equal("Warning", Connection(true, true).DotStatus);
         Assert.Equal("Offline", Connection(false, false).DotStatus);
-        Assert.Equal("Unknown", Connection(null, false).DotStatus);
+        Assert.Equal("Connecting", Connection(null, false).DotStatus);
 
         /* An offline server's collector-error marker must not turn its dot amber — the flags resolve in order. */
         Assert.Equal("Offline", Connection(false, true).DotStatus);
@@ -103,14 +107,15 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
     [Fact]
     public void TheDotTooltip_OpensOnTheSentenceTheCardOpensOn()
     {
-        Assert.StartsWith("Online — the last connection check succeeded", Connection(true, false).DotTooltip, StringComparison.Ordinal);
-        Assert.StartsWith("Warning — one or more collectors are failing on this server", Connection(true, true).DotTooltip, StringComparison.Ordinal);
-        Assert.StartsWith("Offline — the last connection check failed", Connection(false, false).DotTooltip, StringComparison.Ordinal);
-        Assert.StartsWith("Unknown — this server has not been connection-checked yet", Connection(null, false).DotTooltip, StringComparison.Ordinal);
+        /* The first line names the server, since the rail shows the dot with no name beside it; the sentence follows. */
+        Assert.StartsWith("Online: the last connection check succeeded", HeadlineLine(Connection(true, false)), StringComparison.Ordinal);
+        Assert.StartsWith("Warning: one or more collectors are failing on this server", HeadlineLine(Connection(true, true)), StringComparison.Ordinal);
+        Assert.StartsWith("Offline: the last connection check failed", HeadlineLine(Connection(false, false)), StringComparison.Ordinal);
+        Assert.StartsWith("Connecting: the first connection check has not finished yet", HeadlineLine(Connection(null, false)), StringComparison.Ordinal);
 
         /* And it ends on the gesture THIS surface supports. The card's line names the card; naming a single click
            on either would be naming a no-op, since both handlers act only on a double-click. */
-        Assert.EndsWith("Double-click the row to open this server's tab", Connection(true, false).DotTooltip, StringComparison.Ordinal);
+        Assert.EndsWith("Double-click to open this server's tab", Connection(true, false).DotTooltip, StringComparison.Ordinal);
         Assert.EndsWith("Double-click the card to open this server's tab", Card(true, false).StatusTooltip, StringComparison.Ordinal);
 
         var xaml = ReadRepoFile(Path.Combine("Lite", "MainWindow.xaml"));
@@ -152,7 +157,7 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
     public void TheDot_CannotBandFreshnessEvenByAccident()
     {
         const string disclaimer =
-            "It reports the connection check only, not collection freshness — the Overview card's Last Collect row bands that.";
+            "It reports the connection check only, not collection freshness. The Overview card's Last Collect row bands that.";
 
         foreach (var isOnline in new bool?[] { true, false, null })
         {
@@ -187,7 +192,7 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
     {
         var sidebar = WithoutComments(ReadRepoFile(Path.Combine("Lite", "Models", "ServerConnection.cs")));
 
-        foreach (var word in new[] { "Online", "Warning", "Offline", "Unknown" })
+        foreach (var word in new[] { "Online", "Warning", "Offline", "Connecting" })
         {
             Assert.DoesNotContain("\"" + word + "\"", sidebar, StringComparison.Ordinal);
         }

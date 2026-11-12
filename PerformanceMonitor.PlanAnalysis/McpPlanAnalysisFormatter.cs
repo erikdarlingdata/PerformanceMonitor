@@ -117,7 +117,7 @@ public static class McpPlanAnalysisFormatter
     /// honesty ("corroboration, with caveats"); <c>impact_basis</c> — the real A15/A16 item, an unlabelled
     /// statement-scoped percent — stays.</para>
     /// </summary>
-    public const string MissingIndexCaveat = "Missing-index requests are weak evidence: uses are plan-cache-bounded and \"impact\" is one operator's estimated cost. A request corroborates a measured-slow plan; it never drives a finding. Any new index can regress other statements and adds write cost — test it.";
+    public const string MissingIndexCaveat = "Missing-index requests are weak evidence: uses are plan-cache-bounded and \"impact\" is one operator's estimated cost. A request corroborates a measured-slow plan; it never drives a finding. Any new index can regress other statements and adds write cost: test it.";
 
     /// <summary>
     /// Parses plan XML, runs the analyzer, and builds a structured JSON result.
@@ -218,8 +218,19 @@ public static class McpPlanAnalysisFormatter
                             physical_op = n.PhysicalOp,
                             logical_op = n.LogicalOp,
                             cost_percent = n.CostPercent,
+                            /* #8377: EstimateRows is the optimizer's estimate for one execution and ActualRows is the
+                               total across every execution, so the pair alone reads an inner-side operator as a
+                               misestimate. expected_rows is the figure to set beside actual_rows:
+                               RowEstimateHelper.GetExpectedRows, the arithmetic the plan viewer's node label, edge
+                               colour and rules 5, 16 and 26 share (the estimate times ActualExecutions on the inner
+                               side of a Nested Loops join, where the executions are a true loop count; the estimate
+                               itself everywhere else). estimated_rows stays per execution, the figure the viewer's
+                               Properties panel shows as "Estimated Number of Rows Per Execution". expected_rows and
+                               actual_executions are null, not 0, without runtime statistics (#3541 A12). */
                             estimated_rows = n.EstimateRows,
+                            expected_rows = n.HasActualStats ? RowEstimateHelper.GetExpectedRows(n) : (double?)null,
                             actual_rows = n.HasActualStats ? n.ActualRows : (long?)null,
+                            actual_executions = n.HasActualStats ? n.ActualExecutions : (long?)null,
                             actual_elapsed_ms = n.HasActualStats ? n.ActualElapsedMs : (long?)null,
                             self_elapsed_ms = r.SelfMs,
                             self_elapsed_note = r.Exchange ? ExchangeSelfElapsedNote : null,

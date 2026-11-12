@@ -54,12 +54,92 @@ public partial class MainWindow : Window
        Switching to a server's tab words the status bar from this, so "Data loaded" is not lost on the way back (F19). */
     private readonly Dictionary<string, string> _serverStatusSuffix = new();
 
+    private const string ReadyCollectionActive = "Ready - Collection active";
+    private const string ReadyCollectionStarting = "Ready - Collection starting";
+
+    /// <summary>
+    /// The status bar's text once the window is up: "Collection active" when a collection cycle has run or is running, else
+    /// "Collection starting", so it agrees with the Collection segment beside it instead of calling collection active while that
+    /// segment still says it is starting.
+    /// </summary>
+    private string ReadyStatusText() =>
+        _backgroundService is { } service && (service.IsCollecting || service.LastCollectionTime.HasValue) ? ReadyCollectionActive : ReadyCollectionStarting;
+
+    /// <summary>The status timer's promotion of "Collection starting" to "Collection active" once the first cycle runs. Any other text in the bar is left as it is.</summary>
+    private void PromoteReadyStatus()
+    {
+        if (StatusText.Text == ReadyCollectionStarting) StatusText.Text = ReadyCollectionActive;
+    }
+
     /// <summary>
     /// The status bar text for a connected server tab: "Connected to X", plus " - Data loaded" (or the collection error)
     /// once the server's first collection has finished. One wording for the moment the tab opens and every later switch to it.
     /// </summary>
     internal static string ConnectedStatusText(string displayName, string? suffix) =>
         string.IsNullOrEmpty(suffix) ? $"Connected to {displayName}" : $"Connected to {displayName} - {suffix}";
+
+    /// <summary>
+    /// The status bar text for a server tab whose server the last connection check could not reach (#8304): the server is named
+    /// and called offline, with no "Connected" and no "Data loaded", since the collectors that just ran reached nothing. The
+    /// tab still shows the stored data. Kept short on purpose: at the 900 px minimum width with the sidebar open, the bar leaves
+    /// this text about 120 px beside its four counters, and a longer sentence lost its ending there.
+    /// </summary>
+    internal static string OfflineStatusText(string displayName) => $"Offline: {displayName}";
+
+    /// <summary>
+    /// The status bar text for a server tab, from the server's cached connection status (#8304): <see cref="OfflineStatusText"/> when
+    /// the last check failed, else <see cref="ConnectedStatusText"/> with the tab's collection suffix. Pure, so the three places that
+    /// word the bar (a tab switch, the end of the tab's first collection, and the 30-second connection check) cannot disagree.
+    /// </summary>
+    internal static string ServerTabStatusText(bool? isOnline, string displayName, string? suffix) =>
+        isOnline == false ? OfflineStatusText(displayName) : ConnectedStatusText(displayName, suffix);
+
+    /// <summary>The server list and connection-status cache this window reads; the status bar is worded from it.</summary>
+    internal ServerManager ServerManager => _serverManager;
+
+    /* #8304: what WordSelectedServerTabStatus last wrote, and the IsOnline it wrote it from. The connection check re-words the bar
+       only while it still shows that text, or once the cached IsOnline has moved on from it, so a message another path put there
+       (a failed refresh, the server-removal report, "Collecting data from X...") stands until the server's status changes. */
+    private string? _wordedStatusText;
+    private bool? _wordedStatusIsOnline;
+
+    /// <summary>
+    /// Words the status bar for the selected server tab from its server's cached connection status and its collection suffix (#8304),
+    /// on a tab switch and when the tab's first collection ends. Another selected tab (Overview, Alerts) leaves the bar as it is.
+    /// </summary>
+    internal void WordSelectedServerTabStatus()
+    {
+        if (ServerTabControl.SelectedItem is TabItem { Content: ServerTab serverTab })
+        {
+            _serverStatusSuffix.TryGetValue(serverTab.Server.Id, out var suffix);
+            _wordedStatusIsOnline = _serverManager.GetConnectionStatus(serverTab.Server.Id).IsOnline;
+            _wordedStatusText = ServerTabStatusText(_wordedStatusIsOnline, serverTab.Server.DisplayNameWithIntent, suffix);
+            StatusText.Text = _wordedStatusText;
+        }
+    }
+
+    /// <summary>
+    /// The connection check's half (#8304): re-words the selected server tab's status bar when the bar still shows the text
+    /// <see cref="WordSelectedServerTabStatus"/> last wrote, or when the server's cached IsOnline differs from the value that text
+    /// was worded from, so a server that goes down while its tab is open reads Offline on the next check and one that comes back
+    /// reads Connected again, while a message another path put on the bar stands until then.
+    /// </summary>
+    private void FollowSelectedServerTabStatus()
+    {
+        if (ServerTabControl.SelectedItem is not TabItem { Content: ServerTab serverTab })
+        {
+            return;
+        }
+
+        var isOnline = _serverManager.GetConnectionStatus(serverTab.Server.Id).IsOnline;
+        if (StatusText.Text == _wordedStatusText || isOnline != _wordedStatusIsOnline)
+        {
+            WordSelectedServerTabStatus();
+        }
+    }
+
+    /// <summary>Runs the connection check the status timer runs, for a test that flips a cached status and reads the bar.</summary>
+    internal void RunConnectionCheck() => CheckConnectionsAndNotify();
     private readonly Dictionary<string, (Action<int, int, DateTime?> AlertCounts, Action<PerformanceMonitor.Ui.TimeRangeSpec> ApplyTimeRange, Func<Task> ManualRefresh)> _tabEventHandlers = new();
     /* Server tab badge state for the non-blocking/deadlock conditions (#754/#749), keyed by the
        ServerConnection GUID (the same key as _openServerTabs). The alert sweep sets these; both the
@@ -90,6 +170,13 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, bool> _previousCollectorErrorStates = new();
     private readonly Dictionary<string, bool> _previousXeSessionFailureStates = new();
     private readonly DispatcherTimer _statusTimer;
+
+    /* #8533: the collection label's own tick. Its age is worded to the second and a cycle ends once a minute, so the 30 second
+       status timer alone would repaint it at the same two points of every cycle. StartCollectionStatus starts it. */
+    internal DispatcherTimer CollectionAgeTimer { get; } = new() { Interval = CollectionStatusLabel.AgeTick };
+
+    /* True while the status bar shows that the local database stopped collection: the label's tick leaves the field alone then. */
+    private bool _collectionStoppedShown;
     private LocalDataService? _dataService;
     /* Phase-5 slice B: the alert loop's collected-store reads go through this seam (see
        LiteAlertReadAdapter); the shared engine (slice D) consumes the same surface. */
@@ -414,7 +501,12 @@ public partial class MainWindow : Window
                 /* #8012: a held story whose path loses a leaf is seeded from the wider path's page row. The wider path
                    is found among the distinct paths this server has stored under the same root across the findings
                    retention, so a restart long after the path shortened still finds it. */
-                getStoredStoryPaths: muteReadStore.GetStoryPathsAsync);
+                getStoredStoryPaths: muteReadStore.GetStoryPathsAsync,
+                /* #8542: the store's forcing state for a finding's force-plan targets, read when its notification
+                   is built, so the advice T-SQL gives no force statement for a plan the store blocks. */
+                readForcePlanTargetStates: (serverId, targets) => muteReadStore.TryGetForcePlanTargetStatesAsync(
+                    serverId,
+                    [new PerformanceMonitor.Analysis.AnalysisFinding { Remediation = new PerformanceMonitor.Analysis.RemediationAction("PLAN_REGRESSION", "force", targets) }]));
 
             _backgroundService = new CollectionBackgroundService(
                 _collectorService, _databaseInitializer, archiveService, retentionService, _serverManager,
@@ -564,9 +656,10 @@ public partial class MainWindow : Window
             // Update status
             UpdateStatusBar();
             _statusTimer.Start();
+            StartCollectionStatus(_backgroundService, () => DateTime.UtcNow);
 
             await RefreshOverviewAsync();
-            StatusText.Text = "Ready - Collection active";
+            StatusText.Text = ReadyStatusText();
 
             /* Now past the risky DuckDB init — open the single-instance "exit for upgrade" channel so a
                newer build can ask us to step aside cleanly (#single-instance-upgrade-handoff). */
@@ -628,7 +721,7 @@ public partial class MainWindow : Window
                 {
                     Dispatcher.Invoke(() =>
                     {
-                        Title = $"Performance Monitor Lite — Update v{newVersion.TargetFullRelease.Version} available (About in the sidebar)";
+                        Title = $"Performance Monitor Lite: Update v{newVersion.TargetFullRelease.Version} available (About in the sidebar)";
                         AnnounceUpdate($"v{newVersion.TargetFullRelease.Version}");
                     });
                     return;
@@ -645,7 +738,7 @@ public partial class MainWindow : Window
             {
                 Dispatcher.Invoke(() =>
                 {
-                    Title = $"Performance Monitor Lite — Update {result.LatestVersion} available (About in the sidebar)";
+                    Title = $"Performance Monitor Lite: Update {result.LatestVersion} available (About in the sidebar)";
                     AnnounceUpdate(result.LatestVersion);
                 });
             }
@@ -672,7 +765,7 @@ public partial class MainWindow : Window
     {
         _trayService?.ShowNotification(
             "Update Available",
-            $"Performance Monitor Lite {version} is available. Click About in the left sidebar to install it — "
+            $"Performance Monitor Lite {version} is available. Click About in the left sidebar to install it. "
                 + "that updates in place and keeps your data.",
             Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
     }
@@ -741,6 +834,7 @@ public partial class MainWindow : Window
         }
 
         _statusTimer.Stop();
+        CollectionAgeTimer.Stop();
 
         /* Close the sentinel connection (#4262) now that collection/archival can no longer run against
            it — dispose is a write-lock acquire, and by this point nothing should still be holding a read
@@ -768,8 +862,7 @@ public partial class MainWindow : Window
         if (ServerTabControl.SelectedItem is TabItem { Content: ServerTab serverTab })
         {
             ServerTimeHelper.ActiveServerClock = serverTab.ServerClock;
-            _serverStatusSuffix.TryGetValue(serverTab.Server.Id, out var statusSuffix);
-            StatusText.Text = ConnectedStatusText(serverTab.Server.DisplayNameWithIntent, statusSuffix);
+            WordSelectedServerTabStatus();
         }
 
         /* Refresh alerts tab when selected */
@@ -947,28 +1040,19 @@ public partial class MainWindow : Window
         LocalDatabaseStatusText.Visibility = localDatabase.StatusLine is null ? Visibility.Collapsed : Visibility.Visible;
 
         // Update collection status
+        _collectionStoppedShown = localDatabase.CollectionStopped;
         if (localDatabase.CollectionStopped)
         {
             CollectionStatusText.Text = "Collection: Stopped (local database failed)";
         }
         else if (_backgroundService != null)
         {
-            if (_backgroundService.IsCollecting)
+            /* The loop's own states, in the label's words: the text its one-second tick and the cycle signal paint too. */
+            CollectionStatusText.Text = CollectionStatusLabel.Text(
+                _backgroundService.IsCollecting, _backgroundService.IsPaused, _backgroundService.LastCollectionTime, DateTime.UtcNow);
+            if (_backgroundService.IsCollecting || (!_backgroundService.IsPaused && _backgroundService.LastCollectionTime.HasValue))
             {
-                CollectionStatusText.Text = "Collection: Running";
-            }
-            else if (_backgroundService.IsPaused)
-            {
-                CollectionStatusText.Text = "Collection: Paused";
-            }
-            else if (_backgroundService.LastCollectionTime.HasValue)
-            {
-                var ago = DateTime.UtcNow - _backgroundService.LastCollectionTime.Value;
-                CollectionStatusText.Text = $"Collection: {ago.TotalSeconds:F0}s ago";
-            }
-            else
-            {
-                CollectionStatusText.Text = "Collection: Starting...";
+                PromoteReadyStatus();
             }
         }
         else
@@ -978,6 +1062,37 @@ public partial class MainWindow : Window
 
         // Update collector health
         UpdateCollectorHealth();
+    }
+
+    /// <summary>
+    /// #8533: starts the collection field over <paramref name="loop"/>, and is the one place that does. The field repaints on its
+    /// own one-second tick and when a cycle starts or ends. The loop raises its signal on its own thread, so that repaint is posted
+    /// to this one. The label lives as long as the two signals it subscribes to. The window's load calls this after the status
+    /// bar's first paint.
+    /// </summary>
+    internal void StartCollectionStatus(CollectionBackgroundService loop, Func<DateTime> utcNow)
+    {
+        _ = new CollectionStatusLabel(
+            () => loop.IsCollecting,
+            () => loop.IsPaused,
+            () => loop.LastCollectionTime,
+            utcNow,
+            PaintCollectionStatus,
+            repaint => CollectionAgeTimer.Tick += (s, e) => repaint(),
+            repaint => loop.CycleStateChanged += () => Dispatcher.BeginInvoke(repaint));
+        CollectionAgeTimer.Start();
+    }
+
+    /// <summary>
+    /// #8533: paints the collection field for the label's own tick and the loop's cycle signal. Only the loop's states come
+    /// through here, so while the status bar shows that the local database stopped collection the field is left as it is.
+    /// </summary>
+    private void PaintCollectionStatus(string text)
+    {
+        if (!_collectionStoppedShown)
+        {
+            CollectionStatusText.Text = text;
+        }
     }
 
     private void UpdateCollectorHealth()
@@ -1452,7 +1567,8 @@ public partial class MainWindow : Window
 
         var utcOffset = status.UtcOffsetMinutes ?? 0;
         var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialResolver, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition, awsRdsKind: CollectorEngineCapability.AwsRdsKindOf(status.IsAwsRds, status.IsAwsRdsWebOrExpress),
-            isLongQueryTraceEnabled: () => _scheduleManager.GetScheduleForServer(server.Id, "long_query_completions")?.Enabled ?? false);
+            isLongQueryTraceEnabled: () => _scheduleManager.GetScheduleForServer(server.Id, "long_query_completions")?.Enabled ?? false,
+            queryStoreHealthSchedule: () => _scheduleManager.GetScheduleForServer(server.Id, "query_store_health"));
         var tabHeader = CreateTabHeader(server);
         var tabItem = new TabItem
         {
@@ -1528,6 +1644,9 @@ public partial class MainWindow : Window
         ServerTabControl.Items.Add(tabItem);
         ServerTabControl.SelectedItem = tabItem;
 
+        /* #8535: DuckDB's own memory beside the process's, so a walk's growth reads as DuckDB or not DuckDB straight from the log. */
+        _databaseInitializer.LogServerTabMemoryInBackground(server.DisplayName, opened: true);
+
         // Show the tab control, hide empty state
         EmptyStatePanel.Visibility = Visibility.Collapsed;
         ServerTabControl.Visibility = Visibility.Visible;
@@ -1546,24 +1665,43 @@ public partial class MainWindow : Window
         // Then collect fresh data and refresh again
         if (_collectorService != null)
         {
-            StatusText.Text = $"Collecting data from {server.DisplayNameWithIntent}...";
+            var collecting = $"Collecting data from {server.DisplayNameWithIntent}...";
+            StatusText.Text = collecting;
             try
             {
                 await Task.Run(() => _collectorService.RunAllCollectorsForServerAsync(server));
+                serverTab.FirstCollectionFinished();
+                /* The collectors reached the server, so a connection status the cycle's check has not filled in yet is checked
+                   now: the status bar, the Overview card and the sidebar dot then say the same thing about this server. */
+                if (_serverManager.GetConnectionStatus(server.Id).IsOnline is null)
+                    await _serverManager.CheckConnectionAsync(server.Id);
                 _serverStatusSuffix[server.Id] = "Data loaded";
-                StatusText.Text = ConnectedStatusText(server.DisplayNameWithIntent, "Data loaded");
+                /* #8304: worded from the connection check, so a server the check could not reach is called offline, not connected:
+                   its collectors just ran and reached nothing, and the tab shows stored data. When the person has moved to another
+                   tab meanwhile, the collecting line is replaced only while it is still what the bar shows. */
+                if (ServerTabControl.SelectedItem == tabItem)
+                {
+                    WordSelectedServerTabStatus();
+                }
+                else if (StatusText.Text == collecting)
+                {
+                    StatusText.Text = ServerTabStatusText(_serverManager.GetConnectionStatus(server.Id).IsOnline, server.DisplayNameWithIntent, "Data loaded");
+                }
                 serverTab.RefreshData();
                 UpdateCollectorHealth();
                 _ = RefreshOverviewAsync();
             }
             catch (Exception ex)
             {
+                serverTab.FirstCollectionFinished();
+                serverTab.RefreshData();
                 _serverStatusSuffix[server.Id] = $"Collection error: {ex.Message}";
                 StatusText.Text = ConnectedStatusText(server.DisplayNameWithIntent, _serverStatusSuffix[server.Id]);
             }
         }
         else
         {
+            serverTab.FirstCollectionFinished();
             StatusText.Text = $"Connected to {server.DisplayNameWithIntent}";
         }
     }
@@ -1915,6 +2053,10 @@ public partial class MainWindow : Window
             _openServerTabs.Remove(serverId);
             _serverStatusSuffix.Remove(serverId);
 
+            /* #8535: the line a close leaves, to read against the open's, then a request for a trim: the buffer pool holds what the
+               tab read after the tab is gone. Off the UI thread, and the trim never waits on a busy store (the next tick takes it). */
+            _databaseInitializer.OnServerTabClosedInBackground(_serverManager.GetServerById(serverId)?.DisplayName ?? serverId);
+
             /* Clean up alert state for this server */
             _alertStateService.RemoveServerState(serverId);
 
@@ -1953,8 +2095,8 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog() == true && dialog.AddedCount > 0)
         {
             RefreshServerList();
-            var msg = $"Added {dialog.AddedCount} server(s)";
-            if (dialog.SkippedCount > 0) msg += $", skipped {dialog.SkippedCount} duplicate(s)";
+            var msg = $"Added {CountText.Plural(dialog.AddedCount, "server")}";
+            if (dialog.SkippedCount > 0) msg += $", skipped {CountText.Plural(dialog.SkippedCount, "duplicate")}";
             if (dialog.CollidedCount > 0) msg += $", {dialog.CollidedCount} collided";
             if (dialog.FailedCount > 0) msg += $", {dialog.FailedCount} failed";
             StatusText.Text = msg + ".";
@@ -2139,15 +2281,15 @@ public partial class MainWindow : Window
             int settingsCopied = SettingsImport.CopyMissing(
                 oldConfigDir, dialog.FolderName, App.ConfigDirectory, App.DataDirectory);
 
-            var message = $"Imported {imported} server connection(s).";
+            var message = $"Imported {CountText.Plural(imported, "server connection")}.";
             if (skipped > 0)
-                message += $"\nSkipped {skipped} duplicate(s) (already configured).";
+                message += $"\nSkipped {CountText.Plural(skipped, "duplicate")} (already configured).";
             if (collided > 0)
                 message += $"\n{collided} collided: not imported because the server's id matches a different server already configured (see the log).";
             if (profilesImported > 0)
-                message += $"\nImported {profilesImported} credential profile(s).";
+                message += $"\nImported {CountText.Plural(profilesImported, "credential profile")}.";
             if (settingsCopied > 0)
-                message += $"\nCopied {settingsCopied} settings file(s).";
+                message += $"\nCopied {CountText.Plural(settingsCopied, "settings file")}.";
             if (imported > 0)
                 message += "\n\nCredentials from the previous install are preserved.\nIf any connections fail to authenticate, re-enter the password in Manage Servers.";
             if (profilesImported > 0)
@@ -2483,6 +2625,15 @@ public partial class MainWindow : Window
             ServerSearchRow.Visibility = Visibility.Visible;
             SidebarToggleButton.Content = "«";
         }
+
+        /* #8306: the rail is 40 px. The list and the footer draw closer to its edges, each server row keeps only the inset its status
+           dot needs and shows the dot alone, and the footer stacks its buttons as icons. The row template reads the two resources
+           through DynamicResource, so swapping them here restyles every row at once. */
+        ServerListView.Margin = collapsed ? new Thickness(4, 8, 4, 8) : new Thickness(8);
+        Resources["SidebarRowPadding"] = collapsed ? new Thickness(3, 6, 3, 6) : new Thickness(8, 6, 8, 6);
+        Resources["SidebarRowLabelVisibility"] = collapsed ? Visibility.Collapsed : Visibility.Visible;
+        SidebarFooterBorder.Padding = collapsed ? new Thickness(4, 8, 4, 8) : new Thickness(8, 8, 8, 8);
+        Sidebar.SetCompact(collapsed);
     }
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)
@@ -2695,7 +2846,7 @@ public partial class MainWindow : Window
 
                     _trayService?.ShowNotification(
                         "Capture Not Running",
-                        $"{server.DisplayNameWithIntent}: {captures} capture can't start — {reason}",
+                        $"{server.DisplayNameWithIntent}: {captures} capture can't start ({reason})",
                         Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
                 }
 
@@ -2713,6 +2864,11 @@ public partial class MainWindow : Window
         {
             AppLogger.Error("ConnectionAlerts", $"Connection check notify failed: {ex.Message}", ex);
         }
+
+        /* #8304: the selected server tab's status bar follows the cached connection status this check reads (the collection loop's
+           CheckAllConnectionsAsync, the Refresh button and the connect-time check refresh it): Offline when its server went down,
+           Connected when it came back, and otherwise only while the bar still shows the text written for it. */
+        FollowSelectedServerTabStatus();
     }
 
     }

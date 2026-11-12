@@ -339,7 +339,7 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
             sections.Add((await DiagnosticsBundle.RunSectionAsync("store_statements",
                 c => StoreStatementsSectionAsync(postgres, hours, c), ct)) with { AfterAlias = CompactStatementTexts });
             sections.Add(await DiagnosticsBundle.RunSectionAsync("store_log",
-                async c => DiagnosticsBundle.ParseReader(await DarlingMcpStoreLogTools.GetStoreLog(postgres, hours, 50, null, c)), ct));
+                async c => DiagnosticsBundle.ParseReader(await DarlingMcpStoreLogTools.GetStoreLog(postgres, hours, 50, null, full_text: true, offset: 0, responseByteBudget: null, c)), ct));
         }
 
         var logDirectory = options.LogDirectory ?? DarlingFileLoggerProvider.DefaultLogDirectory();

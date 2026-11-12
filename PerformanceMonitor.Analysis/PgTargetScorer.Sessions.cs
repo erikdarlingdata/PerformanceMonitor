@@ -422,7 +422,7 @@ public static partial class PgTargetScorer
             [
                 new()
                 {
-                    Description = "The same holder — application, role and database — was parked past the floor in three or more captures of the window: a code path, not one forgotten session",
+                    Description = "The same holder (application, role and database) was parked past the floor in three or more captures of the window: a code path, not one forgotten session",
                     /* unmeasured: IdleInTransactionRecurrenceBoost and the capture gate, chosen, not measured — see the declarations. */
                     Boost = IdleInTransactionRecurrenceBoost,
                     Predicate = facts =>
@@ -450,7 +450,7 @@ public static partial class PgTargetScorer
         },
         new()
         {
-            Description = "Instance CPU is elevated while the connection pool is near its ceiling — arrivals are queueing on CPU, not just on slots",
+            Description = "Instance CPU is elevated while the connection pool is near its ceiling: arrivals are queueing on CPU, not just on slots",
             /* unmeasured: ConnectionSaturationCoFireBoost, chosen, not measured — see its declaration. */
             Boost = ConnectionSaturationCoFireBoost,
             Predicate = facts =>
@@ -458,7 +458,7 @@ public static partial class PgTargetScorer
         },
         new()
         {
-            Description = "ANOMALY_PG_SESSION_SPIKE fired while ANOMALY_PG_TPS did not — more connections than this hour usually carries, doing no more work than usual: arrivals are queueing at the cliff, not working",
+            Description = "ANOMALY_PG_SESSION_SPIKE fired while ANOMALY_PG_TPS did not, more connections than this hour usually carries, doing no more work than usual: arrivals are queueing at the cliff, not working",
             /* unmeasured: OfferedVsDeliveredBoost, chosen, not measured — see its declaration. */
             Boost = OfferedVsDeliveredBoost,
             Predicate = facts => OfferedVsDeliveredFired(facts, key),

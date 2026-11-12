@@ -307,7 +307,7 @@ public sealed class FinOpsOptimizationViewLiveTests
         Assert.Equal("Version Store", version.GetProperty("metric").GetString());
         Assert.Equal(100m, version.GetProperty("current_mb").GetDecimal());
         Assert.Equal(2500m, version.GetProperty("peak_24h_mb").GetDecimal());
-        Assert.Equal("Version store pressure \u2014 check long-running transactions", version.GetProperty("warning").GetString());
+        Assert.Equal("Version store pressure: check long-running transactions", version.GetProperty("warning").GetString());
         Assert.Equal("", tempdb.GetProperty("rows")[3].GetProperty("warning").GetString());
 
         var waits = Section(tool, "wait_categories");

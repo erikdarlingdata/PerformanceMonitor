@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using Microsoft.Extensions.Logging.Abstractions;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -92,7 +93,7 @@ internal static class DarlingLaunchMemorySelfCheck
 
         if (failures.Count > 0)
         {
-            error.WriteLine(string.Create(CultureInfo.InvariantCulture, $"The launch memory self-check failed ({failures.Count} problem(s))."));
+            error.WriteLine(string.Create(CultureInfo.InvariantCulture, $"The launch memory self-check failed ({CountText.Plural(failures.Count, "problem")})."));
             return 1;
         }
 

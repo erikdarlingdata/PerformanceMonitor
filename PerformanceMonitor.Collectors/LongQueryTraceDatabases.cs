@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -605,5 +606,5 @@ public sealed class LongQueryTraceDropException : Exception
 
     private static string Describe(IReadOnlyList<string> databases, Exception firstFailure) => databases.Count == 0
         ? $"Could not list the databases to drop the long-query trace session from: {firstFailure.Message}"
-        : $"Could not drop the long-query trace session in {databases.Count} database(s) ({string.Join(", ", databases)}): {firstFailure.Message}";
+        : $"Could not drop the long-query trace session in {CountText.Plural(databases.Count, "database")} ({string.Join(", ", databases)}): {firstFailure.Message}";
 }

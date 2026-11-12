@@ -17,6 +17,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
@@ -125,6 +126,8 @@ internal static class DarlingTriageEndpoint
            an EVENT ("N more failures since the previous sample"), not a condition that clears. */
         (DarlingSelfAlertEvaluator.RefreshJobRecoveredMetric, DarlingSelfAlertEvaluator.RefreshJobStuckMetric),
         (DarlingSelfAlertEvaluator.RetentionJobRecoveredMetric, DarlingSelfAlertEvaluator.RetentionJobStuckMetric),
+        /* #8302: a daily rollup behind its source, resolved when it catches up. */
+        (DarlingSelfAlertEvaluator.DailyRollupRecoveredMetric, DarlingSelfAlertEvaluator.DailyRollupStaleMetric),
         (DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, DarlingSelfAlertEvaluator.StaleMuteMetric),
         (DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric),
         /* #5288: the MCP endpoint's certificate alert and its own resolution title. */
@@ -317,6 +320,7 @@ internal static class DarlingTriageEndpoint
                they are all downstream of. */
             [DarlingSelfAlertEvaluator.RefreshJobStuckMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.RetentionJobStuckMetric] = StoreSections(),
+            [DarlingSelfAlertEvaluator.DailyRollupStaleMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.PolicyJobFailingMetric] = StoreSections(),
 
             /* #3306: the stale-mute alert is the one store-family member whose subject is the CONFIGURATION
@@ -514,6 +518,76 @@ internal static class DarlingTriageEndpoint
         }
 
         return IsFleetLevelStoreMetric(metricName) ? s_fleetLevelStoreSections : DefaultSections;
+    }
+
+    /// <summary>#8584: the PostgreSQL sections for the firing metrics whose <see cref="SectionsByMetric"/> reads are SQL Server
+    /// only (the Cleared aliases fold to the firing name through <see cref="AlertNotebookEndpoint.ResolvedMetricOf"/>). A
+    /// PostgreSQL target gets these and none of the SQL Server ones, which would answer "does not apply" about an event the
+    /// service itself detected.</summary>
+    private static readonly Dictionary<string, IReadOnlyList<TriageSection>> s_postgresSectionsByMetric =
+        new Dictionary<string, IReadOnlyList<TriageSection>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Deadlocks Detected"] = new[]
+            {
+                S("Deadlocks", "get_pg_deadlocks", ("hours", "4"), ("limit", "10")),
+                S("Newest deadlock graphs", "get_pg_deadlock_detail", ("limit", "3")),
+            },
+            ["Blocking Detected"] = new[]
+            {
+                S("Blocking chains", "get_pg_blocking", ("hours", "4"), ("limit", "20")),
+                S("Sessions holding a transaction open", "get_pg_session_states", ("hours", "1"), ("limit", "25")),
+            },
+            ["Blocking Wait Time"] = new[]
+            {
+                S("Blocking chains", "get_pg_blocking", ("hours", "4"), ("limit", "20")),
+                S("Sessions holding a transaction open", "get_pg_session_states", ("hours", "1"), ("limit", "25")),
+            },
+            ["Long-Running Query"] = new[]
+            {
+                S("Long-running sessions", "get_pg_session_states", ("hours", "1"), ("limit", "25")),
+            },
+        };
+
+    /// <summary>#8584: the PostgreSQL sections for <paramref name="metricName"/> (a firing metric or its Cleared alias), or null
+    /// when the metric has none, in which case <see cref="SectionsFor(string?)"/> is the whole answer on every engine.</summary>
+    private static IReadOnlyList<TriageSection>? PostgresSectionsFor(string? metricName)
+    {
+        if (string.IsNullOrWhiteSpace(metricName))
+        {
+            return null;
+        }
+
+        var trimmed = metricName.Trim();
+        return s_postgresSectionsByMetric.TryGetValue(AlertNotebookEndpoint.ResolvedMetricOf(trimmed) ?? trimmed, out var sections)
+            ? sections
+            : null;
+    }
+
+    /// <summary>#8584: whether <paramref name="metricName"/> has PostgreSQL sections of its own, so the page pays the registry
+    /// read for the server's engine only for these metrics.</summary>
+    internal static bool HasEngineSpecificSections(string? metricName) => PostgresSectionsFor(metricName) is not null;
+
+    /// <summary>#8584: the sections for one metric on a server of <paramref name="engine"/>, the way the alert notebooks pick their
+    /// cells (#8323, #8553): a PostgreSQL target gets the PostgreSQL sections and no SQL Server one, a SQL Server target the
+    /// <see cref="SectionsFor(string?)"/> list unchanged, and an engine that cannot be resolved (<c>null</c>) both sets. A
+    /// metric with no PostgreSQL sections returns <see cref="SectionsFor(string?)"/> whatever the engine.</summary>
+    internal static IReadOnlyList<TriageSection> SectionsFor(string? metricName, CollectorTargetEngine? engine)
+    {
+        var sqlServer = SectionsFor(metricName);
+        var postgres = PostgresSectionsFor(metricName);
+        if (postgres is null || engine is CollectorTargetEngine.SqlServer)
+        {
+            return sqlServer;
+        }
+
+        if (engine is CollectorTargetEngine.PostgreSql)
+        {
+            return postgres;
+        }
+
+        var both = new List<TriageSection>(sqlServer);
+        both.AddRange(postgres);
+        return both;
     }
 
     /// <summary>The fleet-level fallback, held as ONE instance so a caller can compare identity the way the
@@ -749,7 +823,18 @@ internal static class DarlingTriageEndpoint
             /* The alert-type-relevant sections + the standing collection log, each through the SAME
                /api/read dispatch handler the read surface serves, each failure captured per-section. */
             var sections = new JsonArray();
-            foreach (var section in SectionsFor(metric))
+
+            /* #8584: a metric with PostgreSQL sections of its own learns the resolved server's engine first, as the alert
+               notebooks do (#8323, #8553): one registry read by primary key, paid only for those metrics; a failed read or
+               an unresolved server leaves the engine unknown and both sets are listed, never a failed page. */
+            CollectorTargetEngine? sectionEngine = null;
+            if (HasEngineSpecificSections(metric) && serverId is { } engineServerId)
+            {
+                sectionEngine = MonitoredEngineKind.EngineOf(
+                    await AlertNotebookEndpoint.ReadEngineKindAsync(postgres, engineServerId, logger, context.RequestAborted));
+            }
+
+            foreach (var section in SectionsFor(metric, sectionEngine))
             {
                 sections.Add(await RunSectionAsync(section, dispatch, context, postgres, analysis, serverName, asOf, logger));
             }
@@ -921,6 +1006,9 @@ internal static class DarlingTriageEndpoint
         ["metric_name"] = row.MetricName,
         ["current_value"] = row.CurrentValue,
         ["threshold_value"] = row.ThresholdValue,
+        /* The flag get_alert_history carries: a row whose alert reports a state, not a measurement, so its stored 0 is not a reading
+           and the alert card shows the dash Alert History shows for it. */
+        ["state_only"] = AlertMetricClassifier.IsStateOnly(row.MetricName),
         ["alert_sent"] = row.AlertSent,
         ["notification_type"] = row.NotificationType,
         ["send_error"] = row.SendError,

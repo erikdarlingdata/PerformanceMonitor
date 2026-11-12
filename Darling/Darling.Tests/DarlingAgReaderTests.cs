@@ -860,7 +860,7 @@ public sealed class DarlingAgReaderTests
         Assert.Contains(result.AvailabilityGroups, g => g.AgName == "AG1");
         Assert.DoesNotContain(result.AvailabilityGroups, g => g.AgName == "AG2");
         Assert.True(result.GroupsTruncated);
-        Assert.Contains("No view of 1 availability group(s) fit: AG2", result.GroupsTruncatedNote);
+        Assert.Contains("No view of 1 availability group fit: AG2", result.GroupsTruncatedNote);
         Assert.DoesNotContain("at least one view of each availability group", result.GroupsTruncatedNote);
     }
 

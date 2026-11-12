@@ -35,7 +35,8 @@ public sealed record FleetSweepServerReading(
     DateTime? LastCollectionUtc = null,
     DateTime? RegisteredUtc = null,
     FleetIdentityCapacity? IdentityCapacity = null,
-    FleetDatabaseStates? DatabaseStates = null)
+    FleetDatabaseStates? DatabaseStates = null,
+    bool Attempted = false)
 {
     /// <summary>
     /// #7669: a column at its identity limit is a state that stays true until someone acts, so no count of events in the span carries it.
@@ -53,14 +54,23 @@ public sealed record FleetSweepServerReading(
     /// <summary>
     /// #6155: this server reported nothing in the span AND was already Offline, by <c>list_servers</c>'s rule, at the instant the service
     /// started. Its silence is older than the restart, so the post-restart settle window does not explain it. A server last collected a
-    /// minute before the restart is not Offline by that rule and stays inside the window.
+    /// minute before the restart is not Offline by that rule and stays inside the window. #8464: the rule reads the log's failed rows
+    /// too, through <see cref="WasFailingBeforeRestart"/>, so a server whose collectors ran and all failed before the restart is Offline
+    /// here as it is on every other surface, and the restart does not explain its silence.
     /// </summary>
     public bool WasOfflineBeforeRestart(DateTime serviceStartedUtc) =>
         ReadFault is null
         && !Signals.HasData
         && (LastCollectionUtc is not null || RegisteredUtc is not null)
         && (LastCollectionUtc is null || LastCollectionUtc < serviceStartedUtc)
-        && DarlingMcpDataTools.FreshnessStatus(LastCollectionUtc, RegisteredUtc, serviceStartedUtc) == "Offline";
+        && DarlingMcpDataTools.FreshnessStatus(LastCollectionUtc, RegisteredUtc, serviceStartedUtc, null, WasFailingBeforeRestart(serviceStartedUtc)) == "Offline";
+
+    /// <summary>#8464: whether the collectors had run against this server, and none had collected, before the service started. The
+    /// any-collector-row probe behind <see cref="Attempted"/> is unbounded in time, so the registration guards it: a server first registered
+    /// after the restart cannot have been failing before it, and one registered before the restart with collector rows and no success was,
+    /// because its collectors run every cycle from registration.</summary>
+    public bool WasFailingBeforeRestart(DateTime serviceStartedUtc) =>
+        Attempted && LastCollectionUtc is null && RegisteredUtc is { } registered && registered < serviceStartedUtc;
 }
 
 /// <summary>The in-process counters the sweep cites as its instrument-liveness evidence: the service's
@@ -278,7 +288,9 @@ public static class FleetSweepEngine
                     DailyHealthBand.NoData when reading.WasOfflineBeforeRestart(instruments.ServiceStartedUtc) =>
                         "No collection inside the sweep span. " + (reading.LastCollectionUtc is { } lastSeen
                             ? "The server's last collection was " + lastSeen.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC, "
-                            : "The store holds no collection from it within its retained history, ")
+                            : reading.WasFailingBeforeRestart(instruments.ServiceStartedUtc)
+                                ? "Its collectors run and every collection fails, and they were failing "
+                                : "The store holds no collection from it within its retained history, ")
                         + "before the service started (" + instruments.ServiceStartedUtc.ToString("o")
                         + "), so it was already offline before the restart: classified offline, not startup-transient.",
                     DailyHealthBand.NoData when inSettleWindow =>
@@ -511,7 +523,7 @@ public static class FleetSweepEngine
         if (readFaults.Count > 0)
         {
             alive = false;
-            notes.Add($"{readFaults.Count} server signal read(s) failed — those servers are unreadable, not quiet.");
+            notes.Add($"{CountText.Plural(readFaults.Count, "server signal read")} failed — {(readFaults.Count == 1 ? "that server is" : "those servers are")} unreadable, not quiet.");
         }
 
         if (serversExpected > 0 && serversReported == 0)
@@ -563,7 +575,7 @@ public static class FleetSweepEngine
         }
         else if (baselineReset)
         {
-            notes.Add("Service restarted since the previous sweep — the pass-counter baseline reset, so counter advance "
+            notes.Add("Service restarted since the previous sweep: the pass-counter baseline reset, so counter advance "
                 + "is not judgeable this sweep.");
         }
 
@@ -926,8 +938,8 @@ public static class FleetSweepEngine
             collection_runs = reading.Signals.CollectionRuns,
             high_cpu_events = reading.Signals.HighCpuEvents,
             blocking_events = reading.Signals.BlockingEvents,
-            blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(
-                reading.Signals.BlockingEvents, reading.Signals.Window),
+            blocking_rate_per_hour = TrendPayloads.RoundRate(ServerHealthClassifier.BlockingRatePerHour(
+                reading.Signals.BlockingEvents, reading.Signals.Window), 2), // #8572
             memory_pressure_events = reading.Signals.MemoryPressureEvents,
             memory_critical_events = reading.Signals.MemoryCriticalEvents,
             alert_count = reading.Signals.AlertCount,
@@ -1102,17 +1114,19 @@ public static class FleetSweepEngine
                 Window = spanEndUtc - spanStartUtc,
             };
 
-            /* #6155: a server with nothing in the span gets its newest collection read, through the probe list_servers uses, so the
-               sweep can tell a server that went quiet after the restart from one that was already offline before it. */
+            /* #6155: a server with nothing in the span gets its newest SUCCESS collection read, through the probe the offline note and
+               list_servers share, so the sweep can tell a server that went quiet after the restart from one that was already offline before it. */
             DateTime? lastCollection = null;
             DateTime? registered = null;
-            if (!signals.HasData && await DarlingServerOfflineNote.ReadFreshnessAsync(postgres, serverId, cancellationToken).ConfigureAwait(false) is var (reg, last))
+            var attempted = false;
+            if (!signals.HasData && await DarlingServerOfflineNote.ReadFreshnessAsync(postgres, serverId, cancellationToken).ConfigureAwait(false) is var (reg, last, tried))
             {
                 registered = reg;
                 lastCollection = last;
+                attempted = tried;
             }
 
-            return new FleetSweepServerReading(serverId, serverName, signals, peakBlock, ReadFault: null, lastCollection, registered);
+            return new FleetSweepServerReading(serverId, serverName, signals, peakBlock, ReadFault: null, lastCollection, registered, Attempted: attempted);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

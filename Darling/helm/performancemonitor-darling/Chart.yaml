@@ -1,0 +1,10 @@
+apiVersion: v2
+name: performancemonitor-darling
+description: Darling, the PerformanceMonitor SQL Server collector service, with its PostgreSQL/TimescaleDB store.
+type: application
+version: 0.0.0
+appVersion: "latest"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/erikdarlingdata/PerformanceMonitor
+sources:
+  - https://github.com/erikdarlingdata/PerformanceMonitor

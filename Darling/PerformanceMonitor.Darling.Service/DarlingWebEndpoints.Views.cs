@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -76,7 +76,7 @@ public static partial class DarlingWebEndpoints
     internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(
         NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken,
         ReadLatencyRecorder? readLatency = null, int clientDeadlineHeadroomSeconds = 0, bool remapClientTimeout = false, bool includeDataStartFields = false,
-        Action<Exception>? onRunException = null, DateTime? nowUtc = null, string? caller = null, ReadSurface? cacheHost = null)
+        Action<Exception>? onRunException = null, DateTime? nowUtc = null, string? caller = null, ReadSurface? cacheHost = null, IReadOnlyList<int>? authorizedServerIds = null)
     {
         /* #5506 part 3 (round 1, C1): a heavy panel is answered from the read cache, joins an identical run in flight, or
            runs once and is stored, as /api/read and the MCP reads are. The host that runs it (cacheHost: web or mcp) is
@@ -84,7 +84,7 @@ public static partial class DarlingWebEndpoints
            their entries are never shared. What is stored is the exact text the host answers (PayloadText), so a hit is
            byte-identical to the run that stored it. A hit skips admission. */
         var admission = readLatency?.Admission;
-        if (cacheHost is { } host && admission is not null
+        if (authorizedServerIds is null && cacheHost is { } host && admission is not null
             && admission.IsCached(ReadSurface.Compose, ComposeRouteLabel(body), ComposeWindowBand(body)))
         {
             return await RunComposedPanelCachedAsync(postgres, body, readLatency!, admission, host,
@@ -92,7 +92,7 @@ public static partial class DarlingWebEndpoints
         }
 
         return await RunComposedPanelAdmittedAsync(postgres, body, readLatency, clientDeadlineHeadroomSeconds,
-            remapClientTimeout, includeDataStartFields, onRunException, nowUtc, caller, cacheHost, cancellationToken);
+            remapClientTimeout, includeDataStartFields, onRunException, nowUtc, caller, cacheHost, authorizedServerIds, cancellationToken);
     }
 
     private static async Task<ComposeRunOutcome> RunComposedPanelCachedAsync(
@@ -122,7 +122,7 @@ public static partial class DarlingWebEndpoints
            answer), never the run's, so one run counts once. */
         var flight = cache.Join(key, ttl,
             token => RunComposedPanelAdmittedAsync(postgres, body, readLatency, clientDeadlineHeadroomSeconds, remapClientTimeout,
-                includeDataStartFields, onRunException, nowUtc, caller, host, token),
+                includeDataStartFields, onRunException, nowUtc, caller, host, null, token),
             run => run.PayloadText is { } text && ReadResultCache.IsCacheableText(text, gcf: false) ? text : null);
         if (flight.IsLead)
         {
@@ -161,7 +161,7 @@ public static partial class DarlingWebEndpoints
     private static async Task<ComposeRunOutcome> RunComposedPanelAdmittedAsync(
         NpgsqlDataSource postgres, JsonObject body,
         ReadLatencyRecorder? readLatency, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, bool includeDataStartFields,
-        Action<Exception>? onRunException, DateTime? nowUtc, string? caller, ReadSurface? cacheHost, System.Threading.CancellationToken cancellationToken)
+        Action<Exception>? onRunException, DateTime? nowUtc, string? caller, ReadSurface? cacheHost, IReadOnlyList<int>? authorizedServerIds, System.Threading.CancellationToken cancellationToken)
     {
         /* #4442 scope 2: recorded ONCE per call, here, so the web /api/compose/run route and the MCP
            run_custom_view_panel tool -- both of which call this ONE runner -- contribute exactly one
@@ -201,7 +201,7 @@ public static partial class DarlingWebEndpoints
         }
 
         stopwatch.Restart();
-        var outcome = await ComposePanelRunner.RunComposedPanelCoreAsync(ComposeHost, postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, nowUtc);
+        var outcome = await ComposePanelRunner.RunComposedPanelCoreAsync(ComposeHost, postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, authorizedServerIds, nowUtc);
         /* Round 1, C1: the text the host answers, taken once here so a cached copy of it is the same bytes. */
         if (cacheHost is { } host && outcome.Payload is { } payload)
         {
@@ -374,6 +374,9 @@ public static partial class DarlingWebEndpoints
 
         /// <summary>The outcome the route answered with.</summary>
         internal void Complete(ReadOutcome outcome) => _outcome = outcome;
+
+        /// <summary>How long the route has run since it was admitted, for a failure line written before the run is disposed.</summary>
+        internal long ElapsedMilliseconds => _stopwatch.ElapsedMilliseconds;
 
         public void Dispose()
         {
@@ -603,8 +606,12 @@ public static partial class DarlingWebEndpoints
     /// true is the generic-Exception catch's "Error running query: {ex.Message}", reclassified here exactly as
     /// <see cref="ToHttpResult"/>'s ServerError arm reclassifies a tool's envelope, since by this point the
     /// real Exception is equally gone — only the sentence survived the round trip through
-    /// <see cref="ComposeRunOutcome"/>.</summary>
-    internal static IResult ComposeRunFailureResult(ComposeRunOutcome outcome, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted)
+    /// <see cref="ComposeRunOutcome"/>. #8323: a cell the store stopped at the viewer role's statement timeout
+    /// (SQLSTATE 57014) is not the author's error, and a saved notebook's reader is usually not its author, so that one
+    /// arm answers <see cref="ComposeStatementTimeoutSentence"/> as <c>error</c>, built from <paramref name="body"/> (the
+    /// run's own window and server set), with the engine's text behind <c>detail</c>, where the author case still finds
+    /// it. Still 400, still the one Warning log line.</summary>
+    internal static IResult ComposeRunFailureResult(ComposeRunOutcome outcome, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted, JsonObject? body = null)
     {
         /* W13: an unknown server is a plain 404 with its message, never a quiet empty answer. */
         if (outcome.IsNotFound)
@@ -626,11 +633,46 @@ public static partial class DarlingWebEndpoints
             logger.LogWarning(
                 "{Route} answered a Custom View panel's query error at 400 after {ElapsedMs} ms (SQLSTATE {SqlState}): {Error}",
                 route, elapsedMs, sqlState, outcome.Error);
+
+            if (sqlState == QueryStoreComposeStamp.StatementTimeoutSqlState)
+            {
+                return JsonNodeResult(
+                    new JsonObject { ["error"] = ComposeStatementTimeoutSentence(body), ["detail"] = outcome.Error },
+                    StatusCodes.Status400BadRequest);
+            }
         }
 
         return outcome.IsServerError
             ? ServerErrorResult(outcome.Error!, route, logger, elapsedMs, requestAborted)
             : ErrorResult(outcome.Error!, StatusCodes.Status400BadRequest);
+    }
+
+    /// <summary>#8323: the plain sentence a composed cell answers when the store stopped it at its statement timeout: what
+    /// the cell was reading (<paramref name="body"/>'s <c>windowStart</c>/<c>windowEnd</c>, else its <c>hours</c>, else the
+    /// default window) and for how many servers, counted by the run's own scope rule
+    /// (<see cref="ComposePanelRunner.ServerScopeOf"/>: the top-level <c>server</c> name or list, else the bound server
+    /// variable; the literal "All" and blank entries are no server, so a fleet run reads every server), and what to do next.
+    /// The engine's own text rides beside it, in <c>detail</c>, not in this sentence.</summary>
+    internal static string ComposeStatementTimeoutSentence(JsonObject? body)
+    {
+        string window;
+        if (body is not null
+            && ComposeSpec.TryParseUtcInstant(body["windowStart"], out var start)
+            && ComposeSpec.TryParseUtcInstant(body["windowEnd"], out var end))
+        {
+            window = start.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " to " + end.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC";
+        }
+        else
+        {
+            var hours = body?["hours"] is JsonValue hoursValue && hoursValue.TryGetValue<int>(out var sent) ? sent : DefaultComposeHours;
+            window = hours == 1 ? "the past hour" : "the past " + hours.ToString(CultureInfo.InvariantCulture) + " hours";
+        }
+
+        var servers = body is null ? 0 : ComposePanelRunner.ServerScopeOf(body)?.Count ?? 0;
+        var scope = servers == 0 ? "every server" : servers == 1 ? "1 server" : servers.ToString(CultureInfo.InvariantCulture) + " servers";
+
+        return "The store stopped this cell at its statement timeout. It was reading " + window + " for " + scope
+            + ". Narrow the window or the server set, or run the cell again when fewer reads are running.";
     }
 
     internal static JsonValue? DbValueToJson(object value) => ComposePanelRunner.DbValueToJson(value);
@@ -872,6 +914,7 @@ public static partial class DarlingWebEndpoints
 
             /* ── alerts / mute rules (DarlingMcpAlertTools) ── */
             ["get_alert_history"] = R(CatAlerts, "Recent fired-alert history for a server, newest first and bounded by limit. Excludes operator-dismissed alerts unless include_dismissed is true (dismissed_excluded_count says how many the default hid). include_streak adds streak_days to each row: days in a row this metric fired at this time of day before the alert, muted fires counting.", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("include_dismissed", false), PText("metric_name"), PText("family"), PBool("include_streak", false)),
+            ["get_alert_badge_summary"] = R(CatAlerts, "What the sidebar's alert badge shows, one entry per server with something to show: the count of actionable alerts in the last 24 hours (not muted, not dismissed, not a resolution), whether any fired critical, and the newest alert's time. Grouped in the store, so it is never cut short by a row cap the way a page of get_alert_history is."),
             ["get_alert_settings"] = R(CatAlerts, "The current alert-settings configuration."),
             ["get_daily_health_report"] = R(CatAlerts, "The Daily Health Report for one day (#7041), built from the store and sent nowhere. date is a local date in the report's time zone, default the latest finished period.", PText("date")),
             /* #5241: a web-only read (no MCP tool behind it, see WebOnlyReadNames): one alert's advice and fix script,
@@ -970,7 +1013,7 @@ public static partial class DarlingWebEndpoints
             ["get_pg_deadlocks"] = R(CatData, "PostgreSQL deadlocks reported in the window, with the victim, the lock modes and resources, and the victim's statement. Needs nothing configured on the target.", PServer(), PHours(24), PLimit(25), PAsOf()),
             ["get_pg_deadlock_detail"] = R(CatData, "PostgreSQL deadlock graphs in full: the whole wait graph as the server wrote it, and every participant's statement with its literals normalized. Newest first, or one by deadlock_hash.", PServer(), PText("deadlock_hash"), PLimit(5)),
             ["get_pg_log_events"] = R(CatData, "PostgreSQL server-log events in the window, classified by family (error, connection, lock_wait, temp_file, autovacuum, checkpoint), newest first, SQL in them normalized. The 'check the error log' read. Filter by family and min_severity; the page says what bounded it.", PServer(), PHours(24), PText("family"), PText("min_severity"), PLimit(50), PAsOf()),
-            ["get_pg_wait_trend"] = R(CatTrends, "One PostgreSQL wait event over time, per second. Omit wait_event to follow whichever dominates. Estimates from a sampling profiler, so the shape is the finding.", PServer(), PText("wait_event"), PHours(24), PAsOf()),
+            ["get_pg_wait_trend"] = R(CatTrends, "One PostgreSQL wait event over time, per second. Omit wait_event to follow whichever dominates. Estimates from a sampling profiler, so the shape is the finding.", PServer(), PText("wait_event"), PHours(24), PAsOf(), PInt("bucket_minutes")),
             ["get_pg_query_duration_trend"] = R(CatTrends, "One PostgreSQL statement over time by queryid: what a single execution cost in each interval. Omit queryid for the busiest statement. The regression read.", PServer(), PText("queryid"), PHours(24), PAsOf(), PInt("bucket_minutes")),
             ["get_pg_io_trend"] = R(CatTrends, "One PostgreSQL (backend_type, context) pair over time: I/O rates per second, the hit ratio per point, and latency where the server measures it. Omit both to follow whichever pair moved the most I/O.", PServer(), PText("backend_type"), PText("context"), PHours(24), PAsOf(), PInt("bucket_minutes")),
             ["get_pg_database_trend"] = R(CatTrends, "One PostgreSQL database over time: temp-file spills, the cache hit ratio per point with its worst interval, deadlocks and the rollback share. Omit database for the biggest spiller. The cumulative ratio is a lifetime average that hides a cliff.", PServer(), PText("database"), PHours(24), PAsOf(), PInt("bucket_minutes")),
@@ -1017,7 +1060,7 @@ public static partial class DarlingWebEndpoints
             ["get_store_host"] = R(CatOverview, "The monitoring store's own HOST profile: platform/RAM/data volume, PostgreSQL/TimescaleDB facts, and a verdict per sizing-relevant setting against what this host would derive today - is the store sized right. No parameters; a snapshot."),
             ["get_collector_cost"] = R(CatOverview, "The monitoring tool's OWN per-collector cost on the monitored servers (self-monitoring) - which of our collectors is the most expensive to run. Pass collector_name for that one collector's daily trend instead of the ranked list.", PInt("days_back", 7), PText("collector_name")),
             ["get_collector_stall_probes"] = R(CatOverview, "The out-of-band server-wide wait samples taken while one of OUR collectors was stalled mid-read - what the monitored instance was doing inside the window the sequential sweep records nothing in. Carries the outcome census beside the samples, deliberately unbanded.", PServer(), PInt("days_back", 7), PLimit(DarlingMcpStallProbeTools.DefaultLimit)),
-            ["get_oversized_plan_backlog"] = R(CatOverview, "The cached plans this tool measured as too large to capture inline, and what the out-of-band sweep has done about each one: per server the three verdict buckets (pending/captured/expired, a strict partition), the attempt figures on still-pending rows, the newest capture and expiry instants, and observed_bytes min/median/max, with the per-collector census beside them. Takes no window - a worklist updated in place, not a series. Pass server_name with include_rows for the claim keys.", PServer(), PBool("include_rows", false), PLimit(DarlingMcpOversizedPlanBacklogTools.DefaultLimit)),
+            ["get_oversized_plan_backlog"] = R(CatOverview, "The cached plans this tool measured as too large to capture inline, and what the out-of-band sweep has done about each one: per server the four verdict buckets (pending/captured/expired/dropped, a strict partition), the attempt figures on still-pending rows, the newest capture and expiry instants, and observed_bytes min/median/max, with the per-collector census beside them. Takes no window - a worklist updated in place, not a series. Pass server_name with include_rows for the claim keys.", PServer(), PBool("include_rows", false), PLimit(DarlingMcpOversizedPlanBacklogTools.DefaultLimit)),
             ["get_slow_reads"] = R(CatOverview, "The monitoring tool's OWN slow or failed reads, newest first - each with the arguments it was asked with, the source that answered and its slowest statements. Recorded when a read took 5 seconds or more or ended in a timeout, error or limit. Optional server, surface (web/compose/mcp) and route filter.", PHours(DarlingMcpSlowReadTools.DefaultHours), PServer(), PText("surface"), PText("route"), PLimit(DarlingMcpSlowReadTools.DefaultLimit)),
             ["get_read_latency"] = R(CatOverview, "The monitoring tool's OWN read-latency history (self-monitoring) - which of the web dashboard's or MCP server's own reads is really slow, and how often it times out. p50/p95/p99 are bucket upper-bound estimates, per (surface, route, window band: 1h, 24h, 7d, 7d+ or none), so one route can return a row per band; sorted p95 desc. window_band is the width of the window the read asked for (its default window when it sent none). max_in_flight is the most other reads running when one started; wait_total_ms is the summed wait for a store connection. Optional surface (web/compose/mcp) and route filter. fallbacks and gate_failures count reads that fell back to raw.", PHours(DarlingMcpReadLatencyTools.DefaultHours), PText("surface"), PText("route"), PLimit(DarlingMcpReadLatencyTools.DefaultLimit)),
 

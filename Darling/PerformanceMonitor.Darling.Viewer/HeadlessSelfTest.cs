@@ -59,13 +59,13 @@ public static class HeadlessSelfTest
         var notes = new List<string>();
         if (!string.Equals(withTimeout, original, StringComparison.Ordinal))
         {
-            notes.Add($"[note ] applied the Viewer's Connection timeout preference ({connectionTimeoutSeconds}s) — "
+            notes.Add($"[note ] applied the Viewer's Connection timeout preference ({connectionTimeoutSeconds}s), "
                 + "testing the same connection string startup uses, not the raw darling.json one");
         }
 
         if (!string.Equals(effective, withTimeout, StringComparison.Ordinal))
         {
-            notes.Add($"[note ] added the store's Search Path ({DarlingStoreConnection.StoreSearchPath}) because the connection string names none — "
+            notes.Add($"[note ] added the store's Search Path ({DarlingStoreConnection.StoreSearchPath}) because the connection string names none, "
                 + "testing the same connection string startup uses, not the raw darling.json one");
         }
 
@@ -148,7 +148,7 @@ public static class HeadlessSelfTest
         {
             /* Unreadable viewer settings must not stop the probe: the raw string is still worth testing, and
                saying which one was tested keeps the result interpretable. */
-            Print($"[note ] could not read the Viewer's settings ({ex.Message}) — testing darling.json's connection string as-is, "
+            Print($"[note ] could not read the Viewer's settings ({ex.Message}), testing darling.json's connection string as-is, "
                 + "which may differ from what startup opens");
         }
 

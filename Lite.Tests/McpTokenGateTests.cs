@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
 using System.Text.RegularExpressions;
@@ -80,6 +81,167 @@ public sealed class McpTokenGateTests
 
         Assert.Equal(StatusCodes.Status401Unauthorized, status);
         Assert.Equal(0, reached);
+    }
+
+    /// <summary>#8611: a refused token used to leave nothing in the log, so "is my token wrong" was answerable only from the client. One line
+    /// per refusal, rate-limited the way Darling's MCP host is (a run of wrong tokens writes one line, the next window's line says how many
+    /// were held back), and never any part of a token.</summary>
+    [Fact]
+    public async Task AWrongToken_WritesOneRefusalLine_ARunOfThemIsRateLimited_AndNoLineCarriesAToken()
+    {
+        var lines = new List<string>();
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        await using var app = builder.Build();
+        McpHostService.UseBearerTokenGate(app, Token, currentToken: null, log: lines.Add, utcNow: () => now);
+        app.Run(context =>
+        {
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            return Task.CompletedTask;
+        });
+        await app.StartAsync();
+        using var client = app.GetTestClient();
+
+        async Task<int> Send(string? authorization)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/");
+            if (authorization is not null)
+            {
+                request.Headers.TryAddWithoutValidation("Authorization", authorization);
+            }
+
+            using var response = await client.SendAsync(request);
+            return (int)response.StatusCode;
+        }
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, await Send("Bearer secretguess0"));
+        Assert.Single(lines);
+        Assert.Contains("401", lines[0], StringComparison.Ordinal);
+
+        for (var i = 1; i < 5; i++)
+        {
+            now = now.AddSeconds(5);
+            Assert.Equal(StatusCodes.Status401Unauthorized, await Send("Bearer secretguess" + i));
+        }
+
+        Assert.Single(lines);
+
+        /* The right token is served and logs nothing. */
+        Assert.Equal(StatusCodes.Status200OK, await Send("Bearer " + Token));
+        Assert.Single(lines);
+
+        /* Past the window the next refusal is logged again and says how many were held back (four in the run, the right token not counted). */
+        now = now.AddMinutes(11);
+        Assert.Equal(StatusCodes.Status401Unauthorized, await Send("Bearer secretguess9"));
+        Assert.Equal(2, lines.Count);
+        Assert.Contains("4 further", lines[1], StringComparison.Ordinal);
+
+        foreach (var line in lines)
+        {
+            Assert.DoesNotContain("secretguess", line, StringComparison.Ordinal);
+            Assert.DoesNotContain(Token[..8], line, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>Starts the gate with a clock the test moves and a log it reads, and returns the sender.</summary>
+    private static async Task<(Func<string?, Task<int>> Send, List<string> Lines, Func<DateTime> Now, Action<DateTime> SetNow, WebApplication App)> GateWithLogAsync(DateTime start)
+    {
+        var lines = new List<string>();
+        var now = start;
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        var app = builder.Build();
+        McpHostService.UseBearerTokenGate(app, Token, currentToken: null, log: lines.Add, utcNow: () => now);
+        app.Run(context =>
+        {
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            return Task.CompletedTask;
+        });
+        await app.StartAsync();
+        var client = app.GetTestClient();
+
+        async Task<int> Send(string? authorization)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/");
+            if (authorization is not null)
+            {
+                request.Headers.TryAddWithoutValidation("Authorization", authorization);
+            }
+
+            using var response = await client.SendAsync(request);
+            return (int)response.StatusCode;
+        }
+
+        return (Send, lines, () => now, t => now = t, app);
+    }
+
+    /// <summary>#8611: during setup a client first sends no header, then a wrong token. The first line must not hide the second: the
+    /// only line in the log would name the wrong problem for ten minutes. A repeat of a state already logged still holds.</summary>
+    [Fact]
+    public async Task ANewRefusalState_IsLoggedAtOnce_AndARepeatOfAStateInTheWindowIsHeld()
+    {
+        var (send, lines, now, setNow, app) = await GateWithLogAsync(new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc));
+        await using var _ = app;
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, await send(null));
+        setNow(now().AddMinutes(1));
+        Assert.Equal(StatusCodes.Status401Unauthorized, await send("Bearer secretguess0"));
+
+        Assert.Equal(2, lines.Count);
+        Assert.Contains("no 'Authorization: Bearer <token>' header was presented", lines[0], StringComparison.Ordinal);
+        Assert.Contains("the presented bearer token does not match the MCP token", lines[1], StringComparison.Ordinal);
+
+        setNow(now().AddMinutes(1));
+        await send(null);
+        await send("Bearer secretguess1");
+        await send("Basic abc");
+        Assert.Equal(3, lines.Count);
+        Assert.Contains("is not a 'Bearer <token>'", lines[2], StringComparison.Ordinal);
+        Assert.All(lines, line => Assert.DoesNotContain("secretguess", line, StringComparison.Ordinal));
+    }
+
+    /// <summary>#8611: the held-back count is true when it is read. Five wrong tokens in the morning and the next one in the evening
+    /// must not say four were held back "in the last 10 minutes". The line says the four were held in the window after the line before.</summary>
+    [Fact]
+    public async Task TheHeldBackCount_NamesTheWindowItWasCountedIn_NotTheTimeTheLineIsWritten()
+    {
+        var (send, lines, now, setNow, app) = await GateWithLogAsync(new DateTime(2026, 1, 1, 9, 0, 0, DateTimeKind.Utc));
+        await using var _ = app;
+
+        for (var i = 0; i < 5; i++)
+        {
+            await send("Bearer secretguess" + i);
+            setNow(now().AddSeconds(30));
+        }
+
+        setNow(new DateTime(2026, 1, 1, 17, 0, 0, DateTimeKind.Utc));
+        await send("Bearer secretguess9");
+
+        Assert.Equal(2, lines.Count);
+        Assert.Equal(
+            "MCP refused a request (HTTP 401): the access token gate rejected it, the presented bearer token does not match the MCP token. "
+            + "4 further refusal(s) like this were not logged in the 10 minute(s) after the previous line.",
+            lines[1]);
+    }
+
+    /// <summary>The three client states in the log line, and never the token: a raw token sent without "Bearer " is the case where the
+    /// header's text IS a token, so the line must not carry any of it.</summary>
+    [Theory]
+    [InlineData(null, "no 'Authorization: Bearer <token>' header was presented")]
+    [InlineData("", "no 'Authorization: Bearer <token>' header was presented")]
+    [InlineData("   ", "no 'Authorization: Bearer <token>' header was presented")]
+    [InlineData("Bearer ", "is not a 'Bearer <token>'")]
+    [InlineData("Basic dXNlcjpwYXNz", "is not a 'Bearer <token>'")]
+    [InlineData("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "is not a 'Bearer <token>'")]
+    [InlineData("Bearer 0123456789abcdef", "the presented bearer token does not match the MCP token")]
+    public void DescribeBearerRefusal_NamesTheClientState_AndNeverCarriesTheHeadersText(string? authorization, string expected)
+    {
+        var described = McpHostService.DescribeBearerRefusal(authorization);
+
+        Assert.Contains(expected, described, StringComparison.Ordinal);
+        Assert.DoesNotContain("0123456789abcdef", described, StringComparison.Ordinal);
+        Assert.DoesNotContain("dXNlcjpwYXNz", described, StringComparison.Ordinal);
     }
 
     [Theory]

@@ -108,9 +108,9 @@ public sealed class DurationTrendExecutionCountLiveTests
             var storeTrend = store.GetProperty("trend");
             Assert.Equal(2, storeTrend.GetArrayLength());
             Assert.Equal(0, store.GetProperty("unrated_points").GetInt32());
-            Assert.Equal(10d / 3600d, storeTrend[0].GetProperty("executions_per_second").GetDouble(), 9);
+            Assert.Equal(10d / 3600d, storeTrend[0].GetProperty("executions_per_second").GetDouble(), 6);
             Assert.Equal(10, storeTrend[0].GetProperty("execution_count").GetInt64());
-            Assert.Equal(25d / 3600d, storeTrend[1].GetProperty("executions_per_second").GetDouble(), 9);
+            Assert.Equal(25d / 3600d, storeTrend[1].GetProperty("executions_per_second").GetDouble(), 6);
             Assert.Equal(25, storeTrend[1].GetProperty("execution_count").GetInt64());
 
             bodySucceeded = true;

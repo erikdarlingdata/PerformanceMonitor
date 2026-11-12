@@ -18,16 +18,18 @@
                 BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
             <DockPanel>
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
-                    <Button Content="+" Click="ZoomIn_Click" Width="28" Height="28" Padding="0" FontSize="16"
+                    <!-- The zoom, Fit, Save and Minimap buttons act on a drawn plan: the code-behind enables them while one is
+                         drawn (UpdateToolbarState). -->
+                    <Button x:Name="ZoomInButton" Content="+" Click="ZoomIn_Click" Width="28" Height="28" Padding="0" FontSize="16"
                             FontWeight="Bold" ToolTip="Zoom In"/>
-                    <Button Content="&#x2212;" Click="ZoomOut_Click" Width="28" Height="28" Padding="0" FontSize="16"
+                    <Button x:Name="ZoomOutButton" Content="&#x2212;" Click="ZoomOut_Click" Width="28" Height="28" Padding="0" FontSize="16"
                             FontWeight="Bold" Margin="4,0,0,0" ToolTip="Zoom Out"/>
-                    <Button Content="Fit" Click="ZoomFit_Click" Height="28" Padding="8,0" Margin="4,0,0,0"
+                    <Button x:Name="ZoomFitButton" Content="Fit" Click="ZoomFit_Click" Height="28" Padding="8,0" Margin="4,0,0,0"
                             ToolTip="Zoom to Fit"/>
                     <TextBlock x:Name="ZoomLevelText" Text="100%" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundMutedBrush}" Margin="8,0,0,0" FontSize="11"/>
                     <Separator Margin="12,4"/>
-                    <Button Content="Save .sqlplan" Click="SavePlan_Click" Height="28" Padding="8,0"
+                    <Button x:Name="SavePlanButton" Content="Save .sqlplan" Click="SavePlan_Click" Height="28" Padding="8,0"
                             ToolTip="Save plan as .sqlplan file"/>
                     <Separator x:Name="StatementsButtonSeparator" Margin="12,4" Visibility="Collapsed"/>
                     <Button x:Name="StatementsButton" Content="Statements" Click="ToggleStatements_Click"
@@ -58,13 +60,22 @@
                                FontWeight="SemiBold"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </Expander.Header>
-                <Grid MaxHeight="220">
+                <!-- The cards size to their content, and a 900 px window is narrower than four of them with text: the strip scrolls
+                     sideways to the rest, and each card stops growing at 360 px (the cap sits on the card itself, since a column's
+                     MaxWidth does not constrain a card measured in a strip of unbounded width), so a card's text wraps inside it.
+                     A strip that scrolls sideways measures its grid with no width limit, and a star column measured that way sizes
+                     to its content, so the code-behind bounds the grid's width (BoundInsightsGridToStrip): the strip's width, or the
+                     four content-sized columns plus the Wait Stats column's minimum when the strip is narrower than that. In a wide
+                     window the Wait Stats column then fills the remaining width and its rows ellipsize; in a narrow one the grid
+                     keeps its minimums and the strip scrolls. -->
+                <ScrollViewer x:Name="InsightsStrip" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                <Grid x:Name="InsightsGrid" MaxHeight="220">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition x:Name="ServerContextColumn" Width="Auto" MinWidth="180"/>
-                        <ColumnDefinition Width="Auto" MinWidth="180"/>
-                        <ColumnDefinition Width="Auto" MinWidth="200"/>
-                        <ColumnDefinition Width="Auto" MinWidth="200"/>
-                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition x:Name="ServerContextColumn" Width="Auto" MinWidth="180" MaxWidth="360"/>
+                        <ColumnDefinition Width="Auto" MinWidth="180" MaxWidth="360"/>
+                        <ColumnDefinition Width="Auto" MinWidth="200" MaxWidth="360"/>
+                        <ColumnDefinition Width="Auto" MinWidth="200" MaxWidth="360"/>
+                        <ColumnDefinition Width="*" MinWidth="280"/>
                     </Grid.ColumnDefinitions>
 
                     <!--
@@ -80,7 +91,7 @@
                     -->
 
                     <!-- Server Context (first, placeholder when no metadata) -->
-                    <Border Grid.Column="0"
+                    <Border Grid.Column="0" MaxWidth="360"
                             Background="{DynamicResource BackgroundLightBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                         <DockPanel>
@@ -96,8 +107,12 @@
                                                FontWeight="SemiBold" Foreground="{DynamicResource InsightServerBrush}"
                                                Margin="0,0,0,6"/>
                                     <StackPanel x:Name="ServerContextContent"/>
+                                    <!-- The sentence is longer than the card's 360 px cap, so it wraps, and within 220 px: a card
+                                         with one sentence to show stays near its minimum width and leaves the strip to the cards
+                                         after it. -->
                                     <TextBlock x:Name="ServerContextEmpty"
                                                FontSize="12" Visibility="Collapsed"
+                                               TextWrapping="Wrap" MaxWidth="220" HorizontalAlignment="Left"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 </StackPanel>
                             </ScrollViewer>
@@ -105,7 +120,7 @@
                     </Border>
 
                     <!-- Runtime Summary (neutral centre: no accent, just the alignment gutter) -->
-                    <Border Grid.Column="1"
+                    <Border Grid.Column="1" MaxWidth="360"
                             Background="{DynamicResource BackgroundLightBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                         <DockPanel>
@@ -123,7 +138,7 @@
                     </Border>
 
                     <!-- Missing Indexes (center) -->
-                    <Border Grid.Column="2"
+                    <Border Grid.Column="2" MaxWidth="360"
                             Background="{DynamicResource BackgroundLightBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                         <DockPanel>
@@ -149,7 +164,7 @@
                     </Border>
 
                     <!-- Parameters -->
-                    <Border Grid.Column="3"
+                    <Border Grid.Column="3" MaxWidth="360"
                             Background="{DynamicResource BackgroundLightBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                         <DockPanel>
@@ -199,6 +214,7 @@
                         </DockPanel>
                     </Border>
                 </Grid>
+                </ScrollViewer>
             </Expander>
         </Border>
 
@@ -217,15 +233,17 @@
                      Padding="8,4"/>
         </Expander>
 
-        <!-- Statements Panel + Plan Canvas + Properties Panel -->
-        <Grid Grid.Row="3">
+        <!-- Statements Panel + Plan Canvas + Properties Panel. The two panels open at the widths they ask for and narrow, the
+             Statements panel first, when those would leave the canvas less than its minimum; the code-behind sets the widths and
+             the canvas column's minimum (FitSidePanels), which also bounds a splitter drag. -->
+        <Grid x:Name="PlanBody" Grid.Row="3">
             <Grid.ColumnDefinitions>
                 <!-- Col 0: Statements Panel (hidden by default) -->
                 <ColumnDefinition x:Name="StatementsColumn" Width="0"/>
                 <!-- Col 1: Statements Splitter (hidden by default) -->
                 <ColumnDefinition x:Name="StatementsSplitterColumn" Width="0"/>
                 <!-- Col 2: Plan Canvas -->
-                <ColumnDefinition Width="*"/>
+                <ColumnDefinition x:Name="CanvasColumn" Width="*"/>
                 <!-- Col 3: Properties Splitter (hidden by default) -->
                 <ColumnDefinition Width="Auto"/>
                 <!-- Col 4: Properties Panel (hidden by default) -->
@@ -348,7 +366,7 @@
             <StackPanel x:Name="EmptyState" Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Center">
                 <TextBlock x:Name="EmptyStateTitle" Text="No Plan Loaded" FontSize="20" FontWeight="Light"
                            Foreground="{DynamicResource ForegroundMutedBrush}" HorizontalAlignment="Center"/>
-                <TextBlock x:Name="EmptyStateDetail" Text="Right-click a query row and choose 'View Plan' to display an execution plan here"
+                <TextBlock x:Name="EmptyStateDetail" Text="Right-click a query row and choose 'View Stored Plan' or 'Get Actual Plan (re-run)' to display an execution plan here"
                            FontSize="13" Foreground="{DynamicResource ForegroundMutedBrush}"
                            HorizontalAlignment="Center" Margin="0,8,0,0"/>
             </StackPanel>

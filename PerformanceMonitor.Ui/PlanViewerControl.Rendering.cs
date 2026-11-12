@@ -25,6 +25,7 @@ public partial class PlanViewerControl
     private void RenderStatement(PlanStatement statement)
     {
         _currentStatement = statement;
+        UpdateToolbarState();
         PlanCanvas.Children.Clear();
         _selectedNodeBorder = null;
         PlanScrollViewer.ScrollToHome();
@@ -40,10 +41,10 @@ public partial class PlanViewerControl
         // Render edges first (behind nodes)
         RenderEdges(statement.RootNode);
 
-        // Render nodes
-        var allWarnings = new List<PlanWarning>();
-        CollectWarnings(statement.RootNode, allWarnings);
-        RenderNodes(statement.RootNode, allWarnings.Count);
+        // Render nodes. The root's badge counts the statement's warnings by the one rule the root tooltip and
+        // the Statements grid use (PlanWarningDisplay.StatementWarnings): statement-level and operator warnings,
+        // at every severity, so a statement whose findings are all statement-level still shows them.
+        RenderNodes(statement.RootNode, PlanWarningDisplay.StatementWarnings(statement).Count);
 
         // Update banners
         ShowMissingIndexes(statement.MissingIndexes);
@@ -97,9 +98,7 @@ public partial class PlanViewerControl
         // Tooltip — root node includes statement-level PlanWarnings
         if (totalWarningCount > 0 && _currentStatement != null)
         {
-            var allWarnings = new List<PlanWarning>();
-            allWarnings.AddRange(_currentStatement.PlanWarnings);
-            CollectWarnings(node, allWarnings);
+            var allWarnings = PlanWarningDisplay.StatementWarnings(_currentStatement);
             border.ToolTip = BuildNodeTooltip(node, allWarnings);
             AutomationProperties.SetHelpText(border, PlanNodeBorder.Summary(node, allWarnings));
         }

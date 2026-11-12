@@ -48,7 +48,7 @@ public sealed class DarlingMcpFleetTools
         "memory_mb, buffer_pool_mb and threads are always null (no DMV equivalent), not a gap. <<GUIDE>> " +
         "Gets the whole fleet's health at a glance: one pre-banded card per monitored server (CPU, memory, " +
         "blocking, deadlocks, worker threads, and collector health, each with a Healthy/Warning/Critical band), " +
-        "plus a rollup — counts by band, cross-server blocking and deadlock totals, and a worst-first 'needs " +
+        "plus a rollup, counts by band, cross-server blocking and deadlock totals, and a worst-first 'needs " +
         "attention' ranking (worst_servers: a server whose band is Warning or worse, or whose band is Healthy but " +
         "carries a Warning-level Identity capacity, Agent alerts, Database state or Protection tile; advisory_tiles on the row names " +
         "those tiles and the band stays Healthy). database_states on the card lists the databases not in their expected state (the Database State alert's " +
@@ -61,13 +61,13 @@ public sealed class DarlingMcpFleetTools
         "cpu_source names which collector produced each card's total_cpu_percent, so a missing number is never " +
         "ambiguous: RingBuffer (SQL Server, and the only arm that also fills cpu_percent / " +
         "other_process_cpu_percent with the per-process split), PerformanceInsights (an Aurora PostgreSQL " +
-        "target's instance CPU from the AWS API, total only — no per-process breakdown exists), NotCollected " +
-        "(a source that applies here produced no current reading — check get_collection_health), or " +
+        "target's instance CPU from the AWS API, total only, no per-process breakdown exists), NotCollected " +
+        "(a source that applies here produced no current reading, check get_collection_health), or " +
         "NoSourceForEngine (a PostgreSQL target not known to be Aurora, INCLUDING plain RDS for PostgreSQL: " +
         "PostgreSQL exposes no instance-CPU counter and the Performance Insights ingest is gated to Aurora, " +
         "so that null is structural and no grant or upgrade changes it). A PostgreSQL target's memory_mb, " +
         "buffer_pool_mb and the whole threads block are null for " +
-        "the same structural reason and no band is claimed for them — those metrics are SQL Server DMV " +
+        "the same structural reason and no band is claimed for them: those metrics are SQL Server DMV " +
         "readings with no PostgreSQL equivalent collected; get_pg_buffer_usage, get_pg_kernel_stats and " +
         "get_pg_session_states are the reads that answer the nearest PostgreSQL questions. A PostgreSQL " +
         "target's deadlock_count IS measured: it is the server's own pg_stat_database.deadlocks counter, " +
@@ -87,31 +87,54 @@ public sealed class DarlingMcpFleetTools
         "healthy/failed/collector_count, collector_severity, deadlock_collector_band and deadlock_source, and the " +
         "fleet's servers_with_collection_failures and deadlock_coverage, come from one 7-day scan of the collection " +
         "log that does not depend on hours_back and is shared by every overview call of the same minute on this " +
-        "host — 0 means this call ran it, anything up to 59 means a scan that many seconds before generated_at " +
+        "host, 0 means this call ran it, anything up to 59 means a scan that many seconds before generated_at " +
         "did. Everything else on the payload was read for this call. Racing several calls with different " +
         "hours_back values buys nothing on that half and costs the window-bound reads N times over: call once " +
         "with the widest window and derive, or sequence the calls. " +
-        "detail defaults to \"summary\" (#4198): the rollup, band counts and worst_servers, WITHOUT the " +
-        "per-server cards array — #4198 measured that array at 67-81 KB on a fleet this size, large enough " +
-        "that Claude Code refused it inline outright. Pass detail=\"cards\" for the full per-server detail " +
-        "this tool returned before #4198, once you already know which server needs it; cards_included says " +
-        "which shape you got, and a summary response's cards_note repeats the lever. worst_only and band " +
-        "narrow a detail=\"cards\" call back toward a manageable size instead of shipping every card: " +
+        "detail defaults to \"summary\": the rollup, band counts and worst_servers, WITHOUT the " +
+        "per-server cards array, which measured at 67-81 KB on a fleet this size, large enough " +
+        "that Claude Code refused it inline outright. Pass detail=\"cards\" for the per-server cards, " +
+        "once you already know which server needs it; cards_included says " +
+        "which shape you got, and a summary response's cards_note repeats the lever. A cards answer is held " +
+        "to the 32,768-byte response budget: the cards are ordered worst first, every card by the " +
+        "worst_servers ranking (the needs-attention servers by score, then the rest by score, name breaking a " +
+        "tie), so no card on a page ranks below one left out, and as many whole cards as fit are returned. cards_total is how " +
+        "many cards the call selected, card_offset where this page starts, cards_returned how many it holds. " +
+        "When cards were left out, budget_truncated is true, budget_note says how many of how many fit, " +
+        "cards_left_out names the servers whose cards are not on this page (the first 100; " +
+        "cards_left_out_count is all of them), and next_card_offset is the card_offset that reads on from the " +
+        "first one left out. A card is never cut: one card wider than the budget is still returned whole. " +
+        "worst_only and band narrow a detail=\"cards\" call instead of paging through every card: " +
         "worst_only keeps only the cards already named in worst_servers, and band keeps only cards at one " +
-        "FleetHealthBand (healthy, warning, critical, offline). Both are ignored under detail=\"summary\", " +
-        "which never includes cards to filter.")]
-    public static async Task<string> GetFleetOverview(
+        "FleetHealthBand (healthy, warning, critical, offline). Both, and card_offset, are ignored under " +
+        "detail=\"summary\", which never includes cards to filter.")]
+    public static Task<string> GetFleetOverview(
         NpgsqlDataSource postgres,
         [Description("Hours of blocking/deadlock history the per-server cards and fleet totals window over. Default 1.")] int hours_back = 1,
-        [Description("\"summary\" (default): rollup, band counts, worst_servers, no cards array. \"cards\": adds every server's full card, this tool's shape before #4198. See tool guide.")] string detail = "summary",
+        [Description("\"summary\" (default): rollup, band counts, worst_servers, no cards array. \"cards\": adds the per-server cards that fit the response budget, worst first. See tool guide.")] string detail = "summary",
         [Description("Cards-only: keep only cards already in worst_servers (the needs-attention list). No effect under detail=\"summary\". Default false.")] bool worst_only = false,
-        [Description("Cards-only filter: keep only cards at this FleetHealthBand — \"healthy\", \"warning\", \"critical\", or \"offline\" (case-insensitive). Ignored under detail=\"summary\". Omit for every band.")] string? band = null,
+        [Description("Cards-only filter: keep only cards at this FleetHealthBand, \"healthy\", \"warning\", \"critical\", or \"offline\" (case-insensitive). Ignored under detail=\"summary\". Omit for every band.")] string? band = null,
         MonitoredServerRegistryState? registryState = null,
         ILogger? logger = null,
-        CancellationToken cancellationToken = default)
+        [Description("Cards-only: cards to skip, worst first (a page start). Default 0; use next_card_offset when budget_truncated is true.")] int card_offset = 0,
+        CancellationToken cancellationToken = default) =>
+        GetFleetOverview(postgres, hours_back, detail, worst_only, card_offset, McpResponseBudget.DefaultBytes, band, registryState, logger, cancellationToken);
+
+    /// <summary>
+    /// get_fleet_overview under an explicit <paramref name="responseByteBudget"/> (#8568): the MCP tool passes
+    /// <see cref="McpResponseBudget.DefaultBytes"/> and pages its cards worst first, the web viewer's
+    /// <c>/api/read</c> mirror passes null and keeps every card in the reader's order.
+    /// </summary>
+    internal static async Task<string> GetFleetOverview(
+        NpgsqlDataSource postgres, int hours_back, string detail, bool worst_only, int card_offset, int? responseByteBudget,
+        string? band, MonitoredServerRegistryState? registryState, ILogger? logger, CancellationToken cancellationToken)
     {
         var validation = DarlingReadWindow.ValidateHoursBack(hours_back);
         if (validation != null) return validation;
+        if (card_offset < 0)
+        {
+            return McpHelpers.Refusal("card_offset", $"Invalid card_offset value '{card_offset}'. Must be 0 or more.");
+        }
 
         var wantsCards = string.Equals(detail, "cards", StringComparison.OrdinalIgnoreCase);
         if (!wantsCards && !string.Equals(detail, "summary", StringComparison.OrdinalIgnoreCase))
@@ -140,13 +163,17 @@ public sealed class DarlingMcpFleetTools
                     ? null
                     : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct),
                 cancellationToken: cancellationToken,
-                logger: logger);
+                logger: logger,
+                allowedTagIds: DarlingServerResolver.WebAllowedTagIds);
 
             if (result.TotalServers == 0)
             {
-                return McpHelpers.Status(
-                    "empty",
-                    "No servers are registered yet. The service registers each monitored server on its first successful connection.");
+                /* A scoped web reader whose tags map to no server is told so; the registry may well hold servers it cannot see. */
+                return DarlingServerResolver.WebAllowedServerIds is not null
+                    ? McpHelpers.Status("empty", "No servers are in this token's scope.")
+                    : McpHelpers.Status(
+                        "empty",
+                        "No servers are registered yet. The service registers each monitored server on its first successful connection.");
             }
 
             /* Both branches serialize the SAME result (so a rollup field added later reaches both shapes
@@ -156,7 +183,7 @@ public sealed class DarlingMcpFleetTools
             var node = JsonSerializer.SerializeToNode(result, DarlingFleetReader.JsonOptions)!.AsObject();
 
             /* #7010: the window notice, one fleet-wide and one per truncated card (summary mode strips the cards, and only the top level stays). */
-            var windowNotice = await ReadWindowNoticeAsync(
+            var windowNotice = DarlingServerResolver.WebAllowedServerIds is not null ? null : await ReadWindowNoticeAsync(
                 postgres, result.Cards.Select(c => c.ServerName).ToList(), now.AddHours(-hours_back), now, logger, cancellationToken);
             windowNotice?.AttachTop(node);
 
@@ -186,7 +213,9 @@ public sealed class DarlingMcpFleetTools
 
                 windowNotice?.AttachCards(node["cards"] as JsonArray);
                 node["cards_included"] = true;
-                return node.ToJsonString(DarlingFleetReader.JsonOptions);
+                return responseByteBudget is int budget
+                    ? PageCards(node, DarlingFleetReader.WorstFirst(result.Cards).Select(c => c.ServerId).ToList(), card_offset, budget)
+                    : node.ToJsonString(DarlingFleetReader.JsonOptions);
             }
 
             /* #4198 summary mode: strip the heavy cards array — measured at 67-81 KB on a fleet this size,
@@ -205,6 +234,55 @@ public sealed class DarlingMcpFleetTools
         {
             return McpHelpers.FormatError("get_fleet_overview", ex);
         }
+    }
+
+    /// <summary>The most left-out servers a cards answer names (#8568); <c>cards_left_out_count</c> is all of them.</summary>
+    internal const int MaxCardsLeftOutNamed = 100;
+
+    /// <summary>
+    /// The cards page of a budgeted answer (#8568): <paramref name="node"/>'s <c>cards</c> ordered worst first (every
+    /// card at its place in <paramref name="rankedServerIds"/>, the fleet's servers in
+    /// <see cref="DarlingFleetReader.WorstFirst"/> order, #8654), started at <paramref name="cardOffset"/> and ended at
+    /// the last whole card that fits <paramref name="budgetBytes"/>. The answer counts what it selected and what it
+    /// holds, names the servers left out in the same order and gives the offset that reads on from them, so a card is
+    /// paged to and never dropped, and no card on a page ranks below one the page left out.
+    /// </summary>
+    internal static string PageCards(JsonObject node, IReadOnlyList<int> rankedServerIds, int cardOffset, int budgetBytes)
+    {
+        var rank = new Dictionary<int, int>();
+        for (var i = 0; i < rankedServerIds.Count; i++)
+        {
+            rank.TryAdd(rankedServerIds[i], i);
+        }
+
+        var cards = (node["cards"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().ToList();
+        var ordered = cards
+            .Select((card, index) => (card, index))
+            .OrderBy(x => x.card["server_id"] is JsonValue id && id.TryGetValue<int>(out var serverId) && rank.TryGetValue(serverId, out var at) ? at : int.MaxValue)
+            .ThenBy(x => x.index)
+            .Select(x => x.card)
+            .ToList();
+        var page = ordered.Skip(cardOffset).ToList();
+
+        string Reply(int kept)
+        {
+            var leftOut = page.Skip(kept).ToList();
+            node["cards"] = new JsonArray(page.Take(kept).Select(c => c.DeepClone()).ToArray());
+            node["cards_total"] = ordered.Count;
+            node["card_offset"] = cardOffset;
+            node["cards_returned"] = kept;
+            node["budget_truncated"] = leftOut.Count > 0;
+            node["budget_note"] = leftOut.Count > 0
+                ? McpResponseBudget.PageCutNote(page.Count, kept, "worst first", "cards",
+                    $"Call again with card_offset {cardOffset + kept} for the next page, or narrow the cards with band.")
+                : null;
+            node["cards_left_out_count"] = leftOut.Count;
+            node["cards_left_out"] = new JsonArray(leftOut.Take(MaxCardsLeftOutNamed).Select(c => c["server_name"]?.DeepClone()).ToArray());
+            node["next_card_offset"] = leftOut.Count > 0 ? cardOffset + kept : null;
+            return node.ToJsonString(DarlingFleetReader.JsonOptions);
+        }
+
+        return McpResponseBudget.FitPrefix(page.Count, Reply, budgetBytes).Json;
     }
 
     /// <summary>The relations the cards' blocking and deadlock counts read (#7010): the XE blocked process reports, the DMV blocking snapshots

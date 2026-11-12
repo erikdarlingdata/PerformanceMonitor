@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.PlanAnalysis;
@@ -33,7 +34,7 @@ public sealed partial class PgFactCollector
        so it provably predates whatever change set that configuration and must not be counted. A
        current_maxdop of 0 (unlimited) or unknown (no server_config row yet) makes no configuration
        impossible, so the count is unchanged in both of those cases. */
-    public const string QueryStatsSql = @"
+    public static string QueryStatsSql => @"
 WITH current_maxdop AS
 (
     SELECT value_in_use
@@ -48,9 +49,7 @@ SELECT
     /* #5633: DISTINCT (database, query_hash), like spilling_queries below. This count drives the QUERY_HIGH_DOP threshold (5/20) and
        its N-queries text, and v_query_stats holds one row per query per snapshot, so one high-DOP query seen in 20 collections
        scored at full severity as 20 queries. A NULL hash collapses to one per database, as for spilling_queries. */
-    COUNT(DISTINCT CASE WHEN v.max_dop > 8
-                         AND (m.value_in_use IS NULL OR m.value_in_use = 0 OR v.max_dop <= m.value_in_use)
-                        THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS high_dop_queries,
+" + QueryHighDopSignature.HighDopQueriesCountSql + @"
     COUNT(DISTINCT CASE WHEN v.delta_spills > 0
                         THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS spilling_queries,
     SUM(v.delta_execution_count) AS total_executions,
@@ -185,14 +184,7 @@ LIMIT " + FactRanked.MaxObjects + ";";
         }
     }
 
-    /// <summary>
-    /// How many parameter-sensitive plans the fact counts and how many the read reports: the <c>LIMIT</c> this
-    /// statement carried until the compiled-before-the-window test moved to the reader (#4821), which has to run
-    /// BEFORE the cap for the cap to keep the same plans.
-    /// </summary>
-    internal const int ParameterSensitivityMaxOffenders = 20;
-
-    public const string ParameterSensitivitySql = @"
+    public static string ParameterSensitivitySql => @"
 WITH newest AS
 (
     -- creation_time is the MONITORED SERVER's local wall clock -- QueryStatsCollector ships the
@@ -260,11 +252,7 @@ SELECT
     query_plan_hash
 FROM latest, svr
 WHERE rn = 1
-AND   min_worker_time >= 10000
-AND   max_worker_time >= 250000
-AND   execution_count >= 20
-AND   creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'
-AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
+" + ParameterSensitivitySignature.PredicateSql("creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'") + @"
 ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
     /// <summary>
@@ -338,7 +326,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                         }));
                 }
                 offenderCount++;
-                if (offenderCount >= ParameterSensitivityMaxOffenders)
+                if (offenderCount >= FactThresholds.ParameterSensitivity.OffenderCap)
                     break;
             }
 
@@ -359,7 +347,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                     ["worst_min_worker_us"] = worstMinWorker,
                     ["worst_max_worker_us"] = worstMaxWorker,
                     ["worst_grant_ratio"] = worstGrantRatio,
-                    ["grant_divergence"] = worstGrantRatio >= 5 ? 1 : 0,
+                    ["grant_divergence"] = worstGrantRatio >= FactThresholds.ParameterSensitivity.GrantDivergenceRatio ? 1 : 0,
                     ["spill_divergence"] = worstSpillDivergence
                 }
             });
@@ -996,8 +984,8 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
 
             /* #5630: read the candidates first (the worst 100 by factor), then judge them, because judging reads plans
                and a second command cannot run while this reader is open. */
-            /* #5812: a current MCP or viewer call reuses the candidates of a read of the same shape younger than one analysis
-               cadence (PlanRegressionCandidateCache.RefreshAfter). The scheduled pass always reads and refills the entry, so it
+            /* #5812: a current MCP or viewer call reuses the candidates of a read of the same shape younger than the reuse
+               window (PlanRegressionCandidateCache.RefreshAfter). The scheduled pass always reads and refills the entry, so it
                stays as fresh as before. Everything below the read (the input check, the cut, the fact) still runs every time. */
             var readStartedUtc = DateTime.UtcNow;
             /* The daily read's leading five parameters stand for the window and the built days; $6, the watermarks, goes in
@@ -1454,37 +1442,50 @@ AND   delta_execution_count > 0";
     }
 
     public const string PlanAdvisorySql = @"
-SELECT query_plan_xml, query_plan_gz
+SELECT COALESCE(r.query_plan_xml, d.query_plan_xml) AS query_plan_xml, d.query_plan_gz
 FROM
 (
-    SELECT
-        query_plan_xml,
-        query_plan_gz,
-        delta_worker_time,
-        /* #7886: one row per plan. v_query_stats holds one row per query per snapshot, and every snapshot
-           row of a cached plan resolves to the same plan XML. Without this rank the hottest plan fills all
-           ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
-           multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
-           plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A plan is
-           a statement's plan in one database: query_plan_hash is a shape hash that two statements with one
-           shape share, as does one statement in two databases, and a hashless row's plan_handle is shared by
-           every statement in its batch, so database_name and query_hash stay in the key. The window sorts
-           every in-window row that has a plan, plan column included, before the limit takes ten. */
-        ROW_NUMBER() OVER (PARTITION BY database_name, query_hash, COALESCE(query_plan_hash, plan_handle) ORDER BY delta_worker_time DESC) AS plan_rank
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    /* #2069: plan content written since V54 lives as gzip bytes (query_plan_gz) with the text
-       column NULL, so the presence guard and the projection both carry BOTH forms and the read
-       loop resolves text-else-gz (PayloadDimensions.ResolveContent). A guard on query_plan_xml
-       alone matches nothing on a store using the default plan_xml_compression = 'gzip', which
-       costs this collector every MISSING_INDEX and PLAN_WARNING it exists to emit. */
-    AND   (query_plan_xml IS NOT NULL OR query_plan_gz IS NOT NULL)
-) AS ranked
-WHERE plan_rank = 1
-ORDER BY delta_worker_time DESC
-LIMIT 10";
+    SELECT query_plan_xml, query_plan_digest, delta_worker_time
+    FROM
+    (
+        SELECT
+            f.query_plan_xml,
+            f.query_plan_digest,
+            f.delta_worker_time,
+            /* #7886: one row per plan. query_stats holds one row per query per snapshot, and every snapshot
+               row of a cached plan resolves to the same plan XML. Without this rank the hottest plan fills all
+               ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
+               multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
+               plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A plan is
+               a statement's plan in one database: query_plan_hash is a shape hash that two statements with one
+               shape share, as does one statement in two databases, and a hashless row's plan_handle is shared by
+               every statement in its batch, so database_name and query_hash stay in the key. */
+            ROW_NUMBER() OVER (PARTITION BY f.database_name, f.query_hash, COALESCE(f.query_plan_hash, f.plan_handle) ORDER BY f.delta_worker_time DESC) AS plan_rank
+        FROM query_stats AS f
+        WHERE f.server_id = $1
+        AND   f.collection_time >= $2
+        AND   f.collection_time <= $3
+        /* #8570: the window ranks every in-window row, so it ranks the table's own thin columns and carries
+           the plan's digest, not the plan. This read went through v_query_stats, which looked up query_plan_dim and
+           put each row's plan content into the rank's sort: a plan under the 2 KB TOAST limit sits inline in the
+           dimension row, so every snapshot row of every plan was sorted with its whole plan (on 67,200 rows of
+           1.4 KB plans the sort wrote 26 MB and 21 MB to disk, against 4.5 MB). The ten winners' content is read
+           by their digest after the limit. The presence guard is the view's, kept as a test on the dimension
+           row: a row has a plan when its own column or its dimension row carries one (the dimension's text
+           column or, since #2069, its gzip bytes), and a digest whose dimension row is gone has none. */
+        AND   (f.query_plan_xml IS NOT NULL
+               OR EXISTS (SELECT 1 FROM query_plan_dim AS p
+                          WHERE p.digest = f.query_plan_digest
+                          AND   (p.query_plan_xml IS NOT NULL OR p.query_plan_gz IS NOT NULL)))
+    ) AS ranked
+    WHERE plan_rank = 1
+    ORDER BY delta_worker_time DESC
+    LIMIT 10
+) AS r
+/* #2069: a plan written since V54 lives as gzip bytes (query_plan_gz) with the text column NULL, so the
+   projection carries BOTH forms and the C# side resolves text-else-gz (PayloadDimensions.ResolveContent). */
+LEFT JOIN query_plan_dim AS d ON d.digest = r.query_plan_digest
+ORDER BY r.delta_worker_time DESC";
 
     /// <summary>
     /// WS4: plan-XML advisories. Parses the already-collected query plans of the top queries by

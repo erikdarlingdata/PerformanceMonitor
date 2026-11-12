@@ -95,7 +95,7 @@ public sealed class DarlingMcpPgKernelStatsTools
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                         "empty",
                         $"No per-query OS resource usage for {resolved.DisplayName} in the last "
-                        + $"{hours_back} hour(s). These are per-interval deltas, so a single collection "
+                        + $"{CountText.Plural(hours_back, "hour")}. These are per-interval deltas, so a single collection "
                         + "has nothing to difference against and the window fills on the second one.",
                         emptyNotice.AsHints()), cancellationToken, emptyStart);
             }

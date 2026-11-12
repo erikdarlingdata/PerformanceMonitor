@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// with the app's theme, as ServerTabToolbarWrapTests does for Lite's toolbars. Lite's own card is a two-column grid with no detail
 /// cell, so it has no twin here.
 /// </summary>
+[Collection("viewer-time-statics")]
 public sealed class ViewerOverviewCardDetailColumnTests
 {
     private const string ThemeUri = "pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml";
@@ -52,7 +53,7 @@ public sealed class ViewerOverviewCardDetailColumnTests
             };
             var window = new Window { Content = host, Width = 1920, Height = 1080, Left = 0, Top = 0 };
             window.Resources["BoolToVisibility"] = new BooleanToVisibilityConverter();
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ClippedTextProbe.Settle(window);

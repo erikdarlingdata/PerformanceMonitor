@@ -53,7 +53,7 @@ public sealed class ChartTextRefreshTests
             chart.Plot.Add.TimeSeries(xs, xs.Select((_, i) => 10.0 + i).ToArray());
             chart.Plot.YLabel("MB/s");
             var window = new Window { Content = chart, Width = 480, Height = 320, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ChartLayoutProbe.Settle(window, [chart]);
@@ -96,7 +96,7 @@ public sealed class ChartTextRefreshTests
         {
             var slicer = new TimeRangeSlicerControl();
             var window = new Window { Content = slicer, Width = 700, Height = 220, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var end = new DateTime(2026, 3, 10, 18, 0, 0, DateTimeKind.Utc);
@@ -142,7 +142,7 @@ public sealed class ChartTextRefreshTests
                 var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
                 typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     ClippedTextProbe.Settle(window);
@@ -201,7 +201,7 @@ public sealed class ChartTextRefreshTests
                 var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
                 typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = width, Height = height, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var chart = (WpfPlot)tab.FindName("QueryHeatmapChart");
@@ -235,7 +235,7 @@ public sealed class ChartTextRefreshTests
             var control = new CorrelatedTimelineLanesControl();
             control.Initialize(null!, 1, () => TimeZoneInfo.Utc);
             var window = new Window { Content = control, Width = 1280, Height = 800, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var to = DateTime.UtcNow;
@@ -270,7 +270,7 @@ public sealed class ChartTextRefreshTests
             var control = new CorrelatedTimelineLanesControl();
             control.Initialize(null!, 1, () => TimeZoneInfo.Utc);
             var window = new Window { Content = control, Width = width, Height = height, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var to = DateTime.UtcNow;

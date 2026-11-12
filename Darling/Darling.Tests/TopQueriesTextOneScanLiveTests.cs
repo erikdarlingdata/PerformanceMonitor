@@ -34,8 +34,8 @@ namespace PerformanceMonitor.Darling.Tests;
 /// candidate count, not a read of the window.
 ///
 /// <para>Two facts. The plan one: under the statement's <c>latest_text</c> node nothing but the text dimension (and the
-/// ranked rows) is read, and the rows read from <c>query_stats</c> over the whole statement are at most one pass of the
-/// window for the Viewer and two for the MCP (its ranking is already two passes, #5226). The behaviour one: the texts the
+/// ranked rows) is read, and the rows read from <c>query_stats</c> over the whole statement are at most two passes of the
+/// window for each reader (a ranking pass and a pass over the winners' rows; #5226, and the Viewer since #8549). The behaviour one: the texts the
 /// two readers return on the newest-text edge cases are the ones the old lookup gave. The newest row of a group has no
 /// text but an older one does; two rows of one group share a collection time and the row collected last wins; a group
 /// whose only text is inline (a pre-dimension row) still has it; a group whose newest text is inline while an older
@@ -79,7 +79,8 @@ public sealed class TopQueriesTextOneScanLiveTests
 
             var viewerPlan = await ExplainAsync(connection, ViewerDataService.TopQueriesSql, ct, serverId, start, end,
                 P(NpgsqlDbType.Integer, Top), P(NpgsqlDbType.Array | NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, Candidates), P(NpgsqlDbType.Array | NpgsqlDbType.Text, null));
-            AssertTextIsALookupOnTheCappedRows("ViewerTopQueriesSql", viewerPlan, windowPasses: 1);
+            /* #8549: the Viewer now ranks in one pass and reads the winners' rows in a second, as the MCP reader does. */
+            AssertTextIsALookupOnTheCappedRows("ViewerTopQueriesSql", viewerPlan, windowPasses: 2);
 
             var mcpSql = TopRankings.Apply(DarlingDataReader.TopQueriesSql, TopRanking.Cpu, hourly: false);
             var mcpPlan = await ExplainAsync(connection, mcpSql, ct, serverId, start, end,
@@ -446,6 +447,11 @@ public sealed class TopQueriesTextOneScanLiveTests
                     serverId);
             }
 
+            /* #8570: pass 2 of TopQueriesSql narrows the window to the winners' hashes with a semi join. On a table just bulk
+               loaded with no statistics the planner runs that as a nested loop that rescans the window once per winner,
+               which is cheap on a few thousand rows and not how a store that has run a day (and been analyzed) reads it.
+               Analyze first, so the bound below checks the plan a real store gets. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "VACUUM (ANALYZE) query_stats");
             await body(connection, connectionString, serverId, now, ct);
             succeeded = true;
         }

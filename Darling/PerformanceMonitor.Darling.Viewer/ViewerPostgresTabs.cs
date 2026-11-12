@@ -88,9 +88,9 @@ internal static class ViewerPostgresTabs
                fake SUCCESS rows a day), so a grid built from the log alone would show a PostgreSQL
                operator one row short and never mention the missing collector. Derived from the catalog, it
                appears with the reason it is missing. */
-            "Every PostgreSQL collector for this server: when it last ran, what it returned, and — for a "
-            + "collector this engine cannot run at all — why it never will. The extension panel below is the "
-            + "third capability axis (#2545) and the only one that is ACTIONABLE: engine kind and edition "
+            "Every PostgreSQL collector for this server: when it last ran, what it returned, and, for a "
+            + "collector this engine cannot run at all, why it never will. The extension panel below is the "
+            + "third capability axis and the only one that is ACTIONABLE: engine kind and edition "
             + "are walls, but an extension that is available and not installed is one command away."),
 
         new ViewerPostgresTab(
@@ -103,7 +103,7 @@ internal static class ViewerPostgresTabs
                makes no sense from its row count usually spilled, and pg_stat_database's temp counters are
                the only evidence of that we collect. */
             "What ran, what waited on what, and what it cost. Blocking is a periodic SAMPLE rather than an "
-            + "event log, so the capture counts above the grid are its denominator — three chains means "
+            + "event log, so the capture counts above the grid are its denominator: three chains means "
             + "something different in 60 captures than in 4."),
 
         new ViewerPostgresTab(
@@ -129,7 +129,7 @@ internal static class ViewerPostgresTabs
             "One story in four panels: a session holds a transaction open, that transaction holds the xmin "
             + "horizon, the horizon starves vacuum, and vacuum falling behind ends in wraparound. Read on "
             + "their own each of these looks survivable. Only the first panel can name the session, and "
-            + "only it says whether that session pins anything at all — an open transaction that holds no "
+            + "only it says whether that session pins anything at all: an open transaction that holds no "
             + "snapshot and no transaction id costs vacuum nothing, however long it has been idle."),
 
         new ViewerPostgresTab(
@@ -177,8 +177,8 @@ internal static class ViewerPostgresTabs
             /* pg_database_size_stats (V136, #3691) is PLACED here and not yet DRAWN: the per-database size series
                is the Storage tab's question ("where is the space going") asked over time, and its panel lands
                with the object-growth slice. Placing it now keeps the placement census truthful about which
-               screen owns it; the note below tells the operator it is collected and not yet shown, so the
-               registry does not claim a panel that is not there. It comes off in the same PR as the panel. */
+               screen owns it. The tab's note does not mention it (#8564: a development note read as noise
+               above the grids). */
             new[] { "pg_table_bloat_stats", "pg_index_usage_stats", "pg_index_bloat", "pg_column_stats", "pg_predicate_stats", "pg_database_size_stats" },
             /* One tab, because both panels answer the same question — where is the space going and is it
                earning its keep — and the two remedies compete for the same maintenance window. Bloat is
@@ -190,14 +190,10 @@ internal static class ViewerPostgresTabs
                Bloat sits above index usage because it is the more urgent of the two and the more
                dangerous to act on: a bloat percentage is an ESTIMATE and the panel has to say so before
                anyone reads a number off it. */
-            "Where the space went, and whether it is earning its keep. The bloat figures are ESTIMATES "
-            + "computed from column-width statistics — the table itself is never read — so confirm one with "
-            + "pgstattuple before rewriting anything. An index nothing scans is a candidate, never a "
-            + "conclusion: check the constraint and validity columns beside it first. The column-statistics "
-            + "panel is the INPUT those bloat estimates are computed from, and it answers a different "
-            + "question of its own: why the planner chose what it chose. The hourly per-database size series "
-            + "(pg_database_size_stats) is collected for this tab and not yet drawn — its growth panel lands "
-            + "with the object-growth work."),
+            "Where the space went, and whether it is earning its keep. An index nothing scans is a candidate, "
+            + "never a conclusion: check the constraint and validity columns beside it first. The "
+            + "column-statistics panel holds the figures the bloat numbers are computed from, and it answers a "
+            + "different question of its own: why the planner chose what it chose."),
     };
 
     /// <summary>The first PostgreSQL tab's index — what a PostgreSQL server's tab strip selects, since

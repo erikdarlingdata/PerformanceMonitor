@@ -222,7 +222,7 @@ public sealed class PgTargetBloatLiveTests
 
                 var advice = chain.GetProperty("advice");
                 Assert.Equal("public.big.big_pkey in appdb grew 900 MB of estimated reclaimable space (1800% of the earlier estimate) across 10 daily samples spanning 9 days", advice.GetProperty("headline").GetString());
-                Assert.Contains("83.3% of the indexes seen were skipped at their latest sample — a majority, across 2 distinct reasons", advice.GetProperty("investigation").GetString(), StringComparison.Ordinal);
+                Assert.Contains("83.3% of the indexes seen were skipped at their latest sample: a majority, across 2 distinct reasons", advice.GetProperty("investigation").GetString(), StringComparison.Ordinal);
                 Assert.Contains("PG_BLOAT_TREND co-fired on this index's table", advice.GetProperty("investigation").GetString(), StringComparison.Ordinal);
                 Assert.Contains("The trend is the finding; the percentage is not.", advice.GetProperty("remediation").GetString(), StringComparison.Ordinal);
                 Assert.DoesNotContain("CREATE INDEX", advice.GetProperty("remediation").GetString(), StringComparison.OrdinalIgnoreCase);

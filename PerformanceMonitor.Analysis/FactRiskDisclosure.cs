@@ -71,11 +71,11 @@ public static class FactRiskDisclosure
         var changing = new List<RiskItem>
         {
             new($"Enabling RCSI on {db} takes a brief exclusive database lock and will " +
-                "block until all in-flight transactions in that database complete — run it at " +
+                "block until all in-flight transactions in that database complete: run it at " +
                 "a quiet moment; under load it can wait or be chosen as a deadlock victim."),
             new($"RCSI adds row-version load to tempdb; a long-running reader transaction on " +
                 $"{db} can grow the version store and pressure tempdb."),
-            new("Reader/writer concurrency semantics change — readers stop taking shared locks " +
+            new("Reader/writer concurrency semantics change: readers stop taking shared locks " +
                 "and read the last committed row version instead. Application code that relies on " +
                 "default locking behavior (or uses NOLOCK to work around blocking today) should be " +
                 "tested on a copy first."),
@@ -107,7 +107,7 @@ public static class FactRiskDisclosure
             {
                 notChanging.Add(new(
                     $"Roughly {pct.ToString(CultureInfo.InvariantCulture)}% of the captured lock " +
-                    "contention was readers blocked by writers (shared / range-shared locks) — the " +
+                    "contention was readers blocked by writers (shared / range-shared locks): the " +
                     "exact pattern RCSI eliminates."));
             }
             else
@@ -115,14 +115,14 @@ public static class FactRiskDisclosure
                 notChanging.Add(new(
                     $"Only {pct.ToString(CultureInfo.InvariantCulture)}% of the captured contention " +
                     "was reader-vs-writer; the majority was writer/writer (X/IX/U), which RCSI does " +
-                    "NOT resolve — shorter transactions and better write-path indexing are the levers. " +
+                    "NOT resolve: shorter transactions and better write-path indexing are the levers. " +
                     "Enabling RCSI may add tempdb overhead without relieving this contention."));
             }
         }
         else
         {
             notChanging.Add(new(
-                $"Little or no reader/writer blocking was captured for {db} in this window — the case " +
+                $"Little or no reader/writer blocking was captured for {db} in this window: the case " +
                 "for enabling RCSI here is weak; consider whether the finding is driven by another database."));
         }
 

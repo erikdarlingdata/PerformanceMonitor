@@ -66,6 +66,14 @@ public sealed class DarlingMcpPgIndexUsageTools
                  + "waiting on the index it was meant to become.";
         }
 
+        /* #8572: the text is chosen from the row's own flags and its scans. A constraint index that was scanned is not "zero scans", and a
+           unique index that backs no constraint (supports_constraint false) is not a constraint index at all. */
+        if (r.IsPrimaryKey && scansInWindow > 0)
+        {
+            return "Backs the PRIMARY KEY and was scanned during this window, so it is in use for reads as well. This cannot be "
+                 + "dropped without dropping the constraint.";
+        }
+
         if (r.IsPrimaryKey)
         {
             return "Backs the PRIMARY KEY. Zero scans does NOT mean unused: enforcing the key on every "
@@ -73,12 +81,31 @@ public sealed class DarlingMcpPgIndexUsageTools
                  + "dropping the constraint.";
         }
 
-        if (r.SupportsConstraint || r.IsUnique)
+        if (r.SupportsConstraint && scansInWindow > 0)
+        {
+            return "Backs a UNIQUE or EXCLUSION constraint and was scanned during this window, so it is in use for reads as "
+                 + "well. Dropping the index drops the constraint with it, which changes what data the table will accept.";
+        }
+
+        if (r.SupportsConstraint)
         {
             return "Backs a UNIQUE or EXCLUSION constraint. Zero scans does NOT mean unused - a uniqueness "
                  + "check is not counted as a scan - and dropping the index drops the constraint with it, "
                  + "which changes what data the table will accept. Treat the scan count as irrelevant here "
                  + "unless you have already decided the constraint itself is not wanted.";
+        }
+
+        if (r.IsUnique && scansInWindow > 0)
+        {
+            return "In use: scanned during this window. It is also a UNIQUE index that backs no constraint, so dropping it would "
+                 + "remove the uniqueness check it enforces as well as the reads it serves.";
+        }
+
+        if (r.IsUnique)
+        {
+            return "This is a UNIQUE index that backs no constraint. Zero scans does NOT mean unused: a uniqueness check is not "
+                 + "counted as a scan, and dropping the index removes the uniqueness it enforces. Decide whether that uniqueness is "
+                 + "wanted (if it is, a UNIQUE constraint should own it) before treating the scan count as a reason to drop it.";
         }
 
         if (r.IsReplicaIdentity)
@@ -91,7 +118,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         if (sampleCount < MinimumSamplesForADisuseClaim)
         {
             return "Not enough history to say anything about disuse: this read has "
-                 + sampleCount.ToString(CultureInfo.InvariantCulture) + " sample(s) of this index, and a "
+                 + CountText.Plural(sampleCount, "sample") + " of this index, and a "
                  + "windowed scan count is a DIFFERENCE that needs at least two. PostgreSQL records no "
                  + "index creation time anywhere, so how long we have been watching is the only evidence "
                  + "available that an index is old enough to judge.";
@@ -165,7 +192,7 @@ public sealed class DarlingMcpPgIndexUsageTools
     /// makes the cost visible on an index that is never read: those accesses are the write path maintaining
     /// it, counted by the server rather than inferred from the size.
     /// </summary>
-    internal static string CostFinding(long indexBytes, long tableBytes, long blocksHit, long blocksRead)
+    internal static string CostFinding(long indexBytes, long tableBytes, long blocksHit, long blocksRead, long scansInWindow = 0)
     {
         if (indexBytes < 0)
         {
@@ -177,10 +204,19 @@ public sealed class DarlingMcpPgIndexUsageTools
             : string.Empty;
 
         var maintenance = blocksHit + blocksRead > 0
-            ? $" The server recorded {(blocksHit + blocksRead).ToString(CultureInfo.InvariantCulture)} block "
-            + "accesses against it. On an index with no scans those are the WRITE path maintaining it and "
-            + "VACUUM cleaning it, which is the cost being paid stated in the server's own units."
+            ? $" The server recorded {(blocksHit + blocksRead).ToString("N0", CultureInfo.InvariantCulture)} block "
+            + (scansInWindow > 0
+                ? "accesses against it. The scans that read it are part of that figure, beside the WRITE path maintaining it and "
+                  + "VACUUM cleaning it."
+                : "accesses against it. On an index with no scans those are the WRITE path maintaining it and "
+                  + "VACUUM cleaning it, which is the cost being paid stated in the server's own units.")
             : string.Empty;
+
+        if (scansInWindow > 0)
+        {
+            return $"{DescribeBytes(indexBytes)}." + share + maintenance
+                 + " Every write maintains it and every VACUUM cleans it, so its size is also paid on the write path.";
+        }
 
         return $"{DescribeBytes(indexBytes)}." + share + maintenance
              + " On PostgreSQL an unused index costs more than the space: it is maintained by every write "
@@ -373,7 +409,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                    against production. */
                 index_definition = r.IndexDefinition,
                 droppability_finding = DroppabilityFinding(r, r.ScansInWindow, r.SampleCount),
-                cost_finding = CostFinding(r.IndexBytes, r.TableBytes, r.BlocksHit, r.BlocksRead),
+                cost_finding = CostFinding(r.IndexBytes, r.TableBytes, r.BlocksHit, r.BlocksRead, r.ScansInWindow),
                 sample_count = r.SampleCount,
                 first_seen_at = r.FirstSeenAt.ToString("o"),
                 measured_at = r.MeasuredAt.ToString("o"),
@@ -405,18 +441,18 @@ public sealed class DarlingMcpPgIndexUsageTools
                 note = "An index with no scans is a CANDIDATE, never a conclusion. Three things this data "
                      + "cannot see, in the order they bite: an index backing a constraint enforces it "
                      + "without ever registering a scan; a query that runs less often than "
-                     + $"{hours_back} hour(s) looks identical to a dead index; and a rare query may only be "
+                     + $"{CountText.Plural(hours_back, "hour")} looks identical to a dead index; and a rare query may only be "
                      + "acceptable because this index exists. Counts are cumulative since each database's "
                      + "statistics were last reset, which is reported per index. Indexes under 64 kB are "
                      + "deliberately not reported here, so this count is LOWER than get_pg_index_bloat's "
-                     + "complete btree census — the difference is that floor, not a missing read."
+                     + "complete btree census: the difference is that floor, not a missing read."
                      + (resetSeen
                          ? " At least one index's database had its statistics RESET, or lost to a crash restart, inside "
                          + "this window, so its windowed scan count is clamped at zero rather than negative "
                          + "and is a lower bound. A zero there is not counted among the unscanned indexes."
                          : string.Empty)
                      + (invalidCount > 0
-                         ? $" {invalidCount} INVALID index(es) are present and sorted to the top - those are "
+                         ? $" {CountText.Plural(invalidCount, "INVALID index", "INVALID indexes")} {(invalidCount == 1 ? "is" : "are")} present and sorted to the top - those are "
                          + "failed CREATE INDEX CONCURRENTLY leftovers, maintained by writes and used by "
                          + "nobody."
                          : string.Empty)
@@ -488,7 +524,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice is { IsUnavailable: false, WindowTruncated: true }, notice.EffectiveStart,
-                    factual: $"No indexes were recorded for {displayName} in the last {hoursBack} hour(s) even though "
+                    factual: $"No indexes were recorded for {displayName} in the last {CountText.Plural(hoursBack, "hour")} even though "
                         + "collection ran - at least two snapshots exist. Every index on every collected database is "
                         + "under the collector's 64 KB size floor, which is the state of a schema whose indexes are "
                         + "all trivially small",
@@ -500,7 +536,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         {
             return await DarlingServerOfflineNote.UnavailableAsync(
                 postgres, serverId, displayName,
-                $"Only ONE index snapshot exists for {displayName} in the last {hoursBack} hour(s), so this "
+                $"Only ONE index snapshot exists for {displayName} in the last {CountText.Plural(hoursBack, "hour")}, so this "
                 + "is NOT a report about index usage. A windowed scan count is a DIFFERENCE and needs two "
                 + "snapshots before it produces anything. This collector runs DAILY, so on a newly added "
                 + "server it clears itself within a day or two; widen hours_back in the meantime.",
@@ -510,7 +546,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         return await DarlingServerOfflineNote.UnavailableAsync(
             postgres, serverId, displayName,
             probe.RowsEver > 0
-                ? $"No index snapshots were collected for {displayName} in the last {hoursBack} hour(s), so "
+                ? $"No index snapshots were collected for {displayName} in the last {CountText.Plural(hoursBack, "hour")}, so "
                 + "the window says nothing either way. Collection HAS run for this server outside the "
                 + "window - this collector runs DAILY, so a window shorter than about 48 hours can "
                 + "legitimately contain fewer than two samples. Widen hours_back, or use "

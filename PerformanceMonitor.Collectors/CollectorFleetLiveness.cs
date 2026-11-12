@@ -81,10 +81,16 @@ ORDER BY a.server_id";
             : null;
     }
 
-    /// <summary>The answer: applicable servers (one row each, newest success and newest failure, or no run at all) and the servers where the collector does not apply.</summary>
+    /// <summary>
+    /// The answer: applicable servers (one row each, newest success and newest failure, or no run at all) and the servers where the
+    /// collector does not apply. <paramref name="noRunReasons"/> (#8361) names, by server id, a reason a server with no run in the window
+    /// is not collected on this host, such as a Query Store collector on a readable secondary; such a server is listed under
+    /// <c>not_applicable</c> with that reason, the way an engine gap is, instead of as a <c>no_run_in_window</c> row.
+    /// </summary>
     public static string Build(
         string collectorName, int hoursBack, DateTime windowStartUtc, DateTime windowEndUtc,
-        IReadOnlyList<ServerFacts> servers, IReadOnlyList<RunFacts> runs)
+        IReadOnlyList<ServerFacts> servers, IReadOnlyList<RunFacts> runs,
+        IReadOnlyDictionary<int, string>? noRunReasons = null)
     {
         var byServer = runs.ToDictionary(r => r.ServerId);
         var applicable = new List<object>();
@@ -104,6 +110,12 @@ ORDER BY a.server_id";
 
             if (!byServer.TryGetValue(server.ServerId, out var run))
             {
+                if (noRunReasons is not null && noRunReasons.TryGetValue(server.ServerId, out var reason))
+                {
+                    notApplicable.Add(new { server_name = server.ServerName, display_name = Name(server.DisplayName, server.ServerName), reason });
+                    continue;
+                }
+
                 noRunCount++;
                 applicable.Add(new
                 {

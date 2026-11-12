@@ -168,7 +168,7 @@ public sealed class ViewerHourlyWindowEdgesTests
         Assert.Null(ViewerServerTab.HourlyBannerSuffix("raw", true, "a note a raw read never has"));
 
         var bare = ViewerServerTab.HourlyBannerSuffix("hourly", false, null);
-        Assert.Contains("aggregated hourly", bare, StringComparison.Ordinal);
+        Assert.Contains("Aggregated hourly", bare, StringComparison.Ordinal);
         Assert.DoesNotContain("Window edges", bare, StringComparison.Ordinal);
         Assert.Equal(bare, ViewerServerTab.HourlyBannerSuffix("hourly", false, ""));
 

@@ -9,6 +9,7 @@
 using System;
 using System.Globalization;
 using System.Text.Json.Nodes;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Notifications;
@@ -17,30 +18,63 @@ namespace PerformanceMonitor.Darling.Service;
 
 internal static partial class AlertNotebookEndpoint
 {
-    /// <summary>High CPU template version (#4223). Bumped only if this template's SHAPE changes.</summary>
-    internal const int CpuTemplateVersion = 1;
+    /// <summary>High CPU template version (#4223). Bumped only if this template's SHAPE changes. 2: the cells follow
+    /// the server's engine (#8323).</summary>
+    internal const int CpuTemplateVersion = 2;
 
-    /// <summary>High CPU (spec §3): header, status, a SQL Server CPU timeline and a PostgreSQL CPU timeline
-    /// (the metric fires on both engines since #2719, so both panels are always present — the wrong-engine
-    /// panel's own read simply comes back empty, the same "not applicable" shape
-    /// <see cref="DarlingTriageEndpoint.SectionsByMetric"/>'s "High CPU" row already uses), the top-queries and
-    /// top-procedures-by-CPU drill-downs, then scheduler pressure for the SQL Server-side follow-up.</summary>
+    private const string CpuFiringMetric = "High CPU";
+
+    /// <summary>#8555: does a <c>High CPU</c> section answer on this engine? The CPU Resolved notebook is mechanical (it shares
+    /// the firing's section list), so it keeps only the reads of the target's own engine, the way the High CPU template does since
+    /// #8323: <c>get_pg_cpu_utilization</c> (Performance Insights) is PostgreSQL's, the others are SQL Server's.</summary>
+    private static bool CpuSectionAppliesTo(DarlingTriageEndpoint.TriageSection section, CollectorTargetEngine engine) =>
+        string.Equals(section.Read, "get_pg_cpu_utilization", StringComparison.Ordinal)
+            ? engine == CollectorTargetEngine.PostgreSql
+            : engine == CollectorTargetEngine.SqlServer;
+
+    /// <summary>High CPU (spec §3): header, status, then the resolved server's own engine's cells (#8323,
+    /// <see cref="AuthoredContext.EngineKind"/>). The metric fires on both engines (#2719). SQL Server: the SQL Server CPU
+    /// timeline, the top-queries and top-procedures-by-CPU drill-downs, then scheduler pressure. PostgreSQL (Aurora
+    /// included): the PostgreSQL CPU timeline and <c>get_pg_top_queries</c>, titled by its measure (total execution time). With no engine (a fleet-level store with
+    /// no server, or a registry row no connect has stamped) both timelines and every drill-down are emitted, the shape
+    /// <see cref="DarlingTriageEndpoint.SectionsByMetric"/>'s "High CPU" row uses, and the wrong engine's cells answer
+    /// empty or not collected. A panel for a measure the engine cannot have is never drawn for a known engine: it would
+    /// say "No data in this window", a true-negative sentence for a measure that was never collected.</summary>
     private static JsonArray BuildCpuCells(
         string? metric, string? serverName, string? asOf, DateTime windowStart, DateTime windowEnd,
-        AlertIncident? incident, DarlingAlertReader.AlertHistoryReadRow? row, string status)
+        AlertIncident? incident, DarlingAlertReader.AlertHistoryReadRow? row, string status, AuthoredContext context)
     {
         var cells = new JsonArray
         {
             HeaderCell(metric, serverName, incident, row),
             StatusCell(status),
-            CpuGaugeTimelinePanel("SQL Server CPU", "cpu_utilization_stats", "sqlserver_cpu_utilization", windowStart, windowEnd),
-            CpuGaugeTimelinePanel("PostgreSQL CPU", "pg_cpu_utilization", "pg_acu_utilization_pct", windowStart, windowEnd),
-            AuthoredReadCell("get_top_queries_by_cpu", "Top queries by CPU", serverName, asOf,
-                ("hours", "24"), ("top", "10")),
-            AuthoredReadCell("get_top_procedures_by_cpu", "Top procedures by CPU", serverName, asOf,
-                ("hours", "24"), ("top", "10")),
-            AuthoredReadCell("get_cpu_scheduler_pressure", "Scheduler pressure", serverName, asOf),
         };
+
+        var engine = MonitoredEngineKind.EngineOf(context.EngineKind);
+        if (engine is null or CollectorTargetEngine.SqlServer)
+        {
+            cells.Add(CpuGaugeTimelinePanel("SQL Server CPU", "cpu_utilization_stats", "sqlserver_cpu_utilization", windowStart, windowEnd));
+        }
+
+        if (engine is null or CollectorTargetEngine.PostgreSql)
+        {
+            cells.Add(CpuGaugeTimelinePanel("PostgreSQL CPU", "pg_cpu_utilization", "pg_acu_utilization_pct", windowStart, windowEnd));
+        }
+
+        if (engine is null or CollectorTargetEngine.SqlServer)
+        {
+            cells.Add(AuthoredReadCell("get_top_queries_by_cpu", "Top queries by CPU", serverName, asOf,
+                ("hours", "24"), ("top", "10")));
+            cells.Add(AuthoredReadCell("get_top_procedures_by_cpu", "Top procedures by CPU", serverName, asOf,
+                ("hours", "24"), ("top", "10")));
+            cells.Add(AuthoredReadCell("get_cpu_scheduler_pressure", "Scheduler pressure", serverName, asOf));
+        }
+        else
+        {
+            /* get_pg_top_queries ranks query shapes by total execution time; pg_stat_statements has no CPU column. */
+            cells.Add(AuthoredReadCell("get_pg_top_queries", "Top queries by execution time", serverName, asOf,
+                ("hours", "24"), ("limit", "10")));
+        }
 
         return cells;
     }

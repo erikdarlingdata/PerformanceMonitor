@@ -269,7 +269,7 @@ public static partial class PgTargetScorer
                 [
                     new()
                     {
-                        Description = "The same head blocker was the root of a chain in three or more captures of the window — a holder, not a lock handoff",
+                        Description = "The same head blocker was the root of a chain in three or more captures of the window: a holder, not a lock handoff",
                         /* unmeasured: BlockingCoFireBoost and BlockingPersistenceCaptures, chosen, not measured — see the declarations. */
                         Boost = BlockingCoFireBoost,
                         Predicate = facts =>
@@ -278,7 +278,7 @@ public static partial class PgTargetScorer
                     },
                     new()
                     {
-                        Description = "The engine's own log_lock_waits lines fired past the same bar — the written record agrees with the sample",
+                        Description = "The engine's own log_lock_waits lines fired past the same bar: the written record agrees with the sample",
                         /* unmeasured: BlockingCoFireBoost, chosen, not measured — see its declaration. */
                         Boost = BlockingCoFireBoost,
                         Predicate = facts =>
@@ -286,7 +286,7 @@ public static partial class PgTargetScorer
                     },
                     new()
                     {
-                        Description = "More sessions were blocked per capture than this server's hour-of-week baseline — the chain is unusual for this server, not its routine",
+                        Description = "More sessions were blocked per capture than this server's hour-of-week baseline: the chain is unusual for this server, not its routine",
                         /* unmeasured: BlockingCoFireBoost, chosen, not measured — see its declaration. */
                         Boost = BlockingCoFireBoost,
                         Predicate = facts =>
@@ -299,7 +299,7 @@ public static partial class PgTargetScorer
                 [
                     new()
                     {
-                        Description = "A sampled blocking chain fired in the same window — the sample names the root the log line cannot",
+                        Description = "A sampled blocking chain fired in the same window: the sample names the root the log line cannot",
                         /* unmeasured: BlockingCoFireBoost, chosen, not measured — see its declaration. */
                         Boost = BlockingCoFireBoost,
                         Predicate = facts =>
@@ -312,7 +312,7 @@ public static partial class PgTargetScorer
                 [
                     new()
                     {
-                        Description = "The same backend was still running the same statement over the floor in three or more captures — one statement, not a series",
+                        Description = "The same backend was still running the same statement over the floor in three or more captures: one statement, not a series",
                         /* unmeasured: BlockingCoFireBoost and BlockingPersistenceCaptures, chosen, not measured — see the declarations. */
                         Boost = BlockingCoFireBoost,
                         Predicate = facts =>

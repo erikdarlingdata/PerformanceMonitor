@@ -53,7 +53,7 @@ public sealed class DarlingMcpQueryTagTools
     private const string KindHash = "hash";
 
     [McpServerTool(Name = "create_query_tag"), Description(
-        "Creates a query tag, at the root or under parent_id. A query tag labels queries (by query_hash or by object, see assign_query_tag) so resource use can be grouped by it; it is not a server tag. Names are trimmed, 1-100 characters, unique among siblings ignoring case (the same name under two different parents is fine); tags nest at most four levels. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (null) and undo (the delete_query_tag call for the new id).")]
+        "Creates a query tag, at the root or under parent_id. A query tag labels queries (by query_hash or by object, see assign_query_tag) so resource use can be grouped by it; it is not a server tag. Names are trimmed, 1-100 characters, unique among siblings ignoring case (the same name under two different parents is fine); tags nest at most four levels. Needs mcp.allowWrites or a named operator token. The tag map takes effect on the collector's next map pass. The answer carries previous (null) and undo (the delete_query_tag call for the new id).")]
     public static Task<string> CreateQueryTag(
         NpgsqlDataSource postgres,
         [Description("The tag name (1-100 characters, trimmed, unique among siblings).")] string name,
@@ -63,7 +63,7 @@ public sealed class DarlingMcpQueryTagTools
         CreateQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), name, parent_id, colour, cancellationToken);
 
     [McpServerTool(Name = "update_query_tag"), Description(
-        "PARTIAL edit of a query tag: send only name, colour or parent_id in changes_json; an explicit null clears colour or moves the tag to the root. A move carries the subtree, its assignments and its rules; it is refused with cycle if the new parent is the tag or one of its descendants, and with depth_limit past four levels. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (the tag's name, colour and parent_id before) and undo (the update_query_tag call that puts the changed fields back).")]
+        "PARTIAL edit of a query tag: send only name, colour or parent_id in changes_json; an explicit null clears colour or moves the tag to the root. A move carries the subtree, its assignments and its rules; it is refused with cycle if the new parent is the tag or one of its descendants, and with depth_limit past four levels. Needs mcp.allowWrites or a named operator token. The tag map takes effect on the collector's next map pass. The answer carries previous (the tag's name, colour and parent_id before) and undo (the update_query_tag call that puts the changed fields back).")]
     public static Task<string> UpdateQueryTag(
         NpgsqlDataSource postgres,
         [Description("The tag id (from list_query_tags).")] int tag_id,
@@ -72,7 +72,7 @@ public sealed class DarlingMcpQueryTagTools
         UpdateQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), tag_id, changes_json, cancellationToken);
 
     [McpServerTool(Name = "delete_query_tag"), Description(
-        "Deletes a query tag AND its child tags, their hand assignments and their rules. Permanent. A tag that has children, assignments or rules answers confirm_required with the counts and deletes nothing; send it again with confirm=true to proceed. Collected data is untouched. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (the deleted tag); a tag that had no children, assignments or rules also carries undo (the create_query_tag call, which makes a new id), and any other delete carries an undo_note instead, because no single call restores the subtree.")]
+        "Deletes a query tag AND its child tags, their hand assignments and their rules. Permanent. A tag that has children, assignments or rules answers confirm_required with the counts and deletes nothing; send it again with confirm=true to proceed. Collected data is untouched. Needs mcp.allowWrites or a named operator token. The tag map takes effect on the collector's next map pass. The answer carries previous (the deleted tag); a tag that had no children, assignments or rules also carries undo (the create_query_tag call, which makes a new id), and any other delete carries an undo_note instead, because no single call restores the subtree.")]
     public static Task<string> DeleteQueryTag(
         NpgsqlDataSource postgres,
         [Description("The tag id (from list_query_tags).")] int tag_id,
@@ -81,7 +81,7 @@ public sealed class DarlingMcpQueryTagTools
         DeleteQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), tag_id, confirm, cancellationToken);
 
     [McpServerTool(Name = "assign_query_tag"), Description(
-        "Hand-assigns a query tag to one key: kind 'hash' takes query_hash; kind 'object' takes database_name, schema_name AND object_name (all three). server_id limits the assignment to one monitored server; omit it for every server. One tag per key and server scope, with a hash and the object names compared ignoring case: a key that already has a hand tag in that scope moves to this tag, and the result says so (status moved). A hand assignment beats any rule. query_id is kept for display only and never matched on. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (the tag the key held before in this scope, or null) and undo (unassign_query_tag for a new assignment, assign_query_tag with the earlier tag for a move).")]
+        "Hand-assigns a query tag to one key: kind 'hash' takes query_hash; kind 'object' takes database_name, schema_name AND object_name (all three). server_id limits the assignment to one monitored server; omit it for every server. One tag per key and server scope, with a hash and the object names compared ignoring case: a key that already has a hand tag in that scope moves to this tag, and the result says so (status moved). A hand assignment beats any rule. query_id is kept for display only and never matched on. Needs mcp.allowWrites or a named operator token. The tag map takes effect on the collector's next map pass. The answer carries previous (the tag the key held before in this scope, or null) and undo (unassign_query_tag for a new assignment, assign_query_tag with the earlier tag for a move).")]
     public static Task<string> AssignQueryTag(
         NpgsqlDataSource postgres,
         [Description("The tag id (from list_query_tags).")] int tag_id,
@@ -96,7 +96,7 @@ public sealed class DarlingMcpQueryTagTools
         AssignQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), tag_id, kind, query_hash, database_name, schema_name, object_name, server_id, query_id, null, cancellationToken);
 
     [McpServerTool(Name = "unassign_query_tag"), Description(
-        "Removes the hand tag from one key in exactly one server scope: the same kind, key parts and server_id that assign_query_tag took (omit server_id for the every-server assignment; a server-limited assignment is a different row). A key with no hand tag in that scope is a no-op. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (the tag that was removed) and undo (the assign_query_tag call that restores it).")]
+        "Removes the hand tag from one key in exactly one server scope: the same kind, key parts and server_id that assign_query_tag took (omit server_id for the every-server assignment; a server-limited assignment is a different row). A key with no hand tag in that scope is a no-op. Needs mcp.allowWrites or a named operator token. The tag map takes effect on the collector's next map pass. The answer carries previous (the tag that was removed) and undo (the assign_query_tag call that restores it).")]
     public static Task<string> UnassignQueryTag(
         NpgsqlDataSource postgres,
         [Description("The key kind: 'hash' or 'object'.")] string kind,
@@ -473,14 +473,32 @@ public sealed class DarlingMcpQueryTagTools
         try
         {
             var snapshot = await store.ReadSnapshotAsync(ct);
+            var allowedIds = DarlingServerResolver.WebAllowedServerIds;
+            if (allowedIds is not null)
+            {
+                var tagIds = await store.UsedTagIdsAsync(allowedIds, ct);
+                snapshot = snapshot with
+                {
+                    Tags = snapshot.Tags.Where(tag => tagIds.Contains(tag.Id))
+                        .Select(tag => tag with { ParentId = tag.ParentId is int parent && tagIds.Contains(parent) ? parent : null }).ToList(),
+                    Assignments = snapshot.Assignments.Where(assignment =>
+                        assignment.ServerId is int id && allowedIds.Contains(id)).ToList(),
+                    ServerNames = snapshot.ServerNames.Where(pair => allowedIds.Contains(pair.Key))
+                        .ToDictionary(pair => pair.Key, pair => pair.Value),
+                };
+            }
+
             var tags = new JsonArray();
             var listed = 0;
             var truncated = false;
             foreach (var tag in InTreeOrder(snapshot.Tags))
             {
                 var node = TagNode(snapshot, tag);
-                node["rule_count"] = snapshot.RuleCountByTag.GetValueOrDefault(tag.Id);
-                node["enabled_rule_count"] = snapshot.EnabledRuleCountByTag.GetValueOrDefault(tag.Id);
+                if (allowedIds is null)
+                {
+                    node["rule_count"] = snapshot.RuleCountByTag.GetValueOrDefault(tag.Id);
+                    node["enabled_rule_count"] = snapshot.EnabledRuleCountByTag.GetValueOrDefault(tag.Id);
+                }
                 var mine = snapshot.Assignments.Where(a => a.TagId == tag.Id).ToList();
                 node["assignment_count"] = mine.Count;
                 var assignments = new JsonArray();
@@ -514,6 +532,7 @@ public sealed class DarlingMcpQueryTagTools
                     ["note"] = "A tag, assignment or rule write takes effect on the collector's next map pass; the map is current when built_version has caught up with rules_version.",
                 },
             };
+            if (allowedIds is not null) result.Remove("map");
             result["assignments_returned"] = listed;
             result["truncated"] = truncated;
             if (truncated)

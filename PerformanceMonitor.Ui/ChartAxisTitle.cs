@@ -220,12 +220,14 @@ namespace PerformanceMonitor.Ui
         {
             // WpfPlot -> Border -> Grid is how every chart tab hosts a chart; walk up to the Grid whichever the nesting.
             // #8144: a chart in a ChartPanel card is hosted by the card's Border in the tab's Grid, so the walk starts at the card.
+            // A Grid with no rows of its own is a row group: one row's charts, aligned with each other and not with the rows around
+            // them. It is not the Grid whose row holds the chart, so the walk goes on to the Grid above it.
             System.Windows.DependencyObject child = HostOf(chart);
             System.Windows.Controls.Grid? grid = null;
             while (child is not null)
             {
                 var parent = System.Windows.Media.VisualTreeHelper.GetParent(child);
-                if (parent is System.Windows.Controls.Grid g) { grid = g; break; }
+                if (parent is System.Windows.Controls.Grid g && !IsRowGroup(g)) { grid = g; break; }
                 child = parent;
             }
             if (grid is null || child is not System.Windows.FrameworkElement host) return;
@@ -240,25 +242,64 @@ namespace PerformanceMonitor.Ui
             foreach (System.Windows.UIElement sibling in grid.Children)
             {
                 if (System.Windows.Controls.Grid.GetRow(sibling) != row) continue;
-                var inner = (sibling as System.Windows.Controls.Border)?.Child ?? sibling;
-                var card = inner as ChartPanel;
-                var plot = ((card?.Content ?? inner) as WpfPlot)?.Plot;
-                // The Border around the chart has a margin between charts, and that is part of the row, not of the chart. So is a card's own chrome.
-                var margin = (sibling is System.Windows.FrameworkElement fe ? fe.Margin.Top + fe.Margin.Bottom : 0) + (card?.ChromeHeight ?? 0);
-                if (plot is not null && RowMinHeightFor(plot) is { } h) need = Math.Max(need, Math.Ceiling(h + margin) + (card is null ? 0 : 1)); // whole pixels; a card's fractional chrome rounds the chart down by up to one more: the chart renders at its pixel size, truncated
+                foreach (var (plot, margin, card) in HostedPlots(sibling, 0))
+                {
+                    if (RowMinHeightFor(plot) is { } h) need = Math.Max(need, Math.Ceiling(h + margin) + (card ? 1 : 0)); // whole pixels; a card's fractional chrome rounds the chart down by up to one more: the chart renders at its pixel size, truncated
+                }
             }
             if (Math.Abs(definition.MinHeight - need) > 0.5) definition.MinHeight = need;
 
             var baseGridMin = (double)s_baseGridMin.GetValue(grid, g => ((System.Windows.Controls.Grid)g).MinHeight);
             double total = 0;
-            foreach (var d in grid.RowDefinitions)
+            for (var i = 0; i < grid.RowDefinitions.Count; i++)
             {
+                var d = grid.RowDefinitions[i];
                 if (d.Height.IsStar) total += d.MinHeight;
                 else if (d.Height.IsAbsolute) total += d.Height.Value;
-                else total += d.ActualHeight;
+                else total += d.ActualHeight - OpenExpanderContentHeight(grid, i);
             }
             var gridMin = Math.Max(baseGridMin, total);
             if (Math.Abs(grid.MinHeight - gridMin) > 0.5) grid.MinHeight = gridMin;
+        }
+
+        /// <summary>A Grid with no rows of its own: one row's charts side by side, grouped so they align with each other alone.</summary>
+        private static bool IsRowGroup(System.Windows.Controls.Grid grid) => grid.RowDefinitions.Count == 0;
+
+        /// <summary>
+        /// The plots a row's child hosts, each with the height the row spends around it: the host's margin between charts, a card's own
+        /// chrome, and the margin of a row group that holds the host. Each is part of the row and not of the chart.
+        /// </summary>
+        private static System.Collections.Generic.IEnumerable<(ScottPlot.Plot Plot, double Margin, bool Card)> HostedPlots(System.Windows.UIElement host, double outerMargin)
+        {
+            var margin = outerMargin + (host is System.Windows.FrameworkElement fe ? fe.Margin.Top + fe.Margin.Bottom : 0);
+            if (host is System.Windows.Controls.Grid group && IsRowGroup(group))
+            {
+                foreach (System.Windows.UIElement child in group.Children)
+                {
+                    foreach (var hosted in HostedPlots(child, margin)) yield return hosted;
+                }
+                yield break;
+            }
+            var inner = (host as System.Windows.Controls.Border)?.Child ?? host;
+            var card = inner as ChartPanel;
+            var plot = ((card?.Content ?? inner) as WpfPlot)?.Plot;
+            if (plot is not null) yield return (plot, margin + (card?.ChromeHeight ?? 0), card is not null);
+        }
+
+        /// <summary>
+        /// The content height, margins included, of every opened <see cref="System.Windows.Controls.Expander"/> in the row. An Auto row counts
+        /// toward the Grid's floor at its closed height, so the floor follows the charts, and a snapshot grid a reader opened does not keep
+        /// the page tall after it closes. A row without an opened expander counts in full.
+        /// </summary>
+        private static double OpenExpanderContentHeight(System.Windows.Controls.Grid grid, int row)
+        {
+            double height = 0;
+            foreach (System.Windows.UIElement child in grid.Children)
+            {
+                if (System.Windows.Controls.Grid.GetRow(child) == row && child is System.Windows.Controls.Expander { IsExpanded: true, Content: System.Windows.FrameworkElement content })
+                    height += content.ActualHeight + content.Margin.Top + content.Margin.Bottom;
+            }
+            return height;
         }
 
         /// <summary>

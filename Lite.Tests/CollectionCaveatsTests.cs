@@ -177,7 +177,7 @@ public sealed class CollectionCaveatsTests : IDisposable
         {
             Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
             var message = doc.RootElement.GetProperty("message").GetString()!;
-            Assert.Contains("All metrics are within normal ranges. COLLECTION CAVEAT: 1 of 32 fact families could not be read (trace_flag (error)) — the absence of findings is not evidence", message, StringComparison.Ordinal);
+            Assert.Contains("All metrics are within normal ranges. COLLECTION CAVEAT: 1 of 32 fact families could not be read (trace_flag (error)), the absence of findings is not evidence", message, StringComparison.Ordinal);
 
             var caveats = doc.RootElement.GetProperty("hints").GetProperty("collection_caveats");
             Assert.Equal(1, caveats.GetProperty("families_failed").GetInt32());

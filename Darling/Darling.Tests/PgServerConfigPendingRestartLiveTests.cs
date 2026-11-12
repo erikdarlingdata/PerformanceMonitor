@@ -374,7 +374,7 @@ public sealed class PgServerConfigPendingRestartLiveTests
             command.CommandText = plan.Text;
             await using var reader = await command.ExecuteReaderAsync(ct);
             var rows = await PgServerConfigCollector.Instance.ReadAsync(reader, context, ct);
-            Assert.True(rows.Count > 100, "a non-superuser role with no pg_file_settings grant must still collect the full pg_settings snapshot — the whole point of resolving the capability BEFORE BuildQuery.");
+            Assert.True(rows.Count > 100, "a non-superuser role with no pg_file_settings grant must still collect the full pg_settings snapshot: the whole point of resolving the capability BEFORE BuildQuery.");
 
             /* Logged once, not every cycle. */
             Assert.True(PgFileSettingsCapability.ShouldLogUnreadable(targetKey), "the first discovery must be logged.");

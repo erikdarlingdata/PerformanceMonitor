@@ -72,7 +72,7 @@ public sealed class AnalysisPassRowTests
             DarlingWorker.AnalysisPassStatus.Ran, 7, null, 84_000, 61_500, insideFleetSlot: true);
         Assert.Equal(AnalysisPassRow.Analyzed, status);
         Assert.Equal(
-            "Scheduled analysis pass ran in 84s, 7 finding(s), PLAN_REGRESSION read 62s, inside this server's fleet collection slot.",
+            "Scheduled analysis pass ran in 84s, 7 findings, PLAN_REGRESSION read 62s, inside this server's fleet collection slot.",
             detail);
 
         // Ran past its budget and finished: the task completed, so the figure the service stamped survives.
@@ -81,7 +81,7 @@ public sealed class AnalysisPassRowTests
         var (timedOut, timedOutDetail) = DarlingWorker.DescribeAnalysisPass(
             DarlingWorker.AnalysisPassStatus.TimedOut, 0, "analysis exceeded 120s", 125_000, finishedRead, insideFleetSlot: true);
         Assert.Equal(AnalysisPassRow.Abandoned, timedOut);
-        Assert.Contains("timed out in 125s, 0 finding(s), PLAN_REGRESSION read 62s,", timedOutDetail, StringComparison.Ordinal);
+        Assert.Contains("timed out in 125s, 0 findings, PLAN_REGRESSION read 62s,", timedOutDetail, StringComparison.Ordinal);
         Assert.EndsWith(" analysis exceeded 120s", timedOutDetail, StringComparison.Ordinal);
 
         // Still running when the sweep gave up: null, and the service is not read.
@@ -134,7 +134,7 @@ public sealed class AnalysisPassRowTests
         tally.AddGrid("wait_stats", 1, T0.AddMinutes(-2));
         var report = DarlingCycleSkip.Build(
             tally.TryTake(T0, DarlingCycleSkip.RowMinInterval)!, new CycleSkipCauses(0, null, 0, 95_000, GateWaitAnalysisHolders: 3), T0)!;
-        Assert.Contains("waited 95s for a fleet collection slot (3 slot(s) were held by scheduled analysis passes when it got one)", report.Message, StringComparison.Ordinal);
+        Assert.Contains("waited 95s for a fleet collection slot (3 slots were held by scheduled analysis passes when it got one)", report.Message, StringComparison.Ordinal);
 
         var none = new CycleSkipAccumulator();
         none.AddGrid("wait_stats", 1, T0.AddMinutes(-2));
@@ -155,7 +155,7 @@ public sealed class AnalysisPassRowTests
         }
 
         var report = DarlingCycleSkip.Build(tally.TryTake(T0, DarlingCycleSkip.RowMinInterval)!, new CycleSkipCauses(0, null, 0, 0), T0)!;
-        Assert.Contains("5 slot(s) skipped across 5 collector(s) (every collector that lost a slot, 1 slot(s) each)", report.Message, StringComparison.Ordinal);
+        Assert.Contains("5 slots skipped across 5 collectors (every collector that lost a slot, 1 slot each)", report.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("every due collector", report.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("top:", report.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("ag_database_replica_states", report.Message, StringComparison.Ordinal);
@@ -165,10 +165,10 @@ public sealed class AnalysisPassRowTests
     public void ATieAcrossTheCut_IsListedByCount_AndDistinctCountsKeepTheirNames()
     {
         Assert.Equal(
-            "by count: 4 collectors at 2 slot(s) each, 16 collectors at 1 slot(s) each",
+            "by count: 4 collectors at 2 slots each, 16 collectors at 1 slot each",
             DarlingCycleSkip.TopText(Counts(("a", 2, 4), ("b", 1, 16))));
         Assert.Equal(
-            "by count: query_store_00 5, 3 collectors at 2 slot(s) each, 2 collectors at 1 slot(s) each",
+            "by count: query_store_00 5, 3 collectors at 2 slots each, 2 collectors at 1 slot each",
             DarlingCycleSkip.TopText(Counts(("query_store", 5, 1), ("b", 2, 3), ("c", 1, 2))));
         Assert.Equal(
             "top: query_stats 3, wait_stats 2, attention 1",

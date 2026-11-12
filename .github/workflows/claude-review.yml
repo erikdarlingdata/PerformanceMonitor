@@ -59,7 +59,10 @@ name: Claude Auto Review
 # The review posts
 # comments for its findings and ends every run with ONE formal verdict review (the VERDICT
 # PROTOCOL in the prompt below): changes-requested when a finding is substantive, a comment
-# review otherwise. The verdict's color lives in claude-review-guard.yml, not here: its verdict
+# review otherwise. An LGTM on the pull request's head also dismisses the bot's own earlier
+# changes-requested reviews, which otherwise keep the pull request blocked after the bot has
+# cleared it (the dismissal step at the end of the review job says which ones). The verdict's
+# color lives in claude-review-guard.yml, not here: its verdict
 # arm fails while the newest verdict is changes-requested, so a substantive finding shows as a
 # failed check, which a branch rule can require, and not only as a comment (the #3470-#3473
 # train shipped six findings in one night as comments that auto-merge outran; one was
@@ -867,7 +870,13 @@ jobs:
       # the body, the guard is authoritative about the state. The section headings are listed in
       # the log for the record and not graded: a mark that fails on a heading's wording is one
       # people learn to ignore, and the ledger is what the later pass computes from.
+      #
+      # When the newest verdict passes and is a COMMENTED review, it is an LGTM that covers this run's
+      # head (the ledger agrees with the state, and the marker names the head), and the step's
+      # outputs carry its id, submission time and URL for the dismissal step below. Any other outcome
+      # leaves them empty, and that step does nothing.
       - name: Verify the review posted a verdict
+        id: verdict
         if: ${{ always() && env.HAS_OAUTH_TOKEN == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -929,7 +938,7 @@ jobs:
             # failure of THIS lookup is the #2309 shape too -- warn and stand down, the verdict
             # exists and the guard has the state.
             newest=$(printf '%s\n' "$matched" | tail -n 1)
-            IFS=$'\t' read -r verdict_state _ verdict_id verdict_url <<<"$newest"
+            IFS=$'\t' read -r verdict_state verdict_at verdict_id verdict_url <<<"$newest"
             errfile=$(mktemp 2>/dev/null || echo /dev/null)
             if ! body=$(gh api "repos/$R/pulls/$PR/reviews/$verdict_id" --jq '.body // ""' 2>"$errfile"); then
               err=$(cat "$errfile" 2>/dev/null || true)
@@ -977,6 +986,15 @@ jobs:
             if [ -z "$missing" ]; then
               echo "::notice title=Structured verdict present::$verdict_state -- $verdict_url"
               summary "- newest verdict: $verdict_state, structured (header + ledger agree with the state) -- $verdict_url"
+              if [ "$verdict_state" = COMMENTED ]; then
+                # A COMMENTED verdict whose ledger agrees with its state is an LGTM, and the marker
+                # check above held, so it covers this run's head. The dismissal step reads these.
+                {
+                  echo "lgtm_id=$verdict_id"
+                  echo "lgtm_at=$verdict_at"
+                  echo "lgtm_url=$verdict_url"
+                } >> "$GITHUB_OUTPUT"
+              fi
               exit 0
             fi
 
@@ -1028,6 +1046,139 @@ jobs:
             echo "(no transcript at $transcript)"
           fi
           exit 1
+
+      # The bot's clean verdict is a COMMENTED review (the prompt never approves: an approval could
+      # count toward branch protection, and a dismissal does not), so its own earlier
+      # CHANGES_REQUESTED reviews still stand, and GitHub keeps the pull request blocked by them until
+      # someone dismisses them. This step dismisses the ones the LGTM supersedes, and only those:
+      #   - written by REVIEW_BOT itself, in state CHANGES_REQUESTED. A person's review is never
+      #     touched, and a review already dismissed is in state DISMISSED and is not read again.
+      #   - submitted before the LGTM (in the same second, a lower id), so a change request posted
+      #     after it stands.
+      #   - stamped with the LGTM's head or an ancestor of it (compare says identical or ahead), so a
+      #     change request on a commit the LGTM's head does not descend from stands: one that is newer,
+      #     one a force-push diverged from the head, one unknown to the repository, and one whose
+      #     commit cannot be compared. GitHub stamps a review with the pull request's head at the
+      #     moment it is submitted.
+      # The LGTM is the one the verdict check above confirmed: structured, COMMENTED with a ledger
+      # that says LGTM, and marked with this run's head. A verdict on an older head dismisses nothing:
+      # the step's first read is the pull request's head NOW, and a head that has moved on means the
+      # run for the newer push decides what stands. The review job's concurrency group cancels this
+      # run once that newer run reaches the job, and a cancelled step dismisses nothing more; the head
+      # read covers the seconds before it. Every failure here is a warning, never the job's colour:
+      # the LGTM is posted and the guard reads its state, and a review left standing is dismissed by
+      # hand. The dismissal goes through this run's GITHUB_TOKEN, so github-actions[bot] dismisses,
+      # with a message that names the LGTM. PUT /pulls/{n}/reviews/{id}/dismissals is under the Pull
+      # requests permission, which the job's pull-requests: write already grants, so no permission is
+      # added. No review body is printed: ids, states, commits and URLs only. Every input arrives
+      # through env:, never through a ${{ }} interpolation into the script text.
+      - name: Dismiss the change requests the LGTM supersedes
+        if: ${{ success() && steps.verdict.outputs.lgtm_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Author of every review the action leaves behind (the action's bot_name default).
+          REVIEW_BOT: claude[bot]
+          # The LGTM the verdict check confirmed: its id, its submission time and its URL.
+          LGTM_ID: ${{ steps.verdict.outputs.lgtm_id }}
+          LGTM_AT: ${{ steps.verdict.outputs.lgtm_at }}
+          LGTM_URL: ${{ steps.verdict.outputs.lgtm_url }}
+        run: |
+          set -euo pipefail
+          summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          sha_re='^[0-9a-f]{40}$'
+          id_re='^[0-9]+$'
+
+          # The decide job's read helper: a failing gh call cannot kill the step under set -e, and
+          # stderr never lands in a value the step compares.
+          LOOKUP_OUT=''; LOOKUP_ERR=''
+          lookup() {
+            local errfile
+            errfile=$(mktemp 2>/dev/null || echo /dev/null)
+            if ! LOOKUP_OUT=$(gh api "$@" 2>"$errfile"); then
+              LOOKUP_ERR=$(tr '\n' ' ' < "$errfile" 2>/dev/null || true)
+              LOOKUP_ERR=${LOOKUP_ERR:-$LOOKUP_OUT}
+              [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
+              return 1
+            fi
+            [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
+          }
+
+          if ! [[ "$HEAD_SHA" =~ $sha_re && "$LGTM_ID" =~ $id_re ]]; then
+            echo "::warning title=No change request dismissed::This run's head (${HEAD_SHA:0:12}) or the LGTM's id ($LGTM_ID) is not the shape expected, so nothing is dismissed."
+            exit 0
+          fi
+
+          # The pull request's head NOW. A head that moved on since this run started means the LGTM
+          # covers an older commit, and the run for the newer head decides what stands.
+          if ! lookup "repos/$R/pulls/$PR" --jq '.head.sha'; then
+            echo "::warning title=No change request dismissed::The pull request's head could not be read ($LOOKUP_ERR), so the LGTM is not known to cover it and nothing is dismissed. Dismiss $REVIEW_BOT's stale change requests by hand if the LGTM covers the head."
+            summary "- Change requests: the head could not be read; none dismissed."
+            exit 0
+          fi
+          if [ "$LOOKUP_OUT" != "$HEAD_SHA" ]; then
+            echo "::notice title=No change request dismissed::The pull request's head is now ${LOOKUP_OUT:0:12}, and the LGTM covers ${HEAD_SHA:0:12}. The run for the newer head decides."
+            summary "- Change requests: the head moved to ${LOOKUP_OUT:0:12}; none dismissed."
+            exit 0
+          fi
+
+          # The bot's own CHANGES_REQUESTED reviews submitted before the LGTM, oldest first. GitHub
+          # stamps submitted_at in one ISO-8601 UTC shape, so the comparison is a plain string one, and
+          # the id breaks a tie in the same second. The commit is the last field, so an empty commit_id
+          # is a trailing empty field, which `read` keeps; a tab is whitespace to it, and an empty
+          # field in the middle would be swallowed.
+          if ! lookup --paginate "repos/$R/pulls/$PR/reviews?per_page=100" \
+              --jq '.[] | select(.user.login == env.REVIEW_BOT and .state == "CHANGES_REQUESTED"
+                                 and .submitted_at != null
+                                 and (.submitted_at < env.LGTM_AT
+                                      or (.submitted_at == env.LGTM_AT and .id < (env.LGTM_ID | tonumber))))
+                    | "\(.id)\t\(.submitted_at)\t\(.html_url)\t\(.commit_id // "")"'; then
+            echo "::warning title=No change request dismissed::The reviews could not be read ($LOOKUP_ERR), so nothing is dismissed. Dismiss $REVIEW_BOT's stale change requests by hand if any stand."
+            summary "- Change requests: the reviews could not be read; none dismissed."
+            exit 0
+          fi
+          stale=$LOOKUP_OUT
+          if [ -z "$stale" ]; then
+            echo "No CHANGES_REQUESTED review by $REVIEW_BOT precedes the LGTM; nothing to dismiss."
+            exit 0
+          fi
+
+          message="Superseded by $REVIEW_BOT's LGTM on ${HEAD_SHA:0:12}: $LGTM_URL"
+          dismissed=0; left=0
+          while IFS=$'\t' read -r cr_id cr_at cr_url cr_commit; do
+            [ -n "$cr_id" ] || continue
+            if ! [[ "$cr_id" =~ $id_re && "$cr_commit" =~ $sha_re ]]; then
+              echo "::notice title=Change request left standing::Review $cr_id ($cr_at) names no commit this step can hold against the head, so it stands: $cr_url"
+              left=$((left + 1)); continue
+            fi
+            if [ "$cr_commit" = "$HEAD_SHA" ]; then
+              status=identical
+            elif ! lookup "repos/$R/compare/$cr_commit...$HEAD_SHA?per_page=1" --jq '.status'; then
+              echo "::warning title=Change request left standing::The commit ${cr_commit:0:12} of review $cr_id cannot be compared with the head ($LOOKUP_ERR), so it stands: $cr_url"
+              left=$((left + 1)); continue
+            else
+              status=$LOOKUP_OUT
+            fi
+            if [ "$status" != identical ] && [ "$status" != ahead ]; then
+              echo "::notice title=Change request left standing::Review $cr_id is on ${cr_commit:0:12}, which the LGTM's head ${HEAD_SHA:0:12} does not descend from (compare says $status), so it stands: $cr_url"
+              left=$((left + 1)); continue
+            fi
+            errfile=$(mktemp 2>/dev/null || echo /dev/null)
+            if gh api -X PUT "repos/$R/pulls/$PR/reviews/$cr_id/dismissals" -f message="$message" --silent 2>"$errfile"; then
+              echo "dismissed review $cr_id ($cr_at, on ${cr_commit:0:12}): $cr_url"
+              dismissed=$((dismissed + 1))
+            else
+              err=$(cat "$errfile" 2>/dev/null || true)
+              echo "::warning title=Change request not dismissed::gh api PUT reviews/$cr_id/dismissals failed: ${err:-no stderr}. Dismiss it by hand if it still stands: $cr_url"
+              left=$((left + 1))
+            fi
+            [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
+          done <<<"$stale"
+
+          echo "::notice title=Change requests superseded by the LGTM::$dismissed dismissed, $left left standing."
+          summary "- Change requests by $REVIEW_BOT that the LGTM supersedes ($LGTM_URL): $dismissed dismissed, $left left standing."
 
       # The `re-review` label is a request, and a request that has been answered goes away: a stuck
       # label cannot be added again, so it could never ask twice. Removed only after a FULL review

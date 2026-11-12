@@ -57,6 +57,7 @@ namespace Darling.Tests;
 /// the pins below hold a one-of-six card exactly where #3528 left it.</para>
 /// </summary>
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
+[Collection("application-theme")] // #8395: reads a card brush off the STA thread
 public sealed class UnmeasuredMetricsAreNotHealthyTests
 {
     private static readonly DateTime Now = new(2026, 9, 10, 12, 0, 0, DateTimeKind.Utc);
@@ -554,7 +555,7 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
 
         /* The tooltip's headline names the band and the reason once — not "Warning — no metric measured yet
            · 0 of 6 measured", which would say the same thing twice. */
-        Assert.StartsWith("Warning — " + FleetRollup.NoMetricMeasuredReason, viewer.StatusTooltip, StringComparison.Ordinal);
+        Assert.StartsWith("Warning: " + FleetRollup.NoMetricMeasuredReason, viewer.StatusTooltip, StringComparison.Ordinal);
         Assert.DoesNotContain("0 of 6", viewer.StatusTooltip, StringComparison.Ordinal);
 
         /* The border agrees with the band: the awaiting-first-collection amber, not the calm dark. */
@@ -568,7 +569,7 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
         Assert.Equal(1, DarlingFleetReader.BuildRollup(new[] { one }, Now, Now.AddHours(-1), Now).HealthyCount);
         var oneViewer = ViewerCard(engineKind, bandedCollectors: 1);
         Assert.Equal(FleetHealthBand.Healthy, FleetRollup.ClassifyBand(oneViewer));
-        Assert.StartsWith("Healthy — 1 of 6 measured", oneViewer.StatusTooltip, StringComparison.Ordinal);
+        Assert.StartsWith("Healthy: 1 of 6 measured", oneViewer.StatusTooltip, StringComparison.Ordinal);
     }
 
     /* ─────────────────────────── the ordering the guards depend on ─────────────────────────── */

@@ -19,7 +19,7 @@
 
         <TextBlock Grid.Row="0" FontWeight="Bold" FontSize="14"
                    Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,8"
-                   Text="Database State Alert — Expected State per Database"/>
+                   Text="Database State Alert: Expected State per Database"/>
 
         <TextBlock Grid.Row="1" TextWrapping="Wrap" FontSize="11"
                    Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,12"
@@ -40,7 +40,7 @@
                       Foreground="{DynamicResource ForegroundBrush}">
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" IsReadOnly="True" Width="2*"/>
-                    <DataGridTextColumn Header="Current State" Binding="{Binding CurrentState}" IsReadOnly="True" Width="1.4*"/>
+                    <DataGridTextColumn Header="Last Known State" Binding="{Binding CurrentState}" IsReadOnly="True" Width="1.4*"/>
                     <DataGridComboBoxColumn x:Name="ExpectedColumn" Header="Expected State"
                                             SelectedItemBinding="{Binding ExpectedState}" Width="1.6*"/>
                     <DataGridTextColumn Header="Source" Binding="{Binding SourceLabel}" IsReadOnly="True" Width="1*"/>
@@ -52,7 +52,7 @@
                    Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,8,0,0"/>
 
         <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-            <Button Content="Reset Selected to Current" Height="28" Padding="10,0" Margin="0,0,8,0"
+            <Button Content="Reset Selected to Last Known State" Height="28" Padding="10,0" Margin="0,0,8,0"
                     Click="ResetSelected_Click"/>
             <Button Content="Save" Width="80" Height="28" Margin="0,0,8,0" Click="Save_Click" Style="{StaticResource AccentButton}"/>
             <Button Content="Close" Width="80" Height="28" Click="Cancel_Click" IsCancel="True"/>

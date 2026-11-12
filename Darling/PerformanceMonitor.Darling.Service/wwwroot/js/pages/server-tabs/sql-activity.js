@@ -126,7 +126,7 @@ export async function drawPerfmonTrends(slot, server, ctx, checked) {
       /* The server's no-trend sentence points at hints.collected_counters, a JSON path a reader cannot open, so
          the counters it holds are listed here as text instead. */
       const collected = trend.hints && Array.isArray(trend.hints.collected_counters) ? trend.hints.collected_counters : null;
-      const said = collected && trend.message ? trend.message.replace(/\s*[—-]\s*see hints\.collected_counters.*$/, ".") : trend.message;
+      const said = collected && trend.message ? trend.message.replace(/\s*[:—-]\s*see hints\.collected_counters.*$/, ".") : trend.message;
       notes.push(counter + ": " + (said || (trend.kind === "empty" ? "no trend data." : "could not be read.")) + (collected && collected.length ? " Collected here: " + collected.join(", ") + "." : ""));
       return;
     }

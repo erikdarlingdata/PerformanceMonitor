@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// STA thread, narrower and wider than their columns, and read back the width each column was actually given. Lite's twin, for Lite's
 /// themes, is FillColumnTests in Lite.Tests.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerFillColumnTests
 {
     private static string ViewerDir([CallerFilePath] string thisFile = "") =>
@@ -89,7 +90,7 @@ public sealed class ViewerFillColumnTests
                 /* A grid with no rows has no content to scroll over, so it never scrolls sideways; one empty row stands in for the data. */
                 grid.ItemsSource = new[] { new object() };
                 var window = new Window { Content = tab, Width = width, Height = 1000 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     typeof(ViewerServerTab).GetField("_suppressDrillDownAutoRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(tab, true);
@@ -141,7 +142,7 @@ public sealed class ViewerFillColumnTests
             grid.Height = 300;
             var window = new Window { Content = new Canvas { Children = { grid } }, Width = 600, Height = 400 };
             window.Resources.MergedDictionaries.Add(Theme(theme));
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ClippedTextProbe.Settle(window);

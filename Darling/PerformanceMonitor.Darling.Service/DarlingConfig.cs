@@ -40,6 +40,10 @@ public sealed class DarlingConfig
         AllowTrailingCommas = true,
     };
 
+    /// <summary>#8184: the options <see cref="Parse"/> reads darling.json with (case-insensitive names, comments, trailing commas), for a
+    /// reader of one block that must accept the same file.</summary>
+    internal static JsonSerializerOptions JsonOptions => s_jsonOptions;
+
     [JsonPropertyName("postgres")]
     public PostgresConfig Postgres { get; set; } = new();
 
@@ -212,6 +216,18 @@ public sealed class DarlingConfig
     /// </summary>
     [JsonPropertyName("rawChunkIntervalReconcileEnabled")]
     public bool RawChunkIntervalReconcileEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Whether the daily-summary warmer runs at all (#8370). Default TRUE. The warmer builds each SQL Server target's
+    /// closed-day <c>get_daily_summary_range</c> block two minutes after the service starts and again just after each
+    /// UTC day boundary, one server at a time under the long-read limit, so a server's first Overview visitor finds it
+    /// built. Set false to stop the passes, for example while a store maintenance window overlaps the boundary pass; the
+    /// first visitor of each server then pays the cold read, as before the warmer existed. A file-only knob like
+    /// <see cref="RawChunkIntervalReconcileEnabled"/> (not seeded into the control-plane store, unlike
+    /// <see cref="QueryStoreBackfillEnabled"/>), so an edit takes effect on the next restart.
+    /// </summary>
+    [JsonPropertyName("dailySummaryWarmerEnabled")]
+    public bool DailySummaryWarmerEnabled { get; set; } = true;
 
     /// <summary>
     /// Whether the service builds a <c>pg_trgm</c> GIN index on the plan-cache text (<c>collect.query_text_dim.query_text</c>, #7674).
@@ -396,6 +412,21 @@ public sealed class DarlingConfig
     /// </summary>
     [JsonPropertyName("web")]
     public WebConfig Web { get; set; } = new();
+
+    /// <summary>
+    /// #8184: the opt-in health port for Kubernetes probes, <c>/livez</c> and <c>/readyz</c> and nothing else. FILE-ONLY:
+    /// the control plane never writes it, and a change needs a restart. Optional; omit the section entirely.
+    /// </summary>
+    [JsonPropertyName("health")]
+    public HealthConfig Health
+    {
+        get => _health;
+
+        /* "health": null means off, the same as an absent block (the #5460 heartbeat rule). */
+        set => _health = value ?? new();
+    }
+
+    private HealthConfig _health = new();
 
     /// <summary>
     /// Declared PEER STORES (#2339): what this store covers, and which sibling Darling stores cover the
@@ -644,6 +675,10 @@ public sealed class DarlingConfig
         problems.AddRange(FrontDoorConfig.Validate(FrontDoor));
         /* #5450: the heartbeat block, for the same reason (a broken one is reported even with no servers yet). */
         problems.AddRange(HeartbeatConfig.Validate(Heartbeat));
+
+        /* #8184: the health block is not checked here (D-validate). The health port is an optional, default-off endpoint, so a bad
+           value there must not stop collection: the health host refuses its own bad config with one Critical line and does not
+           listen. See HealthConfig.Problems. */
 
         /* #6468: no servers is a valid configuration. A first install starts with an empty list and the person adds the
            first server in the Viewer or the web dashboard, so an empty list is not a problem to report here. */
@@ -1263,9 +1298,10 @@ public sealed class AlertsConfig
     public AlertNotificationMode DeliveryMode { get; set; } = AlertNotificationMode.Summary;
 
     /// <summary>Per-event mode's cap on incidents delivered individually per cycle before the trailing
-    /// "+N more" batch (#1141); clamped 1–100 when applied. Stored as <c>config_alert_settings.per_event_max</c>.</summary>
+    /// "+N more" batch (#1141); clamped 1–100 when applied. Defaults to <see cref="AlertDefaults.PerEventMax"/>, the figure Lite
+    /// ships too. Stored as <c>config_alert_settings.per_event_max</c>.</summary>
     [JsonPropertyName("perEventMax")]
-    public int PerEventMax { get; set; } = 5;
+    public int PerEventMax { get; set; } = AlertDefaults.PerEventMax;
 
     /* The long-running-query read shape (V20 control-plane knobs) — the row cap + the five noise-filter
        opt-outs the shared AlertEngine forwards to GetLongRunningQueriesAsync. Defaults match Lite's App.*
@@ -1624,7 +1660,11 @@ public sealed class McpConfig
     /// <see cref="McpNetworkConfig.EncryptedToken"/> or <see cref="McpNetworkConfig.Token"/>, an enabled MCP server does not
     /// start, and the log names the settings to add. On, a loopback-only server with no token serves local clients
     /// without one, with the write and investigation tools off (they need the token), and every start logs one line
-    /// saying so. A configured token always gates, whatever this says. File-only and restart-only.
+    /// saying so. This applies only to a start with no token configured: a configured token is still resolved and gates
+    /// every request, and a token that clears the floor serves the write and investigation tools as their settings say,
+    /// whatever this says. Lite's <c>mcp_allow_tokenless_loopback</c> differs: on, Lite does not read its stored token at
+    /// all and serves reads only.
+    /// File-only and restart-only.
     /// </summary>
     [JsonPropertyName("allowTokenlessLoopback")]
     public bool AllowTokenlessLoopback { get; set; }
@@ -2094,10 +2134,14 @@ public sealed class WebConfig
     /// <summary>
     /// Default OFF; a darling.json without the key keeps it off, so an upgrade from 3.11 keeps that release's web scope until the
     /// operator turns it on. The files this product writes for a NEW install (the MSI's minimal darling.json and darling.sample.json) set
-    /// it to true explicitly (#6600). On the managed store the dashboard signs in as the read-only <c>viewer</c> role, so
-    /// its Admin writes were list-only. On, the dashboard opens a second, small connection pool that signs in as the managed <c>admin</c> role
-    /// (the Viewer's login) and uses it only for those writes and their access checks, and only for a person signed in as an admin; every read
-    /// stays on <c>viewer</c>. Off keeps the dashboard list-only on the managed store. A store you bring yourself is unchanged either way.
+    /// it to true explicitly (#6600). On the managed store the dashboard signs in as the least-privilege <c>web</c> role, which holds no grant
+    /// for the Admin writes: notification routes and environment profiles, threshold overrides, alert settings, people, report feedback, server
+    /// actions, note decisions, agent changes and the agent switch, and the rest of the list in docs/darling/configuration-web.md. On, the
+    /// dashboard opens a second, small connection pool that signs in as the managed <c>admin</c> role (the Viewer's login) and uses it only for
+    /// those writes and their access checks, and only for a person signed in as an admin; every other request stays on <c>web</c>. Off turns
+    /// those writes off on the managed store and nothing else: a sign-in that can edit still adds and edits monitored servers and writes mute
+    /// rules, dismissals and custom alert rules, through the <c>web</c> role's own grants. With OIDC and no <c>roleClaim</c> every signed-in
+    /// user can edit, so each one can add a server whatever this says. A store you bring yourself is unchanged either way.
     /// File-only and restart-only.
     /// </summary>
     [JsonPropertyName("allowAdminWrites")]
@@ -2126,6 +2170,76 @@ public sealed class WebConfig
     /// </summary>
     [JsonPropertyName("network")]
     public WebNetworkConfig? Network { get; set; }
+}
+
+/// <summary>
+/// #8184: the health port's config. Off by default. The port serves only <c>/livez</c> and <c>/readyz</c>, one word each,
+/// with no token, no <c>allowFrom</c> and no TLS, so it carries nothing worth protecting.
+/// </summary>
+public sealed class HealthConfig
+{
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
+
+    [JsonPropertyName("port")]
+    public int Port { get; set; } = 5154;
+
+    /// <summary>
+    /// The address to bind. Empty means <c>0.0.0.0</c> inside a container and <c>127.0.0.1</c> outside one.
+    /// </summary>
+    [JsonPropertyName("listen")]
+    public string Listen { get; set; } = "";
+
+    /// <summary>
+    /// The address <paramref name="listen"/> names, or null when it does not parse. Empty resolves by
+    /// <paramref name="inContainer"/>: a probe reaches a pod over the pod address, so a container binds every interface.
+    /// </summary>
+    internal static IPAddress? ResolveListenAddress(string listen, bool inContainer)
+    {
+        if (string.IsNullOrWhiteSpace(listen))
+        {
+            return inContainer ? IPAddress.Any : IPAddress.Loopback;
+        }
+
+        return IPAddress.TryParse(listen.Trim(), out var address) ? address : null;
+    }
+
+    /// <summary>
+    /// #8184: what makes the health host refuse to listen, empty when the block is usable or off. Not part of
+    /// <see cref="DarlingConfig.Validate"/> (D-validate): the port is an optional, default-off endpoint, so a bad value turns off only
+    /// the port, with one Critical line, and collection keeps running. The clash test compares against the <c>web.port</c> and
+    /// <c>mcp.port</c> the same file read gives (<paramref name="webPort"/> and <paramref name="mcpPort"/>, null when that block is
+    /// <c>null</c>), whether or not those surfaces are enabled: the control plane can turn either on later without a restart, and the
+    /// ports would then collide. A port the control plane later stores for web or MCP is not seen here.
+    /// </summary>
+    internal static IReadOnlyList<string> Problems(HealthConfig health, int? webPort, int? mcpPort)
+    {
+        var problems = new List<string>();
+        if (!health.Enabled)
+        {
+            return problems;
+        }
+
+        if (health.Port is < 1 or > 65535)
+        {
+            problems.Add($"health.port must be between 1 and 65535 (got {health.Port}).");
+        }
+        else if (health.Port == webPort)
+        {
+            problems.Add($"health.port ({health.Port}) is the same as web.port — give the health listener its own port.");
+        }
+        else if (health.Port == mcpPort)
+        {
+            problems.Add($"health.port ({health.Port}) is the same as mcp.port — give the health listener its own port.");
+        }
+
+        if (ResolveListenAddress(health.Listen, inContainer: false) is null)
+        {
+            problems.Add($"health.listen (\"{health.Listen}\") is not an IP address.");
+        }
+
+        return problems;
+    }
 }
 
 /// <summary>
@@ -2294,6 +2408,11 @@ public sealed class WebNetworkConfig
 /// </summary>
 public sealed class WebTokenEntry
 {
+    /// <summary>Optional server tag ids for a scoped reader: the reader sees the servers under these tags and their descendants, and
+    /// nothing else. Null is an unscoped reader. Only a <c>web.network.tokens</c> entry with the reader role carries one.</summary>
+    [JsonPropertyName("allowedTagIds")]
+    public List<int>? AllowedTagIds { get; set; }
+
     /// <summary>The <c>reader</c> role: the read-only seat, the one an OIDC viewer gets.</summary>
     public const string ReaderRole = "reader";
 

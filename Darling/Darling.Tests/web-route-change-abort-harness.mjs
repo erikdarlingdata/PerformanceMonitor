@@ -180,7 +180,7 @@ const scenarios = {
     const before = { started: !!slow, aborted: slow.aborted };
     await go("#/server/alpha");
     const afterLeave = { aborted: slow.aborted, serverRenders };
-    await advance(3);
+    await advance(8); // the server page's Overview sends its heavy reads two at a time (#8554), so its first load takes a few more seconds
     const btn = refreshBtn();
     const out = { before, afterLeave, busyAfterSettle: btn.disabled === true };
     const r0 = serverRenders;
@@ -329,19 +329,19 @@ const scenarios = {
   async leaveHealthWithCalendarReadOut() {
     dailyEmpty = true;
     await boot("#/server/alpha");
-    await advance(2);
+    await advance(8); // the range read goes through the heavy gate (#8554), a few rounds behind the strips
     const ranges = () => fetchLog.filter((r) => r.url.includes("get_daily_summary_range"));
     const before = { reads: ranges().length, aborted: ranges().some((r) => r.aborted) };
     await go("#/investigations"); await settle();
     const afterLeave = { reads: ranges().length, monthReadAborted: ranges().length > 1 && ranges()[1].aborted };
-    await go("#/server/alpha"); await advance(2);
+    await go("#/server/alpha"); await advance(8);
     return { before, afterLeave, monthReadsAfterReturn: ranges().length - afterLeave.reads };
   },
   /* The Overview tab draws today's tile and the month calendar from ONE get_daily_summary_range read, and asks no get_daily_summary beside it. */
   async overviewReadsTheRangeOnce() {
     rangeBody = { to_date: "2026-10-03", days: [{ summary_date: "2026-10-01", top_wait_type: "WAIT_OLD" }, { summary_date: "2026-10-03", top_wait_type: "WAIT_TODAY" }] };
     await boot("#/server/alpha/overview");
-    await advance(2);
+    await advance(8); // the first round ends when the range read has landed: the gate (#8554) sends it after the trends and the baseline
     /* #7552: the Top wait value breaks after an underscore, so it is a few text nodes with <wbr> between them: read a node as the text of its whole subtree, the way a browser's textContent does. */
     const full = (n) => (n.children.length ? n.children.map((c) => (c && c.children ? full(c) : "")).join("") : n.textContent || "");
     const has = (t) => !!byId.main.find((x) => full(x) === t);
@@ -353,6 +353,23 @@ const scenarios = {
       calendarDrawn: !!byId.main.find((x) => x.textContent === "Daily Health Calendar"),
       anyAborted: fetchLog.some((r) => r.aborted),
     };
+  },
+  /* #8554: the Overview sends its five heavy reads through the page's heavy-read gate, two in flight. Leaving while some are in flight
+     and the rest are still waiting for a slot aborts the ones out and drops the waiting ones, which are never sent after the leave, and
+     the slots are free for the next visit. */
+  async leaveOverviewWithHeavyReadsQueued() {
+    const heavy = /get_server_trend|get_memory_trend|get_file_io_trend|get_overview_baselines|get_daily_summary_range/;
+    const sent = () => fetchLog.filter((r) => heavy.test(r.url));
+    await boot("#/server/alpha/overview");
+    /* No clock step here: the panels' reads start with the page, before the fleet card answers (#8554), so the two the gate lets through
+       are already out and unanswered and the other three wait. A step would answer the two and let the next two through. */
+    const before = { sent: sent().length, aborted: sent().some((r) => r.aborted) };
+    await go("#/investigations"); await settle();
+    const afterLeave = { sent: sent().length, allAborted: sent().length > 0 && sent().every((r) => r.aborted) };
+    await advance(10);
+    const afterWait = { sent: sent().length };
+    await go("#/server/alpha/overview"); await advance(8);
+    return { before, afterLeave, afterWait, sentOnReturn: sent().length - afterWait.sent, abortedOnReturn: sent().slice(afterWait.sent).some((r) => r.aborted) };
   },
   /* The FinOps Locking tab's Database box reads the server's database names with the tab's own signal. */
   async finopsDatabaseBoxReadOut() {

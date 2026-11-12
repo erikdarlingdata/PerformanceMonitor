@@ -252,14 +252,17 @@ public sealed class RawWindowFloorViewerPortTests
     /// Store, four table() calls in server-tabs.js, plus the two matching panels in the starter dashboard
     /// template (view-templates.js). <c>topQueriesPanel</c> (the Query Store tab's drill-down composite for
     /// get_top_queries_by_cpu) calls VIZ.table directly rather than through loadPanel, so it renders the note
-    /// itself off <c>res.data.truncation_note</c> instead of a <c>noteKey</c> string.
+    /// itself off <c>res.data.truncation_note</c> instead of a <c>noteKey</c> string. The shared read catalog
+    /// (read-fields.js) carries the key on exactly four table entries: <c>get_top_queries_by_cpu</c> and
+    /// <c>get_top_procedures_by_cpu</c> over the SQL Server raw tiers, <c>get_pg_top_queries</c>, and <c>get_pg_deadlocks</c> (#8553), whose
+    /// PostgreSQL reads return the same <c>truncation_note</c> from their window notices.
     /// </summary>
     [Fact]
     public void WebViewer_CarriesTheTruncationNoteKey_OnEveryRawTopPanel()
     {
         Assert.Equal(4, CountOf(ServerTabsJs, "\"truncation_note\""));
         Assert.Contains("res.data.truncation_note", ServerTabsJs, StringComparison.Ordinal);
-        Assert.Equal(2, CountOf(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "read-fields.js"), "noteKey: \"truncation_note\""));
+        Assert.Equal(4, CountOf(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "read-fields.js"), "noteKey: \"truncation_note\""));
         Assert.Equal(2, CountOf(ViewTemplatesJs, "...READ_FIELDS.get_top_"));
     }
 

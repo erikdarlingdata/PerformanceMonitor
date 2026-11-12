@@ -101,7 +101,7 @@ public sealed class AgentLevel2ToolPolicyTests
         var admin = catalog.Count(DarlingMcpWritePolicy.IsServerAdmin);
         var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
         Assert.Contains($"the write tools are off, so the {writes + admin - ActionTools.Length} that change monitoring configuration are not served", text, StringComparison.Ordinal);
-        Assert.Contains($"the {ActionTools.Length} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch), except the four mute rule tools, which an agent token may also call without one for a rule that expires within 7 days (reason and expires_at required)", text, StringComparison.Ordinal);
+        Assert.Contains($"the {ActionTools.Length} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch), except the four mute rule tools, which an agent token (named, or the unnamed one under `mcp.allowInvestigations`) may also call without one for {DarlingMcpInstructions.DirectMuteLimits} (reason and expires_at required)", text, StringComparison.Ordinal);
     }
 
     /// <summary>#7414: with mcp.allowAgentMuteRules off every direct mute call is refused, so neither census offers one.</summary>
@@ -289,7 +289,7 @@ public sealed class AgentLevel2ToolLiveTests
 
     private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Connection, string Arg, Guid Request, CancellationToken Ct);
 
-    private static async Task RunAsync(Func<Ctx, Task> body, int routeLevel = 2)
+    private static async Task RunAsync(Func<Ctx, Task> body, int routeLevel = 2, int requestServerId = 7)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -301,7 +301,7 @@ public sealed class AgentLevel2ToolLiveTests
         await PgMigrations.MigrateAsync(connection, ct);
         await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        foreach (var id in new[] { 7, 8 })
+        foreach (var id in new[] { 7, 8, requestServerId }.Distinct())
         {
             await ExecAsync(connection, $@"INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
 VALUES ({id}, 'srv-{id}', 'srv-{id}', TRUE, 15, now(), now())", ct);
@@ -310,7 +310,7 @@ VALUES ({id}, 'srv-{id}', 'srv-{id}', TRUE, 15, now(), now())", ct);
         await ExecAsync(connection, $"INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Blocking', {routeLevel})", ct);
         var now = DateTime.UtcNow;
         var store = new InvestigationRequestStore(source, 30);
-        var alert = new InvestigationAlert(1, 7, "srv-7", "blocking", "Blocking", now, Array.Empty<string>(), null, 20, 100,
+        var alert = new InvestigationAlert(1, requestServerId, "srv-" + requestServerId.ToString(CultureInfo.InvariantCulture), "blocking", "Blocking", now, Array.Empty<string>(), null, 20, 100,
             LeaseMinutes: 15, ExpiryMinutes: 240) { AutonomyLevel = routeLevel };
         var opened = await store.OpenOrJoinAsync(alert, ct);
         var claim = await store.ClaimAsync(opened.RequestId!.Value, "agent-a", ct);
@@ -457,6 +457,24 @@ VALUES ('{id}', {(enabled ? "TRUE" : "FALSE")}, now() AT TIME ZONE 'utc', {(serv
                 Assert.Equal("1", await ScalarAsync(c.Connection, $"SELECT count(*) FROM config_mute_rules WHERE id = '{id}' AND enabled = FALSE", c.Ct));
             }
         });
+    }
+
+    /// <summary>#8550: a server's id is a hash of its name, and -1 is one of the ids it can be. A request on that server changes
+    /// that server's mute, and a rule that names no server stays out of its reach.</summary>
+    [Fact]
+    public async Task ARequestOnAServerWhoseIdIsMinusOne_DeletesItsOwnMute_AndIsRefusedOnARuleThatNamesNoServer_OtherServer()
+    {
+        await RunAsync(async c =>
+        {
+            var own = await SeedMuteAsync(c, -1, "Blocking Detected");
+            Assert.Equal("deleted", (string?)Parse(await DarlingMcpAlertTools.DeleteMuteRule(c.Source, own, c.Arg, AgentSeat))["status"]);
+
+            var everyServer = await SeedMuteAsync(c, null, "Blocking Detected");
+            Assert.Equal(AgentActionCodes.OtherServer, (string?)Parse(await DarlingMcpAlertTools.SetMuteRuleEnabled(c.Source, everyServer, false, c.Arg, AgentSeat))["reason"]);
+            Assert.Equal(AgentActionCodes.OtherServer, (string?)Parse(await DarlingMcpAlertTools.DeleteMuteRule(c.Source, everyServer, c.Arg, AgentSeat))["reason"]);
+            Assert.Equal(AgentActionCodes.OtherServer, (string?)Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, everyServer, "{\"reason\":\"x\"}", c.Arg, AgentSeat))["reason"]);
+            Assert.Equal("1", await ScalarAsync(c.Connection, $"SELECT count(*) FROM config_mute_rules WHERE id = '{everyServer}' AND enabled = TRUE", c.Ct));
+        }, requestServerId: -1);
     }
 
     [Fact]

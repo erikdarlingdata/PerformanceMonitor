@@ -87,6 +87,11 @@ internal static class DarlingProcessServices
        is migrated. */
     services.AddSingleton<SlowReadLog>();
 
+    /* #8184: the opt-in health port (/livez, /readyz). Registered BEFORE the worker on purpose: hosted services start in order, so it
+       listens before migrations and before #8141's ownership check can stop the start, and a probe sees `starting` or `stopped`
+       rather than a refused connection. Self-gating on darling.json's health.enabled (default OFF). */
+    services.AddHostedService<PerformanceMonitor.Darling.Service.Hosting.DarlingHealthHostService>();
+
     services.AddHostedService<DarlingWorker>();
 
     /* AN4: the analysis MCP tools over Streamable HTTP — registered always, self-gating on

@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// and cut its last line. The real Expensive Queries and High Impact grids are taken off the real tab, themed as the app themes
 /// them, and shown with one formatted row; the realized preview cell is one trimmed line whose tooltip carries the whole statement.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerFinOpsQueryPreviewCellTests
 {
     /* The head of a formatted statement as the reader stores it: CRLF line breaks, a tab and eight-space indentation. */
@@ -70,7 +71,7 @@ public sealed class ViewerFinOpsQueryPreviewCellTests
         Detach(grid);
         grid.ItemsSource = new[] { row };
         var window = new Window { Content = grid, Width = 1280, Height = 400, Left = 0, Top = 0 };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         try
         {
             ClippedTextProbe.Settle(window);

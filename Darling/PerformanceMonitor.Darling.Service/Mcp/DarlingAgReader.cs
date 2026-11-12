@@ -360,7 +360,7 @@ internal static class DarlingAgReader
                 : "most severe first, then by the largest lag/queue depth";
             var missingSentence = missing.Count == 0
                 ? ""
-                : $" No view of {missing.Count} availability group(s) fit: {string.Join(", ", missing.Take(5))}{(missing.Count > 5 ? ", …" : "")}.";
+                : $" No view of {CountText.Plural(missing.Count, "availability group")} fit: {string.Join(", ", missing.Take(5))}{(missing.Count > 5 ? ", …" : "")}.";
             var scope = missing.Count == 0 ? "to see the rest" : "to see them";
 
             return budgetCut

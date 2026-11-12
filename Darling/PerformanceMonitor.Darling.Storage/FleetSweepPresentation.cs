@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -154,6 +155,17 @@ public static class FleetSweepPresentation
         ArgumentNullException.ThrowIfNull(wouldHavePaged);
 
         var node = BuildRunNode(run);
+
+        /* The detail carries every server's verdict below, band and reason included, so the document's
+           critical_servers (the critical verdicts' names and reasons again) is not embedded beside them:
+           the three surfaces that read a detail (the web feed, the Viewer, get_sweep_reports' latest and
+           by-id answers) ship the list once, in verdicts. The same render-over-the-embed rule as the
+           would_have_paged strip above: the stored row keeps what was written, and a timeline entry, which
+           has no verdicts beside it, keeps the list in its embedded document. */
+        if (node["report"] is JsonObject embedded)
+        {
+            embedded.Remove("critical_servers");
+        }
 
         var verdictArray = new JsonArray();
         var namesById = new Dictionary<int, string>();
@@ -321,7 +333,9 @@ public static class FleetSweepPresentation
 
         try
         {
-            return JsonNode.Parse(json);
+            /* #8572: a stored signals document carries unrounded doubles (a window in minutes as 13.287291981666666). They are rounded as the
+               document is embedded, so every row stored before the fix reads clean on the MCP tool, the web feed and the Viewer alike. */
+            return McpHelpers.RoundFloatNoise(JsonNode.Parse(json));
         }
         catch (JsonException)
         {

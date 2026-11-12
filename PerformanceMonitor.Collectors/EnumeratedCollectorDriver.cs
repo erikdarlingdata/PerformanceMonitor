@@ -273,12 +273,12 @@ public static class EnumeratedCollectorDriver
 
     /// <summary>
     /// The collection-log note for an enumeration that reported PROBE failures (#1837), <c>{0}</c> = how
-    /// many items failed. Deliberately a count and a pointer rather than the errors themselves: the note
+    /// many items failed, as "1 item" or "3 items". Deliberately a count and a pointer rather than the errors themselves: the note
     /// column is a one-line summary read at a glance in Collection Health, and one unlucky server can fail
     /// to probe hundreds of databases. The per-item text goes to the app log (capped at
     /// <see cref="MaxLoggedProbeFailures"/> lines), which is what "see the app log" means.
     /// </summary>
-    public const string ProbeFailureNoteFormat = "{0} item(s) failed their enumeration probe - see the app log for the per-item errors";
+    public const string ProbeFailureNoteFormat = "{0} failed the enumeration probe - see the app log for the per-item errors";
 
     /// <summary>
     /// How many per-item probe failures each host writes to the app log before collapsing the rest into the
@@ -689,7 +689,7 @@ public static class EnumeratedCollectorDriver
     public static string? BuildNote(bool enumerationWasEmpty, int probeFailureCount)
     {
         var probeNote = probeFailureCount > 0
-            ? string.Format(CultureInfo.InvariantCulture, s_probeFailureNote, probeFailureCount)
+            ? string.Format(CultureInfo.InvariantCulture, s_probeFailureNote, CountText.Plural(probeFailureCount, "item"))
             : null;
 
         return (enumerationWasEmpty, probeNote) switch

@@ -25,7 +25,7 @@
  * descriptions) reaches the DOM through el()/textContent (R4 — never innerHTML).
  */
 
-import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, localizeAlertDetail, fmtNum, storeHash } from "../util.js";
+import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, localizeAlertDetail, fmtNum, isStateZero, storeHash } from "../util.js";
 import { rollingHoursPicker } from "../page-range.js";
 import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
 import { holdsPage, keepScroll, refreshGridInPlace, showAround, showPage, showRefreshError } from "../refresh-in-place.js";
@@ -35,7 +35,7 @@ import { keepLonePanelsWide } from "../panel-layout.js";
 import { renderMarkdown } from "../markdown.js";
 import { NOTEBOOK_TEMPLATES, isNotebookDefinition } from "../notebook.js";
 import { DASHBOARD_TEMPLATES } from "../view-templates.js";
-import { resolveReadTable } from "../read-fields.js";
+import { resolveReadTable, withCatalogWords } from "../read-fields.js";
 import * as api from "../views-api.js";
 import { refreshChoiceOf } from "../refresh-policy.js";
 import { buildRefreshControl } from "../refresh-control.js";
@@ -256,8 +256,8 @@ function firstRunHero(canEdit, servers) {
     el("div", {
       class: "hero-pitch",
       text:
-        "Build a DASHBOARD — pick a metric, aggregate it, group and filter it, and chart it as a line, bar, pie, " +
-        "stacked area, or stat — or a NOTEBOOK that mixes markdown notes with those same charts into a guided " +
+        "Build a DASHBOARD: pick a metric, aggregate it, group and filter it, and chart it as a line, bar, pie, " +
+        "stacked area, or stat. Or build a NOTEBOOK that mixes markdown notes with those same charts into a guided " +
         "investigation. Both save for every seat and re-scope live by server and time range. No SQL to write.",
     }),
     el("div", { class: "hero-ctas" }, [
@@ -698,7 +698,7 @@ export async function renderView(main, id, opts) {
   /* #6214: another person's personal view can be read but not changed, so Edit goes and Delete is disabled. */
   const access = viewAccess(view, session);
   const canEdit = !!session.can_edit && !access.readOnly;
-  const readSet = new Set((catalog.reads || []).map((r) => r.name));
+  const readSet = new Map((catalog.reads || []).map((r) => [r.name, r])); /* a Map: the name check is .has, and #8630 reads each read's parameters */
   const sourceSet = new Set(((catalog.compose || {}).measures || []).map((m) => m.source));
 
   const status = el("div", { class: "view-status" });
@@ -842,8 +842,15 @@ export async function renderNotebookDoc(main, opts) {
      uses: a read the catalog lists must render, not fail as "Unknown read" (it did while this was always the
      empty catalog). The empty catalog is only what an alert-mode caller that passes none gets. */
   const catalog = isAlert ? (opts.catalog || { reads: [], compose: {} }) : opts.catalog;
-  const readSet = new Set((catalog.reads || []).map((r) => r.name));
+  const readSet = new Map((catalog.reads || []).map((r) => [r.name, r])); /* a Map: the name check is .has, and #8630 reads each read's parameters */
   const sourceSet = new Set(((catalog.compose || {}).measures || []).map((m) => m.source));
+
+  /* #8555: a row that declares no notebook (the report rows) shows only the notes its caller drew: no "Alert notebook" header,
+     no Save as notebook or Open live buttons, no "no cells yet" line, none of which has anything to act on. */
+  if (isAlert && opts.noNotebook) {
+    mount(main, []);
+    return;
+  }
 
   const status = el("div", { class: "view-status" });
   const head = isAlert
@@ -1013,7 +1020,7 @@ function renderAlertCell(cell, index, readSet, sourceSet, scope, opts, limiter) 
     if (!cell.read || !readSet.has(cell.read) || !cell.viz || !VIZ[cell.viz]) {
       return panelErrorCard(cell.title, "Unknown read '" + (cell.read || "") + "' or visualization '" + (cell.viz || "") + "'.");
     }
-    return gatedCell(opts, limiter, (release) => renderPanel(resolveReadTable(cell), release));
+    return gatedCell(opts, limiter, (release) => renderPanel(resolveReadTable(withAsOfSupport(cell, readSet)), release));
   }
   /* A markdown cell is prose: no load, so no slot — the same air-gapped renderMarkdown a saved notebook uses. */
   if (cell.type === "markdown") {
@@ -1072,6 +1079,12 @@ function notShownCard(title, message) {
   ]);
 }
 
+/* One side of the alert's value line: a state-only row's stored 0 (util.js's isStateZero, the rule Alert History applies) is not a
+   reading and shows as the dash Alert History shows; anything else is the number, in this page's format. */
+function stateOrNum(a, key) {
+  return isStateZero(a, key) ? "—" : fmtNum(a[key], 1);
+}
+
 /* The header cell: the endpoint's own alert facts, rendered directly (no read — they arrived with the envelope).
    A null `alert` (stale/no match) renders the honest empty state instead of blank fields. */
 function renderAlertHeaderCell(cell, opts) {
@@ -1086,10 +1099,17 @@ function renderAlertHeaderCell(cell, opts) {
     if (a.database) rows.push(["Database", a.database]);
     if (typeof a.total_occurrences === "number") rows.push(["Total occurrences", String(a.total_occurrences)]);
     /* current_value/threshold_value (#4368): same fmtNum(_, 1) triage.js's alertFields uses for the matched
-       alert card, so the two pages format the same fields the same way. Omitted only when BOTH are absent —
-       fmtNum already renders a lone missing side as "\u2014" rather than dropping the whole line. */
+       alert card, so the two pages format the same fields the same way. Omitted when both sides are absent, or when both
+       are a state-only row's stored zeros (below); fmtNum renders a lone missing side as "\u2014" rather than dropping
+       the whole line. */
     if (typeof a.current_value === "number" || typeof a.threshold_value === "number") {
-      rows.push(["Value vs threshold", "current " + fmtNum(a.current_value, 1) + " vs threshold " + fmtNum(a.threshold_value, 1)]);
+      /* A state-only row's stored zeros are not readings (stateOrNum): the line is left out when both sides are dashes
+         rather than print 0 against 0, the way Alert History shows a dash in each column. */
+      const current = stateOrNum(a, "current_value");
+      const threshold = stateOrNum(a, "threshold_value");
+      if (current !== "—" || threshold !== "—") {
+        rows.push(["Value vs threshold", "current " + current + " vs threshold " + threshold]);
+      }
     }
   }
   const body = a
@@ -1305,7 +1325,19 @@ function panelOrError(p, readSet, sourceSet, scope, onSettled, slot = null, gate
   if (p.source != null) {
     return renderComposedPanelCard(p, scope, onSettled, slot, gate);
   }
-  return renderPanel(p, onSettled, gate);
+  /* #8492: a read table that carries its own columns takes the catalog's words and rules for the same keys (withCatalogWords), so a saved
+     view's alert-history table shows a state-only row's stored zeros as the dash Alert History shows. A panel with no columns of its own
+     is unchanged. */
+  return renderPanel(withCatalogWords(withAsOfSupport(p, readSet)), onSettled, gate);
+}
+
+/* #8630: a read cell that names an `as_of` is drawn "Pinned" only when its tool takes one. The catalog lists each read's parameters, so a
+   read with no `as_of` of its own (get_server_summary, get_collection_health) is marked `asOfIgnored` and the cell says it shows the
+   current state. This covers a template cell and a custom notebook's alike, so no template has to drop its `as_of`. */
+function withAsOfSupport(cell, readSet) {
+  const read = cell && cell.read ? readSet.get(cell.read) : null;
+  if (!read || !cell.params || cell.params.as_of == null) return cell;
+  return (read.params || []).some((x) => x.name === "as_of") ? cell : { ...cell, asOfIgnored: true };
 }
 
 /* Why a panel cannot start a read (the catalog check), as {title, message}, or null when it can. A panel with a problem

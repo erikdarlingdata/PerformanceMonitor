@@ -893,11 +893,11 @@ public class PostgresAlertEvaluatorTests
         var pg = PostgresAlertEvaluator.EvaluatePoisonWait(Poison(600_000, waits: 300_000))!;
 
         Assert.Equal(
-            "[THREADPOOL] 600s of wait accumulated in the last 10 minutes across 300,000 waits — on average 1.0 task(s) continuously stuck",
+            "[THREADPOOL] 600s of wait accumulated in the last 10 minutes across 300,000 waits — on average 1.0 task continuously stuck",
             sql.ShortMessage);
-        Assert.StartsWith("[IPC:BtreePage] 600s of wait accumulated in the last 10 minutes across 300,000 waits — on average 1.0 backend(s) continuously stuck", pg.ShortMessage, StringComparison.Ordinal);
+        Assert.StartsWith("[IPC:BtreePage] 600s of wait accumulated in the last 10 minutes across 300,000 waits — on average 1.0 backend continuously stuck", pg.ShortMessage, StringComparison.Ordinal);
         Assert.Equal(
-            pg.ThresholdValue.Replace("backend(s)", "task(s)", StringComparison.Ordinal),
+            pg.ThresholdValue.Replace("backend", "task", StringComparison.Ordinal),
             sql.ThresholdValue);
     }
 

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -68,7 +68,7 @@ public static partial class DarlingWebEndpoints
                GET /api/people answers every session its own key, and only an administrator (a signed-in admin or the shared web token) the list
                of people with their keys and Slack ids (#7107). MCP get_people shows identity kinds, never the ids. */
             var seat = DarlingWebSeat.FromContext(context);
-            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["can_own"] = seat.OwnerKey is not null, ["signed_in_admin"] = DarlingWebSeat.IsSignedInAdmin(context), ["managed_store"] = managedStore, ["admin_writes_off"] = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm) });
+            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["scoped"] = seat.AllowedTagIds is not null, ["can_own"] = seat.OwnerKey is not null, ["signed_in_admin"] = DarlingWebSeat.IsSignedInAdmin(context), ["managed_store"] = managedStore, ["admin_writes_off"] = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm) });
         });
 
         /* The read catalog: input truth (read names + their WIRE query keys) the composer binds params from. */
@@ -89,6 +89,47 @@ public static partial class DarlingWebEndpoints
 
             using var run = new WebRouteRun(readLatencyRecorder, CatalogRoute, ReadWindowBand.None, context, readScope.Scope);
             var serverName = context.Request.Query["server"].ToString();
+
+            /* The registry could not be read: a fault of the store, for a scoped reader and for one with no scope. The run completes
+               with the sentence's outcome, the sentence is logged once, and the answer is the fixed failure body. */
+            IResult RegistryFault(string sentence)
+            {
+                run.Complete(ToolResultOutcome(sentence, context.RequestAborted));
+                ThrowIfCallerGone(sentence, context.RequestAborted);
+                return ToHttpResult(sentence, DarlingWebFailureLog.RouteOf(context.Request), logger, run.ElapsedMilliseconds, context.RequestAborted);
+            }
+
+            if (DarlingWebSeat.FromContext(context).AllowedTagIds is { } catalogTags)
+            {
+                if (string.IsNullOrWhiteSpace(serverName))
+                {
+                    /* The fleet form for a scoped reader keeps the fleet-wide overrides (the cadence every server shares) and the grant's
+                       own servers' overrides, and drops every other server's row before the node is built, so nothing in the answer is
+                       derived from a server the reader may not see. */
+                    var permitted = await AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
+                    var fleetSchedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, null, context.RequestAborted);
+                    var grantSchedules = fleetSchedules.Where(schedule => schedule.ServerId is null || Array.IndexOf(permitted, schedule.ServerId.Value) >= 0).ToList();
+                    run.Complete(ReadOutcome.Ok);
+                    return JsonNodeResult(BuildCatalogNode(null, grantSchedules));
+                }
+
+                var authorized = await AuthorizedWebServerRowAsync(postgres, context, catalogTags);
+                if (authorized.StoreFault is { } registryFault)
+                {
+                    return RegistryFault(registryFault);
+                }
+
+                if (authorized.Row is not { } authorizedServer)
+                {
+                    run.Complete(ReadOutcome.Ok);
+                    return ErrorResult("Server data is unavailable to this token.", StatusCodes.Status403Forbidden);
+                }
+
+                // Keep the authorized ID: resolving the name again could select another server after a rename.
+                var scopedSchedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, authorizedServer.ServerId, context.RequestAborted);
+                run.Complete(ReadOutcome.Ok);
+                return JsonNodeResult(BuildCatalogNode(authorizedServer.ServerId, scopedSchedules));
+            }
             if (string.IsNullOrWhiteSpace(serverName))
             {
                 var fleetSchedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, null, context.RequestAborted);
@@ -99,6 +140,12 @@ public static partial class DarlingWebEndpoints
             var (resolved, resolveError) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, context.RequestAborted);
             if (resolveError != null)
             {
+                /* The registry-read sentence is not a refusal envelope: it is the store's fault, not an answer about the name. */
+                if (resolveError.StartsWith(DarlingServerResolver.RegistryReadFaultPrefix, StringComparison.Ordinal))
+                {
+                    return RegistryFault(resolveError);
+                }
+
                 run.Complete(ReadOutcome.Ok);
                 return JsonNodeResult(JsonNode.Parse(resolveError)!.AsObject());
             }
@@ -121,7 +168,10 @@ public static partial class DarlingWebEndpoints
         app.MapGet("/api/views/{id:long}", async (HttpContext context, long id) =>
         {
             var result = await store.GetAsync(id, DarlingWebSeat.FromContext(context).OwnerKey, context.RequestAborted);
-            return result is CustomViewResult.Ok ok
+            /* A scoped seat never reaches this route: the host's gate answers 403 to every path outside SupportsScopedRead. The
+               personal-view check below is defence in depth for that seat. */
+            return result is CustomViewResult.Ok ok &&
+                !(DarlingWebSeat.FromContext(context).AllowedTagIds is not null && ok.View!.Personal)
                 ? JsonNodeResult(BuildFullViewNode(ok.View!))
                 : NotFoundResult();
         });
@@ -292,8 +342,11 @@ public static partial class DarlingWebEndpoints
                sees. Only THIS web mapping (see ComposeRunFailureResult) stops putting a STORE fault's text on
                the wire (M1's outcome.Fault, checked before outcome.Error is ever read for the 400/500 split). */
             var stopwatch = Stopwatch.StartNew();
+            var composeTags = DarlingWebSeat.FromContext(context).AllowedTagIds;
+            var authorizedIds = composeTags is null ? null
+                : await AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
             var outcome = await RunComposedPanelAsync(composeReadPostgres ?? postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true, includeDataStartFields: true,
-                caller: WebReadCaller(context), cacheHost: ReadSurface.Web);
+                caller: WebReadCaller(context), cacheHost: ReadSurface.Web, authorizedServerIds: authorizedIds);
             if (outcome.PayloadText is { } payloadText)
             {
                 return Results.Text(payloadText, "application/json");
@@ -318,7 +371,7 @@ public static partial class DarlingWebEndpoints
                 context.RequestAborted.ThrowIfCancellationRequested();
             }
 
-            return ComposeRunFailureResult(outcome, "/api/compose/run", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            return ComposeRunFailureResult(outcome, "/api/compose/run", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, body);
         });
     }
 

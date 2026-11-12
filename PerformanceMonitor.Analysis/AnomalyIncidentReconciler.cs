@@ -271,8 +271,8 @@ public static class AnomalyIncidentReconciler
 
         var name = string.IsNullOrEmpty(jobFact.ObjectName) ? null : jobFact.ObjectName;
         var sentence = name is null
-            ? $" {JobSentenceMarker} — an Agent job was running well past its normal duration (the Running Jobs view names it) — so this anomaly and that job are ONE incident, not two: a long index rebuild, CHECKDB or reload drives exactly this write, log-flush and schema-lock pressure, and moving or shortening the job is the fix for both cards."
-            : $" {JobSentenceMarker} — Agent job `{name}` was running well past its normal duration — so this anomaly and that job are ONE incident, not two: a long index rebuild, CHECKDB or reload drives exactly this write, log-flush and schema-lock pressure, and moving or shortening the job is the fix for both cards.";
+            ? $" {JobSentenceMarker}, an Agent job was running well past its normal duration (the Running Jobs view names it), so this anomaly and that job are ONE incident, not two: a long index rebuild, CHECKDB or reload drives exactly this write, log-flush and schema-lock pressure, and moving or shortening the job is the fix for both cards."
+            : $" {JobSentenceMarker}, Agent job `{name}` was running well past its normal duration, so this anomaly and that job are ONE incident, not two: a long index rebuild, CHECKDB or reload drives exactly this write, log-flush and schema-lock pressure, and moving or shortening the job is the fix for both cards.";
 
         anomaly.StoryText = FactAdvice.SerializeForStoryText(advice with { Investigation = advice.Investigation + sentence });
     }

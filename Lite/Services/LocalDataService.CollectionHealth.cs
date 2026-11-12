@@ -79,7 +79,8 @@ GROUP BY collector_name
 HAVING COUNT(*) FILTER (WHERE status = 'PERMISSIONS') > 0";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
+        /* #8533: the Collection Health window, so this covers the same days as the rows beside it. */
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-CollectionHealthWindow.Days) });
 
         var denied = new List<string>();
         using var reader = await command.ExecuteReaderAsync();
@@ -594,7 +595,8 @@ LIMIT 1";
             using var command = connection.CreateCommand();
             command.CommandText = CollectionHealthReadSourceSql;
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
-            command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
+            /* #8533: the Collection Health window, shared by every read of these rows and by the sentence that words it. */
+            command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-CollectionHealthWindow.Days) });
             ApplyReadSource(rows, await command.ExecuteScalarAsync(cancellationToken) as string);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -678,7 +680,8 @@ GROUP BY collector_name";
             using var command = connection.CreateCommand();
             command.CommandText = ObservedQuietGapsSql(needing.Count);
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
-            command.Parameters.Add(new DuckDBParameter { Value = nowUtc.AddDays(-7) });
+            /* #8533: the Collection Health window, shared by every read of these rows and by the sentence that words it. */
+            command.Parameters.Add(new DuckDBParameter { Value = nowUtc.AddDays(-CollectionHealthWindow.Days) });
             foreach (var row in needing)
             {
                 command.Parameters.Add(new DuckDBParameter { Value = row.CollectorName });
@@ -754,7 +757,8 @@ GROUP BY collector_name";
         command.CommandText = CollectionHealthSqlOverride ?? CollectionHealthSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
+        /* #8533: the Collection Health window, shared by every read of these rows and by the sentence that words it. */
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-CollectionHealthWindow.Days) });
 
         var items = new List<CollectorHealthRow>();
         System.Data.Common.DbDataReader reader;

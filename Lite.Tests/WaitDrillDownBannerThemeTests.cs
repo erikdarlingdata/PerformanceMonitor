@@ -21,6 +21,7 @@ namespace PerformanceMonitorLite.Tests;
 /// and Cool Breeze the text was pale on a pale page. The tests build the real window against each theme's own dictionary and read
 /// the brush the banner text and border actually resolve to, then swap the theme under the open window and read them again.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class WaitDrillDownBannerThemeTests
 {
     private static readonly string[] Themes = ["DarkTheme", "LightTheme", "CoolBreezeTheme"];

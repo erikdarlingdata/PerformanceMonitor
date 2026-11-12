@@ -81,7 +81,8 @@ public sealed record ComposeRunContext(
     DateTime? QueryStoreStampThrough = null,
     bool ModuleMapMissing = false,
     IReadOnlyList<int>? QueryStoreRawServerIds = null,
-    bool QueryStoreFleetReady = false)
+    bool QueryStoreFleetReady = false,
+    IReadOnlyList<int>? AuthorizedServerIds = null)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -226,7 +227,7 @@ public static class ComposeCompiler
         string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam, ComposeRunContext context, string? wideStartParam = null,
         IReadOnlyList<string>? dimensionFilters = null, string? serverScopeSql = null, bool restrictDedupe = false,
         string? edgeStartParam = null, string? edgeEndParam = null, ComposeAggregate aggregate = ComposeAggregate.Sum,
-        StampRelation? stamp = null, string? splitRawParam = null)
+        StampRelation? stamp = null, string? splitRawParam = null, string? sumPerCaptureColumn = null)
     {
         if (route.Tier == ComposeSourceTier.HourlyRawEdges)
         {
@@ -296,6 +297,19 @@ public static class ComposeCompiler
                 + $"FROM {PgSchemaGenerator.CollectSchema}.{DefaultTraceTable} "
                 + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam}"
                 + ") AS dte_ranked WHERE dte_rn = 1)";
+        }
+
+        /* #8573: a SumPerCapture measure (the connected-backend count) is a level held one row per database, so a capture's figure
+           is the sum across its rows, and the panel's aggregate must run over those per-capture sums. Summing within each
+           (server, collection_time) first keeps avg and max from ever adding captures together. The group columns are the ones the
+           outer server scope and window filter on, so both push into this subquery. A capture whose every row is NULL (a row written
+           before the column existed) sums to NULL and stays out of the aggregate. */
+        if (sumPerCaptureColumn is not null)
+        {
+            return $"(SELECT server_id, server_name, {timeColumn}, SUM({sumPerCaptureColumn}) AS {sumPerCaptureColumn} "
+                + $"FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
+                + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam} "
+                + $"GROUP BY server_id, server_name, {timeColumn})";
         }
 
         if (!string.Equals(sourceTable, QueryStoreTable, StringComparison.Ordinal))
@@ -556,10 +570,11 @@ public static class ComposeCompiler
            interpolated (the compile-run endpoint resolves the $server variable to this). */
         var startParam = p.AddTimestamp(context.StartUtc);
         var endParam = p.AddTimestamp(context.EndUtc);
-        var hasServerScope = context.Servers is { Count: > 0 };
-        var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
+        var hasServerScope = context.Servers is { Count: > 0 } || context.AuthorizedServerIds is not null;
+        var serverScopeParam = context.Servers is { Count: > 0 } ? p.AddTextArray(context.Servers) : null;
+        var authorizedParam = context.AuthorizedServerIds is not null ? p.AddIntArray(context.AuthorizedServerIds) : null;
         var unregisteredParam = hasServerScope && context.UnregisteredServers is { Count: > 0 } ? p.AddTextArray(context.UnregisteredServers) : null;
-        string FactScope() => ServerScope($"{FactAlias}.", serverScopeParam!, unregisteredParam);
+        string FactScope() => ServerScope($"{FactAlias}.", serverScopeParam!, unregisteredParam, authorizedParam);
 
         /* The hourly-raw-edges route binds its two edge instants here and no other route binds anything, so every
            other compile keeps its parameters. wideStartParam below is Query Store only and the hybrid route never
@@ -576,7 +591,7 @@ public static class ComposeCompiler
            with no watermark (or a stale one, older than the window) binds nothing new and compiles the window ranking (see the module
            CTE below). A watermark later than the run's now (written ahead of the clock by an older build) counts as no watermark. */
         string? moduleOverlayFloorParam = null;
-        if (!route.IsCagg && plan.UsesModuleJoin && !context.ModuleMapMissing
+        if (!route.IsCagg && plan.UsesModuleJoin && !context.ModuleMapMissing && context.AuthorizedServerIds is null
             && context.ModuleMapThrough is DateTime moduleMapThrough && moduleMapThrough <= context.NowUtc
             && moduleMapThrough - DarlingModuleMap.WatermarkSlack > context.StartUtc)
         {
@@ -648,8 +663,8 @@ public static class ComposeCompiler
         var stampRelation = stampPlan is null
             ? null
             : new StampRelation(stampPlan.Partials, stampThroughParam!,
-                AndScope(hasServerScope ? ServerScope("s.", serverScopeParam!, unregisteredParam) : null, splitRawParam is null ? null : $"s.server_id <> ALL({splitRawParam})"),
-                AndScope(hasServerScope ? ServerScope("b.", serverScopeParam!, null) : null, splitRawParam is null ? null : $"b.server_id <> ALL({splitRawParam})"),
+                AndScope(hasServerScope ? ServerScope("s.", serverScopeParam!, unregisteredParam, authorizedParam) : null, splitRawParam is null ? null : $"s.server_id <> ALL({splitRawParam})"),
+                AndScope(hasServerScope ? ServerScope("b.", serverScopeParam!, null, authorizedParam) : null, splitRawParam is null ? null : $"b.server_id <> ALL({splitRawParam})"),
                 ReadsFleetRollup(plan, context, hasServerScope, splitRawParam is not null));
 
         /* In stamp mode every value is the combine form over the relation's partial columns (single scan: over rank_base's). */
@@ -665,7 +680,7 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate, stampRelation, splitRawParam));
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate, stampRelation, splitRawParam, plan.Measure.SumPerCapture ? plan.Measure.Column : null));
 
             /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
                relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a
@@ -739,7 +754,7 @@ public static class ComposeCompiler
                servers, 2.88 million rows) that was 12 to 16 s against the window ranking's 5 to 14 s, which sorts in parallel. So that
                case compiles the window ranking itself, the same text a store without the map compiles, and costs what it cost before
                #5811. */
-            if (!context.ModuleMapMissing && moduleOverlayFloorParam is not null)
+            if (!context.ModuleMapMissing && context.AuthorizedServerIds is null && moduleOverlayFloorParam is not null)
             {
                 AppendMapFirstModuleCte(sql, startParam, endParam, moduleOverlayFloorParam, hasServerScope ? serverScopeParam : null, unregisteredParam);
             }
@@ -755,7 +770,7 @@ public static class ComposeCompiler
                 sql.Append("          AND collection_time <= ").Append(endParam).Append('\n');
                 if (hasServerScope)
                 {
-                    sql.Append("          AND ").Append(ServerScope(string.Empty, serverScopeParam!, unregisteredParam)).Append('\n');
+                    sql.Append("          AND ").Append(ServerScope(string.Empty, serverScopeParam!, unregisteredParam, authorizedParam)).Append('\n');
                 }
 
                 sql.Append("          AND sql_handle IS NOT NULL\n");
@@ -1125,8 +1140,13 @@ public static class ComposeCompiler
     /// registry row resolves to no id (the runner finds those, <see cref="ComposeRunContext.UnregisteredServers"/>), so those
     /// names alone also match on the row's stored <c>server_name</c> through <paramref name="unregisteredParam"/>.</para>
     /// </summary>
-    internal static string ServerScope(string prefix, string namesParam, string? unregisteredParam) =>
-        ServerScopeSql.Predicate(prefix, namesParam, unregisteredParam);
+    internal static string ServerScope(string prefix, string? namesParam, string? unregisteredParam, string? authorizedParam = null)
+    {
+        var requested = namesParam is null ? null : ServerScopeSql.Predicate(prefix, namesParam, unregisteredParam);
+        var authorized = authorizedParam is null ? null : $"{prefix}server_id = ANY({authorizedParam})";
+        return requested is null ? authorized!
+            : authorized is null ? requested : $"({requested} AND {authorized})";
+    }
 
     /// <summary>
     /// The read that runs before a panel's <see cref="AnnotationClockFrame.ServerLocal"/> annotation query
@@ -1152,11 +1172,12 @@ public static class ComposeCompiler
         sql.Append("SELECT DISTINCT ON (server_name) server_name, time_zone_id, utc_offset_minutes\n");
         sql.Append("FROM ").Append(PgSchemaGenerator.CollectSchema).Append(".server_properties\n");
         sql.Append("WHERE utc_offset_minutes IS NOT NULL\n");
-        if (context.Servers is { Count: > 0 })
+        if (context.Servers is { Count: > 0 } || context.AuthorizedServerIds is not null)
         {
-            var scopeParam = p.AddTextArray(context.Servers);
+            var scopeParam = context.Servers is { Count: > 0 } ? p.AddTextArray(context.Servers) : null;
             var unregisteredParam = context.UnregisteredServers is { Count: > 0 } ? p.AddTextArray(context.UnregisteredServers) : null;
-            sql.Append("AND   ").Append(ServerScope(string.Empty, scopeParam, unregisteredParam)).Append('\n');
+            var authorizedParam = context.AuthorizedServerIds is not null ? p.AddIntArray(context.AuthorizedServerIds) : null;
+            sql.Append("AND   ").Append(ServerScope(string.Empty, scopeParam, unregisteredParam, authorizedParam)).Append('\n');
         }
 
         sql.Append("ORDER BY server_name, collection_time DESC");
@@ -1334,8 +1355,9 @@ public static class ComposeCompiler
         var p = new ParamList();
         var startParam = p.AddTimestamp(context.StartUtc);
         var endParam = p.AddTimestamp(context.EndUtc);
-        var hasServerScope = context.Servers is { Count: > 0 };
-        var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
+        var hasServerScope = context.Servers is { Count: > 0 } || context.AuthorizedServerIds is not null;
+        var serverScopeParam = context.Servers is { Count: > 0 } ? p.AddTextArray(context.Servers) : null;
+        var authorizedParam = context.AuthorizedServerIds is not null ? p.AddIntArray(context.AuthorizedServerIds) : null;
         var unregisteredParam = hasServerScope && context.UnregisteredServers is { Count: > 0 } ? p.AddTextArray(context.UnregisteredServers) : null;
         var serverLocal = source.Frame == AnnotationClockFrame.ServerLocal;
 
@@ -1358,7 +1380,7 @@ public static class ComposeCompiler
         sql.Append("  AND ").Append(ts).Append(" <= ").Append(endParam).Append('\n');
         if (hasServerScope)
         {
-            sql.Append("  AND ").Append(ServerScope($"{FactAlias}.", serverScopeParam!, unregisteredParam)).Append('\n');
+            sql.Append("  AND ").Append(ServerScope($"{FactAlias}.", serverScopeParam!, unregisteredParam, authorizedParam)).Append('\n');
         }
 
         sql.Append("ORDER BY ts\n");

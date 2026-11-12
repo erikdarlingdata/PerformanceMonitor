@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -333,6 +333,14 @@ public static partial class DarlingWebEndpoints
 
         app.MapDelete("/api/notification-routes/{id:int}", async (HttpContext context, int id) =>
         {
+            /* #8611: the other agent setup writes refuse a request without a JSON content type (AgentSetupRunAsync), and so do the mute
+               routes. A DELETE has no body to type, so without this check a cross-site form or a no-cors fetch could send it; a JSON
+               content type forces a preflight the dashboard never answers. The dashboard's own call (apiWrite) always sends it. */
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
             var stopwatch = Stopwatch.StartNew();
             if (!DarlingWebSeat.IsSignedInAdmin(context))
             {
@@ -523,8 +531,28 @@ public static partial class DarlingWebEndpoints
                     requestId = parsed;
                 }
 
+                var scopedTags = DarlingWebSeat.FromContext(context).AllowedTagIds;
+                if (scopedTags is not null)
+                {
+                    if (requestId is null)
+                    {
+                        return ErrorResult("A permitted request is required.", StatusCodes.Status403Forbidden);
+                    }
+
+                    var ids = await AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
+                    await using var command = postgres.CreateCommand(
+                        "SELECT EXISTS (SELECT 1 FROM config.investigation_requests WHERE request_id = $1 AND server_id = ANY($2))");
+                    command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                    command.Parameters.AddWithValue(requestId.Value);
+                    command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, ids);
+                    if (await command.ExecuteScalarAsync(context.RequestAborted) is not true)
+                    {
+                        return ErrorResult("Request data is unavailable to this token.", StatusCodes.Status403Forbidden);
+                    }
+                }
+
                 var read = await changes.ReadAsync(AgentChangesLimit, requestId, context.RequestAborted);
-                var canDecide = await AdminChanges(context).CanDecideAsync(context.RequestAborted);
+                var canDecide = scopedTags is null && await AdminChanges(context).CanDecideAsync(context.RequestAborted);
                 return DarlingWebStatementSweep.JsonText(
                     AgentChangesBody(read, canDecide, DateTime.UtcNow), "/api/agent-changes", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }

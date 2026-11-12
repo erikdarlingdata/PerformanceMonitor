@@ -188,12 +188,81 @@ public sealed class DarkPastRetentionReadsOfflineTests
         Assert.Null(justAdded.IsOnline);
         Assert.True(justAdded.AwaitingFirstCollection);
         Assert.Equal("Never", justAdded.LastCollectionDisplay);
+
+        /* #8464: the empty Last Collect is worded from the registration against the retention horizon alone, not from the band, so a
+           card that reads Offline for another reason (a failed connect) still says "Never" when nothing was ever collected. */
+        var refused = Card(DateTime.UtcNow.AddDays(-1), null);
+        Assert.Null(refused.IsOnline);
+        Assert.Equal("Never", refused.LastCollectionDisplay);
+        refused.ConnectDownSince = DateTime.UtcNow.AddHours(-1);
+        refused.ApplyFreshness(DateTime.UtcNow);
+        Assert.False(refused.IsOnline);
+        Assert.Equal("Never", refused.LastCollectionDisplay);
+        var agedOutCard = Card(DateTime.UtcNow.AddYears(-1), null);
+        Assert.False(agedOutCard.IsOnline);
+        Assert.Equal("None retained", agedOutCard.LastCollectionDisplay);
+        Assert.False(ServerSummaryItem.HistoryAgedOut(DateTime.UtcNow.AddDays(-1), DateTime.UtcNow));
+        Assert.True(ServerSummaryItem.HistoryAgedOut(DateTime.UtcNow.AddYears(-1), DateTime.UtcNow));
+        Assert.Equal("Never", justAdded.LastCollectionDisplay);
     }
 
     /// <summary>
     /// Every reading with a newest collection is untouched on every surface: the dot, the card and
     /// <c>list_servers</c> band fresh, stale and offline exactly as the ladder does, whatever the registration.
     /// </summary>
+    /// <summary>#8464: a server whose collectors have run and all failed has no successful collection, as a server no collector has
+    /// reached has none. The log's failed rows tell them apart on every surface: tried and refused is Offline everywhere, with "Never"
+    /// for its Last Collect (nothing was collected, so nothing was retained), and the offline note says the collectors fail rather than
+    /// pointing at retention; no row at all keeps awaiting-first-collection for a registration inside the horizon.</summary>
+    [Fact]
+    public void AServerWhoseCollectorsAllFail_ReadsOffline_OnEverySurface_AndOneNeverTried_StaysAwaiting()
+    {
+        var offline = ServerCollectionStatusRules.FromFreshness(ServerFreshness.Offline).McpToken();
+        var awaiting = ServerCollectionStatusRules.FromFreshness(ServerFreshness.NeverCollected).McpToken();
+
+        /* list_servers and the Admin grid's word. */
+        Assert.Equal(offline, DarlingMcpDataTools.FreshnessStatus(null, Recently, Now, null, attempted: true));
+        Assert.Equal(offline, DarlingMcpDataTools.FreshnessStatus(null, null, Now, null, attempted: true));
+        Assert.Equal(awaiting, DarlingMcpDataTools.FreshnessStatus(null, Recently, Now, null, attempted: false));
+        Assert.Equal(offline, DarlingMcpDataTools.FreshnessStatus(null, LongAgo, Now, null, attempted: false));
+
+        /* The fleet card's 48-hour window. */
+        Assert.Equal(ServerFreshness.Offline, DarlingFleetReader.ClassifyWindowedFreshness(null, Now.AddHours(-1), Now, null, attempted: true));
+        Assert.Equal(ServerFreshness.NeverCollected, DarlingFleetReader.ClassifyWindowedFreshness(null, Now.AddHours(-1), Now, null, attempted: false));
+
+        /* The Overview card: Offline, and "Never", not "None retained", because nothing was collected. */
+        var refused = new ServerSummaryItem { ServerId = 1, DisplayName = "sql-01", RegisteredAt = Recently, Attempted = true };
+        refused.ApplyFreshness(Now);
+        Assert.False(refused.IsOnline);
+        Assert.False(refused.AwaitingFirstCollection);
+        Assert.Equal(ServerCollectionStatus.Offline.Word(), refused.StatusDisplay);
+        Assert.Equal("Never", refused.LastCollectionDisplay);
+        var untried = new ServerSummaryItem { ServerId = 2, DisplayName = "sql-02", RegisteredAt = Recently, Attempted = false };
+        untried.ApplyFreshness(Now);
+        Assert.Null(untried.IsOnline);
+        Assert.True(untried.AwaitingFirstCollection);
+        Assert.Equal("Never", untried.LastCollectionDisplay);
+
+        /* The sidebar dot. */
+        var refusedRow = new DarlingServer(1, "sql-01", "sql-01", true, 16, registeredAt: Recently) { Attempted = true };
+        refusedRow.ApplyFreshness(null, Now);
+        Assert.Equal(ServerCollectionStatus.Offline, refusedRow.CardStatus);
+        var untriedRow = new DarlingServer(2, "sql-02", "sql-02", true, 16, registeredAt: Recently) { Attempted = false };
+        untriedRow.ApplyFreshness(null, Now);
+        Assert.Equal(ServerCollectionStatus.AwaitingFirstCollection, untriedRow.CardStatus);
+
+        /* The server tab's header and the offline note every MCP read carries. */
+        Assert.Contains("every collection fails", ViewerServerTab.FreshnessLabel(null, Recently, Now, attempted: true), StringComparison.Ordinal);
+        Assert.Equal("no data collected yet", ViewerServerTab.FreshnessLabel(null, Recently, Now, attempted: false));
+        Assert.Equal("no collection retained", ViewerServerTab.FreshnessLabel(null, LongAgo, Now, attempted: false));
+        var lead = DarlingServerOfflineNote.LeadFor("sql-01", null, Recently, Now, attempted: true);
+        Assert.NotNull(lead);
+        Assert.Contains("every collection fails", lead);
+        Assert.DoesNotContain("retained history", lead);
+        Assert.Null(DarlingServerOfflineNote.LeadFor("sql-02", null, Recently, Now, attempted: false));
+        Assert.Contains("retained history", DarlingServerOfflineNote.LeadFor("sql-03", null, LongAgo, Now, attempted: false));
+    }
+
     [Fact]
     public void FreshStaleAndOfflineReadings_AreUnchangedOnEverySurface()
     {

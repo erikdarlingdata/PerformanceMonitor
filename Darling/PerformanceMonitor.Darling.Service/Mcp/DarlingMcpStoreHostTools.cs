@@ -46,7 +46,7 @@ public sealed class DarlingMcpStoreHostTools
         + "server_name, no window: a snapshot. Reads the managed data directory's conf files off local disk for "
         + "settings attribution (needs no elevated PostgreSQL privilege); a bring-your-own store reports every "
         + "setting not-managed. stale_after_hardware_change means a managed block still sets a value this host's "
-        + "CURRENT RAM/disk would size differently today - the #4207/#4211 class of drift. <<GUIDE>> Reports the "
+        + "CURRENT RAM/disk would size differently today - that class of drift. <<GUIDE>> Reports the "
         + "host PostgreSQL/TimescaleDB runs on and whether the settings in force still match it: platform "
         + "(OS, containerized, processor_count), cloud (provider - aws or azure - and instance_type, the EC2 "
         + "instance type or Azure VM size; both null when this host is not on either cloud or the metadata "
@@ -56,7 +56,7 @@ public sealed class DarlingMcpStoreHostTools
         + "store this is the SERVICE's own disk, not necessarily the store's - data_volume.note says so when "
         + "managed is false), managed, and store (postgres_version, timescale_version, size_bytes, "
         + "buffer_hit_ratio_percent, temp_bytes, uncompressed_chunk_bytes, uncompressed_chunk_count, "
-        + "uncompressed_chunk_percent_of_ram - the #4211 metric: how much of the store's raw ingest sits "
+        + "uncompressed_chunk_percent_of_ram - the metric for how much of the store's raw ingest sits "
         + "uncompressed against the RAM budget). settings is one row per sizing-relevant setting (shared_buffers, "
         + "work_mem, effective_cache_size, maintenance_work_mem, the TimescaleDB worker counts, max_connections, "
         + "max_wal_size): current (the live value), source (which conf block or ALTER SYSTEM set it), derived "
@@ -172,7 +172,7 @@ public sealed class DarlingMcpStoreHostTools
                        store's disk at all (postgres.connectionString can point anywhere). */
                     note = profile.IsManagedStore
                         ? null
-                        : "This is the service's own disk, not necessarily the store's — a bring-your-own postgres.connectionString may point at a different host entirely.",
+                        : "This is the service's own disk, not necessarily the store's: a bring-your-own postgres.connectionString may point at a different host entirely.",
                 },
                 managed = profile.IsManagedStore,
                 store = new

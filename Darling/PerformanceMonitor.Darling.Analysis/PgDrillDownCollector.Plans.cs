@@ -20,11 +20,16 @@ namespace PerformanceMonitor.Darling.Analysis;
 
 public sealed partial class PgDrillDownCollector
 {
+    /// <summary>
+    /// The newest plan handle for the hash in the finding's database (<c>$3</c>), or in any database when
+    /// <c>$3</c> is empty (#8317). Byte-identical to Lite's <c>CollectPlanAnalysis</c> text.
+    /// </summary>
     public const string PlanHandleLookupSql = @"
 SELECT plan_handle
 FROM v_query_stats
 WHERE server_id = $1
 AND   query_hash = $2
+AND   ($3 = '' OR database_name = $3)
 AND   plan_handle IS NOT NULL AND plan_handle != ''
 ORDER BY collection_time DESC
 LIMIT 1";
@@ -46,7 +51,7 @@ LIMIT 1";
         var queryHash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
         if (string.IsNullOrEmpty(queryHash)) return;
 
-        // Look up plan_handle from the store for this query_hash
+        // Look up plan_handle from the store for this query_hash in the finding's database (#8317)
         string? planHandle = null;
         try
         {
@@ -55,6 +60,7 @@ LIMIT 1";
             using var cmd = new NpgsqlCommand(PlanHandleLookupSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(queryHash);
+            cmd.Parameters.AddWithValue(finding.DatabaseName ?? "");
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (await reader.ReadAsync(context.CancellationToken) && !reader.IsDBNull(0))
@@ -86,9 +92,9 @@ LIMIT 1";
             if (!string.IsNullOrWhiteSpace(plan.ParseError))
                 return;
 
-            // #4530/#4597: one store read per drill-down call so rule 38 can see the server's edition/MAXDOP. No
-            // database name is known at this call site (query_hash lookup only), so Database stays null.
-            var metadata = await DarlingServerMetadataReader.ReadAsync(_postgres, context.ServerId, cancellationToken: context.CancellationToken);
+            // #4530/#4597: one store read per drill-down call so rule 38 can see the server's edition/MAXDOP. The
+            // finding's database scopes the read when the fact carries one (#8317).
+            var metadata = await DarlingServerMetadataReader.ReadAsync(_postgres, context.ServerId, finding.DatabaseName, context.CancellationToken);
             PlanAnalysisPipeline.Run(plan, _analyzerConfig, metadata, context.CancellationToken);
 
             // #4514: includes statements nested inside a stored procedure or UDF body, so a
@@ -137,38 +143,7 @@ LIMIT 1";
         }
     }
 
-    public const string PlanAdvisoryXmlSql = @"
-SELECT query_plan_xml, query_plan_gz
-FROM
-(
-    SELECT
-        query_plan_xml,
-        query_plan_gz,
-        delta_worker_time,
-        /* #7886: one row per plan. v_query_stats holds one row per query per snapshot, and every snapshot
-           row of a cached plan resolves to the same plan XML. Without this rank the hottest plan fills all
-           ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
-           multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
-           plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A plan is
-           a statement's plan in one database: query_plan_hash is a shape hash that two statements with one
-           shape share, as does one statement in two databases, and a hashless row's plan_handle is shared by
-           every statement in its batch, so database_name and query_hash stay in the key. The window sorts
-           every in-window row that has a plan, plan column included, before the limit takes ten. */
-        ROW_NUMBER() OVER (PARTITION BY database_name, query_hash, COALESCE(query_plan_hash, plan_handle) ORDER BY delta_worker_time DESC) AS plan_rank
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    /* #2069: plan content written since V54 lives as gzip bytes (query_plan_gz) with the text
-       column NULL, so the presence guard and the projection both carry BOTH forms and the read
-       loop resolves text-else-gz (PayloadDimensions.ResolveContent). A guard on query_plan_xml
-       alone matches nothing on a store using the default plan_xml_compression = 'gzip', which
-       costs this collector every MISSING_INDEX and PLAN_WARNING it exists to emit. */
-    AND   (query_plan_xml IS NOT NULL OR query_plan_gz IS NOT NULL)
-) AS ranked
-WHERE plan_rank = 1
-ORDER BY delta_worker_time DESC
-LIMIT 10";
+    public const string PlanAdvisoryXmlSql = PgFactCollector.PlanAdvisorySql;
 
     /// <summary>
     /// WS4: re-parses the top collected query plans (the same top-10-by-cost set the fact collector

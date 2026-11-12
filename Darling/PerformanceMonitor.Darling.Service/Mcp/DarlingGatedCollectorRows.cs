@@ -148,6 +148,111 @@ internal static class DarlingGatedCollectorRows
             .ToList();
 
     /// <summary>
+    /// #8361: the collector the scheduler does not run on a server whose every Query Store database is a readable secondary. Its
+    /// statement skips such a database, so on that server it has nothing to read; the scheduler serves its slot without a run.
+    /// </summary>
+    internal static string QueryStoreSecondaryCollector => QueryStoreHintsCollector.Instance.Name;
+
+    /// <summary>
+    /// A logged row of that collector the readable-secondary sentence explains instead: HEALTHY while its last run is recent, or
+    /// STOPPED once the gate has held it off past the failing cutoff. A failing, denied or stale row keeps its own row and its last
+    /// error, as the Always On rows do.
+    /// </summary>
+    internal static bool IsNotApplicableWhenQueryStoreSecondary(CollectorHealth row) =>
+        string.Equals(row.CollectorName, QueryStoreSecondaryCollector, StringComparison.Ordinal)
+        && row.HealthStatus is CollectorHealthClassifier.Healthy or CollectorHealthClassifier.Stopped;
+
+    internal static List<CollectorHealth> RowsShownWhenQueryStoreSecondary(IEnumerable<CollectorHealth> loggedRows) =>
+        loggedRows.Where(r => !IsNotApplicableWhenQueryStoreSecondary(r)).ToList();
+
+    /// <summary>
+    /// The one <c>not_collected</c> row for <see cref="QueryStoreSecondaryCollector"/> when <paramref name="loggedRows"/> holds a row
+    /// the sentence explains, with the same three keys as the engine-gated rows; none otherwise.
+    /// </summary>
+    internal static IReadOnlyList<object> QueryStoreSecondaryRows(IEnumerable<CollectorHealth> loggedRows, string message) =>
+        loggedRows.Any(IsNotApplicableWhenQueryStoreSecondary)
+            ? new object[] { new { collector = QueryStoreSecondaryCollector, status = NotCollectedStatus, message } }
+            : Array.Empty<object>();
+
+    /// <summary>
+    /// #8361: the readable-secondary sentence for this server under the same judgment the scheduler's gate applies
+    /// (<see cref="DarlingQueryStoreReadableSecondary.Message"/>), or null when its last known role is not one or the store cannot say.
+    /// Whether the <c>query_store_health</c> collector can refresh the capture is its effective schedule in the store's rows, as
+    /// <c>StoreConfigProvider.ResolveSchedule</c> reads them; disabled, the capture is frozen: the <c>query_store_hints</c> collector's own run that
+    /// captured no database keeps it counting (#8541), and otherwise only a PRIMARY or SECONDARY role overrules it, so the row agrees with the gate after a failover and on a readable standby whose role carries no answer. The
+    /// Query Store reads' <c>not_collected</c> answer comes through here too (#8402).
+    /// </summary>
+    internal static async Task<string?> QueryStoreSecondaryMessageAsync(NpgsqlDataSource postgres, int serverId, string serverName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var overrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, serverId, cancellationToken);
+            var healthCaptureRefreshes = StoreConfigProvider.ResolveSchedule(QueryStoreHealthCollector.Instance.Name, serverId, overrides).Enabled;
+            return await DarlingQueryStoreReadableSecondary.MessageAsync(
+                postgres, serverId, serverName, healthCaptureRefreshes, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// #8541: whether a collector's effective schedule runs it on this server, and the interval in minutes it runs it at, from the
+    /// store's schedule rows: enabled as <c>StoreConfigProvider.ResolveSchedule</c> reads them, the interval as
+    /// <see cref="DarlingCollectorCadence.Minutes"/> does. Enabled at the shipped interval when the store cannot say, so a read
+    /// that words itself by the answer keeps its enabled wording.
+    /// </summary>
+    internal static async Task<(bool Enabled, int IntervalMinutes)> CollectorScheduleAsync(
+        NpgsqlDataSource postgres, int serverId, string collectorName, CancellationToken cancellationToken)
+    {
+        var shippedMinutes = CollectorScheduleDefaults.All[collectorName].FrequencyMinutes;
+        try
+        {
+            var overrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, serverId, cancellationToken);
+            return (
+                StoreConfigProvider.ResolveSchedule(collectorName, serverId, overrides).Enabled,
+                DarlingCollectorCadence.Minutes(collectorName, serverId, overrides, shippedMinutes));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return (true, shippedMinutes);
+        }
+    }
+
+    /// <summary>
+    /// #8361: the same judgment for a fleet, in two commands whatever its size: every schedule row once
+    /// (<see cref="DarlingDataReader.AllScheduleOverridesSql"/>), resolved per server in memory, then one set-based read of the
+    /// readable-secondary facts over the ids (<see cref="DarlingQueryStoreReadableSecondary.FleetFactsSql"/>). The fleet form of
+    /// <c>get_collection_health</c> answers outside admission, so the cost cannot grow with the number of servers. Empty when the
+    /// store cannot answer or there is no server to ask about.
+    /// </summary>
+    internal static async Task<IReadOnlyDictionary<int, string>> QueryStoreSecondaryFleetMessagesAsync(
+        NpgsqlDataSource postgres, IReadOnlyList<CollectorFleetLiveness.ServerFacts> servers, CancellationToken cancellationToken)
+    {
+        if (servers.Count == 0)
+        {
+            return new Dictionary<int, string>();
+        }
+
+        try
+        {
+            var overrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, serverId: null, cancellationToken);
+            var asked = servers
+                .Select(s => new DarlingQueryStoreReadableSecondary.FleetServer(
+                    s.ServerId,
+                    s.DisplayName ?? s.ServerName,
+                    StoreConfigProvider.ResolveSchedule(QueryStoreHealthCollector.Instance.Name, s.ServerId, overrides).Enabled))
+                .ToList();
+            return await DarlingQueryStoreReadableSecondary.MessagesAsync(postgres, asked, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new Dictionary<int, string>();
+        }
+    }
+
+    /// <summary>
     /// The rows for <paramref name="serverName"/>, or none when the server is not PostgreSQL, the engine read
     /// fails, or nothing is gated. Reads the server's engine edition and kind from the registry, then asks
     /// <see cref="CollectorEngineCapability.NotCollectedMessage"/> about every PostgreSQL collector.

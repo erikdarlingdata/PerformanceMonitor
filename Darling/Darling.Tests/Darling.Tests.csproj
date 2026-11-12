@@ -155,4 +155,8 @@
     <!-- #6140: the one-step compose setup script, run by ComposeSetupScriptTests in a temp folder. -->
     <None Include="..\compose\setup.sh" Link="Fixtures\compose.setup.sh" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Some Viewer windows name their icon by a root-relative URI, which resolves against the entry assembly, this one, when a test builds a window. -->
+    <Resource Include="..\PerformanceMonitor.Darling.Viewer\EDD.ico" Link="EDD.ico" />
+  </ItemGroup>
 </Project>

@@ -21,6 +21,7 @@ namespace PerformanceMonitorLite.Tests;
 /// trace is opt-in, where its switch is and which box to tick, so the sentence over the empty rows only says why the rows are
 /// empty: as one sentence, short enough to sit on one line in the shared empty-hint style at the width that style allows.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class LongQueriesEmptyLineTests
 {
     private static readonly Uri LiteTheme = new("pack://application:,,,/PerformanceMonitorLite;component/Themes/DarkTheme.xaml");
@@ -59,7 +60,7 @@ public sealed class LongQueriesEmptyLineTests
             var oneLine = new TextBlock { Style = style, Text = "x", Visibility = Visibility.Visible };
             var host = new Grid { Children = { sentence, oneLine } };
             var window = new Window { Content = host, Width = 900, Height = 600, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ClippedTextProbe.Settle(window);

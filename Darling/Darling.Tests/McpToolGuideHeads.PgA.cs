@@ -321,7 +321,7 @@ public sealed class McpToolGuideHeadsPgPlanTests
     {
         var text = DarlingMcpPgDeadlockTools.NoDeadlocksText("target-a", 24);
 
-        Assert.StartsWith("No deadlock was reported on target-a in the last 24 hour(s).", text, StringComparison.Ordinal);
+        Assert.StartsWith("No deadlock was reported on target-a in the last 24 hours.", text, StringComparison.Ordinal);
         Assert.Contains("message_locale facet", text, StringComparison.Ordinal);
         Assert.Contains("log_line_prefix_readable facet", text, StringComparison.Ordinal);
         Assert.Contains("FOUR different things", text, StringComparison.Ordinal);

@@ -44,6 +44,8 @@ namespace PerformanceMonitor.Ui
         /// around it), and falls back to the theme's stock hex when the app has no dictionary (the tests, a headless host).
         /// The figure and legend sit on the raised panel color, the data area on the well color (Dark) or the page color
         /// (the light themes), text on the foreground, and the legend outline on the border.
+        /// #8266: the grid is the theme's ink at a low alpha in every theme, so a 1 px gridline reads against the plot
+        /// the same way in each (a contrast of about 1.5 against the plot background) and stays quieter than the axis.
         /// </summary>
         public static ChartThemeColors GetThemeColors()
         {
@@ -56,7 +58,7 @@ namespace PerformanceMonitor.Ui
                     figure,
                     ThemeColor("BackgroundColor", "#DAE6F0"),
                     text,
-                    border.WithAlpha(120),
+                    text.WithAlpha(60),
                     figure,
                     text,
                     border);
@@ -70,7 +72,7 @@ namespace PerformanceMonitor.Ui
                     figure,
                     ThemeColor("BackgroundColor", "#F5F7FA"),
                     text,
-                    ScottPlot.Colors.Black.WithAlpha(20),
+                    ScottPlot.Colors.Black.WithAlpha(50),
                     figure,
                     text,
                     ThemeColor("BorderColor", "#DEE2E6"));
@@ -138,9 +140,11 @@ namespace PerformanceMonitor.Ui
 
         /// <summary>
         /// Minimal chrome for simple single-series charts (e.g. the history dialogs): backgrounds,
-        /// axis, grid, and tick label colors only — no legend handling, axis-margin override,
+        /// axis, grid, tick label and legend colors only — no legend placement, axis-margin override,
         /// font-size override, background brush, or first-render hook. Sources colors from
-        /// <see cref="GetThemeColors"/> so the per-theme hexes can't drift from the full theme.
+        /// <see cref="GetThemeColors"/> so the per-theme hexes can't drift from the full theme. The legend
+        /// takes the theme's colors because ScottPlot draws one inside the plot for any named series, and
+        /// its stock white box and black text do not belong on a dark plot (#8540).
         /// </summary>
         public static void ApplyMinimalChartTheme(WpfPlot chart)
         {
@@ -151,6 +155,9 @@ namespace PerformanceMonitor.Ui
             chart.Plot.Grid.MajorLineColor = c.Grid;
             chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = c.Text;
             chart.Plot.Axes.Left.TickLabelStyle.ForeColor = c.Text;
+            chart.Plot.Legend.BackgroundColor = c.LegendBackground;
+            chart.Plot.Legend.FontColor = c.LegendForeground;
+            chart.Plot.Legend.OutlineColor = c.LegendOutline;
             ApplyShortPlotFixes(chart);
         }
 

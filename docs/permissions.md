@@ -29,7 +29,7 @@ GRANT CONNECT ANY DATABASE TO [YourLogin];
    (the identity column capacity collector) and the AG catalog views return zero rows that look exactly like "no data" (see the AG note below). */
 GRANT VIEW ANY DEFINITION TO [YourLogin];
 
-/* The deadlock, blocked-process and attention Extended Events sessions, and the opt-in long-query trace session.
+/* The deadlock, blocked-process and attention Extended Events sessions, the opt-in long-query trace session and the schema-changes session of the opt-in schema tracking.
    A login without this shows PERMISSIONS for the collector instead of an error. */
 GRANT ALTER ANY EVENT SESSION TO [YourLogin];
 

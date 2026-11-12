@@ -119,7 +119,9 @@ public sealed class MinWindowChromeTests
             using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
             var (rows, charts, summary) = StaTestThread.Run(() => WithTheme(theme, () =>
             {
-                var w = NewWindow(dir);
+                /* The window reads the app's three store paths when it is built; point them at the test's folder, and put them back before it is deleted. */
+                using var paths = new AppPathsScope(dir);
+                var w = NewWindow();
                 var tab = HostTab(w, duckDb);
                 Lay(w, 900, 600);
                 var main = (TabControl)tab.FindName("MainTabControl");
@@ -348,7 +350,7 @@ public sealed class MinWindowChromeTests
                 var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
                 typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = tabWidth, Height = 600, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var found = new List<string>();
@@ -395,7 +397,7 @@ public sealed class MinWindowChromeTests
                 var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
                 typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = tabWidth, Height = 600, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     ClippedTextProbe.Settle(window);
@@ -470,7 +472,7 @@ public sealed class MinWindowChromeTests
     private static List<string> PairsShareARow(FrameworkElement tab, double width, params string[] captions)
     {
         var window = new Window { Content = tab, Width = width, Height = 600, Left = 0, Top = 0 };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         try
         {
             ClippedTextProbe.Settle(window);
@@ -536,7 +538,9 @@ public sealed class MinWindowChromeTests
             Directory.CreateDirectory(dir);
             try
             {
-                var w = NewWindow(dir);
+                /* The window reads the app's three store paths when it is built; point them at the test's folder, and put them back before it is deleted. */
+                using var paths = new AppPathsScope(dir);
+                var w = NewWindow();
                 try
                 {
                     return body(w);
@@ -561,7 +565,9 @@ public sealed class MinWindowChromeTests
             using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
             return StaTestThread.Run(() => WithTheme(theme, () =>
             {
-                var w = NewWindow(dir);
+                /* The window reads the app's three store paths when it is built; point them at the test's folder, and put them back before it is deleted. */
+                using var paths = new AppPathsScope(dir);
+                var w = NewWindow();
                 try
                 {
                     return body(w, HostTab(w, duckDb));
@@ -578,20 +584,14 @@ public sealed class MinWindowChromeTests
         }
     }
 
-    private static MainWindow NewWindow(string dir)
+    private static MainWindow NewWindow()
     {
-        /* The window reads these three paths when it is built; point them at a folder of the test's own. */
-        foreach (var (name, value) in new[] { ("DatabasePath", Path.Combine(dir, "monitor.duckdb")), ("ConfigDirectory", dir), ("SharedConfigDirectory", dir) })
-        {
-            typeof(App).GetProperty(name, BindingFlags.Static | BindingFlags.Public)!.SetValue(null, value);
-        }
-
         var w = new MainWindow();
         var root = (UIElement)w.Content;
         w.Content = null;
         var host = new Window { Content = root, Width = 900, Height = 600, Left = 0, Top = 0, WindowStartupLocation = WindowStartupLocation.Manual, ShowInTaskbar = false };
         s_hosts.Add(w, host);
-        host.Show();
+        StaTestThread.ShowOffScreen(host);
         /* Windows will not size a window past the screen (plus its borders), so a 1280 wide host is cut to 1044 on a 1024 wide screen
            and the sidebar would rightly be the rail. The host lifts that limit, so a test gets the width it asks for on any screen. */
         ((System.Windows.Interop.HwndSource)PresentationSource.FromVisual(host)).AddHook(AllowAnySize);

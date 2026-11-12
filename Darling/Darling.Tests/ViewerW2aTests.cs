@@ -235,6 +235,7 @@ public sealed class ViewerOverviewSqlTests
 /// every display property is a pure format. Verifies the one semantic change — status from collection
 /// freshness, not a live ping — maps onto Lite's Online / Warning / Offline card states.
 /// </summary>
+[Collection("application-theme")] // #8395: reads a card brush off the STA thread
 public sealed class ViewerServerSummaryDisplayTests
 {
     private static readonly DateTime Now = new(2026, 7, 3, 12, 0, 0, DateTimeKind.Utc);
@@ -631,6 +632,36 @@ public sealed class ViewerServerSummaryDisplayTests
         Assert.Equal(
             "0.0/hr",
             new ServerSummaryItem { DeadlockCount = 0, DeadlockWindow = TimeSpan.FromHours(1) }.DeadlockDetail);
+    }
+
+    /// <summary>#8532: a card that counted an event never shows a zero rate beside the count. One deadlock or one
+    /// blocked wait over a 24 hour window is 0.04/hr, which one decimal place writes as "0.0"; the detail says
+    /// "&lt;0.1" there. A count of zero over a measured window still reads "0.0/hr", which is a measurement.</summary>
+    [Fact]
+    public void DeadlockDetail_SaysLessThanATenth_WhenAPositiveRateRoundsToZero()
+    {
+        var day = TimeSpan.FromHours(24);
+        Assert.Equal("<0.1/hr", new ServerSummaryItem { DeadlockCount = 1, DeadlockWindow = day }.DeadlockDetail);
+        Assert.Equal("0.1/hr", new ServerSummaryItem { DeadlockCount = 2, DeadlockWindow = day }.DeadlockDetail); // 0.08/hr
+        Assert.Equal("0.0/hr", new ServerSummaryItem { DeadlockCount = 0, DeadlockWindow = day }.DeadlockDetail);
+    }
+
+    /// <summary>#8532: the blocking detail follows the deadlock detail's rule, for a SQL Server card's waits and for
+    /// a PostgreSQL card's captures.</summary>
+    [Fact]
+    public void BlockingDetail_SaysLessThanATenth_WhenAPositiveRateRoundsToZero()
+    {
+        var sqlServer = new ServerSummaryItem { BlockingCount = 1, MaxBlockingWaitMs = 42000, BlockingWindow = TimeSpan.FromHours(24) };
+        Assert.Equal("<0.1/hr, max: 42s", sqlServer.BlockingDetail);
+
+        var postgres = new ServerSummaryItem
+        {
+            IsPostgres = true,
+            PgBlockingCapturesTotal = 2000,
+            PgBlockingCapturesWithBlocking = 1,
+            BlockingWindow = TimeSpan.FromHours(1),
+        };
+        Assert.Equal("<0.1/hr, of 2000 sampled", postgres.BlockingDetail);
     }
 
     [Fact]

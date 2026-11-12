@@ -42,7 +42,7 @@ public sealed partial class PgTargetRelationshipGraph
            edge when none is emitted, never throws) and the decomposition's burn share at or past the dominant line.
            No edge to PG_CPU_BURN_CORES: base 0, unreachable (class summary). */
         AddEdge(PgTargetFactKeys.CpuDecomposition, PgTargetFactKeys.BadActorFamily, KernelCategory,
-            "Compute-bound — the CPU this window is burning is attributable: a top statement crossed its own threshold in the same pass",
+            "Compute-bound, the CPU this window is burning is attributable: a top statement crossed its own threshold in the same pass",
             facts => PgTargetScorer.IsDominant(facts, PgTargetScorer.KernelBurnShareKey) && AnyBadActorFired(facts));
 
         /* Wait-bound → the fired wait. Standouts first, then the rollups: InferenceEngine orders a node's active
@@ -56,7 +56,7 @@ public sealed partial class PgTargetRelationshipGraph
         {
             var waitKey = PgTargetFactKeys.WaitKey(type, waitEvent);
             AddEdge(PgTargetFactKeys.CpuDecomposition, waitKey, KernelCategory,
-                $"Wait-bound — backend time this window was parked, and {(waitEvent is null ? type : type + ":" + waitEvent)} is itself a finding",
+                $"Wait-bound: backend time this window was parked, and {(waitEvent is null ? type : type + ":" + waitEvent)} is itself a finding",
                 facts => PgTargetScorer.IsDominant(facts, PgTargetScorer.KernelWaitShareKey)
                     && facts.TryGetValue(waitKey, out var wait) && wait.BaseSeverity > 0);
         }

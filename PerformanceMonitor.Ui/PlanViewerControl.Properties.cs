@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -123,132 +124,120 @@ public partial class PlanViewerControl
         }
 
         // === Operator Details Section ===
-        var hasOperatorDetails = !string.IsNullOrEmpty(node.OrderBy)
-            || !string.IsNullOrEmpty(node.TopExpression)
-            || !string.IsNullOrEmpty(node.GroupBy)
-            || !string.IsNullOrEmpty(node.PartitionColumns)
-            || !string.IsNullOrEmpty(node.HashKeys)
-            || !string.IsNullOrEmpty(node.SegmentColumn)
-            || !string.IsNullOrEmpty(node.DefinedValues)
-            || !string.IsNullOrEmpty(node.OuterReferences)
-            || !string.IsNullOrEmpty(node.InnerSideJoinColumns)
-            || !string.IsNullOrEmpty(node.OuterSideJoinColumns)
-            || !string.IsNullOrEmpty(node.ActionColumn)
-            || node.ManyToMany || node.PhysicalOp == "Merge Join" || node.BitmapCreator
-            || node.SortDistinct || node.StartupExpression
-            || node.NLOptimized || node.WithOrderedPrefetch || node.WithUnorderedPrefetch
-            || node.WithTies || node.Remoting || node.LocalParallelism
-            || node.SpoolStack || node.DMLRequestSort || node.NonClusteredIndexCount > 0
-            || !string.IsNullOrEmpty(node.OffsetExpression) || node.TopRows > 0
-            || !string.IsNullOrEmpty(node.ConstantScanValues)
-            || !string.IsNullOrEmpty(node.UdxUsedColumns);
-
-        if (hasOperatorDetails)
+        // #8456: the section opens for every operator and is removed when no row went into it, so a row added below
+        // cannot miss a gate. The rows alone decide whether the section is shown and copied.
+        var sectionPanelBefore = _currentPropertySection;
+        var sectionBefore = _currentSection;
+        AddPropertySection("Operator Details");
+        if (!string.IsNullOrEmpty(node.OrderBy))
+            AddPropertyRow("Order By", node.OrderBy, isCode: true);
+        if (!string.IsNullOrEmpty(node.TopExpression))
         {
-            AddPropertySection("Operator Details");
-            if (!string.IsNullOrEmpty(node.OrderBy))
-                AddPropertyRow("Order By", node.OrderBy, isCode: true);
-            if (!string.IsNullOrEmpty(node.TopExpression))
-            {
-                var topText = node.TopExpression;
-                if (node.IsPercent) topText += " PERCENT";
-                if (node.WithTies) topText += " WITH TIES";
-                AddPropertyRow("Top", topText);
-            }
-            if (node.SortDistinct)
-                AddPropertyRow("Distinct Sort", "True");
-            if (node.StartupExpression)
-                AddPropertyRow("Startup Expression", "True");
-            if (node.NLOptimized)
-                AddPropertyRow("Optimized", "True");
-            if (node.WithOrderedPrefetch)
-                AddPropertyRow("Ordered Prefetch", "True");
-            if (node.WithUnorderedPrefetch)
-                AddPropertyRow("Unordered Prefetch", "True");
-            if (node.BitmapCreator)
-                AddPropertyRow("Bitmap Creator", "True");
-            if (node.Remoting)
-                AddPropertyRow("Remoting", "True");
-            if (node.LocalParallelism)
-                AddPropertyRow("Local Parallelism", "True");
-            if (!string.IsNullOrEmpty(node.GroupBy))
-                AddPropertyRow("Group By", node.GroupBy, isCode: true);
-            if (!string.IsNullOrEmpty(node.PartitionColumns))
-                AddPropertyRow("Partition Columns", node.PartitionColumns, isCode: true);
-            if (!string.IsNullOrEmpty(node.HashKeys))
-                AddPropertyRow("Hash Keys", node.HashKeys, isCode: true);
-            if (!string.IsNullOrEmpty(node.OffsetExpression))
-                AddPropertyRow("Offset", node.OffsetExpression);
-            if (node.TopRows > 0)
-                AddPropertyRow("Rows", $"{node.TopRows}");
-            if (node.SpoolStack)
-                AddPropertyRow("Stack Spool", "True");
-            if (node.PrimaryNodeId > 0)
-                AddPropertyRow("Primary Node Id", $"{node.PrimaryNodeId}");
-            if (node.DMLRequestSort)
-                AddPropertyRow("DML Request Sort", "True");
-            if (node.NonClusteredIndexCount > 0)
-            {
-                AddPropertyRow("NC Indexes Maintained", $"{node.NonClusteredIndexCount}");
-                foreach (var ixName in node.NonClusteredIndexNames)
-                    AddPropertyRow("", ixName, isCode: true);
-            }
-            if (!string.IsNullOrEmpty(node.ActionColumn))
-                AddPropertyRow("Action Column", node.ActionColumn, isCode: true);
-            if (!string.IsNullOrEmpty(node.SegmentColumn))
-                AddPropertyRow("Segment Column", node.SegmentColumn, isCode: true);
-            if (!string.IsNullOrEmpty(node.DefinedValues))
-                AddPropertyRow("Defined Values", node.DefinedValues, isCode: true);
-            if (!string.IsNullOrEmpty(node.OuterReferences))
-                AddPropertyRow("Outer References", node.OuterReferences, isCode: true);
-            if (!string.IsNullOrEmpty(node.InnerSideJoinColumns))
-                AddPropertyRow("Inner Join Cols", node.InnerSideJoinColumns, isCode: true);
-            if (!string.IsNullOrEmpty(node.OuterSideJoinColumns))
-                AddPropertyRow("Outer Join Cols", node.OuterSideJoinColumns, isCode: true);
-            if (node.PhysicalOp == "Merge Join")
-                AddPropertyRow("Many to Many", node.ManyToMany ? "Yes" : "No");
-            else if (node.ManyToMany)
-                AddPropertyRow("Many to Many", "Yes");
-            if (!string.IsNullOrEmpty(node.ConstantScanValues))
-                AddPropertyRow("Values", node.ConstantScanValues, isCode: true);
-            if (!string.IsNullOrEmpty(node.UdxUsedColumns))
-                AddPropertyRow("UDX Columns", node.UdxUsedColumns, isCode: true);
-            if (node.RowCount)
-                AddPropertyRow("Row Count", "True");
-            if (node.ForceSeekColumnCount > 0)
-                AddPropertyRow("ForceSeek Columns", $"{node.ForceSeekColumnCount}");
-            if (!string.IsNullOrEmpty(node.PartitionId))
-                AddPropertyRow("Partition Id", node.PartitionId, isCode: true);
-            if (node.IsStarJoin)
-                AddPropertyRow("Star Join Root", "True");
-            if (!string.IsNullOrEmpty(node.StarJoinOperationType))
-                AddPropertyRow("Star Join Type", node.StarJoinOperationType);
-            if (!string.IsNullOrEmpty(node.ProbeColumn))
-                AddPropertyRow("Probe Column", node.ProbeColumn, isCode: true);
-            if (node.InRow)
-                AddPropertyRow("In-Row", "True");
-            if (node.ComputeSequence)
-                AddPropertyRow("Compute Sequence", "True");
-            if (node.RollupHighestLevel > 0)
-                AddPropertyRow("Rollup Highest Level", $"{node.RollupHighestLevel}");
-            if (node.RollupLevels.Count > 0)
-                AddPropertyRow("Rollup Levels", string.Join(", ", node.RollupLevels));
-            if (!string.IsNullOrEmpty(node.TvfParameters))
-                AddPropertyRow("TVF Parameters", node.TvfParameters, isCode: true);
-            if (!string.IsNullOrEmpty(node.OriginalActionColumn))
-                AddPropertyRow("Original Action Col", node.OriginalActionColumn, isCode: true);
-            if (!string.IsNullOrEmpty(node.TieColumns))
-                AddPropertyRow("WITH TIES Columns", node.TieColumns, isCode: true);
-            if (!string.IsNullOrEmpty(node.UdxName))
-                AddPropertyRow("UDX Name", node.UdxName);
-            if (node.GroupExecuted)
-                AddPropertyRow("Group Executed", "True");
-            if (node.RemoteDataAccess)
-                AddPropertyRow("Remote Data Access", "True");
-            if (node.OptimizedHalloweenProtectionUsed)
-                AddPropertyRow("Halloween Protection", "True");
-            if (node.StatsCollectionId > 0)
-                AddPropertyRow("Stats Collection Id", $"{node.StatsCollectionId}");
+            var topText = node.TopExpression;
+            if (node.IsPercent) topText += " PERCENT";
+            if (node.WithTies) topText += " WITH TIES";
+            AddPropertyRow("Top", topText);
+        }
+        if (node.SortDistinct)
+            AddPropertyRow("Distinct Sort", "True");
+        if (node.StartupExpression)
+            AddPropertyRow("Startup Expression", "True");
+        if (node.NLOptimized)
+            AddPropertyRow("Optimized", "True");
+        if (node.WithOrderedPrefetch)
+            AddPropertyRow("Ordered Prefetch", "True");
+        if (node.WithUnorderedPrefetch)
+            AddPropertyRow("Unordered Prefetch", "True");
+        if (node.BitmapCreator)
+            AddPropertyRow("Bitmap Creator", "True");
+        if (node.Remoting)
+            AddPropertyRow("Remoting", "True");
+        if (node.LocalParallelism)
+            AddPropertyRow("Local Parallelism", "True");
+        if (!string.IsNullOrEmpty(node.GroupBy))
+            AddPropertyRow("Group By", node.GroupBy, isCode: true);
+        if (!string.IsNullOrEmpty(node.PartitionColumns))
+            AddPropertyRow("Partition Columns", node.PartitionColumns, isCode: true);
+        if (!string.IsNullOrEmpty(node.HashKeys))
+            AddPropertyRow("Hash Keys", node.HashKeys, isCode: true);
+        if (!string.IsNullOrEmpty(node.OffsetExpression))
+            AddPropertyRow("Offset", node.OffsetExpression);
+        if (node.TopRows > 0)
+            AddPropertyRow("Rows", $"{node.TopRows}");
+        if (node.SpoolStack)
+            AddPropertyRow("Stack Spool", "True");
+        if (node.PrimaryNodeId > 0)
+            AddPropertyRow("Primary Node Id", $"{node.PrimaryNodeId}");
+        if (node.DMLRequestSort)
+            AddPropertyRow("DML Request Sort", "True");
+        if (node.NonClusteredIndexCount > 0)
+        {
+            AddPropertyRow("NC Indexes Maintained", $"{node.NonClusteredIndexCount}");
+            foreach (var ixName in node.NonClusteredIndexNames)
+                AddPropertyRow("", ixName, isCode: true);
+        }
+        if (!string.IsNullOrEmpty(node.ActionColumn))
+            AddPropertyRow("Action Column", node.ActionColumn, isCode: true);
+        if (!string.IsNullOrEmpty(node.SegmentColumn))
+            AddPropertyRow("Segment Column", node.SegmentColumn, isCode: true);
+        if (!string.IsNullOrEmpty(node.DefinedValues))
+            AddPropertyRow("Defined Values", node.DefinedValues, isCode: true);
+        if (!string.IsNullOrEmpty(node.OuterReferences))
+            AddPropertyRow("Outer References", node.OuterReferences, isCode: true);
+        if (!string.IsNullOrEmpty(node.InnerSideJoinColumns))
+            AddPropertyRow("Inner Join Cols", node.InnerSideJoinColumns, isCode: true);
+        if (!string.IsNullOrEmpty(node.OuterSideJoinColumns))
+            AddPropertyRow("Outer Join Cols", node.OuterSideJoinColumns, isCode: true);
+        if (node.PhysicalOp == "Merge Join")
+            AddPropertyRow("Many to Many", node.ManyToMany ? "Yes" : "No");
+        else if (node.ManyToMany)
+            AddPropertyRow("Many to Many", "Yes");
+        if (!string.IsNullOrEmpty(node.ConstantScanValues))
+            AddPropertyRow("Values", node.ConstantScanValues, isCode: true);
+        if (!string.IsNullOrEmpty(node.UdxUsedColumns))
+            AddPropertyRow("UDX Columns", node.UdxUsedColumns, isCode: true);
+        if (node.RowCount)
+            AddPropertyRow("Row Count", "True");
+        if (node.ForceSeekColumnCount > 0)
+            AddPropertyRow("ForceSeek Columns", $"{node.ForceSeekColumnCount}");
+        if (!string.IsNullOrEmpty(node.PartitionId))
+            AddPropertyRow("Partition Id", node.PartitionId, isCode: true);
+        if (node.IsStarJoin)
+            AddPropertyRow("Star Join Root", "True");
+        if (!string.IsNullOrEmpty(node.StarJoinOperationType))
+            AddPropertyRow("Star Join Type", node.StarJoinOperationType);
+        if (!string.IsNullOrEmpty(node.ProbeColumn))
+            AddPropertyRow("Probe Column", node.ProbeColumn, isCode: true);
+        if (node.InRow)
+            AddPropertyRow("In-Row", "True");
+        if (node.ComputeSequence)
+            AddPropertyRow("Compute Sequence", "True");
+        if (node.RollupHighestLevel > 0)
+            AddPropertyRow("Rollup Highest Level", $"{node.RollupHighestLevel}");
+        if (node.RollupLevels.Count > 0)
+            AddPropertyRow("Rollup Levels", string.Join(", ", node.RollupLevels));
+        if (!string.IsNullOrEmpty(node.TvfParameters))
+            AddPropertyRow("TVF Parameters", node.TvfParameters, isCode: true);
+        if (!string.IsNullOrEmpty(node.OriginalActionColumn))
+            AddPropertyRow("Original Action Col", node.OriginalActionColumn, isCode: true);
+        if (!string.IsNullOrEmpty(node.TieColumns))
+            AddPropertyRow("WITH TIES Columns", node.TieColumns, isCode: true);
+        if (!string.IsNullOrEmpty(node.UdxName))
+            AddPropertyRow("UDX Name", node.UdxName);
+        if (node.GroupExecuted)
+            AddPropertyRow("Group Executed", "True");
+        if (node.RemoteDataAccess)
+            AddPropertyRow("Remote Data Access", "True");
+        if (node.OptimizedHalloweenProtectionUsed)
+            AddPropertyRow("Halloween Protection", "True");
+        if (node.StatsCollectionId > 0)
+            AddPropertyRow("Stats Collection Id", $"{node.StatsCollectionId}");
+        if (_currentSection!.Rows.Count == 0)
+        {
+            PropertiesContent.Children.Remove(_currentSection.Expander);
+            _propertySections.Remove(_currentSection);
+            _currentPropertySection = sectionPanelBefore;
+            _currentSection = sectionBefore;
         }
 
         // === Scalar UDFs ===
@@ -344,7 +333,7 @@ public partial class PlanViewerControl
         // === Estimated Rows Section ===
         AddPropertySection("Estimated Rows");
         var estExecs = EstimatedExecutions(node);
-        AddPropertyRow("Est. Executions", $"{estExecs:N0}");
+        AddPropertyRow("Est. Executions", MetricFormatter.FormatEstimatedExecutions(estExecs));
         AddPropertyRow("Est. Rows Per Exec", $"{node.EstimateRows:N1}");
         AddPropertyRow("Est. Rows All Execs", $"{node.EstimateRows * estExecs:N1}");
         if (node.EstimatedRowsRead > 0)
@@ -579,7 +568,8 @@ public partial class PlanViewerControl
             AddPropertyRow("Retrieved From Cache", s.RetrievedFromCache ? "True" : "False");
             AddPropertyRow("Batch Mode On RowStore", s.BatchModeOnRowStoreUsed ? "True" : "False");
             AddPropertyRow("Security Policy", s.SecurityPolicyApplied ? "True" : "False");
-            AddPropertyRow("Parameterization Type", $"{s.StatementParameterizationType}");
+            if (s.StatementParameterizationType is int parameterizationType)
+                AddPropertyRow("Parameterization Type", PropertyRows.ParameterizationTypeName(parameterizationType, s.Parameters.Select(p => p.Name)));
             if (!string.IsNullOrEmpty(s.QueryHash))
                 AddPropertyRow("Query Hash", s.QueryHash, isCode: true);
             if (!string.IsNullOrEmpty(s.QueryPlanHash))
@@ -791,7 +781,7 @@ public partial class PlanViewerControl
             {
                 AddPropertySection("Wait Stats");
                 foreach (var w in s.WaitStats.OrderByDescending(w => w.WaitTimeMs))
-                    AddPropertyRow(w.WaitType, $"{w.WaitTimeMs:N0} ms ({w.WaitCount:N0} waits)");
+                    AddPropertyRow(w.WaitType, PlanDisplayText.WaitRowText(w.WaitTimeMs, w.WaitCount));
             }
 
             // === Trace Flags ===
@@ -820,7 +810,7 @@ public partial class PlanViewerControl
                 AddPropertySection("Plan Warnings");
                 foreach (var w in PlanWarningDisplay.OrderByBenefit(s.PlanWarnings))
                 {
-                    var warnColor = PlanWarningDisplay.WarningSeverityColorHex(w.Severity);
+                    var warnBrush = WarningSeverityBrush(w.Severity);
                     var warnPanel = new StackPanel { Margin = new Thickness(10, 2, 10, 2) };
                     var planWarnHeaderText = PlanWarningDisplay.PlanWarningHeader(w);
                     var planWarnHeaderBlock = new TextBlock
@@ -828,7 +818,7 @@ public partial class PlanViewerControl
                         Text = planWarnHeaderText,
                         FontWeight = FontWeights.SemiBold,
                         FontSize = 11,
-                        Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor))
+                        Foreground = warnBrush
                     };
                     AttachOriginNavigation(planWarnHeaderBlock, planWarnHeaderText, w.OriginNodeIds);
                     warnPanel.Children.Add(planWarnHeaderBlock);
@@ -876,7 +866,7 @@ public partial class PlanViewerControl
             AddPropertySection("Warnings");
             foreach (var w in PlanWarningDisplay.OrderByBenefit(node.Warnings))
             {
-                var warnColor = PlanWarningDisplay.WarningSeverityColorHex(w.Severity);
+                var warnBrush = WarningSeverityBrush(w.Severity);
                 var warnPanel = new StackPanel { Margin = new Thickness(10, 2, 10, 2) };
                 var opWarnHeaderText = PlanWarningDisplay.PlanWarningHeader(w);
                 var opWarnHeaderBlock = new TextBlock
@@ -884,7 +874,7 @@ public partial class PlanViewerControl
                     Text = opWarnHeaderText,
                     FontWeight = FontWeights.SemiBold,
                     FontSize = 11,
-                    Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor))
+                    Foreground = warnBrush
                 };
                 AttachOriginNavigation(opWarnHeaderBlock, opWarnHeaderText, w.OriginNodeIds);
                 warnPanel.Children.Add(opWarnHeaderBlock);
@@ -908,7 +898,7 @@ public partial class PlanViewerControl
                         Margin = new Thickness(16, 2, 0, 0)
                     });
                 }
-                PropertiesContent.Children.Add(warnPanel);
+                (_currentPropertySection ?? PropertiesContent).Children.Add(warnPanel);
                 RegisterBuiltWarningRow(opWarnHeaderText, w.Message, warnPanel);
             }
         }
@@ -920,13 +910,23 @@ public partial class PlanViewerControl
         // selection would throw away whatever width the user had dragged out, on every click.
         if (PropertiesPanel.Visibility != Visibility.Visible)
         {
-            PropertiesColumn.MinWidth = MinPropertiesWidth;
-            PropertiesColumn.MaxWidth = MaxPropertiesWidth;
-            PropertiesColumn.Width = new GridLength(
-                PerformanceMonitor.PlanAnalysis.PropertyRows.ClampWidth(_propertiesPanelWidth));
-            PropertiesSplitter.Visibility = Visibility.Visible;
-            PropertiesPanel.Visibility = Visibility.Visible;
+            _statementsOpenedLast = false;
+            if (_closedByFit == SidePanel.Properties)
+                _closedByFit = SidePanel.None;
+            RevealPropertiesPanel();
+            FitSidePanels();
         }
+    }
+
+    /// <summary>Shows the Properties panel at its remembered width. The fit that follows gives it the width the viewer has room for.</summary>
+    private void RevealPropertiesPanel()
+    {
+        PropertiesColumn.MinWidth = MinPropertiesWidth;
+        PropertiesColumn.MaxWidth = MaxPropertiesWidth;
+        PropertiesColumn.Width = new GridLength(
+            PerformanceMonitor.PlanAnalysis.PropertyRows.ClampWidth(_propertiesPanelWidth));
+        PropertiesSplitter.Visibility = Visibility.Visible;
+        PropertiesPanel.Visibility = Visibility.Visible;
     }
 
     private void PropertiesFilter_TextChanged(object sender, TextChangedEventArgs e)
@@ -1151,9 +1151,9 @@ public partial class PlanViewerControl
     }
 
     /// <summary>
-    /// Wraps a warning panel built directly under <see cref="PropertiesContent"/> (the plan-level
-    /// and per-operator warning lists, which are prose panels rather than label/value grids) as a
-    /// filterable, copyable row on the section most recently opened by <see cref="AddPropertySection"/>.
+    /// Wraps a warning panel built in the body of the section most recently opened by <see cref="AddPropertySection"/>
+    /// (the plan-level and per-operator warning lists, which are prose panels rather than label/value grids) as a
+    /// filterable, copyable row on that section.
     /// </summary>
     private void RegisterBuiltWarningRow(string header, string body, FrameworkElement panel)
     {
@@ -1222,7 +1222,8 @@ public partial class PlanViewerControl
         ClosePropertiesPanel();
     }
 
-    private void ClosePropertiesPanel()
+    /// <summary>Hides the Properties panel and keeps the operator selected, so the panel can come back showing it.</summary>
+    private void HidePropertiesPanel()
     {
         PropertiesPanel.Visibility = Visibility.Collapsed;
         PropertiesSplitter.Visibility = Visibility.Collapsed;
@@ -1231,6 +1232,14 @@ public partial class PlanViewerControl
         PropertiesColumn.MinWidth = 0;
         PropertiesColumn.MaxWidth = double.PositiveInfinity;
         PropertiesColumn.Width = new GridLength(0);
+    }
+
+    private void ClosePropertiesPanel()
+    {
+        // A panel the person closes, or the panel of a plan that is going, is not one for a later fit to bring back.
+        if (_closedByFit == SidePanel.Properties)
+            _closedByFit = SidePanel.None;
+        HidePropertiesPanel();
 
         // Deselect node
         if (_selectedNodeBorder != null)
@@ -1240,6 +1249,7 @@ public partial class PlanViewerControl
             _selectedNodeBorder = null;
         }
         _selectedNode = null;
+        FitSidePanels();
     }
 
     #endregion
@@ -1354,23 +1364,28 @@ public partial class PlanViewerControl
         var columns = ParameterCard.Columns(parameters);
         var allCompiledNull = parameters.All(p => p.CompiledValue == null);
 
-        var colDef = new List<GridLength> { GridLength.Auto, GridLength.Auto };
+        /* The grid is never wider than its card, which cuts what is past its edge with no ellipsis. The name column shares the
+           card with the value columns at twice a value column's weight and no wider than its longest name (its MaxWidth, set
+           once the cells are in the tree, below), so a short name takes its own width and a long one is what gives. The data
+           type sizes to its text, and its cells stop at ParameterTypeMaxWidth (AddParamCell). Each value column keeps
+           ParameterValueMinWidth however long the names are: room for its header, and a hover target for a cut cell's
+           tooltip. The three minimums and the type's maximum come to less than the narrowest the card's content gets (its
+           360 px cap, less its edge, its margins and a scroll bar). */
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2, GridUnitType.Star), MinWidth = ParameterNameMinWidth });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         int compiledCol = -1, runtimeCol = -1;
         int nextCol = 2;
         if (columns.ShowCompiled)
         {
-            colDef.Add(new GridLength(1, GridUnitType.Star));
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = ParameterValueMinWidth });
             compiledCol = nextCol++;
         }
         if (columns.ShowRuntime)
         {
-            colDef.Add(new GridLength(1, GridUnitType.Star));
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = ParameterValueMinWidth });
             runtimeCol = nextCol++;
         }
-
-        var grid = new Grid();
-        foreach (var width in colDef)
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = width });
 
         var columnHeaderBrush = ParamsAccentBrush;
         var valueBrush = TooltipFgBrush;
@@ -1403,24 +1418,37 @@ public partial class PlanViewerControl
             }
 
             if (runtimeCol >= 0)
-            {
-                var tooltip = row.Sniffed
-                    ? "Runtime value differs from compiled — possible parameter sniffing"
-                    : null;
-                AddParamCell(grid, rowIndex, runtimeCol, row.RuntimeText, row.Sniffed ? sniffedBrush : valueBrush, tooltip: tooltip);
-            }
+                AddParamCell(grid, rowIndex, runtimeCol, row.RuntimeText, row.Sniffed ? sniffedBrush : valueBrush, sniffed: row.Sniffed);
 
             rowIndex++;
         }
 
         ParametersContent.Children.Add(grid);
 
+        // The name column's bound: its widest cell on one line, measured in the tree, where the cells have the card's font.
+        var nameWidth = ParameterNameMinWidth;
+        foreach (var cell in grid.Children.OfType<TextBlock>().Where(cell => Grid.GetColumn(cell) == 0))
+        {
+            cell.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            nameWidth = Math.Max(nameWidth, Math.Ceiling(cell.DesiredSize.Width));
+        }
+        grid.ColumnDefinitions[0].MaxWidth = nameWidth;
+
         foreach (var annotation in ParameterCard.Annotations(parameters, statement.StatementText, maskedText, unresolved))
             AddParameterAnnotation(annotation);
     }
 
+    /// <summary>The least the Parameters card's name column keeps, in px, when a long name gives way to the value columns.</summary>
+    private const double ParameterNameMinWidth = 60;
+
+    /// <summary>The most a Parameters card data type cell takes, in px, its margin included: room for the longest built-in type name.</summary>
+    private const double ParameterTypeMaxWidth = 110;
+
+    /// <summary>The least a Parameters card value column keeps, in px: its header ("Compiled") and its cell's margin.</summary>
+    private const double ParameterValueMinWidth = 64;
+
     private static void AddParamCell(Grid grid, int row, int col, string text, Brush brush,
-        FontWeight fontWeight = default, string? tooltip = null)
+        FontWeight fontWeight = default, bool sniffed = false)
     {
         var tb = new TextBlock
         {
@@ -1433,16 +1461,43 @@ public partial class PlanViewerControl
             MaxWidth = 200,
             Background = Brushes.Transparent
         };
-        // Name and DataType columns are short — no need for max width.
         if (col <= 1)
-            tb.MaxWidth = double.PositiveInfinity;
-        if (tooltip != null)
-            tb.ToolTip = tooltip;
-        else if (text.Length > 30)
-            tb.ToolTip = text;
+        {
+            // A name is as wide as its column lets it be. A data type's column sizes to its cells, so the cell carries the
+            // bound: a cell measured with no limit is cut at its column's edge with no ellipsis. A name or a type over 30
+            // characters carries a tooltip; so does one that is cut, which is known only once it is laid out.
+            tb.MaxWidth = col == 1 ? ParameterTypeMaxWidth - tb.Margin.Right : double.PositiveInfinity;
+            if (text.Length > 30)
+                tb.ToolTip = text;
+            tb.SizeChanged += (_, _) => tb.ToolTip = text.Length > 30 || IsTrimmed(tb) ? text : null;
+        }
+        else
+        {
+            // A value column shares what the card leaves after Name and Data Type, so whether a cell is cut is known
+            // only once it is laid out: the tooltip is chosen again at every size, and a cell with no size yet counts
+            // as cut, so its value is never hidden.
+            tb.ToolTip = ParameterCard.ValueCellTooltip(text, sniffed, trimmed: true);
+            tb.SizeChanged += (_, _) => tb.ToolTip = ParameterCard.ValueCellTooltip(text, sniffed, IsTrimmed(tb));
+        }
         Grid.SetRow(tb, row);
         Grid.SetColumn(tb, col);
         grid.Children.Add(tb);
+    }
+
+    /// <summary>
+    /// Whether the cell's text is wider than the width its column gave it, so an ellipsis cuts it. The line is cut the
+    /// moment it is wider than its cell, so the slack is a floating-point epsilon: a tooltip on a cell shown whole only
+    /// repeats the visible text, while a missing one hides a value.
+    /// </summary>
+    private static bool IsTrimmed(TextBlock cell)
+    {
+        if (cell.Text.Length == 0)
+            return false;
+        var natural = new FormattedText(
+            cell.Text, CultureInfo.CurrentUICulture, cell.FlowDirection,
+            new Typeface(cell.FontFamily, cell.FontStyle, cell.FontWeight, cell.FontStretch),
+            cell.FontSize, Brushes.Black, VisualTreeHelper.GetDpi(cell).PixelsPerDip).WidthIncludingTrailingWhitespace;
+        return natural > cell.ActualWidth - cell.Padding.Left - cell.Padding.Right + 0.01;
     }
 
     private void AddParameterAnnotation(ParameterCardAnnotation annotation)
@@ -1488,7 +1543,7 @@ public partial class PlanViewerControl
         var totalWait = sorted.Sum(w => w.WaitTimeMs);
 
         // The header ellipsizes in a narrow card, so the total it carries goes on a tooltip too.
-        WaitStatsHeader.Text = $"  Wait Stats \u2014 {totalWait:N0}ms total";
+        WaitStatsHeader.Text = "  " + PlanDisplayText.WaitStatsHeaderText(totalWait);
         WaitStatsHeader.ToolTip = PlanDisplayText.WaitStatsHeaderTooltip(sorted.Count, totalWait);
 
         /* Ported from PerformanceStudio (erikdarlingdata/PerformanceStudio@78a3370, refined @80de6fc):
@@ -1528,7 +1583,7 @@ public partial class PlanViewerControl
                 Margin = new Thickness(0, 2, 10, 2),
                 Background = Brushes.Transparent
             };
-            nameText.ToolTip = $"{w.WaitType} \u2014 {category} wait";
+            nameText.ToolTip = $"{w.WaitType}: {category} wait";
             Grid.SetRow(nameText, i);
             Grid.SetColumn(nameText, 0);
             grid.Children.Add(nameText);
@@ -1551,7 +1606,7 @@ public partial class PlanViewerControl
             // Duration text: the other flexible column, so this is what gives when the strip is narrow.
             var durationText = new TextBlock
             {
-                Text = $"{w.WaitTimeMs:N0}ms ({w.WaitCount:N0} waits)",
+                Text = PlanDisplayText.WaitRowText(w.WaitTimeMs, w.WaitCount),
                 FontSize = 12,
                 Foreground = TooltipFgBrush,
                 TextTrimming = TextTrimming.CharacterEllipsis,
@@ -1626,6 +1681,7 @@ public partial class PlanViewerControl
 
             var labelText = new TextBlock
             {
+                TextWrapping = TextWrapping.Wrap,
                 Text = label,
                 FontSize = 11,
                 Foreground = labelBrush,
@@ -1638,6 +1694,7 @@ public partial class PlanViewerControl
 
             var valueText = new TextBlock
             {
+                TextWrapping = TextWrapping.Wrap,
                 Text = value,
                 FontSize = 11,
                 Foreground = colorKey == null ? valueBrush : (Brush)FindResource(colorKey),
@@ -1694,6 +1751,7 @@ public partial class PlanViewerControl
             var row = rows[rowIndex];
             var labelText = new TextBlock
             {
+                TextWrapping = TextWrapping.Wrap,
                 Text = row.Label,
                 FontSize = 11,
                 Foreground = labelBrush,
@@ -1706,6 +1764,7 @@ public partial class PlanViewerControl
 
             var valueText = new TextBlock
             {
+                TextWrapping = TextWrapping.Wrap,
                 Text = row.Value,
                 FontSize = 11,
                 Foreground = valueBrush,
@@ -1736,6 +1795,7 @@ public partial class PlanViewerControl
     {
         InsightsPanel.Visibility = Visibility.Visible;
         InsightsHeader.Text = "  Plan Insights";
+        FitInsightsToHeight();
     }
 
     #endregion

@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// grid's own collection view does, so they fail on the column's sort key and on the mapper's raw number, not on a copy
 /// of either.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerPostgresGridNumericSortTests
 {
     private static readonly DateTime Utc = new(2026, 3, 1, 12, 0, 0, DateTimeKind.Utc);
@@ -56,9 +57,18 @@ public sealed class ViewerPostgresGridNumericSortTests
 
             try
             {
-                body(new ViewerServerTab(
+                var tab = new ViewerServerTab(
                     new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
-                    new DarlingServer(1, "pg-sort-test", "pg-sort-test", true, null, engineKind: "postgres")));
+                    new DarlingServer(1, "pg-sort-test", "pg-sort-test", true, null, engineKind: "postgres"));
+                try
+                {
+                    body(tab);
+                }
+                finally
+                {
+                    /* The tab is never shown, so no window's Closed stops its auto-refresh timer (#8367); dispose it here. */
+                    tab.Dispose();
+                }
             }
             finally
             {

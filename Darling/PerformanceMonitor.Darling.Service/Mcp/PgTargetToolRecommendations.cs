@@ -33,7 +33,7 @@ internal static class PgTargetToolRecommendations
     {
         [PgTargetFactKeys.ServerMajorVersion] =
         [
-            new("get_pg_extensions", "Which extensions this target has installed and available — the readiness picture behind the facts"),
+            new("get_pg_extensions", "Which extensions this target has installed and available: the readiness picture behind the facts"),
         ],
         [PgTargetFactKeys.ConfigSharedBuffers] = ConfigReads(),
         [PgTargetFactKeys.ConfigMaxWalSize] = ConfigReads(),
@@ -72,18 +72,18 @@ internal static class PgTargetToolRecommendations
         ],
         [PgTargetFactKeys.BufferCachePressure] =
         [
-            new("get_pg_database_stats", "Per-database block hits and reads — the hit-ratio arm"),
+            new("get_pg_database_stats", "Per-database block hits and reads: the hit-ratio arm"),
             new("get_pg_io_stats", "Evictions and reads by backend type and context (PG 16+)"),
             new("get_pg_buffer_usage", "What the buffer cache holds right now, by relation"),
             /* Lane 29 of #3691: the composition drill-down names the relation that holds the pool; this is the read for what reads it. */
-            new("get_pg_top_queries", "The heaviest statements with their shared_blks_read beside shared_blks_hit — which of them is missing the cache"),
+            new("get_pg_top_queries", "The heaviest statements with their shared_blks_read beside shared_blks_hit, which of them is missing the cache"),
         ],
         [PgTargetFactKeys.Tps] = DatabaseReads(),
         [PgTargetFactKeys.HitRatio] = DatabaseReads(),
         [PgTargetFactKeys.DeadlockRate] =
         [
             new("get_pg_database_stats", "The engine's per-database deadlock counter the rate is derived from"),
-            new("get_pg_deadlocks", "The deadlock graphs the log captured — exemplars, not the count"),
+            new("get_pg_deadlocks", "The deadlock graphs the log captured: exemplars, not the count"),
             new("get_pg_deadlock_detail", "One captured deadlock's full graph and statements"),
         ],
         [PgTargetFactKeys.TempSpill] =
@@ -180,7 +180,7 @@ internal static class PgTargetToolRecommendations
         [PgTargetFactKeys.SlotXmin] =
         [
             new("get_pg_replication_slots", "Each slot's xmin and catalog_xmin, and whether it is active"),
-            new("get_pg_xmin_horizon", "The horizon by holder — the slot against the other candidates"),
+            new("get_pg_xmin_horizon", "The horizon by holder: the slot against the other candidates"),
         ],
         [PgTargetFactKeys.AnomalyReplicationLag] =
         [
@@ -229,16 +229,16 @@ internal static class PgTargetToolRecommendations
         [PgTargetFactKeys.ParameterSensitivity] =
         [
             new("get_pg_plans", "Every plan_hash captured for the statement over the window, and when each appeared"),
-            new("get_pg_column_stats", "The predicate columns' top_value_frequency and n_distinct — the skew behind the flip"),
+            new("get_pg_column_stats", "The predicate columns' top_value_frequency and n_distinct: the skew behind the flip"),
             new("get_pg_top_queries", "The statement's calls and mean time beside its neighbours"),
         ],
         [PgTargetFactKeys.SeqScanAdvisory] =
         [
             new("get_pg_plans", "The captured plan with the Seq Scan node, its Filter (literals redacted), its row estimate and actual rows"),
-            new("get_pg_predicate_stats", "Which columns the predicate names, how often it was evaluated and how selective it was (pg_qualstats) — the only source an index column is named from"),
-            new("get_pg_top_queries", "The statement's text, calls and mean time — what the scan costs per hour"),
-            new("get_pg_table_bloat", "The relation's heap size and dead-tuple share — the size gate and the write side of the index's cost"),
-            new("get_pg_column_stats", "The scanned columns' distribution — whether the selective predicate is selective for every value or only the common one"),
+            new("get_pg_predicate_stats", "Which columns the predicate names, how often it was evaluated and how selective it was (pg_qualstats): the only source an index column is named from"),
+            new("get_pg_top_queries", "The statement's text, calls and mean time: what the scan costs per hour"),
+            new("get_pg_table_bloat", "The relation's heap size and dead-tuple share: the size gate and the write side of the index's cost"),
+            new("get_pg_column_stats", "The scanned columns' distribution, whether the selective predicate is selective for every value or only the common one"),
         ],
         [PgTargetFactKeys.AnomalyPlanRegression] = PlanReads(),
         [PgTargetFactKeys.CpuBurnCores] = KernelReads(),
@@ -255,11 +255,11 @@ internal static class PgTargetToolRecommendations
         [
             new("get_pg_server_config", "shared_buffers, max_connections, work_mem, maintenance_work_mem and autovacuum_max_workers as set"),
             new("get_pg_cpu_utilization", "The host's memory_total_bytes the sum is measured against (the V136 memory columns ride the capacity row)"),
-            new("get_pg_session_states", "How many of max_connections are in use — the ceiling's distance from the load"),
+            new("get_pg_session_states", "How many of max_connections are in use: the ceiling's distance from the load"),
         ],
         [PgTargetFactKeys.HostMemoryPressure] =
         [
-            new("get_pg_cpu_utilization", "Host memory free, cached and total per capture over the window — the pressure reading itself"),
+            new("get_pg_cpu_utilization", "Host memory free, cached and total per capture over the window: the pressure reading itself"),
             new("get_pg_server_config", "The memory knobs the host's free-plus-cached share is measured against"),
             new("get_pg_buffer_usage", "What the shared cache holds while the host is short"),
         ],
@@ -273,23 +273,23 @@ internal static class PgTargetToolRecommendations
 
     private static List<ToolRecommendation> GrowthReads() =>
     [
-        new("get_analysis_facts", "source=pg_growth — the trend fact itself: size at both ends of the lookback, growth per day, days-to-double, the top databases by name and the instance total"),
-        new("get_pg_table_bloat", "Whether the new bytes are live rows or dead ones — the bloat question the card asks first, and the database's tables by measured heap size"),
+        new("get_analysis_facts", "source=pg_growth, the trend fact itself: size at both ends of the lookback, growth per day, days-to-double, the top databases by name and the instance total"),
+        new("get_pg_table_bloat", "Whether the new bytes are live rows or dead ones: the bloat question the card asks first, and the database's tables by measured heap size"),
         new("get_pg_autovacuum_health", "Whether autovacuum is keeping up on the tables that grew"),
     ];
 
     private static List<ToolRecommendation> PlanReads() =>
     [
-        new("get_pg_plans", "The captured plans for the statement — both plan_hash values and when the flip was captured"),
+        new("get_pg_plans", "The captured plans for the statement, both plan_hash values and when the flip was captured"),
         new("get_pg_top_queries", "The statement's mean time and calls over the window against its neighbours"),
-        new("get_pg_query_duration_trend", "The statement's duration over time — where the step is"),
+        new("get_pg_query_duration_trend", "The statement's duration over time, where the step is"),
     ];
 
     private static List<ToolRecommendation> KernelReads() =>
     [
-        new("get_pg_kernel_stats", "User and system CPU time by statement (pg_stat_kcache) — who burned the cores"),
+        new("get_pg_kernel_stats", "User and system CPU time by statement (pg_stat_kcache), who burned the cores"),
         new("get_pg_top_queries", "The same statements by calls and mean time"),
-        new("get_pg_extensions", "Whether pg_stat_kcache is installed and loaded — the reading exists only where it is"),
+        new("get_pg_extensions", "Whether pg_stat_kcache is installed and loaded: the reading exists only where it is"),
     ];
 
     private static List<ToolRecommendation> BlockingReads() =>
@@ -303,7 +303,7 @@ internal static class PgTargetToolRecommendations
     [
         new("get_pg_io_stats", "Reads, writes and their timings by backend type and context (PG 16+)"),
         new("get_pg_io_trend", "Read and write latency over the window"),
-        new("get_pg_server_config", "track_io_timing — without it the timings are zero, not fast"),
+        new("get_pg_server_config", "track_io_timing, without it the timings are zero, not fast"),
     ];
 
     /// <summary>The reads for a story-path key, or null when no row and no prefix claims it.</summary>
@@ -337,7 +337,7 @@ internal static class PgTargetToolRecommendations
     /// mean STEPPED (a plan change) or the calls did (a workload change). The read that answers it leads.</summary>
     private static List<ToolRecommendation> BadActorReads() =>
     [
-        new("get_pg_query_duration_trend", "Whether this statement's mean execution time stepped or its call count did — the first question"),
+        new("get_pg_query_duration_trend", "Whether this statement's mean execution time stepped or its call count did: the first question"),
         new("get_pg_top_queries", "This statement's deltas beside the rest of the window's top statements"),
         new("get_pg_plans", "Captured plans for the statement, when plan capture is configured"),
     ];

@@ -164,7 +164,7 @@ public class DarlingMcpPgPlanToolsTests
         var text = DarlingMcpPgPlanTools.NoPlanCapturedMessage(BigQueryId, 24);
 
         Assert.Contains("not a top-N page", text, StringComparison.Ordinal);
-        Assert.Contains("the last 24 hour(s)", text, StringComparison.Ordinal);
+        Assert.Contains("the last 24 hours", text, StringComparison.Ordinal);
         Assert.Contains("get_pg_top_queries", text, StringComparison.Ordinal);
         Assert.Contains("auto_explain.log_min_duration", text, StringComparison.Ordinal);
         Assert.Contains("get_pg_plan_capture_readiness", text, StringComparison.Ordinal);
@@ -183,7 +183,7 @@ public class DarlingMcpPgPlanToolsTests
         var text = DarlingMcpPgPlanTools.NoPlanCapturedMessage(null, 48);
 
         Assert.Contains("every statement", text, StringComparison.Ordinal);
-        Assert.Contains("the last 48 hour(s)", text, StringComparison.Ordinal);
+        Assert.Contains("the last 48 hours", text, StringComparison.Ordinal);
         Assert.Contains("auto_explain.log_min_duration", text, StringComparison.Ordinal);
         Assert.Contains("plan_content_retention_days", text, StringComparison.Ordinal);
 

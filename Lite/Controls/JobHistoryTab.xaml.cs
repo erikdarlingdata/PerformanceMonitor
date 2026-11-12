@@ -265,6 +265,7 @@ public partial class JobHistoryTab : UserControl
                applied in the read, ahead of the row cap (#5703), so a full page of matching runs names its oldest run and the cap label
                counts the same rows. A probe that fails costs the note and never the grid. */
             await ShowDataStartNoteAsync(serverId, readClocks, startUtc, rangeEndUtc ?? nowUtc, all, gen);
+            await RefreshPickerDataStartAsync(serverId, openTabClocks, gen);
             await choicesApplied;
         }
         catch (Exception ex)
@@ -303,8 +304,35 @@ public partial class JobHistoryTab : UserControl
             JobHistoryWindowTruncatedBanner,
             () => System.Threading.Tasks.Task.Run(() => service.GetJobHistoryDataStartAsync(serverId, startUtc, endUtc)),
             startUtc, endUtc, read, zone, zoneWord: serverId is null ? MultiServerTime.MixedZoneWord(mode) : null,
-            superseded: () => _loads.Superseded(nameof(LoadJobsAsync), gen),
-            onFloor: floor => RangePicker.DataStartUtc = LiteTimeRange.DataStartFor(floor, DateTime.UtcNow));
+            superseded: () => _loads.Superseded(nameof(LoadJobsAsync), gen));
+    }
+
+    /// <summary>
+    /// Points the picker's "Data starts" note at the oldest job history the store holds for the scope on screen (the picked server's
+    /// own, or the fleet's at All Servers, <see cref="LocalDataService.GetOldestJobHistoryAsync"/>), else the archive's static
+    /// retention edge. The note previews whatever range a reader types, so it cannot take the "Showing since" probe's floor: a
+    /// probe reads the oldest row INSIDE the window it was asked about, which for a covered window is the window's own start, not
+    /// where the data starts. The read is cached per scope, so a refresh costs nothing until the archive changes. A read that
+    /// fails leaves the retention edge; a load a newer one has superseded writes nothing.
+    /// </summary>
+    private async System.Threading.Tasks.Task RefreshPickerDataStartAsync(int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks, int gen)
+    {
+        if (_dataService == null) return;
+        var service = _dataService;
+
+        /* openTabClocks is the load's one snapshot of the open tabs' clocks, the one the grid's read took. */
+        DateTime? oldest = null;
+        try
+        {
+            oldest = await System.Threading.Tasks.Task.Run(() => service.GetOldestJobHistoryAsync(serverId, openTabClocks));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Debug("JobHistory", $"The oldest job history read failed, the picker's note names the retention edge: {ex.Message}");
+        }
+
+        if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+        RangePicker.DataStartUtc = LiteTimeRange.DataStartFor(oldest, DateTime.UtcNow);
     }
 
     /// <summary>
@@ -331,8 +359,7 @@ public partial class JobHistoryTab : UserControl
     /// <param name="superseded">True when a newer load has started: checked after the probe answers and before the banner is written.</param>
     internal static System.Threading.Tasks.Task ShowJobHistoryDataStartAsync(
         TextBlock banner, Func<System.Threading.Tasks.Task<DateTime?>> probe, DateTime startUtc, DateTime endUtc,
-        IReadOnlyCollection<JobHistoryRow> read, TimeZoneInfo zone, string? zoneWord, Func<bool>? superseded = null,
-        Action<DateTime?>? onFloor = null)
+        IReadOnlyCollection<JobHistoryRow> read, TimeZoneInfo zone, string? zoneWord, Func<bool>? superseded = null)
     {
         var runTimes = read.Where(r => r.RunDateTimeUtc.HasValue).Select(r => r.RunDateTimeUtc!.Value).ToList();
 
@@ -356,7 +383,6 @@ public partial class JobHistoryTab : UserControl
                 if (superseded?.Invoke() == true) return;
 
                 ServerTab.ApplyWindowFloorToBanner(banner, ServerTab.EarlierOfFloorAndRowShown(floor, ServerTab.EarliestRowShown(runTimes, t => t)), startUtc, zone);
-                onFloor?.Invoke(floor); /* #5562 R7: the picker's data-start note takes the floor this probe found */
                 Word();
             });
     }
@@ -437,6 +463,15 @@ public partial class JobHistoryTab : UserControl
     /// <summary>When the choices are read again: for a different window or server, or after <see cref="ChoicesLifetime"/>.</summary>
     private readonly JobHistoryChoicesFreshness _choicesFreshness = new(ChoicesLifetime);
 
+    /// <summary>How long a category list stays current for its window and server (#8549); a category that appears later still reaches
+    /// the drop-down through the runs the grid reads.</summary>
+    private static readonly TimeSpan CategoriesLifetime = TimeSpan.FromMinutes(30);
+
+    /// <summary>The category lists read this session, per window and server, with one read in flight per key (#8549): a load superseded
+    /// while the read ran, a refresh after <see cref="ChoicesLifetime"/> and a return to a window already read take the same answer
+    /// instead of running the statement again.</summary>
+    private readonly JobHistoryCategoryCache _categoryCache = new(CategoriesLifetime);
+
     /// <summary>The configured servers the job history collector runs on, by the name the grid's Server column speaks (the shell's
     /// snapshot, <see cref="LocalDataService.BuildJobHistoryChoiceMap"/>). A disabled server or an Azure SQL Database cannot have job
     /// history, so it is not offered unless it has rows in the window (the rows add it).</summary>
@@ -454,7 +489,8 @@ public partial class JobHistoryTab : UserControl
         var service = _dataService!;
         try
         {
-            var categories = await System.Threading.Tasks.Task.Run(() => service.GetJobHistoryCategoriesAsync(startUtc, endUtc, serverId));
+            var categories = await _categoryCache.GetAsync(key, DateTime.UtcNow,
+                () => System.Threading.Tasks.Task.Run(() => service.GetJobHistoryCategoriesAsync(startUtc, endUtc, serverId)));
             _choicesFailures.Succeeded("categories");
             return categories;
         }
@@ -630,7 +666,7 @@ public partial class JobHistoryTab : UserControl
 
         ColumnFilterState? existingFilter = null;
         _filterManager?.Filters.TryGetValue(columnName, out existingFilter);
-        _filterPopupContent!.Initialize(columnName, existingFilter);
+        _filterPopupContent!.Initialize(columnName, existingFilter, columnHeader: ColumnFilterPopup.ColumnHeaderFor(button));
 
         _filterPopup.PlacementTarget = button;
         _filterPopup.IsOpen = true;

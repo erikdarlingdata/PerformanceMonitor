@@ -51,8 +51,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
            reasons (tab virtualization, layout rebuilds) and Dispose() clears
            the crosshair manager's lane list, permanently breaking the crosshair
            until the ServerTab is rebuilt. The manager holds only managed state
-           (a Popup + lane references) — letting GC clean it up with the control
-           is fine. */
+           (a Popup + lane references) and listens to the theme only while this
+           control is loaded (FollowThemeWhileLoaded, in Initialize), so no static
+           event holds it — letting GC clean it up with the control is fine. */
     }
 
     /// <summary>
@@ -73,9 +74,13 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         {
             var chart = charts[lane];
             ApplyTheme(chart);
-            /* #8086: until the first read comes back a lane shows the empty chart's sentence, not ScottPlot's default -10 to 10
-               axes. The first update resets the chart, which drops this. */
+            /* #8086: until the first read comes back a lane has the empty chart's look, not ScottPlot's default -10 to 10 axes. Its
+               sentence says the lane is loading, not that the window holds no data: the store may hold the window's samples while
+               the first read waits on it. The first update resets the chart, which drops this. */
             emptyLook.RefreshEmptyChart(chart, laneNames[lane], "");
+            foreach (var sentence in chart.Plot.GetPlottables<ScottPlot.Plottables.Text>())
+                sentence.LabelText = LoadingSentence(laneNames[lane]);
+            chart.Refresh();
             // Disable zoom/pan/drag but keep mouse events for crosshair
             chart.UserInputProcessor.UserActionResponses.Clear();
             SetupLaneDrillDown(chart);
@@ -84,6 +89,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         /* The zone is set before the first lane is added: the manager words its tooltip time from it on every mouse
            move, and without one it would read X as the app's server-time value. */
         _crosshairManager = new CorrelatedCrosshairManager { DisplayZoneProvider = displayZone };
+        _crosshairManager.FollowThemeWhileLoaded(this);
         _crosshairManager.AddLane(CpuChart, "SQL CPU", "%");
         _crosshairManager.AddLane(WaitStatsChart, "Wait Stats", "ms/sec");
         _crosshairManager.AddLane(BlockingChart, "Blocking", PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit);
@@ -732,6 +738,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         foreach (var chart in charts)
             chart.Plot.Axes.SetLimitsX(xMin, xMax);
 
+        /* #8307: a lane's plot is flush with the lane's top edge, so a Y tick at the top of the range would have its label cut
+           there. Each lane's range is given the headroom its top tick label needs, before the gutters are measured from the
+           labels the final range gets. */
+        LaneTopTickHeadroom.Apply(charts);
+
         /* #2535: same defect as #2533 on the Darling viewer, same fix. Every lane's X and Y limits are
            final by now, so this is the one place that can see all five gutters at once and hand them the
            widest. It has to run on EVERY refresh, not once at Initialize: ClearChart() calls
@@ -787,16 +798,25 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         chart.Plot.Clear();
     }
 
-    /* A lane whose read failed is drawn as the empty lane is, then says so over it, so it cannot pass for a quiet healthy lane. */
+    /* A lane whose read failed is drawn as the empty lane is (no axes, no grid) and says only that the read failed, so it cannot
+       pass for a quiet healthy lane. The lane is cleared first, as the data paths clear it: the series the last refresh drew would
+       otherwise stay under the note, the crosshair would still read their values, and a lane that fails again would carry two notes. */
     private void ShowFailed(ScottPlot.WPF.WpfPlot chart, string title)
     {
+        ClearChart(chart);
+        ApplyTheme(chart);
+        _crosshairManager?.ClearLane(chart);
         ShowEmpty(chart, title);
         MarkFailed(chart);
     }
 
-    /* The note is anchored to the lane's pixels, not its axes, so SyncXAxes leaves it where it is. */
-    private static void MarkFailed(ScottPlot.WPF.WpfPlot chart)
+    /* A failed read says only that it failed: the empty sentence the lane may already carry would claim the window holds no data,
+       which a read that did not return cannot establish, so it goes before the note is added. The note is anchored to the lane's
+       pixels, not its axes, so SyncXAxes leaves it where it is. */
+    private void MarkFailed(ScottPlot.WPF.WpfPlot chart)
     {
+        foreach (var empty in chart.Plot.GetPlottables<ScottPlot.Plottables.Annotation>().Where(a => a.LabelText == EmptySentence(chart)).ToList())
+            chart.Plot.Remove(empty);
         var note = chart.Plot.Add.Annotation("read failed", ScottPlot.Alignment.MiddleCenter);
         note.LabelFontColor = ChartStyle.GetThemeColors().Text;
         note.LabelFontSize = 11;
@@ -806,31 +826,26 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         chart.Refresh();
     }
 
-    /* Render an empty lane as a live, gridded chart instead of a dead black box. This is most often
-       the Blocking/Deadlocking lane on a healthy server (no events = good news), so make it match the
-       populated lanes: keep the grid and show a 0-1 Y axis. We no longer blank the axes or add the old
-       "No Data" text (which SyncXAxes pushed off-screen anyway). X limits and the vertical gridlines are
-       set afterward by SyncXAxes so the time axis aligns with the other lanes; the left axis keeps its
-       default numeric ticks, so 0/1 labels and horizontal gridlines render. The title arg is retained
+    /* An empty lane looks as every empty chart does (#8644): the one muted sentence the other charts use and nothing else, with no
+       default axes and no gridlines. The sentence is pinned to the lane's center in pixels, not to a data point, so the X limits
+       SyncXAxes sets afterwards (all five lanes share one time ruler) do not carry it off the screen. The title arg is retained
        for call-site readability. */
-    private void ShowEmpty(ScottPlot.WPF.WpfPlot chart, string title)
-    {
-        chart.Plot.Axes.DateTimeTicksBottomUtc(_displayZone);
-        // Only the bottom (File I/O) lane shows time labels; the upper lanes hide them (matches UpdateLane).
-        if (chart != FileIoChart)
-            chart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
+    private void ShowEmpty(ScottPlot.WPF.WpfPlot chart, string title) =>
+        new ChartRenderHelper().RefreshEmptyChart(chart, LaneName(chart), "", pinToPlotCenter: true);
 
-        ReapplyAxisColors(chart);
+    /// <summary>The sentence a lane shows until its first read comes back.</summary>
+    internal static string LoadingSentence(string laneName) => $"Loading {laneName} data...";
 
-        chart.Plot.Title("");
-        chart.Plot.YLabel("");
-        chart.Plot.Legend.IsVisible = false;
-        chart.Plot.Axes.Margins(bottom: 0);
-        if (chart == BlockingChart) ChartStyle.UseCountAxis(chart); // #8224: an empty count lane still labels whole numbers
-        chart.Plot.Axes.SetLimitsY(0, 1);
+    /// <summary>The sentence an empty lane shows, the one the other charts use.</summary>
+    private string EmptySentence(ScottPlot.WPF.WpfPlot chart) => $"No {LaneName(chart)} data in this window";
 
-        chart.Refresh();
-    }
+    /// <summary>The lane's name in its empty sentence, the one Initialize uses before the first read.</summary>
+    private string LaneName(ScottPlot.WPF.WpfPlot chart) =>
+        chart == CpuChart ? "SQL CPU"
+        : chart == WaitStatsChart ? "Wait Stats"
+        : chart == BlockingChart ? "Blocking"
+        : chart == MemoryChart ? "Buffer Pool"
+        : "I/O Latency";
 
     /// <summary>
     /// Reapplies theme to all lane charts (call on theme change).

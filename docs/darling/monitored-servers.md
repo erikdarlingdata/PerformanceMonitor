@@ -25,6 +25,7 @@ Each Darling install has an eight-character id. The service makes it at start an
 ### The sessions
 
 - `PerformanceMonitor_Darling_<id>_LongQueryCompletions` is this install's long-query trace. The service creates it while the opt-in `long_query_completions` collector is on. It is created with `STARTUP_STATE = OFF`, so it stays stopped after a server restart. Each check starts it again when it finds it stopped.
+- `PerformanceMonitor_Darling_<id>_SchemaChanges` records committed table, view, index and trigger DDL (`object_created`, `object_altered`, `object_deleted`, and the end of `sp_rename`, `sp_refreshview` and `sp_refreshsqlmodule`), so the schema pass reads only the objects that changed. It carries the database, login, application and host of each change and no statement text. It has a 4 MB ring buffer capped at 1,000 events and `STARTUP_STATE = OFF`, so the service starts it again when it finds it stopped. The cap stays under the size at which SQL Server cuts the buffer's XML (about 2,300 of these events), so a burst past it costs one full read and the next pass reads the whole buffer again. A restart, a full buffer or an event the session dropped leaves a gap, which the pass closes by reading the whole database.
 - `PerformanceMonitor_Deadlock`, `PerformanceMonitor_BlockedProcess` and `PerformanceMonitor_Attention` keep their shared names, because Lite and other installs read them too. The service never drops them. It checks them at connect and then once an hour. It creates a missing one and starts a stopped one, so a deliberate stop lasts less than an hour.
 - On Azure SQL Database, a shared session can stay unusable after a start. The service then creates `PerformanceMonitor_Darling_<id>_Deadlock`, `PerformanceMonitor_Darling_<id>_BlockedProcess` or `PerformanceMonitor_Darling_<id>_Attention` in that database, with `STARTUP_STATE = OFF`, and reads that one. When the shared session works again, the service switches back and drops its own fallback.
 
@@ -34,7 +35,7 @@ Earlier versions shared one session, `PerformanceMonitor_LongQueryCompletions`, 
 
 ### Removing a server
 
-Removing a server drops this install's sessions on it. These are the long-query session and its own deadlock and blocked-process fallbacks. The service makes one attempt, within 15 seconds. A failed drop is logged and never stops the removal.
+Removing a server drops this install's sessions on it. These are the long-query session, the schema-changes session and its own deadlock and blocked-process fallbacks. The service makes one attempt, within 15 seconds. A failed drop is logged and never stops the removal.
 
 The service leaves a session that another registration of this install keeps. On premises, it also leaves the session when it cannot tell whether another registration of this install shares the instance. That happens when the instance name of this server is not known. The service logs the reason. The two shared sessions stay on the server. The [`--drop-xe-sessions`](collector-settings.md#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions) section shows how to drop them.
 
@@ -90,9 +91,9 @@ What each grant buys you, and what breaks without it:
 | Grant | Why | If missing |
 |---|---|---|
 | `VIEW SERVER STATE` | All DMV collectors (wait stats, query stats, memory, CPU, file I/O, sessions, etc.) and the connect probe | Collection fails — this one is required |
-| `ALTER ANY EVENT SESSION` | Create/start the three shared XE sessions (deadlock, blocked-process and attention) | Logged; deadlock, blocked-process and client-timeout collectors read zero rows (an admin can pre-create the sessions instead) |
+| `ALTER ANY EVENT SESSION` | Create/start the three shared XE sessions (deadlock, blocked-process and attention), and this install's own `PerformanceMonitor_Darling_<id>_SchemaChanges` session while schema tracking is on | Logged; deadlock, blocked-process and client-timeout collectors read zero rows (an admin can pre-create the sessions instead) |
 | `CONNECT ANY DATABASE` | The per-database collectors (`database_scoped_config`, `query_store_health`, `index_object_stats`, `database_size_stats`, `query_store_stats`, `query_store_forced_plans`) enter each database via `EXECUTE [db].sys.sp_executesql` | Databases the login cannot enter are skipped; without the grant that is every user database |
-| `VIEW ANY DEFINITION` | Catalog-view row visibility everywhere: `sys.tables` / `sys.indexes` / `sys.objects` for the index and object collectors, `sys.dm_db_partition_stats`, and the AG catalog views (`sys.availability_groups`, `sys.availability_replicas`) | **Silently zero rows** — catalog views hide rows rather than erroring, so missing objects look exactly like empty databases, and a real AG cluster looks identical to a server with no AGs |
+| `VIEW ANY DEFINITION` | Catalog-view row visibility everywhere: `sys.tables` / `sys.indexes` / `sys.objects` for the index, object and schema-tracking collectors (a database where the login cannot see the definitions is read as incomplete and never has an object recorded as dropped), `sys.dm_db_partition_stats`, and the AG catalog views (`sys.availability_groups`, `sys.availability_replicas`) | **Silently zero rows** — catalog views hide rows rather than erroring, so missing objects look exactly like empty databases, and a real AG cluster looks identical to a server with no AGs |
 | `ALTER SETTINGS` | The `sp_configure` blocked-process-threshold bootstrap | Logged; set the threshold yourself (or via RDS Parameter Group) |
 | `ALTER TRACE` | The `default_trace_events` collector — `sys.traces` / `fn_trace_gettable` accept nothing less | `PERMISSIONS` skip in collection health; the default-trace tab stays empty |
 | msdb job-table `SELECT`s + `agent_datetime` `EXECUTE` | `running_jobs` / `job_history` / `agent_status` collectors and the failed/long-running-job alerts — all direct table reads; `SQLAgentReaderRole` alone leaves every one failing with error 229 | Skipped gracefully — logged as a permissions skip, alerts return no jobs |
@@ -112,11 +113,12 @@ Collectors that hit a permission error (SQL errors 229/297/300, plus 8189 from `
 
 ### Which collectors run on which platform
 
-Every collector declares its own applicability in code (`AppliesTo(CollectorTargetInfo)`), so this is not a hand-maintained per-collector list — the SQL Server collectors fall into eight groups, and a collector outside its supported platform is **skipped before it runs**, not failed and logged every cycle.
+Every collector declares its own applicability in code (`AppliesTo(CollectorTargetInfo)`), so this is not a hand-maintained per-collector list — the SQL Server collectors fall into nine groups, and a collector outside its supported platform is **skipped before it runs**, not failed and logged every cycle.
 
 | Runs on | Collectors | Gate |
 |---|---|---|
 | Everything | wait stats, CPU utilization, memory (stats/clerks/grants), file I/O, tempdb, latches, spinlocks, plan cache, session summary, plus blocking, deadlocks, blocked-process reports, DMV blocking snapshots, perfmon, query snapshots, procedure stats, index/object stats, long-query completions, client timeouts (`attention`), database config/scoped-config/size, server properties, session stats, waiting tasks, identity capacity (on Azure SQL Database it reads one database at a time), database protection (backups and CHECKDB, labelled by platform) | no gate |
+| Everything except Amazon RDS Web and Express editions | schema tracking (`schema_objects`, Darling only, off by default: versioned table and view definitions kept in the store, see [Schema tracking](../how-collection-works.md#schema-tracking)) | `XeSessionSupported` |
 | On-prem, Managed Instance, RDS — **not** Azure SQL DB | CPU scheduler stats, default trace events, memory pressure events, server config, system health events, trace flags, database states, Availability Group replica states, Availability Group database replica states, job history | `!IsAzureSqlDb` |
 | On-prem and Managed Instance, **not** RDS | agent status, running jobs | `!IsAzureSqlDb && !IsAwsRds` |
 | On-prem only, **not** Managed Instance, RDS or Azure SQL DB | Agent alerts | `!IsAzureSqlDb && !IsAwsRds && !IsAzureManagedInstance` |

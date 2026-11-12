@@ -243,6 +243,24 @@ public static class ViewerTimeHelper
     /// UTC, which is what the stored-times reads that use it (Job History, system events) want. The machine and the
     /// current time come in as arguments so the choice is unit-testable without depending on the test machine's zone.
     /// </summary>
+    /// <summary>
+    /// The zone a list that covers every server unless one is picked reads typed times in, and words its range in (#8645): the picked
+    /// server's own clock (<paramref name="rowClocks"/>, taken from the rows the list read), else the one clock a view of several servers
+    /// reads on (<see cref="MultiServerTime.MixedZone(TimeDisplayMode, TimeZoneInfo)"/>: UTC in UTC mode, this machine's zone otherwise).
+    /// Never <see cref="ActiveServerClock"/>: that is whichever server tab was opened last, so a list of every server took one
+    /// server's zone. The machine's zone is an argument so a test names it.
+    /// </summary>
+    internal static TimeZoneInfo ListZoneFor(
+        TimeDisplayMode mode, int? serverId, IReadOnlyDictionary<int, ServerClock> rowClocks, TimeZoneInfo machine) =>
+        serverId is int one && rowClocks.TryGetValue(one, out var clock)
+            ? DisplayZoneFor(mode, clock)
+            : MultiServerTime.MixedZone(mode, machine);
+
+    /// <summary>The viewer machine's own clock right now, as a fixed offset: what a card or row with no clock of its own is shown in (#8645),
+    /// never the active server tab's.</summary>
+    internal static ServerClock MachineClock() =>
+        ServerClock.FixedOffset((int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes);
+
     internal static ServerClock ClockForServerOrMachine(
         IReadOnlyDictionary<int, ServerClock> clocks, int serverId, TimeZoneInfo machine, DateTime utcNow)
     {
@@ -267,6 +285,19 @@ public static class ViewerTimeHelper
         TimeDisplayMode.UTC => "UTC",
         _ => OffsetLabel(clock.OffsetMinutesAt(naiveUtc)),
     };
+
+    /// <summary>
+    /// The viewer's port of Lite's <c>ServerTimeHelper.WithServerZoneLabel</c>: <paramref name="text"/>, a time worded on <paramref name="clock"/>, with that clock's offset at <paramref name="naiveUtc"/>
+    /// after it in Server Time, "09:30 (UTC-08:00)": a list or a row of cards shows several servers, each on its own clock, and the
+    /// label says which. UTC and Local Time are one zone for every server and carry none. A time in the hour that repeats after a
+    /// daylight saving change already ends with its offset and is left as it is.
+    /// </summary>
+    public static string WithServerZoneLabel(string text, TimeDisplayMode mode, ServerClock clock, DateTime naiveUtc)
+    {
+        if (mode != TimeDisplayMode.ServerTime || text.Length == 0) return text;
+        var label = GetTimezoneLabel(mode, clock, naiveUtc);
+        return label.Length > 3 && text.EndsWith(label[3..], StringComparison.Ordinal) ? text : text + " (" + label + ")";
+    }
 
     private static string LocalZoneName(DateTime naiveUtc)
     {

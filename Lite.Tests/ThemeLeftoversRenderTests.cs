@@ -111,7 +111,7 @@ public sealed class ThemeLeftoversRenderTests
                 .OfType<Setter>().First(s => s.Property == Control.BackgroundProperty)).Value as Brush);
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 800 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var grid = (DataGrid)tab.FindName("RecommendationsDataGrid");
@@ -141,7 +141,7 @@ public sealed class ThemeLeftoversRenderTests
         {
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 800 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var grid = (DataGrid)tab.FindName("RecommendationsDataGrid");
@@ -189,7 +189,7 @@ public sealed class ThemeLeftoversRenderTests
         {
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 800 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var grid = (DataGrid)tab.FindName("RecommendationsDataGrid");
@@ -234,7 +234,7 @@ public sealed class ThemeLeftoversRenderTests
         {
             FrameworkElement tab = host == "FinOps" ? new FinOpsTab() : new RecommendationsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 800 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ThemeManager.Apply("Light");
@@ -270,7 +270,7 @@ public sealed class ThemeLeftoversRenderTests
             ThemeManager.Apply(theme);
             var card = new ServerOverviewCard { DataContext = item };
             var window = new Window { Content = card, Width = 420, Height = 360 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 Settle(window);
@@ -383,7 +383,7 @@ public sealed class ThemeLeftoversRenderTests
             panel.Children.Add(b);
             panel.Children.Add(t);
             var window = new Window { Content = panel, Width = 300, Height = 200 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ThemeManager.Apply(theme);
@@ -418,7 +418,7 @@ public sealed class ThemeLeftoversRenderTests
         {
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 900 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var content = (FrameworkElement)tab.FindName("UtilizationContent");
@@ -451,7 +451,7 @@ public sealed class ThemeLeftoversRenderTests
         {
             var grid = new DataGrid { AutoGenerateColumns = true, ItemsSource = new[] { new { A = 1 }, new { A = 2 } } };
             var window = new Window { Content = grid, Width = 400, Height = 300 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ThemeManager.Apply("CoolBreeze");
@@ -485,7 +485,7 @@ public sealed class ThemeLeftoversRenderTests
                 },
             };
             var window = new Window { Content = calendar, Width = 1000, Height = 800 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 foreach (var theme in new[] { "Dark", "Light", "CoolBreeze" })
@@ -528,7 +528,7 @@ public sealed class ThemeLeftoversRenderTests
                 var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
                 typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var main = (TabControl)tab.FindName("MainTabControl");
@@ -659,7 +659,7 @@ public sealed class ThemeLeftoversRenderTests
         {
             var tab = new AvailabilityGroupsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 800 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 tab.Render(OneGroup());
@@ -700,7 +700,7 @@ public sealed class ThemeLeftoversRenderTests
             top.Items.Add(new TabItem { Header = "FinOps", Content = finOps });
             top.SelectedIndex = 1;
             var window = new Window { Content = top, Width = 1280, Height = 900, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var sub = Visuals<TabControl>(finOps).First();

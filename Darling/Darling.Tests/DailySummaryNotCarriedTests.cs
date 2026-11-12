@@ -115,7 +115,10 @@ public sealed class DailySummaryNotCarriedTests
                each stays a per-day SubPlan; the candidate days are a fenced subquery holding probe one, and probe
                two filters its output, so the source is probed only on the days the rollup probe found empty.
                DailySummaryProbePlanLiveTests proves the resulting plan on a store. */
-            var member = lf[lf.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal)..];
+            /* The member ends where the next CTE (deadlocks) starts: it used to run to the end of the statement, so a fence in a later
+               CTE (#8549's bounded probe in coll) counted as one of this member's. */
+            var memberStart = lf.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal);
+            var member = lf[memberStart..lf.IndexOf("deadlocks AS (", memberStart, StringComparison.Ordinal)];
             Assert.Equal(3, member.Split("OFFSET 0").Length - 1);
             var rollupProbeAt = member.IndexOf($"SELECT 1 FROM collect.{relation} AS r", StringComparison.Ordinal);
             var fenceAt = member.IndexOf("        OFFSET 0\n    ) AS b\n    WHERE EXISTS (", StringComparison.Ordinal);
@@ -128,7 +131,8 @@ public sealed class DailySummaryNotCarriedTests
             var queriesAt = sql.IndexOf("queries AS (", StringComparison.Ordinal);
             Assert.Equal(2, sql[queriesAt..sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal)].Split("UNION ALL").Length - 1);
             var rollupAt = sql.IndexOf("SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash", StringComparison.Ordinal);
-            var rawAt = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
+            /* #8651: the raw tail reads collect.query_stats through the credited-pairs shape (DailySummarySql.CreditedPairs), no longer the view, so its pair select marks it. */
+            var rawAt = sql.IndexOf("SELECT p.d, p.query_hash", StringComparison.Ordinal);
             var notCarriedAt = sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal);
             Assert.True(rollupAt > 0 && rawAt > rollupAt && notCarriedAt > rawAt);
         }
@@ -234,14 +238,13 @@ public sealed class DailySummaryNotCarriedTests
 
         var tools = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHealthTools.cs");
         Assert.Equal(2, tools.Split("days_missing = ").Length - 1);
-        Assert.Contains("days_missing = range.DaysMissing.Select(day => day.ToString(\"yyyy-MM-dd\"))", tools, StringComparison.Ordinal);
+        Assert.Contains("days_missing = range.DaysMissing.Where(", tools, StringComparison.Ordinal); // #8682: filtered to the days the budget kept
         Assert.Contains("days_missing = row.UniqueQueries is null ? new[] { row.SummaryDate.ToString(\"yyyy-MM-dd\") } : Array.Empty<string>()", tools, StringComparison.Ordinal);
 
         var page = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         Assert.Contains("export function dailySummaryPanels(server)", page, StringComparison.Ordinal);
         Assert.Contains("row.unique_queries == null", page, StringComparison.Ordinal);
         Assert.Contains("[\"not materialized\"]", page, StringComparison.Ordinal);
-        Assert.Contains("...dailySummaryPanels(server),", page, StringComparison.Ordinal);
         /* The descriptor it replaced is gone: one fetch of the one read, as before. */
         Assert.DoesNotContain("\"Daily Health Calendar\",\n        \"get_daily_summary_range\"", page.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 

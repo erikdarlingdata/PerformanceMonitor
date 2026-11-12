@@ -134,7 +134,7 @@ public static class EntraAmbientCredentialFailure
             + "Azure PowerShell session, no Visual Studio or VS Code sign-in, no AZURE_CLIENT_ID / "
             + "AZURE_CLIENT_SECRET environment variables, and no managed identity. The usual fix is "
             + "to open a terminal, run \"az login\", sign in there, and then test the connection "
-            + "again. If you cannot install the Azure CLI, use Azure — Service Principal "
+            + "again. If you cannot install the Azure CLI, use Azure: Service Principal "
             + "instead. The log names each source and why it declined.",
 
         EntraAmbientCredentialFailureKind.CredentialSourceFaulted =>

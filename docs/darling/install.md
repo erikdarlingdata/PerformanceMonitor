@@ -52,7 +52,7 @@ PowerShell's `ConvertFrom-Json` fails on this file. Some parsers accept comments
 
 ## Step 1: Prerequisites
 
-- Windows on the service host. The bundled store, the DPAPI credential protection and the Windows-service lifetime are all Windows-only. A Linux path exists (see [Run on Linux](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804)), but it is a different procedure. The WPF viewer is Windows either way.
+- Windows on the service host. The bundled store, the DPAPI credential protection and the Windows-service lifetime are all Windows-only. A Linux path exists (see [Run on Linux](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804), or [Run Darling on Kubernetes](kubernetes.md) for the Helm chart), but it is a different procedure. The WPF viewer is Windows either way.
 - No .NET runtime to install. The service and the viewer in the zip carry their own .NET runtime, so they are self-contained. A stock Windows Server needs nothing installed first. Runtime updates arrive with each Darling release.
 - A monitored SQL Server and a login on it. The server can be SQL Server 2016 SP2 to 2025 (2017 needs CU3 or later), Azure SQL MI, AWS RDS or Azure SQL DB. The login needs `VIEW SERVER STATE` and the rest of the [monitoring grants](monitored-servers.md#permissions-on-monitored-servers).
 - Nothing else. In the shipped default (`postgres.managed = true`), the service runs its own bundled PostgreSQL 18 and TimescaleDB. You do not provision a database.

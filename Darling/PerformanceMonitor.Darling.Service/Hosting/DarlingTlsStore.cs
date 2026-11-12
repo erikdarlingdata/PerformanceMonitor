@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.Hosting;
 
@@ -232,7 +233,7 @@ internal static class DarlingTlsStore
         if (qualifying.Count == 0)
         {
             throw new InvalidOperationException(
-                $"{setting}.subject '{dnsName}' matches {named.Count} certificate(s) in the {where} store but none can be served "
+                $"{setting}.subject '{dnsName}' matches {CountText.Plural(named.Count, "certificate")} in the {where} store but none can be served "
                 + $"(expired: {expired}, not yet valid: {notYetValid}, no Server Authentication usage: {noUsage}, "
                 + $"no private key: {noKey})." + unreadableNote);
         }
@@ -246,7 +247,7 @@ internal static class DarlingTlsStore
     }
 
     private static string UnreadableSanNote(int count, string where)
-        => $"{count} certificate(s) in the {where} store have a Subject Alternative Name that could not be read and were skipped.";
+        => $"{CountText.Plural(count, "certificate")} in the {where} store {(count == 1 ? "has" : "have")} a Subject Alternative Name that could not be read and {(count == 1 ? "was" : "were")} skipped.";
 
     /// <summary>True when the certificate lists the Server Authentication extended key usage. A certificate with no
     /// extended key usage at all does not count: the selector asks for the usage by name.</summary>
@@ -410,7 +411,7 @@ internal static class DarlingTlsStore
                     $"{section}.network.tls.store: the private key of the newer certificate {newer.Thumbprint} "
                     + $"(subject {newer.Subject}, valid from {newer.NotBefore.ToUniversalTime():u}) could not be opened by the service account "
                     + $"{account} ({newestFailure!.Message})"
-                    + (skipped > 1 ? $", and {skipped - 1} other newer certificate(s) also could not be opened" : string.Empty)
+                    + (skipped > 1 ? $", and {CountText.Plural(skipped - 1, "other newer certificate")} also could not be opened" : string.Empty)
                     + $". Serving the older certificate {chosen.Thumbprint} until it expires on {chosen.NotAfter.ToUniversalTime():u}. "
                     + $"Give {account} Read on the newer key before then: {tool} > the certificate > All Tasks > Manage Private Keys, or from an elevated prompt run: "
                     + DarlingTlsKeyAccess.GrantCommandFor(newer.Thumbprint, location, name, account)

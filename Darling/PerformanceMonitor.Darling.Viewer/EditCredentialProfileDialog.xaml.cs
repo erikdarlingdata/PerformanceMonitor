@@ -82,7 +82,7 @@ public partial class EditCredentialProfileDialog : Window
             var inUse = _profileStore.CountServersUsingProfile(existing.Id);
             if (inUse > 0)
             {
-                StatusText.Text = $"{inUse} server(s) use this profile — editing its secret affects all of them.";
+                StatusText.Text = $"{CountText.Plural(inUse, "server")} {(inUse == 1 ? "uses" : "use")} this profile. Editing its secret affects {(inUse == 1 ? "it" : "all of them")}.";
             }
         }
     }

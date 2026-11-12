@@ -56,9 +56,27 @@ public partial class FinOpsTab : UserControl
     /// </summary>
     public event Action<string, string, string?>? PlanRequested;
 
+    /// <summary>The Server Inventory grid's filters, for the tests that drive a column filter the way the funnel does.</summary>
+    internal DataGridFilterManager<ServerPropertyRow>? ServerInventoryFilters => _finopsServerInventoryFilterMgr;
+
+    /// <summary>#8474: the Hardware Note column is on screen only while a bound inventory row carries a note (a server whose hardware
+    /// read was denied), so a column blank on every server takes no width from the text columns beside it. The rows are re-read on every
+    /// reload and filter, because each one binds the grid again. It reads the unfiltered rows, not the grid's filtered items, and keeps the
+    /// column while a filter is set on it: a filter on the column itself (IsEmpty hides every noted row) must not collapse the column and
+    /// with it the funnel that clears the filter. Before the first load the grid's own items are all there is.</summary>
+    private void ShowHardwareNoteColumnWhenAnyRowHasANote()
+    {
+        var rows = _finopsServerInventoryFilterMgr?.UnfilteredRows ?? FinOpsServerInventoryDataGrid.Items.OfType<ServerPropertyRow>().ToList();
+        var any = rows.Any(r => !string.IsNullOrEmpty(r.HardwareUnavailableReason))
+            || (_finopsServerInventoryFilterMgr?.HasActiveFilterOn(nameof(ServerPropertyRow.HardwareUnavailableReason)) ?? false);
+        FinOpsHardwareNoteColumn.Visibility = any ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     public FinOpsTab()
     {
         InitializeComponent();
+        ((System.Collections.Specialized.INotifyCollectionChanged)FinOpsServerInventoryDataGrid.Items).CollectionChanged += (_, _) => ShowHardwareNoteColumnWhenAnyRowHasANote();
+        ShowHardwareNoteColumnWhenAnyRowHasANote();
         DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
         ViewerChartCards.Attach(this); // #8151: "0 throughout" in a card whose chart plots only zeros
 
@@ -274,16 +292,47 @@ public partial class FinOpsTab : UserControl
     }
 
     /// <summary>Runs the active sub-tab's loader (FinOpsTab.Loaders.cs) with the status-bar error surfacing the per-server tab's LoadInnerTabAsync uses.</summary>
-    private async Task LoadActiveSubTabGuardedAsync()
+    private async Task LoadActiveSubTabGuardedAsync() => await LoadActiveSubTabGuardedAsync(_firstOpen.Take() ?? new ViewerLoadTimer(), logSlowLoad: true);
+
+    /* #8549: the first open's clock (see ViewerFirstOpen): the shell starts it when the tab becomes visible and the tab's first load runs on it. */
+    private readonly ViewerFirstOpen _firstOpen = new();
+
+    /// <summary>Where a slow load's line goes; null is the Viewer log's "SlowLoad" source. A test swaps it to read the line.</summary>
+    internal Action<string>? SlowLoadSink { get; set; }
+
+    /// <summary>The first open's slow-load threshold. A test lowers it to read a line without waiting three seconds.</summary>
+    internal int FirstOpenSlowThresholdMs { get => _firstOpen.SlowThresholdMs; set => _firstOpen.SlowThresholdMs = value; }
+
+    /// <summary>#8549: the shell calls this when it makes the tab visible, so a wait behind another tab's refresh counts in a slow first open's line.</summary>
+    internal void BeginFirstOpen() => _firstOpen.Begin();
+
+    /// <summary>#8549: the shell calls this when the fleet lane starts the tab's refresh.</summary>
+    internal void FirstOpenRefreshStarted() => _firstOpen.RefreshStarted();
+
+    /// <summary>#8549: times a read the shell makes for this tab before its load (the picker's server list) as a store read of the first open.</summary>
+    internal Task<T> TrackFirstOpenRead<T>(string phase, Task<T> read) => _firstOpen.Track(phase, read);
+
+    /// <summary>#8549: the guarded load on a clock the caller may own (a test reads its phases). The sub-tab loads wrote no SlowLoad line at all, so a
+    /// slow FinOps open names the read or panel that was slow.</summary>
+    internal async Task LoadActiveSubTabGuardedAsync(ViewerLoadTimer timer, bool logSlowLoad)
     {
         try
         {
-            await LoadFinOpsAsync();
-            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+            await LoadFinOpsAsync(timer);
+            /* #8549: the page's grids and cards are measured and drawn after the loader's own code, so the clock waits for that pass and the line names it. */
+            await timer.SettleLayoutAsync(Dispatcher);
+            StatusChanged?.Invoke($"{_server.DisplayName}: refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
             StatusChanged?.Invoke($"refresh failed: {ex.Message}");
+        }
+        finally
+        {
+            if (logSlowLoad)
+            {
+                timer.FinishAndLog(ActiveSubTabSurface, SlowLoadSink);
+            }
         }
     }
 

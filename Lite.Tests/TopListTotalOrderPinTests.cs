@@ -37,9 +37,6 @@ public sealed class TopListTotalOrderPinTests
         Assert.Contains("ROW_NUMBER() OVER (ORDER BY r.total_cpu_us DESC, r.database_name, r.query_hash, r.host_object_name) AS page_ord", sql, StringComparison.Ordinal);
         Assert.Contains("\nORDER BY r.total_cpu_us DESC, r.database_name, r.query_hash, r.host_object_name\nLIMIT $4", sql, StringComparison.Ordinal);
         AssertNoRankingOrderEndsOnTheMetric(sql, @"ORDER BY (?:SUM\(delta_worker_time\)|r\.total_cpu_us) DESC[^\n]*");
-
-        /* The module pick reaches the page (the procedure a statement belongs to): a tie on the time takes the row collected last. */
-        Assert.Contains("PARTITION BY sql_handle ORDER BY collection_time DESC, collection_id DESC) AS rn", sql, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -143,7 +143,7 @@ LIMIT $3";
                     /* The cut landed short of the baseline floor the finding would state. The detector would describe a
                        baseline it never read, so this sweep evaluates nothing; the next sweep re-reads. */
                     _logger?.LogWarning(
-                        "[PgPileupSnapshotReader] pileup window read for server {ServerId} filled its {RowCap}-row cap and reached back only to {OldestUtc:u}, short of the {Minutes}-minute baseline the finding would state — this sweep's evaluation is skipped",
+                        "[PgPileupSnapshotReader] pileup window read for server {ServerId} filled its {RowCap}-row cap and reached back only to {OldestUtc:u}, short of the {Minutes}-minute baseline the finding would state: this sweep's evaluation is skipped",
                         serverId, _rowCap, rows.Min(r => r.CollectionTime), SameStatementPileupDetector.BaselineLookbackMinutes);
                     rows.Clear();
                 }
@@ -158,7 +158,7 @@ LIMIT $3";
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
             _logger?.LogWarning(
-                "[PgPileupSnapshotReader] pileup window read failed for server {ServerId} — this sweep's evaluation is skipped, the next sweep re-reads: {Message}",
+                "[PgPileupSnapshotReader] pileup window read failed for server {ServerId}, this sweep's evaluation is skipped, the next sweep re-reads: {Message}",
                 serverId, ex.Message);
             rows.Clear();
         }

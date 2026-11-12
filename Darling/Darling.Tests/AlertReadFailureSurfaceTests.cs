@@ -934,9 +934,11 @@ public sealed class AlertReadFailureSurfaceTests
         /* 19th and 20th counted in DarlingSelfAlertEvaluator since #7068: the same seed for the state alerts ("standing incident seed self-alert") and for Capture Down ("capture-down standing seed self-alert"). */
         /* 21st counted in DarlingSelfAlertEvaluator since #7076: the same seed read for a stuck TimescaleDB policy job on the first pass after a restart ("policy job standing seed self-alert"). */
         /* 22nd counted in DarlingSelfAlertEvaluator since #7076: the history read that finds an open row of a policy job that is healthy again, to close an episode that ended while the service was down ("policy job ended-episode close self-alert"). */
+        /* 23rd counted in DarlingSelfAlertEvaluator since #8302: the seed read for a daily rollup still behind its source on the first pass after a restart ("stale rollup standing seed self-alert"). */
+        /* 24th counted in DarlingSelfAlertEvaluator since #8302: the history read that closes a stale-rollup episode that ended while the service was down ("stale rollup ended-episode close self-alert"). */
         /* 16th counted since #6875: the identity-capacity self-alert read in the per-server sweep, counted as "identity-capacity self-alert". */
         /* 22nd exempt since #7041: the daily health report's delivery-stamp WRITE, a write whose loss costs one re-send at the next restart and never a missed delivery, like the other daily documents' stamp write. */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 23, 23),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 25, 23),
     };
 
     /// <summary>
@@ -1000,8 +1002,9 @@ public sealed class AlertReadFailureSurfaceTests
        14th: the collection log hourly rollup's catch there (#5810), a maintenance write no alert is judged on.
        15th: EvaluateComposeHoursStuckAsync's catch (#5867), the compose builder's failure record read for its self-alert, which
        holds the standing alert on a failed read.
-       16th: the Poison Wait detail read in EvaluatePgPoisonWaitAsync (#7082), the text of a page whose condition was read and counted. */
-    private const int WorkerExemptSites = 16;
+       16th: the Poison Wait detail read in EvaluatePgPoisonWaitAsync (#7082), the text of a page whose condition was read and counted.
+       17th: the job history category summary pass's catch in SweepStoreSelfMetricsAsync (#8549), a maintenance write no alert is judged on. */
+    private const int WorkerExemptSites = 17;
 
     /// <summary>
     /// Counted sites tree-wide. ONE numeral with several readers rather than the same number written out at
@@ -1063,10 +1066,12 @@ public sealed class AlertReadFailureSurfaceTests
     /// And a FIFTY-THIRD since #7086: the PostgreSQL Long-Running Query alert's statement lookup ("PostgreSQL long-running-query statement lookup"), counted because a swallowed lookup sends the page without its statement line.
     /// And a FIFTY-FOURTH since #7076: the same seed read for a stuck TimescaleDB policy job found on the first pass after a restart ("policy job standing seed self-alert"), counted for the same reason.
     /// And a FIFTY-FIFTH since #7076: the read that closes an ended policy job episode ("policy job ended-episode close self-alert"), counted because a swallowed failure leaves the old row open for the next restart to seed from.
+    /// And a FIFTY-SIXTH since #8302: the seed read for a daily rollup still behind its source on the first pass after a restart ("stale rollup standing seed self-alert"), counted for the same reason as the policy job seed.
+    /// And a FIFTY-SEVENTH since #8302: the read that closes a stale-rollup episode that ended while the service was down ("stale rollup ended-episode close self-alert"), counted because a swallowed failure leaves the old row open.
     /// And a FIFTY-SIXTH and FIFTY-SEVENTH since #7295: the blocking and deadlock count watermark seed ("blocking and deadlock count watermark seed") and the CPU incident opened-time seed ("CPU incident opened-time seed"), counted because a swallowed read there leaves the key seeded at 0 and pages again what a page already carried, or reads an open incident as opened at its first sweep.
     /// And a FIFTY-EIGHTH since #7368: the Store Autovacuum Behind read ("store autovacuum self-alert"), in <c>DarlingSelfAlertEvaluator.cs</c>.
     /// </summary>
-    private const int CountedSites = 58;
+    private const int CountedSites = 60;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
@@ -1122,6 +1127,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["delivery stamp could not be written"] = "a write (#3580): the daily document was already delivered and process memory already gates it; the dropped stamp costs one re-announcement at the next restart and never a delivery - the stamp READ beside it is the read, and it is counted",
         ["Store statement history is still failing"] = "the Debug repeat of a telemetry write sweep (#5097); the first failure warns, no alert is judged on its result",
         ["Collection log hourly rollup failed"] = "a maintenance write (#5810): the pass upserts the hourly rollup and no alert is judged on its result; a failed pass is redone by the next, and get_collection_health reads the hours after the newest rolled hour from the raw log",
+        ["Job history category summary pass failed"] = "a maintenance write (#8549): the pass upserts the hourly category summary and no alert is judged on its result; a failed pass rolls back and the next one retries, and the Category list reads job_history until the summary covers its window",
         ["The threshold override for"] = "an in-memory override lookup (#5910), not a read: the global value applies and the check's own read is counted as before",
         ["Read-latency flush failed"] ="the read-latency histogram flush writes instrumentation; losing an hour's rows can't hide an alert condition",
         ["Capture-down engine facts read failed"] = "#6912: the read goes through ReadWithOneRetryAsync, whose adapter already records the failure, so counting again here would double it; the catch only keeps the unknown edition from silencing Capture Down for the pass",
@@ -1324,8 +1330,8 @@ public sealed class AlertReadFailureSurfaceTests
            at the next restart and never a delivery. 46th since #7085: the High CPU incident's opened-at save, a write whose
            loss costs the restart bound and never the opening page. 47th since #7082: the Poison Wait detail read, the text of a page whose
            condition was already read and counted. 48th since #7368: the Store Autovacuum Behind apply and deliver half, whose
-           read is counted just above it. */
-        Assert.Equal(48, totalExempt);
+           read is counted just above it. 49th since #8549: the job history category summary pass's catch, a maintenance write. */
+        Assert.Equal(49, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

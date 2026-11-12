@@ -854,8 +854,8 @@ public sealed class WebDataStartNoteTests
         Assert.Contains("const floor = windowFloorStrip(res.data, desc);", panels, StringComparison.Ordinal);
 
         /* #4966: the empty envelope carries the note too, drawn above its message, and a read's answer is composed in the
-           browser's zone for the envelope as it is for rows. */
-        Assert.Contains("mount(body, [kept, windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), panelEmptyStrip(desc, res)]);", panels, StringComparison.Ordinal);
+           browser's zone for the envelope as it is for rows. #8577: a pinned read's window strip leads them. */
+        Assert.Contains("mount(body, [kept, readPinStrip(desc, res), windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), panelEmptyStrip(desc, res)]);", panels, StringComparison.Ordinal);
         Assert.Contains("res.kind !== \"data\" && res.kind !== \"empty\"", util, StringComparison.Ordinal);
 
         Assert.Contains("windowFloorStrip(res.data, spec)", tabs, StringComparison.Ordinal);

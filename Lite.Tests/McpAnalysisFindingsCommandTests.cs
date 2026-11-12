@@ -326,12 +326,12 @@ public sealed class McpAnalysisFindingsCommandTests : IClassFixture<SharedDuckDb
 
         var legacyOut = findings.Single(f => f.GetProperty("story_path_hash").GetString() == "basis_legacy_hash");
         Assert.Equal(1.0, legacyOut.GetProperty("confidence").GetDouble());
-        Assert.StartsWith("path-shape (pre-#3538)", legacyOut.GetProperty("confidence_basis").GetString(), StringComparison.Ordinal);
+        Assert.StartsWith("path-shape (older confidence formula)", legacyOut.GetProperty("confidence_basis").GetString(), StringComparison.Ordinal);
 
         var corroboratedOut = findings.Single(f => f.GetProperty("story_path_hash").GetString() == "basis_corroborated_hash");
         Assert.Equal(0.6, corroboratedOut.GetProperty("confidence").GetDouble());
         var basis = corroboratedOut.GetProperty("confidence_basis").GetString()!;
-        Assert.StartsWith("corroboration (#3538)", basis, StringComparison.Ordinal);
+        Assert.StartsWith("corroboration:", basis, StringComparison.Ordinal);
         Assert.Contains("2-node story path", basis, StringComparison.Ordinal);
 
         var pileupOut = findings.Single(f => f.GetProperty("story_path_hash").GetString() == "basis_pileup_hash");

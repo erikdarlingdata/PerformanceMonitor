@@ -247,7 +247,7 @@ public static class ViewerActualPlanFlow
         if (otherDatabases.Length > 0) prompt.AppendLine(otherDatabases);
         prompt.AppendLine();
         prompt.AppendLine(QueryModificationDetector.BuildConsentQueryText(queryText));
-        prompt.AppendLine("It runs as the service's stored monitoring login, with SET STATISTICS XML ON. All data results are discarded — only the plan is returned.");
+        prompt.AppendLine("It runs as the service's stored monitoring login, with SET STATISTICS XML ON. All data results are discarded. Only the plan is returned.");
         prompt.AppendLine();
         prompt.AppendLine(QueryModificationDetector.CapturedQueryNotice);
 
@@ -282,9 +282,8 @@ public static class ViewerActualPlanFlow
     {
         if (prepared.Lookup == QueryStatsActualPlanLookup.NothingStored)
         {
-            MessageBox.Show(owner,
-                "No stored query text was found for this query, so there is nothing to run. Nothing was run.",
-                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(owner, "No Plan Available",
+                "No stored query text was found for this query, so there is nothing to run. Nothing was run.");
             return;
         }
 
@@ -309,7 +308,7 @@ public static class ViewerActualPlanFlow
     private static void ShowReadOnly(Window owner)
         => MessageBox.Show(owner,
             "Capturing an actual plan asks the service to re-execute the query, which it does by running a " +
-            "command — a read-only viewer seat can't enqueue commands. The command is queued in the MONITORING " +
+            "command: a read-only viewer seat can't enqueue commands. The command is queued in the MONITORING " +
             "STORE, not on the monitored server. Reconnect with a read-write store profile to capture actual " +
             "plans.",
             "Read-Only Viewer", MessageBoxButton.OK, MessageBoxImage.Information);

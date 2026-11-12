@@ -18,6 +18,7 @@ namespace Darling.Tests;
 /// The members the fix adds are reached by name, so this class builds against a tree without them and fails at the lookup
 /// with the member's name.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerWalkthroughLows8115Tests
 {
     private const string ThemeUri = "pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml";
@@ -123,7 +124,7 @@ public sealed class ViewerWalkthroughLows8115Tests
             var grid = (DataGrid)control.FindName(tab == "alerts" ? "AlertsDataGrid" : "JobHistoryDataGrid")!;
             grid.ItemsSource = new List<ServerRow> { new() { ServerName = name }, new() { ServerName = "SHORT" } };
             var window = new Window { Content = control, Width = 1640, Height = 800, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 Settle(window);
@@ -194,7 +195,7 @@ public sealed class ViewerWalkthroughLows8115Tests
         {
             var store = new ViewerAppSettingsStore(Path.Combine(Path.GetTempPath(), "settings-tabs-8115-" + Guid.NewGuid().ToString("N") + ".json"));
             var window = new SettingsWindow(new ViewerPreferences(), store, null) { Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 Settle(window);

@@ -112,7 +112,10 @@ SELECT
 SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2 AND collection_time >= $3";
 
     /// <summary>
-    /// Newest collection time across all collectors for one server. $1 server_id.
+    /// Newest successful collection time across all collectors for one server. $1 server_id. #8464: only a
+    /// <c>SUCCESS</c> row counts (<see cref="CollectionRunSql.SuccessfulCollectorRun"/>). Every attempt writes a row, a failed
+    /// one included, so a read over every row moved <c>last_collection</c> forward on each failed attempt, and a dark server
+    /// read fresh.
     ///
     /// <para><b>#3976: <c>ORDER BY collection_time DESC LIMIT 1</c>, not <c>MAX(collection_time)</c>.</b> Same
     /// answer — <c>ExecuteScalarAsync</c> reads null identically whether MAX found no matching row or LIMIT 1
@@ -125,7 +128,7 @@ SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2 AN
     /// plan built to prove a MAX over the whole retained history cannot do regardless of any WHERE clause.</para>
     /// </summary>
     public const string ServerSummaryLastCollectionSql = $@"
-SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {CollectionCycleRow.NotCycleRowSql} ORDER BY collection_time DESC LIMIT 1";
+SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {CollectionRunSql.SuccessfulCollectorRun} ORDER BY collection_time DESC LIMIT 1";
 
     /// <summary>The span the blocking and deadlock counts cover, ending at the read's clock — Lite's window.
     /// Published by the tool so "recent" has a number.</summary>
@@ -445,8 +448,9 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
     /// <summary>#4232: ONE cache for every store this reader serves — <c>get_daily_summary_range</c> shares it
     /// between the web viewer's <c>/api/read</c> mirror and MCP clients, because both paths call this same
     /// method. Keyed inside <see cref="DailySummaryRangeCache{TRow}"/> by (store, server, range, routed
-    /// statement); <see cref="NpgsqlDataSource"/> has no value-equality override, so distinct stores — including
-    /// a live test's own <c>ScratchPostgres</c> database — never collide on one store's cached block.</summary>
+    /// statement), where the store is <see cref="DailySummaryRangeCache.StoreKeyFor"/>: the host, port and database
+    /// a data source reaches, compared by value. Two pools over one store share a block, and distinct stores
+    /// (including a live test's own <c>ScratchPostgres</c> database) never collide, because they name another database.</summary>
     internal static DailySummaryRangeCache<DailySummaryReadRow> RangeCache { get; private set; } = new();
 
     /// <summary>#4232: test-only reset for <see cref="RangeCache"/>. This cache is by design stale for a closed day -- a row that lands late for
@@ -575,7 +579,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
            statement itself returns spans more than one day, but these post-read judgments do move between
            refreshes, so they are re-applied after the join every time). */
         Task<List<DailySummaryReadRow>> ReadRawAsync(string sql, IReadOnlyList<string>? scope) => RangeCache.GetRangeAsync(
-            storeKey: postgres,
+            storeKey: DailySummaryRangeCache.StoreKeyFor(postgres), // #8451: the store, not this host's pool: the warmer builds through another
             serverId: serverId,
             fromDate: fromDate,
             toDate: toDate,

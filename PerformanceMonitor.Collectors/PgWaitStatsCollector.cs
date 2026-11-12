@@ -170,11 +170,11 @@ FROM aurora_stat_system_waits() AS w(type_id, event_id, waits, wait_time)
 LEFT JOIN aurora_stat_wait_type() AS t(type_id, type_name)
        ON t.type_id = w.type_id
 LEFT JOIN aurora_stat_wait_event() AS e(type_id, event_id, event_name)
-       /* BOTH ids. event_id is unique across types today because Aurora packs the type into its high byte
+       " + /* BOTH ids. event_id is unique across types today because Aurora packs the type into its high byte
           (event_id >> 24 = type_id), so joining on event_id alone happens to be correct — but that is an
           undocumented encoding, the function hands us type_id right there, and adding it costs nothing.
           Without it, a future Aurora that reuses an event_id under a different type would silently produce a
-          row-multiplying join and double every wait figure for the affected events. */
+          row-multiplying join and double every wait figure for the affected events. */ @"
        ON  e.event_id = w.event_id
        AND e.type_id  = w.type_id
 WHERE w.wait_time > 0";

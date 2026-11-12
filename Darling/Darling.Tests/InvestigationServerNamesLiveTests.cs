@@ -133,6 +133,32 @@ VALUES ($1, $2, $3, TRUE, $4, $4)", serverId, host, display, DarlingMcpTestData.
         });
     }
 
+    /// <summary>#8578: an alert's request carries the display name or the host name and an analysis finding's the storage name (host[:database][:RO]).
+    /// Whatever the caller passed, a registered server's request is stored under the registry's display name, so the list names one server one way;
+    /// a server with no registry row keeps the caller's label.</summary>
+    [Fact]
+    public async Task RequestsForOneServer_AreStoredUnderTheRegistrysDisplayName_WhateverNameTheCallerPassed()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            await RegisterAsync(connection, ServerId, InstanceName, OpenedName, ct);
+            var store = new InvestigationRequestStore(dataSource, 30, () => Now.AddMinutes(-10));
+
+            var fromFinding = (await store.OpenOrJoinAsync(
+                Alert() with { ServerName = InstanceName + ":SalesDatabase:RO", Family = "query_performance", MetricName = "Analysis: queries", DedupKeys = [ServerId + ":Analysis"] }, ct)).RequestId!.Value;
+            var fromAlert = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
+            var fromHostAlert = (await store.OpenOrJoinAsync(
+                Alert() with { ServerName = InstanceName, Family = "resources", MetricName = "High CPU", DedupKeys = [ServerId + ":HighCpu"] }, ct)).RequestId!.Value;
+
+            Assert.Equal(3, new[] { fromFinding, fromAlert, fromHostAlert }.Distinct().Count());
+            foreach (var id in new[] { fromFinding, fromAlert, fromHostAlert })
+                Assert.Equal(OpenedName, (string?)(await PayloadAsync(store, id, ct))["server_name"]);
+
+            var gone = (await store.OpenOrJoinAsync(Alert(ServerId + 2, "Gone Server"), ct)).RequestId!.Value;
+            Assert.Equal("Gone Server", (string?)(await PayloadAsync(store, gone, ct))["server_name"]);
+        });
+    }
+
     private static async Task RunAsync(Func<NpgsqlDataSource, NpgsqlConnection, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;

@@ -310,7 +310,7 @@ public sealed class McpPlanAnalysisEnvelopeTests
     [Fact]
     public void TheCaveat_IsTheMaintainersSentenceVerbatim()
     {
-        const string parity = "Missing-index requests are weak evidence: uses are plan-cache-bounded and \"impact\" is one operator's estimated cost. A request corroborates a measured-slow plan; it never drives a finding. Any new index can regress other statements and adds write cost — test it.";
+        const string parity = "Missing-index requests are weak evidence: uses are plan-cache-bounded and \"impact\" is one operator's estimated cost. A request corroborates a measured-slow plan; it never drives a finding. Any new index can regress other statements and adds write cost: test it.";
         Assert.Equal(parity, McpPlanAnalysisFormatter.MissingIndexCaveat);
 
         Assert.Contains("plan-cache-bounded", McpPlanAnalysisFormatter.MissingIndexCaveat, StringComparison.Ordinal);

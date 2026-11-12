@@ -252,25 +252,26 @@ public static class RingBufferLossNote
             var parts = new List<string>();
             if (Evicted > 0)
             {
-                parts.Add(string.Format(inv, "{0:N0} event(s) were evicted from the ring buffer before collection", Evicted));
+                parts.Add(CountText.Plural(Evicted, "event") + (Evicted == 1 ? " was" : " were") + " evicted from the ring buffer before collection");
             }
 
             if (Dropped > 0)
             {
-                parts.Add(string.Format(inv, "{0:N0} event(s) were dropped by the session before they reached its targets", Dropped));
+                parts.Add(CountText.Plural(Dropped, "event") + (Dropped == 1 ? " was dropped by the session before it reached its targets" : " were dropped by the session before they reached its targets"));
             }
 
             if (UnknownRuns > 0)
             {
-                parts.Add(string.Format(inv, "{0:N0} span(s) after a session restart could not be counted", UnknownRuns));
+                parts.Add(CountText.Plural(UnknownRuns, "span") + " after a session restart could not be counted");
             }
 
             /* The times are the collector runs that FOUND the loss; each loss happened in the window before its run. */
             var first = FirstLossUtc.ToString("yyyy-MM-dd HH:mm", inv);
             var last = LastLossUtc.ToString("yyyy-MM-dd HH:mm", inv);
+            /* #8572: its own sentence, so the last count does not read as the thing that was found ("1 span ... could not be counted found by the run"). */
             var found = first == last
-                ? string.Format(inv, " found by the run at {0} UTC", first)
-                : string.Format(inv, " found by the runs between {0} and {1} UTC", first, last);
+                ? string.Format(inv, ". The loss was found by the run at {0} UTC", first)
+                : string.Format(inv, ". The loss was found by the runs between {0} and {1} UTC", first, last);
             var text = string.Join("; ", parts) + found;
             return Describe(NewestNote) is { } latest ? text + ". Latest: " + latest : text;
         }

@@ -131,6 +131,19 @@ public sealed class ChartAxisStartSyntheticLiteTests
     {
         var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "axis-start-test", DisplayName = "axis-start-test", IsEnabled = true };
         var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
+        try
+        {
+            return DrawAndRead(tab, which, firstPoint);
+        }
+        finally
+        {
+            /* The tab is never shown, so no window's Closed stops its auto-refresh timer (#8367); stop it here. */
+            tab.StopRefresh();
+        }
+    }
+
+    private static double DrawAndRead(ServerTab tab, TabChart which, DateTime? firstPoint)
+    {
         tab.ServerDataStartUtc = DateTime.UtcNow.AddHours(-3);
         var times = firstPoint is DateTime t
             ? Enumerable.Range(0, 20).Select(i => t.AddMinutes(i * 5)).ToList()

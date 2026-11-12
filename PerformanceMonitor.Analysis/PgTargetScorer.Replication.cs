@@ -451,21 +451,21 @@ public static partial class PgTargetScorer
     [
         new()
         {
-            Description = "PG_SLOT_RETENTION co-fired — the primary is retaining the WAL this standby has not replayed; the lag is also a disk-fill path",
+            Description = "PG_SLOT_RETENTION co-fired: the primary is retaining the WAL this standby has not replayed; the lag is also a disk-fill path",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.SlotRetention, out var f) && f.BaseSeverity > 0,
         },
         new()
         {
-            Description = "ANOMALY_PG_REPLICATION_LAG co-fired — against this server's own hour-of-week baseline the lag is anomalous, not this standby's routine distance",
+            Description = "ANOMALY_PG_REPLICATION_LAG co-fired, against this server's own hour-of-week baseline the lag is anomalous, not this standby's routine distance",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AnomalyReplicationLag, out var f) && f.BaseSeverity > 0,
         },
         new()
         {
-            Description = "The standby is SYNCHRONOUS (sync_state sync or quorum) — its lag is commit latency on the primary, not only staleness on the replica",
+            Description = "The standby is SYNCHRONOUS (sync_state sync or quorum): its lag is commit latency on the primary, not only staleness on the replica",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.3,
             /* #4759: a standby that already left holds no commit back, so its old sync_state adds nothing. */
@@ -475,7 +475,7 @@ public static partial class PgTargetScorer
         },
         new()
         {
-            Description = "ANOMALY_PG_WAL_VOLUME co-fired — the primary is writing more WAL than its own hour-of-week baseline; the standby is being offered more than it can apply",
+            Description = "ANOMALY_PG_WAL_VOLUME co-fired: the primary is writing more WAL than its own hour-of-week baseline; the standby is being offered more than it can apply",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AnomalyWalVolume, out var f) && f.BaseSeverity > 0,
@@ -486,21 +486,21 @@ public static partial class PgTargetScorer
     [
         new()
         {
-            Description = "PG_SLOT_XMIN co-fired — a slot is pinning the xmin horizon as well as the disk: the two independent ways an abandoned slot takes a server down, both present",
+            Description = "PG_SLOT_XMIN co-fired, a slot is pinning the xmin horizon as well as the disk: the two independent ways an abandoned slot takes a server down, both present",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.SlotXmin, out var f) && f.BaseSeverity > 0,
         },
         new()
         {
-            Description = "PG_REPLICATION_LAG co-fired — a connected standby is behind too; the retained WAL has a consumer that is not keeping up rather than none at all",
+            Description = "PG_REPLICATION_LAG co-fired: a connected standby is behind too; the retained WAL has a consumer that is not keeping up rather than none at all",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.ReplicationLag, out var f) && f.BaseSeverity > 0,
         },
         new()
         {
-            Description = "ANOMALY_PG_WAL_VOLUME co-fired — the primary is writing more WAL than its own hour-of-week baseline, so the pile behind this slot grows faster than its history says",
+            Description = "ANOMALY_PG_WAL_VOLUME co-fired: the primary is writing more WAL than its own hour-of-week baseline, so the pile behind this slot grows faster than its history says",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AnomalyWalVolume, out var f) && f.BaseSeverity > 0,
@@ -511,7 +511,7 @@ public static partial class PgTargetScorer
     [
         new()
         {
-            Description = "PG_XMIN_HOLD co-fired with a replication-slot holder — the vacuum family's own read attributes the cluster's horizon to a slot",
+            Description = "PG_XMIN_HOLD co-fired with a replication-slot holder: the vacuum family's own read attributes the cluster's horizon to a slot",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.XminHold, out var f) && f.BaseSeverity > 0
@@ -519,14 +519,14 @@ public static partial class PgTargetScorer
         },
         new()
         {
-            Description = "PG_AUTOVACUUM_BACKLOG co-fired — tables are past their trigger line and staying there: dead tuples newer than the slot's horizon cannot be removed",
+            Description = "PG_AUTOVACUUM_BACKLOG co-fired, tables are past their trigger line and staying there: dead tuples newer than the slot's horizon cannot be removed",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AutovacuumBacklog, out var f) && f.BaseSeverity > 0,
         },
         new()
         {
-            Description = "PG_WRAPAROUND_TREND co-fired — the held horizon is already showing as a freeze age autovacuum cannot bring down",
+            Description = "PG_WRAPAROUND_TREND co-fired: the held horizon is already showing as a freeze age autovacuum cannot bring down",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.5,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.WraparoundTrend, out var f) && f.BaseSeverity > 0,

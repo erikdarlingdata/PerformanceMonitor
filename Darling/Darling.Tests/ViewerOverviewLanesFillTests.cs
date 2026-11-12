@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// carries X labels and gets room for them, each lane's caption sits in the lane's top left (no left gutter), and the lanes' plot
 /// rectangles still line up.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerOverviewLanesFillTests
 {
     private readonly ITestOutputHelper _output;
@@ -84,7 +85,7 @@ public sealed class ViewerOverviewLanesFillTests
                 var control = new CorrelatedTimelineLanesControl();
                 control.Initialize(null!, 1);
                 var window = new Window { Content = control, Width = width, Height = height, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var to = DateTime.UtcNow;

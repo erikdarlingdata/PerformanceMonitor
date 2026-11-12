@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
@@ -157,5 +158,84 @@ public sealed class AlertNotebookRenderBehaviourTests
 
         Assert.Empty(Strings(r, "errors"));
         Assert.Contains(Strings(r, "notices"), n => n.Contains("dismissed", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>#8555: a report row declares no notebook. The page draws only the caller's notes: no "Alert notebook" header, no
+    /// Open live button and no "no cells yet" line, which had nothing to act on and read as a broken notebook.</summary>
+    [Fact]
+    public void AReportRow_DrawsNoNotebookChrome()
+    {
+        if (!TryRun("noNotebook", out var r)) return;
+
+        Assert.Empty(Strings(r, "heads"));
+        Assert.Empty(Strings(r, "buttons"));
+        Assert.Empty(Strings(r, "empties"));
+        Assert.Empty(Strings(r, "errors"));
+    }
+
+    /// <summary>The counterpart of the report row: an ordinary alert whose notebook has no cells keeps its header, its button and its line.</summary>
+    [Fact]
+    public void AnOrdinaryAlertWithNoCells_KeepsTheNotebookHeaderAndTheEmptyLine()
+    {
+        if (!TryRun("emptyNotebook", out var r)) return;
+
+        Assert.Equal(new[] { "Alert notebook" }, Strings(r, "heads"));
+        Assert.Contains("Open live", Strings(r, "buttons"));
+        Assert.Equal(new[] { "This notebook has no cells yet." }, Strings(r, "empties"));
+    }
+
+    /// <summary>The header card's labelled fields, label to value.</summary>
+    private static Dictionary<string, string?> Fields(JsonElement node) =>
+        node.GetProperty("fields").EnumerateArray().ToDictionary(f => f[0].GetString()!, f => f[1].GetString());
+
+    /// <summary>A resolution row has no measured value or threshold: the row's state_only says its stored zeros are not readings,
+    /// and Alert History shows a dash for each. The header leaves the value-vs-threshold line out rather than print 0 against 0.</summary>
+    [Fact]
+    public void AResolutionRow_HasNoValueVsThresholdLine()
+    {
+        if (!TryRun("resolution", out var r)) return;
+
+        Assert.Empty(Strings(r, "errors"));
+        var fields = Fields(r);
+        Assert.Equal("Client Timeouts Cleared", fields["Metric"]);
+        Assert.DoesNotContain("Value vs threshold", fields.Keys);
+    }
+
+    /// <summary>A state-only row with a real number on one side keeps that number and shows the dash for the stored zero, the per-side
+    /// rule Alert History applies.</summary>
+    [Fact]
+    public void AStateOnlyRow_WithARealReading_ShowsIt_AndADashForTheStoredZero()
+    {
+        if (!TryRun("stateMeasured", out var r)) return;
+
+        Assert.Empty(Strings(r, "errors"));
+        Assert.Equal("current 3 vs threshold —", Fields(r)["Value vs threshold"]);
+    }
+
+    /// <summary>A measured row keeps both numbers, and a measured reading that really is 0 is still a number: only a state-only row's
+    /// stored zero is a dash.</summary>
+    [Fact]
+    public void AMeasuredRow_ShowsBothNumbers_EvenWhenTheReadingIsZero()
+    {
+        if (!TryRun("measured", out var measured)) return;
+        Assert.Equal("current 90 vs threshold 80", Fields(measured)["Value vs threshold"]);
+
+        TryRun("measuredZero", out var zero);
+        Assert.Equal("current 0 vs threshold 0", Fields(zero)["Value vs threshold"]);
+    }
+
+    /// <summary>The notebook's own Alert History table cell shows a resolution row's stored zeros as the dash too: the read's table
+    /// (resolved from the shipped read catalog) carries the state-zero dash rule on its Value and Threshold columns and on no other.</summary>
+    [Fact]
+    public void TheAlertHistoryTableCell_CarriesTheStateZeroDashRule_OnItsValueColumns()
+    {
+        if (!TryRun("historyTable", out var r)) return;
+
+        Assert.Empty(Strings(r, "errors"));
+        var read = r.GetProperty("reads").EnumerateArray().Single(x => x.GetProperty("read").GetString() == "get_alert_history");
+        Assert.Equal(8, read.GetProperty("columns").GetInt32());
+        Assert.Equal(
+            new[] { "current_value", "threshold_value" },
+            read.GetProperty("stateZeroDash").EnumerateArray().Select(e => e.GetString()).ToArray());
     }
 }

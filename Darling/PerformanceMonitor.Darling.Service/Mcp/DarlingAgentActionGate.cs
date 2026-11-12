@@ -62,7 +62,7 @@ internal static class DarlingAgentActionGate
             return AgentActionGateOutcome.Ungated;
         if (!policy.Investigations)
             return AgentActionGateOutcome.Refused(new AgentActionRefusal(NotServed,
-                $"{tool} is not available on this service. An operator must set mcp.allowWrites (or mcp.allowInvestigations with mcp.allowWrites off) in darling.json, set an MCP token, and restart the service. Do not retry."));
+                $"{tool} is not available on this service. An operator must use a named operator or agent token, or set mcp.allowWrites (or mcp.allowInvestigations with mcp.allowWrites off) in darling.json and an MCP token, and restart the service. Do not retry."));
 
         var problem = InvestigationToolCore.ParseAgentAction(agentAction, out var action);
         if (problem is not null)
@@ -83,7 +83,7 @@ internal static class DarlingAgentActionGate
         }
 
         /* The legacy token's agent_id is free text. One that is a served named agent's name would put the change in that agent's journal, and
-           one that is a reserved placeholder (invalid, unclaimed) would make its rows read as a refusal's, so it is refused and journaled
+           one that is a reserved placeholder (invalid, unclaimed, legacy-token) would make its rows read as a refusal's, so it is refused and journaled
            under no agent's name. */
         if (policy.AgentTokenName is null && IsRefusedLegacyAgentId(namedAgentNames, action!.AgentId))
         {

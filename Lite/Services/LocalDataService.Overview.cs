@@ -179,7 +179,13 @@ WHERE server_id = $1 AND deadlock_time >= $2";
 
         /* Last collection time from collection_log — hot table first (#3895). A miss on both leaves the CPU
            row's collection_time (UTC) above in place. #5643: the loop's skipped-slots row is not a
-           collection, so it cannot make a stalled server read fresh. */
+           collection, so it cannot make a stalled server read fresh. #8304: only a SUCCESS row is a collection
+           that reached the server. Every attempt writes a row, ERROR and PERMISSIONS included, so a server Lite
+           cannot reach writes one per collector per cycle, and a read over every row moved this stamp, and the
+           freshness band under it, forward on each failed attempt. The filter is the one
+           GetLastSuccessfulCollectionAsync applies for the server list, so the card and the list agree; both read
+           CollectionRunSql.SuccessfulCollectorRun, the fragment Darling's card, sidebar dot, list_servers and
+           get_server_summary read too (#8464). */
         foreach (var relation in NewestFirstRelations("collection_log"))
         {
             using var cmd = connection.CreateCommand();
@@ -187,7 +193,7 @@ WHERE server_id = $1 AND deadlock_time >= $2";
 SELECT MAX(collection_time)
 FROM " + relation + $@"
 WHERE server_id = $1
-AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
+AND   {CollectionRunSql.SuccessfulCollectorRun}";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             var result = await cmd.ExecuteScalarAsync();
             if (result != null && result != DBNull.Value)
@@ -196,6 +202,10 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
                 break;
             }
         }
+
+        /* #8464: the second fact the band needs when there is no successful collection: whether any collector has run against the
+           server at all. One with failed rows and no SUCCESS row is Offline; one with no row is awaiting its first collection. */
+        var attempted = lastCollection.HasValue || await HasAnyCollectorRowAsync(connection, serverId);
 
         var summary = new ServerSummaryItem
         {
@@ -220,7 +230,7 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
            rather than read inside the band, so the classification stays a pure function of
            (last collection, now) — the shape the viewer's ApplyFreshness already has. The registration rides
            in with the caller for #3967, so every caller's card bands a dark-past-retention server alike. */
-        summary.ApplyCollectionFreshness(DateTime.UtcNow, registeredAtUtc);
+        summary.ApplyCollectionFreshness(DateTime.UtcNow, registeredAtUtc, attempted);
         return summary;
     }
 
@@ -278,8 +288,8 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
     /// <summary>
     /// #7167: when this server's newest SUCCESSFUL collector run landed (<c>collection_log.status = 'SUCCESS'</c>, the status Collection
     /// Health counts as a run that reached the server), or null when the store holds none. A server Lite cannot reach logs ERROR,
-    /// PERMISSIONS or SKIPPED rows every cycle, which keep the plain newest-row read of <see cref="GetServerSummaryAsync"/> fresh while
-    /// nothing is being read, so this read leaves them out. The loop's skipped-slots row is not a collector run (#5643).
+    /// PERMISSIONS, SKIPPED or CANCELLED rows every cycle while nothing is being read, so this read leaves them out, as the card's
+    /// Last Collect read in <see cref="GetServerSummaryAsync"/> does (#8304). The loop's skipped-slots row is not a collector run (#5643).
     /// </summary>
     public async Task<DateTime?> GetLastSuccessfulCollectionAsync(int serverId)
     {
@@ -291,8 +301,7 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
 SELECT MAX(collection_time)
 FROM " + relation + $@"
 WHERE server_id = $1
-AND   status = 'SUCCESS'
-AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
+AND   {CollectionRunSql.SuccessfulCollectorRun}";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             var result = await cmd.ExecuteScalarAsync();
             if (result != null && result != DBNull.Value)
@@ -302,6 +311,42 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// #8464: whether any collector has run against the server, a failed attempt included: the fact that, beside a null
+    /// <see cref="GetLastSuccessfulCollectionAsync"/>, tells a server the collectors reach and are refused by (Offline) from one no
+    /// collector has reached yet (awaiting its first collection). The loop's skipped-slots row is not a collector run and does not count.
+    /// Reads the live table first and then the archive, and stops at the first row found.
+    /// </summary>
+    public async Task<bool> HasAnyCollectorRowAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        return await HasAnyCollectorRowAsync(connection, serverId);
+    }
+
+    /// <summary>The probe over a connection the caller already holds, so a reader that has the store's read lock in hand (the Overview
+    /// card's summary) never asks for a second one.</summary>
+    private static async Task<bool> HasAnyCollectorRowAsync(LockedConnection connection, int serverId)
+    {
+        foreach (var relation in NewestFirstRelations("collection_log"))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+SELECT 1
+FROM " + relation + $@"
+WHERE server_id = $1
+AND   collector_name <> '{CollectionCycleSkip.CollectorName}'
+LIMIT 1";
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+            var result = await cmd.ExecuteScalarAsync();
+            if (result != null && result != DBNull.Value)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
 
@@ -352,7 +397,7 @@ public sealed class ServerTagPill
 /// The Overview card's status-line state, as a VALUE rather than a rendered string. The word on the card
 /// (<see cref="ServerSummaryItem.StatusDisplay"/>), the colour it is painted
 /// (<see cref="ServerSummaryItem.StatusBrush"/>), the card's border
-/// (<see cref="ServerSummaryItem.CardBorderBrush"/>), the offline overlay
+/// (<see cref="ServerSummaryItem.CardBorderBrush"/>), the "--" the Blocking and Deadlocks rows read on a dark server
 /// (<see cref="ServerSummaryItem.IsOffline"/>) and the first line of its tooltip
 /// (<see cref="ServerSummaryItem.StatusTooltip"/>) are all renderings OF THIS — the
 /// (<c>IsOnline</c>, <c>HasCollectorErrors</c>) pair is read by <see cref="ServerCardStatusRules.Classify"/>
@@ -385,17 +430,18 @@ public enum ServerCardStatus
     /// Nothing to do with the metric rows, which is the whole reason it needs explaining.</summary>
     CollectorErrors,
 
-    /// <summary>The last connection check failed — the card's red offline overlay.</summary>
+    /// <summary>The last connection check failed — the card's red border and Offline word, with "--" on its Blocking and Deadlocks rows.</summary>
     Offline,
 
     /// <summary>The server has not been connection-checked yet (<c>IsOnline</c> is null): a card built before
-    /// the first check completed, not a dead server.</summary>
+    /// the first check completed, not a dead server. Its word is "Connecting": the collectors run before the first check
+    /// finishes, so the card's rows are already green while this state lasts, and a verdict word would contradict them.</summary>
     Unknown,
 }
 
 /// <summary>
 /// The ladder itself, in ONE function, plus the two renderings every surface shares. #2451 collapsed the
-/// Overview card's word, colour, border, overlay and tooltip onto <see cref="ServerCardStatus"/>; #2458 found
+/// Overview card's word, colour, border, greyed rows and tooltip onto <see cref="ServerCardStatus"/>; #2458 found
 /// the sidebar row's dot (<c>ServerConnection.DotStatus</c>) deriving the same four words from its own copy of
 /// the same flag pair, on a different type, on a different surface — so the sidebar and the card could say
 /// different things about one server and nothing would notice. They now read this.
@@ -429,7 +475,7 @@ public static class ServerCardStatusRules
         ServerCardStatus.CollectorErrors => "Warning",
         ServerCardStatus.Online => "Online",
         ServerCardStatus.Offline => "Offline",
-        _ => "Unknown"
+        _ => "Connecting"
     };
 
     /// <summary>What the word means, in words — the first line of whichever tooltip renders it. Every arm names
@@ -437,10 +483,10 @@ public static class ServerCardStatusRules
     /// word and a colour left the reader guessing which axis they were about.</summary>
     public static string Headline(this ServerCardStatus status) => status switch
     {
-        ServerCardStatus.CollectorErrors => "Warning — one or more collectors are failing on this server",
-        ServerCardStatus.Online => "Online — the last connection check succeeded",
-        ServerCardStatus.Offline => "Offline — the last connection check failed",
-        _ => "Unknown — this server has not been connection-checked yet",
+        ServerCardStatus.CollectorErrors => "Warning: one or more collectors are failing on this server",
+        ServerCardStatus.Online => "Online: the last connection check succeeded",
+        ServerCardStatus.Offline => "Offline: the last connection check failed",
+        _ => "Connecting: the first connection check has not finished yet",
     };
 }
 
@@ -573,20 +619,42 @@ public class ServerSummaryItem
     {
         get
         {
-            if (CpuIsStale || !CpuPercent.HasValue) return "--";
-            /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so there is no total to show. The
-               figure is the SQL Server's own, and says so. */
-            if (!OtherProcessCpuPercent.HasValue) return $"SQL CPU {CpuPercent:F0}%";
-            return $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
+            if (IsOffline || CpuIsStale || !CpuPercent.HasValue) return "--";
+            return CpuFigure;
         }
     }
+
+    /// <summary>The CPU reading in the headline's words, with no gate on it: "64% (SQL 60%)", or "SQL CPU 60%" when the host
+    /// total is unknown (#7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so the figure is the SQL Server's own
+    /// and says so). <see cref="CpuDisplay"/> shows it only for a reading the card can stand behind; <see cref="StatusReason"/>
+    /// quotes it for an offline card too, because the reason is the card's own account of the numbers it holds and the tooltip
+    /// decides whether to show them (#8465).</summary>
+    private string CpuFigure =>
+        !OtherProcessCpuPercent.HasValue ? $"SQL CPU {CpuPercent:F0}%" : $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
     /// <summary>#8162: the CPU row's detail column, the host's other-process share ("Other: 5%"). Empty when the CPU figure is not shown
-    /// (stale, or never measured) or the server cannot report the other-process figure (#7682).</summary>
+    /// (stale, or never measured) or the server cannot report the other-process figure (#7682). #8465: an offline card's row says
+    /// when the server was last collected instead (<see cref="StaleDetail"/>), the Darling card's rule.</summary>
     public string CpuDetail =>
-        CpuIsStale || !CpuPercent.HasValue || !OtherProcessCpuPercent.HasValue ? "" : $"Other: {OtherProcessCpuPercent:F0}%";
-    public string MemoryDisplay => MemoryMb.HasValue ? $"{MemoryMb / 1024.0:F1} GB" : "--";
-    public string BlockingDisplay => BlockingCount > 0 ? BlockingCount.ToString() : "0";
-    public string DeadlockDisplay => DeadlockCount > 0 ? DeadlockCount.ToString() : "0";
+        IsOffline ? StaleDetail
+        : CpuIsStale || !CpuPercent.HasValue || !OtherProcessCpuPercent.HasValue ? "" : $"Other: {OtherProcessCpuPercent:F0}%";
+
+    /* #8465: an offline card shows no measurement at all. Its memory figure is from before the server went dark, and a calm
+       "32.0 GB" under a red Offline reads as live health, so Memory reads "--" as CPU, Blocking and Deadlocks do: the Darling
+       card's rule. The figure stays on the item, because the alert engine reads it. */
+    public string MemoryDisplay => MemoryMb.HasValue && !IsOffline ? $"{MemoryMb / 1024.0:F1} GB" : "--";
+
+    /// <summary>#8465: the detail an offline card's CPU row carries in place of a reading, in the Darling card's words: when the
+    /// server was last collected ("last collected 3d ago", <see cref="MinutesAgoText"/>), or "no recent collection" when nothing
+    /// was. A server whose newest collection is past the offline mark has no current value, only the last one collected.</summary>
+    public string StaleDetail =>
+        LastCollectionTime.HasValue
+            ? "last collected " + MinutesAgoText.Format(Math.Max(0, (int)(DateTime.UtcNow - LastCollectionTime.Value).TotalMinutes))
+            : "no recent collection";
+    /* #8304: an offline card has no hour counts to show. Its stored counts are from before the server went dark, and a green
+       "0" under a red Offline reads as a healthy server, so Blocking and Deadlocks read "--" in the card's unknown grey, as
+       CPU does for a reading it cannot show. The counts themselves stay on the item: the alert engine reads them. */
+    public string BlockingDisplay => IsOffline ? "--" : BlockingCount > 0 ? BlockingCount.ToString() : "0";
+    public string DeadlockDisplay => IsOffline ? "--" : DeadlockCount > 0 ? DeadlockCount.ToString() : "0";
 
     /// <summary>
     /// How old the newest collection_log row for this server is, banded by the SHARED
@@ -614,16 +682,23 @@ public class ServerSummaryItem
     /// comes back null. Added before that instant, it bands Offline; added after it, or with no registration,
     /// it keeps the ladder's never-collected reading. The same rule the Darling viewer and fleet card apply.</para>
     /// </summary>
-    public void ApplyCollectionFreshness(DateTime nowUtc, DateTime? registeredAtUtc) =>
-        CollectionFreshness = ServerHealthClassifier.ClassifyFreshness(
-            LastCollectionTime, registeredAtUtc, RetentionService.OldestRetainedInstant(nowUtc), nowUtc);
+    public void ApplyCollectionFreshness(DateTime nowUtc, DateTime? registeredAtUtc, bool attempted = false)
+    {
+        var oldestRetained = RetentionService.OldestRetainedInstant(nowUtc);
+        CollectionFreshness = ServerHealthClassifier.ClassifyFreshness(LastCollectionTime, registeredAtUtc, oldestRetained, nowUtc, attempted);
+        HistoryAgedOut = registeredAtUtc is { } registered && registered < oldestRetained;
+    }
+
+    /// <summary>#3967, #8464: the server was added before the archive's oldest retained instant, so with no collection to show it
+    /// collected before everything the archive keeps. Words the empty Last Collect; the band is a separate question.</summary>
+    public bool HistoryAgedOut { get; private set; }
 
     /// <summary>
     /// The clock of the server this card is for, stamped by the overview refresh: the server's own collected clock,
     /// else its open tab's, else the machine's (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>),
     /// the chain Alert History and Job History use. <see cref="LastCollectionDisplay"/> converts on it in Server
     /// mode, so the card reads the same wall clock as that server's alert and job rows. Null on a hand-built item,
-    /// which then takes the active server's clock.
+    /// which then takes the machine's clock (#8645), never the active server tab's.
     /// </summary>
     public ServerClock? Clock { get; set; }
 
@@ -631,13 +706,17 @@ public class ServerSummaryItem
     /// The Last Collect time as the card words it: <paramref name="lastCollectionUtc"/> (naive UTC) in the selected
     /// "Show timestamps in" mode on <paramref name="clock"/> (the same zone choice as the Alert History and Job History
     /// rows), as "HH:mm:ss" when that wall time falls on today's date in the same zone, and with its date
-    /// ("yyyy-MM-dd HH:mm:ss") otherwise, so a collection from nine days ago does not read as one from this morning.
+    /// ("yyyy-MM-dd HH:mm:ss") otherwise, so a collection from nine days ago does not read as one from this morning. In Server
+    /// Time each card is on its own server's clock, so the text ends with that clock's offset, "12:30:15 (UTC-08:00)"
+    /// (<see cref="ServerTimeHelper.WithServerZoneLabel"/>).
     /// </summary>
     internal static string FormatLastCollect(DateTime lastCollectionUtc, TimeDisplayMode mode, ServerClock? clock, DateTime nowUtc)
     {
-        var zone = ServerTimeHelper.DisplayZoneFor(mode, clock ?? ServerTimeHelper.ActiveServerClock);
+        var onClock = clock ?? ServerTimeHelper.ClockForServer(null, null); /* #8645: never the last-opened server tab's clock */
+        var zone = ServerTimeHelper.DisplayZoneFor(mode, onClock);
         var isToday = DisplayZone.ToDisplay(lastCollectionUtc, zone).Date == DisplayZone.ToDisplay(nowUtc, zone).Date;
-        return ServerTimeHelper.FormatInstant(lastCollectionUtc, zone, isToday ? "HH:mm:ss" : "yyyy-MM-dd HH:mm:ss");
+        var text = ServerTimeHelper.FormatInstant(lastCollectionUtc, zone, isToday ? "HH:mm:ss" : "yyyy-MM-dd HH:mm:ss");
+        return ServerTimeHelper.WithServerZoneLabel(text, mode, onClock, lastCollectionUtc);
     }
 
     /// <summary>
@@ -650,10 +729,10 @@ public class ServerSummaryItem
     {
         get
         {
-            /* #3967: with nothing to show, "Never" only for a server that has never collected. One banded
-               Offline with nothing to show collected once, and none of it is still archived. */
+            /* #3967, #8464: with nothing to show, "None retained" only for a server added before the archive's oldest retained
+               instant: it collected before everything the archive keeps. Every other such card reads "Never", whatever its band. */
             if (!LastCollectionTime.HasValue)
-                return CollectionFreshness == ServerFreshness.Offline ? "None retained (stopped)" : "Never";
+                return HistoryAgedOut ? "None retained (stopped)" : "Never";
 
             var stamp = FormatLastCollect(LastCollectionTime.Value, ServerTimeHelper.CurrentDisplayMode, Clock, DateTime.UtcNow);
             return CollectionFreshness switch
@@ -696,13 +775,13 @@ public class ServerSummaryItem
     public string? CollectionFreshnessTooltip => CollectionFreshness switch
     {
         ServerFreshness.Fresh =>
-            $"Collection is current — something landed within the last {Minutes(ServerHealthThresholds.StaleThreshold)}.",
+            $"Collection is current: something landed within the last {Minutes(ServerHealthThresholds.StaleThreshold)}.",
         ServerFreshness.Stale =>
-            $"Collection is stale — nothing has landed for over {Minutes(ServerHealthThresholds.StaleThreshold)}.\n" +
+            $"Collection is stale: nothing has landed for over {Minutes(ServerHealthThresholds.StaleThreshold)}.\n" +
             "This is about collection stopping, not about the server's metrics: the connection check can " +
             "still be passing and no collector reporting an error.",
         ServerFreshness.Offline =>
-            $"Collection has stopped — nothing has landed for over {Minutes(ServerHealthThresholds.OfflineThreshold)}.\n" +
+            $"Collection has stopped: nothing has landed for over {Minutes(ServerHealthThresholds.OfflineThreshold)}.\n" +
             "This is about collection stopping, not about the server's metrics: the connection check can " +
             "still be passing and no collector reporting an error.",
         ServerFreshness.NeverCollected =>
@@ -759,10 +838,15 @@ public class ServerSummaryItem
         CollectionFreshness is ServerFreshness.Stale or ServerFreshness.Offline or ServerFreshness.NeverCollected;
 
     /* Color coding. A CPU row with no shown figure (stale, #7196, or never measured) is the card's unknown grey, the one
-       StatusBrush's fallback uses, never the Healthy green (#3635): Darling bands the same case Unknown. */
-    public SolidColorBrush CpuBrush => MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : ShownCpuPercentForAlert is null ? "#888888" : "#81C784");
-    public SolidColorBrush BlockingBrush => MakeBrush(BlockingIsElevated ? "#FFB74D" : "#81C784");
-    public SolidColorBrush DeadlockBrush => MakeBrush(DeadlocksAreElevated ? "#E57373" : "#81C784");
+       StatusBrush's fallback uses, never the Healthy green (#3635): Darling bands the same case Unknown. #8465: an offline card's
+       CPU row reads "--" too, and takes the same grey whatever its last reading was, as Blocking and Deadlocks do. The reading
+       stays inside CpuFreshnessBound for at least fifteen minutes after a server goes dark, so without this arm the "--" and its
+       dot were painted in the colour of a figure the card no longer shows. */
+    public SolidColorBrush CpuBrush => IsOffline ? MakeBrush("#888888") : MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : ShownCpuPercentForAlert is null ? "#888888" : "#81C784");
+    /* #8304: on a dark server the Blocking and Deadlocks rows read "--", so their dots take the same unknown grey as a CPU row
+       with no shown figure; the gates below are read only for a reachable server, by the brush and the reason alike. */
+    public SolidColorBrush BlockingBrush => IsOffline ? MakeBrush("#888888") : MakeBrush(BlockingIsElevated ? "#FFB74D" : "#81C784");
+    public SolidColorBrush DeadlockBrush => IsOffline ? MakeBrush("#888888") : MakeBrush(DeadlocksAreElevated ? "#E57373" : "#81C784");
     /* The border ranks the same states the status word names, so it reads the SAME discriminant rather than
        the flags behind it — see ServerCardStatus for the pair the raw reads disagreed on. The precedence is
        unchanged: a dark server first, then the metric rows worst-first, then failing collectors. */
@@ -857,18 +941,24 @@ public class ServerSummaryItem
 
             if (CpuIsElevated)
             {
-                /* #7682: "SQL CPU 12%" already names the metric, so it takes no second "CPU" in front. */
-                parts.Add(CpuDisplay.StartsWith("SQL CPU", StringComparison.Ordinal) ? CpuDisplay : "CPU " + CpuDisplay);
+                /* #7682: "SQL CPU 12%" already names the metric, so it takes no second "CPU" in front. #8465: the figure itself,
+                   not CpuDisplay, which reads "--" on an offline card: the reason keeps the pre-blackout number and the tooltip
+                   leaves it out. */
+                parts.Add(CpuFigure.StartsWith("SQL CPU", StringComparison.Ordinal) ? CpuFigure : "CPU " + CpuFigure);
             }
 
-            if (BlockingIsElevated)
+            /* #8304: a dark server's Blocking and Deadlocks rows read "--", so the reason names neither; it quotes the rows as they read. */
+            if (!IsOffline)
             {
-                parts.Add("Blocking " + BlockingDisplay);
-            }
+                if (BlockingIsElevated)
+                {
+                    parts.Add("Blocking " + BlockingDisplay);
+                }
 
-            if (DeadlocksAreElevated)
-            {
-                parts.Add("Deadlocks " + DeadlockDisplay);
+                if (DeadlocksAreElevated)
+                {
+                    parts.Add("Deadlocks " + DeadlockDisplay);
+                }
             }
 
             return string.Join(", ", parts);
@@ -879,8 +969,8 @@ public class ServerSummaryItem
     /// The Overview card's status tooltip (#2437, answering #2422 on Lite's surface): what the status word
     /// means, what the metric rows say, and what to do next.
     ///
-    /// <para>The metric line is omitted on an Offline card. The card draws a dimming overlay across those rows
-    /// precisely because the numbers under it are the last ones collected before the server went dark, so
+    /// <para>The metric line is omitted on an Offline card. Its Blocking and Deadlocks rows read "--" (#8304)
+    /// precisely because the numbers behind them are the last ones collected before the server went dark, so
     /// demanding attention for them would contradict the card while the reader is looking at it.</para>
     /// </summary>
     public string StatusTooltip

@@ -150,21 +150,21 @@ public sealed class PgPlanCaptureReadinessCollector : PostgresCollectorDefinitio
        is how a collector starts failing on one major version and not another. */
     private const string QueryText = @"
 WITH settings AS (
-    /* Every GUC this collector judges, read ONCE. Facets consume these columns and never call
+    " + /* Every GUC this collector judges, read ONCE. Facets consume these columns and never call
        current_setting themselves - which is the structural point, not tidiness: the shipped bug was one
        fact (is auto_explain loaded) derived in five separate places, where the fifth simply forgot to
-       derive it and asserted the opposite of the other four. */
+       derive it and asserted the opposite of the other four. */ @"
     SELECT
         current_setting('shared_preload_libraries', true)                        AS preload,
         current_setting('auto_explain.log_min_duration', true)                   AS threshold,
         current_setting('auto_explain.log_format', true)                         AS log_format,
         current_setting('log_line_prefix', true)                                 AS line_prefix,
-        /* #7292: where the server writes its log. A target whose log_destination lists csvlog is read through its
+        " + /* #7292: where the server writes its log. A target whose log_destination lists csvlog is read through its
            csvlog file, and a jsonlog-only target through its jsonlog file, and those readers take the pid and the
-           query id from columns of their own, never from log_line_prefix. server_version_num decides whether the csv record has a query_id column at all. */
+           query id from columns of their own, never from log_line_prefix. server_version_num decides whether the csv record has a query_id column at all. */ @"
         current_setting('log_destination', true)                                 AS log_dest,
         current_setting('server_version_num', true)                              AS version_num,
-        /* current_setting rather than a pg_settings subquery, matching the four above. lc_messages is
+        " + /* current_setting rather than a pg_settings subquery, matching the four above. lc_messages is
            PGC_SUPERUSER by context - a superuser can SET it - but it carries no GUC_SUPERUSER_ONLY flag, so
            any role may read it. The decisive evidence is next door rather than in the docs: this collector
            already reads shared_preload_libraries this way and #2564/#2605 measured that against a live
@@ -178,7 +178,7 @@ WITH settings AS (
            global de_DE with an override putting the MONITORING role at C: the facet would then read
            satisfied about a server whose backends translate. Distinguishing it means reading
            pg_settings.source rather than the resolved value, which is a refinement and not this change;
-           naming the limit is what stops the row being over-read in the meantime. */
+           naming the limit is what stops the row being over-read in the meantime. */ @"
         current_setting('lc_messages', true)                                     AS message_locale
 ),
 probe AS (
@@ -188,13 +188,13 @@ probe AS (
         s.log_format,
         s.line_prefix,
         s.message_locale,
-        /* BOUNDARY-AWARE, not a substring. shared_preload_libraries is a comma-separated list, and a plain
+        " + /* BOUNDARY-AWARE, not a substring. shared_preload_libraries is a comma-separated list, and a plain
            substring test reports true for any library whose name merely CONTAINS this one (measured: both
-           my_auto_explain_shim and auto_explain_extra false-positive that way). */
+           my_auto_explain_shim and auto_explain_extra false-positive that way). */ @"
         coalesce(s.preload, '') ~ '(^|,)\s*auto_explain\s*(,|$)'                 AS loaded,
         EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain') AS catalogued,
         (SELECT max(default_version) FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain') AS catalog_version,
-        /* DERIVED ONCE, for the reason library_loaded is: the shipped #2605 bug was one fact derived in
+        " + /* DERIVED ONCE, for the reason library_loaded is: the shipped #2605 bug was one fact derived in
            five places where the fifth forgot, and this fact is consulted by both the is_satisfied column
            and the detail arms of its facet. A second copy is how they come to disagree.
 
@@ -214,15 +214,15 @@ probe AS (
 
            'english' is matched beside 'en' because that is the form a Windows PostgreSQL reports
            (English_United States.1252). The longer alternative is written first so the result does not
-           depend on the regex engine's alternation order. */
+           depend on the regex engine's alternation order. */ @"
         coalesce(s.message_locale, '') ~* '^(C|POSIX)(\.|$)'
             OR coalesce(s.message_locale, '') ~* '^(english|en)(_|\.|@|$)'     AS english_messages,
-        /* Its own flag, not the negation of the one above. An EMPTY lc_messages means PostgreSQL takes the
+        " + /* Its own flag, not the negation of the one above. An EMPTY lc_messages means PostgreSQL takes the
            message language from the server PROCESS's environment, which no SQL read can see - so it is
            UNKNOWN rather than translated, and it gets its own detail arm because what a reader may conclude
-           from an empty deadlock result differs between the two. */
+           from an empty deadlock result differs between the two. */ @"
         coalesce(s.message_locale, '') = ''                                      AS locale_unset,
-        /* #4735 item 3: DERIVED ONCE, for the reason library_loaded is. SATISFIED means a log_line_prefix the stderr
+        " + /* #4735 item 3: DERIVED ONCE, for the reason library_loaded is. SATISFIED means a log_line_prefix the stderr
            log readers can read: it starts with a timestamp (%t or %m) followed by a space or a colon, and carries the process id alone in brackets,
            [%p]. The readers anchor on that bracket, so a prefix with an unbracketed %p (%m %p, %t %p:) or with more in
            the bracket than the pid (%t [%p-%l]) has every line dropped, and an empty deadlock, plan or log-event read
@@ -233,9 +233,9 @@ probe AS (
            Nothing between the timestamp and [%p] may be a literal '['. Every stderr reader's gap before the pid bracket
            passes one bracket only, the exact text [local] that %r and %h render for a Unix-socket session, and those
            escapes carry no '[' in the format string. So '%m [%l] [%p] ', '%m [%a] [%p] ' and '%m [%c] [%p] ' write a
-           bracket the gap cannot pass (or, for %l, take the line number for the pid) and every line is dropped. */
+           bracket the gap cannot pass (or, for %l, take the line number for the pid) and every line is dropped. */ @"
         coalesce(s.line_prefix, '') ~ '^%[tm][ :][^[]*\[%p\]'                    AS prefix_readable,
-        /* #7182: the shape the stderr plan block pattern (PgPlanLogParser, the block regex) can match: a prefix
+        " + /* #7182: the shape the stderr plan block pattern (PgPlanLogParser, the block regex) can match: a prefix
            that starts with a timestamp (%t or %m, which the pattern's leading date needs) and a space or a colon right
            after it (the pattern needs one after the time zone token, so '%t[%p] %Q ' matches nothing), then the bracketed pid,
            ONE separator (a space or a colon), %Q, ONE space, then the end of the prefix, because
@@ -247,12 +247,12 @@ probe AS (
            string carries no '['), while a
            bare 'contains %Q' test, or 'next escape after %p', reads as met. This is the block pattern's rule
            for whether a block matches at all, not PrefixCarriesQueryIdAfterPid, which only decides whether to
-           trust the token as the id once the block has matched. */
+           trust the token as the id once the block has matched. */ @"
         coalesce(s.line_prefix, '') ~ '^%[tm][ :][^[]*\[%p\][ :]%Q $'            AS prefix_qid_after_pid,
-        /* #7182: the plan reader parses JSON only. Case-insensitive because auto_explain accepts any case for
-           an enum value, and trimmed because a placeholder read may carry what the file spelled. */
+        " + /* #7182: the plan reader parses JSON only. Case-insensitive because auto_explain accepts any case for
+           an enum value, and trimmed because a placeholder read may carry what the file spelled. */ @"
         lower(btrim(coalesce(s.log_format, ''))) = 'json'                       AS log_format_json,
-        /* #7292: the log_destination list, spaces stripped and lowercased the way PgLogFormatCapability.ProbeSql
+        " + /* #7292: the log_destination list, spaces stripped and lowercased the way PgLogFormatCapability.ProbeSql
            normalises it (PostgreSQL accepts 'Stderr, CSVlog'). The readers route on csvlog being LISTED
            (context.PgLogUsesCsvlog is 'csvlog' = ANY (log_destination) and never looks at stderr), so csv_listed
            decides, stderr or not: log_line_prefix is not what the plan, deadlock and log-event reads use then, and
@@ -260,7 +260,7 @@ probe AS (
            PostgreSQL 14 (13 writes 24 columns). jsonlog_only is jsonlog listed with neither csvlog nor stderr: the
            log-event reader takes jsonlog first, the plan and deadlock readers have no jsonlog route (the plan
            reader would take the stderr route and skip with 'no stderr log file'). Everything else (stderr without
-           csvlog, a NULL or empty list, syslog) keeps the prefix rule. */
+           csvlog, a NULL or empty list, syslog) keeps the prefix rule. */ @"
         'csvlog' = ANY (d.dest)                                                  AS csv_listed,
         'jsonlog' = ANY (d.dest) AND NOT 'csvlog' = ANY (d.dest)
             AND NOT 'stderr' = ANY (d.dest)                                      AS jsonlog_only,
@@ -283,13 +283,13 @@ UNION ALL
 
 SELECT
     'capture_threshold'::text,
-    /* GATED ON loaded, and that gate is the whole point. A GUC named auto_explain.* can EXIST with no
+    " + /* GATED ON loaded, and that gate is the whole point. A GUC named auto_explain.* can EXIST with no
        auto_explain behind it: PostgreSQL accepts any qualified custom variable, so a parameter group (or a
        plain SET) can define auto_explain.log_min_duration on a server where the library was never loaded.
        Measured on a live Aurora target: threshold 60000 with shared_preload_libraries carrying no
        auto_explain, and this facet reported SATISFIED with the words 'auto_explain is loaded and capturing
        at this threshold' - directly contradicting library_loaded in the same result set, on the single most
-       important claim the panel makes. Reproduced locally on PostgreSQL 17 with one SET. */
+       important claim the panel makes. Reproduced locally on PostgreSQL 17 with one SET. */ @"
     p.loaded AND coalesce(p.threshold, '-1') <> '-1',
     coalesce(p.threshold, '(setting absent - library not loaded)'),
     CASE
@@ -323,9 +323,9 @@ UNION ALL
 
 SELECT
     'extension_available'::text,
-    /* A loaded library IS proof of availability, so that alternative is part of the test and the earlier
+    " + /* A loaded library IS proof of availability, so that alternative is part of the test and the earlier
        contradiction with library_loaded cannot recur. The catalog check is kept rather than dropped because
-       a managed provider may ship a control file this does not know about. */
+       a managed provider may ship a control file this does not know about. */ @"
     p.catalogued OR p.loaded,
     CASE
         WHEN p.catalogued THEN p.catalog_version
@@ -348,14 +348,19 @@ UNION ALL
 
 SELECT
     'plan_text_setting'::text,
-    /* Gated on loaded for the same reason as capture_threshold: auto_explain.log_format is equally
-       definable as a placeholder on a server with no auto_explain. */
+    " + /* Gated on loaded for the same reason as capture_threshold: auto_explain.log_format is equally
+       definable as a placeholder on a server with no auto_explain. */ @"
     p.loaded AND p.log_format_json,
     coalesce(p.log_format, '(setting absent - library not loaded)'),
     CASE
         WHEN NOT p.loaded AND p.log_format IS NOT NULL
             THEN 'This value is a PLACEHOLDER - auto_explain is not loaded, so nothing is writing plans in '
                  || 'this or any format. Fix library_loaded first.'
+        " + /* #8572: with the library not loaded the setting does not exist, so the library-loads-and-logs-plans sentence below
+           would describe a loaded library on a row whose own observed value says it is not loaded. Same wording as capture_threshold. */ @"
+        WHEN NOT p.loaded
+            THEN 'This setting does not exist because auto_explain is not loaded. Fix library_loaded first - '
+                 || 'plans cannot be written in any format until the library is loaded.'
         WHEN p.log_format_json
             THEN 'auto_explain writes plans as JSON, the format the plan capture reads.'
         ELSE 'auto_explain.log_format is not json. The plan capture reads only JSON and skips every other '
@@ -369,7 +374,7 @@ UNION ALL
 
 SELECT
     'plan_attribution'::text,
-    /* strpos, NOT like. This is a printf-style format string rather than a delimited list, so a boundary
+    " + /* strpos, NOT like. This is a printf-style format string rather than a delimited list, so a boundary
        regex would be wrong here - but LIKE is wrong in a way that is much easier to miss: a wildcard pattern
        matches ANY value containing the letter Q and reports attribution working on a prefix that has none.
 
@@ -378,12 +383,12 @@ SELECT
 
        NOT gated on loaded: log_line_prefix is a real core GUC that always exists and always means what it
        says, and it is worth knowing this is wrong BEFORE the library goes on, because fixing it afterwards
-       means every plan captured in between is stored without its query id or not at all. */
+       means every plan captured in between is stored without its query id or not at all. */ @"
     CASE WHEN p.csv_listed THEN p.csv_has_query_id WHEN p.jsonlog_only THEN false ELSE p.prefix_qid_after_pid END,
     coalesce(p.line_prefix, '(unreadable)'),
     CASE
-        /* #7292: a target with csvlog listed is not judged by the prefix: the plan reader takes the csv route
-           whenever csvlog is listed, stderr or not, and reads the query id from the record's own column. */
+        " + /* #7292: a target with csvlog listed is not judged by the prefix: the plan reader takes the csv route
+           whenever csvlog is listed, stderr or not, and reads the query id from the record's own column. */ @"
         WHEN p.csv_has_query_id
             THEN 'log_destination lists csvlog, so the plan reader reads the csvlog and takes the query '
                  || 'id from the record''s own query_id column; log_line_prefix plays no part. Nothing to change in '
@@ -425,7 +430,7 @@ UNION ALL
 
 SELECT
     'message_locale'::text,
-    /* NOT gated on loaded, and for a stronger reason than plan_attribution's: lc_messages governs whether
+    " + /* NOT gated on loaded, and for a stronger reason than plan_attribution's: lc_messages governs whether
        ANY of this product's log reads can find their anchor, and the deadlock read depends on it with no
        auto_explain in the picture at all. A locale that hides deadlocks is worth reporting on a server that
        will never load auto_explain.
@@ -433,7 +438,7 @@ SELECT
        An unset locale reads as UNSATISFIED, which is the same direction the reader takes for a NULL: a
        precondition this cannot prove must not be presented as met. The detail arm says it is unknown rather
        than wrong, so the row does not overclaim in the other direction either - the extension_available
-       convention, where a negative is inconclusive and says so. */
+       convention, where a negative is inconclusive and says so. */ @"
     p.english_messages,
     CASE
         WHEN p.locale_unset THEN '(empty - the server takes its message language from its own environment)'
@@ -475,12 +480,12 @@ UNION ALL
 
 SELECT
     'log_line_prefix_readable'::text,
-    /* NOT gated on loaded, for message_locale's reason: the deadlock and log-event reads depend on the prefix with
-       no auto_explain in the picture at all. */
+    " + /* NOT gated on loaded, for message_locale's reason: the deadlock and log-event reads depend on the prefix with
+       no auto_explain in the picture at all. */ @"
     p.prefix_readable OR p.csv_listed OR p.jsonlog_only,
     coalesce(p.line_prefix, '(unreadable)'),
     CASE
-        /* #7292: the destination gate the detail text below has always described. */
+        " + /* #7292: the destination gate the detail text below has always described. */ @"
         WHEN p.csv_listed OR p.jsonlog_only
             THEN 'log_destination lists csvlog, or lists jsonlog without csvlog or stderr, so the log readers take '
                  || 'the process id and every other field from the structured log''s own columns and '

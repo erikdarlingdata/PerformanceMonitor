@@ -36,11 +36,11 @@ public static partial class PgTargetAdvice
     private static readonly AdviceBlock s_ioReadStatic = new(
         Headline: "Data-file reads are slow per operation for this storage (pg_stat_io)",
         Investigation:
-            "Milliseconds per data-file read over the window — read_time divided by reads from pg_stat_io " +
+            "Milliseconds per data-file read over the window: read_time divided by reads from pg_stat_io " +
             "(pg_io_stats, PostgreSQL 16+), differenced per backend type and context with the engine's own " +
             "stats_reset honoured and summed over every identity that reads relation files. The bars (10 ms " +
-            "warning, 30 ms critical) were measured on Aurora storage — 14 days × 50 clusters of the dogfood " +
-            "fleet, 2026-09-19, where the fleet's own worst hours sit at the warning line — so on a stock " +
+            "warning, 30 ms critical) were measured on Aurora storage: 14 days × 50 clusters of the dogfood " +
+            "fleet, 2026-09-19, where the fleet's own worst hours sit at the warning line, so on a stock " +
             "PostgreSQL host on local NVMe a value near them is very slow, and on network block storage it may be " +
             "the volume's advertised latency.",
         Remediation:
@@ -49,14 +49,14 @@ public static partial class PgTargetAdvice
             "the cache; get_pg_buffer_usage shows what the cache is holding instead. If the buffer-cache-pressure " +
             "finding fired in the same window, the working set is larger than shared_buffers and the lever is that " +
             "knob (which costs memory the OS page cache and work_mem no longer get) or the query. On Aurora the " +
-            "storage tier's latency is not tunable from the instance — the working set and the query are the only " +
+            "storage tier's latency is not tunable from the instance: the working set and the query are the only " +
             "levers. Never trade durability for latency: fsync, synchronous_commit and full_page_writes are " +
             "posture, not performance settings.");
 
     private static readonly AdviceBlock s_ioWriteStatic = new(
-        Headline: "Data-file write latency per operation (pg_stat_io) — stated, not graded",
+        Headline: "Data-file write latency per operation (pg_stat_io): stated, not graded",
         Investigation:
-            "Milliseconds per data-file write over the window — write_time divided by writes from pg_stat_io " +
+            "Milliseconds per data-file write over the window: write_time divided by writes from pg_stat_io " +
             "(pg_io_stats, PostgreSQL 16+), the same reset-aware difference the read fact takes. No bar exists for " +
             "it yet: the measured population is Aurora, where backends do not write data files and the counter is " +
             "not reported at all, so a bar here would be a number nobody measured. The figure is context for the " +
@@ -94,7 +94,7 @@ public static partial class PgTargetAdvice
         {
             return s_ioReadStatic with
             {
-                Headline = $"Data-file read latency cannot be measured — PostgreSQL {major} has no pg_stat_io (16+)",
+                Headline = $"Data-file read latency cannot be measured: PostgreSQL {major} has no pg_stat_io (16+)",
                 Investigation =
                     $"This server's registry major is {major}; pg_stat_io arrived in PostgreSQL 16, so there is no per-operation " +
                     "read time to difference and this pass makes no latency claim for the I/O family (a 0 here would be a " +
@@ -112,19 +112,19 @@ public static partial class PgTargetAdvice
         {
             var knobClause = fact.Metadata.TryGetValue(PgTargetScorer.IoTrackIoTimingConfigKey, out var knob)
                 ? (knob >= 1
-                    ? " The config snapshot reports track_io_timing = on, so the flip happened inside this window — the next window will measure."
+                    ? " The config snapshot reports track_io_timing = on, so the flip happened inside this window: the next window will measure."
                     : " The config snapshot confirms track_io_timing = off; the CONFIG_PG_TRACK_IO_TIMING advisory is the card for that.")
                 : " The config snapshot was not collected for this window; the data alone says the timings were not taken.";
             return s_ioReadStatic with
             {
-                Headline = $"Data-file read latency cannot be measured — {IoCount(ops)} reads counted{windowClause}, none timed (track_io_timing is off)",
+                Headline = $"Data-file read latency cannot be measured: {IoCount(ops)} reads counted{windowClause}, none timed (track_io_timing is off)",
                 Investigation =
                     $"pg_stat_io counted {IoCount(ops)} data-file reads{windowClause} ({IoRate(opsPerSec)}/sec of observed time) and reported 0 " +
                     "read time for all of them: the engine only records I/O time under track_io_timing = on, so the quotient is " +
                     "undefined, not zero, and this pass makes no latency claim." + knobClause,
                 Remediation =
                     "Turning track_io_timing on (reloadable, no restart) populates read_time here and blk_read_time in " +
-                    "pg_stat_statements from the next window. Its cost is one clock read per I/O — run pg_test_timing on the host " +
+                    "pg_stat_statements from the next window. Its cost is one clock read per I/O: run pg_test_timing on the host " +
                     "first; on a system whose clock source is slow it is a measurable overhead on I/O-heavy backends, which is why " +
                     "it ships off. get_pg_server_config shows the current value and its source.",
             };
@@ -136,8 +136,8 @@ public static partial class PgTargetAdvice
             return s_ioReadStatic with
             {
                 Headline = ops > 0
-                    ? $"Data-file reads averaged {IoMs(ms)} per operation over only {IoCount(ops)} reads{windowClause} — under the floor, not graded"
-                    : $"No data-file reads reached storage{windowClause} — nothing to grade",
+                    ? $"Data-file reads averaged {IoMs(ms)} per operation over only {IoCount(ops)} reads{windowClause}, under the floor, not graded"
+                    : $"No data-file reads reached storage{windowClause}: nothing to grade",
                 Investigation =
                     (ops > 0
                         ? $"pg_stat_io timed {IoCount(ops)} data-file reads{windowClause} at {IoMs(ms)} per operation on average. "
@@ -145,7 +145,7 @@ public static partial class PgTargetAdvice
                     $"Under {IoCount(PgTargetScorer.IoMinimumOps)} operations in the window a per-operation average is a quotient over a handful of " +
                     "reads and the calibration read saw exactly that tail produce noise, so the figure is stated and not graded (the " +
                     "floor is measured: 14 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-19). A server whose " +
-                    "working set fits in shared_buffers lands here by design — that is the cache working, not a gap.",
+                    "working set fits in shared_buffers lands here by design, that is the cache working, not a gap.",
                 Remediation =
                     "Nothing to do for latency. If the cache-pressure finding says otherwise, believe that one: it grades misses, " +
                     "not the speed of the few that happened.",
@@ -160,10 +160,10 @@ public static partial class PgTargetAdvice
             "max 33.7 ms)." +
             (isAurora
                 ? " This is an Aurora cluster, so the bars are this storage tier's own shape."
-                : " This is stock PostgreSQL: the bars are an Aurora-storage shape, and a host on local NVMe routinely reads under 1 ms — treat the warning line as generous for it, and read the number against what its volume class advertises.");
+                : " This is stock PostgreSQL: the bars are an Aurora-storage shape, and a host on local NVMe routinely reads under 1 ms, treat the warning line as generous for it, and read the number against what its volume class advertises.");
 
         var investigation =
-            $"Data-file reads averaged {IoMs(ms)} per operation{windowClause}{routineClause} — {IoCount(ops)} reads at {IoRate(opsPerSec)}/sec of observed time, " +
+            $"Data-file reads averaged {IoMs(ms)} per operation{windowClause}{routineClause}: {IoCount(ops)} reads at {IoRate(opsPerSec)}/sec of observed time, " +
             "read_time ÷ reads from pg_stat_io summed over every backend type and context that reads relation files " +
             "(a per-operation figure, so a 24-hour and a 4-hour window of steady storage say the same milliseconds)." +
             populationClause +
@@ -176,7 +176,7 @@ public static partial class PgTargetAdvice
               "is the working set and the query. get_pg_top_queries ordered by shared_blks_read names the statements missing the " +
               "cache; get_pg_io_stats shows whether the reads are client backends (the workload) or autovacuum and bulk reads " +
               "(maintenance, which can be scheduled); get_pg_buffer_usage shows what shared_buffers holds instead. If the " +
-              "buffer-cache-pressure finding fired, shared_buffers is the knob — larger costs the instance memory that work_mem " +
+              "buffer-cache-pressure finding fired, shared_buffers is the knob: larger costs the instance memory that work_mem " +
               "and the OS cache no longer get, and on Aurora is sized by the instance class. Latency alone is not a reason to " +
               "scale the instance; latency with cache pressure and a named statement is."
             : "Fewer reads first, faster reads second. get_pg_top_queries ordered by shared_blks_read names the statements whose " +
@@ -184,14 +184,14 @@ public static partial class PgTargetAdvice
               "bulk reads (maintenance, which can be scheduled); get_pg_buffer_usage shows what shared_buffers holds instead. If " +
               "the buffer-cache-pressure finding fired, shared_buffers is the knob (memory the OS page cache and work_mem no longer " +
               "get). If the reads are already few and each is slow, the number is the volume's: compare it with what the storage " +
-              "class advertises before touching PostgreSQL. Never trade durability for latency — fsync, synchronous_commit and " +
+              "class advertises before touching PostgreSQL. Never trade durability for latency: fsync, synchronous_commit and " +
               "full_page_writes are posture, not performance settings.";
 
         return s_ioReadStatic with
         {
             Headline = fired
                 ? $"Data-file reads averaged {IoMs(ms)} per operation{windowClause}{(isAurora ? " (Aurora storage tier)" : string.Empty)}"
-                : $"Data-file reads averaged {IoMs(ms)} per operation{windowClause} — under the warning bar",
+                : $"Data-file reads averaged {IoMs(ms)} per operation{windowClause}, under the warning bar",
             Investigation = investigation,
             Remediation = remediation,
         };
@@ -207,7 +207,7 @@ public static partial class PgTargetAdvice
         {
             return s_ioWriteStatic with
             {
-                Headline = $"Data-file write latency cannot be measured — {IoCount(ops)} writes counted{windowClause}, none timed (track_io_timing is off)",
+                Headline = $"Data-file write latency cannot be measured: {IoCount(ops)} writes counted{windowClause}, none timed (track_io_timing is off)",
                 Investigation =
                     $"pg_stat_io counted {IoCount(ops)} data-file writes{windowClause} ({IoRate(opsPerSec)}/sec of observed time) and reported 0 write " +
                     "time for all of them: the engine records I/O time only under track_io_timing = on, so the quotient is undefined, " +
@@ -220,11 +220,11 @@ public static partial class PgTargetAdvice
             return s_ioWriteStatic with
             {
                 Headline = ops > 0
-                    ? $"Data-file writes averaged {IoMs(fact.Value)} per operation over only {IoCount(ops)} writes{windowClause} — stated, not graded"
-                    : $"No backend data-file writes{windowClause} — stated, not graded",
+                    ? $"Data-file writes averaged {IoMs(fact.Value)} per operation over only {IoCount(ops)} writes{windowClause}: stated, not graded"
+                    : $"No backend data-file writes{windowClause}: stated, not graded",
                 Investigation =
                     (ops > 0
-                        ? $"pg_stat_io timed {IoCount(ops)} data-file writes{windowClause} at {IoMs(fact.Value)} per operation on average — under the {IoCount(PgTargetScorer.IoMinimumOps)}-operation floor, a quotient over too few writes to describe the storage. "
+                        ? $"pg_stat_io timed {IoCount(ops)} data-file writes{windowClause} at {IoMs(fact.Value)} per operation on average, under the {IoCount(PgTargetScorer.IoMinimumOps)}-operation floor, a quotient over too few writes to describe the storage. "
                         : $"pg_stat_io counted no data-file writes{windowClause}: the checkpointer and background writer kept ahead, or the window was read-only. ") +
                     "Write latency has no bar in this release (see the family's static text), so this is context either way.",
             };
@@ -232,9 +232,9 @@ public static partial class PgTargetAdvice
 
         return s_ioWriteStatic with
         {
-            Headline = $"Data-file writes averaged {IoMs(fact.Value)} per operation{windowClause} — stated, not graded",
+            Headline = $"Data-file writes averaged {IoMs(fact.Value)} per operation{windowClause}: stated, not graded",
             Investigation =
-                $"Data-file writes averaged {IoMs(fact.Value)} per operation{windowClause} — {IoCount(ops)} writes at {IoRate(opsPerSec)}/sec of observed time, " +
+                $"Data-file writes averaged {IoMs(fact.Value)} per operation{windowClause}: {IoCount(ops)} writes at {IoRate(opsPerSec)}/sec of observed time, " +
                 "write_time ÷ writes from pg_stat_io summed over every backend type and context that writes relation files. No " +
                 "bar grades it yet: the measured population (Aurora) does not report the counter, and a stock write bar has not " +
                 "been read. Context for the checkpoint and background-writer findings.",
@@ -261,8 +261,8 @@ public static partial class PgTargetAdvice
             "The window's peak QUARTER-HOUR milliseconds per data-file read (read_time ÷ reads from pg_stat_io, differenced " +
             "per backend type and context with stats_reset honoured, quarter-hours under the 250-read floor not rated) was " +
             "judged against this server's hour-of-week baseline of the same quantity over the last 30 days. A latency " +
-            "anomaly says the storage answered this server far more slowly than it usually does at this hour — on Aurora " +
-            "that is the storage tier, on stock PostgreSQL the volume or a noisy neighbour on it — and the regular " +
+            "anomaly says the storage answered this server far more slowly than it usually does at this hour, on Aurora " +
+            "that is the storage tier, on stock PostgreSQL the volume or a noisy neighbour on it, and the regular " +
             "read-latency finding says whether the level is also high by the measured fleet's standard." + s_anomalyHedge,
         Remediation:
             "get_pg_io_trend shows the hour against its usual level; get_pg_io_stats shows whether the slow reads were the " +

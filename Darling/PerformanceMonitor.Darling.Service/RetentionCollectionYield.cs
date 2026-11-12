@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -492,7 +493,7 @@ internal sealed class RetentionCollectionYield
         {
             text += string.Create(
                 inv,
-                $"; stopped at its {WallBudget.TotalMinutes:F0}-minute time budget {StoppedPlace}, with {TablesNotReached} table(s) not reached - the next pass continues from the rows left");
+                $"; stopped at its {WallBudget.TotalMinutes:F0}-minute time budget {StoppedPlace}, with {CountText.Plural(TablesNotReached, "table")} not reached - the next pass continues from the rows left");
         }
 
         return text;

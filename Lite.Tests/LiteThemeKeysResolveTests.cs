@@ -23,6 +23,7 @@ namespace PerformanceMonitorLite.Tests;
 /// theme at all; that local value sat on top of the theme's own DataGrid stripe. The tests load each Lite theme dictionary and
 /// resolve the key, then build the real FinOps tab against each theme and read where each grid's AlternatingRowBackground comes from.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class LiteThemeKeysResolveTests
 {
     private static readonly string[] Themes = ["DarkTheme", "LightTheme", "CoolBreezeTheme"];

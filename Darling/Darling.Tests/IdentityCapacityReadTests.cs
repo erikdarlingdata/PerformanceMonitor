@@ -214,6 +214,39 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
 
     private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement;
 
+    /// <summary>
+    /// #8571 item 2: the summary took its soonest exhaustion from the one column with a projection (5,415 days) while a column at
+    /// 100 percent with no values left, and another with 109 left, had no projection and were skipped. A column with no values left
+    /// is 0 days, and the summary counts the columns it could not project and says so.
+    /// </summary>
+    [Fact]
+    public async Task SoonestExhaustion_IsZeroForAFullColumn_AndTheSummaryCountsColumnsWithoutAProjection()
+    {
+        var now = DateTime.UtcNow;
+        var oldAt = now.AddDays(-4);
+        var newAt = now.AddHours(-1);
+        await WithStoreAsync(async (c, ct) =>
+        {
+            await Marker(c, ct, DataId, DataServer, "Sales", oldAt);
+            await Column(c, ct, "Sales", "Filling", "int", 10, "1000000000", "1", "1", 46.6, oldAt);
+            await Marker(c, ct, DataId, DataServer, "Sales", newAt);
+            await Column(c, ct, "Sales", "Filling", "int", 10, "1100000000", "1", "1", 51.2, newAt);
+            await Column(c, ct, "Sales", "Full", "int", 10, "2147483647", "1", "1", 100, newAt);
+            await Column(c, ct, "Sales", "NearlyFull", "int", 10, "2147483538", "1", "1", 99.9999, newAt);
+        }, async (postgres, ct) =>
+        {
+            var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, null, ct));
+            var summary = root.GetProperty("summary");
+            var columns = root.GetProperty("columns").EnumerateArray().ToDictionary(x => x.GetProperty("table").GetString()!);
+
+            Assert.Equal("0", columns["Full"].GetProperty("values_remaining").GetString());
+            Assert.Equal(JsonValueKind.Number, columns["Filling"].GetProperty("days_to_exhaustion").ValueKind);
+            Assert.Equal(0, summary.GetProperty("soonest_exhaustion_days").GetDouble());
+            Assert.Equal(2, summary.GetProperty("columns_without_projection").GetInt32());
+            Assert.Contains("projection", summary.GetProperty("soonest_exhaustion_note").GetString(), StringComparison.Ordinal);
+        });
+    }
+
     [Fact]
     public async Task Bands_Rate_CleanMarker_AndTheUnscannedDatabase_ReadBackThroughTheReaderAndTheTool()
     {
@@ -481,7 +514,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             /* No scan in the window at all, but databases waiting: unavailable, naming them. */
             var none = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, "Fresh", 200, null, ct));
             Assert.Equal("unavailable", none.GetProperty("status").GetString());
-            Assert.Contains("1 database(s) not yet scanned (Fresh)", none.GetProperty("message").GetString());
+            Assert.Contains("1 database not yet scanned (Fresh)", none.GetProperty("message").GetString());
         });
     }
 
@@ -523,7 +556,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             /* The tool agrees: Gamma is in neither list. */
             var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, null, ct));
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
-            Assert.Contains("2 database(s) not yet scanned (Alpha, Beta)", root.GetProperty("message").GetString());
+            Assert.Contains("2 databases not yet scanned (Alpha, Beta)", root.GetProperty("message").GetString());
             Assert.DoesNotContain("Gamma", root.GetProperty("message").GetString());
 
             /* An empty list on the server's row is "no scope at this level" and stops the fall-through to a fleet scope. */

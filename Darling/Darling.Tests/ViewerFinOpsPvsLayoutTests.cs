@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// #8220: the Viewer's FinOps > Version Store (PVS) hosted the way the main window hosts it. The trend chart keeps a plot of at least
 /// 120 DIPs, and the grid under it keeps its space: it is at least 120 DIPs tall and either fully in view or reachable by scrolling.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerFinOpsPvsLayoutTests
 {
     private readonly ITestOutputHelper _output;
@@ -42,7 +43,7 @@ public sealed class ViewerFinOpsPvsLayoutTests
             var outer = new TabControl();
             outer.Items.Add(new TabItem { Header = "FinOps", Content = tab });
             var window = new Window { Content = ChartLayoutProbe.HostLikeMainWindow(outer), Width = width, Height = height, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var grid = (DataGrid)tab.FindName("FinOpsPvsStatsDataGrid");

@@ -46,7 +46,7 @@ public sealed class FinOpsPvsLayoutTests
             var outer = new TabControl();
             outer.Items.Add(new TabItem { Header = "FinOps", Content = tab });
             var window = new Window { Content = ChartLayoutProbe.HostLikeMainWindow(outer), Width = width, Height = height, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var grid = (DataGrid)tab.FindName("PvsStatsDataGrid");

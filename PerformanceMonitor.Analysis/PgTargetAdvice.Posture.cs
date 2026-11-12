@@ -55,7 +55,7 @@ public static partial class PgTargetAdvice
         {
             return new AdviceBlock(
                 Headline:
-                    $"{settingName} is managed by Aurora — reported for posture, not graded",
+                    $"{settingName} is managed by Aurora: reported for posture, not graded",
                 Investigation:
                     $"The configuration snapshot{snapshot} reports {settingName} = {(fact.Value == 1 ? "off" : "on")}. On Aurora PostgreSQL the storage layer owns durability for this setting and the parameter group does not expose it, so the value is the platform's, not this server's operator's, and no finding is raised on it.",
                 Remediation:
@@ -66,7 +66,7 @@ public static partial class PgTargetAdvice
         {
             return new AdviceBlock(
                 Headline:
-                    $"{settingName} is on — the PostgreSQL default",
+                    $"{settingName} is on: the PostgreSQL default",
                 Investigation:
                     $"The configuration snapshot{snapshot} reports {settingName} = on, which is the shipped default and the durable setting. This is a statement of posture, not a finding.",
                 Remediation:
@@ -84,27 +84,27 @@ public static partial class PgTargetAdvice
 
     private static AdviceBlock ComposeFsyncOff(Fact fact, string snapshot) => new(
         Headline:
-            "fsync is off — an operating-system crash or power loss can leave this cluster unrecoverable",
+            "fsync is off: an operating-system crash or power loss can leave this cluster unrecoverable",
         Investigation:
             $"The configuration snapshot{snapshot} reports fsync = off; PostgreSQL's default is on. With fsync off the server does not wait for its writes to reach durable storage before it reports a commit or completes a checkpoint, so after an operating-system crash or a power loss the data files and the WAL can disagree in ways crash recovery cannot repair, and the failure is discovered when the cluster will not start or when a page reads back wrong. Nothing about the workload changes this statement: fsync is a durability policy, and this finding does not weigh it against anything the server is doing.",
         Remediation:
-            $"This is the operator's policy to own, and the durable choice is the default. If this cluster holds data that cannot be rebuilt from somewhere else, set it back: ALTER SYSTEM SET fsync = on; then SELECT pg_reload_conf(); — {ChangeMechanism(fact)}. If it is off deliberately (a disposable load target, a replica that will be rebuilt from its primary), record that decision where the next operator will find it, because the setting leaves no trace until the failure.");
+            $"This is the operator's policy to own, and the durable choice is the default. If this cluster holds data that cannot be rebuilt from somewhere else, set it back: ALTER SYSTEM SET fsync = on; then SELECT pg_reload_conf();, {ChangeMechanism(fact)}. If it is off deliberately (a disposable load target, a replica that will be rebuilt from its primary), record that decision where the next operator will find it, because the setting leaves no trace until the failure.");
 
     private static AdviceBlock ComposeFullPageWritesOff(Fact fact, string snapshot) => new(
         Headline:
-            "full_page_writes is off — a page torn by a crash cannot be repaired from WAL, and the damage surfaces later as corruption",
+            "full_page_writes is off: a page torn by a crash cannot be repaired from WAL, and the damage surfaces later as corruption",
         Investigation:
-            $"The configuration snapshot{snapshot} reports full_page_writes = off; PostgreSQL's default is on. The server writes 8 kB pages that the operating system and the storage may commit in smaller pieces; with full_page_writes on, the first change to a page after each checkpoint writes the whole page into WAL so recovery can put the page back whole. With it off, a crash in the middle of a page write leaves a half-old, half-new page that recovery then replays changes onto, and the corruption is found on a later read, not at restart. The setting is safe only where the storage itself guarantees an 8 kB write is atomic — a property of the file system or array that the operator has to verify; this finding cannot see it and does not assume it.",
+            $"The configuration snapshot{snapshot} reports full_page_writes = off; PostgreSQL's default is on. The server writes 8 kB pages that the operating system and the storage may commit in smaller pieces; with full_page_writes on, the first change to a page after each checkpoint writes the whole page into WAL so recovery can put the page back whole. With it off, a crash in the middle of a page write leaves a half-old, half-new page that recovery then replays changes onto, and the corruption is found on a later read, not at restart. The setting is safe only where the storage itself guarantees an 8 kB write is atomic: a property of the file system or array that the operator has to verify; this finding cannot see it and does not assume it.",
         Remediation:
-            $"This is the operator's policy to own, and the durable choice is the default. Unless the storage's atomic-write guarantee has been verified and written down, set it back: ALTER SYSTEM SET full_page_writes = on; then SELECT pg_reload_conf(); — {ChangeMechanism(fact)}. If it stays off on the strength of that guarantee, record the guarantee and the storage it rests on beside the setting, so a storage migration re-opens the question.");
+            $"This is the operator's policy to own, and the durable choice is the default. Unless the storage's atomic-write guarantee has been verified and written down, set it back: ALTER SYSTEM SET full_page_writes = on; then SELECT pg_reload_conf();, {ChangeMechanism(fact)}. If it stays off on the strength of that guarantee, record the guarantee and the storage it rests on beside the setting, so a storage migration re-opens the question.");
 
     private static AdviceBlock ComposeSynchronousCommitOff(Fact fact, string snapshot) => new(
         Headline:
-            "synchronous_commit is off — a crash discards the most recent commits the server already acknowledged, up to about three wal_writer_delay cycles",
+            "synchronous_commit is off: a crash discards the most recent commits the server already acknowledged, up to about three wal_writer_delay cycles",
         Investigation:
-            $"The configuration snapshot{snapshot} reports synchronous_commit = off; PostgreSQL's default is on. The server acknowledges a commit before that commit's WAL has reached disk, and the WAL writer flushes on its own cycle, so a crash between the acknowledgement and the flush discards transactions the client was told had succeeded — a window of at most three times wal_writer_delay, 600 ms at the shipped 200 ms. The database stays consistent: this is a bounded loss of the newest commits, not corruption, which is why it is an advisory posture and not a critical one. {SessionScopeSentence(fact)}",
+            $"The configuration snapshot{snapshot} reports synchronous_commit = off; PostgreSQL's default is on. The server acknowledges a commit before that commit's WAL has reached disk, and the WAL writer flushes on its own cycle, so a crash between the acknowledgement and the flush discards transactions the client was told had succeeded: a window of at most three times wal_writer_delay, 600 ms at the shipped 200 ms. The database stays consistent: this is a bounded loss of the newest commits, not corruption, which is why it is an advisory posture and not a critical one. {SessionScopeSentence(fact)}",
         Remediation:
-            $"Decide this as policy, not as tuning — it is the operator's call, and the durable choice is the default. If every acknowledged commit on this server must survive a crash, set the server default back: ALTER SYSTEM SET synchronous_commit = on; then SELECT pg_reload_conf(); — {ChangeMechanism(fact)}. If a bounded loss of the newest commits is acceptable for this server's data, leave it and write the decision down. A middle path is to keep the server default on and make the durability choice per transaction (SET LOCAL synchronous_commit = off) only for work whose loss has been accepted, so the exception is visible in the code that takes it.");
+            $"Decide this as policy, not as tuning: it is the operator's call, and the durable choice is the default. If every acknowledged commit on this server must survive a crash, set the server default back: ALTER SYSTEM SET synchronous_commit = on; then SELECT pg_reload_conf();, {ChangeMechanism(fact)}. If a bounded loss of the newest commits is acceptable for this server's data, leave it and write the decision down. A middle path is to keep the server default on and make the durability choice per transaction (SET LOCAL synchronous_commit = off) only for work whose loss has been accepted, so the exception is visible in the code that takes it.");
 
     /// <summary>The snapshot's age against the window end, from the fact — the collector stamps it off
     /// <c>TimeRangeEnd</c>, never the wall clock.</summary>

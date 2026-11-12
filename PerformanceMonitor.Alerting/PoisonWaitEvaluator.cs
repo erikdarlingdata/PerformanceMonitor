@@ -147,7 +147,7 @@ public static class PoisonWaitEvaluator
         /// <summary>The bar that was crossed, in the PostgreSQL twin's exact clause order.</summary>
         public string ThresholdValue => string.Create(CultureInfo.InvariantCulture,
             $"{BreachedAvgWaiters * WindowMinutes * 60:N0}s accumulated over {WindowMinutes}m "
-            + $"(an average of {BreachedAvgWaiters:0.#} task(s) continuously waiting)");
+            + $"(an average of {BreachedAvgWaiters:0.#} {(BreachedAvgWaiters == 1 ? "task" : "tasks")} continuously waiting)");
 
         /// <summary>The numeric twin of <see cref="ThresholdValue"/>: the breached bar as milliseconds.</summary>
         public double NumericThresholdValue => BreachedAvgWaiters * WindowMs;
@@ -159,7 +159,7 @@ public static class PoisonWaitEvaluator
         /// </summary>
         public string ShortMessage => string.Create(CultureInfo.InvariantCulture,
             $"[{WaitType}] {AccumulatedSeconds:N0}s of wait accumulated in the last {WindowMinutes} minutes "
-            + $"across {AccumulatedWaits:N0} waits — on average {AvgWaiters:N1} task(s) continuously stuck");
+            + $"across {AccumulatedWaits:N0} waits — on average {AvgWaiters:N1} {(AvgWaiters == 1 ? "task" : "tasks")} continuously stuck");
     }
 
     /// <summary>

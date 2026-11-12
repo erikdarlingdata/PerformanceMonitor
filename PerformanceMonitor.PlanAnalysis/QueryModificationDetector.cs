@@ -225,7 +225,7 @@ public static partial class QueryModificationDetector
     {
         ArgumentNullException.ThrowIfNull(info);
         return info.ModifiesData
-            ? "Get Actual Plan (re-run) — DATA WILL BE MODIFIED"
+            ? "Get Actual Plan (re-run): DATA WILL BE MODIFIED"
             : "Get Actual Plan (re-run)";
     }
 

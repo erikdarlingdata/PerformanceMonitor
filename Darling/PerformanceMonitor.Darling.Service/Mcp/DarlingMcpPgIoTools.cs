@@ -60,11 +60,11 @@ public sealed class DarlingMcpPgIoTools
         if (runs >= CollectorRunFacts.RunsForDeltaBaseline)
         {
             return ("empty", string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                $"No (backend_type, object, context) combination recorded read, write, extend or hit activity in this window: the pg_io_stats collector ran successfully {runs:N0} time(s) in the last {hoursBack} hour(s) and no counter moved between them."));
+                $"No (backend_type, object, context) combination recorded read, write, extend or hit activity in this window: the pg_io_stats collector ran successfully {CountText.Plural(runs, "time")} in the last {CountText.Plural(hoursBack, "hour")} and no counter moved between them."));
         }
 
         return ("unavailable", string.Create(System.Globalization.CultureInfo.InvariantCulture,
-            $"The pg_io_stats collector ran successfully {runs:N0} time(s) in the last {hoursBack} hour(s), and activity is the difference between two of its snapshots, so this window was not measured. This is a collection gap, not an all-clear: check collection health."));
+            $"The pg_io_stats collector ran successfully {CountText.Plural(runs, "time")} in the last {CountText.Plural(hoursBack, "hour")}, and activity is the difference between two of its snapshots, so this window was not measured. This is a collection gap, not an all-clear: check collection health."));
     }
 
     [McpServerTool(Name = "get_pg_io_stats"), Description("Gets PostgreSQL I/O attributed to WHO, WHAT and WHY - backend_type/object/context from pg_stat_io, differenced across the window. track_io_timing is OFF by default: when untracked every *_time_ms and avg_read_ms are null, never a false 0.000; busiest_basis names the fallback ranking. Write counters are always null on Aurora, never a true zero. THE PAGE IS BOUNDED BY limit: combinations_returned/truncated. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_total_reads/pct_of_total_read_time divide by total_reads/total_read_time_ms; returned_reads states the page's own share. <<GUIDE>> Gets PostgreSQL I/O attributed to WHO did it, to WHAT, and WHY - the (backend_type, object, context) breakdown from pg_stat_io, differenced across the requested window. Richer than SQL Server's file-level dm_io_virtual_file_stats: instead of 'this file is busy' you get 'autovacuum workers are reading relations in the vacuum context', which names the cause. The context dimension is the one with no SQL Server equivalent and the one that changes the remedy - it separates ordinary buffer-pool misses (where more shared_buffers or a better index helps) from sequential scans that deliberately bypass the pool via a ring buffer (where it will not help at all), from vacuum's ring buffer, from a standby applying WAL. Reports whether the server tracks I/O TIMING at all: track_io_timing is OFF by default in PostgreSQL, and its zero read_time would otherwise divide out to a latency of 0.000 ms that reads as an impossibly fast disk rather than an unmeasured one - the time fields are null when untracked, and busiest_basis says what the ranking actually used. Also reports whether write counters are TRACKED at all (write_counters_tracked per row, write_counters_tracked_anywhere once), because on Amazon Aurora they are not measured - backends there do not write data files, the storage layer does, and the engine reports the write side as NULL on some majors and as 0 on others - so the flag is false there and the write fields are null, where a zero would otherwise read as 'no writes happened'. Requires PostgreSQL 16 or later; valid on a standby. THE PAGE IS BOUNDED BY limit: combinations_returned is how many combinations you got, truncated says the window held more, and the rows are the busiest so the ones past the cap did less. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_total_reads' denominator is total_reads and pct_of_total_read_time's is total_read_time_ms, each the WHOLE window's figure across every combination that moved, computed in the same statement as the rows - so a three-row page does not sum to 100%, and the gap between returned_reads / returned_read_time_ms (what the page adds up to) and the totals is the I/O the cap left out; returned_pct_of_total_reads and returned_pct_of_total_read_time are those ratios stated once.")]
@@ -306,7 +306,7 @@ public sealed class DarlingMcpPgIoTools
             busiest_rank_note = busiest is not null && rankedByReads ? "(by reads)" : null,
             busiest_basis = timingTracked
                 ? "total read time (read_time_ms), then read count"
-                : "read count (reads) — this server does not measure I/O time, so every read-time figure "
+                : "read count (reads): this server does not measure I/O time, so every read-time figure "
                   + "is zero in the store and cannot rank anything; the ordering falls back to the counter "
                   + "that exists",
             /* Said once at the top rather than repeated per row: on Aurora this is false everywhere,
@@ -325,7 +325,7 @@ public sealed class DarlingMcpPgIoTools
             note = (anyWritesTracked
                 ? "All counters are windowed differences, clamped per interval so a stats reset cannot "
                 + "produce a negative figure."
-                : "All counters are windowed differences. This server tracks NO write counters — the "
+                : "All counters are windowed differences. This server tracks NO write counters: the "
                 + "signature of Amazon Aurora, where backends do not write data files and the storage "
                 + "layer does. Absent writes here mean unmeasured, not zero.")
                 + " total_reads and total_read_time_ms are the WHOLE window's figures across every "

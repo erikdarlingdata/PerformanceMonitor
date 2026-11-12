@@ -58,7 +58,7 @@ public sealed class DarlingMcpQueryHeatmapTools
     /// enough that no real T-SQL statement is cut by it.</summary>
     public const int FullTextPreviewLength = 32_000;
 
-    [McpServerTool(Name = "get_query_heatmap"), Description("Draws the desktop viewer's Query Heatmap as a table: how many distinct queries fell into each (time bin x log-magnitude bucket) cell over a window, plus the most-executed query in each cell. It answers when a server was slow and how slow at the same time - get_top_queries_by_cpu ranks queries over a whole window and cannot show that the window had two very different halves. Bins are 5 minutes wide by default because that is exactly what the desktop viewer uses, so a browser, an agent and a desktop pointed at the same server draw the same picture; raise bucket_minutes for a longer window, which is also the lever that fits more of the window inside the cell cap. Magnitude buckets are the viewer's seven, in the metric's own unit: under 1, 1-10, 10-100, 100-1K, 1K-10K, 10K-100K and over 100K.")]
+    [McpServerTool(Name = "get_query_heatmap"), Description("Draws the desktop viewer's Query Heatmap as a table: how many distinct queries fell into each (time bin x log-magnitude bucket) cell over a window, plus the most-executed query in each cell. It answers when a server was slow and how slow at the same time - get_top_queries_by_cpu ranks queries over a whole window and cannot show that the window had two very different halves. Bins are 5 minutes wide by default because that is exactly what the desktop viewer uses, so a browser, an agent and a desktop pointed at the same server draw the same picture; raise bucket_minutes for a longer window, which is also the lever that fits more of the window inside the cell cap. Magnitude buckets are the viewer's seven, in the metric's own unit: under 1, 1-10, 10-100, 100-1K, 1K-10K, 10K-100K and over 100K." + McpHelpers.UtcStampsDescription)]
     public static Task<string> GetQueryHeatmap(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -277,7 +277,7 @@ public sealed class DarlingMcpQueryHeatmapTools
 
             return McpHelpers.Status(
                     "unavailable",
-                    $"No query stats have EVER been collected for {serverName}, so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.");
+                    $"No query stats have EVER been collected for {serverName}, so this is NOT a report of a quiet server: there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.");
         }
 
         if (!hasInWindow)
@@ -285,7 +285,7 @@ public sealed class DarlingMcpQueryHeatmapTools
             /* #7459: this answer says unavailable now, which the caller's EmptyAsync leaves as it is, so the offline check is asked here. */
             return await DarlingServerOfflineNote.UnavailableOrEmptyAsync(postgres, serverId, serverName, end, McpHelpers.Status(
                 "unavailable",
-                $"{serverName} has query stats from outside this window but nothing collected IN the last {hours_back} hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
+                $"{serverName} has query stats from outside this window but nothing collected IN the last {CountText.Plural(hours_back, "hour")}, so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
                 notice.AsHints()), cancellationToken);
         }
 
@@ -295,7 +295,7 @@ public sealed class DarlingMcpQueryHeatmapTools
                 /* A database_name filter is exempt: the coverage probe is unfiltered, so a filtered empty grid may be the filter and
                    not the window, and the covered sentence is the one that says so. */
                 notice.WindowTruncated && databaseFilter.IsAll, notice.EffectiveStart,
-                factual: $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid",
+                factual: $"Query stats WERE collected for {serverName} in the last {CountText.Plural(hours_back, "hour")}, but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid",
                 coveredClaim: databaseFilter.Names.Count > 1
                     ? ". A server that is up and idle looks exactly like this, and so does a filter on the chosen databases matching nothing collected."
                     : ". A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected.",

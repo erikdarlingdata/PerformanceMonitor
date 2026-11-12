@@ -271,10 +271,10 @@ public sealed class PgTargetDeadlockDrillDownTests
 
         /* One shape, recurring; every report its own shape; more shapes than carried. */
         var single = summary with { ReportsCaptured = 2, LogCaptured = 2, DistinctShapes = 1, Exemplars = [summary.Exemplars[0]] };
-        Assert.Contains("2 reports captured against 6 the engine counted, in 1 shape — one access pattern, recurring.", PgTargetAdvice.DeadlockExemplarSentence(single), StringComparison.Ordinal);
+        Assert.Contains("2 reports captured against 6 the engine counted, in 1 shape: one access pattern, recurring.", PgTargetAdvice.DeadlockExemplarSentence(single), StringComparison.Ordinal);
         var allDistinct = summary with { ReportsCaptured = 4, DistinctShapes = 4, Exemplars = [summary.Exemplars[1] with { Reports = 1 }, summary.Exemplars[1], summary.Exemplars[1]] };
         var distinctSentence = PgTargetAdvice.DeadlockExemplarSentence(allDistinct);
-        Assert.Contains("in 4 distinct shapes — every report its own pattern, none recurring yet.", distinctSentence, StringComparison.Ordinal);
+        Assert.Contains("in 4 distinct shapes: every report its own pattern, none recurring yet.", distinctSentence, StringComparison.Ordinal);
         Assert.EndsWith("The drill-down carries the top 3; get_pg_deadlocks lists the rest.", distinctSentence, StringComparison.Ordinal);
         /* A shape the parser recovered nothing for still reads as a sentence. */
         var bare = summary with { Exemplars = [summary.Exemplars[0] with { ParticipantCount = null, LockModes = null, Resources = null, VictimStatementFingerprint = null }] };
@@ -292,7 +292,7 @@ public sealed class PgTargetDeadlockDrillDownTests
         Assert.StartsWith(block.Investigation, folded.Investigation, StringComparison.Ordinal);
         Assert.Contains("Exemplars: 4 reports captured", folded.Investigation, StringComparison.Ordinal);
         Assert.StartsWith(block.Remediation, folded.Remediation, StringComparison.Ordinal);
-        Assert.Contains("Here: the shape to fix first is the one that recurred most — 2-participant shape involves RowExclusiveLock, ShareLock on relation orders, tuple orders", folded.Remediation, StringComparison.Ordinal);
+        Assert.Contains("Here: the shape to fix first is the one that recurred most, 2-participant shape involves RowExclusiveLock, ShareLock on relation orders, tuple orders", folded.Remediation, StringComparison.Ordinal);
         Assert.Contains("Two participants is the ordering deadlock", folded.Remediation, StringComparison.Ordinal);
         Assert.Contains("take them in ONE order", folded.Remediation, StringComparison.Ordinal);
         Assert.Contains("deadlock_timeout decides only how long a waiter sits", folded.Remediation, StringComparison.Ordinal);

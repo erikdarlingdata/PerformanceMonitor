@@ -52,19 +52,19 @@ public sealed partial class PgTargetRelationshipGraph
             facts.TryGetValue(key, out var fact) && fact.BaseSeverity > 0;
 
         AddEdge(PgTargetFactKeys.WaitKey("IO", "DataFileRead"), PgTargetFactKeys.IoReadLatencyMs, "io_latency",
-            "Data-file reads were slow per operation over the window — these waits are long because each read is slow, not only because there are many",
+            "Data-file reads were slow per operation over the window: these waits are long because each read is slow, not only because there are many",
             facts => Fired(facts, PgTargetFactKeys.IoReadLatencyMs));
 
         AddEdge(PgTargetFactKeys.IoReadLatencyMs, PgTargetFactKeys.BufferCachePressure, "io_latency",
-            "The buffer cache is measurably short for this working set — the misses are what is reaching the slow storage",
+            "The buffer cache is measurably short for this working set: the misses are what is reaching the slow storage",
             facts => Fired(facts, PgTargetFactKeys.BufferCachePressure));
 
         AddEdge(PgTargetFactKeys.IoReadLatencyMs, PgTargetFactKeys.ConfigEffectiveCacheSize, "io_latency",
-            "effective_cache_size at the compiled default — the planner sizes its cache assumption for a host nobody described",
+            "effective_cache_size at the compiled default: the planner sizes its cache assumption for a host nobody described",
             facts => Fired(facts, PgTargetFactKeys.ConfigEffectiveCacheSize));
 
         AddEdge(PgTargetFactKeys.IoReadLatencyMs, PgTargetFactKeys.ConfigRandomPageCost, "io_latency",
-            "random_page_cost at the compiled default — the planner is costing random reads as if this storage were spinning disks",
+            "random_page_cost at the compiled default: the planner is costing random reads as if this storage were spinning disks",
             facts => Fired(facts, PgTargetFactKeys.ConfigRandomPageCost));
     }
 }

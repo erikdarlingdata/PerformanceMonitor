@@ -195,4 +195,12 @@ public sealed class WebPageRefreshIntervalBehaviourTests
         Assert.Equal(1, r.GetProperty("tickRendersAfter").GetInt32());
         Assert.Empty(r.GetProperty("tickRepeatedReads").EnumerateArray());
     }
+
+    [Fact]
+    public void AnIdleFleetOverview_ReadsTheFleetRollUpOncePerTick_NotOnceForTheSidebarAndOnceForThePage()
+    {
+        // #8633: the page's poll trails the shell's refresh by its last render's length, so the sidebar's roll-up had landed and the
+        // page asked again: two reads per tick (four over these two ticks). The poll now takes the sidebar's roll-up.
+        Assert.Equal(2, Run().GetProperty("idleFleetTickReads").GetInt32());
+    }
 }

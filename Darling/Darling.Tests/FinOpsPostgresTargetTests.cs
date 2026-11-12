@@ -35,7 +35,7 @@ public sealed class FinOpsPostgresTargetTests
         new { server_name = "DD-SQL", display_name = "DD-SQL", engine_kind = (string?)null },
     });
 
-    private static JsonElement Run(string scenario, string registry, string reads = "{}", string server = "", string tab = "")
+    private static JsonElement Run(string scenario, string registry, string reads = "{}", string server = "", string tab = "", string? session = null)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "finops-postgres-target-harness.mjs"));
@@ -45,6 +45,7 @@ public sealed class FinOpsPostgresTargetTests
         psi.Environment["HARNESS_READS"] = reads;
         psi.Environment["HARNESS_SERVER"] = server;
         psi.Environment["HARNESS_TAB"] = tab;
+        if (session is not null) psi.Environment["HARNESS_SESSION"] = session;
 
         Process proc;
         try
@@ -84,6 +85,18 @@ public sealed class FinOpsPostgresTargetTests
 
         Assert.Equal("CC-SQL", r.GetProperty("selected").GetString());
         Assert.Equal(["AA-PG (PostgreSQL)", "BB-AURORA (PostgreSQL)", "CC-SQL", "DD-SQL"], Strings(r.GetProperty("options")));
+    }
+
+    /// <summary>#7988: an empty server list is a scoped session's grant and any other session's registry, and the page says which.
+    /// A scoped reader whose tags map to no server is not told the store has no servers.</summary>
+    [Theory]
+    [InlineData("""{"can_edit":false,"scoped":true}""", "No servers are in this token's scope.")]
+    [InlineData("""{"can_edit":false,"scoped":false}""", "No servers are registered yet.")]
+    public void AnEmptyServerList_NamesTheScopeForAScopedSession_AndTheRegistryForAnyOther(string session, string sentence)
+    {
+        var strips = Strings(Run("strips", "[]", tab: "utilization", session: session).GetProperty("strips"));
+
+        Assert.Equal([sentence], strips);
     }
 
     [Fact]
@@ -138,6 +151,46 @@ public sealed class FinOpsPostgresTargetTests
 
         var sql = Strings(Run("strips", Registry, reads, "CC-SQL", "optimization").GetProperty("strips"));
         Assert.True(sql.Count(s => s == Gate) >= 5, string.Join(" | ", sql));
+    }
+
+    /// <summary>#8555: the strip a Utilization section draws for a PostgreSQL target sits under that section's own heading.</summary>
+    [Fact]
+    public void TheUtilizationStrips_OnAPostgresTarget_CarryTheirPanelTitles()
+    {
+        var reads = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["get_finops"] = new { status = "not_collected", message = Gate },
+        });
+
+        var nodes = Strings(Run("outline", Registry, reads, "AA-PG", "utilization").GetProperty("nodes"));
+
+        foreach (var title in new[] { "h3: Summary", "h3: Top Databases by CPU" })
+        {
+            var at = Array.IndexOf(nodes, title);
+            Assert.True(at >= 0, title + " is missing: " + string.Join(" | ", nodes));
+            Assert.Equal("strip: Not collected for PostgreSQL", nodes[at + 1]);
+        }
+    }
+
+    /// <summary>#8555: Server Inventory on a store with only PostgreSQL targets says "Not collected for PostgreSQL", not "yet": no snapshot is coming.</summary>
+    [Fact]
+    public void ServerInventory_OnAStoreWithOnlyPostgresTargets_DoesNotPromiseASnapshot()
+    {
+        var onlyPg = JsonSerializer.Serialize(new object[]
+        {
+            new { server_name = "AA-PG", display_name = "AA-PG", engine_kind = "postgres" },
+            new { server_name = "BB-AURORA", display_name = "BB-AURORA", engine_kind = "aurora-postgres" },
+        });
+        const string Empty = "No configured server has a collected server_properties snapshot yet, so there is no inventory to show.";
+        var reads = JsonSerializer.Serialize(new Dictionary<string, object> { ["get_finops_inventory"] = new { status = "empty", message = Empty } });
+
+        var pg = Strings(Run("strips", onlyPg, reads, "AA-PG", "server-inventory").GetProperty("strips"));
+        Assert.Contains("Not collected for PostgreSQL", pg);
+        Assert.DoesNotContain(pg, s => s.Contains("yet"));
+
+        // A store with a SQL Server target could still have a snapshot to come, so it keeps the sentence.
+        var mixed = Strings(Run("strips", Registry, reads, "CC-SQL", "server-inventory").GetProperty("strips"));
+        Assert.Contains(Empty, mixed);
     }
 
     [Fact]

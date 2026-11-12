@@ -90,11 +90,11 @@ public sealed class ViewerFleetSweepsReadTests
             }, ct);
 
         await FleetSweepStore.RecordSweepAsync(postgres,
-            Run(newestId, newestAt, true, true, mutedId, """{"fleet":{"bands":{"Healthy":2}},"watch":{"opened":[],"closed":["cpu-pinned"]},"changes":{"band_transitions":[],"new_servers":[],"departed_servers":[]}}"""),
+            Run(newestId, newestAt, true, true, mutedId, """{"fleet":{"bands":{"Healthy":1,"Critical":1}},"watch":{"opened":[],"closed":["cpu-pinned"],"carried":[{"server_id":2,"item":"cpu-pinned","consecutive_hits":1,"consecutive_misses":1}]},"changes":{"band_transitions":[],"new_servers":[],"departed_servers":[]},"critical_servers":[{"server":"server-b","reason":"cpu pinned across the span"}]}"""),
             new[]
             {
                 new FleetSweepServerVerdict(1, "server-a", "Healthy", "Healthy", null, null),
-                new FleetSweepServerVerdict(2, "server-b", "Healthy", "Critical", null, null),
+                new FleetSweepServerVerdict(2, "server-b", "Critical", "Critical", "cpu pinned across the span", """{"cpu":97}"""),
             },
             Array.Empty<FleetSweepWouldHavePagedEntry>(),
             new[] { new FleetSweepWatchItem(2, "cpu-pinned", "cpu above the measured band", "carried", 1, 1, mutedId, newestId, mutedId, null, mutedAt, newestAt, """{"cpu":40}""") },
@@ -103,13 +103,44 @@ public sealed class ViewerFleetSweepsReadTests
         /* The reference: get_sweep_reports for the same store and the same hour, the default view (open + carried). */
         var web = JsonNode.Parse(await DarlingMcpFleetSweepTools.GetSweepReports(postgres, null, 1, null, null, null, ct))!.AsObject();
 
-        /* The timeline: the two sweeps inside the hour, newest first, each with its report embedded. The 3-hour-old sweep is outside. */
+        /* The timeline: the two sweeps inside the hour, newest first, each with its report embedded. The 3-hour-old sweep is outside.
+           #8318: the web feed ships the newest sweep's document once, under latest; its timeline entry carries the row counts
+           (fleet.bands, watch, would_have_paged) and report_under naming latest. The Viewer reads the store itself, so its entry
+           carries the full document. The comparison is field for field with the newest entry's document taken from latest. */
         var timeline = await viewer.GetFleetSweepTimelineAsync(now.AddHours(-1), now, ct);
         var webSweeps = (JsonArray)web["sweeps"]!;
         var viewerSweeps = (JsonArray)timeline["sweeps"]!;
         Assert.Equal(2, webSweeps.Count);
-        Assert.True(JsonNode.DeepEquals(webSweeps, viewerSweeps), "the Viewer's timeline differs from the web feed's");
+        var webNewest = webSweeps.OfType<JsonObject>().Single(s => s["sweep_id"]!.GetValue<string>() == web["latest"]!["sweep_id"]!.GetValue<string>());
+        Assert.Equal("latest", webNewest["report_under"]!.GetValue<string>());
+
+        /* The newest sweep's worklist ships once. latest's document carries the carried items in full under watch.carried, and the
+           slim entry's watch carries their count in its place; the detail's verdicts carry every server's band and reason, so the
+           document's critical_servers (the critical verdicts' names and reasons again) is not embedded beside them. Restoring the
+           full document from latest therefore folds critical_servers back out of the verdicts, and the fold is lossless. */
+        var latestReport = (JsonObject)web["latest"]!["report"]!;
+        Assert.Single((JsonArray)latestReport["watch"]!["carried"]!);
+        var slimCarried = Assert.IsAssignableFrom<JsonValue>(webNewest["report"]!["watch"]!["carried"]);
+        Assert.Equal(1, slimCarried.GetValue<int>());
+        Assert.False(latestReport.ContainsKey("critical_servers"), "latest embeds the list its verdicts already carry");
+        var webSweepsWithLatestDocument = webSweeps.DeepClone().AsArray();
+        var restored = webSweepsWithLatestDocument.OfType<JsonObject>().Single(s => s["sweep_id"]!.GetValue<string>() == webNewest["sweep_id"]!.GetValue<string>());
+        var restoredReport = (JsonObject)latestReport.DeepClone();
+        restoredReport["critical_servers"] = new JsonArray(((JsonArray)web["latest"]!["verdicts"]!).OfType<JsonObject>()
+            .Where(v => v["band"]!.GetValue<string>() == "Critical")
+            .Select(v => (JsonNode)new JsonObject { ["server"] = v["server"]!.GetValue<string>(), ["reason"] = v["reason"]!.GetValue<string>() })
+            .ToArray());
+        restored["report"] = restoredReport;
+        restored.Remove("report_under");
+        Assert.True(JsonNode.DeepEquals(webSweepsWithLatestDocument, viewerSweeps), "the Viewer's timeline differs from the web feed's");
         Assert.Equal(newestId.ToString(), viewerSweeps[0]!["sweep_id"]!.GetValue<string>());
+
+        /* The newest row's counts survive the slim entry: the Viewer's row builder over the web feed's timeline and over the Viewer's
+           own read agree on the bands, watch and would-have-paged texts of every row. */
+        var webRows = FleetSweepsRows.Runs(web);
+        var viewerRows = FleetSweepsRows.Runs(timeline);
+        Assert.Equal(viewerRows.Select(r => (r.SweepId, r.BandsText, r.WatchText, r.WouldHavePagedText)),
+            webRows.Select(r => (r.SweepId, r.BandsText, r.WatchText, r.WouldHavePagedText)));
 
         /* The newest sweep in full, and the muted one by id (it carries the would-have-paged ledger). */
         var latest = await viewer.GetFleetSweepDetailAsync(null, ct);
@@ -162,7 +193,7 @@ public sealed class ViewerFleetSweepsReadTests
         var at = new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc);
         var first = FleetSweepPresentation.BuildSweepDetailNode(
             Run(1, at, true, true, null, """{"no_previous_sweep":true}"""), Array.Empty<FleetSweepServerVerdict>(), Array.Empty<FleetSweepWouldHavePagedEntry>());
-        Assert.Equal("First sweep — there is no previous sweep to diff against, so this document states absolutes.", FleetSweepsRows.ChangesNote(first));
+        Assert.Equal("First sweep: there is no previous sweep to diff against, so this document states absolutes.", FleetSweepsRows.ChangesNote(first));
         Assert.Null(FleetSweepsRows.WouldHavePaged(first));
         Assert.Empty(FleetSweepsRows.Verdicts(first));
 

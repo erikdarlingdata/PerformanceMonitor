@@ -637,7 +637,7 @@ ORDER BY m.metric_name, f.alert_time DESC";
             .ToList();
 
         var (states, stateNote) = await DarlingForcePlanTargetStateReader.TryReadAsync(
-            _postgres, request.ServerId, groups.Select(g => g.Latest), logger: _logger, cancellationToken: cancellationToken).ConfigureAwait(false);
+            _postgres, request.ServerId, groups.Select(g => g.Latest), McpCommandDeadlines.ReadSeconds, logger: _logger, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var result = new List<InvestigationBriefFinding>(groups.Count);
         foreach (var g in groups)

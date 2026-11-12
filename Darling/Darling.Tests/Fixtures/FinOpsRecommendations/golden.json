@@ -13,7 +13,7 @@
         "Category": "Databases",
         "Severity": "Medium",
         "Confidence": "High",
-        "Finding": "1 idle database(s) consuming 2.0GB",
+        "Finding": "1 idle database consuming 2.0GB",
         "Detail": "No query activity in 7 days: ArchiveA. Consider archiving or removing these databases.",
         "EstMonthlySavings": 39.348293882569935444205348900
       },
@@ -21,7 +21,7 @@
         "Category": "Environment",
         "Severity": "Medium",
         "Confidence": "Low",
-        "Finding": "2 possible dev/test database(s) on production server",
+        "Finding": "2 possible dev/test databases on production server",
         "Detail": "Databases matching dev/test patterns: app_dev_a, qa1_a. If these are non-production workloads, consider moving to a lower-cost tier or separate server.",
         "EstMonthlySavings": null
       },
@@ -45,7 +45,7 @@
         "Category": "Licensing",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "TDE in use — Enterprise Edition downgrade blocker",
+        "Finding": "TDE in use: Enterprise Edition downgrade blocker",
         "Detail": "The following databases use Transparent Data Encryption: OrdersA, SalesA. TDE must be removed before downgrading to Standard Edition.",
         "EstMonthlySavings": null
       },
@@ -85,7 +85,7 @@
         "Category": "Cloud",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06) — reserved capacity candidate",
+        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06): reserved capacity candidate",
         "Detail": "CPU utilization is consistently 21.8% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
         "EstMonthlySavings": null
       }
@@ -103,7 +103,7 @@
         "Category": "Databases",
         "Severity": "Medium",
         "Confidence": "High",
-        "Finding": "1 idle database(s) consuming 2.0GB",
+        "Finding": "1 idle database consuming 2.0GB",
         "Detail": "No query activity in 7 days: ArchiveA. Consider archiving or removing these databases.",
         "EstMonthlySavings": null
       },
@@ -111,7 +111,7 @@
         "Category": "Environment",
         "Severity": "Medium",
         "Confidence": "Low",
-        "Finding": "2 possible dev/test database(s) on production server",
+        "Finding": "2 possible dev/test databases on production server",
         "Detail": "Databases matching dev/test patterns: app_dev_a, qa1_a. If these are non-production workloads, consider moving to a lower-cost tier or separate server.",
         "EstMonthlySavings": null
       },
@@ -135,7 +135,7 @@
         "Category": "Licensing",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "TDE in use — Enterprise Edition downgrade blocker",
+        "Finding": "TDE in use: Enterprise Edition downgrade blocker",
         "Detail": "The following databases use Transparent Data Encryption: OrdersA, SalesA. TDE must be removed before downgrading to Standard Edition.",
         "EstMonthlySavings": null
       },
@@ -175,7 +175,7 @@
         "Category": "Cloud",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06) — reserved capacity candidate",
+        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06): reserved capacity candidate",
         "Detail": "CPU utilization is consistently 21.8% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
         "EstMonthlySavings": null
       }
@@ -187,7 +187,7 @@
         "Category": "Cloud",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06) — reserved capacity candidate",
+        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06): reserved capacity candidate",
         "Detail": "CPU utilization is consistently 21.8% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
         "EstMonthlySavings": null
       }
@@ -197,7 +197,7 @@
         "Category": "Cloud",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06) — reserved capacity candidate",
+        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06): reserved capacity candidate",
         "Detail": "CPU utilization is consistently 21.8% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
         "EstMonthlySavings": null
       }

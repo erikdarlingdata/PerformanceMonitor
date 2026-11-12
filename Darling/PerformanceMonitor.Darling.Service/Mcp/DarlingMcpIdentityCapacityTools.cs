@@ -109,8 +109,8 @@ public sealed class DarlingMcpIdentityCapacityTools
                 var noScan = await NoticeAsync(emptyAnswer: true);
                 return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("unavailable",
                         $"No identity capacity scan{where} in the {hours_back}-hour window ending {Format(windowEnd)}" +
-                        (unscanned.Count == 0 ? "" : $", and {unscanned.Count} database(s) not yet scanned ({string.Join(", ", unscanned.Take(10).Select(u => u.DatabaseName))}{(unscanned.Count > 10 ? ", ..." : "")})") +
-                        (skipped.Count == 0 ? "" : $", and {skipped.Count} database(s) skipped on purpose ({string.Join("; ", skipped.Take(10).Select(u => $"{u.DatabaseName} - {u.Text}"))}{(skipped.Count > 10 ? "; ..." : "")})") +
+                        (unscanned.Count == 0 ? "" : $", and {CountText.Plural(unscanned.Count, "database")} not yet scanned ({string.Join(", ", unscanned.Take(10).Select(u => u.DatabaseName))}{(unscanned.Count > 10 ? ", ..." : "")})") +
+                        (skipped.Count == 0 ? "" : $", and {CountText.Plural(skipped.Count, "database")} skipped on purpose ({string.Join("; ", skipped.Take(10).Select(u => $"{u.DatabaseName} - {u.Text}"))}{(skipped.Count > 10 ? "; ..." : "")})") +
                         ". The identity_capacity collector has not run in it, " +
                         "or has not reached the database yet (it runs every 6 hours, stops a pass after 5 minutes and starts the next one where the last stopped). " +
                         "A snapshot, a readable secondary or a database the monitoring login cannot enter is skipped on purpose and listed with its reason. " +
@@ -122,7 +122,12 @@ public sealed class DarlingMcpIdentityCapacityTools
 
             var worst = read.Columns.Count == 0 ? null : read.Columns[0];
             double? worstPercent = worst?.PercentUsed is double wp ? Math.Round(wp, 4) : null;
-            double? soonestDays = read.Columns.Select(c => c.Exhaustion?.DaysLeft).Min() is double sd ? Math.Round(sd, 1) : null;
+            /* #8571: a column with no values left is exhausted now, so it reads 0; it has no projection, and the minimum below skipped it and
+               every other column without an issue rate, which reported the one projected column's 5,415 days as the soonest. The columns the
+               minimum could not see are counted and named beside it. */
+            var anyExhausted = read.Columns.Any(c => c.ValuesRemaining is { } remaining && remaining <= 0);
+            var withoutProjection = read.Columns.Count(c => c.Exhaustion is null);
+            double? soonestDays = anyExhausted ? 0 : read.Columns.Select(c => c.Exhaustion?.DaysLeft).Min() is double sd ? Math.Round(sd, 1) : null;
             var summary = new
             {
                 databases_scanned = read.Databases.Count,
@@ -136,6 +141,12 @@ public sealed class DarlingMcpIdentityCapacityTools
                 worst_band = worst?.Band ?? IdentityCapacityMath.BandOk,
                 worst_percent_used = worstPercent,
                 soonest_exhaustion_days = soonestDays,
+                columns_without_projection = withoutProjection,
+                soonest_exhaustion_note = anyExhausted
+                    ? "0 means a column has no values left. " + (withoutProjection == 0 ? "" : $"{CountText.Plural(withoutProjection, "column")} listed {(withoutProjection == 1 ? "has" : "have")} no projection (no issue rate in the window, or no values left): read values_remaining on them.")
+                    : withoutProjection == 0
+                        ? null
+                        : $"{CountText.Plural(withoutProjection, "column")} listed {(withoutProjection == 1 ? "has" : "have")} no projection (no issue rate in the window) and {(withoutProjection == 1 ? "is" : "are")} not counted in soonest_exhaustion_days: read values_remaining on {(withoutProjection == 1 ? "it" : "them")}.",
             };
             var databaseNodes = read.Databases.Select(d => new
             {
@@ -172,7 +183,7 @@ public sealed class DarlingMcpIdentityCapacityTools
                 {
                     server = resolved.DisplayName,
                     status = "empty",
-                    message = $"{read.Databases.Count} database(s){where} scanned in the window and none has an identity column above 10 percent used.",
+                    message = $"{CountText.Plural(read.Databases.Count, "database")}{where} scanned in the window and none has an identity column above 10 percent used.",
                     as_of = Format(windowEnd),
                     hours_back,
                     hints = notice.AsHints(),

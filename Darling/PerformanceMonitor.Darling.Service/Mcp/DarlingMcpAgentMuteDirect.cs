@@ -23,8 +23,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal sealed record AgentMuteRulesSetting(bool Allowed);
 
 /// <summary>
-/// #7414: an agent token writes a mute or digest rule with no investigation claim. The rule may name one server or all servers and any
-/// metric, the same scope an operator has. The price is a bound on what the rule can do: the rule left behind must expire in the future
+/// #7414: an agent token writes a mute or digest rule with no investigation claim. A digest may name one server or all servers and any
+/// metric, the same scope an operator has. A mute names one server by id and a metric that is not one of the service's own alerts
+/// (<see cref="MuteScopeRefusal"/>), the claim path's own scope rule, so leaving out <c>agent_action</c> never widens what a mute can
+/// silence (#8473). The price is a bound on what the rule can do: the rule left behind must expire in the future
 /// and at most <see cref="MaxExpiryDays"/> days ahead, a <c>reason</c> is required, and the write and its agent change journal row (the
 /// agent, the reason, the rule before and after) commit in one transaction, so a refused or failed write leaves nothing.
 /// <para>
@@ -66,10 +68,11 @@ internal static class DarlingMcpAgentMuteDirect
     internal const int MaxChangesChars = 8192;
 
     /// <summary>
-    /// Direct-path writes per service per hour. A real storm needs a few rules: say three create calls, a couple of updates to narrow
-    /// them and a delete when it ends, about ten writes, and a rule made twice because the first guess was wrong stays far under this.
-    /// Twenty leaves that headroom twice over and still holds a runaway loop to 20 rows an hour, so a change an operator may want to
-    /// undo stays on the 200 row Agent changes list for ten hours of the worst case instead of falling off it in minutes.
+    /// Direct-path writes per agent per hour (#8473: counted by the journal actor, so one agent's writes never use up another's). A real
+    /// storm needs a few rules: say three create calls, a couple of updates to narrow them and a delete when it ends, about ten writes,
+    /// and a rule made twice because the first guess was wrong stays far under this. Twenty leaves that headroom twice over and still
+    /// holds one runaway agent to 20 rows an hour. The service-wide worst case is that many for each agent token and the legacy token
+    /// together, so how long a change stays on the 200 row Agent changes list depends on how many agent tokens the operator has issued.
     /// </summary>
     internal const int MaxWritesPerHour = 20;
 
@@ -86,6 +89,17 @@ internal static class DarlingMcpAgentMuteDirect
     internal static AgentActionRefusal NoMetricRefusal() => new(NoMetricCode,
         "A rule with no metric would silence every alert it covers, including the service's own health alerts and the daily report. " +
         "Name a metric (any server or one server). An operator can make a rule with no metric. Nothing was written.");
+
+    /// <summary>
+    /// #8473: a mute outside the scope an agent may silence, no <c>server_id</c> or one of the service's own alerts, refused with the claim path's
+    /// own reason word (<see cref="DarlingMcpAgentActions.MuteScopeRefusal"/>) and this path's advice. Null for a digest or a mute inside the scope.
+    /// </summary>
+    internal static AgentActionRefusal? MuteScopeRefusal(MuteRule rule) =>
+        DarlingMcpAgentActions.MuteScopeRefusal(rule) is { } scope
+            ? new AgentActionRefusal(scope.Reason, scope.Message +
+                " Without a claim a mute names one server (server_id) and one metric that is not one of the service's own alerts, the same scope a claim allows. " +
+                "A digest (action 'digest') bundles the alerts instead of silencing them and may name any server or metric. An operator can make a wider mute. Nothing was written.")
+            : null;
 
     /// <summary>
     /// The renewal bound (#7414): 7 days is a lifetime, counted from the rule's <c>created_at_utc</c>, not a window that slides. An agent's
@@ -114,7 +128,7 @@ internal static class DarlingMcpAgentMuteDirect
         && InvestigationToolCore.ParseAgentAction(agentAction, out _)?.Reason == AgentActionCodes.Required;
 
     /// <summary>The agent id of a call with no <c>agent_action</c>: the named token's own name, else a fixed word for the legacy token.</summary>
-    internal static string AgentIdOf(DarlingAgentActionSeat seat) => seat.Policy.AgentTokenName ?? "legacy-token";
+    internal static string AgentIdOf(DarlingAgentActionSeat seat) => seat.Policy.AgentTokenName ?? InvestigationToolCore.LegacyTokenAgent;
 
     /// <summary>
     /// The expiry bound, judged on the instant the rule would carry after the write. UTC throughout: <paramref name="nowUtc"/> is the service
@@ -187,6 +201,12 @@ internal static class DarlingMcpAgentMuteDirect
         if (!seat.AgentMuteRulesAllowed)
             return Refusal(new AgentActionRefusal(OffCode,
                 $"An agent token may not write mute or digest rules without a claim on this service: {SettingName} is false in darling.json. Nothing was written."));
+        /* #8473: the host hands the seat the store owner's source and the worker publishes it once it has connected. Until then the only other
+           source is the tool's own, whose role cannot write the journal row under managed roles, so the answer is a refusal rather than an error
+           from the insert, the same word the Level 3 tools use. A seat with no owner source at all (a test host) uses the tool's own source. */
+        if (seat.Owner is { } owner && owner.Read() is null)
+            return Refusal(new AgentActionRefusal(DarlingMcpPlanForceTools.NoOwnerSource,
+                "The service has not published its store owner connection yet, so the rule and its journal row cannot be written. Try again shortly. Nothing was written."));
         try
         {
             await using var connection = seat.Owner?.Read() is { } ownerRead ? await ownerRead.OpenConnectionAsync(ct) : await postgres.OpenConnectionAsync(ct);
@@ -195,9 +215,9 @@ internal static class DarlingMcpAgentMuteDirect
                same-match check below read the journal as the write before them left it, and two calls cannot both see room. */
             if (await InvestigationRequestStore.DirectChangeSwitchRefusalAsync(connection, transaction, ct) is { } off)
                 return Refusal(off);
-            if (await WriteCountInLastHourAsync(connection, transaction, now, ct) >= MaxWritesPerHour)
+            if (await WriteCountInLastHourAsync(connection, transaction, now, agentId, ct) >= MaxWritesPerHour)
                 return Refusal(new AgentActionRefusal(RateCode,
-                    $"This service allows {MaxWritesPerHour} agent mute rule writes an hour and that many were made in the last hour. Wait, or ask an operator. Nothing was written."));
+                    $"This service allows each agent {MaxWritesPerHour} mute rule writes an hour without a claim, and this agent made that many in the last hour. Wait, or ask an operator. Nothing was written."));
 
             var (answer, before, after) = await body(connection, transaction);
             if (!string.Equals(StatusOf(answer), changedStatus, StringComparison.Ordinal))
@@ -215,7 +235,8 @@ internal static class DarlingMcpAgentMuteDirect
         }
     }
 
-    private const string WriteCountSql = "SELECT count(*) FROM config.investigation_journal WHERE event = 'action_called' AND request_id IS NULL AND actor LIKE 'agent:%' AND event_time > $1 - interval '1 hour'";
+    /* #8473: one agent's direct writes, by the journal actor, so the hourly cap is each agent's own. */
+    private const string WriteCountSql = "SELECT count(*) FROM config.investigation_journal WHERE event = 'action_called' AND request_id IS NULL AND actor = $2 AND event_time > $1 - interval '1 hour'";
 
     private const string ServerIdentitySql = "SELECT server_id, lower(COALESCE(display_name, server_name)) FROM collect.servers WHERE server_id = $1 OR lower(COALESCE(display_name, server_name)) = lower($2)";
 
@@ -231,10 +252,11 @@ SELECT EXISTS (
     AND CASE WHEN $6 THEN (x.r->>'server_id') IS NULL AND nullif(btrim(x.r->>'server_name'), '') IS NULL
              ELSE (x.r->>'server_id') = ANY($3) OR ((x.r->>'server_id') IS NULL AND lower(x.r->>'server_name') = ANY($7)) END)";
 
-    private static async Task<long> WriteCountInLastHourAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now, CancellationToken ct)
+    private static async Task<long> WriteCountInLastHourAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now, string agentId, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(WriteCountSql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = "agent:" + agentId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
         return (long)(await command.ExecuteScalarAsync(ct))!;
     }
 
@@ -362,6 +384,8 @@ SELECT EXISTS (
                 /* Judged on the rule as the store holds it. A refusal here is not "created", so nothing commits. */
                 if (created is not null && NamesNoMetric(created))
                     return (Refusal(NoMetricRefusal()), null, null);
+                if (created is not null && MuteScopeRefusal(created) is { } scope)
+                    return (Refusal(scope), null, null);
                 if (created is not null && await MadeRecentlyAsync(connection, transaction, created, now, ct))
                     return (Refusal(RepeatRefusal()), null, null);
             }
@@ -427,6 +451,10 @@ SELECT EXISTS (
                 return (Refusal(badExpiry), null, null);
             if (NamesNoMetric(after))
                 return (Refusal(NoMetricRefusal()), null, null);
+            /* The rule the update leaves behind is judged as a create would be: an update cannot widen a mute onto all servers or a protected metric,
+               nor turn a wide digest into a mute. */
+            if (MuteScopeRefusal(after) is { } scope)
+                return (Refusal(scope), null, null);
             if (LifetimeRefusal(before, after) is { } lifetime)
                 return (Refusal(lifetime), null, null);
             /* An update that moves the rule onto another server, metric or action is a rule made on that match, so it is held to the same
@@ -457,9 +485,11 @@ SELECT EXISTS (
                bound cannot be put in force by an agent. Turning it off is always allowed: it can only make the operator hear more. */
             if (enabled && ExpiryRefusal(before.ExpiresAtUtc, now) is { } badExpiry)
                 return (Refusal(badExpiry), null, null);
-            /* The same rule as create and update: an operator's disabled rule with no metric is not put in force by an agent. */
+            /* The same rule as create and update: an operator's disabled rule with no metric, on all servers or on a protected metric is not put in force by an agent. */
             if (enabled && NamesNoMetric(before))
                 return (Refusal(NoMetricRefusal()), null, null);
+            if (enabled && MuteScopeRefusal(before) is { } scope)
+                return (Refusal(scope), null, null);
 
             var answer = await DarlingMcpAlertTools.SetMuteRuleEnabledCore(new PgMuteRuleStore(connection, transaction), rule_id, enabled);
             return (answer, before, null);

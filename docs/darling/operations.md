@@ -49,12 +49,14 @@ not the content was kept.
 `collect.oversized_plan_backlog` is where those plans are eventually collected, by an out-of-band sweep
 that fetches one plan at a time, ten per server every fifteen minutes. Its `plan_xml` column is
 **plain text, never gzip** — the content never passes through the plan dimension. A row with
-`plan_xml IS NULL` has not been fetched yet; `expired_at` means the plan handle stopped resolving before
-the sweep reached it. `get_plan_xml` and the `analyze_*_plan` tools read this table automatically, so
+`plan_xml IS NULL` has not been fetched yet; `expired_at` with a `last_attempt_at` means the plan handle
+stopped resolving before the sweep reached it, and `expired_at` with no `last_attempt_at` means the sweep
+dropped the row unfetched: a newer sighting of the same query is waiting in its place, or the server was past
+its pending cap. A dropped row is removed a day later. `get_plan_xml` and the `analyze_*_plan` tools read this table automatically, so
 asking the product remains the shortest route.
 
 `get_oversized_plan_backlog` reports the table itself rather than one plan out of it: per server the
-pending / captured / expired counts, the newest capture and expiry instants, and `observed_bytes`
+pending / captured / expired / dropped counts, the newest capture and expiry instants, and `observed_bytes`
 min/median/max, with an optional per-server row listing that carries each plan's claim key,
 `database_name` and `query_hash`. That is where a `query_hash` worth passing to `get_plan_xml` comes
 from, and it is also the read that answers whether the sweep's fetch half has ever succeeded on a given
@@ -159,6 +161,7 @@ A purge runs on the first sweep after startup and then daily, and it does not dr
 - **`collection_log` — 60 days**, deliberately **2x** the 30-day base window (`DarlingRetention.DataRetentionBaseDays`) rather than equal to it: a collector run-record has to outlive the metric rows it explains. At an equal horizon a failed collection and the data you would diagnose it against expire the same night, which erases the evidence at exactly the moment someone finally goes looking for it.
 - **`config_alert_log` — 90 days.** Fired-alert history is low-volume and a useful audit trail, so the horizon is generous, but it is bounded — this purge is the only thing that ever deletes from it.
 - **`collect.plan_force_actions` — 365 days** (`DarlingRetention.PlanForceLedgerRetentionDays`), the auto force-plan bot's decision journal and deliberately the longest horizon in the store: it audits a bot *writing* to production servers rather than measuring them, so it has to outlive the metrics that motivated each decision. Append-only, and never a hypertable because `action_id` is an identity primary key its own `related_action_id` points back to, so it purges by bounded `DELETE`.
+- **`collect.schema_objects` — 30 days, closed versions only** (the `schema_objects` collector's retention, so `--set-collector-retention` applies). A version whose `valid_to` is set is purged once that is older than the horizon, and its column, index, constraint and trigger rows go with it. A current version stays while a pass still sees its database: when no pass has seen a database for the whole horizon (dropped, renamed, its server removed, or out of the collector's scope), its whole history goes, current versions too, with its `collect.schema_capture_state` rows. When a database joins or leaves an Availability Group its history moves to a new key, which starts with a baseline. The pass closes the old key's current versions at that time, so the old history is kept while any of its versions closed within the horizon and ages out like any closed version.
 - **`config.config_command` — 30 days, terminal rows only.** A `pending` or `in_progress` row is **never purged at any age**, because deleting a live command would strand the caller polling it. An abandoned `in_progress` row is the stale-command reaper's problem, not retention's — the reaper marks it failed, which makes it terminal and purgeable — and an ancient `pending` row means the service has not run it yet.
 - **`analysis_findings` — 30 days**, purged by `PgFindingStore.CleanupOldFindingsAsync` on the same tick rather than by the sweep above. It is also not a hypertable — it was designed keyless so it could become one, but the conversion is deliberately not made until finding volume warrants it — so it purges by `DELETE` on every store.
 

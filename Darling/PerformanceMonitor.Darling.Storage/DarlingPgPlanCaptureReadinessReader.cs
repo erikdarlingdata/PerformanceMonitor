@@ -64,6 +64,23 @@ public static class DarlingPgPlanCaptureReadinessReader
        The facet order is spelled as a CASE rather than left to alphabetical, which would give
        capture_threshold, extension_available, library_loaded, message_locale, plan_attribution,
        plan_text_setting - close to the reverse of the order somebody has to act in. */
+    /// <summary>The facets in the order they have to be fixed in, the same order the SQL below sorts them into (#8572): a facet later in the
+    /// list cannot be satisfied until the ones before it are. A caller holding facet names without the SQL (the get_pg_plans precondition
+    /// message) sorts by <see cref="CausalRank"/> so it lists them the way the readiness read does.</summary>
+    public static readonly IReadOnlyList<string> CausalFacetOrder =
+        ["extension_available", "library_loaded", "capture_threshold", "plan_text_setting", "plan_attribution", "message_locale"];
+
+    /// <summary>The position of <paramref name="facet"/> in <see cref="CausalFacetOrder"/>; a facet the list does not know sorts last.</summary>
+    public static int CausalRank(string facet)
+    {
+        for (var i = 0; i < CausalFacetOrder.Count; i++)
+        {
+            if (string.Equals(CausalFacetOrder[i], facet, StringComparison.Ordinal)) return i;
+        }
+
+        return CausalFacetOrder.Count;
+    }
+
     public const string PgPlanCaptureReadinessSql = """
         SELECT facet, is_satisfied, observed, detail, collection_time
         FROM (

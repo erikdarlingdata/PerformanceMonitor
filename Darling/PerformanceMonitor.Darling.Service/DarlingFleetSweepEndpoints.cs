@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Darling.Service.Hosting;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -197,6 +198,12 @@ internal static class DarlingFleetSweepEndpoints
             var runs = await FleetSweepStore.GetSweepsBySpanAsync(
                 postgres, startUtc, endUtc, context.RequestAborted);
 
+            if (DarlingWebSeat.FromContext(context).AllowedTagIds is { } tags)
+            {
+                var ids = await DarlingWebEndpoints.AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
+                runs = await DarlingWebEndpoints.ScopeSweepsAsync(postgres, runs, ids, context.RequestAborted);
+            }
+
             run.Complete(ReadOutcome.Ok);
             return JsonResult(FleetSweepPresentation.BuildTimelineNode(runs, startUtc, endUtc));
         });
@@ -281,6 +288,12 @@ internal static class DarlingFleetSweepEndpoints
                 ? await FleetSweepStore.GetOpenAndCarriedWatchItemsAsync(postgres, context.RequestAborted)
                 : await FleetSweepStore.GetWatchItemsByStateAsync(postgres, state, context.RequestAborted);
 
+            if (DarlingWebSeat.FromContext(context).AllowedTagIds is { } tags)
+            {
+                var ids = await DarlingWebEndpoints.AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
+                items = items.Where(item => ids.Contains(item.ServerId)).ToList();
+            }
+
             var names = await ReadWatchItemNamesAsync(postgres, items, logger, context.RequestAborted);
             run.Complete(ReadOutcome.Ok);
             return JsonResult(FleetSweepPresentation.BuildWatchItemsNode(items, names));
@@ -305,6 +318,14 @@ internal static class DarlingFleetSweepEndpoints
         var ledger = run.AlertsEnabled
             ? new List<FleetSweepWouldHavePagedEntry>()
             : await FleetSweepStore.GetWouldHavePagedAsync(postgres, run.SweepId, context.RequestAborted);
+
+        if (DarlingWebSeat.FromContext(context).AllowedTagIds is { } tags)
+        {
+            var ids = await DarlingWebEndpoints.AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
+            run = await DarlingWebEndpoints.ScopeSweepAsync(postgres, run, ids, context.RequestAborted);
+            verdicts = verdicts.Where(verdict => ids.Contains(verdict.ServerId)).ToList();
+            ledger = ledger.Where(entry => ids.Contains(entry.ServerId)).ToList();
+        }
 
         return FleetSweepPresentation.BuildSweepDetailNode(run, verdicts, ledger);
     }

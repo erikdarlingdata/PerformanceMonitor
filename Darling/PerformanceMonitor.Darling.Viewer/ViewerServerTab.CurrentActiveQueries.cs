@@ -40,7 +40,7 @@ public partial class ViewerServerTab
     /// the service, over its own connection.
     /// </summary>
     private const string ReadOnlySeatMessage =
-        "Read-only viewer — the live fetch queues a request for the service in the MONITORING STORE, which a "
+        "Read-only viewer: the live fetch queues a request for the service in the MONITORING STORE, which a "
         + "read-only seat can't write to. Nothing is sent to or written on the monitored server. Reconnect "
         + "with a read-write store profile to fetch live active queries.";
 
@@ -74,12 +74,12 @@ public partial class ViewerServerTab
                     var leftOut = !includeMonitor && shown.Count < result.Rows.Count ? " The monitor's own statements are left out." : "";
                     CurrentActiveQueriesStatus.Text = (shown.Count == 0
                         ? $"No user requests running as of {stamp}."
-                        : $"{shown.Count} running request(s) as of {stamp}.") + leftOut;
+                        : $"{CountText.Plural(shown.Count, "running request")} as of {stamp}.") + leftOut;
                     break;
 
                 case ActiveQueriesLiveStatus.TimedOut:
                     CurrentActiveQueriesStatus.Text = result.Message
-                        ?? "The service did not return the live active queries in time — try again.";
+                        ?? "The service did not return the live active queries in time. Try again.";
                     break;
 
                 case ActiveQueriesLiveStatus.Failed:

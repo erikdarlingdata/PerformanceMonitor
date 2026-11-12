@@ -131,7 +131,7 @@ public sealed class DarlingMcpDatabaseStateTools
         "A set is an override: the service never replaces it with a learned baseline. CLEAR deletes the row, so the database is pending again and the service learns a baseline from its next observation " +
         "(an integrity or transient state is not learned and stays pending). " +
         "Answer: {status:\"set\"|\"cleared\"|\"unchanged\", previous: {expected_state, is_user_override} or null, undo: {tool, arguments}}. " +
-        "Undo of a set over no expectation is CLEAR; over an expectation, the earlier state (an earlier learned baseline comes back as an override, undo_note says so). Needs mcp.allowWrites; an agent investigation can never call it.")]
+        "Undo of a set over no expectation is CLEAR; over an expectation, the earlier state (an earlier learned baseline comes back as an override, undo_note says so). Needs mcp.allowWrites or a named operator token; an agent investigation can never call it.")]
     public static async Task<string> SetDatabaseStateExpected(
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,

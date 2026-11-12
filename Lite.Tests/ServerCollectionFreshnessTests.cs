@@ -35,6 +35,7 @@ namespace Lite.Tests;
 /// the card has quietly grown numbers of its own — which is the drift the shared class was created to end
 /// (#1562).</para>
 /// </summary>
+[Collection("application-theme")] // #8395: reads a card brush off the STA thread
 public class ServerCollectionFreshnessTests
 {
     private static readonly DateTime Now = new(2026, 8, 21, 12, 0, 0, DateTimeKind.Utc);
@@ -138,7 +139,10 @@ public class ServerCollectionFreshnessTests
         Assert.False(card.CollectionIsNotFresh);
         Assert.Equal(UnknownGrey, Hex(card.LastCollectionBrush));
         Assert.Null(card.CollectionFreshnessTooltip);
-        Assert.DoesNotContain("(", card.LastCollectionDisplay, StringComparison.Ordinal);
+        /* The stamp and nothing after it: no band word. In Server Time the stamp itself ends with its clock's offset in brackets. */
+        Assert.Equal(
+            ServerSummaryItem.FormatLastCollect(card.LastCollectionTime!.Value, ServerTimeHelper.CurrentDisplayMode, card.Clock, DateTime.UtcNow),
+            card.LastCollectionDisplay);
     }
 
     // ── The defect, and the conflation the fix must not create ────────────────────────────────────────
@@ -344,13 +348,13 @@ public class ServerCollectionFreshnessTests
         Assert.Equal(1, CountOccurrences(source, "new ServerSummaryItem"));
         /* #3967: the stamp carries the caller's registration, so every caller's card bands a server whose
            history has aged out of the archive alike. */
-        Assert.Equal(1, CountOccurrences(source, "ApplyCollectionFreshness(DateTime.UtcNow, registeredAtUtc)"));
+        Assert.Equal(1, CountOccurrences(source, "ApplyCollectionFreshness(DateTime.UtcNow, registeredAtUtc, attempted)"));
 
         /* And the stamp is after the object is built: banding an object that has already been handed back
            would band nothing, and the ordering is the half a count cannot see. */
         Assert.True(
             source.IndexOf("new ServerSummaryItem", StringComparison.Ordinal)
-                < source.IndexOf("ApplyCollectionFreshness(DateTime.UtcNow, registeredAtUtc)", StringComparison.Ordinal),
+                < source.IndexOf("ApplyCollectionFreshness(DateTime.UtcNow, registeredAtUtc, attempted)", StringComparison.Ordinal),
             "The freshness stamp no longer follows the summary it is meant to band.");
     }
 

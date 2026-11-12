@@ -81,8 +81,8 @@ public sealed class ViewerLocalStateBehaviourTests
         Assert.Equal(2, before.GetProperty("count").GetInt32());
         Assert.True(before.GetProperty("critical").GetBoolean());
         Assert.True(before.GetProperty("show").GetBoolean());
-        Assert.Equal(0, r.GetProperty("mutedAndResolved").GetProperty("count").GetInt32());
-        Assert.Equal(0, r.GetProperty("dismissed").GetProperty("count").GetInt32());
+        Assert.False(r.GetProperty("noActionable").GetProperty("show").GetBoolean());
+        Assert.Equal(0, r.GetProperty("absent").GetProperty("count").GetInt32());
 
         Assert.False(r.GetProperty("acked").GetProperty("show").GetBoolean());
         Assert.False(r.GetProperty("afterReloadSameRows").GetProperty("show").GetBoolean());
@@ -144,9 +144,29 @@ public sealed class ViewerLocalStateBehaviourTests
     }
 
     [Fact]
-    public void TheBadgeCounts_ShareOneFleetWideAlertRead_AndKeepTheLastCountsWhenARefreshFails()
+    public void ThePageLinksFold_IsRemembered_PerBrowser_AndSurvivesBrokenStorage()
+    {
+        if (!TryRun("navCollapsed", out var r)) return;
+
+        Assert.False(r.GetProperty("initial").GetBoolean());
+        Assert.True(r.GetProperty("afterReload").GetBoolean());
+        Assert.False(r.GetProperty("railUntouched").GetBoolean());
+        Assert.True(r.GetProperty("navKeptWhenRailChanges").GetBoolean());
+        Assert.False(r.GetProperty("afterExpand").GetBoolean());
+        Assert.True(r.GetProperty("railKeptWhenNavChanges").GetBoolean());
+        Assert.False(r.GetProperty("unreadable").GetBoolean());
+        Assert.True(r.GetProperty("unwritableStillWorksInSession").GetBoolean());
+        Assert.False(r.GetProperty("handEdited").GetBoolean());
+    }
+
+    [Fact]
+    public void TheBadgeCounts_ShareOneFleetWideSummaryRead_AndKeepTheLastCountsWhenARefreshFails()
     {
         if (!TryRun("oneRead", out var r)) return;
+
+        /* #8551: the small per-server summary, not a page of alert rows: the read takes no limit and no window to cut. */
+        Assert.Equal("get_alert_badge_summary", r.GetProperty("asked").GetProperty("tool").GetString());
+        Assert.Empty(r.GetProperty("asked").GetProperty("params").EnumerateObject());
 
         Assert.Equal(1, r.GetProperty("readsWithinTtl").GetInt32());
         Assert.Equal(1, r.GetProperty("count").GetInt32());
@@ -217,6 +237,92 @@ public sealed class ViewerLocalStateBehaviourTests
         // With private mode or a full quota the choice holds for the page load only.
         Assert.True(r.GetProperty("setNoStorage").GetBoolean());
         Assert.Equal(new[] { "A" }, Strings(r.GetProperty("heldNoStorage")));
+    }
+
+    /// <summary>The ids the signedIds scenario runs: a negative id, a ten-digit positive id, and the two ends of the 32-bit
+    /// range a server id (a hash of the server's name) can take.</summary>
+    private static readonly int[] SignedIds = { -1563402511, 1730000001, int.MinValue, int.MaxValue };
+
+    private static bool[] Bools(JsonElement node) => node.EnumerateArray().Select(e => e.GetBoolean()).ToArray();
+
+    private static readonly bool[] AllFour = { true, true, true, true };
+    private static readonly bool[] NoneOfFour = { false, false, false, false };
+
+    [Fact]
+    public void AnActionableAlert_DrawsABadge_OnAServerWithANegativeId()
+    {
+        if (!TryRun("signedIds", out var r)) return;
+
+        var badges = r.GetProperty("badges").EnumerateArray().ToArray();
+        Assert.Equal(SignedIds.Length, badges.Length);
+        // The negative id has two actionable alerts, one of them critical; each other id has one.
+        Assert.Equal(new[] { 2, 1, 1, 1 }, badges.Select(b => b.GetProperty("count").GetInt32()).ToArray());
+        Assert.Equal(AllFour, badges.Select(b => b.GetProperty("show").GetBoolean()).ToArray());
+        Assert.True(badges[0].GetProperty("critical").GetBoolean());
+        // server_id 0 (the store's own alerts, an external source's alert that names no registered server) is no server and gets no badge.
+        Assert.Equal(0, r.GetProperty("zeroBadge").GetProperty("count").GetInt32());
+        Assert.False(r.GetProperty("zeroBadge").GetProperty("show").GetBoolean());
+    }
+
+    [Fact]
+    public void TheFavouriteStar_Toggles_OnAServerWithANegativeId_AndSurvivesARebuild()
+    {
+        if (!TryRun("signedIds", out var r)) return;
+
+        Assert.Equal(AllFour, Bools(r.GetProperty("starOn")));
+        Assert.Equal(SignedIds.OrderBy(i => i).ToArray(), Ints(r.GetProperty("storedFavorites")));
+        Assert.Equal(AllFour, Bools(r.GetProperty("starAfterReload")));
+        Assert.Equal(new[] { SignedIds[0], 5 }, Ints(r.GetProperty("starSortsFirst")));
+        Assert.False(r.GetProperty("starOff").GetBoolean());
+        Assert.False(r.GetProperty("starOffAfterReload").GetBoolean());
+    }
+
+    [Fact]
+    public void AnAcknowledgement_QuietsTheBadge_OnAServerWithANegativeOrTenDigitId_AndSurvivesARebuild()
+    {
+        if (!TryRun("signedIds", out var r)) return;
+
+        Assert.Equal(NoneOfFour, Bools(r.GetProperty("shownWhileAcked")));
+        Assert.Equal(
+            SignedIds.Select(i => i.ToString(System.Globalization.CultureInfo.InvariantCulture)).OrderBy(s => s, StringComparer.Ordinal).ToArray(),
+            Strings(r.GetProperty("storedAckKeys")).OrderBy(s => s, StringComparer.Ordinal).ToArray());
+        Assert.Equal(AllFour, Bools(r.GetProperty("ackedAfterReload")));
+        Assert.Equal(NoneOfFour, Bools(r.GetProperty("shownAfterReload")));
+    }
+
+    [Fact]
+    public void TheDatabaseFilter_IsKept_ForAServerWithANegativeOrTenDigitId_AndSurvivesARebuild()
+    {
+        if (!TryRun("signedIds", out var r)) return;
+
+        Assert.Equal(AllFour, Bools(r.GetProperty("filterSet")));
+        var expected = SignedIds.Select(i => "Db" + i.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+        Assert.Equal(expected, r.GetProperty("filterHeld").EnumerateArray().Select(e => Strings(e).SingleOrDefault()).ToArray());
+        Assert.Equal(
+            SignedIds.Select(i => i.ToString(System.Globalization.CultureInfo.InvariantCulture)).OrderBy(s => s, StringComparer.Ordinal).ToArray(),
+            Strings(r.GetProperty("storedFilterKeys")).OrderBy(s => s, StringComparer.Ordinal).ToArray());
+        Assert.Equal(expected, r.GetProperty("filterAfterReload").EnumerateArray().Select(e => Strings(e).SingleOrDefault()).ToArray());
+    }
+
+    [Fact]
+    public void WhatIsNotAServerId_IsRefused_ZeroAFractionTextAndANumberOutsideThirtyTwoBits()
+    {
+        if (!TryRun("signedIds", out var r)) return;
+
+        var notIds = r.GetProperty("notIds").EnumerateArray().ToArray();
+        Assert.Equal(10, notIds.Length);
+        foreach (var n in notIds)
+        {
+            Assert.False(n.GetProperty("star").GetBoolean());
+            Assert.False(n.GetProperty("filter").GetBoolean());
+            Assert.Equal(0, n.GetProperty("badge").GetInt32());
+        }
+
+        // A hand-edited stored value keeps only the one real id it holds.
+        var hand = r.GetProperty("handEdited");
+        Assert.Equal(new[] { SignedIds[0] }, Ints(hand.GetProperty("favorites")));
+        Assert.Equal(new[] { SignedIds[0] }, Ints(hand.GetProperty("acks")));
+        Assert.Equal(new[] { SignedIds[0] }, Ints(hand.GetProperty("filters")));
     }
 
     [Fact]

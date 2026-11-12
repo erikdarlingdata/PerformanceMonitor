@@ -180,6 +180,40 @@ LEFT JOIN query_plan_dim AS d
         return xml.Contains("UsePlan=\"1\"", StringComparison.Ordinal) ? (PlanKind.Variant, null) : (PlanKind.Plain, null);
     }
 
+    internal const string ForcesReadOnlySql = "SET TRANSACTION READ ONLY";
+
+    /// <summary>
+    /// #8570, the field cause: <c>collect.query_store_forced_plans</c> is a plain table whose statistics lag (autoanalyze about every two days on a busy
+    /// store). While the read's window lies past the end of the <c>collection_time</c> histogram, the planner estimates every window scan at one row
+    /// and builds nested loops: the absence step re-ran an index scan of the window 4,656 times and the first-seen step re-ran once per force, 33.5 s
+    /// for one read of 274 forces. The same statement with nested loops off took 45 ms, and a window inside the histogram took 44 ms. Neither index
+    /// leads with <c>collection_time</c>, so the planner cannot probe the real maximum past the histogram. This statement reads the window rows a few
+    /// times and joins them in memory, so a hash or merge join is right at every size, and the plan is made independent of the window estimate by
+    /// setting this with <c>SET LOCAL</c> in the transaction the statement runs in. It leaves no setting on the pooled connection.
+    /// </summary>
+    internal const string ForcesNoNestLoopSql = "SET LOCAL enable_nestloop = off";
+
+    /// <summary>The transaction <see cref="ForcesSql(DatabaseFilter, int)"/> runs in: read-only, with <see cref="ForcesNoNestLoopSql"/> set for its length.</summary>
+    internal static async Task<NpgsqlTransaction> BeginForcesTransactionAsync(NpgsqlConnection connection, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            foreach (var setting in new[] { ForcesReadOnlySql, ForcesNoNestLoopSql })
+            {
+                await using var set = new NpgsqlCommand(setting, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
+                await set.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            return transaction;
+        }
+        catch
+        {
+            await transaction.DisposeAsync();
+            throw;
+        }
+    }
+
     /// <summary>
     /// The newest collector capture of each force, read from the window, with the row cap given. $1 server, $2 start, $3 end, $4 database filter,
     /// $5 query_id or NULL, $6 plan_id or NULL (#6560: both narrow the read itself, before the cap, so a force past the cap is still found). The cap cuts the LAST rows of this order: a force that fails (a failure count or
@@ -187,26 +221,77 @@ LEFT JOIN query_plan_dim AS d
     /// id, so a standing force that needs a person is never what a cap drops. It reads one row past the cap so the caller can tell the read was cut.
     /// First seen (#6833) comes from one grouped pass over the plan rows (<c>firsts</c>): the earliest row after the force's last absence. A correlated
     /// per-force minimum scanned every captured row once per force (500 forces over 24 hours of captures took 11 seconds).
+    /// <para>#8570: the capture rows are read once. One grouped pass finds each force's newest row time, its first row time and how many captures
+    /// (marker rows) it was present in; the newest row itself is then probed at that time through <c>idx_query_store_forced_plans_time</c>, not
+    /// picked by sorting every row of the window. A force that was present in every capture from its first row on was never absent after it, so its
+    /// first sighting is its first row: that is every force but the ones with a gap or a removal, and only those go through the absence step (<c>absent</c>,
+    /// <c>firsts</c>) the statement used to run for all of them. The old statement sorted 427,000 rows twice (28 MB and 14 MB to disk) and took 6,800 ms
+    /// on a 24 hour window of 300 forces, against 380 ms.</para>
+    /// <para>#8570 regression (a busy primary with 274 forces: 21 s, against 9 s before): <c>due</c> counted the markers from each force's first row on
+    /// with a correlated COUNT over the <c>markers</c> CTE, which has no index, so each of the forces read every marker of EVERY database (172,800 markers
+    /// of 600 databases, 24 hours at one capture every five minutes: 18 s of the 22 s). The markers are now ranked once per database, so the count is the
+    /// database's marker total less the rank of the marker at the force's first row, a lookup on (database, time). A first row with no marker at its
+    /// time (the collector writes both at one time, so none in practice) keeps the old count as the fallback. The markers are also read only for
+    /// databases that have a force row in the window: a database without a force never reaches <c>bounds</c>, <c>newest</c> or the absence step,
+    /// and a store of hundreds of databases with a handful of forces read and sorted every database's markers for nothing.</para>
     /// </summary>
     internal static string ForcesSql(DatabaseFilter databases, int maxForces) => $@"
-WITH {BaseCtes(databases)},
-absent AS (
-    SELECT p.database_name, p.plan_id, MAX(m.collection_time) AS last_absent
-    FROM (SELECT DISTINCT database_name, plan_id FROM plans) AS p
-    JOIN win AS m ON m.database_name = p.database_name AND m.plan_id IS NULL
-    WHERE NOT EXISTS (SELECT 1 FROM plans AS x WHERE x.database_name = p.database_name AND x.plan_id = p.plan_id AND x.collection_time = m.collection_time)
+WITH plans AS NOT MATERIALIZED (
+    SELECT database_name, collection_time, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason,
+           variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
+    FROM collect.query_store_forced_plans
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)}
+    AND   plan_id IS NOT NULL AND ($5::bigint IS NULL OR query_id = $5) AND ($6::bigint IS NULL OR plan_id = $6)),
+markers AS (
+    SELECT database_name, collection_time,
+           RANK() OVER (PARTITION BY database_name ORDER BY collection_time) AS marker_rank,
+           COUNT(*) OVER (PARTITION BY database_name) AS marker_total
+    FROM collect.query_store_forced_plans
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)} AND plan_id IS NULL
+    AND   database_name IN (SELECT database_name FROM plans)),
+newest AS (
+    SELECT database_name, MAX(collection_time) AS newest_capture FROM markers GROUP BY database_name),
+bounds AS (
+    SELECT p.database_name, p.plan_id, MAX(p.collection_time) AS latest_time, MIN(p.collection_time) AS first_row,
+           COUNT(m.collection_time) AS markers_present
+    FROM plans AS p
+    LEFT JOIN markers AS m ON m.database_name = p.database_name AND m.collection_time = p.collection_time
     GROUP BY p.database_name, p.plan_id),
+latest AS (
+    SELECT DISTINCT ON (p.database_name, p.plan_id) p.database_name, p.plan_id, p.query_id, p.plan_forcing_type, p.force_failure_count,
+           p.last_force_failure_reason, p.collection_time, p.variant_plan_ids, p.plan_guide_name, p.plan_guide_enabled, p.plan_guide_scope
+    FROM (SELECT DISTINCT latest_time FROM bounds) AS t
+    JOIN plans AS p ON p.collection_time = t.latest_time
+    JOIN bounds AS b ON b.database_name = p.database_name AND b.plan_id = p.plan_id AND b.latest_time = p.collection_time
+    ORDER BY p.database_name, p.plan_id, p.collection_time DESC),
+due AS (
+    SELECT b.database_name, b.plan_id, b.first_row, b.markers_present,
+           COALESCE(f.marker_total - f.marker_rank + 1,
+                    (SELECT COUNT(*) FROM markers AS m WHERE m.database_name = b.database_name AND m.collection_time >= b.first_row)) AS markers_due
+    FROM bounds AS b
+    LEFT JOIN markers AS f ON f.database_name = b.database_name AND f.collection_time = b.first_row),
+gappy AS (
+    SELECT database_name, plan_id FROM due WHERE markers_present <> markers_due),
+absent AS (
+    SELECT g.database_name, g.plan_id, MAX(m.collection_time) AS last_absent
+    FROM gappy AS g
+    JOIN markers AS m ON m.database_name = g.database_name
+    WHERE NOT EXISTS (SELECT 1 FROM plans AS x WHERE x.database_name = g.database_name AND x.plan_id = g.plan_id AND x.collection_time = m.collection_time)
+    GROUP BY g.database_name, g.plan_id),
 firsts AS (
     SELECT x.database_name, x.plan_id, MIN(x.collection_time) AS first_seen
     FROM plans AS x
+    JOIN gappy AS g ON g.database_name = x.database_name AND g.plan_id = x.plan_id
     LEFT JOIN absent AS a ON a.database_name = x.database_name AND a.plan_id = x.plan_id
     WHERE a.last_absent IS NULL OR x.collection_time > a.last_absent
     GROUP BY x.database_name, x.plan_id)
 SELECT l.database_name, l.plan_id, l.query_id, l.plan_forcing_type, l.force_failure_count, l.last_force_failure_reason, l.collection_time,
-       f.first_seen,
+       CASE WHEN g.plan_id IS NULL THEN d.first_row ELSE f.first_seen END,
        n.newest_capture,
        l.variant_plan_ids, l.plan_guide_name, l.plan_guide_enabled, l.plan_guide_scope
 FROM latest AS l
+JOIN due AS d ON d.database_name = l.database_name AND d.plan_id = l.plan_id
+LEFT JOIN gappy AS g ON g.database_name = l.database_name AND g.plan_id = l.plan_id
 LEFT JOIN firsts AS f ON f.database_name = l.database_name AND f.plan_id = l.plan_id
 LEFT JOIN newest AS n ON n.database_name = l.database_name
 ORDER BY CASE WHEN l.collection_time >= n.newest_capture AND (l.force_failure_count > 0 OR btrim(COALESCE(l.last_force_failure_reason, '')) <> '') THEN 0
@@ -218,27 +303,24 @@ LIMIT {maxForces + 1}";
     /// <summary>
     /// How many forces each database's newest capture holds, over the whole set (no cap), so <c>captures[].forced_plan_count</c> stays the
     /// database's real count when the read was cut. Same parameters as <see cref="ForcesSql(DatabaseFilter, int)"/>.
+    /// <para>#8570: a force counts when its newest row of the window is at or after its database's newest marker, which is the same as
+    /// a row at or after that marker existing, so the count reads those rows only (the markers through their partial index, then the
+    /// rows from each marker on) and counts distinct plan ids. It used to build <c>BaseCtes</c>' newest-row-per-force step over the
+    /// whole window, which materialized every capture row of the window twice and sorted them to keep 300 (440,000 rows of 24 hours at one
+    /// capture a minute: 1,000 ms, against 120 ms). A database with no marker in the window has no count either way.</para>
     /// </summary>
     public static string CountsSql(DatabaseFilter databases) => $@"
-WITH {BaseCtes(databases)}
-SELECT l.database_name, COUNT(*)
-FROM latest AS l
-JOIN newest AS n ON n.database_name = l.database_name AND l.collection_time >= n.newest_capture
-GROUP BY l.database_name";
-
-    private static string BaseCtes(DatabaseFilter databases) => $@"win AS (
-    SELECT database_name, collection_time, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason,
-           variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
+WITH newest AS (
+    SELECT database_name, MAX(collection_time) AS newest_capture
     FROM collect.query_store_forced_plans
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)}),
-plans AS (
-    SELECT * FROM win WHERE plan_id IS NOT NULL AND ($5::bigint IS NULL OR query_id = $5) AND ($6::bigint IS NULL OR plan_id = $6)),
-newest AS (
-    SELECT database_name, MAX(collection_time) AS newest_capture FROM win WHERE plan_id IS NULL GROUP BY database_name),
-latest AS (
-    SELECT DISTINCT ON (database_name, plan_id) database_name, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason, collection_time,
-           variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
-    FROM plans ORDER BY database_name, plan_id, collection_time DESC)";
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)} AND plan_id IS NULL
+    GROUP BY database_name)
+SELECT p.database_name, COUNT(DISTINCT p.plan_id)
+FROM collect.query_store_forced_plans AS p
+JOIN newest AS n ON n.database_name = p.database_name AND p.collection_time >= n.newest_capture
+WHERE p.server_id = $1 AND p.collection_time <= $3 AND p.plan_id IS NOT NULL
+AND   ($5::bigint IS NULL OR p.query_id = $5) AND ($6::bigint IS NULL OR p.plan_id = $6){databases.Clause("p.database_name", 4)}
+GROUP BY p.database_name";
 
     /// <summary>Each database's newest marker row in the window. $1 server, $2 start, $3 end, $4 database filter.</summary>
     public static string CapturesSql(DatabaseFilter databases) => $@"
@@ -385,12 +467,18 @@ LIMIT 50";
     {
         var ids = string.Join(", ", unknowns.Take(10).Select(u => u.PlanId.ToString(System.Globalization.CultureInfo.InvariantCulture)))
                   + (unknowns.Count > 10 ? ", ..." : "");
-        var text = $"Later plan(s) {ids} of the query ran after the force, and whether they are variants of the forced plan (the force running) or other plans (the force ignored) is not known: ";
+        var text = unknowns.Count == 1
+            ? $"Later plan {ids} of the query ran after the force, and whether it is a variant of the forced plan (the force running) or another plan (the force ignored) is not known: "
+            : $"Later plans {ids} of the query ran after the force, and whether they are variants of the forced plan (the force running) or other plans (the force ignored) is not known: ";
         var notCollected = unknowns.Count - notChecked;
         if (notCollected > 0)
-            text += $"{notCollected} of them have no plan XML in the store yet (the Query Store collector has not fetched it)";
+            text += unknowns.Count == 1
+                ? "it has no plan XML in the store yet (the Query Store collector has not fetched it)"
+                : $"{notCollected} of them {(notCollected == 1 ? "has" : "have")} no plan XML in the store yet (the Query Store collector has not fetched it)";
         if (notChecked > 0)
-            text += (notCollected > 0 ? "; " : "") + $"{notChecked} were not looked up because more than {MaxStoredPlanChecks} later plans ran in this read";
+            text += (notCollected > 0 ? "; " : "") + (unknowns.Count == 1
+                ? $"it was not looked up because more than {MaxStoredPlanChecks} later plans ran in this read"
+                : $"{notChecked} {(notChecked == 1 ? "was" : "were")} not looked up because more than {MaxStoredPlanChecks} later plans ran in this read");
         return text + ".";
     }
 
@@ -516,7 +604,11 @@ LIMIT 50";
                     counts[countReader.GetString(0)] = checked((int)countReader.GetInt64(1));
             }
 
-            await using var command = postgres.CreateCommand(ForcesSql(databases, maxForces));
+            /* #8570: the force list runs in a short read-only transaction with nested loops off. SET LOCAL ends with the transaction, which is
+               disposed with this block, so the pooled connection goes back to its own settings. See ForcesNoNestLoopSql. */
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await BeginForcesTransactionAsync(connection, commandTimeoutSeconds, cancellationToken);
+            await using var command = new NpgsqlCommand(ForcesSql(databases, maxForces), connection, transaction);
             command.CommandTimeout = commandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, from);

@@ -242,12 +242,12 @@ public sealed class BlockingDatabaseFilterLiveTests
                 postgres, ServerName, 1, null, DatabaseFilter.One("Nope"), cancellationToken: ct)).RootElement;
             Assert.Equal("empty", one.GetProperty("status").GetString());
             Assert.Equal(JsonValueKind.Null, one.GetProperty("source").ValueKind);
-            Assert.Contains("for the database Nope in the last 1 hour(s)", one.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Contains("for the database Nope in the last 1 hour", one.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             var many = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(
                 postgres, ServerName, 1, null, DatabaseFilter.Of(["Nope", "Gone"]), cancellationToken: ct)).RootElement;
             Assert.Equal("empty", many.GetProperty("status").GetString());
-            Assert.Contains("for the chosen databases in the last 1 hour(s)", many.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Contains("for the chosen databases in the last 1 hour", many.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             /* A window the collectors never ran in stays "unavailable" whatever the selection (no capture is no all-clear). */
             var gap = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(

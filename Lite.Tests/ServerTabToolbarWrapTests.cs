@@ -88,7 +88,7 @@ public sealed class ServerTabToolbarWrapTests
     private static List<string> Outside(FrameworkElement tab, int width, int height, params string[] names)
     {
         var window = new Window { Content = tab, Width = width, Height = height, Left = 0, Top = 0 };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         try
         {
             ClippedTextProbe.Settle(window);

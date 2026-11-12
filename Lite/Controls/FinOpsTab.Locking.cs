@@ -86,6 +86,9 @@ public partial class FinOpsTab : UserControl
             if (_loads.Superseded(nameof(LoadIndexLockingGridAsync), gen)) return;
             ApplyLockingHeat(data);
             _indexLockingFilterMgr!.UpdateData(data);
+            /* The grid's columns are wider than its page, so while it holds no rows a horizontal scroll bar would scroll a header
+               row over nothing: the bar shows only while there are rows to scroll. */
+            IndexLockingDataGrid.HorizontalScrollBarVisibility = data.Count > 0 ? System.Windows.Controls.ScrollBarVisibility.Auto : System.Windows.Controls.ScrollBarVisibility.Hidden;
             NoIndexLockingMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             IndexLockingCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "index", "indexes") : "";
 
@@ -196,15 +199,16 @@ public partial class FinOpsTab : UserControl
         var labelBlock = new TextBlock
         {
             Text = label,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = (Brush)FindResource("ForegroundMutedBrush")
+            FontWeight = FontWeights.SemiBold
         };
         var valueBlock = new TextBlock
         {
             Text = value,
-            Foreground = (Brush)FindResource("ForegroundBrush"),
             HorizontalAlignment = HorizontalAlignment.Right
         };
+        // Resource references, so the row's text follows a theme changed while the detail view is open (#8540).
+        labelBlock.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundMutedBrush");
+        valueBlock.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundBrush");
         Grid.SetColumn(labelBlock, 0);
         Grid.SetColumn(valueBlock, 1);
         grid.Children.Add(labelBlock);

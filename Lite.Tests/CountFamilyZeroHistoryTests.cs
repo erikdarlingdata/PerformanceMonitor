@@ -44,8 +44,8 @@ public class CountFamilyZeroHistoryTests
         FactAdvice.Compose(fact.Key, new Dictionary<string, Fact> { [fact.Key] = fact })!;
 
     [Theory]
-    [InlineData("ANOMALY_BLOCKING_SPIKE", 12, "12 blocked process reports this window — against a month in which this hour saw none")]
-    [InlineData("ANOMALY_DEADLOCK_SPIKE", 4, "4 deadlocks this window — against a month in which this hour saw none")]
+    [InlineData("ANOMALY_BLOCKING_SPIKE", 12, "12 blocked process reports this window, against a month in which this hour saw none")]
+    [InlineData("ANOMALY_DEADLOCK_SPIKE", 4, "4 deadlocks this window, against a month in which this hour saw none")]
     public void ZeroHistoryBucket_IsStamped_KeepsIsNewAndRatio_AndReadsAsAMeasuredZero(string key, long count, string headline)
     {
         var bucket = Bucket(mean: 0, samples: 30, days: 30);
@@ -73,7 +73,7 @@ public class CountFamilyZeroHistoryTests
 
         Assert.Equal(0.0, fact.Metadata["baseline_zero_history"]);
         Assert.Equal(1.0, fact.Metadata["is_new"]);
-        Assert.Equal("12 blocked process reports this window — first occurrence, no baseline yet", Compose(fact).Headline);
+        Assert.Equal("12 blocked process reports this window: first occurrence, no baseline yet", Compose(fact).Headline);
     }
 
     [Fact]

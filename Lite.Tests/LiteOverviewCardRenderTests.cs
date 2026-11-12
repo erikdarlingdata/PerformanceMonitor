@@ -65,7 +65,7 @@ public sealed class LiteOverviewCardRenderTests
                 var card = (FrameworkElement)Activator.CreateInstance(type!)!;
                 card.DataContext = item;
                 var window = new Window { Content = card, Width = 420, Height = 360, Left = 0, Top = 0, SizeToContent = SizeToContent.Manual };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     ClippedTextProbe.Settle(window);

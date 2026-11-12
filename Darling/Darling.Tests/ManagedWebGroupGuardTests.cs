@@ -1,0 +1,277 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// Store-free tests of the managed web group guards. The group metadata and credential reads go through a seam, so the per-request
+/// checks (enabled, active, generation, switch, snapshot) and the host's store trips are observed here without a PostgreSQL store.
+/// The live classes prove the same against a real store, along with the owner-guard triggers, the grants and the journal.
+/// </summary>
+public sealed class ManagedWebGroupGuardTests
+{
+    private const string Shared = "shared-guard-test-token-0123456789";
+    private const string Token = "group-guard-test-token-0123456789abcdefghij";
+    private const string Host = "127.0.0.1";
+
+    private sealed class FakeMetadata : IWebAccessGroupMetadata
+    {
+        public (WebAccessGroup Group, Guid Epoch)? Group;
+        public Guid? Epoch;
+        public int Reads;
+        public bool Throw;
+
+        public Task<(WebAccessGroup Group, Guid Epoch)?> ReadEnabledGroupAsync(Guid groupId, CancellationToken ct)
+        {
+            Reads++;
+            if (Throw) throw new InvalidOperationException("the store is down");
+            return Task.FromResult(Group is { } g && g.Group.GroupId == groupId ? Group : null);
+        }
+
+        public Task<Guid?> ReadAdvancedSessionEpochAsync(CancellationToken ct) => Task.FromResult(Epoch);
+    }
+
+    private sealed class FakeCredentials : IWebAccessGroupCredentials
+    {
+        public List<WebAccessGroupCredential> Rows = new();
+
+        public Task<IReadOnlyList<WebAccessGroupCredential>> ReadCredentialsAsync(CancellationToken ct) =>
+            Task.FromResult<IReadOnlyList<WebAccessGroupCredential>>(Rows);
+
+        public Task<bool> ActivateAsync(Guid id, long revision, Guid generation, string? refusalCode, CancellationToken ct) =>
+            Task.FromResult(true);
+    }
+
+    private sealed class Rig : IDisposable
+    {
+        public readonly PasswordPrivateKey Key = PasswordPrivateKey.Generate();
+        public IPasswordKeyRing Ring;
+        public readonly FakeMetadata Metadata = new();
+        public readonly FakeCredentials Credentials = new();
+        public readonly WebAccessGroup Group;
+        public readonly Guid Epoch = Guid.NewGuid();
+        public readonly DarlingWebGroupTokens Groups;
+
+        public Rig(WebAccessGroupScope scope = WebAccessGroupScope.Tags)
+        {
+            Ring = DarlingPasswordKey.FromPrivateKey(Key);
+            Group = new WebAccessGroup(Guid.NewGuid(), "Finance", scope, true, Guid.NewGuid(), 2, "active", null,
+                scope == WebAccessGroupScope.Tags ? new[] { 1 } : Array.Empty<int>());
+            Credentials.Rows.Add(new WebAccessGroupCredential(Group,
+                PasswordSeal.Seal(Token, Key.PublicKey, PasswordBinding.ForWebAccessToken(Group.GroupId, Group.TokenGeneration))));
+            Metadata.Group = (Group, Epoch);
+            Metadata.Epoch = Epoch;
+            Groups = new DarlingWebGroupTokens(() => Credentials, Metadata, () => Ring, Shared, null, null, NullLogger.Instance);
+        }
+
+        public async Task<DarlingWebGroupTokens.Match> RefreshedMatchAsync()
+        {
+            await Groups.RefreshAsync(CancellationToken.None);
+            var match = Groups.FindMatch(Token);
+            Assert.NotNull(match);
+            return match!;
+        }
+
+        public void Dispose() { Groups.Dispose(); Key.Dispose(); }
+    }
+
+    [Fact]
+    public async Task AnActiveGroup_ResolvesToATokenSeat_NamedForTheGroup_WithItsTagsOrNoScope()
+    {
+        using var tags = new Rig();
+        var match = await tags.RefreshedMatchAsync();
+        var seat = await tags.Groups.ResolveAsync(match.GroupId, match.Generation, CancellationToken.None);
+        Assert.NotNull(seat);
+        Assert.False(seat!.CanEdit);
+        Assert.Equal("Finance", seat.TokenName);
+        Assert.Equal("Finance", seat.Subject);
+        Assert.Equal(tags.Group.GroupId, seat.GroupId);
+        Assert.Equal(new[] { 1 }, seat.AllowedTagIds);
+
+        using var all = new Rig(WebAccessGroupScope.AllServers);
+        var allMatch = await all.RefreshedMatchAsync();
+        var allSeat = await all.Groups.ResolveAsync(allMatch.GroupId, allMatch.Generation, CancellationToken.None);
+        Assert.NotNull(allSeat);
+        Assert.Equal("Finance", allSeat!.TokenName);
+        Assert.Null(allSeat.AllowedTagIds);
+    }
+
+    [Fact]
+    public async Task EveryStateThatIsNotLive_ResolvesToNoSeat()
+    {
+        using var rig = new Rig();
+        var match = await rig.RefreshedMatchAsync();
+        var live = rig.Group;
+        foreach (var changed in new[] { live with { Enabled = false }, live with { ActivationState = "refused", RefusalCode = "invalid_token" },
+                     live with { ActivationState = "pending" }, live with { TokenGeneration = Guid.NewGuid() } })
+        {
+            rig.Metadata.Group = (changed, rig.Epoch);
+            Assert.Null(await rig.Groups.ResolveAsync(match.GroupId, match.Generation, CancellationToken.None));
+        }
+
+        // A later switch flip rolls the epoch, so the generation the cookie carries no longer matches.
+        rig.Metadata.Group = (live, Guid.NewGuid());
+        Assert.Null(await rig.Groups.ResolveAsync(match.GroupId, match.Generation, CancellationToken.None));
+
+        // The switch off at request time: the enabled-group read joins on it and answers nothing.
+        rig.Metadata.Group = null;
+        Assert.Null(await rig.Groups.ResolveAsync(match.GroupId, match.Generation, CancellationToken.None));
+
+        rig.Metadata.Group = (live, rig.Epoch);
+        Assert.NotNull(await rig.Groups.ResolveAsync(match.GroupId, match.Generation, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task AnUnavailableSnapshot_ResolvesToNoSeat_WithoutAStoreTrip()
+    {
+        using var rig = new Rig();
+        var match = await rig.RefreshedMatchAsync();
+        rig.Ring = DarlingPasswordKey.Refusing("test key temporarily unavailable");
+        var before = rig.Metadata.Reads;
+        Assert.Null(await rig.Groups.ResolveAsync(match.GroupId, match.Generation, CancellationToken.None));
+        Assert.Equal(before, rig.Metadata.Reads);
+    }
+
+    [Fact]
+    public async Task AStoreFailureDuringTheLookup_Propagates()
+    {
+        using var rig = new Rig();
+        var match = await rig.RefreshedMatchAsync();
+        rig.Metadata.Throw = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => rig.Groups.ResolveAsync(match.GroupId, match.Generation, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task TheHost_AsksTheStoreOncePerApiRequestAndPageLoad_NeverForAScriptOrStylesheet_AndNeverWhileUnavailable_AndRefusesAStoreFailureAtSignInLikeAnyOtherToken()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var rig = new Rig();
+        await rig.RefreshedMatchAsync();
+        await using var postgres = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=unused;Database=unused");
+        await using var app = await StartHostAsync(rig, postgres, ct);
+        var server = app.GetTestServer();
+
+        var signIn = await DarlingWebHostGateLiveTests.PostSignIn(server, Host, IPAddress.Parse("10.0.0.10"), Token);
+        Assert.Equal(302, signIn.Response.StatusCode);
+        var header = Assert.Single(signIn.Response.Headers.SetCookie)!;
+        var cookie = header[..header.IndexOf(';')];
+        var afterSignIn = rig.Metadata.Reads;
+        Assert.True(afterSignIn >= 1, "the sign-in checks the group against the store");
+
+        // The page's scripts and stylesheets carry no data, so the group cookie on them costs no store trip.
+        await Read(server, "/js/app.js", cookie);
+        await Read(server, "/css/app.css", cookie);
+        Assert.Equal(afterSignIn, rig.Metadata.Reads);
+
+        // The page itself and each API call are checked once.
+        await Read(server, "/", cookie);
+        Assert.Equal(afterSignIn + 1, rig.Metadata.Reads);
+        await Read(server, "/api/session", cookie);
+        Assert.Equal(afterSignIn + 2, rig.Metadata.Reads);
+
+        var ring = rig.Ring;
+        rig.Ring = DarlingPasswordKey.Refusing("test key temporarily unavailable");
+        Assert.Equal(401, (await Read(server, "/api/session", cookie)).Status);
+        await Read(server, "/", cookie);
+        Assert.Equal(afterSignIn + 2, rig.Metadata.Reads);
+        rig.Ring = ring;
+
+        rig.Metadata.Throw = true;
+        var liveToken = await DarlingWebHostGateLiveTests.PostSignIn(server, Host, IPAddress.Parse("10.0.0.20"), Token);
+        var otherString = await DarlingWebHostGateLiveTests.PostSignIn(server, Host, IPAddress.Parse("10.0.0.21"), "not-a-token-at-all-0123456789abcdef");
+        Assert.Equal(otherString.Response.StatusCode, liveToken.Response.StatusCode);
+        Assert.NotEqual(503, liveToken.Response.StatusCode);
+        Assert.Equal(await Body(otherString), await Body(liveToken));
+        Assert.Equal(0, liveToken.Response.Headers.SetCookie.Count);
+    }
+
+    [Fact]
+    public async Task AGroupThatNoLongerAdmitsItsCookie_IsShownTheSignInForm_OnThePageItself()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var rig = new Rig();
+        await rig.RefreshedMatchAsync();
+        await using var postgres = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=unused;Database=unused");
+        await using var app = await StartHostAsync(rig, postgres, ct);
+        var server = app.GetTestServer();
+
+        var signIn = await DarlingWebHostGateLiveTests.PostSignIn(server, Host, IPAddress.Parse("10.0.0.10"), Token);
+        var header = Assert.Single(signIn.Response.Headers.SetCookie)!;
+        var cookie = header[..header.IndexOf(';')];
+
+        var signInForm = await Read(server, "/", null);
+        Assert.Equal(200, signInForm.Status);
+        Assert.Contains("<form", signInForm.Body, StringComparison.OrdinalIgnoreCase);
+        Assert.NotEqual(signInForm.Body, (await Read(server, "/", cookie)).Body);
+
+        // The group is disabled, deleted or rotated, or the switch is off: the store answers no enabled group for the cookie. The API
+        // call says the session is over, and the page the holder then reloads is the sign-in form, where a current token signs in.
+        rig.Metadata.Group = null;
+        Assert.Equal(401, (await Read(server, "/api/session", cookie)).Status);
+        var page = await Read(server, "/", cookie);
+        Assert.Equal(signInForm.Status, page.Status);
+        Assert.Equal(signInForm.Body, page.Body);
+    }
+
+    private static async Task<WebApplication> StartHostAsync(Rig rig, NpgsqlDataSource postgres, CancellationToken ct)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        builder.Services.AddSingleton(postgres);
+        DarlingWebHostService.ConfigureResponseCompression(builder.Services);
+        var app = builder.Build();
+        var host = new DarlingWebHostService(NullLogger<DarlingWebHostService>.Instance,
+            new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
+        host.ConfigurePipeline(app, postgres, true, IPAddress.Loopback, IPNetwork.Parse("10.0.0.0/8"), Shared, null,
+            webTokens: null, managedGroups: rig.Groups);
+        await app.StartAsync(ct);
+        return app;
+    }
+
+    private static async Task<(int Status, string Body)> Read(TestServer server, string path, string? cookie)
+    {
+        var response = await server.SendAsync(context =>
+        {
+            context.Request.Path = path;
+            context.Request.Headers.Host = Host;
+            context.Connection.RemoteIpAddress = IPAddress.Parse("10.0.0.4");
+            if (cookie is not null) context.Request.Headers.Cookie = cookie;
+        });
+        return (response.Response.StatusCode, await Body(response));
+    }
+
+    // The test server's response stream is a forward-only reader over what the pipeline wrote, so it is read from where it stands.
+    private static async Task<string> Body(HttpContext response)
+    {
+        using var reader = new StreamReader(response.Response.Body);
+        return await reader.ReadToEndAsync();
+    }
+}

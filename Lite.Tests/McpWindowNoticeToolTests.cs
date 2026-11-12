@@ -845,7 +845,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         AssertTruncatedAt(EmptyHints(root), floor, "query_store_stats");
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("database_name 'Db'", message, StringComparison.Ordinal);
-        Assert.Contains("nothing of it collected IN the last 24 hour(s)", message, StringComparison.Ordinal);
+        Assert.Contains("nothing of it collected IN the last 24 hours", message, StringComparison.Ordinal);
         Assert.Contains("NOT the all-clear", message, StringComparison.Ordinal);
         Assert.DoesNotContain("this is the all-clear", message, StringComparison.Ordinal);
     }
@@ -922,7 +922,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
         var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24));
 
-        Assert.Contains("nothing collected IN the last 24 hour(s)", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Contains("nothing collected IN the last 24 hours", root.GetProperty("message").GetString(), StringComparison.Ordinal);
         AssertTruncatedAt(EmptyHints(root), floor, "query_store_stats");
     }
 
@@ -994,7 +994,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
         var root = Root(await McpQueryTools.GetQueryHeatmap(Service(), _serverManager, ServerName, hours_back: 168));
 
-        Assert.Contains("nothing collected IN the last 168 hour(s)", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Contains("nothing collected IN the last 168 hours", root.GetProperty("message").GetString(), StringComparison.Ordinal);
         /* #7459: nothing in the window while older rows exist is a collector that may have stopped, which is unavailable and not a true negative. */
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         AssertNothingHeld(root.GetProperty("hints"), "query_stats");

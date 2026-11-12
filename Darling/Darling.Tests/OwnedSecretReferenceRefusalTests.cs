@@ -149,6 +149,17 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
         Assert.Equal(OperatingSystem.IsWindows(), Check("env:darling_config") != null);
     }
 
+    [Fact]
+    public void TheStorePasswordVariable_IsRefused_ForAnyLoadedConfig()
+    {
+        /* Npgsql reads PGPASSWORD when the store connection string has no Password, so it holds the store owner's
+           password whether or not darling.json names it. */
+        DarlingOwnedSecrets.Set(DarlingOwnedSecrets.Compute(new DarlingConfig(), Path.Combine(_root, "darling.json")));
+
+        Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Check("env:PGPASSWORD"));
+        Assert.Null(Check("env:SOME_OTHER_VAR"));
+    }
+
     [Theory]
     [InlineData("relative/path")]
     [InlineData("~/secret")]

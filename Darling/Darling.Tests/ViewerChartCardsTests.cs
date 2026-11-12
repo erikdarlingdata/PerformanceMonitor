@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// Viewer server tab and FinOps tab are built off screen; every chart is found by walking the tree and read from the rendered control
 /// (the card's Title, the plot's left axis title), so a new chart is checked with no change here.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerChartCardsTests
 {
     private static readonly BindingFlags Instance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
@@ -69,7 +70,7 @@ public sealed class ViewerChartCardsTests
                     new DarlingServer(1, "chart-cards-test", "chart-cards-test", true, null));
                 typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     // The overview's correlated lanes (CorrelatedTimelineLanesControl) are one stack of lane plots that share an axis, named by
@@ -118,7 +119,7 @@ public sealed class ViewerChartCardsTests
             {
                 var tab = new FinOpsTab();
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var charts = ChartLayoutProbe.Logical<WpfPlot>(tab).ToList();
@@ -149,7 +150,7 @@ public sealed class ViewerChartCardsTests
                 host.Children.Add(card);
                 ViewerChartCards.Attach(host);
                 var window = new Window { Content = host, Width = 600, Height = 400, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     ChartLayoutProbe.Layout(window);
@@ -184,7 +185,7 @@ public sealed class ViewerChartCardsTests
                     new DarlingServer(1, "chart-cards-test", "chart-cards-test", true, null));
                 typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var t0 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -224,7 +225,7 @@ public sealed class ViewerChartCardsTests
                     new DarlingServer(1, "chart-cards-test", "chart-cards-test", true, null));
                 typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var t0 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -266,7 +267,7 @@ public sealed class ViewerChartCardsTests
                     new DarlingServer(1, "chart-cards-test", "chart-cards-test", true, null));
                 typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var cards = ChartLayoutProbe.Logical<ChartPanel>(tab).ToList();

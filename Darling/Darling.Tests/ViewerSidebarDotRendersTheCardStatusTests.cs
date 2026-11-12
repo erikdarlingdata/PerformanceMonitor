@@ -41,6 +41,7 @@ namespace Darling.Tests;
 /// themselves — an <c>if</c> chain, a switch, a dictionary and a ternary all have to spell them.</para>
 /// </summary>
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
+[Collection("application-theme")] // #8395: reads a card brush off the STA thread
 public sealed class ViewerSidebarDotRendersTheCardStatusTests
 {
     private static readonly DateTime Now = new(2026, 8, 21, 12, 0, 0, DateTimeKind.Utc);
@@ -214,12 +215,14 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
             var dot = Dot(lastCollection);
             var lines = dot.DotTooltip.Split('\n');
 
-            Assert.Equal(dot.CardStatus.Headline(), lines[0]);
-            Assert.StartsWith(dot.DotStatus, lines[0], StringComparison.Ordinal);
+            /* The first line names the server, since a rail shows the dot with no name beside it; the headline follows. */
+            Assert.Equal(dot.DisplayName, lines[0]);
+            Assert.Equal(dot.CardStatus.Headline(), lines[1]);
+            Assert.StartsWith(dot.DotStatus, lines[1], StringComparison.Ordinal);
 
             /* And it ends on the gesture THIS surface supports. ServerList_MouseDoubleClick opens the tab;
                a single click only selects, so naming one would be naming a no-op. */
-            Assert.Equal("Double-click the row to open this server's tab", lines[^1]);
+            Assert.Equal("Double-click to open this server's tab", lines[^1]);
         }
 
         var xaml = ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml"));

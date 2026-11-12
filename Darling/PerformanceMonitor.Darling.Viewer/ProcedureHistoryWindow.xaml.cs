@@ -82,7 +82,7 @@ public partial class ProcedureHistoryWindow : Window
                 var totalCpu = _historyData.Sum(r => r.DeltaCpuMs);
                 var first = ViewerTimeHelper.FormatForDisplay(_historyData.First().CollectionTime, "MM/dd HH:mm");
                 var last = ViewerTimeHelper.FormatForDisplay(_historyData.Last().CollectionTime, "MM/dd HH:mm");
-                SummaryText.Text = $"{_historyData.Count} samples from {first} to {last} | " +
+                SummaryText.Text = $"{PerformanceMonitor.Ui.HistorySampleSummary.Span(_historyData.Count, first, last)} | " +
                                    $"Total Executions: {totalExec:N0} | Total CPU: {totalCpu:N1} ms";
             }
             else
@@ -247,8 +247,8 @@ public partial class ProcedureHistoryWindow : Window
 
         if (string.IsNullOrEmpty(planXml))
         {
-            MessageBox.Show(this, "No plan was captured in the collected data for this procedure.",
-                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(this, "No Plan Available",
+                "No plan was captured in the collected data for this procedure.");
             return;
         }
 
@@ -368,7 +368,7 @@ public partial class ProcedureHistoryWindow : Window
         _filterPopupContent.FilterCleared += FilterPopup_FilterCleared;
 
         _filterManager.Filters.TryGetValue(columnName, out var existingFilter);
-        _filterPopupContent.Initialize(columnName, existingFilter);
+        _filterPopupContent.Initialize(columnName, existingFilter, columnHeader: ColumnFilterPopup.ColumnHeaderFor(button));
 
         _filterPopup!.PlacementTarget = button;
         _filterPopup.IsOpen = true;

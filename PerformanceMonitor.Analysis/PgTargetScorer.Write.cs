@@ -113,7 +113,7 @@ public static partial class PgTargetScorer
                 [
                     new AmplifierDefinition
                     {
-                        Description = "PG_CHECKPOINT_PRESSURE co-fires — requested checkpoints dominate: WAL is reaching max_wal_size before checkpoint_timeout",
+                        Description = "PG_CHECKPOINT_PRESSURE co-fires, requested checkpoints dominate: WAL is reaching max_wal_size before checkpoint_timeout",
                         /* unmeasured: KnobCoFireBoost (see the constant) — 0.4 × 1.25 = 0.5, the D5 line. */
                         Boost = KnobCoFireBoost,
                         Predicate = facts => facts.TryGetValue(PgTargetFactKeys.CheckpointPressure, out var pressure) && pressure.BaseSeverity > 0,
@@ -125,14 +125,14 @@ public static partial class PgTargetScorer
                 [
                     new AmplifierDefinition
                     {
-                        Description = "max_wal_size at the shipped default — the checkpoint ceiling was never sized for this WAL rate",
+                        Description = "max_wal_size at the shipped default: the checkpoint ceiling was never sized for this WAL rate",
                         /* unmeasured: CheckpointCauseBoost (see the constant). */
                         Boost = CheckpointCauseBoost,
                         Predicate = facts => facts.TryGetValue(PgTargetFactKeys.ConfigMaxWalSize, out var knob) && knob.BaseSeverity > 0,
                     },
                     new AmplifierDefinition
                     {
-                        Description = "ANOMALY_PG_WAL_VOLUME fired — WAL volume moved against this server's own hour-of-week baseline this window: the leading edge of the pressure",
+                        Description = "ANOMALY_PG_WAL_VOLUME fired, WAL volume moved against this server's own hour-of-week baseline this window: the leading edge of the pressure",
                         /* unmeasured: CheckpointTriggerBoost (see the constant). */
                         Boost = CheckpointTriggerBoost,
                         Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AnomalyWalVolume, out var shift) && shift.BaseSeverity > 0,

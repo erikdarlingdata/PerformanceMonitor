@@ -35,6 +35,8 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
     private const double NodeHeight = DeadlockGraphLayout.NodeHeight;
 
     private DeadlockGraphModel? _model;
+    /// <summary>Each card's measured height, by process id: a card is as tall as its text, within the layout's <see cref="NodeHeight"/> box, and the edges end on its own edge.</summary>
+    private readonly Dictionary<string, double> _cardHeights = new(StringComparer.Ordinal);
     private double _zoomLevel = 1.0;
     private const double ZoomStep = 0.15;
     private const double MinZoom = 0.1;
@@ -114,6 +116,7 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
 
         if (_model.IsEmpty)
         {
+            LayoutUpdated -= FitOnceTheViewerHasASize;
             SummaryText.Text = string.Empty;
             ParallelBanner.Visibility = Visibility.Collapsed;
             ShowEmptyState(true);
@@ -131,6 +134,19 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
             ?? (_model.Processes.Count > 0 ? _model.Processes[0] : null);
         if (initial != null)
             SelectNodeByModel(initial);
+
+        // A graph opens fitted (#8534). The viewer's size is known only after a layout pass, and it depends on the properties panel that
+        // the selection above opens, so the fit runs at the end of the first layout pass in which the viewer has a size.
+        LayoutUpdated -= FitOnceTheViewerHasASize;
+        LayoutUpdated += FitOnceTheViewerHasASize;
+    }
+
+    private void FitOnceTheViewerHasASize(object? sender, EventArgs e)
+    {
+        if (GraphScrollViewer.ActualWidth <= 0 || GraphScrollViewer.ActualHeight <= 0) return;
+
+        LayoutUpdated -= FitOnceTheViewerHasASize;
+        ZoomToFit();
     }
 
     private void ShowEmptyState(bool empty)
@@ -191,17 +207,30 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
 
         var byId = _model.Processes.ToDictionary(p => p.Id, StringComparer.Ordinal);
 
-        // Edges (under the cards), then cards, then edge labels on top so they stay legible.
-        var labels = new List<(Point Pos, string Text, string Tooltip)>();
+        /* The cards are built and measured first, so each edge ends on its own card's edge. They join the canvas after the edges, so they
+           sit over them, and the edge labels come last so they stay legible. */
+        _cardHeights.Clear();
+        var cards = new List<(DeadlockProcessNode Node, Border Visual)>();
+        foreach (var node in _model.Processes)
+        {
+            var visual = CreateNodeVisual(node);
+            visual.Measure(new Size(NodeWidth, NodeHeight));
+            _cardHeights[node.Id] = visual.DesiredSize.Height;
+            cards.Add((node, visual));
+        }
+
+        var labels = new List<(Point Pos, Vector Outward, string Text, string Tooltip)>();
         foreach (var edge in _model.Edges)
             RenderEdge(edge, byId, labels);
 
-        foreach (var node in _model.Processes)
-            RenderNode(node);
+        foreach (var (node, visual) in cards)
+            RenderNode(node, visual);
 
-        foreach (var (pos, text, tooltip) in labels)
-            RenderEdgeLabel(pos, text, tooltip);
+        foreach (var (pos, outward, text, tooltip) in labels)
+            RenderEdgeLabel(pos, outward, text, tooltip);
     }
+
+    private double HeightOf(DeadlockProcessNode node) => _cardHeights.TryGetValue(node.Id, out var h) ? h : NodeHeight;
 
     /// <summary>
     /// Draws a dashed, labelled frame around each independent cycle when one deadlock batched more than one
@@ -251,9 +280,8 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
         }
     }
 
-    private void RenderNode(DeadlockProcessNode node)
+    private void RenderNode(DeadlockProcessNode node, Border visual)
     {
-        var visual = CreateNodeVisual(node);
         Canvas.SetLeft(visual, node.X);
         Canvas.SetTop(visual, node.Y);
         GraphCanvas.Children.Add(visual);
@@ -264,7 +292,7 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
         var border = new Border
         {
             Width = NodeWidth,
-            Height = NodeHeight,
+            MaxHeight = NodeHeight,
             Background = NodeBackgroundBrush,
             BorderBrush = node.IsVictim ? VictimBrush : NodeBorderBrush,
             BorderThickness = new Thickness(node.IsVictim ? 2.5 : 1),
@@ -402,7 +430,7 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
     private void RenderEdge(
         DeadlockWaitEdge edge,
         Dictionary<string, DeadlockProcessNode> byId,
-        List<(Point, string, string)> labels)
+        List<(Point, Vector, string, string)> labels)
     {
         if (!byId.TryGetValue(edge.WaiterProcessId, out var waiter) ||
             !byId.TryGetValue(edge.OwnerProcessId, out var owner))
@@ -414,15 +442,15 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
         if (edge.IsSelfEdge)
         {
             RenderSelfLoop(waiter);
-            labels.Add((new Point(waiter.X + NodeWidth * 0.5, waiter.Y - 30), shortText, tooltip));
+            labels.Add((new Point(waiter.X + NodeWidth * 0.5, waiter.Y - 30), new Vector(0, -1), shortText, tooltip));
             return;
         }
 
         var wc = Center(waiter);
         var oc = Center(owner);
 
-        var startPt = ClipToRect(wc, oc);
-        var endPt = ClipToRect(oc, wc);
+        var startPt = ClipToRect(wc, oc, HeightOf(waiter) / 2);
+        var endPt = ClipToRect(oc, wc, HeightOf(owner) / 2);
 
         // Bow the curve to the right of travel so the two arrows of a 2-cycle separate (A->B and B->A
         // travel in opposite directions, so "right of travel" puts them on opposite sides).
@@ -450,11 +478,11 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
         // Arrowhead at the owner end, aligned to the curve's tangent there.
         AddArrowhead(endPt, Normalize(endPt - control));
 
-        // Label near the curve apex (quadratic point at t=0.5).
+        // Label at the curve apex (quadratic point at t=0.5), set on the bowed side so the two labels of a 2-cycle stay apart.
         var apex = new Point(
             0.25 * startPt.X + 0.5 * control.X + 0.25 * endPt.X,
             0.25 * startPt.Y + 0.5 * control.Y + 0.25 * endPt.Y);
-        labels.Add((apex, shortText, tooltip));
+        labels.Add((apex, perp, shortText, tooltip));
     }
 
     private void RenderSelfLoop(DeadlockProcessNode node)
@@ -500,7 +528,12 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
         });
     }
 
-    private void RenderEdgeLabel(Point pos, string text, string tooltip)
+    /// <summary>
+    /// Draws an edge label with its inner edge at <paramref name="pos"/>, pushed out along <paramref name="outward"/> by half its own extent in
+    /// that direction. The two edges of a 2-cycle bow to opposite sides of one chord, so their labels sit on opposite sides of it and never
+    /// cover each other, whichever way the chord runs: a label is far wider than it is tall, and the cards of a 2-cycle stack top to bottom.
+    /// </summary>
+    private void RenderEdgeLabel(Point pos, Vector outward, string text, string tooltip)
     {
         if (string.IsNullOrEmpty(text)) return;
 
@@ -520,25 +553,27 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
             }
         };
 
-        // Center the label on the apex point.
         label.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-        Canvas.SetLeft(label, pos.X - label.DesiredSize.Width / 2);
-        Canvas.SetTop(label, pos.Y - label.DesiredSize.Height / 2);
+        var w = label.DesiredSize.Width;
+        var h = label.DesiredSize.Height;
+        var center = pos + outward * (Math.Abs(outward.X) * w / 2 + Math.Abs(outward.Y) * h / 2);
+        Canvas.SetLeft(label, center.X - w / 2);
+        Canvas.SetTop(label, center.Y - h / 2);
         GraphCanvas.Children.Add(label);
     }
 
-    private static Point Center(DeadlockProcessNode n) =>
-        new(n.X + NodeWidth / 2, n.Y + NodeHeight / 2);
+    private Point Center(DeadlockProcessNode n) =>
+        new(n.X + NodeWidth / 2, n.Y + HeightOf(n) / 2);
 
     /// <summary>Intersection of the ray from <paramref name="center"/> toward <paramref name="toward"/>
-    /// with the card rectangle centered on <paramref name="center"/>.</summary>
-    private static Point ClipToRect(Point center, Point toward)
+    /// with the card rectangle centered on <paramref name="center"/>, <paramref name="halfH"/> above and below it.</summary>
+    private static Point ClipToRect(Point center, Point toward, double halfH)
     {
         double dx = toward.X - center.X;
         double dy = toward.Y - center.Y;
         if (Math.Abs(dx) < 1e-6 && Math.Abs(dy) < 1e-6) return center;
 
-        const double halfW = NodeWidth / 2, halfH = NodeHeight / 2;
+        const double halfW = NodeWidth / 2;
         double tx = Math.Abs(dx) > 1e-6 ? halfW / Math.Abs(dx) : double.PositiveInfinity;
         double ty = Math.Abs(dy) > 1e-6 ? halfH / Math.Abs(dy) : double.PositiveInfinity;
         double t = Math.Min(tx, ty);
@@ -874,7 +909,13 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
     private void ZoomIn_Click(object sender, RoutedEventArgs e) => SetZoom(_zoomLevel + ZoomStep);
     private void ZoomOut_Click(object sender, RoutedEventArgs e) => SetZoom(_zoomLevel - ZoomStep);
 
-    private void ZoomFit_Click(object sender, RoutedEventArgs e)
+    private void ZoomFit_Click(object sender, RoutedEventArgs e) => ZoomToFit();
+
+    /// <summary>
+    /// Zooms out until the whole graph is inside the viewer, and never above 100%: a graph that already fits is drawn at 100%, where the
+    /// canvas's alignment puts it in the middle of the viewer.
+    /// </summary>
+    private void ZoomToFit()
     {
         if (GraphCanvas.Width <= 0 || GraphCanvas.Height <= 0) return;
         var viewWidth = GraphScrollViewer.ActualWidth;
@@ -890,7 +931,8 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
         _zoomLevel = Math.Max(MinZoom, Math.Min(MaxZoom, level));
         ZoomTransform.ScaleX = _zoomLevel;
         ZoomTransform.ScaleY = _zoomLevel;
-        ZoomLevelText.Text = $"{(int)(_zoomLevel * 100)}%";
+        // The nearest whole percent (#8491): three Zoom Out steps from 100% land on 0.5499..., which reads 55%, not the truncated 54%.
+        ZoomLevelText.Text = $"{Math.Round(_zoomLevel * 100, MidpointRounding.AwayFromZero)}%";
     }
 
     private void GraphScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)

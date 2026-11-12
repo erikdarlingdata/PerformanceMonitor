@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// #8220: the Viewer's Query Heatmap axes at the app's windows. The Y labels (seven duration buckets) do not touch and the X labels
 /// stay on one line with room between them, however many buckets the window holds.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerQueryHeatmapLabelTests
 {
     private readonly ITestOutputHelper _output;
@@ -46,7 +47,7 @@ public sealed class ViewerQueryHeatmapLabelTests
                 new DarlingServer(1, "heatmap", "heatmap", true, null));
             typeof(ViewerServerTab).GetField("_refreshInFlight", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.SetValue(tab, true);
             var window = new Window { Content = ChartLayoutProbe.HostLikeMainWindow(tab), Width = width, Height = height, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var chart = (WpfPlot)tab.FindName("QueryHeatmapChart");

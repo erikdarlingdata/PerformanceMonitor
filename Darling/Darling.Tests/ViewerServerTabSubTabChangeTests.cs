@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// the handler, and the run prints an unhandled thread error that fails no test. The shared tab-revealing helper installs the context, so a
 /// handler the selection fires resumes on the tab's own thread, where the test's next pump runs it.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerServerTabSubTabChangeTests
 {
     [Fact]
@@ -36,7 +37,7 @@ public sealed class ViewerServerTabSubTabChangeTests
                 new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
                 new DarlingServer(1, "sub-tab-change", "sub-tab-change", true, null));
             var window = new Window { Content = ChartLayoutProbe.HostLikeMainWindow(tab), Width = 1280, Height = 800, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 /* The heatmap is the last Queries sub-tab, so revealing it is a real change from the one shown at start. */

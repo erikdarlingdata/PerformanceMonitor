@@ -940,6 +940,25 @@ internal sealed class DarlingSelfAlertEvaluator
     /// other's alert row.</summary>
     private const string RetentionKeyPrefix = "retentionjob:";
 
+    /// <summary>#8302: the metric name a daily rollup fires under when its newest materialized bucket has fallen more
+    /// than <see cref="TimescaleSupport.DailyRollupStaleAfterSpanFor"/> behind its source's. Its own name, not
+    /// <see cref="RefreshJobStuckMetric"/>: the job is not hung or crashed, so the stuck-job machine's re-arm and
+    /// "re-hung" escalation do not apply, and it is a Warning where the refresh family is Critical, so one name per tier
+    /// holds (#3635).</summary>
+    internal const string DailyRollupStaleMetric = "Daily Rollup Stale";
+
+    /// <summary>#8302: the resolution title when the rollup is level with its source again. Carries the recognized
+    /// "Recovered" suffix so <c>AlertMetricClassifier.IsResolution</c> styles it green.</summary>
+    internal const string DailyRollupRecoveredMetric = "Daily Rollup Recovered";
+
+    /// <summary>Prefixes the stale-rollup alert serverKey: the rollup's refresh job id, under its own prefix so it never
+    /// shares a row with the same job's stuck-job alert.</summary>
+    private const string RollupStaleKeyPrefix = "rollupstale:";
+
+    /// <summary>#8302: the daily rollups currently reported behind their source, by refresh job id.</summary>
+    private readonly ConcurrentDictionary<string, bool> _staleRollupState = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastStaleRollupAlert = new(StringComparer.Ordinal);
+
     /* #3816: the total_failures arm's baselines. The DELTA is what this arm judges, and nothing in the
        product persisted a per-pass copy of these counters where the evaluator could reach it, so the
        previous pass's value is held in memory here — one long per policy job, on an hourly cadence. The
@@ -1477,9 +1496,16 @@ internal sealed class DarlingSelfAlertEvaluator
     /// exactly the case to catch); capture-down runs only for a connected server (its XE collectors only
     /// run then). Failure-isolated per condition so a bad store read never breaks the loop.
     /// </summary>
+    /// <param name="captureSessions">#8528: what the service's own ensure of the capture sessions found on this server, judged beside
+    /// the store's newest rows by <see cref="ApplyCaptureDownAsync"/>. Null is an empty report.</param>
+    /// <param name="captureSessionsAfterRead">#8528: the same report, taken again once the capture read has returned. The first
+    /// is taken before this pass's reads, and a run can set a hold and write its row while they are in flight; a capture that
+    /// either report holds is held (<see cref="HeldByEither"/>). Null takes the first report alone.</param>
     public async Task EvaluateStoreAlertsAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, bool connected, CancellationToken cancellationToken,
-        CollectorTargetEngine engine = CollectorTargetEngine.SqlServer)
+        CollectorTargetEngine engine = CollectorTargetEngine.SqlServer,
+        CaptureSessionEnsureReport? captureSessions = null,
+        Func<CaptureSessionEnsureReport>? captureSessionsAfterRead = null)
     {
         if (!_settings.AlertsEnabled)
         {
@@ -1568,7 +1594,8 @@ internal sealed class DarlingSelfAlertEvaluator
             }
 
             captureReadClock.Restart();
-            await ApplyCaptureDownAsync(serverId, serverName, missing, notRunOnEngine, cancellationToken, sweepGeneration: generation);
+            captureSessions = HeldByEither(captureSessions, captureSessionsAfterRead?.Invoke());
+            await ApplyCaptureDownAsync(serverId, serverName, missing, notRunOnEngine, cancellationToken, sweepGeneration: generation, ensure: captureSessions);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1967,9 +1994,14 @@ internal sealed class DarlingSelfAlertEvaluator
     /// </summary>
     /// <param name="sweepGeneration">#4795: as on <see cref="ApplyCollectionStoppedAsync"/>: given and out of date,
     /// this judges nothing, sends nothing and leaves no standing-alert flag or cooldown stamp behind.</param>
+    /// <param name="ensure">#8528: what the service's own ensure of the capture sessions found on this server. A capture whose session
+    /// the ensure started, and whose collector has not read since, has a SESSION_MISSING row from before the start: it is neither down
+    /// nor restored until the read says which, so it is held out of both verdicts, and so is one whose ensure failed with a transient
+    /// error, until its retry has run. A capture whose collector is turned off is not judged at all. A capture the ensure could not
+    /// start fires on this sweep as ever, and the detail says what the service found and quotes the server. Null is an empty report.</param>
     internal async Task ApplyCaptureDownAsync(
         int serverId, string serverName, IReadOnlyList<string> missing, IReadOnlyList<string> notRunOnEngine, CancellationToken cancellationToken,
-        int? sweepGeneration = null)
+        int? sweepGeneration = null, CaptureSessionEnsureReport? ensure = null)
     {
         /* #4795: before any state is read or written and before any send. */
         if (IsStaleSweep(serverId, sweepGeneration))
@@ -1984,6 +2016,13 @@ internal sealed class DarlingSelfAlertEvaluator
 
         var key = Key(serverId);
         var now = _utcNow();
+        ensure ??= CaptureSessionEnsureReport.Empty;
+
+        /* #8528: a capture whose collector is turned off writes no new row, so its last SESSION_MISSING row is not a reading of now: it
+           is judged neither as down nor as awaiting a read. Of the rest, a capture whose newest row is SESSION_MISSING but whose session
+           the service started since with no read yet, or whose ensure failed transiently and awaits its retry, is held. */
+        var (down, awaitingRead) = SplitCapturesAwaitingRead(CapturesBeingCollected(missing, ensure), ensure);
+        missing = down;
 
         if (missing.Count > 0)
         {
@@ -1998,7 +2037,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 try
                 {
                     var standing = await _historyStore.GetOpenFireAsync(
-                        key, CaptureDownMetric, new[] { "Capture Restored", "Capture Cleared" }, null, _serviceStartUtc);
+                        key, CaptureDownMetric, PerformanceMonitor.Darling.Storage.AlertClosingTitles.CaptureDown, null, _serviceStartUtc);
                     if (standing is not null)
                     {
                         _lastCaptureDownAlert[key] = standing.FireAtUtc;
@@ -2027,10 +2066,8 @@ internal sealed class DarlingSelfAlertEvaluator
                 _lastCaptureDownAlert[key] = now;
                 var delivery = await FireAsync(
                     key, serverName, CaptureDownMetric, list, "session running",
-                    detail: StateRepeatNote(decision, refire) + $"The {list} Extended Events {(missing.Count == 1 ? "session is" : "sessions are")} missing and could not be created. " +
-                        CaptureDownConsequence(missing) + " Check the " +
-                        "collection log for the SESSION_MISSING detail (usually a permissions problem: " +
-                        "ALTER ANY EVENT SESSION on-prem, CREATE ANY DATABASE EVENT SESSION on Azure SQL DB).",
+                    detail: StateRepeatNote(decision, refire) + $"The {list} Extended Events {(missing.Count == 1 ? "session is" : "sessions are")} missing. " +
+                        CaptureDownCause(missing, ensure) + " " + CaptureDownConsequence(missing),
                     severity: AlertSeverityLevel.Critical,
                     shortMessage: $"{list} capture is not running — XE {(missing.Count == 1 ? "session" : "sessions")} missing",
                     /* Which capture is missing ("Blocking and Deadlock") against "session running". */
@@ -2044,6 +2081,28 @@ internal sealed class DarlingSelfAlertEvaluator
 
                 NoteStateSend(CaptureDownMetric, key, delivery);
             }
+        }
+        else if (awaitingRead.Count > 0)
+        {
+            /* #8528: every capture the read named has a session the service started since its newest row and no read yet, or an ensure
+               that failed transiently and awaits its retry. The verdict
+               waits for the collector's next row: nothing fires, nothing is seeded, and an active Capture Down neither repeats nor writes
+               its Capture Restored until the read says the session took (or did not). Debug, because the pass says it again every 30 s
+               until that row lands; the ensure's own "Started ... XE session" line is the one Information record of the start. */
+            _logger?.LogDebug(
+                "[{Server}] The {Captures} capture session{Plural} started by the service, or its check did not complete, after the newest SESSION_MISSING run; Capture Down waits for the collector's next read or the service's next check",
+                serverName, string.Join(" and ", awaitingRead), awaitingRead.Count == 1 ? " was" : "s were");
+        }
+        else if (_activeCaptureDown.ContainsKey(key)
+            && _lastCaptureDownList.TryGetValue(key, out var standing)
+            && CapturesNotReadSince(standing, ensure) is { Count: > 0 } notRead)
+        {
+            /* #8528: a capture that was down has left the read on a row that did not read its session: the read failed, yielded,
+               was skipped or was abandoned. Nothing is known about the session, so the alert stands as it is, with no closing row
+               and no repeat, until a row that read the session says whether it is running. */
+            _logger?.LogDebug(
+                "[{Server}] The newest {Captures} capture run did not read its session; Capture Down stays open until a run that does",
+                serverName, string.Join(" and ", notRead));
         }
         else if (_captureDownSeedDone.TryAdd(key, true) && !_activeCaptureDown.ContainsKey(key))
         {
@@ -2063,6 +2122,14 @@ internal sealed class DarlingSelfAlertEvaluator
                     "Capture Cleared",
                     $"{serverName}: The {string.Join(" and ", notRunOnEngine)} capture does not run on this server's engine, so it is no longer expected"), cancellationToken);
             }
+            else if (CaptureDownClearedNotRestored(wasDown, ensure) is { } cleared)
+            {
+                /* #8528: a capture left the read without its session coming back: its collector's newest row is the PERMISSIONS of a
+                   create the server refused, or its collector is turned off. "Restored" would be false for it. */
+                await RecordResolutionAsync(new AlertResolution(
+                    key, serverName, CaptureDownMetric,
+                    "Capture Cleared", $"{serverName}: {cleared}"), cancellationToken);
+            }
             else
             {
                 await RecordResolutionAsync(new AlertResolution(
@@ -2079,6 +2146,232 @@ internal sealed class DarlingSelfAlertEvaluator
         "Client timeouts" => "attention",
         _ => "blocked_process_report",
     };
+
+    /// <summary>
+    /// #8528: splits the captures the read named into those that are down and those whose session the service's own ensure started
+    /// after their newest row, with no read since, or whose ensure failed transiently and awaits its retry. The second group's
+    /// SESSION_MISSING row does not yet say whether the capture is down, so it is held out of both the fire and the restore until
+    /// its collector reads again or the retry has run.
+    /// </summary>
+    internal static (IReadOnlyList<string> Down, IReadOnlyList<string> AwaitingRead) SplitCapturesAwaitingRead(
+        IReadOnlyList<string> missing, CaptureSessionEnsureReport ensure)
+    {
+        if (missing.Count == 0 || (ensure.RestartedAwaitingRead.Count == 0 && ensure.AwaitingRetry.Count == 0))
+        {
+            return (missing, Array.Empty<string>());
+        }
+
+        var down = new List<string>();
+        var awaitingRead = new List<string>();
+        foreach (var capture in missing)
+        {
+            (ensure.IsHeld(CaptureCollectorName(capture)) ? awaitingRead : down).Add(capture);
+        }
+
+        return (down, awaitingRead);
+    }
+
+    /// <summary>
+    /// #8528: the captures the read named whose collector is turned on. A collector that is turned off writes no new row, so its last
+    /// SESSION_MISSING row stays the newest for good and says nothing about the capture now.
+    /// </summary>
+    internal static IReadOnlyList<string> CapturesBeingCollected(IReadOnlyList<string> missing, CaptureSessionEnsureReport ensure) =>
+        missing.Count == 0 || ensure.NotCollecting.Count == 0
+            ? missing
+            : missing.Where(capture => !ensure.IsNotCollecting(CaptureCollectorName(capture))).ToArray();
+
+    /// <summary>
+    /// #8528: the captures of a standing Capture Down whose collector's newest run, as the service wrote it, did not read the
+    /// session (<see cref="CaptureSessionRestarts.StatusSettles"/> is false for it: ERROR, YIELDED, SKIPPED, ABANDONED). Such a row
+    /// takes the capture out of the store read without saying anything about its session. A collector that is turned off, or
+    /// that has not run in this process, is not among them.
+    /// </summary>
+    internal static IReadOnlyList<string> CapturesNotReadSince(string? wasDown, CaptureSessionEnsureReport ensure)
+    {
+        var notRead = new List<string>();
+        foreach (var capture in (wasDown ?? string.Empty).Split(" and ", StringSplitOptions.RemoveEmptyEntries))
+        {
+            var collector = CaptureCollectorName(capture);
+            if (!ensure.IsNotCollecting(collector)
+                && ensure.LastRowStatusOf(collector) is { } status
+                && !CaptureSessionRestarts.StatusSettles(status))
+            {
+                notRead.Add(capture);
+            }
+        }
+
+        return notRead;
+    }
+
+    /// <summary>
+    /// #8528: one report that holds every capture either of two holds: the one taken before the pass's reads and the one taken
+    /// after the capture read. Everything else comes from the later one.
+    /// </summary>
+    internal static CaptureSessionEnsureReport? HeldByEither(CaptureSessionEnsureReport? before, CaptureSessionEnsureReport? afterRead)
+    {
+        if (afterRead is null || before is null)
+        {
+            return afterRead ?? before;
+        }
+
+        return afterRead with
+        {
+            RestartedAwaitingRead = before.RestartedAwaitingRead.Union(afterRead.RestartedAwaitingRead, StringComparer.OrdinalIgnoreCase).ToArray(),
+            AwaitingRetry = before.AwaitingRetry.Union(afterRead.AwaitingRetry, StringComparer.OrdinalIgnoreCase).ToArray(),
+        };
+    }
+
+    /// <summary>
+    /// #8528: the closing text for a Capture Down whose captures left the read without all of them running again, or null when every
+    /// capture that was down is running. A capture leaves the read when its collector's newest row is no longer SESSION_MISSING: a
+    /// success, but also a PERMISSIONS row (a create the server refused the ensure, or a run refused for permission by the row the
+    /// service wrote), and a collector that is turned off is not counted at all. Neither is a session that came back, so the row
+    /// is a clear that says why, and names any capture that is running again beside it. A capture whose newest row did not read
+    /// the session never reaches this: the alert stays open for it (<see cref="CapturesNotReadSince"/>).
+    /// </summary>
+    internal static string? CaptureDownClearedNotRestored(string? wasDown, CaptureSessionEnsureReport ensure)
+    {
+        if (string.IsNullOrEmpty(wasDown))
+        {
+            return null;
+        }
+
+        var sentences = new List<string>();
+        var running = new List<string>();
+        foreach (var capture in wasDown.Split(" and ", StringSplitOptions.RemoveEmptyEntries))
+        {
+            var collector = CaptureCollectorName(capture);
+            if (ensure.IsNotCollecting(collector))
+            {
+                sentences.Add($"The {capture} capture is not running and is no longer reported as down: its collector is turned off, so no session is expected.");
+            }
+            else if (ensure.FailureOf(collector) is { IsPermission: true })
+            {
+                sentences.Add(
+                    $"The {capture} capture is not running and is no longer reported as down: the monitoring login was refused the permission to create its session, " +
+                    "which collection health reports as PERMISSIONS.");
+            }
+            else if (string.Equals(ensure.LastRowStatusOf(collector), "PERMISSIONS", StringComparison.Ordinal))
+            {
+                sentences.Add(
+                    $"The {capture} capture is not running and is no longer reported as down: its collector's newest run was refused for permission, " +
+                    "which collection health reports as PERMISSIONS.");
+            }
+            else
+            {
+                running.Add(capture);
+            }
+        }
+
+        if (sentences.Count == 0)
+        {
+            return null;
+        }
+
+        if (running.Count > 0)
+        {
+            sentences.Add($"The {string.Join(" and ", running)} capture is running again.");
+        }
+
+        return string.Join(" ", sentences);
+    }
+
+    /// <summary>
+    /// #8528: why each capture the alert names is down, from what the service's own ensure found, so the detail says what the service
+    /// saw and claims nothing it did not see. Each cause is a sentence of its own. A session the ensure found stopped or absent and
+    /// could not start says so and quotes the server; one whose last ensure did not complete says when it is asked again; one the last
+    /// ensure started and that is stopped again says that; any other was found stopped, absent or unreadable by its collector, and the
+    /// text says the service's check found nothing to start only when a check in that same run did. The permission sentence covers
+    /// one interval only: between an ensure the server refused for permission and that collector's next row, which is PERMISSIONS and
+    /// takes the capture out of this alert's read.
+    /// </summary>
+    internal static string CaptureDownCause(IReadOnlyList<string> missing, CaptureSessionEnsureReport ensure)
+    {
+        var sentences = new List<string>();
+        var foundStopped = new List<string>();
+        var foundStoppedAfterCheck = new List<string>();
+        foreach (var capture in missing)
+        {
+            var collector = CaptureCollectorName(capture);
+            var failure = ensure.FailureOf(collector);
+            if (failure is { IsPermission: true })
+            {
+                sentences.Add(
+                    $"The service could not create the {capture} session because the monitoring login lacks the permission to create Extended Events sessions " +
+                    "(ALTER ANY EVENT SESSION on-premises, CREATE ANY DATABASE EVENT SESSION on Azure SQL Database)." + ServerSaid(failure));
+            }
+            else if (failure is not null)
+            {
+                sentences.Add($"The service found the {capture} session stopped or absent and could not start it." + ServerSaid(failure));
+            }
+            else if (ensure.WasTransientAtLastEnsure(collector))
+            {
+                sentences.Add(
+                    $"The service's last check of the {capture} session did not complete (a timeout or a dropped connection), so it does not know whether the session can be started. " +
+                    $"It checks again within {(int)DarlingXeSessions.TransientRetryInterval.TotalMinutes} minutes.");
+            }
+            else if (ensure.WasStartedAtLastEnsure(collector))
+            {
+                sentences.Add(
+                    $"The service started the {capture} session at its last check, and its collector has found it stopped, absent or unreadable again since. " +
+                    "The service starts it again at its next check (within the hour, and at once after a restart or failover it has seen).");
+            }
+            else
+            {
+                (ensure.WasCheckedAfterMissingRead(collector) ? foundStoppedAfterCheck : foundStopped).Add(capture);
+            }
+        }
+
+        AddFoundStopped(sentences, foundStoppedAfterCheck, checkedInTheSameRun: true);
+        AddFoundStopped(sentences, foundStopped, checkedInTheSameRun: false);
+        return string.Join(" ", sentences);
+    }
+
+    /// <summary>The sentences for captures with no ensure finding of their own: what the collector found, and what the service does next.</summary>
+    private static void AddFoundStopped(List<string> sentences, List<string> captures, bool checkedInTheSameRun)
+    {
+        if (captures.Count == 0)
+        {
+            return;
+        }
+
+        var one = captures.Count == 1;
+        sentences.Add(
+            $"The collector{(one ? "" : "s")} found the {string.Join(" and ", captures)} session{(one ? "" : "s")} stopped, absent or unreadable" +
+            (checkedInTheSameRun ? ", and the service's check of the sessions in that same run found nothing to start. " : ". ") +
+            "The service starts a stopped session at its next check (within the hour, and at once after a restart or failover it has seen), " +
+            "and this alert clears when the collector reads the session again. The collection log's SESSION_MISSING detail has what the server said.");
+    }
+
+    /// <summary>The longest quote of the server's text in a Capture Down detail. Longer text is cut there and ends in an ellipsis.</summary>
+    internal const int MaxQuotedServerText = 300;
+
+    /// <summary>
+    /// #8528: " The server said: ..." for the detail: the server's own text from the failed ensure, through the cleaner every
+    /// text a monitored server sent goes through (<see cref="CustomAlertEvaluator.SanitizeDisplayText"/>): on one line (a
+    /// SqlException's message holds one line per error), without control characters or the code points that hide or reorder text
+    /// (an engine message carries object and database names), cut between characters at <see cref="MaxQuotedServerText"/> and ended
+    /// with a full stop. Empty when the failure carries no server text, so the service's own sentence is never quoted as the server's.
+    /// </summary>
+    internal static string ServerSaid(DarlingXeSessions.XeEnsureFailure failure)
+    {
+        var text = CustomAlertEvaluator.SanitizeDisplayText(failure.ServerText, MaxQuotedServerText);
+        if (text.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        if (CustomAlertEvaluator.SanitizeDisplayText(failure.ServerText, int.MaxValue).Length > text.Length)
+        {
+            text += "...";
+        }
+        else if (text[^1] is not ('.' or '!' or '?'))
+        {
+            text += ".";
+        }
+
+        return " The server said: " + text;
+    }
 
     /// <summary>
     /// #6912: splits the captures the read named into those this server's engine can run and those it cannot, with the same
@@ -5008,7 +5301,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     detail: StateRepeatNote(decision, refire) + "The SQL Server Agent alerts on this server have gaps. " + gapText +
                         " A server without these alerts says nothing when the engine reports corruption or a fatal error.",
                     severity: AlertSeverityLevel.Warning,
-                    shortMessage: $"SQL Server Agent alerts have {status.Gaps.Count} gap(s): {string.Join(", ", status.Gaps.Select(g => g.Code))}",
+                    shortMessage: $"SQL Server Agent alerts have {CountText.Plural(status.Gaps.Count, "gap")}: {string.Join(", ", status.Gaps.Select(g => g.Code))}",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
                 if (IsStaleSweep(serverId, sweepGeneration))
@@ -5124,9 +5417,9 @@ internal sealed class DarlingSelfAlertEvaluator
                         : string.Empty);
                 var delivery = await FireAsync(
                     key, serverName, metric, string.Create(CultureInfo.InvariantCulture, $"{items.Count} overdue"), $"older than {threshold}",
-                    detail: StateRepeatNote(decision, refire) + $"The {factName} is older than {threshold} on {items.Count} database(s): {names}." + consequence,
+                    detail: StateRepeatNote(decision, refire) + $"The {factName} is older than {threshold} on {CountText.Plural(items.Count, "database")}: {names}." + consequence,
                     severity: AlertSeverityLevel.Warning,
-                    shortMessage: string.Create(CultureInfo.InvariantCulture, $"{metric}: {items.Count} database(s)") + " - " + string.Join(", ", items.Take(5).Select(i => i.Database)) +
+                    shortMessage: string.Create(CultureInfo.InvariantCulture, $"{metric}: {CountText.Plural(items.Count, "database")}") + " - " + string.Join(", ", items.Take(5).Select(i => i.Database)) +
                         (items.Count > 5 ? ", ..." : string.Empty),
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
@@ -5230,10 +5523,10 @@ internal sealed class DarlingSelfAlertEvaluator
                     $"{worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}%",
                     $"{worstBar.ToString(CultureInfo.InvariantCulture)}%",
                     detail: StateRepeatNote(decision, refire) +
-                        $"{hits.Count} identity column(s) on this server are near the end of their type. An identity column that runs out stops every insert into its table. " +
+                        $"{CountText.Plural(hits.Count, "identity column")} on this server {(hits.Count == 1 ? "is" : "are")} near the end of {(hits.Count == 1 ? "its" : "their")} type. An identity column that runs out stops every insert into its table. " +
                         string.Join(" ", lines) + more,
                     severity: isCritical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
-                    shortMessage: $"{hits.Count} identity column(s) near the end of their type, fullest {worst.Column.DatabaseName}.{worst.Column.TableName}.{worst.Column.ColumnName} at {worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used",
+                    shortMessage: $"{CountText.Plural(hits.Count, "identity column")} near the end of {(hits.Count == 1 ? "its" : "their")} type, fullest {worst.Column.DatabaseName}.{worst.Column.TableName}.{worst.Column.ColumnName} at {worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used",
                     numericCurrentValue: worst.Percent,
                     numericThresholdValue: worstBar,
                     cancellationToken);
@@ -9140,7 +9433,7 @@ WHERE c.is_enabled";
     /// one is NOT re-armed and NOT paged: it is logged at Information and remembered as
     /// <c>AwaitingSchedulerRetry</c>. If the same job is still on the arm an hour later — the scheduler's own
     /// retry has not cleared it, because the jittered backoff fell just past the check cadence or because the
-    /// job crashed AGAIN and its backoff doubled — it escalates: one Critical page naming a crash the operator
+    /// job crashed AGAIN and its backoff grew by another retry period — it escalates: one Critical page naming a crash the operator
     /// should read the PostgreSQL log for, no re-arm, and the cooldown re-fires of the escalated state. A job
     /// that clears while awaiting the retry is dropped silently, since nothing was paged for it to recover
     /// from. Stores below 2.26.4, and stores whose version could not be read, keep every #1581 semantic
@@ -9169,12 +9462,29 @@ WHERE c.is_enabled";
 
         var now = _utcNow();
         var stillStuck = new HashSet<string>(StringComparer.Ordinal);
+        var staleRollups = new HashSet<string>(StringComparer.Ordinal);
         var rearmed = 0;
         var fired = 0;
 
         foreach (var job in reading.Stuck)
         {
             var key = job.JobId.ToString(CultureInfo.InvariantCulture);
+
+            /* #8302: a daily rollup behind its source rides the same reading but is not a stuck job. Its refresh job is
+               neither hung nor crashed, so a re-arm would run a job that is not stuck and the "re-hung" escalation would
+               call a healthy job a product bug. It gets its own Warning, its own text, and a resolution when it catches
+               up, and it never enters the stuck-job machine's state. */
+            if (job.Arm == StuckPolicyJobArm.DailyRollupStale)
+            {
+                staleRollups.Add(key);
+                if (await ApplyStaleDailyRollupAsync(job, key, now, cancellationToken))
+                {
+                    fired++;
+                }
+
+                continue;
+            }
+
             stillStuck.Add(key);
 
             /* A family this vocabulary has no sentence for is NOT paged under another family's name (#3816).
@@ -9244,7 +9554,7 @@ WHERE c.is_enabled";
                        same argument for a refresh or a retention job. */
                     _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.AwaitingSchedulerRetry, job.Family);
                     _logger?.LogInformation(
-                        "TimescaleDB {Label} read {Reason}; the scheduler re-runs a crashed job by itself after its crash backoff (at least five minutes, about an hour for a policy's default retry period), and a re-arm would reset that backoff rather than shorten it — not re-armed, not alerted; escalates if still there next check (#3591)",
+                        "TimescaleDB {Label} read {Reason}; the scheduler re-runs a crashed job by itself max(5 minutes, retry_period x consecutive_crashes) after its last job-list reload (about fifteen minutes on this service's retry period), and a re-arm would restart that wait rather than shorten it — not re-armed, not alerted; escalates if still there next check (#3591, #8302)",
                         label, job.Reason);
                     continue;
                 }
@@ -9299,7 +9609,7 @@ WHERE c.is_enabled";
             else if (episode.State == PolicyJobHealth.AwaitingSchedulerRetry)
             {
                 /* #3591: an hour on and the scheduler's own retry has not cleared it. Either the jittered backoff
-                   landed just past this check, or the job crashed AGAIN and its backoff doubled — both are worth a
+                   landed just past this check, or the job crashed AGAIN and its backoff grew by another retry period — both are worth a
                    human reading the PostgreSQL log, and neither is helped by alter_job (which would reset the
                    backoff once more). Escalate: page once now (#5493: a repeat only per connection_refire_minutes), never re-arm. */
                 _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
@@ -9309,12 +9619,15 @@ WHERE c.is_enabled";
                     StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                     job.Reason, "running on schedule",
                     detail: $"TimescaleDB {label} has sat in the scheduler's crash backoff ({job.Reason}) since at least the previous " +
-                        "hourly check, and the scheduler's own retry has not cleared it. A crashed background worker means the " +
+                        "hourly check, and the scheduler has not re-run it. A crashed background worker means the " +
                         "PostgreSQL cluster crash-restarted, failed over, or the worker was killed mid-run — read the PostgreSQL log " +
-                        "around the job's last_run_started_at for the cause, and check whether it has crashed more than once (each " +
-                        "consecutive crash doubles the backoff). The service did NOT re-arm it: on TimescaleDB 2.26.4+ (upstream " +
-                        "#9360) alter_job(next_start => now()) against a job in crash backoff resets the backoff instead of " +
-                        $"shortening it. {band.Stalled}",
+                        "around the job's last_run_started_at for the cause. The scheduler re-runs a crashed job " +
+                        "max(5 minutes, retry_period x consecutive_crashes) after it last reloaded its job list, and every alter_job on " +
+                        "the store reloads that list, so a job whose retry_period is an hour or more is pushed out again by each hourly " +
+                        $"pass and never runs. Every job this service schedules carries a {TimescaleSupport.PolicyJobRetryPeriod} retry_period " +
+                        "and converges onto it at startup; a job still on a longer one runs again after SELECT alter_job(<job_id>, " +
+                        $"retry_period => INTERVAL '{TimescaleSupport.PolicyJobRetryPeriod}'). The service did NOT re-arm it: " +
+                        $"alter_job(next_start => now()) against a job in crash backoff restarts the wait instead of shortening it. {band.Stalled}",
                     severity: band.Severity,
                     shortMessage: $"{label} still in crash backoff an hour on — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
@@ -9368,6 +9681,8 @@ WHERE c.is_enabled";
             }
         }
 
+        await ResolveCaughtUpDailyRollupsAsync(staleRollups, cancellationToken);
+        await CloseEndedStaleRollupEpisodesAsync(reading, staleRollups, cancellationToken);
         await CloseEndedPolicyJobEpisodesAsync(reading, stillStuck, cancellationToken);
 
         /* Recovery: any job we were tracking that is no longer stuck has recovered — drop its state and write
@@ -9553,7 +9868,7 @@ WHERE c.is_enabled";
     /// </summary>
     private void LogPolicyJobSummary(PolicyJobCensus census, int rearmed, int fired, bool alertsEnabled)
         => _logger?.LogInformation(
-            "Store job health: {Jobs} jobs read (compression {Compression}, refresh {Refresh}, retention {Retention}{Other}), {Dead} dead, {Hung} stuck, {Held} held, {Rearmed} re-armed, {Fired} alerted{Disabled} (#3816)",
+            "Store job health: {Jobs} jobs read (compression {Compression}, refresh {Refresh}, retention {Retention}{Other}), {Dead} dead, {Hung} stuck, {Stale} stale, {Held} held, {Rearmed} re-armed, {Fired} alerted{Disabled} (#3816)",
             census.Total,
             census.Compression,
             census.Refresh,
@@ -9561,6 +9876,7 @@ WHERE c.is_enabled";
             census.Other == 0 ? "" : ", other " + census.Other.ToString(CultureInfo.InvariantCulture),
             census.Dead,
             census.Hung,
+            census.Stale,
             census.Held,
             rearmed,
             fired,
@@ -9577,7 +9893,7 @@ WHERE c.is_enabled";
     /// edge depending on a second read five seconds later, and only the reader knows which.</para>
     /// </summary>
     internal readonly record struct PolicyJobCensus(
-        int Total, int Compression, int Refresh, int Retention, int Other, int Held, int Dead, int Hung)
+        int Total, int Compression, int Refresh, int Retention, int Other, int Held, int Dead, int Hung, int Stale)
     {
         /// <summary>Counts one pass. A reading with no census rows (the read failed) counts zeroes, which is
         /// how the summary line says "nothing was read" rather than "a store with no jobs".</summary>
@@ -9594,7 +9910,9 @@ WHERE c.is_enabled";
                 jobs.Count(j => j.Family == TimescaleSupport.StorePolicyJobFamily.Other),
                 jobs.Count(j => j.Held),
                 stuck.Count(j => j.Arm == StuckPolicyJobArm.NextStartNegativeInfinity),
-                stuck.Count(j => j.Arm == StuckPolicyJobArm.RunningPastBound));
+                stuck.Count(j => j.Arm == StuckPolicyJobArm.RunningPastBound),
+                /* #8302: a stale daily rollup is neither dead nor hung; counted so a pass that reports one never logs "0 dead, 0 stuck" alone. */
+                stuck.Count(j => j.Arm == StuckPolicyJobArm.DailyRollupStale));
         }
     }
 
@@ -10704,7 +11022,7 @@ ORDER BY ag_name, database_name, replica_server_name";
     private static readonly HashSet<string> KeyedFleetMetrics = new(StringComparer.Ordinal)
     {
         JobCadenceMetric, RetentionHoldMetric, RawPurgeOverHorizonMetric, ComposeHoursStuckMetric,
-        CompressionJobMetric, RefreshJobStuckMetric, RetentionJobStuckMetric,
+        CompressionJobMetric, RefreshJobStuckMetric, RetentionJobStuckMetric, DailyRollupStaleMetric,
     };
 
     /// <summary>
@@ -10714,6 +11032,170 @@ ORDER BY ag_name, database_name, replica_server_name";
     /// </summary>
     internal static string? StoredAlertKey(string serverKey, string firingMetric) =>
         KeyedFleetMetrics.Contains(firingMetric) && !string.IsNullOrEmpty(serverKey) ? serverKey : null;
+
+    /// <summary>
+    /// #8302: one daily rollup reported behind its source this pass. First sight fires one Warning under
+    /// <see cref="DailyRollupStaleMetric"/> with the rollup, its newest bucket, its source's newest bucket and the fix
+    /// (the reason text the read built); a rollup that stays behind repeats only per <c>connection_refire_minutes</c>,
+    /// like every standing store alert (#5493). Never re-arms: the job is not stuck, it has days to refresh that its
+    /// window has moved past or is about to. Returns whether anything was sent.
+    /// </summary>
+    private async Task<bool> ApplyStaleDailyRollupAsync(StuckPolicyJob job, string key, DateTime now, CancellationToken cancellationToken)
+    {
+        /* #7068 shape: on the first pass of this process, an open fire row for this rollup in the history means it was
+           already announced before the restart. Seeding the state from it keeps the restart from writing a second
+           first-sight row, and lets the pass where the rollup catches up resolve the row it finds open. */
+        if (!_policyJobFirstPassDone && !_staleRollupState.ContainsKey(key))
+        {
+            await SeedStandingStaleRollupAsync(key, cancellationToken);
+        }
+
+        var view = string.IsNullOrEmpty(job.HypertableName) ? "daily rollup" : job.HypertableName;
+        var detail = $"TimescaleDB daily rollup {view} (refresh job {key}) is behind its source: {job.Reason}. The refresh policy " +
+            "refreshes only the whole buckets inside its window, so a day the window has moved past is never refreshed by the " +
+            $"policy on its own; refresh the missed days by hand with CALL refresh_continuous_aggregate('collect.{view}', " +
+            "<its newest bucket end>, <its source's newest bucket end>), then check that the refresh job runs on schedule. " +
+            "The job itself is not stuck, and the service has not altered it. Until the rollup catches up, every reader of it " +
+            "is served answers that stop at its newest bucket.";
+
+        if (_staleRollupState.TryAdd(key, true))
+        {
+            _lastStaleRollupAlert[key] = now;
+            var delivery = await FireAsync(
+                StoreKey(RollupStaleKeyPrefix + key), _storeLabel, DailyRollupStaleMetric,
+                job.Reason, "level with its source",
+                detail: detail,
+                severity: AlertSeverityLevel.Warning,
+                shortMessage: $"daily rollup {view} is behind its source",
+                numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                cancellationToken);
+            NoteStateSend(DailyRollupStaleMetric, key, delivery);
+            return true;
+        }
+
+        var decision = DecideStateAlert(_lastStaleRollupAlert, key, DailyRollupStaleMetric, key, now, out var refire);
+        if (decision is not (ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown))
+        {
+            return false;
+        }
+
+        _lastStaleRollupAlert[key] = now;
+        var repeat = await FireAsync(
+            StoreKey(RollupStaleKeyPrefix + key), _storeLabel, DailyRollupStaleMetric,
+            job.Reason, "level with its source",
+            detail: StateRepeatNote(decision, refire) + detail,
+            severity: AlertSeverityLevel.Warning,
+            shortMessage: $"daily rollup {view} is still behind its source",
+            numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+            cancellationToken);
+        NoteStateSend(DailyRollupStaleMetric, key, repeat);
+        return true;
+    }
+
+    /// <summary>#8302, the #7068 seed for a stale rollup: the open <see cref="DailyRollupStaleMetric"/> row for this key written
+    /// before this process started, if any, becomes the standing state, with its fire time as the last announcement.</summary>
+    private async Task SeedStandingStaleRollupAsync(string key, CancellationToken cancellationToken)
+    {
+        var historyKey = StoreKey(RollupStaleKeyPrefix + key);
+        var seedClock = Stopwatch.StartNew();
+        try
+        {
+            var rows = await _historyStore.GetKeyedStandingAsync(
+                historyKey, DailyRollupStaleMetric, new[] { DailyRollupRecoveredMetric }, null, _serviceStartUtc);
+            if (rows.OpenFor(_ => true, null) is { } standing)
+            {
+                _staleRollupState[key] = true;
+                _lastStaleRollupAlert[key] = standing.FireAtUtc;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning("Could not read the open {Metric} incident for {Key} from alert history after {ElapsedMs} ms; a rollup still behind its source may be announced again after this restart: {Message}",
+                DailyRollupStaleMetric, historyKey, seedClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(null, "stale rollup standing seed self-alert", seedClock.ElapsedMilliseconds);
+        }
+    }
+
+    /// <summary>#8302: the daily refresh jobs whose stale-rollup row has been checked for an episode that ended while no process was watching.</summary>
+    private readonly ConcurrentDictionary<string, bool> _staleRollupEndedChecked = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// #8302, the #7076 close for a stale rollup: a daily refresh job that is not behind now, that no process tracks, and whose
+    /// last <see cref="DailyRollupStaleMetric"/> row is still open in the history (the rollup was refreshed by hand while the
+    /// service was down) gets its <see cref="DailyRollupRecoveredMetric"/> row here, once per job per process. A failed read is
+    /// logged and counted, and the jobs not yet checked are tried again on the next pass.
+    /// </summary>
+    private async Task CloseEndedStaleRollupEpisodesAsync(StorePolicyJobHealth reading, HashSet<string> staleNow, CancellationToken cancellationToken)
+    {
+        foreach (var job in reading.Jobs)
+        {
+            var key = job.JobId.ToString(CultureInfo.InvariantCulture);
+            if (job.Family != TimescaleSupport.StorePolicyJobFamily.Refresh || staleNow.Contains(key) || _staleRollupEndedChecked.ContainsKey(key))
+            {
+                continue;
+            }
+
+            if (_staleRollupState.ContainsKey(key))
+            {
+                _staleRollupEndedChecked[key] = true;
+                continue;
+            }
+
+            var historyKey = StoreKey(RollupStaleKeyPrefix + key);
+            bool episodeStillOpen;
+            var readClock = Stopwatch.StartNew();
+            try
+            {
+                var rows = await _historyStore.GetKeyedStandingAsync(
+                    historyKey, DailyRollupStaleMetric, new[] { DailyRollupRecoveredMetric }, null, _serviceStartUtc);
+                _staleRollupEndedChecked[key] = true;
+                episodeStillOpen = rows.OpenFor(_ => true, null) is not null;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Could not read the open {Metric} incident for {Key} from alert history after {ElapsedMs} ms; an ended incident may stay open until the next pass: {Message}",
+                    DailyRollupStaleMetric, historyKey, readClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(null, "stale rollup ended-episode close self-alert", readClock.ElapsedMilliseconds);
+                return;
+            }
+
+            if (episodeStillOpen)
+            {
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(RollupStaleKeyPrefix + key), _storeLabel, DailyRollupStaleMetric, DailyRollupRecoveredMetric,
+                    $"TimescaleDB daily rollup (refresh job {key}) is level with its source again"), cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>#8302: every daily rollup reported behind its source on an earlier pass and not on this one has caught
+    /// up: its state is dropped and one <see cref="DailyRollupRecoveredMetric"/> row is written under the key its firing used.</summary>
+    private async Task ResolveCaughtUpDailyRollupsAsync(HashSet<string> staleNow, CancellationToken cancellationToken)
+    {
+        foreach (var key in _staleRollupState.Keys.ToList())
+        {
+            if (staleNow.Contains(key))
+            {
+                continue;
+            }
+
+            _staleRollupState.TryRemove(key, out _);
+            _lastStaleRollupAlert.TryRemove(key, out _);
+            _stateRetries.Clear(StateRetryKey(DailyRollupStaleMetric, key));
+            await RecordResolutionAsync(new AlertResolution(
+                StoreKey(RollupStaleKeyPrefix + key), _storeLabel, DailyRollupStaleMetric,
+                DailyRollupRecoveredMetric,
+                $"TimescaleDB daily rollup (refresh job {key}) is level with its source again"), cancellationToken);
+        }
+    }
 
     private Task RecordPolicyJobRecoveredAsync(PolicyJobBand band, string key, CancellationToken cancellationToken) =>
         RecordResolutionAsync(new AlertResolution(

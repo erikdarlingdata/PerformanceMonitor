@@ -211,7 +211,7 @@ public sealed class McpStorageDatabaseNameFilterToolTests : IClassFixture<Shared
         Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
         var message = doc.RootElement.GetProperty("message").GetString();
         Assert.Contains("No PVS rows for database 'DbA'", message);
-        Assert.Contains("2 other database(s)", message);
+        Assert.Contains("2 other databases", message);
         Assert.DoesNotContain("No PVS data collected for this server", none);
     }
 

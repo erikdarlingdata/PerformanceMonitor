@@ -39,7 +39,7 @@ public sealed class DarlingMcpPgBlockingTools
         if (idleInTransaction || string.Equals(rootState, "idle in transaction", StringComparison.Ordinal))
         {
             return "The root is IDLE IN TRANSACTION: it holds locks and is running nothing, so there is no "
-                 + "query to tune and no work in progress to protect. This is an application defect — a "
+                 + "query to tune and no work in progress to protect. This is an application defect: a "
                  + "transaction opened and then left open across think time, a missing commit on an error "
                  + "path, or a connection pool handing back a dirty connection. Find the code path from "
                  + "application_name; bound the class of failure with "
@@ -51,12 +51,12 @@ public sealed class DarlingMcpPgBlockingTools
             return "The root is IDLE IN TRANSACTION (ABORTED): its transaction already failed and every "
                  + "further statement will error, yet it still holds its locks until the client issues "
                  + "ROLLBACK. Nothing it is doing can succeed, so this is the cheapest root to clear. The "
-                 + "client is not handling an error it already received — that is the bug.";
+                 + "client is not handling an error it already received, that is the bug.";
         }
 
         if (string.Equals(rootState, "active", StringComparison.Ordinal))
         {
-            return "The root is ACTIVE — a real query holding locks while it runs. Tune the query or shorten "
+            return "The root is ACTIVE: a real query holding locks while it runs. Tune the query or shorten "
                  + "the transaction; killing it discards work and the next execution will block the same way. "
                  + "If the statement is fast but the TRANSACTION is long, the lock is being held across "
                  + "statements, and moving the write later in the transaction is usually the fix."
@@ -67,16 +67,24 @@ public sealed class DarlingMcpPgBlockingTools
 
         if (rootState is null)
         {
-            return "The root's own state was not captured — it left pg_stat_activity between the blocked "
+            return "The root's own state was not captured: it left pg_stat_activity between the blocked "
                  + "backends being read and its own row being looked up, which means the chain resolved on "
                  + "its own. Nothing to act on unless it recurs.";
         }
 
         return $"The root is in state '{rootState}' while holding locks. Identify it in pg_stat_activity by "
              + "pid and establish what transaction it has open; a root that is neither active nor idle in "
-             + "transaction usually means it is waiting on something else — a lock outside this chain, or a "
+             + "transaction usually means it is waiting on something else: a lock outside this chain, or a "
              + "client that stopped reading.";
     }
+
+    /// <summary>The finding on a window with captures and no blocking in any of them. The count carries the thousands separator the other
+    /// counts in the reply text use (#8572: "any of the 1438 captures").</summary>
+    internal static string NoBlockingFinding(long capturesTotal) =>
+        $"No blocking was present in any of the {capturesTotal.ToString("N0", CultureInfo.InvariantCulture)} captures in this "
+        + "window. Note the limit of that statement: captures are periodic, so blocking that "
+        + "started and cleared between two of them left no trace. PostgreSQL has no "
+        + "engine-side blocked-process recorder to fall back on.";
 
     [McpServerTool(Name = "get_pg_blocking"), Description("PostgreSQL blocking chains, one entry per chain with its ROOT blocker and a remedy keyed to the root's state (idle in transaction: an application defect; active: a query to tune). This is a periodic SAMPLE, not an event log. PostgreSQL records nothing on its own, so blocking shorter than the interval is never seen; empty means none was SAMPLED, not none happened. Capture counts say how many samples the window held. Cycles (deadlocks) are reported separately, never folded into a chain. root_backend_id is a STRING; compare as text, never as a number. <<GUIDE>> Gets PostgreSQL blocking chains that were captured for a server, assembled from the stored edge list into one entry per chain with its ROOT blocker identified and attributed. Use this when sessions are timing out, waiting, or piling up on a PostgreSQL target, or to check whether a past slowdown involved lock contention. Reports for each captured chain: the root blocker's pid, state, application, username and query text, how many sessions were behind it in total and directly, how deep the chain went, the longest-waiting victim, and how many separate captures that same backend has been the root of - which distinguishes one stuck session from a recurring pattern. Also returns a specific remedy per root state, because an 'idle in transaction' root is an application defect while an 'active' root is a query-tuning problem and the two need opposite responses. This is a periodic SAMPLE, not an event log. Unlike SQL Server's blocked-process report, PostgreSQL records nothing on its own, so blocking shorter than the collection interval is never seen and an empty result means 'none was sampled', not 'none happened' - the capture counts in the response say how many samples the window actually contains. root_backend_id is returned as a STRING, not a number, and it is the value to compare a root blocker across captures with: it is a 64-bit composite of the backend's start time and its pid, always well past what a JSON number survives, so a numeric wire form would round DIFFERENT backends onto the same id rather than merely lose one. Works on any PostgreSQL target including standbys.")]
     public static async Task<string> GetPgBlocking(
@@ -139,7 +147,7 @@ public sealed class DarlingMcpPgBlockingTools
                     captures_total = captures.CapturesTotal,
                     captures_with_blocking = captures.CapturesWithBlocking,
                     finding =
-                        "Blocking was captured, but every participant was itself blocked — a lock cycle "
+                        "Blocking was captured, but every participant was itself blocked: a lock cycle "
                         + "(deadlock) rather than a chain with a root. There is no root blocker to name.",
                     cycles = cycleEntries,
                 }, McpHelpers.JsonOptions), notice);
@@ -204,10 +212,7 @@ public sealed class DarlingMcpPgBlockingTools
                     cycles_sampled = 0,
                     first_capture_at = captures.FirstCaptureAt,
                     last_capture_at = captures.LastCaptureAt,
-                    finding = $"No blocking was present in any of the {captures.CapturesTotal} captures in this "
-                        + "window. Note the limit of that statement: captures are periodic, so blocking that "
-                        + "started and cleared between two of them left no trace. PostgreSQL has no "
-                        + "engine-side blocked-process recorder to fall back on.",
+                    finding = NoBlockingFinding(captures.CapturesTotal),
                 }, McpHelpers.JsonOptions), emptyNotice), cancellationToken, startUtc);
             }
 
@@ -245,7 +250,7 @@ public sealed class DarlingMcpPgBlockingTools
             blocked_behind_count = c.BlockedBehindCount,
             blocked_behind_pids = c.BlockedBehindPids,
             finding =
-                "These backends were each waiting on a lock held by another member of the same set — a "
+                "These backends were each waiting on a lock held by another member of the same set: a "
                 + "genuine cycle, which is a deadlock. PostgreSQL's deadlock detector resolves it after "
                 + "deadlock_timeout by killing one participant, so this capture landed inside that "
                 + "window and is likely the only record that will ever exist. The fix is ordering: make "

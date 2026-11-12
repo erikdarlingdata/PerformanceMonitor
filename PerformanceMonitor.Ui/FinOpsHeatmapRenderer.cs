@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using PerformanceMonitor.Common;
 using ScottPlot.WPF;
 
@@ -16,12 +17,14 @@ namespace PerformanceMonitor.Ui
 {
     /// <summary>
     /// What a <see cref="FinOpsHeatmapRenderer.Render"/> call leaves on the chart: the heatmap plottable
-    /// (for hover hit-testing) and the colorbar panel (so the next render can remove it before re-adding).
+    /// (for hover hit-testing), the matrix it drew (a column for every calendar day, which is what a hovered column
+    /// indexes) and the colorbar panel (so the next render can remove it before re-adding).
     /// The host stores this between renders, exactly as the query-heatmap code tracks its plottable + legend.
     /// </summary>
     public sealed class FinOpsHeatmapHandle
     {
         public ScottPlot.Plottables.Heatmap? Plottable { get; init; }
+        public FinOpsHeatmapMatrix? Matrix { get; init; }
         public ScottPlot.Panels.ColorBar? ColorBar { get; init; }
     }
 
@@ -36,6 +39,21 @@ namespace PerformanceMonitor.Ui
     /// </summary>
     public static class FinOpsHeatmapRenderer
     {
+        /// <summary>The height one heatmap row takes: an object's label and the room between it and its neighbours.</summary>
+        public const double RowPitch = 22;
+
+        /// <summary>The height the chart's title, its day labels and its padding take around the plot.</summary>
+        public const double ChromeHeight = 80;
+
+        /// <summary>
+        /// The least height a chart of <paramref name="rows"/> heatmap rows needs: a row of <see cref="RowPitch"/> for each object
+        /// between the title and the day labels, and never under the floor every chart keeps (<see cref="ChartLayout.MinPlotHeight"/>).
+        /// <see cref="Render"/> sets it as the chart's MinHeight, so a host that sizes the chart to its content gives every label a
+        /// row of its own, and scrolls when the chart and what sits under it cannot both fit.
+        /// </summary>
+        public static double MinimumChartHeight(int rows) =>
+            Math.Max(ChartLayout.MinPlotHeight, (Math.Max(rows, 0) * RowPitch) + ChromeHeight);
+
         /// <summary>
         /// Renders <paramref name="matrix"/> into <paramref name="chart"/> and returns a handle for hover +
         /// the next render's cleanup. Pass the previous handle so its colorbar panel is removed first (panels
@@ -54,13 +72,17 @@ namespace PerformanceMonitor.Ui
                 chart.Plot.Axes.Remove(previous.ColorBar);
             chart.Plot.Clear();
             ChartStyle.ApplyThemeToChart(chart);
+            chart.MinHeight = MinimumChartHeight(matrix.IsEmpty ? 0 : matrix.Intensities.GetLength(0));
 
             if (matrix.IsEmpty)
             {
-                chart.Plot.Title($"{title} — No Data");
+                chart.Plot.Title($"{title}: No Data");
                 chart.Refresh();
-                return new FinOpsHeatmapHandle();
+                return new FinOpsHeatmapHandle { Matrix = matrix };
             }
+
+            /* The day axis is a calendar: a day with no sample for any object keeps a blank column, so a collection gap shows. */
+            matrix = FinOpsHeatmapBuilder.WithEveryCalendarDay(matrix);
 
             int numRows = matrix.Intensities.GetLength(0);
             int numCols = matrix.Intensities.GetLength(1);
@@ -79,18 +101,14 @@ namespace PerformanceMonitor.Ui
             heatmap.Colormap = new ScottPlot.Colormaps.Viridis();
             heatmap.NaNCellColor = chart.Plot.DataBackground.Color;
 
-            // X-axis: daily date labels at column positions ("M/d"), ~12 labels max.
-            var xTicks = new ScottPlot.TickGenerators.NumericManual();
-            int xStep = Math.Max(1, numCols / 12);
-            for (int i = 0; i < numCols; i += xStep)
-                xTicks.AddMajor(i, matrix.Days[i].ToString("M/d", CultureInfo.InvariantCulture));
-            chart.Plot.Axes.Bottom.TickGenerator = xTicks;
+            // X-axis: daily date labels at column positions ("M/d"), as many as the axis has room for at each render.
+            chart.Plot.Axes.Bottom.TickGenerator = new HeatmapLabelTicks(
+                numCols, i => matrix.Days[i].ToString("M/d", CultureInfo.InvariantCulture), horizontal: true);
 
-            // Y-axis: object identity labels.
-            var yTicks = new ScottPlot.TickGenerators.NumericManual();
-            for (int i = 0; i < matrix.RowLabels.Length; i++)
-                yTicks.AddMajor(i, matrix.RowLabels[i]);
-            chart.Plot.Axes.Left.TickGenerator = yTicks;
+            // Y-axis: object identity labels, one per row at the height MinimumChartHeight keeps, thinned rather than
+            // overlapped by a host that gives the chart less.
+            chart.Plot.Axes.Left.TickGenerator = new HeatmapLabelTicks(
+                matrix.RowLabels.Length, i => matrix.RowLabels[i], horizontal: false);
 
             chart.Plot.Axes.SetLimitsX(-0.5, numCols - 0.5);
             chart.Plot.Axes.SetLimitsY(-0.5, numRows - 0.5);
@@ -98,21 +116,29 @@ namespace PerformanceMonitor.Ui
             ChartStyle.ReapplyAxisColors(chart);
 
             // Continuous-metric colorbar: log positions, "nice" round values up to the data max (no integer
-            // tick coercion, no 10000 cap — those were query-count specifics).
+            // tick coercion, no 10000 cap — those were query-count specifics). The bar spans the heatmap's own range,
+            // the smallest cell with a value to the largest, so its labels are that smallest value, the round values
+            // above it and the largest. The log scale crowds the round values toward the top, so ColorBarCountTicks
+            // drops the ones whose labels would touch at the bar's length on each render.
             double maxRaw = 0;
+            double minRaw = double.MaxValue;
             for (int r = 0; r < numRows; r++)
+            {
                 for (int c = 0; c < numCols; c++)
-                    if (matrix.Intensities[r, c] > maxRaw) maxRaw = matrix.Intensities[r, c];
+                {
+                    double cell = matrix.Intensities[r, c];
+                    if (cell > maxRaw) maxRaw = cell;
+                    if (cell > 0 && cell < minRaw) minRaw = cell;
+                }
+            }
 
             var colorBar = new ScottPlot.Panels.ColorBar(heatmap, ScottPlot.Edge.Right) { Label = colorBarLabel };
             var format = colorBarTickFormat ?? DefaultMetricTickFormat;
-            var cbTicks = new ScottPlot.TickGenerators.NumericManual();
-            cbTicks.AddMajor(0, "0");
-            foreach (var n in NiceTicksUpTo(maxRaw))
-                cbTicks.AddMajor(Math.Log(1 + n), format(n));
-            if (maxRaw > 0)
-                cbTicks.AddMajor(Math.Log(1 + maxRaw), format(maxRaw));
-            colorBar.Axis.TickGenerator = cbTicks;
+            var roundValues = new List<(double Position, string Label)>();
+            if (minRaw < maxRaw)
+                roundValues.Add((Math.Log(1 + minRaw), format(minRaw)));
+            roundValues.AddRange(NiceTicksUpTo(maxRaw).Where(n => n > minRaw).Select(n => (Math.Log(1 + n), format(n))));
+            colorBar.Axis.TickGenerator = new ColorBarCountTicks(roundValues, (Math.Log(1 + maxRaw), format(maxRaw)));
             colorBar.LabelStyle.ForeColor = chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
             colorBar.Axis.TickLabelStyle.ForeColor = chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
             chart.Plot.Axes.AddPanel(colorBar);
@@ -121,7 +147,7 @@ namespace PerformanceMonitor.Ui
             chart.Plot.Axes.Title.Label.ForeColor = chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
 
             chart.Refresh();
-            return new FinOpsHeatmapHandle { Plottable = heatmap, ColorBar = colorBar };
+            return new FinOpsHeatmapHandle { Plottable = heatmap, Matrix = matrix, ColorBar = colorBar };
         }
 
         private static string DefaultMetricTickFormat(double v)

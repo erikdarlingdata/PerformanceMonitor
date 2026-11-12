@@ -34,6 +34,7 @@ public sealed class DropXeSessionsPerInstallTests
     private const string OwnDeadlock = "PerformanceMonitor_Darling_1a2b3c4d_Deadlock";
     private const string OwnBlocked = "PerformanceMonitor_Darling_1a2b3c4d_BlockedProcess";
     private const string OwnAttention = "PerformanceMonitor_Darling_1a2b3c4d_Attention";
+    private const string OwnSchema = "PerformanceMonitor_Darling_1a2b3c4d_SchemaChanges";
     private const string OtherLiteLongQuery = "PerformanceMonitor_Lite_ffeeddcc_LongQueryCompletions";
     private const string OtherDarlingDeadlock = "PerformanceMonitor_Darling_ffeeddcc_Deadlock";
     private const string OtherDarlingBlocked = "PerformanceMonitor_Darling_ffeeddcc_BlockedProcess";
@@ -45,11 +46,11 @@ public sealed class DropXeSessionsPerInstallTests
     // ---- the names ------------------------------------------------------------------------------------------------------
 
     [Fact]
-    public void TheInstallsNames_AreItsLongQuerySessionAndTheThreeAzureFallbacks()
+    public void TheInstallsNames_AreItsLongQuerySession_TheThreeAzureFallbacksAndTheSchemaChangesSession()
     {
-        Assert.Equal(new[] { OwnLongQuery, OwnDeadlock, OwnBlocked, OwnAttention }, DarlingXeSessionCleanup.InstallSessionNames(Id));
+        Assert.Equal(new[] { OwnLongQuery, OwnDeadlock, OwnBlocked, OwnAttention, OwnSchema }, DarlingXeSessionCleanup.InstallSessionNames(Id));
         Assert.Equal(
-            new[] { SharedDeadlock, SharedBlocked, SharedAttention, Legacy, OwnLongQuery, OwnDeadlock, OwnBlocked, OwnAttention },
+            new[] { SharedDeadlock, SharedBlocked, SharedAttention, Legacy, OwnLongQuery, OwnDeadlock, OwnBlocked, OwnAttention, OwnSchema },
             DarlingXeSessionCleanup.NamesToDrop(Id));
     }
 
@@ -146,7 +147,7 @@ public sealed class DropXeSessionsPerInstallTests
     [Theory]
     [InlineData(XeSessionScope.Server, "FROM sys.server_event_sessions AS ses", "ses")]
     [InlineData(XeSessionScope.Database, "FROM sys.database_event_sessions AS des", "des")]
-    public void TheFindOfOtherInstalls_MatchesTheFourPerInstallShapes_WithTheUnderscoresEscaped(XeSessionScope scope, string from, string alias)
+    public void TheFindOfOtherInstalls_MatchesTheFivePerInstallShapes_WithTheUnderscoresEscaped(XeSessionScope scope, string from, string alias)
     {
         var sql = DarlingXeSessionCleanup.ComposeFindOthersSql(scope);
 
@@ -155,7 +156,7 @@ public sealed class DropXeSessionsPerInstallTests
         Assert.Contains("SELECT /* PerformanceMonitorDarling */", sql, StringComparison.Ordinal);
         var patterns = Regex.Matches(sql, "N'([^']*)'").Select(m => m.Groups[1].Value).ToArray();
         Assert.Equal(
-            new[] { "PerformanceMonitor[_]%[_]LongQueryCompletions", "PerformanceMonitor[_]%[_]Deadlock", "PerformanceMonitor[_]%[_]BlockedProcess", "PerformanceMonitor[_]%[_]Attention" },
+            new[] { "PerformanceMonitor[_]%[_]LongQueryCompletions", "PerformanceMonitor[_]%[_]Deadlock", "PerformanceMonitor[_]%[_]BlockedProcess", "PerformanceMonitor[_]%[_]Attention", "PerformanceMonitor[_]%[_]SchemaChanges" },
             patterns);
         foreach (var pattern in patterns)
         {

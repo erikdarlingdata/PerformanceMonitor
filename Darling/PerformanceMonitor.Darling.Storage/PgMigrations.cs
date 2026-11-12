@@ -931,6 +931,11 @@ END $$;";
     /// </summary>
     private static readonly string V173Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.CreateSql;
 
+    /* V258 (#7988): the Viewer-managed web access groups. The rung puts a trigger on config.server_tags and marks it ENABLE ALWAYS, which take
+       strong locks on a table the Viewer edits, so it opens with the ladder's lock_timeout, V173's shape: a held lock fails the rung cleanly
+       and the retry loop reports who holds it. */
+    private static readonly string V261Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + WebAccessGroupSchema.CreateSql;
+
     /// <summary>
     /// V174 (#5655) — <c>config.service_version</c>: one row per service host with the product version the service reported at
     /// start, its process start time and the time the row was written. The Manage Servers window reads it to show the SERVICE's
@@ -2873,6 +2878,75 @@ BEGIN
 END $$;";
 
     /// <summary>
+    /// V259 (#8549): the daily wait totals, <c>collect.wait_stats_daily</c>, created where the store can hold it at migration time so the
+    /// Daily Summary can read closed days from it. Per server, per UTC day, per stored wait type: the summed positive
+    /// <c>delta_wait_time_ms</c>, the Daily Summary's own <c>wait_per_spelling</c> grain. On a store without TimescaleDB it is the plain view
+    /// over <c>collect.wait_stats</c> (<c>date_trunc('day')</c> for <c>time_bucket</c>). On a TimescaleDB store whose <c>wait_stats</c> is
+    /// already a hypertable (every upgrading store) it is the continuous aggregate, <c>WITH NO DATA</c>, which is catalog-only and
+    /// transaction-safe; the ensure sweep that follows on the same start finds it, gives it the daily refresh policy and the 35-day
+    /// retention, and the start-up backfill fills the closed days from raw (not here: it reads every server's rows). On a fresh
+    /// TimescaleDB store the table is not yet a hypertable here (the conversion runs after the ladder), so this rung creates the plain
+    /// view, which the sweep drops for the aggregate once the table is a hypertable, as on a store that gained the extension.
+    /// Idempotent. An older build ignores the relation and reads raw <c>wait_stats</c> as before. <b>No Lite twin:</b> Lite has no rollup tier.
+    /// </summary>
+    /* Declared before the Scripts array on purpose: a static readonly is null until its initializer runs, and the array reads it. */
+    private static readonly string V259Sql = @"
+DO $$
+DECLARE
+    v_hypertable boolean := false;
+BEGIN
+    /* timescaledb_information only exists once the extension has been created; to_regclass probes it without raising, and
+       the hypertable read goes through EXECUTE so the reference is parsed only when it runs. */
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NOT NULL THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = ''collect'' AND hypertable_name = ''wait_stats'')'
+        INTO v_hypertable;
+    END IF;
+
+    /* The relation exists from this rung on, whatever shape the store is in, so the viewer's probe reads the rung. A store that
+       already holds the relation (a rerun) keeps it: the aggregate's own IF NOT EXISTS, and CREATE OR REPLACE VIEW only on a name
+       that is not already a relation of another kind. */
+    IF v_hypertable THEN
+        EXECUTE '" + TimescaleSupport.CreateWaitStatsDailySql.Replace("'", "''") + @"';
+    ELSIF to_regclass('collect.wait_stats_daily') IS NULL THEN
+        EXECUTE '" + TimescaleSupport.CreateWaitStatsDailyFallbackViewSql.Replace("'", "''") + @"';
+    END IF;
+END $$;";
+
+    /// <summary>
+    /// V263 (#8549): the oldest-run rollup, <c>collect.job_history_oldest_daily</c>, created where the store can hold it at migration time
+    /// so the Job History time range picker's "Data starts" note can read each server's first run from one small row per server per day
+    /// instead of sorting every compressed <c>job_history</c> chunk. Per server, per UTC day of collection: the smallest <c>run_datetime</c>.
+    /// V259's shape. On a TimescaleDB store whose <c>job_history</c> is already a hypertable (every upgrading store) it is the continuous
+    /// aggregate, <c>WITH NO DATA</c>, which is catalog-only and transaction-safe; the ensure sweep that follows on the same start finds it
+    /// and gives it the daily refresh policy, and the start-up backfill fills the closed days from raw (not here: it reads every row of
+    /// the table). Elsewhere (no TimescaleDB, or a fresh store whose table is not yet a hypertable here) it is the plain view over
+    /// <c>collect.job_history</c>, which the sweep drops for the aggregate once the table is a hypertable. Idempotent. An older build
+    /// ignores the relation and reads the oldest run from raw <c>job_history</c> as before. <b>No Lite twin:</b> Lite reads its oldest
+    /// run from a columnar DuckDB table.
+    /// </summary>
+    /* Declared before the Scripts array on purpose: a static readonly is null until its initializer runs, and the array reads it. */
+    private static readonly string V263Sql = @"
+DO $$
+DECLARE
+    v_hypertable boolean := false;
+BEGIN
+    /* timescaledb_information only exists once the extension has been created; to_regclass probes it without raising, and
+       the hypertable read goes through EXECUTE so the reference is parsed only when it runs. */
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NOT NULL THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = ''collect'' AND hypertable_name = ''job_history'')'
+        INTO v_hypertable;
+    END IF;
+
+    /* The relation exists from this rung on, whatever shape the store is in, so the viewer's probe reads the rung. A store that
+       already holds the relation (a rerun) keeps it. */
+    IF v_hypertable THEN
+        EXECUTE '" + TimescaleSupport.CreateJobHistoryOldestDailySql.Replace("'", "''") + @"';
+    ELSIF to_regclass('collect.job_history_oldest_daily') IS NULL THEN
+        EXECUTE '" + TimescaleSupport.CreateJobHistoryOldestDailyFallbackViewSql.Replace("'", "''") + @"';
+    END IF;
+END $$;";
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3385,7 +3459,228 @@ $rung$;";
         new Migration(253, "slack-cards", V253Sql),
         new Migration(254, "slack-chat-requests", V254Sql),
         new Migration(255, "wait-stats-cadence-baseline", V255Sql),
+        new Migration(256, "schema-tracking", V256Sql),
+        new Migration(257, "collection-log-status-time", V257Sql),
+        new Migration(258, "oversized-plan-backlog-dropped-index", V258Sql),
+        new Migration(259, "wait-stats-daily-rollup", V259Sql),
+        new Migration(260, "oversized-plan-backlog-median-indexes", V260Sql),
+        new Migration(WebAccessGroupSchema.Version, "viewer-managed-web-access-groups", V261Sql),
+        new Migration(WebAccessAdvancedSchema.Version, "advanced-web-access-opt-in", WebAccessAdvancedSchema.CreateSql),
+        new Migration(263, "job-history-oldest-daily-rollup", V263Sql),
+        /* V264 (#8691): the per-hour counts of oversized-plan backlog rows the trim deletes. A new table only: no existing row moves. */
+        new Migration(264, "oversized-plan-backlog-dropped-counts", OversizedPlanBacklog.CreateDropCountsTableSql),
+        /* V265 (#8549): the hourly summary of job_history's categories and its one-row coverage table. Two new tables, created empty: no existing row
+           moves and nothing is backfilled here, so the upgrade stays fast and the service's hourly pass fills them. */
+        new Migration(265, "job-history-category-hourly", JobHistoryCategoryHourly.CreateSql),
     };
+
+    /* V256 (#7643): schema tracking. Versioned table and view definitions, kept by the schema_objects collector (Darling only).
+       collect.schema_objects holds one row per version of an object: valid_from to valid_to, what changed it and who detected it, the
+       SHA-256 of its canonical definition, and the properties of a table or a view. History is keyed by a server, or by an availability group
+       for a database that belongs to one (exactly one of the two, a CHECK). The four child tables hold the columns, indexes, constraints and
+       triggers of a version, and go with it (ON DELETE CASCADE). collect.schema_capture_state is the per-server and per-database cursor of
+       the capture: the event session position (and session_ensured_at, the mark a pass leaves as soon as it finds the session running), the
+       recovery fork, the baseline and the last complete read. idx_schema_objects_key_valid_from serves get_schema_changes' window (a history
+       key and a valid_from range), which no other index leads with. collect.schema_capture_passes is the
+       pass log, a collector table whose columns and index are exactly PgSchemaGenerator's output. Owner-written and read through the collect
+       schema's blanket SELECT, so no grant. New tables, no data moves. Every statement is idempotent. */
+    private const string V256Sql = @"
+CREATE TABLE IF NOT EXISTS collect.schema_capture_passes (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    history_key text,
+    pass_kind text,
+    reason text,
+    events_read integer,
+    objects_read integer,
+    versions_written integer,
+    drops_written integer,
+    complete boolean,
+    note text
+);
+
+CREATE INDEX IF NOT EXISTS idx_schema_capture_passes_time ON collect.schema_capture_passes(server_id, collection_time);
+
+CREATE TABLE IF NOT EXISTS collect.schema_objects (
+    version_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    server_id integer NULL,
+    ag_group_id uuid NULL,
+    ag_name text NULL,
+    database_name text NOT NULL,
+    object_id integer NOT NULL,
+    schema_name text NOT NULL,
+    object_name text NOT NULL,
+    object_type char(1) NOT NULL,
+    valid_from timestamp NOT NULL,
+    valid_to timestamp NULL,
+    change_kind text NOT NULL,
+    detected_by text NOT NULL,
+    detected_on_server_id integer NOT NULL,
+    modify_date timestamp NULL,
+    definition_hash bytea NOT NULL,
+    change_login text,
+    change_app text,
+    change_host text,
+    temporal_type text,
+    history_table text,
+    is_memory_optimized boolean,
+    durability text,
+    partition_scheme text,
+    partition_column text,
+    lock_escalation text,
+    is_schema_bound boolean,
+    is_indexed boolean,
+    view_definition text,
+    CONSTRAINT ck_schema_objects_history_key CHECK ((server_id IS NULL) <> (ag_group_id IS NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_schema_objects_current_name
+    ON collect.schema_objects (server_id, ag_group_id, database_name, lower(object_name)) WHERE valid_to IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schema_objects_object_history
+    ON collect.schema_objects (server_id, ag_group_id, database_name, object_id, valid_from);
+
+CREATE INDEX IF NOT EXISTS idx_schema_objects_key_valid_from
+    ON collect.schema_objects (server_id, ag_group_id, valid_from);
+
+CREATE INDEX IF NOT EXISTS idx_schema_objects_closed
+    ON collect.schema_objects (valid_to) WHERE valid_to IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS collect.schema_columns (
+    version_id bigint NOT NULL REFERENCES collect.schema_objects (version_id) ON DELETE CASCADE,
+    is_current boolean NOT NULL,
+    ordinal integer NOT NULL,
+    name text NOT NULL,
+    type_name text NOT NULL,
+    max_length integer,
+    precision integer,
+    scale integer,
+    is_nullable boolean NOT NULL,
+    identity_seed numeric(38,0),
+    identity_increment numeric(38,0),
+    computed_definition text,
+    is_persisted boolean,
+    default_name text,
+    default_definition text,
+    collation_name text,
+    is_sparse boolean,
+    is_rowguidcol boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_schema_columns_version ON collect.schema_columns (version_id);
+
+CREATE INDEX IF NOT EXISTS idx_schema_columns_current_name ON collect.schema_columns (lower(name)) WHERE is_current;
+
+CREATE TABLE IF NOT EXISTS collect.schema_indexes (
+    version_id bigint NOT NULL REFERENCES collect.schema_objects (version_id) ON DELETE CASCADE,
+    is_current boolean NOT NULL,
+    index_id integer NOT NULL,
+    name text,
+    type_desc text NOT NULL,
+    is_unique boolean NOT NULL,
+    is_primary_key boolean NOT NULL,
+    is_unique_constraint boolean NOT NULL DEFAULT FALSE,
+    key_columns text,
+    included_columns text,
+    filter_definition text,
+    data_compression text,
+    is_disabled boolean NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_schema_indexes_version ON collect.schema_indexes (version_id);
+
+CREATE TABLE IF NOT EXISTS collect.schema_constraints (
+    version_id bigint NOT NULL REFERENCES collect.schema_objects (version_id) ON DELETE CASCADE,
+    is_current boolean NOT NULL,
+    kind char(1) NOT NULL,
+    name text NOT NULL,
+    definition text,
+    fk_columns text,
+    referenced_schema text,
+    referenced_table text,
+    referenced_columns text,
+    delete_action text,
+    update_action text,
+    is_disabled boolean NOT NULL DEFAULT FALSE,
+    is_not_trusted boolean NOT NULL DEFAULT FALSE,
+    is_system_named boolean NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_schema_constraints_version ON collect.schema_constraints (version_id);
+
+CREATE INDEX IF NOT EXISTS idx_schema_constraints_referenced_table
+    ON collect.schema_constraints (lower(referenced_table)) WHERE is_current AND kind = 'F';
+
+CREATE TABLE IF NOT EXISTS collect.schema_triggers (
+    version_id bigint NOT NULL REFERENCES collect.schema_objects (version_id) ON DELETE CASCADE,
+    is_current boolean NOT NULL,
+    name text NOT NULL,
+    is_instead_of boolean NOT NULL,
+    events text NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_schema_triggers_version ON collect.schema_triggers (version_id);
+
+CREATE TABLE IF NOT EXISTS collect.schema_capture_state (
+    server_id integer NOT NULL,
+    database_name text NOT NULL,
+    session_create_time timestamp,
+    session_ensured_at timestamp,
+    last_event_sequence bigint,
+    last_event_time timestamp,
+    total_events_processed bigint,
+    dropped_event_count bigint,
+    recovery_fork_guid uuid,
+    history_server_id integer,
+    history_ag_group_id uuid,
+    was_primary boolean,
+    baseline_at timestamp,
+    last_complete_read_at timestamp,
+    last_seen_in_scope_at timestamp,
+    last_reconcile_at timestamp,
+    last_reconcile_reason text,
+    PRIMARY KEY (server_id, database_name)
+);";
+
+
+    /* V257 (#8464): idx_collection_log_status_time, a B-tree on collect.collection_log (server_id, status, collection_time DESC). Every
+       "last collected" read (the Overview card, the sidebar dot, list_servers, get_server_summary, the fleet card, the Admin grid, the
+       offline note and the FinOps inventory) descends a server's collection_log newest-first to its newest SUCCESS row.
+       idx_collection_log_time (server_id, collection_time) orders that descent but holds no status, so on an uncompressed chunk every failed
+       row is fetched from the heap and rejected before the next is tried, and for a server whose every collector fails the descent fetches
+       the chunk's every row. With status in the key the descent reads SUCCESS entries only, and an all-failed server's probe of a chunk is
+       one empty index probe. On a chunk TimescaleDB compresses after this rung the index also gives status a bloom sparse index
+       (auto_sparse_indexes builds one for each column a B-tree index names), so a compressed batch that holds no SUCCESS is skipped without
+       being decompressed; a chunk compressed before this rung keeps the batch metadata it has and is decompressed as before until retention
+       drops it. Not CONCURRENTLY: TimescaleDB refuses it on a hypertable, so this is the plain form every other index rung on this table
+       uses, inside the ladder's own transaction. Idempotent. */
+    private const string V257Sql = @"
+CREATE INDEX IF NOT EXISTS idx_collection_log_status_time ON collect.collection_log (server_id, status, collection_time DESC);";
+
+    /* V260 (#8570): the two indexes the oversized-plan backlog read takes its median through, on collect.oversized_plan_backlog:
+       idx_oversized_plan_backlog_server_bytes (server_id, observed_bytes) for the per-server rollup, and idx_oversized_plan_backlog_collector_bytes
+       (collector_name, observed_bytes) for the fleet-wide collector census. The median used to sort every row of every group, wide rows
+       and all (3,000,000 rows: a 228 MB spill, 5.9 s); the read now counts the group and walks that many rows halfway through the index, which
+       holds the two narrow columns and nothing else. observed_bytes is not NULL and a re-sighting writes the value it already holds unless the
+       plan really changed size, so an update of a waiting row stays heap-only. Plain B-trees on a plain table, built from one read of it. Not
+       CONCURRENTLY: the rung runs inside the ladder's own transaction. Idempotent. */
+    private const string V260Sql = @"
+CREATE INDEX IF NOT EXISTS idx_oversized_plan_backlog_server_bytes ON collect.oversized_plan_backlog (server_id, observed_bytes);
+CREATE INDEX IF NOT EXISTS idx_oversized_plan_backlog_collector_bytes ON collect.oversized_plan_backlog (collector_name, observed_bytes);";
+
+    /* V258 (#8567): idx_oversized_plan_backlog_dropped, a partial B-tree on collect.oversized_plan_backlog (server_id, expired_at) over the
+       rows the sweep dropped unfetched: no content, no attempt, an expiry stamp. Those are the rows OversizedPlanBacklog.PurgeDroppedSql
+       deletes, for one server and before one cutoff, so the purge reads the rows it removes. Through the primary key it reads every row the
+       server has, the waiting ones included, on every pass. The predicate keeps a waiting row out of the index, so a new sighting writes no
+       entry to it, and the index names no column a re-sighting changes on a waiting row, so that update stays heap-only. The build reads the
+       table once. Not CONCURRENTLY: the rung runs inside the ladder's own transaction. Idempotent. */
+    private const string V258Sql = @"
+CREATE INDEX IF NOT EXISTS idx_oversized_plan_backlog_dropped ON collect.oversized_plan_backlog (server_id, expired_at)
+WHERE captured_at IS NULL AND last_attempt_at IS NULL AND expired_at IS NOT NULL;";
+
 
     /// <summary>
     /// V235 (#7083): the blocking alert pages on blocked wait time. The shipped bars move: <c>blocking_count_threshold</c> 1 to 3,
@@ -3501,7 +3796,9 @@ ALTER TABLE config.config_alert_settings
     /// V229 (#6928): <c>config.config_notification_routes.severities</c>, the severity filter of a notification route: <c>both</c> (the
     /// default, Warning and Critical alerts alike, which is what every route did before), <c>critical</c> or <c>warning</c>. NOT NULL with
     /// the default, so every stored route reads <c>both</c> and keeps its effect, and a CHECK holds the three words. An alert that is not
-    /// Critical counts as Warning. A route whose filter excludes an alert does not match it, and matching goes on to the next route.
+    /// Critical counts as Warning, except a recovery delivered as an alert of its own (Server Restored, AG Replica Reconnected), which
+    /// is routed at the tier of the firing it closes. A route whose filter excludes an alert does not match it, and matching goes on to
+    /// the next route.
     /// Idempotent: the column and the constraint are each added only when absent. No backfill and no view refresh: a registry table.
     /// Also <c>config.external_alert_state.fired_severities</c>, every severity an external alert sent during its open episode
     /// (comma separated), so its clear closes the incident of each tier's route. Null on an episode already open, which reads as

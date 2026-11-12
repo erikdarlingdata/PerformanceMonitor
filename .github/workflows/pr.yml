@@ -10,10 +10,20 @@ name: PR CI
 # Every pull request runs, draft or ready for review (#7717; PR 2 of the rollout removed the `ci-next` label gate). Agent
 # pull requests open as drafts and need their first build and test run on CI, not on the laptop. The draft flag does not
 # gate the run, it narrows the scope (#7727): a draft that changes product files runs the build, the test classes of the test
-# files it changed and the Darling Stage=Guard classes, not the full suite. The full suite runs when the pull request is
-# marked ready for review (`ready_for_review` starts a run), so every merge has a full green run behind it.
+# files it changed and the Stage=Guard classes of each suite in its scope (#8355; the Lite Guard classes join only a selection
+# that is already narrow and never narrow a draft on their own), not the full suite. The full suite runs when the pull request
+# is marked ready for review (`ready_for_review` starts a run), so every merge has a full green run behind it.
 # Only a pull request carrying the `merge-train` label does not run; the verdict job fails its `CI result`.
 # No `labeled` trigger: an unrelated label would cancel and restart the run.
+#
+# #7819: a push to dev runs the classes the nightly test map picks for the pushed commit's files, as a ready pull request does
+# (ci-plan.py rule 10), and sets `CI result` on the dev commit. The full suite runs on dev once an hour instead of on
+# every merge: the schedule below re-dispatches this workflow onto the dev ref (the nightly's pattern, see the redispatch job),
+# and the dispatched run plans every area, sets `CI result` and a second status, `CI full suite`, on dev's tip, and skips when
+# that tip already carries a finished `CI full suite`. Branch protection on dev has `strict: false`, so two pull requests that
+# each pass alone can fail together; the hourly run is what catches that, within the hour and with a short commit range.
+# `gh workflow run pr.yml --ref dev` is the manual full run. On another ref it runs that branch's full suite and sets only
+# `CI result` on the branch's commit: `CI full suite` and the "dev is red" issue are written only when the ref is dev.
 
 on:
   push:
@@ -21,6 +31,17 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [dev, main]
+  schedule:
+    # Hourly, off the hour (GitHub's :00 queue is the crowded one). The scheduled run executes the default branch's copy of this
+    # file and does nothing but re-dispatch onto dev, so a change here reaches the schedule only once main carries it.
+    - cron: '17 * * * *'
+  workflow_dispatch: # the full suite on the dispatched ref: the vehicle the hourly re-dispatch rides, and the manual full run
+    inputs:
+      from_schedule:
+        description: 'Set true by the hourly re-dispatch: the run then skips when the dispatched commit already carries a finished CI full suite status. Leave false for a manual run, which always runs.'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -30,17 +51,38 @@ permissions:
   actions: read # the verdict job asks whether a newer run of this workflow exists for the pull request (#6656)
 
 # A new push to a pull request cancels that pull request's earlier run. Dev pushes never cancel a running run: at most one
-# runs and one newest waits, so every run covers every merge up to its SHA.
+# runs and one newest waits. The hourly full suite has its own group, so a merge's run is not queued behind it and a manual
+# dispatch waits for a running one instead of doubling it; the scheduled re-dispatch is seconds long and has its own.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('pr-ci-{0}', github.event.pull_request.number) || 'dev-push' }}
+  group: ${{ github.event_name == 'pull_request' && format('pr-ci-{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && 'dev-full-suite' || github.event_name == 'schedule' && 'dev-hourly-redispatch' || 'dev-push' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CI_RESULT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
+  # #7819: a scheduled run executes the DEFAULT branch's copy of this file (main's), while dev is what the full suite must
+  # test. As nightly.yml does, the schedule does nothing but re-dispatch this workflow onto the dev ref: a workflow_dispatch
+  # run executes the dispatched ref's copy of this file, dev's. GITHUB_TOKEN may create workflow_dispatch runs (the Actions
+  # recursion guard exempts workflow_dispatch and repository_dispatch), and the dispatched run cannot loop back here because it
+  # arrives as workflow_dispatch, not schedule. This job references no tree path, so main's copy keeps working across releases.
+  # Until main carries this job, the schedule starts nothing, and dev's full runs are the nightly's and manual dispatches.
+  redispatch:
+    name: Re-dispatch the hourly full suite onto dev
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Re-dispatch this workflow onto the dev ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pr.yml --repo "${GITHUB_REPOSITORY}" --ref dev -f from_schedule=true
+
   plan:
     name: CI plan
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -51,22 +93,46 @@ jobs:
       class_lists: ${{ steps.plan.outputs.class_lists }}
       build: ${{ steps.plan.outputs.build }}
       pg_old_targets: ${{ steps.plan.outputs.pg_old_targets }}
+      full_suite: ${{ steps.plan.outputs.full_suite }}
       legs: ${{ steps.plan.outputs.legs }}
       legs_json: ${{ steps.plan.outputs.legs_json }}
       exporter: ${{ steps.exporter.outputs.exporter }}
+      harness_restore: ${{ steps.harness_restore.outputs.harness_restore }}
     steps:
       # Depth 2: a pull request run checks out the merge commit, and the plan reads the pull request's own change as
-      # HEAD^1..HEAD (the map selection below, #7728).
+      # HEAD^1..HEAD (the map selection below, #7728). A dev push checks out the pushed commit and reads the same range (#7819).
       - uses: actions/checkout@v7
         with:
           fetch-depth: 2
 
-      # #7728: a pull request that is ready for review picks its test classes from the newest nightly test map. This step only
-      # fetches the map. It never fails the job: a download that fails leaves the file out and says why in map_error, and the
-      # plan then runs every class its areas select. A draft does not use the map, and a push runs everything.
+      # #7819: the hourly re-dispatch runs the full suite only when dev moved since the last full run that finished. A finished
+      # full run leaves `CI full suite` as success or failure on its commit (the verdict job); pending is a run still going or one
+      # that died, and a commit with no such status has never had one. A read that fails runs the suite: a spare run is cheap,
+      # a missed one is not. A manual dispatch (from_schedule false) always runs.
+      - name: Skip when the full suite already ran on this commit
+        id: skip
+        if: github.event_name == 'workflow_dispatch' && inputs.from_schedule == true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          done_count=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/statuses?per_page=100" \
+            --jq '[.[] | select(.context == "CI full suite" and (.state == "success" or .state == "failure"))] | length' 2>/dev/null) || done_count=""
+          if [[ "${done_count}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::notice title=Full suite already ran::${GITHUB_SHA} already carries a finished CI full suite status, and dev has not moved since. Nothing to run."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      # #7728: a pull request that is ready for review picks its test classes from the newest nightly test map, and so does a dev
+      # push (#7819). This step only fetches the map. It never fails the job: a download that fails leaves the file out and says
+      # why in map_error, and the plan then runs every class its areas select. A draft does not use the map, and the hourly
+      # workflow_dispatch run runs everything.
       - name: Fetch the newest nightly test map
         id: map
-        if: github.event_name == 'pull_request' && github.event.pull_request.draft != true
+        if: steps.skip.outputs.skip != 'true' && ((github.event_name == 'pull_request' && github.event.pull_request.draft != true) || github.event_name == 'push')
         continue-on-error: true
         shell: bash
         env:
@@ -93,6 +159,7 @@ jobs:
 
       - name: Plan the run from the changed files
         id: plan
+        if: steps.skip.outputs.skip != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -102,6 +169,8 @@ jobs:
           IS_DRAFT: ${{ github.event.pull_request.draft || 'false' }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_FORCED: ${{ github.event.forced || 'false' }}
           MAP_FILE: ${{ steps.map.outputs.map_file }}
           MAP_ERROR: ${{ steps.map.outputs.map_error || 'the nightly test map was not fetched' }}
         run: |
@@ -121,8 +190,25 @@ jobs:
             fi
           fi
 
-          # A push runs every area whatever it changed, so it needs no file list.
+          # A pull request lists its files through the API. A dev push (#7819) lists the pushed commit's files, HEAD^1..HEAD, when it is
+          # one commit on top of the ref's previous tip (`before`) and not forced; any other push gets one path no area knows, so
+          # the plan runs every area. A workflow_dispatch run has no list and runs every area.
           : > changed.txt
+          if [ "${EVENT_NAME}" = "push" ]; then
+            parent=$(git rev-parse -q --verify HEAD^1 2>/dev/null || true)
+            if [ "${PUSH_FORCED}" = "true" ]; then
+              echo "::warning title=Forced push::The push was forced, so its change cannot be read as one commit. Running every area."
+              echo "unknown/push-was-forced" > changed.txt
+            elif [ -z "${parent}" ] || [ "${parent}" != "${PUSH_BEFORE}" ]; then
+              echo "::warning title=Push of more than one commit::The pushed commit's parent is not the ref's previous tip (${PUSH_BEFORE:0:9}), so the change cannot be read as one commit. Running every area."
+              echo "unknown/push-of-more-than-one-commit" > changed.txt
+            elif ! git diff --name-only HEAD^1 HEAD > changed.part; then
+              echo "::warning title=Changed-file list unavailable::git diff failed, so the pushed commit's files are unknown. Running every area."
+              echo "unknown/push-diff-unavailable" > changed.txt
+            else
+              mv changed.part changed.txt
+            fi
+          fi
           if [ "${EVENT_NAME}" = "pull_request" ]; then
             # The files API can fail (a 5xx, a rate limit) and caps its list at 3000 files. Either way the list cannot be
             # trusted, so give the plan one path no area knows: it then runs every area, and the PR is slower, not red.
@@ -158,14 +244,18 @@ jobs:
           if-no-files-found: error
 
       # The exporter job (Exporter/) has its own path rule: the `exporter` filter in build.yml, read here through ci-select.py
-      # so there is one copy of the patterns. A push, a pull request that is not against dev, and a file list that cannot be
-      # trusted all run it. Root files (the solution, Directory.*.props, global.json, nuget.config) are in the `root` filter.
+      # so there is one copy of the patterns. A run that plans every area (the hourly dispatch, a push the map answered FULL for),
+      # a pull request that is not against dev, an empty file list and a file list that cannot be trusted all run it; a dev push
+      # with a file list follows the pull request's rule (#7819). Root files (the solution, Directory.*.props, global.json,
+      # nuget.config) are in the `root` filter.
       - name: Decide whether the exporter job runs
         id: exporter
+        if: steps.skip.outputs.skip != 'true'
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref || github.ref_name }}
+          PLAN_AREAS: ${{ steps.plan.outputs.areas }}
         run: |
           set -euo pipefail
 
@@ -178,8 +268,10 @@ jobs:
           files = [ln.strip() for ln in open("changed.txt", encoding="utf-8") if ln.strip()]
           areas = mod.Rules().areas(files)
           run = (
-              os.environ["EVENT_NAME"] != "pull_request"
+              os.environ["EVENT_NAME"] not in ("pull_request", "push")
+              or os.environ["PLAN_AREAS"] == "all"
               or os.environ["BASE_REF"] != "dev"
+              or not files
               or any(f.startswith("unknown/") for f in files)
               or areas["exporter"]
               or areas["root"]
@@ -188,22 +280,62 @@ jobs:
           print("exporter=" + ("true" if run else "false"))
           PY
 
+      # The WPF smoke harness (tools/ui-smoke-wpf) is outside the solution and referenced by no test project, so the build
+      # job's restore of the two test projects does not reach its lock file. Without the build job's harness restore, the first
+      # run to restore it after a package bump is the nightly's WPF smoke (#6790, #8529). The build job runs that restore, in
+      # locked mode, when this step answers true: a restore input changed (a csproj, props, targets or solution file,
+      # global.json, nuget.config or any packages.lock.json) or a file of the harness itself, or the run is one the exporter
+      # rule above treats as untrusted or whole-tree. The rule is ci-select.py's harness_restore, which reads the same
+      # build-input names and suffixes as the slow-class skip, and ci-plan-test.py holds its rows. CI runs those rows only
+      # on a "CI scripts only" plan (script_tests, #7743): a change to the rule that also touches a file outside
+      # .github/scripts/ plans every area, which runs no Python check, so such a change needs the rows run by hand.
+      - name: Decide whether the build job restores the WPF smoke harness
+        id: harness_restore
+        if: steps.skip.outputs.skip != 'true'
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref || github.ref_name }}
+          PLAN_AREAS: ${{ steps.plan.outputs.areas }}
+        run: |
+          set -euo pipefail
+
+          python -I - <<'PY' >> "${GITHUB_OUTPUT}"
+          import importlib.util, os, sys
+          spec = importlib.util.spec_from_file_location("ci_select", ".github/scripts/ci-select.py")
+          mod = importlib.util.module_from_spec(spec)
+          sys.modules["ci_select"] = mod
+          spec.loader.exec_module(mod)
+          files = [ln.strip() for ln in open("changed.txt", encoding="utf-8") if ln.strip()]
+          run = mod.harness_restore(os.environ["EVENT_NAME"], os.environ["BASE_REF"], os.environ["PLAN_AREAS"], files)
+          print("harness_restore=" + ("true" if run else "false"))
+          PY
+
       # Pending from the moment the plan says the run goes. A fork's read-only token cannot write it: for a fork pull request,
       # fork-ci-result.yml writes the final state from this run's `CI verdict` job conclusion once the run completes (#8188).
+      # A run on the dev ref that plans every area also marks `CI full suite` pending (#7819); the verdict
+      # job finishes both, and the hourly re-dispatch skips a commit whose `CI full suite` is finished. A pull request's ref is
+      # refs/pull/N/merge and a manual dispatch on another branch has that branch's ref, so neither writes `CI full suite`.
       - name: Set CI result to pending
         if: steps.plan.outputs.run == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          ON_DEV: ${{ github.ref == 'refs/heads/dev' }}
+          FULL_SUITE: ${{ steps.plan.outputs.full_suite }}
           TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           gh api "repos/${GITHUB_REPOSITORY}/statuses/${CI_RESULT_SHA}" -f state=pending -f context='CI result' \
             -f description='CI is running' -f target_url="${TARGET_URL}" > /dev/null
+          if [ "${ON_DEV}" = "true" ] && [ "${FULL_SUITE}" = "true" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/statuses/${CI_RESULT_SHA}" -f state=pending -f context='CI full suite' \
+              -f description='The full suite is running' -f target_url="${TARGET_URL}" > /dev/null
+          fi
 
-      # As build.yml's workflow-lint job does: on every push, and on a pull request when a workflow file changed.
+      # As build.yml's workflow-lint job does: on every dev run, and on a pull request when a workflow file changed.
       - name: Lint the workflow files with actionlint and shellcheck
-        if: steps.plan.outputs.run == 'true' && (steps.plan.outputs.actionlint == 'true' || github.event_name == 'push')
+        if: steps.plan.outputs.run == 'true' && (steps.plan.outputs.actionlint == 'true' || github.event_name != 'pull_request')
         shell: bash
         env:
           ACTIONLINT_IMAGE: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
@@ -256,13 +388,34 @@ jobs:
 
       # Locked mode and `set -euo pipefail`: a multi-line run block under the default shell reports only its last
       # command's exit code, so the first restore could fail unseen (LockedModeRestoreCoverageTests enforces both).
+      # This is the step a pull request fails when a lock file inside the solution is behind, so its ERR trap carries
+      # the message build.yml's restore step carries: a title that says only that a restore failed, and both
+      # regeneration commands, offered for NU1004 alone.
       - name: Restore the test projects
         shell: bash
         run: |
           set -euo pipefail
 
+          trap 'echo "::error title=A locked-mode restore failed::If the errors above are NU1004, a lock file is out of step with its package graph: regenerate with '"'"'dotnet restore PerformanceMonitor.sln --force-evaluate'"'"' and, on Windows, '"'"'dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --force-evaluate'"'"' (the WPF smoke harness is outside the solution, so the first command does not rewrite its lock file), and commit every packages.lock.json they rewrite. Do not remove --locked-mode: the lock files are the only pin on the transitive closure, and the props diff does not show it moving. Any other error is not a lock file mismatch, and regenerating does not clear it."' ERR
+
           dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+
+      # The WPF smoke harness is outside the solution and referenced by no test project, so the step above never reaches its
+      # lock file (the plan job's harness_restore output says when a restore input changed, #8529). The same shell and errexit
+      # line as the step above, so the restore is able to fail this job. The message rides an ERR trap, as build.yml's does.
+      # The trap fires on any failed restore, so its title says only that the restore failed, and the remedy is offered for
+      # NU1004 alone. The remedy names the harness's own project: a solution restore does not rewrite a lock file outside
+      # the solution.
+      - name: Restore the WPF smoke harness (locked)
+        if: needs.plan.outputs.harness_restore == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          trap 'echo "::error title=The WPF smoke harness failed its locked-mode restore::If the errors above are NU1004, the harness lock file is out of step with its package graph: regenerate it on Windows with '"'"'dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --force-evaluate'"'"' and commit tools/ui-smoke-wpf/packages.lock.json. The harness is outside PerformanceMonitor.sln, so a solution restore does not rewrite it. Do not remove --locked-mode. Any other error is not a lock file mismatch, and regenerating does not clear it."' ERR
+
+          dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --locked-mode
 
       - name: Build the Darling test project
         shell: bash
@@ -703,7 +856,8 @@ jobs:
     name: CI verdict
     needs: [plan, build, test, pg-old-targets, exporter]
     # A run that does not go and is not train-blocked has nothing to say, so skip the runner; a failed plan job still reports.
-    if: ${{ always() && (needs.plan.result != 'success' || needs.plan.outputs.run == 'true' || needs.plan.outputs.outcome == 'train-blocked') }}
+    # The scheduled re-dispatch and an hourly run that found its commit already covered plan nothing and say nothing (#7819).
+    if: ${{ always() && github.event_name != 'schedule' && (needs.plan.result != 'success' || needs.plan.outputs.run == 'true' || needs.plan.outputs.outcome == 'train-blocked') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -722,6 +876,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          ON_DEV: ${{ github.ref == 'refs/heads/dev' }}
+          FULL_SUITE: ${{ needs.plan.outputs.full_suite }}
           PLAN_RESULT: ${{ needs.plan.result }}
           PLAN_OUTCOME: ${{ needs.plan.outputs.outcome }}
           PLAN_BUILD: ${{ needs.plan.outputs.build }}
@@ -798,6 +954,13 @@ jobs:
 
           gh api "repos/${GITHUB_REPOSITORY}/statuses/${CI_RESULT_SHA}" -f state="${state}" -f context='CI result' \
             -f description="${desc:0:140}" -f target_url="${TARGET_URL}" > /dev/null
+          # #7819: a run on the dev ref that planned every area also finishes `CI full suite`, which the hourly re-dispatch's skip
+          # rule and the "dev is red" commit range read. A pull request never carries it, and a manual dispatch on another ref
+          # sets only `CI result` on that branch's commit.
+          if [ "${ON_DEV}" = "true" ] && [ "${FULL_SUITE}" = "true" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/statuses/${CI_RESULT_SHA}" -f state="${state}" -f context='CI full suite' \
+              -f description="${desc:0:140}" -f target_url="${TARGET_URL}" > /dev/null
+          fi
 
       # #8202: a pull request whose green came from a rerun passed by luck once. The script reads every earlier attempt's
       # failed test legs for their [FAIL] lines and files one issue per test (or comments on the open one), before the merge
@@ -819,16 +982,20 @@ jobs:
             --event "${GITHUB_EVENT_NAME}" --state "${STATE}" --run-id "${GITHUB_RUN_ID}" --run-attempt "${RUN_ATTEMPT}" \
             --pr-number "${PR_NUMBER}" --head-sha "${HEAD_SHA}"
 
-      # A dev push that turns red opens one "dev is red" issue, or comments on the open one; a green dev push closes it.
-      # Only a failure opens it: a cancelled or skipped-by-cancel run says nothing about the code. The body lists every dev
-      # commit the red run swept in since the last green dev run, with its pull request number (#8202).
+      # A dev run that turns red opens one "dev is red" issue, or comments on the open one. Only a green FULL run closes it
+      # (#7819): a green push that ran the map's classes says nothing about the classes it did not run, and the hourly full
+      # run is at most an hour away. A failed full run names the commits since the last full run that passed; a failed push
+      # names those since the last green dev run. Only a failure opens it: a cancelled or skipped-by-cancel run says nothing
+      # about the code. Only a run on the dev ref (a push, or a dispatch onto dev) touches the issue: a manual dispatch on
+      # another branch tests that branch and must neither open nor close it.
       - name: Open, update or close the "dev is red" issue
-        if: ${{ always() && github.event_name == 'push' && steps.verdict.outputs.state != '' }}
+        if: ${{ always() && github.ref == 'refs/heads/dev' && steps.verdict.outputs.state != '' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           STATE: ${{ steps.verdict.outputs.state }}
           FAILED: ${{ steps.verdict.outputs.failed }}
+          FULL_SUITE: ${{ needs.plan.outputs.full_suite }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           ANY_FAILURE: ${{ contains(needs.*.result, 'failure') }}
         run: |
@@ -837,9 +1004,17 @@ jobs:
           issue=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search '"dev is red" in:title' --json number,title \
             --jq '[.[] | select(.title == "dev is red")][0].number // empty')
 
+          if [ "${FULL_SUITE}" = "true" ]; then
+            kind="full suite"; context="CI full suite"
+          else
+            kind="push"; context="CI result"
+          fi
+
           if [ "${STATE}" = "success" ]; then
-            if [ -n "${issue}" ]; then
-              gh issue close "${issue}" --repo "${GITHUB_REPOSITORY}" --comment "dev is green again at ${GITHUB_SHA}: ${RUN_URL}"
+            if [ -n "${issue}" ] && [ "${FULL_SUITE}" = "true" ]; then
+              gh issue close "${issue}" --repo "${GITHUB_REPOSITORY}" --comment "dev is green again at ${GITHUB_SHA} (the full suite passed): ${RUN_URL}"
+            elif [ -n "${issue}" ]; then
+              echo "A green push run ran only the classes the map selected, so the dev is red issue waits for a green full run."
             fi
             exit 0
           fi
@@ -848,11 +1023,11 @@ jobs:
             exit 0
           fi
 
-          # The body: the failure, the run, and every dev commit from this sha back to the last one whose CI result is
+          # The body: the failure, the run, and every dev commit from this sha back to the last one whose `context` status is
           # success, each with its short sha, pull request number and title. The script writes the head of the body even
           # when the commit list cannot be read, so the issue is filed either way.
           python -I .github/scripts/ci-verdict-issues.py dev-red-body --repo "${GITHUB_REPOSITORY}" --red-sha "${GITHUB_SHA}" \
-            --run-url "${RUN_URL}" --failed "${FAILED}" --out body.txt
+            --run-url "${RUN_URL}" --failed "${FAILED}" --kind "${kind}" --context "${context}" --out body.txt
 
           if [ -n "${issue}" ]; then
             gh issue comment "${issue}" --repo "${GITHUB_REPOSITORY}" --body-file body.txt

@@ -826,7 +826,9 @@ namespace PerformanceMonitor.Common
         /// successful connect, Lite's server entry when it is added), so a server registered inside what the
         /// read could see could only have collected inside it, and the read found nothing. Registered before
         /// it, the server had time to collect and has sent nothing the read could see: Offline is the word, and
-        /// it is what a read that could see all of history says whenever the server did once collect.</para>
+        /// it is what a read that could see all of history says whenever the server did once collect. A server
+        /// whose collectors all fail (#8464) has no successful collection and reads by this same rule here; the
+        /// overload that takes <c>attempted</c> tells it from one that has not been tried.</para>
         ///
         /// <para><b>No registration keeps the ladder's reading</b>, because nothing then says when collection
         /// could have begun. That is also the reading a caller gets by passing null for a server its read did
@@ -863,6 +865,43 @@ namespace PerformanceMonitor.Common
             EffectiveConnectDownSince(lastCollectionUtc, connectDownSinceUtc).HasValue
                 ? ServerFreshness.Offline
                 : ClassifyFreshness(lastCollectionUtc, registeredAtUtc, searchedFromUtc, nowUtc);
+
+        /// <summary>
+        /// The registration rule with the log's failed rows folded in (#8464). A collector writes a row for every attempt, so a server
+        /// with no successful collection falls into two kinds: one whose collectors have run and all failed (a login that connects but
+        /// lacks VIEW SERVER STATE writes a PERMISSIONS row per collector per cycle), and one no collector has reached yet. With
+        /// <paramref name="attempted"/> true and no successful collection the server is <see cref="ServerFreshness.Offline"/> at once:
+        /// it has been tried and nothing arrives, whatever its registration's age, and the fleet card, <c>list_servers</c>, the Overview
+        /// card, the sidebar dot, the Admin grid and every offline note say the same word for it. With no row at all the rule above
+        /// stands, so a server that has not been tried stays awaiting its first collection, and one whose whole history retention
+        /// dropped reads Offline from its registration. A newest collection bands as the ladder bands it, whatever the flag.
+        /// </summary>
+        /// <param name="attempted">Whether the log holds any collector row for the server, a failed one included; the cycle and
+        /// analysis-pass rows are not collector runs and do not count.</param>
+        public static ServerFreshness ClassifyFreshness(
+            DateTime? lastCollectionUtc,
+            DateTime? registeredAtUtc,
+            DateTime searchedFromUtc,
+            DateTime nowUtc,
+            bool attempted) =>
+            !lastCollectionUtc.HasValue && attempted
+                ? ServerFreshness.Offline
+                : ClassifyFreshness(lastCollectionUtc, registeredAtUtc, searchedFromUtc, nowUtc);
+
+        /// <summary>
+        /// <see cref="ClassifyFreshness(DateTime?, DateTime?, DateTime, DateTime, bool)"/> with the service's connection answer folded in
+        /// (#7590), the one function every surface that bands from the registry and the collection log calls.
+        /// </summary>
+        public static ServerFreshness ClassifyFreshness(
+            DateTime? lastCollectionUtc,
+            DateTime? registeredAtUtc,
+            DateTime searchedFromUtc,
+            DateTime nowUtc,
+            DateTime? connectDownSinceUtc,
+            bool attempted) =>
+            EffectiveConnectDownSince(lastCollectionUtc, connectDownSinceUtc).HasValue
+                ? ServerFreshness.Offline
+                : ClassifyFreshness(lastCollectionUtc, registeredAtUtc, searchedFromUtc, nowUtc, attempted);
 
         /// <summary>
         /// The stored failed-connect flag, or null once a collection newer than it proves a later connect worked (#7590). The flag is cleared by
@@ -1195,13 +1234,14 @@ namespace PerformanceMonitor.Common
             : null;
 
         /// <summary>#7616: the reason text for a PostgreSQL blocking band, <c>Blocking 5 captures (25.0/hr)</c>. The rate is left off
-        /// when there are too few captures to rate.</summary>
+        /// when there are too few captures to rate, and is written by <see cref="DailyHealthBandCalculator.RatePerHourText"/>,
+        /// so a positive rate never reads as "0.0".</summary>
         public static string PostgresBlockingReason(long capturesWithBlocking, long capturesTaken)
         {
             var rate = PostgresBlockingRatePerHour(capturesWithBlocking, capturesTaken);
             return "Blocking " + capturesWithBlocking.ToString(CultureInfo.InvariantCulture)
                 + (capturesWithBlocking == 1 ? " capture" : " captures")
-                + (rate.HasValue ? " (" + rate.Value.ToString("0.0", CultureInfo.InvariantCulture) + "/hr)" : "");
+                + (rate.HasValue ? " (" + DailyHealthBandCalculator.RatePerHourText(rate.Value) + "/hr)" : "");
         }
 
         /// <summary>#7444: what each of the band's three arms read, so the band and the reason text that names
@@ -1289,7 +1329,7 @@ namespace PerformanceMonitor.Common
 
             if (arms.RatePerHour.HasValue && arms.Rate >= best && (qualifier is null || arms.Rate > best))
             {
-                qualifier = arms.RatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture) + " waits/hr";
+                qualifier = DailyHealthBandCalculator.RatePerHourText(arms.RatePerHour.Value) + " waits/hr";
             }
 
             return qualifier is null ? head : head + " (" + qualifier + ")";
@@ -3953,7 +3993,7 @@ namespace PerformanceMonitor.Common
                 && pressure.PeakCollectorPeakRunMs >= pressure.PeakCollectorAvgDurationMs * BimodalTailRatio
                 ? string.Format(
                     CultureInfo.InvariantCulture,
-                    " Its MEAN run is only {0:N0} ms, so its cost is bimodal and any figure built from that mean — the sustained verdict, the heaviest_collectors ranking, and this cycle before #2460 — understates one body by {1:N0} ms.",
+                    " Its MEAN run is only {0:N0} ms, so its cost is bimodal and any figure built from that mean (the sustained verdict, the heaviest_collectors ranking, and the cycle's own cost) understates one body by {1:N0} ms.",
                     Math.Round(pressure.PeakCollectorAvgDurationMs),
                     Math.Round(pressure.PeakCollectorPeakRunMs - pressure.PeakCollectorAvgDurationMs))
                 : string.Empty;

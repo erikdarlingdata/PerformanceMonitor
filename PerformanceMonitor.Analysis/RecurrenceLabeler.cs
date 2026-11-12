@@ -476,8 +476,8 @@ public static class RecurrenceLabeler
 
         // Fixed phrasing on purpose: TryReadLabel parses "for N consecutive weeks." back out of it.
         var sentence =
-            $" {RecurringMarker} this chain has fired in this hour×weekday slot — {Slot(slot, offsetKnown)} — for {weeks.ToString(CultureInfo.InvariantCulture)} consecutive weeks. " +
-            "The severity above is unchanged (a weekly problem is still a problem); the label says the cause keeps a schedule, so look at what runs in this slot — a job, a report, a batch — before treating this as a new incident.";
+            $" {RecurringMarker} this chain has fired in this hour×weekday slot: {Slot(slot, offsetKnown)}, for {weeks.ToString(CultureInfo.InvariantCulture)} consecutive weeks. " +
+            "The severity above is unchanged (a weekly problem is still a problem); the label says the cause keeps a schedule, so look at what runs in this slot (a job, a report, a batch), before treating this as a new incident.";
 
         story.StoryText = FactAdvice.SerializeForStoryText(advice with { Investigation = advice.Investigation + sentence });
 
@@ -495,10 +495,10 @@ public static class RecurrenceLabeler
         if (advice is null || advice.Investigation.Contains(MovedWindowMarker, StringComparison.Ordinal))
             return;
 
-        var clock = offsetKnown ? "server local time" : "UTC — the store carries no UTC offset for this server";
+        var clock = offsetKnown ? "server local time" : "UTC: the store carries no UTC offset for this server";
         var sentence =
             $" {MovedWindowMarker} Agent job `{jobName}` ran at {HourAndDay(lastWeekSlot)} last week, {HourAndDay(thisWeekSlot)} this week ({clock}; hour buckets, the job's earliest hour last week). " +
-            "The same weekly job in a different slot is why a symptom that \"went away\" at the old hour has appeared at this one — it moved with the job. The severity above is unchanged; check the job's schedule before treating either hour as a new incident.";
+            "The same weekly job in a different slot is why a symptom that \"went away\" at the old hour has appeared at this one: it moved with the job. The severity above is unchanged; check the job's schedule before treating either hour as a new incident.";
 
         story.StoryText = FactAdvice.SerializeForStoryText(advice with { Investigation = advice.Investigation + sentence });
 

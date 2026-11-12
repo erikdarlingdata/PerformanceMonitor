@@ -866,7 +866,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             Assert.True(cut.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
             Assert.NotEqual(JsonValueKind.Null, cut.GetProperty("hints").GetProperty("effective_start").ValueKind);
             var cutText = cut.GetProperty("message").GetString()!;
-            Assert.StartsWith($"Query stats WERE collected for {ServerName} in the last 24 hour(s), but no capture recorded an execution", cutText, StringComparison.Ordinal);
+            Assert.StartsWith($"Query stats WERE collected for {ServerName} in the last 24 hours, but no capture recorded an execution", cutText, StringComparison.Ordinal);
             Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage + " Delta-based collection also needs a SECOND cycle before the first non-zero row exists.", cutText, StringComparison.Ordinal);
             Assert.DoesNotContain("up and idle", cutText, StringComparison.Ordinal);
 

@@ -125,7 +125,7 @@ public sealed class StoryConfidenceTests
     /// The property the read-time basis label rests on: for every path length the engine can build and
     /// every catalogue size a key can have, the new value is never the legacy path-shape value for that
     /// same length. Without this, <c>confidence_basis</c> could call a fresh corroboration score
-    /// "path-shape (pre-#3538)" — or a legacy row corroborated — and a schema marker would be the only
+    /// "path-shape (older confidence formula)" — or a legacy row corroborated — and a schema marker would be the only
     /// honest alternative (a rung this campaign is not permitted). The legacy shape is exactly 1.0 or
     /// (n-1)/n; the formula's 0.20 floor keeps every lone value away from 1.0, and no small-integer
     /// amplifier share puts a multi-node value on (n-1)/n. Enumerated to the engine's REAL maximum path
@@ -150,27 +150,27 @@ public sealed class StoryConfidenceTests
     public void DescribeBasis_LegacyRows_AreLabelledPathShape_AndNeverReadAsCorroborated()
     {
         var lone = StoryConfidence.DescribeBasis("SCH_M", 1.0, 1);
-        Assert.Contains("path-shape (pre-#3538)", lone, StringComparison.Ordinal);
+        Assert.Contains("path-shape (older confidence formula)", lone, StringComparison.Ordinal);
         Assert.Contains("UNCORROBORATED", lone, StringComparison.Ordinal);
-        Assert.DoesNotContain("corroboration (#3538)", lone, StringComparison.Ordinal);
+        Assert.DoesNotContain("corroboration:", lone, StringComparison.Ordinal);
 
         /* The multi-node legacy values too: (n-1)/n for n = 2, 3, 4. */
-        Assert.Contains("path-shape (pre-#3538)", StoryConfidence.DescribeBasis("CXPACKET", 0.5, 2), StringComparison.Ordinal);
-        Assert.Contains("path-shape (pre-#3538)", StoryConfidence.DescribeBasis("CXPACKET", 2.0 / 3.0, 3), StringComparison.Ordinal);
-        Assert.Contains("path-shape (pre-#3538)", StoryConfidence.DescribeBasis("CXPACKET", 0.75, 4), StringComparison.Ordinal);
+        Assert.Contains("path-shape (older confidence formula)", StoryConfidence.DescribeBasis("CXPACKET", 0.5, 2), StringComparison.Ordinal);
+        Assert.Contains("path-shape (older confidence formula)", StoryConfidence.DescribeBasis("CXPACKET", 2.0 / 3.0, 3), StringComparison.Ordinal);
+        Assert.Contains("path-shape (older confidence formula)", StoryConfidence.DescribeBasis("CXPACKET", 0.75, 4), StringComparison.Ordinal);
     }
 
     [Fact]
     public void DescribeBasis_CorroborationRows_NameTheFormula_AndThePathLength()
     {
         var basis = StoryConfidence.DescribeBasis("PAGEIOLATCH_SH", StoryConfidence.Compute(2, 3, 3), 3);
-        Assert.Contains("corroboration (#3538)", basis, StringComparison.Ordinal);
+        Assert.Contains("corroboration:", basis, StringComparison.Ordinal);
         Assert.Contains("3-node story path", basis, StringComparison.Ordinal);
         Assert.Contains("0.20 for the fired symptom", basis, StringComparison.Ordinal);
-        Assert.DoesNotContain("pre-#3538", basis, StringComparison.Ordinal);
+        Assert.DoesNotContain("older confidence formula", basis, StringComparison.Ordinal);
 
         /* A fresh lone symptom (0.20) is corroboration-derived, not legacy — the floor is not 1.0. */
-        Assert.Contains("corroboration (#3538)", StoryConfidence.DescribeBasis("SCH_M", StoryConfidence.Compute(0, 0, 1), 1), StringComparison.Ordinal);
+        Assert.Contains("corroboration:", StoryConfidence.DescribeBasis("SCH_M", StoryConfidence.Compute(0, 0, 1), 1), StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -378,7 +378,7 @@ public sealed class StoryConfidenceTests
         new FactScorer().ScoreAll(several);
         var card = FactAdvice.Compose("RUNNING_JOBS", several.ToFactLookup());
         Assert.NotNull(card);
-        Assert.Equal("Agent job `Nightly Index Maintenance` and 2 others running well past normal — likely stuck, not busy", card!.Headline);
+        Assert.Equal("Agent job `Nightly Index Maintenance` and 2 others running well past normal, likely stuck, not busy", card!.Headline);
         Assert.StartsWith("3 Agent jobs ran well past normal duration this window, `Nightly Index Maintenance` the furthest past its own history (the Running Jobs view lists the 2 others)", card.Investigation, StringComparison.Ordinal);
         Assert.Contains(", the worst at 400% of its historical average", card.Investigation, StringComparison.Ordinal);
         Assert.StartsWith("Check `Nightly Index Maintenance` in Agent history first, then the others:", card.Remediation, StringComparison.Ordinal);
@@ -388,7 +388,7 @@ public sealed class StoryConfidenceTests
         var one = RebuildFacts(runningLong: 1, worstJob: "Weekly CHECKDB");
         new FactScorer().ScoreAll(one);
         var single = FactAdvice.Compose("RUNNING_JOBS", one.ToFactLookup());
-        Assert.Equal("Agent job `Weekly CHECKDB` running well past normal — likely stuck, not busy", single!.Headline);
+        Assert.Equal("Agent job `Weekly CHECKDB` running well past normal, likely stuck, not busy", single!.Headline);
         Assert.StartsWith("Agent job `Weekly CHECKDB` ran well past normal duration this window, the worst at", single.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("other", single.Investigation, StringComparison.Ordinal);
         Assert.StartsWith("Check `Weekly CHECKDB` in Agent history first: a job at several times", single.Remediation, StringComparison.Ordinal);
@@ -408,7 +408,7 @@ public sealed class StoryConfidenceTests
         var unnamed = RebuildFacts(runningLong: 3);
         new FactScorer().ScoreAll(unnamed);
         var card = FactAdvice.Compose("RUNNING_JOBS", unnamed.ToFactLookup());
-        Assert.Equal("3 Agent jobs running well past normal — likely stuck, not busy", card!.Headline);
+        Assert.Equal("3 Agent jobs running well past normal, likely stuck, not busy", card!.Headline);
         Assert.StartsWith("3 Agent jobs ran well past normal duration this window, the worst at 400% of its historical average", card.Investigation, StringComparison.Ordinal);
         Assert.StartsWith("Check the long-running jobs in Agent history:", card.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("`", card.Headline, StringComparison.Ordinal);
@@ -420,7 +420,7 @@ public sealed class StoryConfidenceTests
         Assert.DoesNotContain("Should Not Appear", refused!.Headline, StringComparison.Ordinal);
         Assert.DoesNotContain("Should Not Appear", refused.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("Should Not Appear", refused.Remediation, StringComparison.Ordinal);
-        Assert.Equal("0 Agent jobs running well past normal — likely stuck, not busy", refused.Headline);
+        Assert.Equal("0 Agent jobs running well past normal, likely stuck, not busy", refused.Headline);
     }
 
     /* ── Helpers ── */

@@ -738,7 +738,9 @@ public sealed partial class DarlingWorker
             /* #6211: live provider like its siblings, so a store change to query_store_fetch_top_n takes effect on the next cycle, no restart. */
             queryStoreFetchTopN: () => StoreConfigProvider.ClampQueryStoreFetchTopN(config.QueryStoreFetchTopN),
             /* #8146: clamped and logged once here, because darling.json is read once at start. */
-            xeRingBufferMaxEvents: StoreConfigProvider.ClampXeRingBufferMaxEvents(config.XeRingBufferMaxEvents, _logger));
+            xeRingBufferMaxEvents: StoreConfigProvider.ClampXeRingBufferMaxEvents(config.XeRingBufferMaxEvents, _logger),
+            /* #7643: the schema pass reads the cadence the dispatch schedules it at, live over the same overrides. */
+            collectorFrequencyMinutes: (name, serverId) => StoreConfigProvider.ResolveSchedule(name, serverId, _scheduleOverrides).FrequencyMinutes);
         /* #7067: one gate, one clock, for the worker's and the runner's repeated warnings. */
         runner.RepeatLog = RepeatLog;
         _runner = runner;
@@ -1014,7 +1016,15 @@ public sealed partial class DarlingWorker
             /* #8012: a held story whose path loses a leaf is seeded from the wider path's page row. The wider path is
                found among the distinct paths this server has stored under the same root across the findings
                retention, so a restart long after the path shortened still finds it. */
-            getStoredStoryPaths: muteReadStore.GetStoryPathsAsync);
+            getStoredStoryPaths: muteReadStore.GetStoryPathsAsync,
+            /* #8542: the store's forcing state for a finding's force-plan targets, read when its notification is
+               built, so the advice T-SQL gives no force statement for a plan the store blocks. The read is
+               awaited inside the pass, so it runs under the pass's deadline; one that times out comes back as
+               a reason, and the message opens by saying the store was not checked. */
+            readForcePlanTargetStates: (serverId, targets) => PerformanceMonitor.Darling.Analysis.DarlingForcePlanTargetStateReader.TryReadAsync(
+                postgres, serverId,
+                [new PerformanceMonitor.Analysis.AnalysisFinding { Remediation = new PerformanceMonitor.Analysis.RemediationAction("PLAN_REGRESSION", "force", targets) }],
+                ServiceCommandDeadlines.NotificationForcePlanStateSeconds, logger: _logger, cancellationToken: stoppingToken));
 
         /* #2138 phase 1: the auto force-plan bot, hooked onto the SCHEDULED analysis pass only (the
            interactive analyze_now command deliberately does not trigger it — an operator poking a
@@ -1147,6 +1157,30 @@ public sealed partial class DarlingWorker
             _queryStoreWriteFence);
         _queryStoreBackfill = queryStoreBackfill;
         var backfillLoop = RunQueryStoreBackfillLoopAsync(queryStoreBackfill, servers, () => config.QueryStoreBackfillEnabled, stoppingToken);
+
+        /* #8370: the daily-summary warmer builds each SQL Server target's closed-day block (the Overview's 31-day
+           get_daily_summary_range read) two minutes after start and again just after each UTC day boundary, when the
+           Overview's key moves to the new day, one server at a time under the read-admission gate, so a server's first
+           visitor after a start or on a new day finds it built rather than paying the cold read of thirty compressed
+           days. It idles while dailySummaryWarmerEnabled is off in the config file, while the service is paused, while a
+           materialization-hole repair is rebuilding the rollups, and while neither host that reads the block is on.
+           Awaited with the other loops at shutdown. */
+        var dailySummaryWarmer = new DailySummaryWarmer(
+            servers: () =>
+            {
+                lock (_serversLock)
+                {
+                    return servers
+                        .Where(s => !s.Retired && !s.Config.IsPostgres)
+                        .Select(s => (s.Config.ServerId, s.Config.DisplayName))
+                        .ToList();
+                }
+            },
+            warm: (serverId, name, token) => DailySummaryWarmer.WarmAsync(postgres, serverId, name, _registryState, _logger, token),
+            enabled: () => config.DailySummaryWarmerEnabled && ShouldRunCollection(_paused) && !_materializationHoleRepairRunning && (config.Web.Enabled || config.Mcp.Enabled),
+            readAdmission: _readAdmission,
+            logger: _logger);
+        var dailySummaryWarmLoop = dailySummaryWarmer.RunAsync(stoppingToken);
 
         /* #5450 proposal 2: the outbound heartbeat, on its own task and connection so a slow or dead URL never touches
            collection. Returns at once when heartbeat.url is not set (the default). The URL is a secret: see
@@ -1514,7 +1548,7 @@ public sealed partial class DarlingWorker
 
             /* #4999: the hang watchdog above reads only the per-server bodies, and a daily run no longer runs in
                one: it is detached and can go for hours, so a stuck one showed up only as stale data. The same goes
-               for the three runs detached by name (query_store, plan_correction, pg_wait_sampling). Same tick, the
+               for the four runs detached by name (query_store, plan_correction, pg_wait_sampling, schema_objects). Same tick, the
                same kind of Warning, one per run, naming the server and collector; the threshold is its own, 15
                minutes (DailyRunWatchdogSeconds), where the bodies' is 60 seconds. After the launch loop and outside
                it, because a detached run belongs to no single body and the loop may leave early. */
@@ -1880,6 +1914,16 @@ public sealed partial class DarlingWorker
             /* Expected on shutdown. */
         }
 
+        /* #8370: the warmer stops at its next wait or its next admitted read; a read in flight is cancelled with the token. */
+        try
+        {
+            await dailySummaryWarmLoop;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
         /* The heartbeat observes the same token and swallows everything but cancellation (#5450). */
         try
         {
@@ -2085,7 +2129,19 @@ public sealed partial class DarlingWorker
         /* #4732: the time this body queued for a fleet slot, kept per minute in _fleetGateStats. A wait that ends in a
            cancel records nothing (the throw skips the line below), like the permit it never took. */
         var gateWaitStarted = Stopwatch.GetTimestamp();
-        await gate.WaitAsync(stoppingToken);
+
+        /* #8539: kept with the time it started waiting for as long as it waits, a cancelled wait included, so a due
+           scheduled analysis pass gives way once this wait is long enough to cost a collection slot. */
+        var waiter = SlotWaiters.Enter(DateTime.UtcNow);
+        try
+        {
+            await gate.WaitAsync(stoppingToken);
+        }
+        finally
+        {
+            SlotWaiters.Leave(waiter);
+        }
+
         var gateWaited = Stopwatch.GetElapsedTime(gateWaitStarted);
         _fleetGateStats?.RecordQueueWait(gateWaited);
         server.LastGateWaitMs = (long)gateWaited.TotalMilliseconds;
@@ -2135,11 +2191,14 @@ public sealed partial class DarlingWorker
                never dispatched by RunDueCollectorsAsync and so the DROP-on-disable has nowhere else to run. */
             await ReconcileLongQueryTraceAsync(server, runner, stoppingToken);
 
+            /* #7643: the schema-changes session of a collector that is off is dropped once, for a server the store shows ran it. */
+            await DropSchemaSessionWhenOffAsync(server, runner, stoppingToken);
+
             /* #4961: the always-on deadlock and blocked-process sessions are ensured at connect and then once an hour, so a
                session dropped from outside comes back within the hour. */
             await EnsureAlwaysOnXeSessionsAsync(
                 server, runner, DateTime.UtcNow, _logger, stoppingToken,
-                attentionEnabled: StoreConfigProvider.ResolveSchedule("attention", server.Config.ServerId, _scheduleOverrides).Enabled);
+                attentionEnabled: AttentionCollectorEnabled(server));
 
             await RunDueCollectorsAsync(server, runner, stoppingToken);
 
@@ -2152,50 +2211,8 @@ public sealed partial class DarlingWorker
                the pass serves. */
             await RefreshMsdbCacheAsync(server, stoppingToken);
 
-            /* AN3: the scheduled analysis pipeline, per-server. The cadence, the enabled gate, and the notify
-               gate are now control-plane knobs read LIVE from config.Analysis (a reload takes effect on the next
-               tick). When analysis is disabled the pass is skipped and NextAnalysisDue is left in the past, so
-               re-enabling runs immediately. The next-due stamp advances up front (Lite's scheduler shape), so a
-               timed-out pass is skipped, not retried immediately. Delivery is gated on the master switch
-               AND analysis_notifications_enabled (ShouldNotifyAnalysisFindings — #3464; Lite's D0 split
-               stands: production unconditional, delivery gated); the interval is clamped to Lite's 5-360
-               range. */
-            /* #5824: the pass runs here, inside this body, so it holds this server's fleet collection slot for its whole
-               length (up to the 120 s budget plus the 5 s unwind grace, then the notify and force-plan steps). The next
-               body reads its length as a candidate cause of any slot this server steps over. */
-            server.LastAnalysisMs = 0;
-            var analysisIntervalMinutes = Math.Clamp(config.Analysis.IntervalMinutes, MinAnalysisIntervalMinutes, MaxAnalysisIntervalMinutes);
-            /* #5812 (ruling R3): an MCP or viewer call reuses PLAN_REGRESSION candidates for one analysis cadence, never
-               longer than the scheduled pass that replaces them. */
-            PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RefreshAfter = TimeSpan.FromMinutes(analysisIntervalMinutes);
-            if (config.Analysis.Enabled && StampIsDue(server.NextAnalysisDue, TimeSpan.FromMinutes(analysisIntervalMinutes), DateTime.UtcNow))
-            {
-                server.NextAnalysisDue = DateTime.UtcNow.AddMinutes(analysisIntervalMinutes);
-
-                /* Every engine takes the pass (#3542). Until the PostgreSQL-target analysis engine existed,
-                   this site gated on the target engine and wrote a tombstone into analysis_state for a
-                   PostgreSQL server instead of running: the pipeline was SQL-Server-shaped, its data-span
-                   gate read wait_stats, and a PostgreSQL server_id would have sat at "0 hours, still
-                   collecting" for the life of the deployment. That gate is gone, and the invariant that
-                   replaced it lives one layer down: the pass ROUTES BY THE REGISTRY'S engine_kind INSIDE
-                   DarlingAnalysisService (its ResolveEngineAsync picks the PostgreSQL-target component set
-                   and the pg_database_stats span gate for a postgres / aurora-postgres row), so the worker
-                   no longer knows or cares which engine it is scheduling. The first real pass then
-                   overwrites any tombstone row still standing with the honest state (D7 — the lazy
-                   overwrite, no migration). */
-                var analysisStarted = Stopwatch.GetTimestamp();
-                Interlocked.Increment(ref _analysisPassesInSlot);
-                try
-                {
-                    await RunScheduledAnalysisAsync(
-                        server, planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), stoppingToken);
-                }
-                finally
-                {
-                    Interlocked.Decrement(ref _analysisPassesInSlot);
-                    server.LastAnalysisMs = (long)Stopwatch.GetElapsedTime(analysisStarted).TotalMilliseconds;
-                }
-            }
+            /* The scheduled analysis step, inside this body's fleet collection slot, after the collectors. */
+            await RunScheduledAnalysisIfDueAsync(server, planFetcher, notificationService, config, stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -2219,6 +2236,146 @@ public sealed partial class DarlingWorker
         finally
         {
             gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// The scheduled analysis step of one server's body: runs the server's analysis pass when its stamp is due. Called
+    /// inside the body's fleet collection slot, after its collectors. Internal so a test can drive the step with
+    /// <see cref="ScheduledAnalysisOverride"/> standing in for the pass; production calls it only from the per-server body.
+    /// </summary>
+    internal async Task RunScheduledAnalysisIfDueAsync(
+        ServerLoopState server,
+        PgPlanFetcher planFetcher,
+        AnalysisNotificationService notificationService,
+        DarlingConfig config,
+        CancellationToken stoppingToken)
+    {
+        /* AN3: the scheduled analysis pipeline, per-server. The cadence, the enabled gate, and the notify
+           gate are control-plane settings read LIVE from config.Analysis (a reload takes effect on the next
+           tick). When analysis is disabled the pass is skipped and NextAnalysisDue is left in the past, so
+           re-enabling runs immediately. The next-due stamp advances up front (Lite's scheduler shape), so a
+           timed-out pass is skipped, not retried immediately. Delivery is gated on the master switch
+           AND analysis_notifications_enabled (ShouldNotifyAnalysisFindings — #3464; Lite's D0 split
+           stands: production unconditional, delivery gated); the interval is clamped to Lite's 5-360
+           range. */
+        /* #5824: the pass runs here, inside this body, so it holds this server's fleet collection slot for its whole
+           length (up to the 120 s budget plus the 5 s unwind grace, then the notify and force-plan steps). The next
+           body reads its length as a candidate cause of any slot this server steps over. */
+        server.LastAnalysisMs = 0;
+        var analysisIntervalMinutes = Math.Clamp(config.Analysis.IntervalMinutes, MinAnalysisIntervalMinutes, MaxAnalysisIntervalMinutes);
+        /* #5812, #8539: an MCP or viewer call reuses PLAN_REGRESSION candidates for one analysis cadence plus the longest
+           the scheduled pass that replaces them is ordinarily deferred (the give-way limit, then one pass budget for a
+           place in a full share), so the entry does not expire in front of a pass that is giving way. A pass kept out of
+           the share for longer leaves it to expire, and the call reads live. */
+        PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RefreshAfter = TimeSpan.FromMinutes(analysisIntervalMinutes) + ScheduledAnalysisAdmission.OrdinaryDeferral(s_analysisTimeout);
+        if (config.Analysis.Enabled && StampIsDue(server.NextAnalysisDue, TimeSpan.FromMinutes(analysisIntervalMinutes), DateTime.UtcNow))
+        {
+            await RunDueScheduledAnalysisAsync(
+                server, planFetcher, notificationService, config, analysisIntervalMinutes, DateTime.UtcNow, stoppingToken);
+        }
+    }
+
+    /// <summary>
+    /// The due half of the scheduled analysis step: asks whether the server's due pass may start at
+    /// <paramref name="nowUtc"/> (<see cref="ScheduledAnalysisAdmission"/>) and runs it when it may. The clock is a
+    /// parameter so a test can ask at fixed times; the step passes the wall clock.
+    /// </summary>
+    internal async Task RunDueScheduledAnalysisAsync(
+        ServerLoopState server,
+        PgPlanFetcher planFetcher,
+        AnalysisNotificationService notificationService,
+        DarlingConfig config,
+        int analysisIntervalMinutes,
+        DateTime nowUtc,
+        CancellationToken stoppingToken)
+    {
+        /* #8539: the pass holds this body's fleet collection slot for its whole length, so it starts only when that
+           does not hold collection back: no body has waited the floor or longer for a slot (for up to the yield limit
+           past the pass's due time), and passes hold less than their share of the slots. A pass that does not start
+           keeps its stamp, so it is still due on this server's next body. */
+        var interval = TimeSpan.FromMinutes(analysisIntervalMinutes);
+
+        /* A stamp more than one interval ahead of the clock is due at once and has no due time of its own, and neither
+           has a stamp never set. The first body that finds either due gives it one and writes it back, so the give-way
+           limit counts from that body on every later ask. Any other stamp is written back as it is. */
+        var dueUtc = ScheduledAnalysisAdmission.DueSince(server.NextAnalysisDue, nowUtc, interval);
+        server.NextAnalysisDue = dueUtc;
+
+        var fleetSlots = StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps);
+        var answer = ScheduledAnalysisAdmission.Ask(SlotWaiters.LongestWait(nowUtc), dueUtc, nowUtc, ref _analysisPassesInSlot, fleetSlots);
+        if (answer != ScheduledAnalysisAdmission.Answer.Starts)
+        {
+            if (server.AnalysisGaveWay == 0 && server.AnalysisShareFull == 0)
+            {
+                server.AnalysisFirstRefusedUtc = nowUtc;
+            }
+
+            if (answer == ScheduledAnalysisAdmission.Answer.GivesWayToCollection)
+            {
+                server.AnalysisGaveWay++;
+            }
+            else
+            {
+                server.AnalysisShareFull++;
+            }
+
+            /* A pass that is never admitted writes no ANALYZED row, so this line is the trace of a server that is not
+               being analysed: once per interval, from one interval after its first refusal. The minutes it gives are
+               from the due time. */
+            if (ScheduledAnalysisAdmission.WarnsLate(server.AnalysisFirstRefusedUtc, nowUtc, interval, server.AnalysisLateWarnedUtc))
+            {
+                server.AnalysisLateWarnedUtc = nowUtc;
+                var lateMinutes = (long)(nowUtc - dueUtc).TotalMinutes;
+                var share = ScheduledAnalysisAdmission.SlotShare(fleetSlots);
+                _logger.LogWarning(
+                    "[{Server}] Scheduled analysis is {LateMinutes} minutes past due and has not started. Collection passes it did not start on: {GaveWay} giving way to waiting collection, {ShareFull} because the analysis share is full ({Share} of {Slots} fleet slots). It asks again on every collection pass",
+                    server.Config.DisplayName, lateMinutes, server.AnalysisGaveWay, server.AnalysisShareFull, share, fleetSlots);
+            }
+
+            return;
+        }
+
+        /* The place is held from here, so everything up to the end of the pass sits inside the try that gives it
+           back. */
+        var analysisStarted = Stopwatch.GetTimestamp();
+        try
+        {
+            if (server.AnalysisGaveWay > 0 || server.AnalysisShareFull > 0)
+            {
+                _logger.LogInformation(
+                    "[{Server}] Scheduled analysis starts. Collection passes it did not start on: {GaveWay} giving way to waiting collection, {ShareFull} because the analysis share is full",
+                    server.Config.DisplayName, server.AnalysisGaveWay, server.AnalysisShareFull);
+                server.AnalysisGaveWay = 0;
+                server.AnalysisShareFull = 0;
+            }
+
+            server.AnalysisFirstRefusedUtc = DateTime.MinValue;
+            server.AnalysisLateWarnedUtc = DateTime.MinValue;
+
+            /* Due again one interval after the ask that started it. */
+            server.NextAnalysisDue = nowUtc.AddMinutes(analysisIntervalMinutes);
+
+            /* Every engine takes the pass (#3542), and nothing here gates on the target engine: the pass ROUTES BY
+               THE REGISTRY'S engine_kind INSIDE DarlingAnalysisService (its ResolveEngineAsync picks the
+               PostgreSQL-target component set and the pg_database_stats span gate for a postgres / aurora-postgres
+               row), so the worker does not know which engine it is scheduling. A tombstone row in analysis_state
+               from a build that did not analyse PostgreSQL servers is overwritten by the first real pass with the
+               honest state (D7 — the lazy overwrite, no migration). */
+            if (ScheduledAnalysisOverride is { } standIn)
+            {
+                await standIn(server, stoppingToken);
+            }
+            else
+            {
+                await RunScheduledAnalysisAsync(
+                    server, planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), stoppingToken);
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _analysisPassesInSlot);
+            server.LastAnalysisMs = (long)Stopwatch.GetElapsedTime(analysisStarted).TotalMilliseconds;
         }
     }
 
@@ -2284,6 +2441,36 @@ public sealed partial class DarlingWorker
         }
 
         await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, DateTime.UtcNow, _logger, cancellationToken, instanceGuard);
+    }
+
+    /// <summary>
+    /// #7643: drops this install's schema-changes session on a server whose <c>schema_objects</c> collector is off, where the store shows the
+    /// collector once ran there. A server that never ran it costs one store read and then nothing, and a dropped session is forgotten by the
+    /// store, so neither is retried on every sweep. SQL Server only: XE is not a PostgreSQL concept.
+    /// </summary>
+    private async Task DropSchemaSessionWhenOffAsync(ServerLoopState server, DarlingCollectorRunner runner, CancellationToken cancellationToken)
+    {
+        if (server.Runtime is not { } runtime || server.Retired || runtime.Target.Engine != CollectorTargetEngine.SqlServer)
+        {
+            return;
+        }
+
+        var serverId = server.Config.ServerId;
+        if (SchemaObjectsOn(serverId))
+        {
+            return;
+        }
+
+        var live = _registryState.Read()?.Servers;
+        var others = (live ?? Array.Empty<MonitoredServer>()).Where(other => other.ServerId != serverId).ToList();
+        await DarlingSchemaCapture.DropWhenDisabledAsync(
+            runner,
+            runtime,
+            others,
+            SchemaObjectsOn,
+            token => LongQueryTraceInstanceGuardFor(serverId, live, SchemaObjectsOn, (otherId, carrier) => runner.GetCollectorStateAsync(otherId, carrier, token)),
+            _logger,
+            cancellationToken);
     }
 
     /// <summary>
@@ -2376,6 +2563,24 @@ public sealed partial class DarlingWorker
 
         return new LongQueryTraceInstanceGuard(ownName, keepers);
     }
+
+    /// <summary>
+    /// Whether the client-timeout (attention) collector is enabled for the server, the switch its always-on session follows
+    /// (<see cref="EnsureAlwaysOnXeSessionsAsync"/>): the sweep body's hourly ensure and the capture run's ensure after an identity
+    /// change (#8528) resolve it the same way.
+    /// </summary>
+    private bool AttentionCollectorEnabled(ServerLoopState server) =>
+        StoreConfigProvider.ResolveSchedule("attention", server.Config.ServerId, _scheduleOverrides).Enabled;
+
+    /// <summary>
+    /// #8528: what the fleet self-alert pass hands the Capture Down self-alert for a server: the loop state's report as of now, with
+    /// each capture collector's effective schedule, so a collector that is turned off is neither held nor judged and a started
+    /// session awaits its read for two of its collector's intervals at most.
+    /// </summary>
+    internal CaptureSessionEnsureReport CaptureSessionReportFor(ServerLoopState server) =>
+        server.CaptureSessionReportAt(
+            DateTime.UtcNow,
+            collectorName => StoreConfigProvider.ResolveSchedule(collectorName, server.Config.ServerId, _scheduleOverrides));
 
     /// <summary>
     /// #4961: a SQL Server restart stops the long-query trace's session, because the per-install session is created
@@ -2644,6 +2849,10 @@ public sealed partial class DarlingWorker
         {
             await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
             var backfilled = await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, _logger, stoppingToken);
+            /* #8549: the daily wait totals, on the same connection and the same off-the-start-path run. */
+            await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
+            /* #8549: the oldest-run rollup under the Job History note, the same way. */
+            await TimescaleSupport.BackfillJobHistoryOldestDailyAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
             if (backfilled > 0)
             {
                 _logger.LogInformation(

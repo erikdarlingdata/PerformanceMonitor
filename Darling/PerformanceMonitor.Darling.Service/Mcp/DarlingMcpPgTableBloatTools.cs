@@ -437,7 +437,7 @@ public sealed class DarlingMcpPgTableBloatTools
                      + "- so estimates whose inputs cannot be trusted are suppressed rather than captioned, "
                      + "and each row carries the pgstattuple command that would settle it exactly."
                      + (permissionsSuspected > 0
-                         ? $" {permissionsSuspected} table(s) have NO usable column statistics. The usual "
+                         ? $" {CountText.Plural(permissionsSuspected, "table")} {(permissionsSuspected == 1 ? "has" : "have")} NO usable column statistics. The usual "
                          + "cause is permissions rather than a missing ANALYZE: pg_stats is filtered by "
                          + "SELECT privilege and pg_monitor does not grant it on user tables. Granting "
                          + "pg_read_all_data (PostgreSQL 14+) to the monitoring role fixes this for the "
@@ -503,7 +503,7 @@ public sealed class DarlingMcpPgTableBloatTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice is { IsUnavailable: false, WindowTruncated: true }, notice.EffectiveStart,
-                    factual: $"No tables were recorded for {serverName} in the last {hoursBack} hour(s) even though "
+                    factual: $"No tables were recorded for {serverName} in the last {CountText.Plural(hoursBack, "hour")} even though "
                         + "collection ran. Every table on every collected database is under the collector's 1 MB "
                         + "floor, below which bloat is not an actionable amount of space",
                     coveredClaim: ". That is a genuine all-clear rather than missing data."),
@@ -513,7 +513,7 @@ public sealed class DarlingMcpPgTableBloatTools
         return await DarlingServerOfflineNote.UnavailableAsync(
             postgres, serverId, serverName,
             probe.RowsEver > 0
-                ? $"No bloat snapshots were collected for {serverName} in the last {hoursBack} hour(s), so "
+                ? $"No bloat snapshots were collected for {serverName} in the last {CountText.Plural(hoursBack, "hour")}, so "
                 + "the window says nothing either way. Collection HAS run for this server outside the "
                 + "window: widen hours_back, or use get_collection_health to find where it stopped."
                 : $"No bloat snapshots have EVER been collected for {serverName}, so there is nothing to "

@@ -38,7 +38,7 @@
  * list) still refreshes.
  */
 
-import { el, mount, apiGet, apiGetFleet, readTool, localTime, hasInFlightReads, beginPageScope, readErrorCount, isSessionExpired, onSessionExpired, frontDoor, currentStore, routeHash, splitStoreHash, storeHash, storeHeaders, loadingStrip } from "./util.js";
+import { el, mount, apiGet, apiGetFleetShell, setPollRender, readTool, localTime, hasInFlightReads, beginPageScope, readErrorCount, isSessionExpired, onSessionExpired, frontDoor, currentStore, routeHash, splitStoreHash, storeHash, storeHeaders, loadingStrip } from "./util.js";
 import { startFrontDoor as startFrontDoorIn, refreshPicker, rememberStore, frontDoorStores, isKnownStore, locateServer, ambiguousStrip, locateFailureStrip } from "./store-picker.js";
 import { makeScrollReset } from "./scroll-reset.js";
 import { renderFleet } from "./pages/fleet.js";
@@ -58,7 +58,7 @@ import { renderTriage } from "./pages/triage.js";
 import { renderEditor } from "./editor.js";
 import { renderNotebookEditor } from "./notebook.js";
 import { renderAlertEditor } from "./alert-editor.js";
-import { getSession, listViews, onViewsChanged } from "./views-api.js";
+import { getSession, peekSession, listViews, onViewsChanged } from "./views-api.js";
 import { paintViewList, viewListAfterRead } from "./view-sidebar.js";
 import { renderMuteRules } from "./pages/mute-rules.js";
 import { renderKnownPatterns } from "./pages/known-patterns.js";
@@ -67,7 +67,7 @@ import { renderManageQueryTags } from "./pages/manage-query-tags.js";
 import { renderQueryTagUsage } from "./pages/query-tag-usage.js";
 import { renderJobHistory } from "./pages/job-history.js";
 import { refreshAttention, clearViewGroups, onChange as onLocalChange } from "./viewer-local.js";
-import { initSidebarCollapse, initSeverityColorSettings } from "./viewer-local-ui.js";
+import { initSidebarCollapse, initNavCollapse, initSeverityColorSettings } from "./viewer-local-ui.js";
 import { initSidebarSearch, paintServerList, paintStoreServerLists } from "./sidebar.js";
 import { initNarrowNav } from "./narrow-nav.js";
 
@@ -300,6 +300,17 @@ export const ROUTE_RENDERERS = {
  * that card's last-fetched payload instead of re-fetching (the profile it reports changes rarely — a hardware
  * or version change, never per-tick). Every other renderX() call below still ignores it.
  */
+const scopedRoutes = new Set(["fleet", "server", "alerts", "sweeps", "finops", "jobHistory", "investigations"]);
+const scopedNav = new Set(["fleet", "alerts", "sweeps", "finops", "job-history", "investigations"]);
+
+/* The shell's scope verdict for one route. Only a session that says scoped gates anything: it hides every nav link outside
+   scopedNav and blocks every route outside scopedRoutes. No session yet, or a failed probe, is an unknown seat: the page renders
+   as before, the seat label says "not connected" (#7928), and the server answers whatever the seat may not read. */
+export function scopeVerdict(session, routeName) {
+  const scoped = session?.scoped === true;
+  return { scoped, blocked: scoped && !scopedRoutes.has(routeName), hidesNav: (route) => scoped && !scopedNav.has(route) };
+}
+
 function route(opts) {
   /* The session-expired takeover owns the DOM from the moment it fires until the operator signs in again —
      see showSignedOutState/onSessionExpired below (#4187). hashchange keeps calling this (a stray click, the
@@ -316,6 +327,15 @@ function route(opts) {
   if (frontDoor() && gateStore(opts)) return;
 
   const r = currentRoute();
+  const verdict = scopeVerdict(peekSession(), r.name);
+  for (const link of document.querySelectorAll(".nav a")) {
+    if (verdict.scoped) link.hidden = verdict.hidesNav(link.dataset.route);
+    else if (link.dataset.route !== "ag") link.hidden = false;
+  }
+  if (verdict.blocked) {
+    mount(main, el("div", { class: "card muted", text: "This page requires an unrestricted dashboard session." }));
+    return;
+  }
   resetScrollOnRouteChange(r, !!(opts && opts.poll === true));
   markPageRenderStart(r.name, !!(opts && opts.poll === true));
   setActiveNav(r);
@@ -371,7 +391,7 @@ let lastStoreFleets = null;
 
 async function refreshStoreSidebar() {
   const list = frontDoorStores();
-  const groups = await Promise.all(list.map(async (s) => ({ store: s, res: await apiGetFleet(s.name) })));
+  const groups = await Promise.all(list.map(async (s) => ({ store: s, res: await apiGetFleetShell(s.name) })));
   lastStoreFleets = groups;
   const own = groups.find((g) => g.store.name === currentStore());
   lastSidebarFleet = own && own.res.kind === "data" ? own.res : null;
@@ -385,7 +405,7 @@ async function refreshSidebar() {
     await refreshStoreSidebar();
     return;
   }
-  const res = await apiGetFleet();
+  const res = await apiGetFleetShell();
   if (res.kind !== "data") {
     mount(serverList, el("div", { class: "muted", style: "padding:0.5rem 1.25rem", text: res.kind === "error" ? "Fleet unavailable" : "" }));
     updateStatusBar(null);
@@ -429,6 +449,7 @@ function paintSidebar() {
 let agNavRevealed = false;
 
 async function refreshAgNav() {
+  if ((await getSession().catch(() => null))?.scoped) return;
   if (agNavRevealed) return;
   const link = document.querySelector('.nav a[data-route="ag"]');
   if (!link) return;
@@ -447,6 +468,7 @@ async function refreshAgNav() {
    reports can_edit. Kept fresh on the 60s poll even while the composer is open. */
 async function refreshViewList() {
   if (!viewList) return;
+  if (peekSession()?.scoped) return;
   const [session, res] = await Promise.all([getSession(), listViews()]);
   if (isSessionExpired()) return; // the session ended while the list was in flight: keep nothing of it
   /* #7929: a failed read keeps the last good list and the paint says so; only an answered list replaces it. */
@@ -497,6 +519,7 @@ const ACCESS_HOVER = {
 function seatLabel(session) {
   if (!session) return null;
   if (session.probe_failed) return { text: "Access: not connected", title: ACCESS_HOVER.none };
+  if (session.scoped) return { text: "Access: scoped read-only", title: "Monitoring data is limited to this token's permitted server tags." };
   return session.can_edit ? { text: "Access: read-write", title: ACCESS_HOVER.write } : { text: "Access: read-only", title: ACCESS_HOVER.read };
 }
 
@@ -522,6 +545,7 @@ async function fetchCollectionState() {
 /* get_store_host is read at most once per STORE_SIZE_TTL_MS, failures included, so a store that cannot answer is
    not retried every poll. A failure keeps the last good size and marks it stale. */
 async function refreshStoreSize(now) {
+  if ((await getSession().catch(() => null))?.scoped) return;
   if (storeSizeInFlight || (storeSizeAttemptAt && now - storeSizeAttemptAt < STORE_SIZE_TTL_MS)) return;
   storeSizeInFlight = true;
   storeSizeAttemptAt = now;
@@ -719,11 +743,14 @@ function markPageRenderStart(routeName, isPoll) {
      settles, like every polled page, not at render start. The editors and #/triage read once or not at all, so they stamp now. */
   if (isNoPollRoute(routeName) && routeName !== "queryTagUsage") {
     pageRendering = false;
+    setPollRender(false);
     pageNextRefreshAt = Infinity;
     notePageUpdated(Date.now());
     return;
   }
   pageRendering = true;
+  /* #8633: a poll's re-render may take the roll-up the sidebar just read (util.js apiGetFleetShell); a navigation never does. */
+  setPollRender(isPoll);
   pageRenderStart = Date.now();
   pageRenderErrorsAtStart = readErrorCount();
   pageNextRefreshAt = Infinity;
@@ -734,6 +761,7 @@ let pageRenderErrorsAtStart = 0;
 
 function settlePageRender(now) {
   pageRendering = false;
+  setPollRender(false);
   pageLastRenderMs = now - pageRenderStart;
   /* The footer says the page is current only when this render's reads settled without an error: a poll that failed keeps the last
      good time, and the red strip on the page is the failure's own notice. */
@@ -754,7 +782,8 @@ function pageIsDue(now) {
 function refreshShell() {
   shellLastRefreshAt = Date.now();
   /* The sidebar and the route() below both read /api/fleet in this same synchronous pass; apiGetFleet hands the
-     second caller the first one's request, so a tick costs the store ONE fleet roll-up, not two (#3895). */
+     second caller the first one's request, so a tick costs the store ONE fleet roll-up, not two (#3895). A page whose poll
+     trails the shell's by a few seconds takes the sidebar's roll-up too, once it has landed (#8633, apiGetFleetShell). */
   if (frontDoor()) refreshPicker();
   refreshSidebar();
   refreshViewList();
@@ -933,6 +962,7 @@ function start() {
   initAutoRefreshToggle();
   initPageRefreshControl();
   initSidebarCollapse(document.getElementById("app"), document.getElementById("sidebar-collapse"));
+  initNavCollapse(document.getElementById("nav-collapse"), document.getElementById("nav-links"));
   initNarrowNav(document.getElementById("app"), document.getElementById("nav-toggle"), document.getElementById("sidebar"));
   initSidebarSearch(document.getElementById("server-search"), paintSidebar);
   initSeverityColorSettings(document.getElementById("viewer-settings"));
@@ -948,4 +978,4 @@ function start() {
   route();
 }
 
-startFrontDoor().catch(() => {}).then(start);
+startFrontDoor().catch(() => {}).then(() => getSession()).then(start);

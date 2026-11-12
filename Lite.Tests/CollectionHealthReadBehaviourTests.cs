@@ -132,7 +132,6 @@ FROM range(1000000) a, range(1000000) b";
         var release = new ManualResetEventSlim();
         var held = HoldWriteLock(_duckDb, release, out var acquired);
         await acquired.WaitAsync(TimeSpan.FromSeconds(30));
-        var waitingBefore = DuckDbInitializer.WaitingReadCountForTests;
         Task read = readName == "GetCollectionHealthAsync"
             ? Task.Run(() => service.GetCollectionHealthAsync(ServerId))
             : Task.Run(() => service.GetRecentCollectionLogAsync(ServerId));
@@ -141,7 +140,7 @@ FROM range(1000000) a, range(1000000) b";
            delay left a starved thread pool free to start the read after the writer let go, with nothing to wait on. The
            lock is then held a further second, so the wait the read reports cannot be shorter than that. */
         var deadline = Stopwatch.StartNew();
-        while (DuckDbInitializer.WaitingReadCountForTests <= waitingBefore)
+        while (_duckDb.WaitingReaderCountForTests == 0)
         {
             Assert.True(deadline.Elapsed < TimeSpan.FromSeconds(30), "the read never reached the lock wait");
             await Task.Delay(5);
@@ -278,7 +277,8 @@ FROM range(1000000) a, range(1000000) b";
 
         Assert.IsAssignableFrom<OperationCanceledException>(firstOutcome);
         Assert.True(firstStopped.Elapsed < InterruptBound, $"the superseded read stopped after {firstStopped.ElapsedMilliseconds} ms");
-        Assert.Equal(2, calls);
+        /* The cancelled Full pass, then the picked tab's read and the chrome pass that follows it (#8647). */
+        Assert.Equal(3, calls);
         AssertLockIsFree();
     }
 
@@ -351,10 +351,9 @@ FROM range(1000000) a, range(1000000) b";
         var release = new ManualResetEventSlim();
         var held = HoldWriteLock(_duckDb, release, out var acquired);
         await acquired.WaitAsync(TimeSpan.FromSeconds(30));
-        var waitingBefore = DuckDbInitializer.WaitingReadCountForTests;
         var slowRead = Task.Run(() => service.GetCollectionHealthAsync(ServerId, allowMemo: true, memoLifetime: lifetime));
         var deadline = Stopwatch.StartNew();
-        while (DuckDbInitializer.WaitingReadCountForTests <= waitingBefore)
+        while (_duckDb.WaitingReaderCountForTests == 0)
         {
             Assert.True(deadline.Elapsed < TimeSpan.FromSeconds(30), "the read never reached the lock wait");
             await Task.Delay(5);

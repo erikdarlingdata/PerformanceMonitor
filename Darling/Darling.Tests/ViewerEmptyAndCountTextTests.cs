@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// beside the sidebar of a 1280x800 and a 900x600 window, and reads the realized font style, weight, brush and bounds of each element.
 /// With REFRESH_SHOTS_DIR set, each screen is saved as a PNG.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerEmptyAndCountTextTests
 {
     private const string ViewerPack = "pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/";
@@ -313,15 +314,16 @@ public sealed class ViewerEmptyAndCountTextTests
 
                     Shoot(window, $"FinOpsLocking-{theme}-{width}x{height}.png");
 
-                    /* Index Analysis: the lower grid shows the one empty sentence, centred in it. */
+                    /* Index Analysis: both grids are collapsed while it is empty, so the one empty sentence is the whole page, centred in it (#8621). */
                     var lower = Find<DataGrid>(tab, "FinOpsIndexAnalysisDetailGrid");
                     var sentence = Find<TextBlock>(tab, "FinOpsIndexAnalysisNoDataMessage");
                     Reveal(lower);
                     sentence.Visibility = Visibility.Visible;
                     Settle(window);
+                    var page = (FrameworkElement)VisualTreeHelper.GetParent(sentence);
                     found.AddRange(Muted(sentence, tab, muted, $"{at}: FinOpsIndexAnalysisNoDataMessage", weight: false));
-                    found.AddRange(Inside(sentence, lower, tab, $"{at}: FinOpsIndexAnalysisNoDataMessage"));
-                    found.AddRange(CentredOn(sentence, lower, tab, $"{at}: FinOpsIndexAnalysisNoDataMessage"));
+                    found.AddRange(Inside(sentence, page, tab, $"{at}: FinOpsIndexAnalysisNoDataMessage"));
+                    found.AddRange(CentredOn(sentence, page, tab, $"{at}: FinOpsIndexAnalysisNoDataMessage"));
                     Shoot(window, $"FinOpsIndexAnalysis-{theme}-{width}x{height}.png");
 
                     /* Optimization: each empty sentence sits inside its grid. */
@@ -433,7 +435,7 @@ public sealed class ViewerEmptyAndCountTextTests
     {
         var problems = new List<string>();
         var window = new Window { Content = tab, Width = width, Height = height, Left = 0, Top = 0, WindowStyle = WindowStyle.None };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         try
         {
             Settle(window);
@@ -477,7 +479,7 @@ public sealed class ViewerEmptyAndCountTextTests
     private static Window Open(FrameworkElement content, int width, int height)
     {
         var window = new Window { Content = content, Width = width, Height = height, Left = 0, Top = 0, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         Settle(window);
         return window;
     }
@@ -582,7 +584,7 @@ public sealed class ViewerEmptyAndCountTextTests
     }
 
     /// <summary><paramref name="sentence"/> lies wholly inside <paramref name="grid"/>'s bounds.</summary>
-    private static List<string> Inside(TextBlock sentence, DataGrid grid, FrameworkElement tab, string what)
+    private static List<string> Inside(TextBlock sentence, FrameworkElement grid, FrameworkElement tab, string what)
     {
         var problems = new List<string>();
         if (!sentence.IsVisible)
@@ -601,7 +603,7 @@ public sealed class ViewerEmptyAndCountTextTests
     }
 
     /// <summary><paramref name="sentence"/> is centred on <paramref name="grid"/>, not on the grids above it as well.</summary>
-    private static List<string> CentredOn(TextBlock sentence, DataGrid grid, FrameworkElement tab, string what)
+    private static List<string> CentredOn(TextBlock sentence, FrameworkElement grid, FrameworkElement tab, string what)
     {
         var problems = new List<string>();
         if (!sentence.IsVisible)

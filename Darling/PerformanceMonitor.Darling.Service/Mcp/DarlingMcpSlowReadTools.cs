@@ -40,7 +40,7 @@ public sealed class DarlingMcpSlowReadTools
     private static readonly string[] s_surfaces = { "web", "compose", "mcp" };
 
     [McpServerTool(Name = "get_slow_reads"), Description(
-        "Gets the monitoring tool's OWN slow or failed reads — each with the arguments it was asked with, the source "
+        "Gets the monitoring tool's OWN slow or failed reads: each with the arguments it was asked with, the source "
         + "that answered, and its slowest statements. Not a monitored SQL Server or PostgreSQL target. Newest first. "
         + "Optional server_name, surface (web/compose/mcp) and route filter. Empty means none was recorded, not a failure. "
         + "caller names who read it (MCP client name and version, or a salted web-session hash); no personal data. "
@@ -62,7 +62,7 @@ public sealed class DarlingMcpSlowReadTools
         + "statement's rows stays null (the driver reports no returned-row count). The read's own rows is recorded only by "
         + "reads that count them, as get_query_store_top does, and is null otherwise. in_flight is how many other reads were "
         + "already running on the service when this read started, and wait_ms is the part of total_ms it spent waiting for a store "
-        + "connection rather than running (a connection wait only: since #5506 a read's total_ms starts once it has its long-read slot, so "
+        + "connection rather than running (a connection wait only: a read's total_ms starts once it has its long-read slot, so "
         + "time spent queued for a slot is in neither figure and shows in get_read_latency's queued and queue_wait_ms instead; a read "
         + "refused busy is never offered here); both are null on rows stored before schema V182. caller is who made the read: an MCP "
         + "client's own name and version (ua: and its User-Agent product token when it sent none, unknown when neither), or web: "
@@ -121,7 +121,7 @@ public sealed class DarlingMcpSlowReadTools
             {
                 return McpHelpers.Status(
                     "empty",
-                    $"No slow read recorded in the last {hours} hour(s)" +
+                    $"No slow read recorded in the last {CountText.Plural(hours, "hour")}" +
                     (serverId is null && string.IsNullOrWhiteSpace(surface) && string.IsNullOrWhiteSpace(route) ? "" : " for that filter") +
                     ". The service records a read that took 5 seconds or more, or ended in a timeout, error or limit; " +
                     "a store before schema V162, or a quiet window, has none.");

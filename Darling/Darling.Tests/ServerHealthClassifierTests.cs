@@ -30,6 +30,52 @@ public sealed class ServerHealthClassifierTests
     public void ClassifyFreshness_NoCollection_IsNeverCollected() =>
         Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, Now));
 
+    /// <summary>#8464: with no successful collection, the log's failed rows decide. A server any collector has run against is Offline
+    /// whatever its registration's age; one with no row at all keeps the registration rule, so a server that has not been tried stays
+    /// awaiting its first collection and one whose history retention dropped reads Offline from its registration.</summary>
+    [Fact]
+    public void ClassifyFreshness_NoSuccess_AttemptedIsOffline_NoRowKeepsTheRegistrationRule()
+    {
+        var horizon = Now.AddDays(-30);
+        var inside = Now.AddMinutes(-31);
+        var before = horizon.AddDays(-1);
+
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, inside, horizon, Now, attempted: true));
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, Now, horizon, Now, attempted: true));
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, null, horizon, Now, attempted: true));
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, before, horizon, Now, attempted: true));
+
+        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, inside, horizon, Now, attempted: false));
+        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, null, horizon, Now, attempted: false));
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, before, horizon, Now, attempted: false));
+    }
+
+    /// <summary>#8464: a newest collection bands on the ladder whatever the flag says, so the flag changes nothing for a server that
+    /// has collected; and the connect-state overload folds the flag in under the failed-connect rule, which still wins.</summary>
+    [Theory]
+    [InlineData(30, ServerFreshness.Fresh)]
+    [InlineData(600, ServerFreshness.Stale)]
+    [InlineData(3600, ServerFreshness.Offline)]
+    public void ClassifyFreshness_WithACollection_IgnoresTheAttemptedFlag(int ageSeconds, ServerFreshness expected)
+    {
+        var horizon = Now.AddDays(-30);
+        var last = Now.AddSeconds(-ageSeconds);
+        Assert.Equal(expected, ServerHealthClassifier.ClassifyFreshness(last, Now.AddDays(-1), horizon, Now, attempted: true));
+        Assert.Equal(expected, ServerHealthClassifier.ClassifyFreshness(last, Now.AddDays(-1), horizon, Now, attempted: false));
+        Assert.Equal(expected, ServerHealthClassifier.ClassifyFreshness(last, Now.AddDays(-1), horizon, Now, connectDownSinceUtc: null, attempted: true));
+    }
+
+    [Fact]
+    public void ClassifyFreshness_ConnectStateOverload_CarriesTheAttemptedFlag()
+    {
+        var horizon = Now.AddDays(-30);
+        var inside = Now.AddMinutes(-31);
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, inside, horizon, Now, connectDownSinceUtc: null, attempted: true));
+        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, inside, horizon, Now, connectDownSinceUtc: null, attempted: false));
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, inside, horizon, Now, connectDownSinceUtc: Now.AddMinutes(-5), attempted: false));
+        Assert.Equal(ServerFreshness.Fresh, ServerHealthClassifier.ClassifyFreshness(Now.AddSeconds(-30), inside, horizon, Now, connectDownSinceUtc: Now.AddMinutes(-5), attempted: true));
+    }
+
     [Theory]
     [InlineData(0, ServerFreshness.Fresh)]
     [InlineData(120, ServerFreshness.Fresh)]     // exactly 2x cadence — still fresh

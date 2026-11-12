@@ -58,7 +58,7 @@ public partial class ViewerServerTab
     /// settable window: the four reads (two trends, two snapshots) fire concurrently — NpgsqlDataSource
     /// pools a connection each — then the two charts and their two Expander grids render.
     /// </summary>
-    private async Task LoadLatchSpinlockAsync()
+    private async Task LoadLatchSpinlockAsync(ViewerLoadTimer? timer = null)
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
@@ -70,21 +70,29 @@ public partial class ViewerServerTab
         var spinlockTrendTask = _dataService.GetSpinlockStatsTrendAsync(_server.ServerId, startUtc, endUtc);
         var spinlockSnapshotTask = _dataService.GetSpinlockStatsSnapshotAsync(_server.ServerId, startUtc, endUtc);
 
+        /* #8549: each read is booked by name (Track hands the task back unchanged), the chart and grid draws are client steps. */
+        _ = timer?.Track("latch trend read", latchTrendTask);
+        _ = timer?.Track("latch snapshot read", latchSnapshotTask);
+        _ = timer?.Track("spinlock trend read", spinlockTrendTask);
+        _ = timer?.Track("spinlock snapshot read", spinlockSnapshotTask);
+
         await Task.WhenAll(latchTrendTask, latchSnapshotTask, spinlockTrendTask, spinlockSnapshotTask);
 
         /* The join is over: free its width before the probes read again, so they are priced against two reads, not four finished ones. */
         readFanOut.Release();
 
-        RenderLatchStatsChart(latchTrendTask.Result);
-        LatchStatsGrid.ItemsSource = latchSnapshotTask.Result;
-        RenderSpinlockStatsChart(spinlockTrendTask.Result);
-        SpinlockStatsGrid.ItemsSource = spinlockSnapshotTask.Result;
+        ClientStep(timer, "latch chart draw", () => RenderLatchStatsChart(latchTrendTask.Result));
+        ClientStep(timer, "latch grid bind", () => LatchStatsGrid.ItemsSource = latchSnapshotTask.Result);
+        ClientStep(timer, "spinlock chart draw", () => RenderSpinlockStatsChart(spinlockTrendTask.Result));
+        ClientStep(timer, "spinlock grid bind", () => SpinlockStatsGrid.ItemsSource = spinlockSnapshotTask.Result);
 
         /* #4966: each chart draws a flat zero over an empty stretch, so each says where its collector's coverage starts. The probes stay OUT
            of the join above: a probe that throws costs the chart's note (DataStartOrNullAsync catches it), never the rows. */
         using var probeFanOut = ViewerReadFanOut.Of(2);
         var latchDataStartTask = _dataService.GetLatchStatsDataStartAsync(_server.ServerId, startUtc, endUtc);
         var spinlockDataStartTask = _dataService.GetSpinlockStatsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        _ = timer?.Track("latch data start read", latchDataStartTask);
+        _ = timer?.Track("spinlock data start read", spinlockDataStartTask);
         UpdateTruncationBanner(LatchStatsTruncationBanner, await DataStartOrNullAsync(latchDataStartTask, "Latch Stats"), startUtc);
         UpdateTruncationBanner(SpinlockStatsTruncationBanner, await DataStartOrNullAsync(spinlockDataStartTask, "Spinlock Stats"), startUtc);
     }
@@ -115,5 +123,22 @@ public partial class ViewerServerTab
     {
         _latchStatsHover?.Dispose();
         _spinlockStatsHover?.Dispose();
+    }
+
+    /// <summary>
+    /// A snapshot grid inside an expander on the page that scrolls as one: a wheel over a grid that cannot scroll further in the wheel's
+    /// direction moves the page instead (<see cref="PageScroll.ForwardWheel"/>). The page keeps the wheel over its plots for their zoom, so
+    /// the forwarding is wired on the grids alone.
+    /// </summary>
+    private void SnapshotGrid_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    {
+        for (var up = sender as System.Windows.DependencyObject; up is not null; up = System.Windows.Media.VisualTreeHelper.GetParent(up))
+        {
+            if (up is System.Windows.Controls.ScrollViewer page)
+            {
+                PageScroll.ForwardWheel(page, e);
+                return;
+            }
+        }
     }
 }

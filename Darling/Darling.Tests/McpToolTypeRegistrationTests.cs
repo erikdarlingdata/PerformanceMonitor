@@ -120,7 +120,7 @@ public sealed class McpToolTypeRegistrationTests
         Assert.True(
             names.Count > 0,
             $"Found no .WithGeminiCompatibleTools<T>() registrations in {path}. If the registration style "
-            + "changed, this test needs to learn the new one rather than be deleted — it is the only thing "
+            + "changed, this test needs to learn the new one rather than be deleted: it is the only thing "
             + "standing between a new tools class and shipping unreachable.");
 
         return names;

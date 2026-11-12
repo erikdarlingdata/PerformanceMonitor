@@ -103,7 +103,12 @@ export const SERVER_TABS = [
   {
     id: "overview",
     label: "Overview",
-    build: (server, ctx) => [
+    build: (server, ctx) => {
+      /* #8554: get_daily_summary_range is the slowest read on a server's first visit (2 to 10 s), and the heavy-read gate lets two reads go at
+         a time in the order they are asked for, so the longest read is asked for FIRST: built here, before the strips', and placed after the
+         findings panel below as before. The strips' trends then take the next slots and the baseline the last. */
+      const dailySummary = dailySummaryPanels(server);
+      return [
       stat("Overview", "get_server_summary", { server }, OVERVIEW_STATS, SNAPSHOT, 2),
       stat("Server Properties", "get_server_properties", { server }, PROPERTY_STATS, SNAPSHOT, 2),
       /* #6291: the desktop Overview's five stacked strips on one time axis and one crosshair. The CPU, Memory, Blocked process
@@ -119,8 +124,9 @@ export const SERVER_TABS = [
          from ONE fetch of get_daily_summary_range, today's tile being the range's anchor-day row, where they
          used to be two reads (get_daily_summary beside the range) that cost the store the day's aggregate
          twice per load. See dailySummaryPanels. */
-      ...dailySummaryPanels(server),
-    ],
+      ...dailySummary,
+      ];
+    },
   },
 
   {
@@ -339,7 +345,7 @@ export const SERVER_TABS = [
         zeroFill: true,
         sourceKey: "source",
         bySource: BLOCKING_BY_SOURCE,
-        emptyText: "No blocked process reports in this window — an empty trend here means none were captured, not that nothing was collected.",
+        emptyText: "No blocked process reports in this window: an empty trend here means none were captured, not that nothing was collected.",
       }),
       linePanel("Deadlock trend", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
@@ -1257,7 +1263,7 @@ export const POSTGRES_TABS = [
           subtitle: ctx.label + ", Amazon Aurora only (AWS Performance Insights)",
           format: "pct",
           unit: "%",
-          emptyText: "No CPU samples in this window. This is an Amazon Aurora feature — on a stock PostgreSQL target this panel is permanently empty.",
+          emptyText: "No CPU samples in this window. This is an Amazon Aurora feature. On a stock PostgreSQL target this panel is permanently empty.",
           /* Click-through 3: on a server that is not Aurora the read answers "not collected", and the panel is not drawn. */
           hideWhenNotCollected: true,
           atTime: false,
@@ -1661,7 +1667,7 @@ export const POSTGRES_TABS = [
           stats: PG_XMIN_STATS,
           span: 2,
           emptyText:
-            "Nothing held the xmin horizon back in this window — the healthy state. Vacuum can reclaim everything it finds.",
+            "Nothing held the xmin horizon back in this window. That is the healthy state. Vacuum can reclaim everything it finds.",
         },
         {
           title: "Horizon Holders",
@@ -1739,8 +1745,8 @@ export const POSTGRES_TABS = [
        were. Hiding it would buy a tidier stock-PostgreSQL page at the price of a tab set that changes shape
        between two PostgreSQL servers in one fleet, and of making the one Aurora-specific capability we have
        invisible to the operator best placed to want it. */
-    note: "Wait Events needs Amazon Aurora and is left off other targets. Sampled Waits and Wait Trend fill on any other PostgreSQL target, from the pg_wait_sampling extension when it is installed and from the service's own once-a-second sampler (a floor that undercounts short waits) when it is not.",
-    noteInfo: "Wait Events comes from aurora_stat_system_waits(), which core PostgreSQL does not have. Sampled Waits says which instrument fed it (instrument). On Amazon Aurora the two sampled panels do not apply and are left off.",
+    note: "Wait Events needs Amazon Aurora and is left off other targets. Sampled Waits fills on any other PostgreSQL target, from the pg_wait_sampling extension when it is installed and from the service's own once-a-second sampler (a floor that undercounts short waits) when it is not. Wait Trend fills everywhere: from the engine's cumulative counters on Amazon Aurora, and from the sampler elsewhere.",
+    noteInfo: "Wait Events comes from aurora_stat_system_waits(), which core PostgreSQL does not have. Sampled Waits says which instrument fed it (instrument). On Amazon Aurora the Sampled Waits panel does not apply and is left off; Wait Trend is drawn there from the engine's cumulative counters.",
     build: (server, ctx) => [
       tablePanel(
         "Wait Events",

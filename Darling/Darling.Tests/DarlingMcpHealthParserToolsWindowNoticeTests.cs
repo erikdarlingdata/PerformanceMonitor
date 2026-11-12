@@ -296,7 +296,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             Assert.True(cut.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
             Assert.Equal(McpHelpers.FormatEffectiveStart(added), cut.GetProperty("hints").GetProperty("effective_start").GetString());
             var message = cut.GetProperty("message").GetString()!;
-            Assert.StartsWith($"No {eventType} events were captured for {HealthName("rung2-" + tool)} in the last 168 hour(s). This server has captured them before", message, StringComparison.Ordinal);
+            Assert.StartsWith($"No {eventType} events were captured for {HealthName("rung2-" + tool)} in the last 168 hours. This server has captured them before", message, StringComparison.Ordinal);
             Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
             Assert.DoesNotContain("nothing happened in this window", message, StringComparison.Ordinal);
         });
@@ -339,7 +339,7 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, 'ring_buffer_truncated=1 ring_buff
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
             var message = root.GetProperty("message").GetString()!;
             Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
-            Assert.Contains("773 event(s) are hidden", message, StringComparison.Ordinal);
+            Assert.Contains("773 events are hidden", message, StringComparison.Ordinal);
             Assert.Contains("5 h 23 min old", message, StringComparison.Ordinal);
             Assert.DoesNotContain("nothing happened in this window", message, StringComparison.Ordinal);
         });
@@ -396,7 +396,7 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, $6)",
             Assert.Contains("2 system_health collection runs that read events of this window", message, StringComparison.Ordinal);
             Assert.Contains("the first at " + Minute(pastEnd.AddHours(-5)), message, StringComparison.Ordinal);
             Assert.Contains("the last at " + Minute(pastEnd.AddHours(-2)), message, StringComparison.Ordinal);
-            Assert.Contains("240 event(s) are hidden", message, StringComparison.Ordinal);
+            Assert.Contains("240 events are hidden", message, StringComparison.Ordinal);
         });
 
     [Theory]
@@ -471,7 +471,7 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, $6)",
             var message = root.GetProperty("message").GetString()!;
             Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
             Assert.Contains("the system_health collection run at " + Minute(after) + ", which read events of this window, reported that", message, StringComparison.Ordinal);
-            Assert.Contains("321 event(s) are hidden", message, StringComparison.Ordinal);
+            Assert.Contains("321 events are hidden", message, StringComparison.Ordinal);
         });
 
     [Theory]
@@ -506,7 +506,7 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, $6)",
             var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rblabel-" + tool, 24, end));
 
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
-            Assert.Contains("555 event(s) are hidden", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.Contains("555 events are hidden", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
         });
 
     /* #6827: a note can match the SQL's pre-filter and still not be a truncated note by TryParse (a value of 1x). The newest
@@ -528,7 +528,7 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, $6)",
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
             var message = root.GetProperty("message").GetString()!;
             Assert.Contains("the system_health collection run at " + Minute(older) + ", which read events of this window, reported that", message, StringComparison.Ordinal);
-            Assert.Contains("240 event(s) are hidden", message, StringComparison.Ordinal);
+            Assert.Contains("240 events are hidden", message, StringComparison.Ordinal);
         });
 
     [Theory]
@@ -599,10 +599,10 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, 'ring_buffer_truncated=1 ring_buff
 
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
             var message = root.GetProperty("message").GetString()!;
-            Assert.StartsWith($"1 {eventType} event(s) were read for {name}", message, StringComparison.Ordinal);
+            Assert.StartsWith($"1 {eventType} event was read for {name}", message, StringComparison.Ordinal);
             Assert.DoesNotContain("events were found", message, StringComparison.Ordinal);
             Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
-            Assert.Contains("773 event(s) are hidden", message, StringComparison.Ordinal);
+            Assert.Contains("773 events are hidden", message, StringComparison.Ordinal);
         });
 
     /* #6453: nothing of any type ever stored. The newest run read the live session through its event_file target and found
@@ -656,7 +656,7 @@ VALUES ($1, $2, $3, $4, $5, 12, $6, 0, $7)",
             var covered = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rung2cov-" + tool, 168, end));
 
             Assert.False(covered.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
-            Assert.EndsWith(", so nothing happened in this window — widen hours_back to reach the most recent events.", covered.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.EndsWith(", so nothing happened in this window: widen hours_back to reach the most recent events.", covered.GetProperty("message").GetString()!, StringComparison.Ordinal);
         });
 
     [Theory]

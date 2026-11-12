@@ -47,15 +47,12 @@ public sealed class TrendPayloadBudgetLiveTests
     /// <summary>What any default answer may weigh: the heaviest measured on DARLING01 after the change was 63 KB.</summary>
     private const int DefaultCeilingBytes = 80 * 1024;
 
-    /// <summary>#4193: get_pg_cpu_utilization's own default ceiling. Its row is the widest in the family by
-    /// design (<see cref="TrendBuckets.PgCpuMaxPoints"/>'s own doc comment: "about 500 bytes/point" for the
-    /// CPU/ACU pair with peaks, the capacity trio and six V136 host-memory columns), so the SAME 200-point
-    /// auto-sizing target (<see cref="TrendBuckets.McpPointBudget"/>) every trend tool shares costs it
-    /// roughly 100 KB at the widest auto-sized window, not the ~63 KB the narrower rows in
-    /// <see cref="DefaultCeilingBytes"/> top out at. Measured 84,556 bytes / 169 points at 168h on this
-    /// fixture; sized with headroom above that rather than raising the shared ceiling and weakening what it
-    /// guards for the other ten tools.</summary>
-    private const int PgCpuDefaultCeilingBytes = 100 * 1024;
+    /// <summary>#8568: what a default answer of the four wide-point reads may weigh, the shared response budget
+    /// itself. <c>get_file_io_trend</c>, <c>get_tempdb_trend</c>, <c>get_pg_database_trend</c> and
+    /// <c>get_pg_cpu_utilization</c> (the widest row in the family, about 500 bytes a point) answered 36 to 60 KB
+    /// at default arguments on production stores under <see cref="DefaultCeilingBytes"/>, so each sizes its own
+    /// points to stay under this at every window.</summary>
+    private const int ResponseBudgetCeilingBytes = McpResponseBudget.DefaultBytes;
 
     /// <summary>What the largest answer a caller can ask for may weigh.</summary>
     private const int CapCeilingBytes = 320 * 1024;
@@ -93,17 +90,18 @@ public sealed class TrendPayloadBudgetLiveTests
             await SeedAsync(connection, end, ct);
 
             var measured = new List<string>();
+            var overBudget = new List<string>();
 
             /* ── left to size themselves ── */
             foreach (var hours in new[] { 1, 4, 24, 72, 168 })
             {
-                Measure(measured, "get_file_io_trend", hours, await DarlingMcpTrendTools.GetFileIoTrend(postgres, ServerName, hours), "trend", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
+                MeasureAgainstBudget(measured, overBudget, "get_file_io_trend", hours, await DarlingMcpTrendTools.GetFileIoTrend(postgres, ServerName, hours), "trend");
                 Measure(measured, "get_lock_wait_trend", hours, await DarlingMcpBlockingTools.GetLockWaitTrend(postgres, ServerName, hours), "trend", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
                 Measure(measured, "get_pg_io_trend", hours, await DarlingMcpPgTrendTools.GetPgIoTrend(postgres, ServerName, hours_back: hours), "points", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
-                Measure(measured, "get_pg_database_trend", hours, await DarlingMcpPgTrendTools.GetPgDatabaseTrend(postgres, ServerName, hours_back: hours), "points", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
+                MeasureAgainstBudget(measured, overBudget, "get_pg_database_trend", hours, await DarlingMcpPgTrendTools.GetPgDatabaseTrend(postgres, ServerName, hours_back: hours), "points");
                 /* #4193: get_pg_cpu_utilization joined the TrendBuckets family; roster it the same as its
                    SQL Server twin get_cpu_utilization below. */
-                Measure(measured, "get_pg_cpu_utilization", hours, await DarlingMcpPgCpuUtilizationTools.GetPgCpuUtilization(postgres, ServerName, hours_back: hours), "samples", PgCpuDefaultCeilingBytes, TrendBuckets.McpPointBudget);
+                MeasureAgainstBudget(measured, overBudget, "get_pg_cpu_utilization", hours, await DarlingMcpPgCpuUtilizationTools.GetPgCpuUtilization(postgres, ServerName, hours_back: hours), "samples");
                 if (hours <= 72)
                 {
                     Measure(measured, "get_query_duration_trend", hours, await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, ServerName, hours_back: hours), "trend", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
@@ -114,11 +112,14 @@ public sealed class TrendPayloadBudgetLiveTests
                    exist regardless, not a reason to seed a second wait_type. */
                 Measure(measured, "get_wait_trend", hours, await DarlingMcpDataTools.GetWaitTrend(postgres, "LCK_M_S", ServerName, hours), "trend", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
                 Measure(measured, "get_cpu_utilization", hours, await DarlingMcpDataTools.GetCpuUtilization(postgres, ServerName, hours), "samples", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
-                Measure(measured, "get_tempdb_trend", hours, await DarlingMcpDataTools.GetTempDbTrend(postgres, ServerName, hours), "trend", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
+                MeasureAgainstBudget(measured, overBudget, "get_tempdb_trend", hours, await DarlingMcpDataTools.GetTempDbTrend(postgres, ServerName, hours), "trend");
                 Measure(measured, "get_memory_trend", hours, await DarlingMcpTrendTools.GetMemoryTrend(postgres, ServerName, hours), "trend", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
                 Measure(measured, "get_perfmon_trend", hours, await DarlingMcpTrendTools.GetPerfmonTrend(postgres, "Batch Requests/sec", ServerName, hours), "trend", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
                 Measure(measured, "get_pg_query_duration_trend", hours, await DarlingMcpPgTrendTools.GetPgQueryDurationTrend(postgres, ServerName, PgQueryIdText, hours), "points", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
             }
+
+            Assert.True(overBudget.Count == 0,
+                $"over the {ResponseBudgetCeilingBytes:N0}-byte response budget at default arguments: {string.Join("; ", overBudget)}");
 
             /* The large-server shape the issue extrapolated to 30 MB: the last four hours also hold 300 tenant
                databases' 600 files. 609 series are active and ranked, and the answer is still five lines and
@@ -197,6 +198,25 @@ public sealed class TrendPayloadBudgetLiveTests
         finally
         {
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
+    /// <summary>#8568: <see cref="Measure"/> for a read held to the response budget itself. The answer names the
+    /// width it chose and that <c>bucket_minutes</c> asks for another, and an answer over
+    /// <see cref="ResponseBudgetCeilingBytes"/> is added to <paramref name="overBudget"/>, so one run names every
+    /// read and window that is over instead of stopping at the first.</summary>
+    private static void MeasureAgainstBudget(List<string> measured, List<string> overBudget, string tool, int hours, string answer, string pointsKey)
+    {
+        Measure(measured, tool, hours, answer, pointsKey, CapCeilingBytes, TrendBuckets.McpPointBudget);
+
+        var root = JsonDocument.Parse(answer).RootElement;
+        Assert.True(root.GetProperty("bucket_minutes").GetInt32() >= 1);
+        Assert.Contains("pass bucket_minutes", root.GetProperty("aggregate_note").GetString(), StringComparison.Ordinal);
+
+        var bytes = Encoding.UTF8.GetByteCount(answer);
+        if (bytes > ResponseBudgetCeilingBytes)
+        {
+            overBudget.Add($"{tool} over {hours}h is {bytes:N0} bytes ({root.GetProperty(pointsKey).GetArrayLength()} points)");
         }
     }
 

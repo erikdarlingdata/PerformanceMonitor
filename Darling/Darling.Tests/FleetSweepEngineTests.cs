@@ -124,6 +124,25 @@ public sealed class FleetSweepEngineTests
         Assert.Contains("\"blocking_rate_per_hour\":0", verdictA.VerdictJson, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #8572: the blocking rate in the evidence payload is rounded for reading, and a rare rate is not rounded to
+    /// nothing. One blocking event over 30 days is 1/720 an hour, which a fixed two places would answer as 0.
+    /// </summary>
+    [Fact]
+    public void VerdictJson_ABlockingRateOfOneInThirtyDays_IsNotRoundedToZero()
+    {
+        var reading = new FleetSweepServerReading(
+            1, "server-a",
+            new DailyHealthSignals { HasData = true, BlockingEvents = 1, Window = TimeSpan.FromDays(30) }, 0, null);
+        var verdict = ComposeSimple(new[] { reading }).Verdicts.Single();
+
+        using var doc = System.Text.Json.JsonDocument.Parse(verdict.VerdictJson!);
+        var rate = doc.RootElement.GetProperty("blocking_rate_per_hour").GetDouble();
+        Assert.NotEqual(0.0, rate);
+        Assert.Equal(1.0 / 720, rate, 3);
+        Assert.True(rate.ToString("R", System.Globalization.CultureInfo.InvariantCulture).Length <= 8, "the rate is rounded, not the raw quotient");
+    }
+
     /* ─────────────────────── the diff: sweep N against sweep N−1's rows ─────────────────────── */
 
     /// <summary>
@@ -363,6 +382,39 @@ public sealed class FleetSweepEngineTests
             instruments: new FleetSweepInstrumentCounters(Now.AddMinutes(-30), 5, 0));
         Assert.True(restarted.Run.InstrumentsAlive);
         Assert.Contains("baseline_reset\":true", restarted.Run.InstrumentLivenessJson, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #8572 row 2c: the note a restart leaves in the liveness document is a sentence with a colon, not an em dash, and it appears only
+    /// when the service started after the previous sweep. The same sweep with no restart carries no such note.
+    /// </summary>
+    [Fact]
+    public void ARestartSinceThePreviousSweep_AddsTheBaselineResetNote_WithoutAnEmDash_AndASteadyServiceAddsNone()
+    {
+        static string[] Notes(FleetSweepComposition composition)
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(composition.Run.InstrumentLivenessJson);
+            return document.RootElement.GetProperty("notes").EnumerateArray().Select(n => n.GetString()!).ToArray();
+        }
+
+        FleetSweepRun PreviousRun(bool alertsEnabled) => new(
+            100, Now.AddHours(-1), Now.AddHours(-2), Now.AddHours(-1), null, alertsEnabled, 1, 1, true,
+            JsonSerializer.Serialize(new { alert_passes_total = 500 }), "{}");
+
+        var restarted = ComposeSimple(
+            new[] { Healthy(1, "server-a") },
+            previousRun: PreviousRun(alertsEnabled: true),
+            instruments: new FleetSweepInstrumentCounters(Now.AddMinutes(-30), 5, 0));
+        var restartNotes = Notes(restarted).Where(n => n.StartsWith("Service restarted since the previous sweep", StringComparison.Ordinal)).ToArray();
+        Assert.Single(restartNotes);
+        Assert.StartsWith("Service restarted since the previous sweep: the pass-counter baseline reset", restartNotes[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("\u2014", restartNotes[0], StringComparison.Ordinal);
+
+        var steady = ComposeSimple(
+            new[] { Healthy(1, "server-a") },
+            previousRun: PreviousRun(alertsEnabled: true),
+            instruments: SteadyInstruments(passes: 600));
+        Assert.DoesNotContain(Notes(steady), n => n.StartsWith("Service restarted", StringComparison.Ordinal));
     }
 
     /* ─────────────────────── master-off: the sweep produces, and delivers nothing ─────────────────────── */

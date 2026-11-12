@@ -998,13 +998,13 @@ public sealed class PgTargetAnomalyTests
 
         /* The gate arm: the mean's robust sigmas against the same routine. */
         var robust = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyWaitProfile, Lookup(Profile(("mean_ms_per_sec", 1507.2), ("mean_modified_z", 8.8), ("mean_ratio", 7.5))))!;
-        Assert.Contains(" led by Lock:relation. The window's mean rate was 1507.2 ms/sec against a routine of 200 — 8.8 times its usual variation above it — so the whole window sat high, not one delta. This is a shift in the overall wait profile", robust.Investigation, StringComparison.Ordinal);
+        Assert.Contains(" led by Lock:relation. The window's mean rate was 1507.2 ms/sec against a routine of 200 (8.8 times its usual variation above it), so the whole window sat high, not one delta. This is a shift in the overall wait profile", robust.Investigation, StringComparison.Ordinal);
         Assert.Contains("20.2 times its usual variation above its normal level", robust.Headline, StringComparison.Ordinal);
         Assert.DoesNotContain("× it", robust.Investigation, StringComparison.Ordinal);
 
         /* The ratio arm (modified z 0 by construction): the mean's multiple, the stamped mean_ratio first. */
         var classical = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyWaitProfile, Lookup(Profile(("modified_z", 0), ("mean_ms_per_sec", 1507.2), ("mean_modified_z", 0), ("mean_ratio", 7.5))))!;
-        Assert.Contains("The window's mean rate was 1507.2 ms/sec against a routine of 200 — about 7.5× it — so the whole window sat high, not one delta.", classical.Investigation, StringComparison.Ordinal);
+        Assert.Contains("The window's mean rate was 1507.2 ms/sec against a routine of 200, about 7.5× it, so the whole window sat high, not one delta.", classical.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("times its usual variation above it", classical.Investigation, StringComparison.Ordinal);
         /* A fact stamped with the mean but no mean_ratio: the quotient is the belt (1507.2 / 200 = 7.5). */
         var unstampedRatio = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyWaitProfile, Lookup(Profile(("modified_z", 0), ("mean_ms_per_sec", 1507.2))))!;
@@ -1022,7 +1022,7 @@ public sealed class PgTargetAnomalyTests
         var preGate = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyWaitProfile, Lookup(Profile()))!;
         Assert.DoesNotContain("mean rate", preGate.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("mean was", preGate.Investigation, StringComparison.Ordinal);
-        Assert.Contains("(CPU excluded) — 20.2 times its usual variation above its 200 ms/sec baseline for this hour-of-week — led by Lock:relation. This is a shift in the overall wait profile, and the named contributors are where to look.", preGate.Investigation, StringComparison.Ordinal);
+        Assert.Contains("(CPU excluded): 20.2 times its usual variation above its 200 ms/sec baseline for this hour-of-week, led by Lock:relation. This is a shift in the overall wait profile, and the named contributors are where to look.", preGate.Investigation, StringComparison.Ordinal);
         Assert.Equal(preGate.Headline, robust.Headline);
         var preGateFirst = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyWaitProfile, Lookup(Anomaly(PgTargetFactKeys.AnomalyWaitProfile, ("current_ms_per_sec", 3200), ("is_new", 1), ("fallback_exceedance", 3.6))))!;
         Assert.Contains("(CPU excluded), led by the collected wait types.", preGateFirst.Investigation, StringComparison.Ordinal);
@@ -1045,9 +1045,9 @@ public sealed class PgTargetAnomalyTests
         fact.Metadata[PgTargetScorer.CpuSampleCountKey] = 48;
         new FactScorer().ScoreAll([fact]);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.CpuPercent, Lookup(fact))!;
-        Assert.Contains("peaked at 90% of its configured capacity ceiling — 10.8 of 12 configured ACUs at the peak", block.Headline, StringComparison.Ordinal);
+        Assert.Contains("peaked at 90% of its configured capacity ceiling: 10.8 of 12 configured ACUs at the peak", block.Headline, StringComparison.Ordinal);
         Assert.Contains("averaged 62.5% across 48 five-minute samples", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("The raw cpu_percent peaked at 100% of the capacity currently allocated — a core was pinned — which is reported, not graded.", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("The raw cpu_percent peaked at 100% of the capacity currently allocated (a core was pinned), which is reported, not graded.", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("about the 99.8th and 99.9th percentile of the measured fleet's five-minute samples (threshold_lineage = 1)", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("get_pg_top_queries", block.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("SQL Server", block.Headline + block.Investigation + block.Remediation, StringComparison.Ordinal);
@@ -1299,7 +1299,7 @@ FROM generate_series(5, $5, 5) AS k",
                 var deadlockCard = Assert.Single(findings, f => RootKey(f) == PgTargetFactKeys.AnomalyDeadlockRate);
                 Assert.Equal(deadlockParent.GetProperty("incident_id").GetString(), deadlockCard.GetProperty("incident_id").GetString());
                 var deadlockHeadline = deadlockCard.GetProperty("advice").GetProperty("headline").GetString();
-                Assert.Contains($"24 deadlocks this window (6/hour) — against a {BaselineMath.BaselineWindowDays}-day baseline in which this hour saw none", deadlockHeadline, StringComparison.Ordinal);
+                Assert.Contains($"24 deadlocks this window (6/hour), against a {BaselineMath.BaselineWindowDays}-day baseline in which this hour saw none", deadlockHeadline, StringComparison.Ordinal);
                 Assert.DoesNotContain("first occurrence", deadlockHeadline, StringComparison.Ordinal);
                 Assert.True(deadlockCard.GetProperty("severity").GetDouble() < 1.49);
             }
@@ -1609,7 +1609,7 @@ CROSS JOIN (VALUES (3, 300001::bigint, 'Lock', 'relation'), (0, 1::bigint, 'CPU'
             /* Lane 26: the composed advice for the detector's real fact names the mean it stamped, against the bucket's
                routine (median 200), with its robust sigmas — the whole window, not the one hot collection. */
             var advice = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyWaitProfile, shifted.ToFactLookup())!;
-            Assert.Contains($"The window's mean rate was {fact.Metadata["mean_ms_per_sec"].ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)} ms/sec against a routine of {fact.Metadata["baseline_mean"].ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)} — {fact.Metadata["mean_modified_z"].ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)} times its usual variation above it — so the whole window sat high, not one delta", advice.Investigation, StringComparison.Ordinal);
+            Assert.Contains($"The window's mean rate was {fact.Metadata["mean_ms_per_sec"].ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)} ms/sec against a routine of {fact.Metadata["baseline_mean"].ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)} ({fact.Metadata["mean_modified_z"].ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)} times its usual variation above it), so the whole window sat high, not one delta", advice.Investigation, StringComparison.Ordinal);
             Assert.Contains("peaked at about 3200 ms of waiting per second", advice.Investigation, StringComparison.Ordinal);
 
             bodySucceeded = true;

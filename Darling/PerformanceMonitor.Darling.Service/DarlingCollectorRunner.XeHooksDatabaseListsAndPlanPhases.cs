@@ -168,6 +168,12 @@ public sealed partial class DarlingCollectorRunner
     internal Func<ServerRuntime, string, LongQueryTraceReplicaState>? LongQueryTraceReplicaStateForTests { get; set; }
 
     /// <summary>
+    /// Replaces the connection a removal opens to drop the schema-changes session (#7643): called with the server, the database
+    /// (the empty name for the server's own scope) and the session name. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, string, CancellationToken, Task>? SchemaSessionDropForTests { get; set; }
+
+    /// <summary>
     /// #8146: replaces what the read-only-intent ensure finds on the primary when its replica shows no definition, with
     /// <see cref="LongQueryTraceStepOverrideForTests"/> set: called with the server and the database, answers whether the
     /// primary already holds the definition. True, the ensure sends no <see cref="LongQueryTraceStep.CreateDefinition"/>, as the

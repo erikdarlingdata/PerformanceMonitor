@@ -273,15 +273,18 @@ LIMIT $3";
 
     /// <summary>
     /// Object-growth heatmap data for a single database (#1138 §3A): the ranked top-N summary rows and the
-    /// long-form daily reserved-MB samples (pivoted to a matrix by FinOpsHeatmapBuilder).
+    /// long-form daily reserved-MB samples (pivoted to a matrix by FinOpsHeatmapBuilder), each sample's Day one calendar day of
+    /// <paramref name="dayZone"/>: the selected time display's zone on the server's clock (<see cref="DisplayDayZoneAsync"/>), so the
+    /// heatmap's columns read in the same clock as every other time on the page.
     /// </summary>
     public async Task<(List<ObjectSizeGrowthRow> Objects, List<FinOpsObjectDaySample> Samples)> GetObjectGrowthHeatmapDataAsync(
-        int serverId, string databaseName, int daysBack = 30, int topN = 20, CancellationToken cancellationToken = default)
+        int serverId, string databaseName, TimeZoneInfo dayZone, int daysBack = 30, int topN = 20, CancellationToken cancellationToken = default)
     {
-        var windowStart = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-daysBack), DateTimeKind.Unspecified);
+        var nowUtc = DateTime.UtcNow;
+        var windowStart = DateTime.SpecifyKind(nowUtc.AddDays(-daysBack), DateTimeKind.Unspecified);
 
         var (objects, samples) = await DarlingFinOpsStorageGrowthReader.GetObjectGrowthHeatmapDataAsync(
-            _dataSource, serverId, databaseName, windowStart, daysBack, topN,
+            _dataSource, serverId, databaseName, windowStart, daysBack, DisplayDays(windowStart, nowUtc, dayZone), topN,
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
         return (objects.Select(o => ObjectSizeGrowthRow.From(o, databaseName)).ToList(), samples);
     }

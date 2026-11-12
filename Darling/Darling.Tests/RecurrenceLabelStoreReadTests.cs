@@ -593,7 +593,7 @@ VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, $5)",
     private static DateTime Local(int y, int mo, int d, int h) => new(y, mo, d, h, 0, 0);
 
     private static string JobCard(string name) =>
-        FactAdvice.SerializeForStoryText(new AdviceBlock($"Agent job `{name}` running well past normal — likely stuck, not busy", "job investigation.", "job remediation."));
+        FactAdvice.SerializeForStoryText(new AdviceBlock($"Agent job `{name}` running well past normal, likely stuck, not busy", "job investigation.", "job remediation."));
 
     private static AnalysisFinding Finding(string hash, string rootKey, DateTime analysisTimeUtc, string? storyText = null, int? serverId = null, string? serverName = null) => new()
     {

@@ -113,7 +113,7 @@ public sealed class ServerTabChartLayoutTests
             var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
             typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(tab, true);
             var window = new Window { Content = ChartLayoutProbe.HostLikeMainWindow(tab), Width = width, Height = height, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var (failures, readings) = ChartLayoutProbe.MeasureHeavyLegends(window, tab, ChartLayoutProbe.HeavyLegendCharts, "lite-heavy", $"{width}x{height}");
@@ -175,7 +175,7 @@ public sealed class ServerTabChartLayoutTests
             // Switching to a tab would start that tab's load against a server that is not there.
             typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(tab, true);
             var window = new Window { Content = legendRule ? ChartLayoutProbe.HostLikeMainWindow(tab) : tab, Width = width, Height = height, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 foreach (var chart in ChartLayoutProbe.Logical<WpfPlot>(tab))

@@ -112,7 +112,9 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// then plain PostgreSQL, which is what those tests ran on before.</para>
     /// </summary>
     /// <param name="plainPostgres">Leave TimescaleDB off. Only for a test whose subject is the store WITHOUT the extension.
-    /// Such a database is also empty, as <paramref name="emptyStore"/> describes.</param>
+    /// The database is created from <c>template0</c>, so it carries no extension row the cluster's <c>template1</c> holds (the
+    /// TimescaleDB image installs the extension into <c>template1</c>, and a database cloned from it would answer the product's
+    /// <c>pg_extension</c> probes as a TimescaleDB store). Such a database is also empty, as <paramref name="emptyStore"/> describes.</param>
     /// <param name="emptyStore">Leave the database unmigrated (#7097). By default the database is a clone of a template
     /// this process migrated once (see <see cref="GetTemplateAsync"/>), so the test's own <c>MigrateAsync</c> is a no-op:
     /// the same schema, journal and jobs at about half the cost. Pass this when the test applies part of the ladder,
@@ -178,7 +180,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     private static async Task<ScratchPostgres> CreateEmptyAsync(
         string baseConnectionString, bool plainPostgres, string creator, CancellationToken cancellationToken, bool cCollation = false)
     {
-        var scratch = await MintAsync(baseConnectionString, template: null, creator, cancellationToken, cCollation);
+        var scratch = await MintAsync(baseConnectionString, template: null, creator, cancellationToken, cCollation, plainPostgres);
         var clusterKey = ClusterKey(baseConnectionString);
         if (!plainPostgres && !ClustersWithoutTimescale.ContainsKey(clusterKey))
         {
@@ -201,9 +203,11 @@ internal sealed class ScratchPostgres : IAsyncDisposable
         return scratch;
     }
 
-    /// <summary>Runs <c>CREATE DATABASE</c>, from <paramref name="template"/> when one is named, and returns its handle.</summary>
+    /// <summary>Runs <c>CREATE DATABASE</c>, from <paramref name="template"/> when one is named, from <c>template0</c> for a
+    /// <paramref name="cCollation"/> or <paramref name="plainPostgres"/> database, and returns its handle.</summary>
     private static async Task<ScratchPostgres> MintAsync(
-        string baseConnectionString, string? template, string creator, CancellationToken cancellationToken, bool cCollation = false)
+        string baseConnectionString, string? template, string creator, CancellationToken cancellationToken, bool cCollation = false,
+        bool plainPostgres = false)
     {
         /* The factory's pattern (prefix, creation stamp, 12 hex): safe to interpolate as a quoted identifier. */
         var databaseName = ScratchDatabaseSweep.NewName(DateTime.UtcNow);
@@ -218,8 +222,13 @@ internal sealed class ScratchPostgres : IAsyncDisposable
             await using var create = new NpgsqlCommand(
                 template is not null ? $"CREATE DATABASE \"{databaseName}\" TEMPLATE \"{template}\""
                 : cCollation ? $"CREATE DATABASE \"{databaseName}\" TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'"
+                : plainPostgres ? $"CREATE DATABASE \"{databaseName}\" TEMPLATE template0"
                 : $"CREATE DATABASE \"{databaseName}\"",
                 admin.Connection);
+            /* CREATE DATABASE ... TEMPLATE waits for the cluster to finish other databases' creates and drops, and with a
+               parallel suite on one cluster it ran past Npgsql's default 30 seconds and failed a test whose question was not
+               the create (#8699). The scheduler start call in CreateAsync allows 120 seconds for the same reason. */
+            create.CommandTimeout = 120;
             await create.ExecuteNonQueryAsync(cancellationToken);
 
             /* The store's database-default search_path, set before any test connection exists (#8231). MigrateAsync sets the

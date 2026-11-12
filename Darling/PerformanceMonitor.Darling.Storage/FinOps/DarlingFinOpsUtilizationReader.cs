@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage.FinOps;
@@ -38,16 +40,19 @@ public sealed record UtilizationEfficiencyDto(
     int EngineEdition,
     string ProvisioningStatus);
 
-/// <summary>One day of the 7-day provisioning classification trend. <paramref name="Day"/> is a naive-UTC date.</summary>
+/// <summary>One day of the 7-day provisioning classification trend. <paramref name="Day"/> is the day the read bucketed by (<see cref="DayBucket"/>): a UTC date unless the caller gave the display's days.</summary>
 public sealed record ProvisioningTrendDto(
     DateTime Day,
     decimal AvgCpuPct,
     int MaxCpuPct,
     decimal P95CpuPct,
     decimal MemoryRatio,
-    string Status);
+    string Status,
+    decimal? StolenMemoryPct = null,
+    string? StatusReason = null,
+    bool IsPartial = false);
 
-/// <summary>One day of pool-level memory-grant vs used efficiency. <paramref name="Day"/> is a naive-UTC date.</summary>
+/// <summary>One day of pool-level memory-grant vs used efficiency. <paramref name="Day"/> is the day the read bucketed by (<see cref="DayBucket"/>): a UTC date unless the caller gave the display's days.</summary>
 public sealed record MemoryGrantEfficiencyDto(
     DateTime Day,
     decimal AvgGrantedMb,
@@ -60,13 +65,23 @@ public sealed record MemoryGrantEfficiencyDto(
     long ForcedGrants);
 
 /// <summary>
+/// One day of a per-day read: the calendar day its row is labelled with, and the half-open range [<paramref name="StartUtc"/>,
+/// <paramref name="EndUtc"/>) of naive-UTC instants it holds. Adjacent buckets share a bound, so every sample lands in exactly one day.
+/// <see cref="DarlingFinOpsUtilizationReader.UtcDays"/> builds UTC days on their midnights; the Viewer builds the selected time
+/// display's days, whose bounds are the UTC instants that zone's midnights fall on.
+/// </summary>
+public readonly record struct DayBucket(DateTime Day, DateTime StartUtc, DateTime EndUtc);
+
+/// <summary>
 /// The FinOps Utilization reads (utilization efficiency, 7-day provisioning trend, memory-grant efficiency) as plain
 /// DTOs with naive-UTC times, shared by the viewer and any other reader of the store. The DuckDB→PG rewrite of
 /// Lite's <c>LocalDataService.FinOps.Utilization.cs</c> is near-verbatim (positional <c>$1/$2</c> params,
 /// PERCENTILE_CONT, <c>CAST(... AS DECIMAL(p,s))</c>, and <c>LEFT JOIN ... ON true</c> all run identically on PG); the
 /// ONE substantive change is that Lite's <c>server_info</c> CTE reads <c>v_server_properties</c>, which Darling has no
 /// view for, so it reads the collected <c>server_properties</c> base table directly (bare name resolves through the
-/// connection's Search Path). SQL kept in <c>public const</c> so tests pin it.
+/// connection's Search Path). SQL kept in <c>public const</c> so tests pin it. The two per-day reads bucket by a days table
+/// the caller passes (<see cref="DayBucket"/>): UTC days for a caller with no display, such as the MCP tools, and the selected
+/// time display's days for the Viewer.
 /// </summary>
 public static class DarlingFinOpsUtilizationReader
 {
@@ -152,47 +167,61 @@ CROSS JOIN mem_latest m
 LEFT JOIN server_info s ON true
 LEFT JOIN grants g ON true";
 
-    /// <summary>7-day daily provisioning classification trend. $1 server_id, $2 cutoff (naive UTC).</summary>
+    /// <summary>7-day daily provisioning classification trend. $1 server_id, $2 cutoff (naive UTC), $3 the days' labels (date[]),
+    /// $4 their starts and $5 their ends (timestamp[], naive UTC, half-open): one element per <see cref="DayBucket"/>.</summary>
     public const string ProvisioningTrendSql = @"
-WITH daily_cpu AS (
+WITH days AS (
+    SELECT day, start_utc, end_utc
+    FROM unnest($3::date[], $4::timestamp[], $5::timestamp[]) AS d(day, start_utc, end_utc)
+),
+daily_cpu AS (
     SELECT
-        CAST(collection_time AS DATE) AS day,
+        d.day,
         AVG(CAST(sqlserver_cpu_utilization AS DECIMAL(5,2))) AS avg_cpu_pct,
         MAX(sqlserver_cpu_utilization) AS max_cpu_pct,
         PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu_pct,
         COUNT(*) AS cpu_samples
     FROM v_cpu_utilization_stats
+    JOIN days d
+      ON collection_time >= d.start_utc
+     AND collection_time < d.end_utc
     WHERE server_id = $1
     AND   collection_time >= $2
-    GROUP BY CAST(collection_time AS DATE)
+    GROUP BY d.day
 ),
 daily_mem AS (
     SELECT
-        CAST(collection_time AS DATE) AS day,
+        d.day,
         AVG(total_server_memory_mb) AS avg_total_mb,
         AVG(buffer_pool_mb) AS avg_buffer_pool_mb,
         AVG(CAST(total_server_memory_mb AS DECIMAL(10,2)) / NULLIF(target_server_memory_mb, 0)) AS avg_memory_ratio,
         MAX(max_workers_count) AS max_workers_count,
         MAX(current_workers_count) AS current_workers_count
     FROM v_memory_stats
+    JOIN days d
+      ON collection_time >= d.start_utc
+     AND collection_time < d.end_utc
     WHERE server_id = $1
     AND   collection_time >= $2
-    GROUP BY CAST(collection_time AS DATE)
+    GROUP BY d.day
 ),
 /* Same pressure signals as the point-in-time read, per day, so a day cannot be classified by a rule
    the current verdict does not use (#2246). */
 daily_grants AS (
     SELECT
-        CAST(collection_time AS DATE) AS day,
+        d.day,
         MAX(waiter_count) AS max_grant_waiters,
         SUM(COALESCE(timeout_error_count_delta, 0)) AS grant_timeouts,
         SUM(COALESCE(forced_grant_count_delta, 0)) AS forced_grants,
         MAX(100.0 * granted_memory_mb / NULLIF(target_memory_mb, 0)) AS grant_utilization_pct
     FROM v_memory_grant_stats
+    JOIN days d
+      ON collection_time >= d.start_utc
+     AND collection_time < d.end_utc
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before id 1 was collected */
-    GROUP BY CAST(collection_time AS DATE)
+    GROUP BY d.day
 )
 SELECT
     c.day,
@@ -226,11 +255,16 @@ ORDER BY c.day";
 
     /// <summary>
     /// Memory-grant vs used efficiency per day from resource-semaphore snapshots (Optimization sub-tab).
-    /// $1 server_id, $2 cutoff (naive UTC).
+    /// $1 server_id, $2 cutoff (naive UTC), $3 the days' labels (date[]), $4 their starts and $5 their ends (timestamp[], naive UTC,
+    /// half-open): one element per <see cref="DayBucket"/>.
     /// </summary>
     public const string MemoryGrantEfficiencySql = @"
+WITH days AS (
+    SELECT day, start_utc, end_utc
+    FROM unnest($3::date[], $4::timestamp[], $5::timestamp[]) AS d(day, start_utc, end_utc)
+)
 SELECT
-    CAST(collection_time AS DATE) AS day,
+    d.day,
     AVG(granted_memory_mb) AS avg_granted_mb,
     AVG(used_memory_mb) AS avg_used_mb,
     CAST(AVG(used_memory_mb) * 100.0 / NULLIF(AVG(granted_memory_mb), 0) AS DECIMAL(5,1)) AS efficiency_pct,
@@ -240,11 +274,14 @@ SELECT
     SUM(timeout_error_count_delta) AS timeout_errors,
     SUM(forced_grant_count_delta) AS forced_grants
 FROM v_memory_grant_stats
+JOIN days d
+  ON collection_time >= d.start_utc
+ AND collection_time < d.end_utc
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before id 1 was collected */
-GROUP BY CAST(collection_time AS DATE)
-ORDER BY CAST(collection_time AS DATE)";
+GROUP BY d.day
+ORDER BY d.day";
 
     /// <summary>The last-24-hour utilization efficiency, or <c>null</c> when the store has no row to join.</summary>
     public static async Task<UtilizationEfficiencyDto?> GetUtilizationEfficiencyAsync(
@@ -311,16 +348,50 @@ ORDER BY CAST(collection_time AS DATE)";
             ProvisioningStatus: status);
     }
 
-    /// <summary>The 7-day daily provisioning classification trend, oldest day first.</summary>
-    public static async Task<List<ProvisioningTrendDto>> GetProvisioningTrendAsync(
+    /// <summary>
+    /// The 7-day daily provisioning classification trend, oldest day first, each row a UTC calendar day: the day a caller with no
+    /// display, such as the MCP tools, names. The days are the seven of <see cref="ProvisioningTrendWindow"/>: the six whole UTC
+    /// days before today and today so far.
+    /// </summary>
+    public static Task<List<ProvisioningTrendDto>> GetProvisioningTrendAsync(
         NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
     {
-        var cutoff = DateTime.UtcNow.AddDays(-7);
+        var nowUtc = DateTime.UtcNow;
+        var cutoff = ProvisioningTrendWindow.FirstDay(nowUtc);
+        return GetProvisioningTrendAsync(dataSource, serverId, cutoff, UtcDays(cutoff, nowUtc), commandTimeoutSeconds, cancellationToken);
+    }
+
+    /// <summary>
+    /// The daily provisioning classification trend of the samples at or after <paramref name="fromUtc"/>, oldest day first, each row
+    /// one of <paramref name="days"/>: the samples inside its bounds, labelled with its Day. The Viewer passes the selected time
+    /// display's days, so a row reads in the same clock as every other time on its page. The read keeps the newest
+    /// <see cref="ProvisioningTrendWindow.Days"/> of the days, so it never returns more rows than that, and marks a row partial
+    /// when its day has not ended on the wall clock: that day is judged on the hours so far.
+    /// </summary>
+    public static async Task<List<ProvisioningTrendDto>> GetProvisioningTrendAsync(
+        NpgsqlDataSource dataSource, int serverId, DateTime fromUtc, IReadOnlyList<DayBucket> days, int commandTimeoutSeconds,
+        CancellationToken cancellationToken = default)
+    {
+        /* The window's newest CPU sample, read first so the days run through it (#8503): the caller builds its days through its own
+           clock, and a sample the store's host wrote at or after the last day's end would otherwise match no day and leave the table.
+           The trend's rows come from the CPU samples, so with none in the window there is no row to return. */
+        if (await NewestSampleAsync(dataSource, ProvisioningTrendNewestSampleSql, serverId, fromUtc, commandTimeoutSeconds, cancellationToken) is not DateTime newest)
+        {
+            return [];
+        }
+        days = DaysThrough(days, newest);
+        if (days.Count > ProvisioningTrendWindow.Days)
+        {
+            days = days.Skip(days.Count - ProvisioningTrendWindow.Days).ToList();
+        }
+        var asOfUtc = DateTime.UtcNow;
+        var dayEnds = days.ToDictionary(d => d.Day.Date, d => d.EndUtc);
 
         await using var command = dataSource.CreateCommand(ProvisioningTrendSql);
         command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(fromUtc, DateTimeKind.Unspecified) });
+        AddDayBuckets(command, days);
 
         var items = new List<ProvisioningTrendDto>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -331,6 +402,15 @@ ORDER BY CAST(collection_time AS DATE)";
             var p95Cpu = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3));
             var memRatio = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4));
 
+            var maxGrantWaiters = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5));
+            var grantTimeouts = reader.IsDBNull(6) ? 0L : Convert.ToInt64(reader.GetValue(6));
+            var forcedGrants = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7));
+            var maxWorkers = reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9));
+            var currentWorkers = reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10));
+            var engineEdition = reader.IsDBNull(11) ? (int?)null : Convert.ToInt32(reader.GetValue(11));
+            decimal? stolenMemoryPercent = reader.IsDBNull(14) || reader.IsDBNull(15) || Convert.ToDouble(reader.GetValue(14)) <= 0
+                ? null
+                : (decimal)((Convert.ToDouble(reader.GetValue(14)) - Convert.ToDouble(reader.GetValue(15))) / Convert.ToDouble(reader.GetValue(14)) * 100.0);
             var status = ProvisioningVerdict.Evaluate(
                 avgCpu, maxCpu, p95Cpu,
                 maxGrantWaiters: reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
@@ -347,27 +427,56 @@ ORDER BY CAST(collection_time AS DATE)";
                     : (decimal)((Convert.ToDouble(reader.GetValue(14)) - Convert.ToDouble(reader.GetValue(15))) / Convert.ToDouble(reader.GetValue(14)) * 100.0),
                 isAgSecondary: ProvisioningVerdict.IsSecondaryReplicaRole(reader.IsDBNull(16) ? null : reader.GetString(16)));
 
+            var day = reader.GetDateTime(0);
             items.Add(new ProvisioningTrendDto(
-                reader.GetDateTime(0),
+                day,
                 avgCpu,
                 maxCpu,
                 p95Cpu,
                 memRatio,
-                status));
+                status,
+                stolenMemoryPercent,
+                /* The reason comes from the same place as the verdict, as the Viewer's badge does. */
+                status == ProvisioningVerdict.UnderProvisioned
+                    ? ProvisioningVerdict.UnderProvisionedReason(p95Cpu, maxGrantWaiters, grantTimeouts, forcedGrants, maxWorkers, currentWorkers, stolenMemoryPercent, engineEdition)
+                    : null,
+                IsPartial: dayEnds.TryGetValue(day.Date, out var dayEnd) && dayEnd > asOfUtc));
         }
         return items;
     }
 
-    /// <summary>Memory-grant vs used efficiency per day over the last <paramref name="hoursBack"/> hours.</summary>
-    public static async Task<List<MemoryGrantEfficiencyDto>> GetMemoryGrantEfficiencyAsync(
+    /// <summary>
+    /// Memory-grant vs used efficiency over the last <paramref name="hoursBack"/> hours, each row a UTC calendar day: the day a caller
+    /// with no display, such as the MCP tools, names.
+    /// </summary>
+    public static Task<List<MemoryGrantEfficiencyDto>> GetMemoryGrantEfficiencyAsync(
         NpgsqlDataSource dataSource, int serverId, int hoursBack, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
     {
-        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+        var nowUtc = DateTime.UtcNow;
+        var cutoff = nowUtc.AddHours(-hoursBack);
+        return GetMemoryGrantEfficiencyAsync(dataSource, serverId, cutoff, UtcDays(cutoff, nowUtc), commandTimeoutSeconds, cancellationToken);
+    }
+
+    /// <summary>
+    /// Memory-grant vs used efficiency of the samples at or after <paramref name="fromUtc"/>, each row one of <paramref name="days"/>:
+    /// the samples inside its bounds, labelled with its Day. The Viewer passes the selected time display's days.
+    /// </summary>
+    public static async Task<List<MemoryGrantEfficiencyDto>> GetMemoryGrantEfficiencyAsync(
+        NpgsqlDataSource dataSource, int serverId, DateTime fromUtc, IReadOnlyList<DayBucket> days, int commandTimeoutSeconds,
+        CancellationToken cancellationToken = default)
+    {
+        /* The window's newest grant sample, read first so the days run through it (#8503), as the provisioning trend does. */
+        if (await NewestSampleAsync(dataSource, MemoryGrantEfficiencyNewestSampleSql, serverId, fromUtc, commandTimeoutSeconds, cancellationToken) is not DateTime newest)
+        {
+            return [];
+        }
+        days = DaysThrough(days, newest);
 
         await using var command = dataSource.CreateCommand(MemoryGrantEfficiencySql);
         command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(fromUtc, DateTimeKind.Unspecified) });
+        AddDayBuckets(command, days);
 
         var items = new List<MemoryGrantEfficiencyDto>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -385,5 +494,88 @@ ORDER BY CAST(collection_time AS DATE)";
                 reader.IsDBNull(8) ? 0 : Convert.ToInt64(reader.GetValue(8))));
         }
         return items;
+    }
+
+    /// <summary>The newest CPU sample at or after $2 for server $1: the newest sample <see cref="ProvisioningTrendSql"/> can return,
+    /// since its rows come from the CPU samples.</summary>
+    internal const string ProvisioningTrendNewestSampleSql = @"
+SELECT MAX(collection_time)
+FROM v_cpu_utilization_stats
+WHERE server_id = $1
+AND   collection_time >= $2";
+
+    /// <summary>The newest regular-semaphore grant sample at or after $2 for server $1: the newest sample
+    /// <see cref="MemoryGrantEfficiencySql"/> can return.</summary>
+    internal const string MemoryGrantEfficiencyNewestSampleSql = @"
+SELECT MAX(collection_time)
+FROM v_memory_grant_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before id 1 was collected */";
+
+    /// <summary>The newest sample a per-day read can return, by its own statement, or null with no sample in the window.</summary>
+    private static async Task<DateTime?> NewestSampleAsync(
+        NpgsqlDataSource dataSource, string sql, int serverId, DateTime fromUtc, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        await using var command = dataSource.CreateCommand(sql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(fromUtc, DateTimeKind.Unspecified) });
+        return await command.ExecuteScalarAsync(cancellationToken) is DateTime latest ? latest : null;
+    }
+
+    /// <summary>
+    /// <paramref name="days"/>, with days appended until the last one ends after <paramref name="latest"/>, the window's newest
+    /// sample. The caller builds its days through its own clock, and a sample stamped at or after the last day's end, which the
+    /// store's host writes when the caller's clock trails it, would otherwise match no day and leave the read's rows. Each appended
+    /// day starts where the last one ends and runs a day; one with no sample adds no row, since every per-day read takes its rows
+    /// from the samples.
+    /// </summary>
+    internal static IReadOnlyList<DayBucket> DaysThrough(IReadOnlyList<DayBucket> days, DateTime latest)
+    {
+        if (days.Count == 0 || days[^1].EndUtc > latest)
+        {
+            return days;
+        }
+
+        var covered = new List<DayBucket>(days);
+        while (covered[^1].EndUtc <= latest)
+        {
+            var last = covered[^1];
+            covered.Add(new DayBucket(last.Day.AddDays(1), last.EndUtc, last.EndUtc.AddDays(1)));
+        }
+        return covered;
+    }
+
+    /// <summary>
+    /// The UTC calendar days from <paramref name="fromUtc"/> to <paramref name="toUtc"/>, each bounded by its midnights: what a read
+    /// with no display buckets by, and the day the MCP <c>day</c> field names.
+    /// </summary>
+    public static List<DayBucket> UtcDays(DateTime fromUtc, DateTime toUtc)
+    {
+        var (first, last) = fromUtc <= toUtc ? (fromUtc, toUtc) : (toUtc, fromUtc);
+        var days = new List<DayBucket>();
+        for (var day = first.Date; day <= last.Date; day = day.AddDays(1))
+        {
+            days.Add(new DayBucket(day, day, day.AddDays(1)));
+        }
+        return days;
+    }
+
+    /// <summary>The days of a per-day read as its next three parameters: the days' labels, starts and ends as three arrays, one element per day.</summary>
+    internal static void AddDayBuckets(NpgsqlCommand command, IReadOnlyList<DayBucket> days)
+    {
+        var labels = new DateOnly[days.Count];
+        var starts = new DateTime[days.Count];
+        var ends = new DateTime[days.Count];
+        for (var i = 0; i < days.Count; i++)
+        {
+            labels[i] = DateOnly.FromDateTime(days[i].Day);
+            starts[i] = DateTime.SpecifyKind(days[i].StartUtc, DateTimeKind.Unspecified);
+            ends[i] = DateTime.SpecifyKind(days[i].EndUtc, DateTimeKind.Unspecified);
+        }
+        command.Parameters.Add(new NpgsqlParameter { Value = labels, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date });
+        command.Parameters.Add(new NpgsqlParameter { Value = starts, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp });
+        command.Parameters.Add(new NpgsqlParameter { Value = ends, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp });
     }
 }

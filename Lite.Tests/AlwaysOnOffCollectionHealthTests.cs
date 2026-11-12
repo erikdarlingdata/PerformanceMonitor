@@ -96,7 +96,7 @@ public sealed class AlwaysOnOffCollectionHealthTests : IClassFixture<SharedDuckD
         }
 
         var note = root.GetProperty("collector_detail_note").GetString()!;
-        Assert.StartsWith("1 of 1 collector(s) below are HEALTHY", note, StringComparison.Ordinal);
+        Assert.StartsWith("1 of 1 collector below is HEALTHY", note, StringComparison.Ordinal);
         Assert.Contains(" 0 need a look", note, StringComparison.Ordinal);
     }
 
@@ -112,7 +112,7 @@ public sealed class AlwaysOnOffCollectionHealthTests : IClassFixture<SharedDuckD
 
         Assert.Equal(2, ag.Count);
         Assert.All(ag, row => Assert.Equal("HEALTHY", row.GetProperty("status").GetString()));
-        Assert.StartsWith("1 of 3 collector(s) below are HEALTHY", root.GetProperty("collector_detail_note").GetString()!, StringComparison.Ordinal);
+        Assert.StartsWith("1 of 3 collectors below is HEALTHY", root.GetProperty("collector_detail_note").GetString()!, StringComparison.Ordinal);
     }
 
     [Fact]

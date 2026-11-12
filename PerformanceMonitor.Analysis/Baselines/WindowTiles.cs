@@ -34,15 +34,41 @@ public static class WindowTiles
     /// </summary>
     public const string LocalHourSql = "date_trunc('hour', " + BaselineLocalClock.LocalCollectionTimeSql + ")";
 
+    /// <summary>#8293: the column every tiled statement returns the tile's distinct collection instants under.</summary>
+    public const string CollectionsColumn = "tile_collections";
+
+    /// <summary>#8293: the column every tiled statement returns the seconds from the tile's first collection instant
+    /// to its last under.</summary>
+    public const string CollectionSpanSecondsColumn = "tile_span_seconds";
+
+    /// <summary>
+    /// #8293: the two coverage columns every tiled statement appends after its own columns — the tile's distinct
+    /// collection instants and the seconds from its first instant to its last, both measured from the rows' own
+    /// <c>collection_time</c> — so <see cref="ReadTile"/> fills <see cref="WindowTile.Collections"/> and
+    /// <see cref="WindowTile.CollectionSpan"/> for every family without moving any family's ordinal contract.
+    /// Counts instants, not rows, because the I/O families carry several file rows per collection. Runs on
+    /// PostgreSQL and DuckDB alike. Every tiled statement's FROM exposes <c>collection_time</c>, since the tile
+    /// key <see cref="LocalHourSql"/> is built over it, and sees every collection the collector wrote: a statement
+    /// that filters rows on activity keeps that filter on its value aggregates, or joins the collections it would
+    /// drop back in, so an idle hour the collector wrote every minute is still a covered hour and only the active
+    /// rows are samples.
+    /// </summary>
+    public const string CoverageColumnsSql =
+        "COUNT(DISTINCT collection_time) AS " + CollectionsColumn + @",
+       extract(epoch FROM (date_trunc('second', MAX(collection_time)) - date_trunc('second', MIN(collection_time)))) AS " + CollectionSpanSecondsColumn;
+
     /// <summary>
     /// The whole-window aggregate the never-blind fallback feeds to today's <c>EvaluateZScore</c> when no
-    /// tile clears <c>AnomalyThresholds.MinTileSamples</c> (design §1's "Never-blind rule"): peak is the
+    /// tile can be scored (design §1's "Never-blind rule", <c>AnomalyGate.EvaluateTiles</c> null): peak is the
     /// max of the tiles' peaks, mean is the samples-weighted mean, samples is the sum, <see cref="WindowTile.PeakTimeUtc"/>
     /// is the max-peak tile's (a tie goes to the LATER tile), and <see cref="WindowTile.LocalHour"/> is the
     /// earliest tile's.
     ///
     /// <para>An empty list, or a list whose samples sum to zero, returns <c>default</c> with
     /// <c>Samples == 0</c> — the caller treats that exactly as today's early "no data" return.</para>
+    ///
+    /// <para>The aggregate carries no coverage (<see cref="WindowTile.Collections"/> 0): it is judged by the
+    /// whole-window gate, which the tile gate's coverage rule decides whether to reach.</para>
     /// </summary>
     public static WindowTile WholeWindow(IReadOnlyList<WindowTile> tiles)
     {
@@ -143,6 +169,10 @@ public static class WindowTiles
     /// time. Uses <see cref="Convert.ToDouble(object)"/> and <see cref="Convert.ToInt64(object)"/> because
     /// Npgsql and DuckDB hand back different numeric CLR types for the same SQL numeric column — this
     /// works for both <c>NpgsqlDataReader</c> and <c>DuckDBDataReader</c>.
+    /// <para>#8293: the two coverage columns (<see cref="CollectionsColumn"/>, <see cref="CollectionSpanSecondsColumn"/>)
+    /// are read by NAME, because <see cref="CoverageColumnsSql"/> appends them after each family's own columns and
+    /// no family's ordinal contract moves. A row without them, or with DBNull there, leaves
+    /// <see cref="WindowTile.Collections"/> at 0, and the gate does not score such a tile.</para>
     /// </summary>
     public static WindowTile ReadTile(
         IDataRecord r,
@@ -164,6 +194,71 @@ public static class WindowTiles
             peakTimeUtc = r.GetDateTime(peakTimeOrdinal);
         }
 
-        return new WindowTile(localHour, peak, mean, samples, peakTimeUtc);
+        long collections = 0;
+        var collectionSpan = TimeSpan.Zero;
+        for (var i = 0; i < r.FieldCount; i++)
+        {
+            var name = r.GetName(i);
+            if (name == CollectionsColumn && !r.IsDBNull(i))
+            {
+                collections = Convert.ToInt64(r.GetValue(i));
+            }
+            else if (name == CollectionSpanSecondsColumn && !r.IsDBNull(i))
+            {
+                collectionSpan = TimeSpan.FromSeconds(Convert.ToDouble(r.GetValue(i)));
+            }
+        }
+
+        return new WindowTile(localHour, peak, mean, samples, peakTimeUtc, collections, collectionSpan);
+    }
+
+    /// <summary>
+    /// #8293: the collector's cadence as the window's own tiles measure it — the mean gap between consecutive
+    /// collection instants in the FULLEST tile, the one holding the most distinct instants (at least
+    /// <paramref name="minCollections"/>, never fewer than two), ties to the shorter gap. The fullest, for two
+    /// reasons: a gap inside a tile can only stretch that tile's mean gap, and the fullest tile has the fewest gaps;
+    /// and a sparse tile's instants can sit seconds apart (a collector restart, a run-now) without saying anything
+    /// about the cadence — read from such a tile, a few seconds would price every full hour as uncovered and leave
+    /// the window blind. <c>null</c> when no tile holds enough instants to measure one, which leaves every tile's
+    /// coverage unknown.
+    /// </summary>
+    public static TimeSpan? CollectionCadence(IReadOnlyList<WindowTile> tiles, int minCollections)
+    {
+        TimeSpan? cadence = null;
+        long fullest = 0;
+        var floor = Math.Max(2, minCollections);
+        foreach (var tile in tiles)
+        {
+            if (tile.Collections < floor || tile.CollectionSpan <= TimeSpan.Zero)
+            {
+                continue;
+            }
+
+            var gap = TimeSpan.FromTicks(tile.CollectionSpan.Ticks / (tile.Collections - 1));
+            if (cadence is null || tile.Collections > fullest || (tile.Collections == fullest && gap < cadence.Value))
+            {
+                cadence = gap;
+                fullest = tile.Collections;
+            }
+        }
+
+        return cadence;
+    }
+
+    /// <summary>#8293: how much of its hour a tile's collection covers — its collection instants, each worth one
+    /// <paramref name="cadence"/>. A gap leaves instants out, and so leaves that time uncovered.</summary>
+    public static TimeSpan CoveredTime(WindowTile tile, TimeSpan cadence)
+        => TimeSpan.FromTicks(tile.Collections * cadence.Ticks);
+
+    /// <summary>#8293: how much of the window the tiles' collection covers in all — the per-tile figures summed.</summary>
+    public static TimeSpan CoveredTime(IReadOnlyList<WindowTile> tiles, TimeSpan cadence)
+    {
+        long ticks = 0;
+        foreach (var tile in tiles)
+        {
+            ticks += tile.Collections * cadence.Ticks;
+        }
+
+        return TimeSpan.FromTicks(ticks);
     }
 }

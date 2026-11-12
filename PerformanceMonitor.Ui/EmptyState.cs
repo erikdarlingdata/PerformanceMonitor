@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Documents;
 using System.Windows.Media;
 
@@ -53,6 +54,9 @@ public static class EmptyState
     /// </summary>
     public static void Show(FrameworkElement surface, bool isEmpty, string? text = null, bool clearOfBaseline = false)
     {
+        /* #8647: a read came back, so the sentence that held the place until it did is done, whichever answer the read gave. */
+        ShowLoading(surface, false);
+
         var anchor = Anchor(surface);
         if (anchor.Parent is not Grid parent)
         {
@@ -97,6 +101,121 @@ public static class EmptyState
 
         existing.Text = text ?? GetText(surface) ?? DefaultGridText;
         existing.Visibility = isEmpty ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>What a surface says between the moment its tab is picked and the moment its first read returns (#8647).</summary>
+    public const string LoadingText = "Loading...";
+
+    /// <summary>The name given to the loading element this class makes, so it is found again and never doubled.</summary>
+    public const string LoadingElementName = "LoadingText";
+
+    /// <summary>
+    /// #8647: shows <see cref="LoadingText"/> over <paramref name="surface"/> when <paramref name="loading"/>, hides it otherwise.
+    /// The text sits where <see cref="Show"/>'s sentence sits and wears the same muted look, so the empty-state sentence replaces it
+    /// in place once a read returns no rows. Nothing happens when the surface has no Grid cell to put it in.
+    /// </summary>
+    public static void ShowLoading(FrameworkElement surface, bool loading)
+    {
+        var anchor = Anchor(surface);
+        if (anchor.Parent is not Grid parent)
+        {
+            return;
+        }
+
+        var name = LoadingElementName + "_" + SurfaceKey(surface);
+        var existing = parent.Children.OfType<TextBlock>().FirstOrDefault(t => t.Name == name);
+
+        if (existing is null)
+        {
+            if (!loading)
+            {
+                return;
+            }
+
+            existing = new TextBlock
+            {
+                Name = name,
+                Text = LoadingText,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = TextAlignment.Center,
+                TextWrapping = TextWrapping.Wrap,
+                IsHitTestVisible = false,
+            };
+            existing.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundMutedBrush");
+            Grid.SetRow(existing, Grid.GetRow(anchor));
+            Grid.SetColumn(existing, Grid.GetColumn(anchor));
+            Grid.SetRowSpan(existing, Grid.GetRowSpan(anchor));
+            Grid.SetColumnSpan(existing, Grid.GetColumnSpan(anchor));
+            Panel.SetZIndex(existing, 5);
+            parent.Children.Add(existing);
+        }
+
+        existing.Visibility = loading ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>True when <see cref="ShowLoading"/> has ever put its text on <paramref name="surface"/>, shown or since hidden.</summary>
+    public static bool HasLoadingText(FrameworkElement surface)
+        => Anchor(surface).Parent is Grid parent
+            && parent.Children.OfType<TextBlock>().Any(t => t.Name == LoadingElementName + "_" + SurfaceKey(surface));
+
+    /// <summary>True while <see cref="LoadingText"/> is on screen over <paramref name="surface"/>.</summary>
+    public static bool IsShowingLoading(FrameworkElement surface)
+        => Anchor(surface).Parent is Grid parent
+            && parent.Children.OfType<TextBlock>().Any(t => t.Name == LoadingElementName + "_" + SurfaceKey(surface) && t.Visibility == Visibility.Visible);
+
+    /// <summary>
+    /// #8647: puts <see cref="LoadingText"/> over a grid nobody has given rows to yet (its <see cref="ItemsControl.ItemsSource"/> is
+    /// null) and takes it away the moment a read assigns one, rows or none: the empty-state sentence or the rows then take its place.
+    /// Done once per grid: a grid that already carries the text, shown or hidden, is left alone, so a tab picked again never
+    /// says "Loading..." over rows it already holds. Returns true when it put the text up.
+    /// </summary>
+    public static bool ShowLoadingUntilRead(DataGrid grid)
+    {
+        if (grid.ItemsSource is not null || HasLoadingText(grid))
+        {
+            return false;
+        }
+
+        ShowLoading(grid, true);
+        if (!HasLoadingText(grid))
+        {
+            return false;
+        }
+
+        /* #8535: the grid's own binding watches its ItemsSource, not DependencyPropertyDescriptor.AddValueChanged. That one records the
+           grid in a table that lives as long as the process until RemoveValueChanged runs, and it ran only when rows arrived. A grid
+           whose read never assigned any (a sub-tab never picked, a read that failed, a tab closed first) stayed in that table, and
+           through the grid's column templates the whole closed server tab stayed with it: every chart's device-pixel bitmap, 600 to
+           700 MB a tab at 250% display scaling. A binding keeps its listener on the grid itself, so it is collected with the grid. */
+        BindingOperations.SetBinding(grid, RowsArrivedWatchProperty, new Binding
+        {
+            Source = grid,
+            Path = new PropertyPath(ItemsControl.ItemsSourceProperty),
+            Mode = BindingMode.OneWay,
+        });
+        return true;
+    }
+
+    /// <summary>
+    /// Bound to a grid's own <see cref="ItemsControl.ItemsSource"/> by <see cref="ShowLoadingUntilRead"/> while its "Loading..." text
+    /// is up: the first non-null value takes the text away and ends the binding.
+    /// </summary>
+    private static readonly DependencyProperty RowsArrivedWatchProperty = DependencyProperty.RegisterAttached(
+        "RowsArrivedWatch",
+        typeof(object),
+        typeof(EmptyState),
+        new PropertyMetadata(null, OnRowsArrived));
+
+    private static void OnRowsArrived(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (e.NewValue is null || d is not DataGrid grid)
+        {
+            return;
+        }
+
+        BindingOperations.ClearBinding(grid, RowsArrivedWatchProperty);
+        ShowLoading(grid, false);
     }
 
     /// <summary>The name given to the filtered-out element, so it is found again and never doubled.</summary>

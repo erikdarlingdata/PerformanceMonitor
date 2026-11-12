@@ -74,7 +74,7 @@ public partial class AlertsHistoryTab : UserControl
         RangePicker.Value = TimeRangePresets.FromLegacyHours(24)!; /* 24 hours, as the list opened */
         /* #5562 M1: typed times and calendar periods are read in the zone the Time column is worded in (the display mode), as the
            Darling Viewer's Alert History does with its display zone. */
-        RangePicker.ZoneProvider = () => ServerTimeHelper.CurrentDisplayZone;
+        RangePicker.ZoneProvider = PickerZone;
         /* R8: "All" is a span of 365 days, longer than anything Lite keeps (archive files are deleted by whole month, 3 months
            back, so rows older than 3 months survive until their month's file goes), through the shared control's longest choice. */
         RangePicker.SetLongestChoice(LiteTimeRange.AlertHistoryLongestChoice, "All");
@@ -98,6 +98,50 @@ public partial class AlertsHistoryTab : UserControl
         _staleDataTimer.Start();
     }
 
+    /// <summary>The distinct servers this tab's reads have listed. A list that has shown more than one server is a list of several
+    /// servers for the rest of its life, whatever one read returns.</summary>
+    private readonly HashSet<int> _serversSeen = new();
+
+    /// <summary>
+    /// True while the list spans servers: no server is picked in the Server filter and the reads have listed more than one. Such
+    /// a list reads on one clock (<see cref="PerformanceMonitor.Ui.MultiServerTime"/>), and the header, the range picker and the
+    /// rows all take it from here, so the clock does not change when a read comes back empty or the range changes.
+    /// </summary>
+    internal bool ListSpansServers => GetSelectedServerId() is null && _serversSeen.Count > 1;
+
+    /// <summary>The clock each server's rows were stamped with by the last reads (#8645), so the picker words a range in the zone the rows beside it use.</summary>
+    private readonly Dictionary<int, ServerClock> _rowClocks = new();
+
+    /// <summary>The zone the range picker reads typed times and calendar periods in (#8645): <see cref="PickerZoneFor"/> for the server this
+    /// list is on, which is the picked server, else the one server every read so far listed, else none.</summary>
+    private TimeZoneInfo PickerZone()
+    {
+        int? serverId = ListSpansServers ? null : GetSelectedServerId() ?? (_serversSeen.Count == 1 ? _serversSeen.First() : null);
+        return PickerZoneFor(ServerTimeHelper.CurrentDisplayMode, serverId, _rowClocks, _openTabClock, TimeZoneInfo.Local);
+    }
+
+    /// <summary>
+    /// The zone the range picker words a range in (#8645). This tab covers every server unless one is picked, so it never takes the
+    /// clock of whichever server tab was opened last (<c>ServerTimeHelper.ActiveServerClock</c>): with no server to name it reads the
+    /// one clock a view of several servers reads on (<see cref="PerformanceMonitor.Ui.MultiServerTime.MixedZone(TimeDisplayMode, TimeZoneInfo)"/>:
+    /// UTC in UTC mode, this machine's zone otherwise), as Job History does. With one server it is that server's clock, the one its rows
+    /// were stamped with, else its open tab's, and the machine's zone when neither is known. Pure, so a test names the mode and the machine.
+    /// </summary>
+    internal static TimeZoneInfo PickerZoneFor(
+        TimeDisplayMode mode, int? serverId, IReadOnlyDictionary<int, ServerClock> rowClocks,
+        Func<int, ServerClock?>? openTabClock, TimeZoneInfo machine)
+    {
+        if (serverId is not int one)
+        {
+            return PerformanceMonitor.Ui.MultiServerTime.MixedZone(mode, machine);
+        }
+
+        var clock = rowClocks.TryGetValue(one, out var stamped) ? stamped : openTabClock?.Invoke(one);
+        return clock is null
+            ? PerformanceMonitor.Ui.MultiServerTime.MixedZone(mode, machine)
+            : ServerTimeHelper.DisplayZoneFor(mode, clock);
+    }
+
     /// <summary>
     /// Refreshes the alert history data.
     /// </summary>
@@ -110,6 +154,21 @@ public partial class AlertsHistoryTab : UserControl
     /// rows the grid shows. Split out of the load so a test can drive it with rows (#5542 L6).</summary>
     internal int ShowAlerts(List<AlertHistoryRow> alerts)
     {
+        _serversSeen.UnionWith(alerts.Select(a => a.ServerId));
+        foreach (var row in alerts)
+        {
+            if (row.Clock is { } rowClock) _rowClocks[row.ServerId] = rowClock;
+        }
+
+        if (ListSpansServers)
+        {
+            /* One read of a list of several servers may hold one server's rows: they still draw on the list's clock. */
+            foreach (var row in alerts)
+            {
+                row.MixedServers = true;
+            }
+        }
+
         if (_filterManager != null)
             _filterManager.UpdateData(alerts);
         else
@@ -117,7 +176,9 @@ public partial class AlertsHistoryTab : UserControl
 
         var displayCount = AlertsDataGrid.ItemsSource is ICollection<AlertHistoryRow> coll ? coll.Count : alerts.Count;
         NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-        AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ServerTimeHelper.CurrentDisplayMode, alerts.Any(a => a.MixedServers)); // D5: the column names its clock
+        DismissAllButton.IsEnabled = displayCount > 0 && !_dismissInFlight;
+        AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ServerTimeHelper.CurrentDisplayMode, ListSpansServers); // D5: the column names its clock
+        RangePicker.Refresh(); // the range label names the same clock
         DataGridHeaderFit.Apply(AlertsDataGrid); // #6136: the longer title widens its column
         /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
         _lastReadRowCount = alerts.Count;
@@ -322,7 +383,7 @@ public partial class AlertsHistoryTab : UserControl
 
         ColumnFilterState? existingFilter = null;
         _filterManager?.Filters.TryGetValue(columnName, out existingFilter);
-        _filterPopupContent!.Initialize(columnName, existingFilter);
+        _filterPopupContent!.Initialize(columnName, existingFilter, columnHeader: ColumnFilterPopup.ColumnHeaderFor(button));
 
         _filterPopup.PlacementTarget = button;
         _filterPopup.IsOpen = true;
@@ -398,7 +459,7 @@ public partial class AlertsHistoryTab : UserControl
     private void SetDismissInFlight(bool inFlight)
     {
         _dismissInFlight = inFlight;
-        DismissAllButton.IsEnabled = !inFlight;
+        DismissAllButton.IsEnabled = !inFlight && AlertsDataGrid.Items.Count > 0;
         DismissWaitIndicator.Visibility = inFlight ? Visibility.Visible : Visibility.Collapsed;
         if (inFlight)
         {

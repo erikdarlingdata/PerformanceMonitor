@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// rows are bound, and everything is read from the realized controls (<see cref="GridPolishProbe"/>): where each column starts, whether its header and
 /// its values end on the same edge, whether a header carries the filter button, and whether long text is trimmed with an ellipsis and a tooltip.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerGridPolishRound2Tests
 {
     private static readonly string[] Themes = { "DarkTheme", "LightTheme", "CoolBreezeTheme" };
@@ -50,19 +51,27 @@ public sealed class ViewerGridPolishRound2Tests
             views.AddRange(StaTestThread.Run(() => WithTheme(theme, () =>
             {
                 FrameworkElement tab = tabKind == "FinOps" ? new FinOpsTab() : NewServerTab();
-                var found = new List<View>();
-                foreach (var c in cases)
+                try
                 {
-                    var grid = GridColumnLayoutProbe.Detach(tab, c.Grid);
-                    foreach (var window in WindowWidths)
+                    var found = new List<View>();
+                    foreach (var c in cases)
                     {
-                        var rows = GridPolishProbe.Rows(c.Row, 3, c.Values);
-                        var cols = GridPolishProbe.Measure(grid, rows, GridWidth(window), GridPolishProbe.PngPath("Viewer" + tabKind, c.Grid, theme, window));
-                        found.Add(new View($"{theme} {window:0}", c.Grid, window, GridWidth(window), cols));
+                        var grid = GridColumnLayoutProbe.Detach(tab, c.Grid);
+                        foreach (var window in WindowWidths)
+                        {
+                            var rows = GridPolishProbe.Rows(c.Row, 3, c.Values);
+                            var cols = GridPolishProbe.Measure(grid, rows, GridWidth(window), GridPolishProbe.PngPath("Viewer" + tabKind, c.Grid, theme, window));
+                            found.Add(new View($"{theme} {window:0}", c.Grid, window, GridWidth(window), cols));
+                        }
                     }
-                }
 
-                return found;
+                    return found;
+                }
+                finally
+                {
+                    /* The tab is never shown, so no window's Closed stops its auto-refresh timer (#8367); dispose it here. */
+                    (tab as ViewerServerTab)?.Dispose();
+                }
             })));
         }
 
@@ -311,7 +320,7 @@ public sealed class ViewerGridPolishRound2Tests
             parent.Children.Remove(list);
             var window = new Window { Content = list, Width = 280, Height = 400, Left = 0, Top = 0 };
             list.ItemsSource = new[] { new SelectableItem { DisplayName = LongName, IsSelected = false } };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ClippedTextProbe.Settle(window);
@@ -329,6 +338,8 @@ public sealed class ViewerGridPolishRound2Tests
             }
             finally
             {
+                /* The tab is never shown, so no window's Closed stops its auto-refresh timer (#8367); dispose it here. */
+                tab.Dispose();
                 window.Content = null;
                 window.Close();
             }
@@ -370,17 +381,21 @@ public sealed class ViewerGridPolishRound2Tests
         {
             var previous = ThemeManager.CurrentTheme;
             ThemeManager.ThemeUriProvider = name => new Uri($"pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/{name}Theme.xaml");
+            ViewerServerTab? tab = null;
             try
             {
                 /* As the app starts: the theme comes in through ThemeManager.Apply (with the shared styles), then the tab is built. */
                 ThemeManager.Apply("Dark");
-                var grid = GridColumnLayoutProbe.Detach(NewServerTab(), "ServerConfigGrid");
+                tab = NewServerTab();
+                var grid = GridColumnLayoutProbe.Detach(tab, "ServerConfigGrid");
                 var rows = GridPolishProbe.Rows(typeof(ServerConfigRow), 3, new Dictionary<string, object?> { ["ValueConfigured"] = 5L, ["ValueInUse"] = 5L });
                 return GridPolishProbe.HeaderLooksAfterThemeSwitches(grid, rows, GridWidth(1280), "Dark", new[] { "Light", "CoolBreeze" },
                     theme => GridPolishProbe.PngPath("ViewerServer", "ServerConfigGrid-after-switch", theme, 1280));
             }
             finally
             {
+                /* The tab is never shown, so no window's Closed stops its auto-refresh timer (#8367); dispose it here. */
+                tab?.Dispose();
                 ThemeManager.Apply(previous);
                 ThemeManager.ThemeUriProvider = ThemeManager.ThemeUri;
             }

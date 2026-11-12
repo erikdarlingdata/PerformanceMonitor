@@ -480,12 +480,13 @@ public sealed partial class DarlingWorker
                 var attentionEnabled = StoreConfigProvider.ResolveSchedule("attention", server.Config.ServerId, _scheduleOverrides).Enabled;
                 var captureOutcome = new DarlingXeSessions.CaptureEnsureOutcome();
                 var attentionFault = await DarlingXeSessions.EnsureAllAsync(runtime, runner, _logger, cancellationToken, attentionEnabled, captureOutcome);
-                server.AttentionXePermissionFault = attentionFault?.Message;
-                captureOutcome.CarryForwardTransient(server.CaptureEnsure);
-                server.CaptureEnsure = captureOutcome;
                 server.AttentionXeEnsuredWhileEnabled = attentionEnabled;
                 server.XeSessionsEnsuredAtUtc = DateTime.UtcNow;
-                ApplyTransientEnsureRetry(server, captureOutcome, DateTime.UtcNow);
+
+                /* #8528: the same hand-off as the sweep's ensure, so a session this connect's ensure started awaits its read too. A
+                   capture run that recorded SESSION_MISSING before the connection was dropped is not a capture that is down once the
+                   reconnect has started its session. */
+                ApplyCaptureEnsure(server, captureOutcome, attentionFault, DateTime.UtcNow);
             }
 
             /* On-load config snapshots (effective FrequencyMinutes 0) run once per connect, then every
@@ -841,6 +842,36 @@ public sealed partial class DarlingWorker
     }
 
     /// <summary>
+    /// #8361: whether the server's last known role leaves <c>query_store_hints</c> nothing to read: every database in its newest
+    /// <c>query_store_health</c> capture that Query Store is on for is a readable secondary, or, with no such database, its newest
+    /// <c>ag_replica_role</c> reads Secondary; never when a <c>query_store_replica</c> is set for it. The same store facts the Query
+    /// Store reads' <c>not_collected</c> answer is built from (<see cref="DarlingQueryStoreReadableSecondary"/>), read on each call.
+    /// The capture counts while the <c>query_store_health</c> collector's effective schedule lets it refresh on this server;
+    /// disabled, the capture is frozen: a PRIMARY or SECONDARY role overrules it, and under any other role the newest query_store run
+    /// decides, so a failover reaches the gate while a readable standby whose run reads nothing stays gated, as the reads judge it
+    /// (#8402). #8541: the collector's own newest run that stored no row keeps the gate closed for an hour whatever the capture
+    /// and the role read (the forwarder of a distributed availability group reads PRIMARY, and a capture ages out of retention),
+    /// then one run goes through and reads each database's <c>readonly_reason</c> again. The read runs in the
+    /// sweep body and carries the sweep deadline like every other store command there. False when the store cannot answer, so the collector runs.
+    /// </summary>
+    internal async Task<bool> QueryStoreHintsStandsDownAsync(ServerLoopState server, ServerRuntime runtime, CancellationToken cancellationToken)
+    {
+        if (QueryStoreReadableSecondaryOverride is { } answer)
+        {
+            return answer(runtime.ServerId);
+        }
+
+        if (_postgres is null)
+        {
+            return false;
+        }
+
+        var healthCaptureRefreshes = StoreConfigProvider.ResolveSchedule(QueryStoreHealthCollector.Instance.Name, runtime.ServerId, _scheduleOverrides).Enabled;
+        return await DarlingQueryStoreReadableSecondary.GateStandsDownAsync(
+            _postgres, runtime.ServerId, server.Config.DisplayName, healthCaptureRefreshes, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+    }
+
+    /// <summary>
     /// One server's scheduled collector pass: runs, or detaches, every collector that has come due. Internal
     /// (#4938) so a test can drive the pass with <see cref="RunOneBodyOverride"/> standing in for the collector
     /// runs; production calls it only from the per-server body.
@@ -1068,6 +1099,27 @@ public sealed partial class DarlingWorker
                             server.Config.DisplayName, name, server.RefusedBackoff.Streak(name));
                         continue;
                     }
+
+                    /* #8361: query_store_hints on a server whose every Query Store database is a readable secondary. The collector's
+                       statement skips such a database (readonly_reason & 8), so a run there reads the database list, collects
+                       nothing and logs a success with zero rows every slot, which get_collection_health reads as a run that needs
+                       a look. The slot is served like the backoff's above (counted, the stamp moved on) and the run is skipped, so
+                       no collection_log row is written. The answer comes from three facts in the store: the
+                       newest query_store_health capture, ag_replica_role when that capture has no database Query Store is read
+                       for, and the collector's own newest run, which is the only one left once the capture has aged out of
+                       retention. It is asked again at every slot. A server that becomes a secondary stops at its next slot; one
+                       stood down on its own run that stored no row runs again once that run is an hour old, so a promoted
+                       forwarder is found within the hour.
+                       A store that cannot answer runs the collector. get_collection_health lists the collector as not_collected
+                       with the same sentence. */
+                    if (string.Equals(name, QueryStoreHintsCollector.Instance.Name, StringComparison.Ordinal)
+                        && await QueryStoreHintsStandsDownAsync(server, runtime, cancellationToken))
+                    {
+                        _logger.LogDebug(
+                            "  [{Server}] {Collector} not run this slot: its last run found no database to capture, or every Query Store database on the server is a readable secondary, so there is nothing for it to read (#8361, #8541)",
+                            server.Config.DisplayName, name);
+                        continue;
+                    }
                 }
 
                 /* #2700: query_store is split off this sequential body rather than awaited inline. Its
@@ -1105,7 +1157,7 @@ public sealed partial class DarlingWorker
                 var peerMaxAtDispatchMs = PeerMaxOrNull(server);
                 /* #3604: pg_wait_sampling is the third, and the reason is different in kind — see
                    IsPgWaitSamplingCollector: a deliberate 30 s sampling window, not a bimodal tail. */
-                /* #4999: ONE test decides whether a collector leaves this pass, RunsDetached: the three above by
+                /* #4999: ONE test decides whether a collector leaves this pass, RunsDetached: the four above by
                    name and every daily collector by cadence. get_collection_health asks the same test to leave
                    those collectors out of its sweep-body roll-up, so the dispatch and the reading cannot
                    disagree about what runs in the body. */
@@ -1176,6 +1228,9 @@ public sealed partial class DarlingWorker
         var taken = server.CycleSkips.TryTake(now, DarlingCycleSkip.RowMinInterval);
         if (taken is null)
         {
+            /* #8539: no row from this body (nothing is pending, or the last row is under RowMinInterval old). What it
+               measured stays with any slots still pending, so the row that reports them can name it. */
+            server.CycleSkips.NoteCauses(causes);
             return;
         }
 
@@ -1191,6 +1246,11 @@ public sealed partial class DarlingWorker
         if (written)
         {
             server.CycleSkips.Commit(taken, now);
+        }
+        else
+        {
+            /* The slots stay pending for the next body, and so does what this one measured. */
+            server.CycleSkips.NoteCauses(causes);
         }
     }
 
@@ -1328,7 +1388,7 @@ public sealed partial class DarlingWorker
                    the same slot: held means the scheduled run is still going, and the snapshot leaves that
                    collector out and says so. Free means the snapshot runs it inline, as before, holds the slot for
                    that run only, and gives it back after, so a snapshot that is over never makes the next scheduled
-                   run skip. The three collectors detached by name take their own slot inside RunOneAsync. */
+                   run skip. The four collectors detached by name take their own slot inside RunOneAsync. */
                 var snapshotSlot = TryTakeInlineDailySlot(runtime.ServerId, name, effective);
                 if (snapshotSlot is null)
                 {
@@ -1342,7 +1402,11 @@ public sealed partial class DarlingWorker
                 /* null for the same reason as the on-load loop: an operator snapshot is not a body. */
                 using (snapshotSlot)
                 {
-                    totalRows += await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);
+                    /* #7643: a collector that tells a run the operator asked for from the sweep (the schema pass reads every database in full) sees it here. */
+                    using (DarlingSnapshotScope.Enter())
+                    {
+                        totalRows += await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);
+                    }
                 }
 
                 collectorsRun++;
@@ -1368,7 +1432,7 @@ public sealed partial class DarlingWorker
                 true,
                 skippedCount == 0
                     ? "snapshot complete"
-                    : $"snapshot complete; {skippedCount} collector(s) skipped",
+                    : $"snapshot complete; {CountText.Plural(skippedCount, "collector")} skipped",
                 json);
         }
         finally
@@ -2027,7 +2091,7 @@ LIMIT 1";
     private static string WhereToCreateIt(string? connectedDatabase)
         => string.IsNullOrWhiteSpace(connectedDatabase)
             ? "in the connected database (CREATE EXTENSION ...). "
-            : $"in database '{connectedDatabase}', which is the one this collector connects to — an "
+            : $"in database '{connectedDatabase}', which is the one this collector connects to: an "
               + "extension installed in a DIFFERENT database on the same cluster is invisible from here, "
               + $"so run CREATE EXTENSION in '{connectedDatabase}'. ";
 
@@ -2050,7 +2114,7 @@ LIMIT 1";
     private static string WhereToGrantIt(string? connectedDatabase)
         => string.IsNullOrWhiteSpace(connectedDatabase)
             ? "in the database this collector connects to."
-            : $"in database '{connectedDatabase}', the one this collector connects to — issued in a "
+            : $"in database '{connectedDatabase}', the one this collector connects to: issued in a "
               + "DIFFERENT database on the same cluster, they change nothing here.";
 
     /// <summary>
@@ -2080,7 +2144,7 @@ LIMIT 1";
         var where = string.IsNullOrWhiteSpace(connectedDatabase)
             ? $"run {create} in the connected database (extensions are per-database). "
             : $"run {create} in database '{connectedDatabase}', which is the one this collector connects "
-              + "to — an extension installed in a DIFFERENT database on the same cluster is invisible "
+              + "to: an extension installed in a DIFFERENT database on the same cluster is invisible "
               + "from here. ";
 
         var preload = required.Any(r => r.InstallKind == PgExtensionInstallKind.SharedPreloadLibraries)
@@ -2089,7 +2153,7 @@ LIMIT 1";
               + "whatever else is installed. "
             : string.Empty;
 
-        return $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the {names} {noun} this collector reads is "
+        return $"{ex.MessageText} (SQLSTATE {ex.SqlState}): the {names} {noun} this collector reads is "
             + "not installed on this target. This is NOT a missing grant, and no GRANT will change it: "
             + where
             + preload
@@ -2196,7 +2260,7 @@ LIMIT 1";
             ? "in the connected database"
             : $"in database '{connectedDatabase}'";
 
-        var head = $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the missing object is {companion.ObjectName}, "
+        var head = $"{ex.MessageText} (SQLSTATE {ex.SqlState}): the missing object is {companion.ObjectName}, "
             + $"which is NOT the {extension.ExtensionName} extension's base object";
 
         const string tail = "This is "
@@ -2219,7 +2283,7 @@ LIMIT 1";
                 return head + $". pg_extension has NO row for {extension.ExtensionName} {where}: the extension "
                     + "was never created there, so it is not present at any version and there is nothing for "
                     + $"ALTER EXTENSION {extension.ExtensionName} UPDATE to update. This target is Aurora, where "
-                    + $"this collector's source is {auroraSource} — which needs no extension — so the collector "
+                    + $"this collector's source is {auroraSource} (which needs no extension), so the collector "
                     + $"is not waiting on one: running CREATE EXTENSION {extension.ExtensionName} {where} is "
                     + $"OPTIONAL, and what it buys is {companion.ObjectName} and nothing else. " + tail;
 
@@ -2230,25 +2294,25 @@ LIMIT 1";
                     + $"{extension.ExtensionName} {where}"
                     + (extension.InstallKind == PgExtensionInstallKind.SharedPreloadLibraries
                         ? $", and {extension.ExtensionName} has to be in shared_preload_libraries before that "
-                          + "does anything — a parameter-group change and a restart. "
+                          + "does anything: a parameter-group change and a restart. "
                         : ". ")
                     + tail;
 
             /* BELOW the companion's version: #3818's case, and now stated as a fact read out of the catalog
                rather than as one of two possibilities. */
             case PgExtensionCompanionVerdict.BelowCompanionVersion:
-                return head + $": that resolved, so the extension IS installed {where} and this is not the "
+                return head + $". That resolved, so the extension IS installed {where} and this is not the "
                     + "extension missing. pg_extension says it is at catalog version "
                     + $"{extensionRow.ExtensionVersion}, below the {companion.SinceExtensionVersion} whose update "
-                    + $"script creates {companion.ObjectName} — an engine upgraded in place or restored keeps the "
+                    + $"script creates {companion.ObjectName}: an engine upgraded in place or restored keeps the "
                     + "version the extension was created at until someone runs ALTER EXTENSION "
-                    + $"{extension.ExtensionName} UPDATE {where} — a statement, with no restart and no "
+                    + $"{extension.ExtensionName} UPDATE {where}, a statement, with no restart and no "
                     + "shared_preload_libraries change; RDS and Aurora do not run it for you. " + tail;
 
             /* AT OR ABOVE: the update everything else would have recommended is already done, so recommending
                it again is the wrong-remedy defect in its third form. */
             case PgExtensionCompanionVerdict.AtOrAboveCompanionVersion:
-                return head + $": that resolved, so the extension IS installed {where} and this is not the "
+                return head + $". That resolved, so the extension IS installed {where} and this is not the "
                     + "extension missing. pg_extension says it is at catalog version "
                     + $"{extensionRow.ExtensionVersion}, which already carries {companion.ObjectName} "
                     + $"({companion.SinceExtensionVersion} and later), so no ALTER EXTENSION "
@@ -2260,12 +2324,12 @@ LIMIT 1";
             /* NOTHING OBSERVED — or a version string nothing can rank. The two-possibilities sentence, which
                is everything the fault alone supports. */
             default:
-                return head + ": that resolved, so the "
+                return head + ". That resolved, so the "
                     + $"extension IS installed {where} and this is not the extension missing. {companion.ObjectName} "
                     + $"is created by the extension's {companion.SinceExtensionVersion} update script, so either the "
                     + $"extension is present at a catalog version below {companion.SinceExtensionVersion} (an engine "
                     + "upgraded in place or restored keeps the version the extension was created at until someone "
-                    + $"runs ALTER EXTENSION {extension.ExtensionName} UPDATE {where} — a statement, with no restart "
+                    + $"runs ALTER EXTENSION {extension.ExtensionName} UPDATE {where}, a statement, with no restart "
                     + "and no shared_preload_libraries change; RDS and Aurora do not run it for you) or the object "
                     + "is installed outside the schema the query text names (a relocatable extension lives in whatever "
                     + "schema it was created in; check pg_extension.extversion and extnamespace). " + tail;
@@ -2401,10 +2465,10 @@ LIMIT 1";
                hint said pg_monitor covers everything, which sent an operator in a circle: the product's
                own changelog knew better. */
             CollectorTargetFault.Permissions when ReadsServerLogWithPgReadFile(collectorName) => ("PERMISSIONS",
-                $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — this collector reads the server log with "
+                $"{ex.MessageText} (SQLSTATE {ex.SqlState}): this collector reads the server log with "
                 + "pg_read_file(), which pg_monitor does NOT cover. The monitoring login needs BOTH the "
                 + "pg_read_server_files role AND an explicit GRANT EXECUTE ON FUNCTION pg_read_file(text), "
-                + "pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean) — the "
+                + "pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean): the "
                 + "role alone does not carry EXECUTE, because the function's ACL is postgres=X/postgres. "
                 + "EXECUTE grants live in each database's own catalog, so issue them "
                 + WhereToGrantIt(connectedDatabase)
@@ -2414,7 +2478,7 @@ LIMIT 1";
                 + "collector switches to it on its own once it is granted."),
 
             CollectorTargetFault.Permissions => ("PERMISSIONS",
-                $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the monitoring login lacks a grant this "
+                $"{ex.MessageText} (SQLSTATE {ex.SqlState}): the monitoring login lacks a grant this "
                 + "source needs. pg_monitor covers every collector here; check that it is granted."),
 
             /* #3410, the half #3414 left open: 58P01 and 42501 were told apart in the classifier —
@@ -2428,16 +2492,16 @@ LIMIT 1";
                is the exception being made, not a reclassification. */
             CollectorTargetFault.Unclassified when ReadsServerLogWithPgReadFile(collectorName) && ex.SqlState == "58P01" =>
                 ("PERMISSIONS",
-                    $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the server named the exact file it could "
+                    $"{ex.MessageText} (SQLSTATE {ex.SqlState}). The server named the exact file it could "
                     + "not OPEN, and that path is the fact to act on: 58P01 is a missing FILE, not a missing "
-                    + "grant, and no GRANT changes it — a denial is 42501 and gets different advice. The "
+                    + "grant, and no GRANT changes it (a denial is 42501 and gets different advice). The "
                     + "path is built from the server's own answers, current_setting('log_directory') joined "
                     + "to a name pg_ls_logdir() returned in the same statement, and it resolves on the "
                     + "MONITORED server's filesystem, not the monitoring host's. A one-off is a file removed "
                     + "between the listing and the read and heals on the next cycle; one that repeats every "
                     + "cycle means the directory log_directory names no longer holds what the listing said, "
                     + "which is worth a look at that server's setting and what actually sits behind it. A "
-                    + "server whose logging_collector is off does not land here — that is detected first "
+                    + "server whose logging_collector is off does not land here: that is detected first "
                     + "and recorded as its own named state."),
 
             /* #4046 part 1c: a 22021 on a log-tail reader has no arm here on purpose. It keeps ERROR, and the
@@ -2478,7 +2542,7 @@ LIMIT 1";
                makes it one. Threaded from ServerRuntime.ConnectedDatabase; when that is unknown the
                sentence degrades to what it always said rather than inventing a name. */
             CollectorTargetFault.ObjectMissing => ("PERMISSIONS",
-                $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the source object does not exist on this "
+                $"{ex.MessageText} (SQLSTATE {ex.SqlState}): the source object does not exist on this "
                 + "target. This is NOT a missing grant: it is normally an extension that was never created "
                 + WhereToCreateIt(connectedDatabase)
                 + "The collector will keep degrading until it is. Recorded as a non-fatal skip rather than "
@@ -2487,7 +2551,7 @@ LIMIT 1";
             /* 0A000 / 55000 / 55006: the server will not do this, permanently or by configuration —
                pg_stat_wal on Aurora, or an optimized-reads cache that is switched off. */
             CollectorTargetFault.FeatureDisabled => ("PERMISSIONS",
-                $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — this source is unsupported or disabled on "
+                $"{ex.MessageText} (SQLSTATE {ex.SqlState}): this source is unsupported or disabled on "
                 + "this server. NOT a missing grant. Aurora does not implement some community sources at "
                 + "all, and others are gated by a parameter group. Recorded as a non-fatal skip because it "
                 + "will not change until the platform or the parameter group does."),
@@ -2556,7 +2620,7 @@ LIMIT 1";
         {
             PostgresCancelSource.TargetStatementTimeout =>
                 $"{collectorName} on {where} was CANCELLED BY THE SERVER after {elapsed} ms (SQLSTATE "
-                + $"{CollectorFaultCancelOrigin.QueryCanceled}) — the target's own statement_timeout "
+                + $"{CollectorFaultCancelOrigin.QueryCanceled}): the target's own statement_timeout "
                 + "expired, so the deadline that fired is on the monitored server, not here. Nothing was "
                 + "collected this cycle: this is NOT 'there was nothing to collect'.",
 
@@ -2575,7 +2639,7 @@ LIMIT 1";
                response. A cancel that DID arrive as SQLSTATE 57014 would be contradicted by its own
                explanation. */
             PostgresCancelSource.OurCommandDeadline =>
-                $"{collectorName} on {where} hit its CLIENT-SIDE command deadline after {elapsed} ms — "
+                $"{collectorName} on {where} hit its CLIENT-SIDE command deadline after {elapsed} ms: "
                 + "its command timeout expired and Npgsql cancelled the read mid-stream, which is why the "
                 + "transport reports 'Exception while reading from stream' with no SQLSTATE. The statement "
                 + "was still running when it was cut off, so the work asked for does not fit the deadline; "
@@ -2603,7 +2667,7 @@ LIMIT 1";
                  + "for a pg_cancel_backend() aimed at the backend, and for the client CancelRequest this "
                  + "service's own command deadline sends: one code, three producers, and only the wording "
                  + $"tells them apart. The server said {QuotedCancelWording(origin.ServerText)}, which is "
-                 + "not its statement_timeout wording — so do not change statement_timeout on the target "
+                 + "not its statement_timeout wording, so do not change statement_timeout on the target "
                  + "on the strength of this row. Nothing was collected this cycle: this is NOT 'there was "
                  + "nothing to collect'.",
         };
@@ -2727,6 +2791,11 @@ LIMIT 1";
             _postgres!, runtime, collectorName, status, rowsCollected, sqlMs, storageMs, errorMessage, fanout, phases, drain,
             fetchPhases, sweepPeerMaxMs, logger, cancellationToken, readSource);
         RecordRunForBackoff(server, runtime, collectorName, status, errorMessage);
+
+        /* #8528: the row just written is the collector's own reading after any session start the ensure made, so a capture session
+           marked as started and awaiting its read has been read: the Capture Down self-alert judges this collector's newest row as it
+           stands. A row that is not SESSION_MISSING also ends the collector's run of missing-session rows. */
+        server.CaptureSessionRestarts.RowWritten(collectorName, status);
     }
 
     /// <summary>
@@ -2829,7 +2898,8 @@ LIMIT 1";
            NotGated (mirroring QueryStoreServerGate's) collapses this to a single null check below — a
            future third collector needs only its own IsXCollector check added to this one condition,
            never a second one to keep in sync. */
-        using var detachedGate = IsPlanCorrectionCollector(collectorName) || IsPgWaitSamplingCollector(collectorName) || detachedDaily
+        using var detachedGate = IsPlanCorrectionCollector(collectorName) || IsPgWaitSamplingCollector(collectorName)
+            || IsSchemaObjectsCollector(collectorName) || detachedDaily
             ? _detachedCollectorGates.GetOrAdd((runtime.ServerId, collectorName), static _ => new DetachedCollectorGate()).TryAcquire()
             : DetachedCollectorGate.NotGated;
 
@@ -2949,6 +3019,21 @@ LIMIT 1";
 
         try
         {
+            /* #8528: the instance's identity moved since the capture sessions were last ensured: an earlier run saw it (wait_stats and
+               cpu_utilization observe the identity, on a sweep where one of them is due and its read succeeds) and cleared the ensure
+               stamp (ForgetLongQueryTraceLatch), after the sweep body's own ensure had already passed as not due. A restart or a failover
+               leaves the sessions stopped, and the read of a stopped session records SESSION_MISSING, which the Capture Down self-alert
+               fires on, although the next sweep's ensure starts it. So the ensure runs here, before the read, and the read sees the
+               started session; the stamp it sets keeps the other capture collectors of this sweep from ensuring again. A capture run
+               that comes before the identity is observed is covered at its read (CaptureReadThatStartsAStoppedSession). */
+            var ensuredBeforeRead = false;
+            if (IsCaptureSessionCollector(collectorName) && server.XeSessionsEnsuredAtUtc is null)
+            {
+                await EnsureAlwaysOnXeSessionsAsync(
+                    server, runner, DateTime.UtcNow, _logger, cancellationToken, attentionEnabled: AttentionCollectorEnabled(server));
+                ensuredBeforeRead = true;
+            }
+
             /* #3754: the long-query completion session is ensured by the per-sweep reconcile, not by this
                run, and until now nothing carried the reconcile's failure here. So on a target where the
                CREATE was refused in every database the collector still ran, its tolerant ring-buffer read
@@ -2988,6 +3073,13 @@ LIMIT 1";
                 await RaiseCaptureEnsureFaultAsync(
                     collectorName, runtime.Target.IsAzureSqlDb, captureFault,
                     () => run(runner, runtime, cancellationToken), _logger, server.Config.DisplayName);
+            }
+
+            /* #8528: a capture run that finds its session stopped ensures the sessions once and reads again before any row is written,
+               whichever collector ran first and whether or not the identity was observed. */
+            if (IsCaptureSessionCollector(collectorName))
+            {
+                run = CaptureReadThatStartsAStoppedSession(server, collectorName, ensuredBeforeRead, run);
             }
 
             var result = await run(runner, runtime, cancellationToken);
@@ -3248,8 +3340,18 @@ LIMIT 1";
                 "  [{Server}] {Collector} => XE session missing (capture down): {Message}",
                 server.Config.DisplayName, collectorName, ex.Message);
 
+            /* #8528: the last ensure of this capture's session failed with a transient error, so nothing is known about the session
+               until its retry (DarlingXeSessions.TransientRetryInterval). The row below stands; the Capture Down self-alert holds its
+               verdict for the collector until the retry has run, once per streak of SESSION_MISSING rows, so a retry that fails again
+               fires. The hold is set before the row is written, so a pass that reads the row finds the hold. */
+            if (IsCaptureSessionCollector(collectorName) && server.CaptureEnsure.IsTransientFor(collectorName))
+            {
+                server.CaptureSessionRestarts.TryHoldForRetry(collectorName);
+            }
+
             await LogRunAsync(
                 server, runtime, collectorName, "SESSION_MISSING", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+
             return 0;
         }
         catch (Exception ex) when (AwsRoleConfigurationFault(ex) is { } assume)
@@ -3301,11 +3403,11 @@ LIMIT 1";
 
             await LogRunAsync(
                 server, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds,
-                $"{ex.Message} — the MONITORING HOST's IAM role lacks a grant this source needs, which is "
+                $"{ex.Message}. The MONITORING HOST's IAM role lacks a grant this source needs, which is "
                 + "not a database grant: plan capture on managed PostgreSQL reads the server log through "
                 + "the RDS API, so the role needs rds:DescribeDBInstances, rds:DescribeDBClusters, "
                 + "rds:DescribeDBLogFiles and rds:DownloadDBLogFilePortion "
-                + "on the target instance. Nothing was read this cycle — this is NOT 'no plans were "
+                + "on the target instance. Nothing was read this cycle: this is NOT 'no plans were "
                 + "captured'.",
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
@@ -3320,10 +3422,10 @@ LIMIT 1";
 
             await LogRunAsync(
                 server, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds,
-                $"{ex.Message} — the MONITORING HOST's IAM role lacks a grant this source needs, which is "
+                $"{ex.Message}. The MONITORING HOST's IAM role lacks a grant this source needs, which is "
                 + "not a database grant: instance CPU on managed PostgreSQL reads AWS Performance Insights, "
                 + "so the role needs rds:DescribeDBInstances, rds:DescribeDBClusters and "
-                + "pi:GetResourceMetrics on the target instance. Nothing was read this cycle — this is NOT "
+                + "pi:GetResourceMetrics on the target instance. Nothing was read this cycle: this is NOT "
                 + "'CPU is idle'.",
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
@@ -3925,6 +4027,8 @@ LIMIT 1";
         ["query_store_forced_plans"] = (r, s, ct) => r.RunAsync(QueryStoreForcedPlansCollector.Instance, s, ct),
         ["query_store_hints"] = (r, s, ct) => r.RunAsync(QueryStoreHintsCollector.Instance, s, ct),
         ["identity_capacity"] = (r, s, ct) => r.RunAsync(IdentityCapacityCollector.Instance, s, ct),
+        /* #7643: the schema pass has its own run (events, probe, per-database catalog reads, versioned store), not the one-query path. */
+        ["schema_objects"] = (r, s, ct) => DarlingSchemaCapture.RunAsync(r, s, ct),
         ["agent_alerts"] = (r, s, ct) => r.RunAsync(AgentAlertsCollector.Instance, s, ct),
         ["database_protection"] = (r, s, ct) => r.RunAsync(DatabaseProtectionCollector.Instance, s, ct),
         ["pvs_stats"] = (r, s, ct) => r.RunAsync(PvsStatsCollector.Instance, s, ct),
@@ -4020,6 +4124,90 @@ LIMIT 1";
     private sealed class DarlingXeSessionDeniedException : Exception
     {
         public DarlingXeSessionDeniedException(string message) : base(message) { }
+    }
+
+    /// <summary>
+    /// #8528: the read of a capture collector (deadlocks, blocked_process_report, attention), which starts a session it finds stopped
+    /// before any row is written. The ensure before the read runs only when another collector has already observed the instance's
+    /// new identity; a capture run that comes first, or a sweep where the collectors that observe it are not due or fail, reads a
+    /// stopped session. So a read that finds the session missing ensures the sessions once, through the same
+    /// <see cref="EnsureAlwaysOnXeSessionsAsync"/>, and reads again: a session the ensure started is read as running and the run
+    /// records what that read finds, with a note on its row that nothing was captured while the session was stopped. It does not
+    /// ensure when this run already did before its read; when the ensure of this collector's own session failed transiently and has
+    /// its retry pending; or when <see cref="CaptureSessionRestarts.TryBeginReadEnsure"/> refuses: an ensure has run since this
+    /// collector's previous row (one ensure per sweep), an earlier run of the same streak of SESSION_MISSING rows already ensured
+    /// (the run whose read-time start recorded SUCCESS included), or the session was started at a read twice within the hour. A
+    /// session that stays unreadable is left to the hourly pass, and one that keeps stopping records SESSION_MISSING, so Capture
+    /// Down fires. An ensure that left a fault for the run ends it the way the gates before the read do (PERMISSIONS for a
+    /// refusal, SESSION_MISSING otherwise).
+    /// </summary>
+    /// <summary>#8528: the note on the row of a capture run whose ensure at its read started the stopped session.</summary>
+    internal const string SessionStartedAtReadNote =
+        "The session was stopped and was started before this read; events between the stop and this start were not captured.";
+
+    private DispatchEntry CaptureReadThatStartsAStoppedSession(
+        ServerLoopState server, string collectorName, bool ensuredBeforeRead, DispatchEntry read) =>
+        async (runner, runtime, cancellationToken) =>
+        {
+            try
+            {
+                return await read(runner, runtime, cancellationToken);
+            }
+            catch (DarlingXeSessionMissingException)
+            {
+                var ensuredAtRead = !ensuredBeforeRead
+                    && !server.CaptureEnsure.IsTransientFor(collectorName)
+                    && server.CaptureSessionRestarts.TryBeginReadEnsure(collectorName, DateTime.UtcNow);
+                if (!ensuredAtRead)
+                {
+                    NoteCaptureCheckedAfterMissingRead(server, collectorName, ensured: ensuredBeforeRead);
+                    throw;
+                }
+
+                server.XeSessionsEnsuredAtUtc = null;
+                await EnsureAlwaysOnXeSessionsAsync(
+                    server, runner, DateTime.UtcNow, _logger, cancellationToken, attentionEnabled: AttentionCollectorEnabled(server));
+
+                if (AttentionPermissionFaultFor(collectorName, server) is { } attentionFault)
+                {
+                    throw new DarlingXeSessionDeniedException(attentionFault);
+                }
+
+                if (CaptureEnsureFaultFor(collectorName, server) is { } captureFault)
+                {
+                    await RaiseCaptureEnsureFaultAsync(
+                        collectorName, runtime.Target.IsAzureSqlDb, captureFault,
+                        () => read(runner, runtime, cancellationToken), _logger, server.Config.DisplayName);
+                }
+
+                try
+                {
+                    var started = await read(runner, runtime, cancellationToken);
+
+                    /* The session was stopped and this run started it. The start is counted, and the row carries a note, so its
+                       SUCCESS does not read as a quiet server: nothing was captured between the stop and this start. */
+                    server.CaptureSessionRestarts.NoteStartedAtRead(collectorName, DateTime.UtcNow);
+                    return started with { HostNote = EnumeratedCollectorDriver.MergeNotes(started.HostNote, SessionStartedAtReadNote) };
+                }
+                catch (DarlingXeSessionMissingException)
+                {
+                    NoteCaptureCheckedAfterMissingRead(server, collectorName, ensured: true);
+                    throw;
+                }
+            }
+        };
+
+    /// <summary>
+    /// #8528: records that an ensure in this collector's own run completed, left no failure for it and started nothing, and the read
+    /// still found the session stopped. Only then may the Capture Down detail say the service's check found nothing to start.
+    /// </summary>
+    private static void NoteCaptureCheckedAfterMissingRead(ServerLoopState server, string collectorName, bool ensured)
+    {
+        var outcome = server.CaptureEnsure;
+        if (ensured && !outcome.IsTransientFor(collectorName) && !outcome.Started.Contains(collectorName))
+        {
+            server.CaptureSessionRestarts.NoteCheckedAfterMissingRead(collectorName);
+        }
     }
 
     private static async Task<CollectorRunResult> RunXeTolerantAsync<TRow>(

@@ -61,7 +61,7 @@ public static partial class PgTargetAdvice
             "remedy is autovacuum's, not storage. For growth that is data, retention or archival of the oldest rows " +
             "(counter-objective: the rows are gone from the live database) and partitioning by time so old partitions can " +
             "be detached or dropped in O(1) (counter-objective: a migration of the table and every query's plan). Disk " +
-            "free space is not collected for a PostgreSQL target — bring the volume's headroom to the days-to-double figure " +
+            "free space is not collected for a PostgreSQL target: bring the volume's headroom to the days-to-double figure " +
             "yourself before deciding anything.");
 
     private static AdviceBlock ComposeDatabaseGrowth(IReadOnlyDictionary<string, Fact> facts)
@@ -98,13 +98,13 @@ public static partial class PgTargetAdvice
         var bloatSameDb = bloat is not null && PgTargetScorer.GrowthAndBloatShareADatabase(f, bloat);
         var anomaly = facts.TryGetValue(PgTargetFactKeys.AnomalyDatabaseGrowth, out var a) && a.Severity > 0;
 
-        var pctText = pctComputable ? $" ({Pct(pct)})" : " (from an earliest size of zero — no percentage to state)";
+        var pctText = pctComputable ? $" ({Pct(pct)})" : " (from an earliest size of zero, no percentage to state)";
         var doublingText = doubling is { } dd && dd > 0 ? $"; at that slope it doubles in ~{FmtDays(dd)}" : string.Empty;
         var headline = graded
             ? subject == PgTargetScorer.GrowthSubjectInstance && totalAvailable
-                ? $"The instance grew {FmtBytes(m.GetValueOrDefault(PgTargetScorer.GrowthTotalBytesKey))}{TotalPctText(m)} in {FmtDays(lookback)} — {FmtBytes(m.GetValueOrDefault(PgTargetScorer.GrowthTotalBytesPerDayKey))}/day, led by {db} at {FmtBytes(growth)}"
-                : $"{db} grew {FmtBytes(growth)}{pctText} in {FmtDays(lookback)} — {FmtBytes(perDay)}/day{doublingText}"
-            : $"{db} is the fastest-growing database at {FmtBytes(growth)}{pctText} over {FmtDays(lookback)} — under the line";
+                ? $"The instance grew {FmtBytes(m.GetValueOrDefault(PgTargetScorer.GrowthTotalBytesKey))}{TotalPctText(m)} in {FmtDays(lookback)}: {FmtBytes(m.GetValueOrDefault(PgTargetScorer.GrowthTotalBytesPerDayKey))}/day, led by {db} at {FmtBytes(growth)}"
+                : $"{db} grew {FmtBytes(growth)}{pctText} in {FmtDays(lookback)}: {FmtBytes(perDay)}/day{doublingText}"
+            : $"{db} is the fastest-growing database at {FmtBytes(growth)}{pctText} over {FmtDays(lookback)}, under the line";
 
         var inv = new StringBuilder();
         inv.Append($"{db} measured {FmtBytes(first)} at its earliest sample inside the {lookback:0}-day lookback ending at the analysis window and {FmtBytes(latest)} at its latest ({samples:0} hourly samples, {FmtHours(spanHours)} apart at the ends): growth of {FmtBytes(growth)}{pctText}, {FmtBytes(perDay)} a day");
@@ -112,7 +112,7 @@ public static partial class PgTargetAdvice
             inv.Append($" ({Pct(pctPerDay)} a day)");
         inv.Append(". ");
         if (doubling is { } dbl && dbl > 0)
-            inv.Append($"At that slope the database is twice its current size in about {FmtDays(dbl)} — a straight-line extrapolation of the lookback's slope, not a forecast: a one-off load inside the fortnight reads as the same bytes as a steady drift. ");
+            inv.Append($"At that slope the database is twice its current size in about {FmtDays(dbl)}, a straight-line extrapolation of the lookback's slope, not a forecast: a one-off load inside the fortnight reads as the same bytes as a steady drift. ");
 
         if (totalAvailable)
         {
@@ -127,10 +127,10 @@ public static partial class PgTargetAdvice
         }
         else if (unsized > 0)
         {
-            inv.Append($"The instance total could not be trended: {unsized:0} database{(unsized == 1 ? string.Empty : "s")} could not be sized by the monitoring role (no CONNECT privilege and not a member of pg_read_all_stats — on a managed service, typically the vendor's own database), the collector writes the total as NULL on every row in that case, and a sum over the databases this role can see is not the instance total. Their growth is unknown, not zero. ");
+            inv.Append($"The instance total could not be trended: {unsized:0} database{(unsized == 1 ? string.Empty : "s")} could not be sized by the monitoring role (no CONNECT privilege and not a member of pg_read_all_stats, on a managed service, typically the vendor's own database), the collector writes the total as NULL on every row in that case, and a sum over the databases this role can see is not the instance total. Their growth is unknown, not zero. ");
         }
 
-        inv.Append($"The line is measured against the dogfood fleet (393 databases on 50 Aurora clusters, 14 days, 2026-10-06) — growth of at least {FmtBytes(PgTargetScorer.GrowthConcerningBytes)} AND at least {Pct(100.0 * PgTargetScorer.GrowthConcerningFraction)} of the earliest size; {FmtBytes(PgTargetScorer.GrowthCriticalBytes)} AND {Pct(100.0 * PgTargetScorer.GrowthCriticalFraction)} is the critical line, and the grade is the weaker arm's — the fleet read confirmed these lines rather than moved them (threshold_lineage = 1 on this fact). ");
+        inv.Append($"The line is measured against the dogfood fleet (393 databases on 50 Aurora clusters, 14 days, 2026-10-06): growth of at least {FmtBytes(PgTargetScorer.GrowthConcerningBytes)} AND at least {Pct(100.0 * PgTargetScorer.GrowthConcerningFraction)} of the earliest size; {FmtBytes(PgTargetScorer.GrowthCriticalBytes)} AND {Pct(100.0 * PgTargetScorer.GrowthCriticalFraction)} is the critical line, and the grade is the weaker arm's, the fleet read confirmed these lines rather than moved them (threshold_lineage = 1 on this fact). ");
         inv.Append(graded
             ? subject == PgTargetScorer.GrowthSubjectInstance
                 ? "The instance total crossed it. "
@@ -151,9 +151,9 @@ public static partial class PgTargetAdvice
         inv.Append($"Population: {seen:0} database{(seen == 1 ? string.Empty : "s")} seen in the lookback, {unsized:0} unsized, {considered:0} with at least {PgTargetScorer.GrowthMinimumSamples} samples, {overLine:0} over the line. ");
 
         if (bloatSameDb)
-            inv.Append($"PG_BLOAT_TREND co-fired on {bloat!.ObjectName ?? "a table"} in {bloat.DatabaseName ?? db}: part of this growth is dead space autovacuum has not reclaimed — the bloat card's levers come before any storage decision. ");
+            inv.Append($"PG_BLOAT_TREND co-fired on {bloat!.ObjectName ?? "a table"} in {bloat.DatabaseName ?? db}: part of this growth is dead space autovacuum has not reclaimed, the bloat card's levers come before any storage decision. ");
         else if (bloat is not null)
-            inv.Append($"PG_BLOAT_TREND fired in {bloat.DatabaseName ?? "another database"} — not one this trend names; the two findings do not share a cause on the evidence here. ");
+            inv.Append($"PG_BLOAT_TREND fired in {bloat.DatabaseName ?? "another database"}, not one this trend names; the two findings do not share a cause on the evidence here. ");
         if (anomaly)
             inv.Append("ANOMALY_PG_DATABASE_GROWTH co-fired: the instance's growth rate in this window is unusual against its own hour-of-week routine, so the fortnight's slope is happening now rather than being a step that already happened. ");
 
@@ -163,10 +163,10 @@ public static partial class PgTargetAdvice
             rem.Append($"Work the PG_BLOAT_TREND card for {bloat!.ObjectName ?? "the named table"} before buying storage for this: reclaimed dead space is growth that reverses. ");
         else
             rem.Append($"get_pg_table_bloat for {db} shows whether the bytes are live rows or dead ones; growth that is bloat has autovacuum's remedies, and a storage decision made on it buys disk for nothing. ");
-        rem.Append($"For growth that is data: retention or archival of the oldest rows in the largest tables (get_pg_table_bloat ranks {db}'s tables by measured heap size) is the lever that shrinks the slope — counter-objective: the rows leave the live database, and a DELETE of that size is its own vacuum and WAL event, so the archive is a batch job, not a statement. ");
-        rem.Append("Partitioning the largest time-keyed tables by range lets old partitions be detached or dropped in O(1) instead of deleted row by row — counter-objective: a migration of the table under load and a plan change for every query that reads it. ");
+        rem.Append($"For growth that is data: retention or archival of the oldest rows in the largest tables (get_pg_table_bloat ranks {db}'s tables by measured heap size) is the lever that shrinks the slope, counter-objective: the rows leave the live database, and a DELETE of that size is its own vacuum and WAL event, so the archive is a batch job, not a statement. ");
+        rem.Append("Partitioning the largest time-keyed tables by range lets old partitions be detached or dropped in O(1) instead of deleted row by row, counter-objective: a migration of the table under load and a plan change for every query that reads it. ");
         rem.Append($"Disk free space is NOT collected for a PostgreSQL target, so this card cannot say when the volume fills: bring the volume's headroom to the {FmtBytes(perDay)}/day figure yourself. ");
-        rem.Append("Whatever the decision, watch the same fact over the next lookback — a slope that flattens after an archive was data; one that does not is a workload that grew.");
+        rem.Append("Whatever the decision, watch the same fact over the next lookback: a slope that flattens after an archive was data; one that does not is a workload that grew.");
 
         return new AdviceBlock(headline, inv.ToString().TrimEnd(), rem.ToString().TrimEnd());
     }
@@ -182,24 +182,24 @@ public static partial class PgTargetAdvice
     {
         var inv = new StringBuilder();
         var rem = new StringBuilder();
-        inv.Append($"{seen:0} database{(seen == 1 ? string.Empty : "s")} seen in the {lookback:0}-day lookback ending at the analysis window, {unsized:0} unsized, {samplesInLookback:0} distinct collection times. This is a statement about what could be measured, not a growth figure — a withheld trend never reads as zero growth. ");
+        inv.Append($"{seen:0} database{(seen == 1 ? string.Empty : "s")} seen in the {lookback:0}-day lookback ending at the analysis window, {unsized:0} unsized, {samplesInLookback:0} distinct collection times. This is a statement about what could be measured, not a growth figure: a withheld trend never reads as zero growth. ");
 
         string headline;
         switch (reason)
         {
             case PgTargetScorer.GrowthReasonAllUnsized:
-                headline = "No database's size could be read in the lookback — the monitoring role may size none of them";
+                headline = "No database's size could be read in the lookback: the monitoring role may size none of them";
                 inv.Append("Every row carried size_bytes NULL: sizing a database requires CONNECT on it or membership in pg_read_all_stats, and the collector writes NULL rather than failing where the role has neither. ");
                 rem.Append("Grant the monitoring role pg_read_all_stats (or CONNECT on each database it should size); the hourly collector's next samples then carry sizes and the trend begins from there. Counter-objective: the role can read every database's statistics. ");
                 break;
             default:
                 headline = $"Database growth has sized databases, but none has {PgTargetScorer.GrowthMinimumSamples} hourly samples in the lookback yet";
-                inv.Append($"A trend needs {PgTargetScorer.GrowthMinimumSamples} samples before it is graded (three hourly samples is a floor on store age, not a tuned bar: in the fleet read of 2026-10-06, 391 of 393 databases had the full 14 days of samples — threshold_lineage = 1 on this fact). The size collector is hourly, so this is a store younger than three hours of PostgreSQL collection, or a target the collector has only just reached. ");
+                inv.Append($"A trend needs {PgTargetScorer.GrowthMinimumSamples} samples before it is graded (three hourly samples is a floor on store age, not a tuned bar: in the fleet read of 2026-10-06, 391 of 393 databases had the full 14 days of samples, threshold_lineage = 1 on this fact). The size collector is hourly, so this is a store younger than three hours of PostgreSQL collection, or a target the collector has only just reached. ");
                 rem.Append("Nothing to do but wait for the collector: the fact grades itself once three hourly samples exist for a sized database. ");
                 break;
         }
 
-        rem.Append("The trend is the finding; a spot size — which every screen already shows — is not.");
+        rem.Append("The trend is the finding; a spot size (which every screen already shows) is not.");
         return new AdviceBlock(headline, inv.ToString().TrimEnd(), rem.ToString().TrimEnd());
     }
 
@@ -211,13 +211,13 @@ public static partial class PgTargetAdvice
             "The instance total in pg_database_size_stats (total_bytes, one value per hourly collection, NULL wherever a " +
             "database could not be sized) is differenced between consecutive samples and rated per day; the window's peak " +
             "and mean rate are compared with this server's own 30-day hour-of-week baseline of the same series. The " +
-            "collector is hourly, so the baseline holds about four samples per hour-of-week bucket and thirty per hour — " +
+            "collector is hourly, so the baseline holds about four samples per hour-of-week bucket and thirty per hour: " +
             "it will sit at the hour-only (or flat) tier for months, and the magnitude floor (256 MB a day) carries most of " +
             "the grade until then. Both bars are chosen, not measured; the fact carries threshold_lineage = 0.",
         Remediation:
             "A growth-rate deviation on its own is context: read PG_DATABASE_GROWTH for which database is growing and by how " +
             "much over the fortnight, and get_pg_table_bloat for whether the new bytes are live rows or dead ones. A rate " +
-            "spike with no fortnight trend behind it is a load, a restore or a rebuild — find the job; a spike on top of a " +
+            "spike with no fortnight trend behind it is a load, a restore or a rebuild: find the job; a spike on top of a " +
             "trend is the trend accelerating.");
 
     private static partial AdviceBlock? ComposeGrowthAnomaly(IReadOnlyDictionary<string, Fact> factsByKey)
@@ -238,7 +238,7 @@ public static partial class PgTargetAdvice
         sb.Append(" The series is hourly, so this baseline is thin by construction (about four samples per hour-of-week bucket over 30 days) and will lean on its magnitude floor of ")
           .Append(FmtBytes(Baselines.AnomalyThresholds.PgDatabaseGrowthFloorBytesPerDay)).Append(" a day for months");
         if (tier is { } t)
-            sb.Append(" — it graded at tier ").Append(t.ToString("0", CultureInfo.InvariantCulture)).Append(" (0 = full hour-of-week, 1 = hour only, 2 = flat)");
+            sb.Append(": it graded at tier ").Append(t.ToString("0", CultureInfo.InvariantCulture)).Append(" (0 = full hour-of-week, 1 = hour only, 2 = flat)");
         sb.Append('.');
 
         var trend = KnobFact(factsByKey, PgTargetFactKeys.DatabaseGrowth);
@@ -246,7 +246,7 @@ public static partial class PgTargetAdvice
         {
             var db = string.IsNullOrEmpty(trend.ObjectName) ? "the fastest-growing database" : trend.ObjectName;
             sb.Append(" PG_DATABASE_GROWTH names ").Append(db).Append(" at ").Append(FmtBytes(KnobMeta(trend, PgTargetScorer.GrowthBytesKey) ?? trend.Value))
-              .Append(" over the fortnight").Append(trend.BaseSeverity > 0 ? " — over the line, so this rate is a trend accelerating." : " — under the line, so this rate is a load, not yet a trend.");
+              .Append(" over the fortnight").Append(trend.BaseSeverity > 0 ? ", over the line, so this rate is a trend accelerating." : ", under the line, so this rate is a load, not yet a trend.");
         }
 
         return block with { Investigation = block.Investigation + sb.ToString().TrimEnd() };

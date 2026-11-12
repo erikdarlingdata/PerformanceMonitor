@@ -59,6 +59,9 @@ public partial class ViewerServerTab
         try
         {
             viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_server.ServerId, databaseName);
+            /* The Server Context card names the server as the store knows it, else as this tab does. */
+            if (viewer.ServerMetadata is { ServerName: null } metadata)
+                metadata.ServerName = _server.DisplayName;
             await viewer.LoadPlan(planXml, label, queryText);
         }
         catch (System.Xml.XmlException ex)
@@ -195,13 +198,10 @@ public partial class ViewerServerTab
             if (string.IsNullOrEmpty(planXml))
             {
                 HidePlanLoading();
-                MessageBox.Show(
-                    "No execution plan was captured for this row. The plan may not have been collected yet, " +
+                InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
+                "No execution plan was captured for this row. The plan may not have been collected yet, " +
                     "or it aged out of the store's retention window. A Query Store plan outside its database-hour's top N " +
-                    "(Settings, Query Store fetch top N) is not fetched until a later run ranks it.",
-                    "No Plan Available",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Information);
+                    "(Settings, Query Store fetch top N) is not fetched until a later run ranks it.");
                 return;
             }
 

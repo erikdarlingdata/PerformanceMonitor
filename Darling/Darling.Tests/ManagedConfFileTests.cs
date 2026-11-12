@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -57,6 +58,51 @@ public sealed class ManagedConfFileTests
         }
 
         return count;
+    }
+
+    /// <summary>
+    /// A store whose conf was written before V259 sized its workers for 29 continuous aggregates. The next start
+    /// derives them again for 30 (#8549), through both writers: the legacy v8 block (the stale-content check in
+    /// ShouldAppendHardwareSizing) and darling-managed.conf (a body that differs from the fresh render's is replaced
+    /// unless the file is a hand edit). Without this, a 16 GB host would keep 147 slots for 148 jobs and the
+    /// three V259 policy jobs would launch in retried waves after downtime.
+    /// </summary>
+    [Fact]
+    public void WorkerSettings_WrittenForTheOlderAggregateCount_AreDerivedAgainAtTheNextStart()
+    {
+        var inputs = SampleInputs();
+        var quantizedRam = DarlingManagedPostgres.QuantizeRam(inputs.RamBytes);
+        var current = DarlingManagedPostgres.DeriveWorkerSettings(inputs.HypertableCount, quantizedRam);
+        var older = DarlingManagedPostgres.DeriveWorkerSettings(inputs.HypertableCount, TimescaleSupport.ContinuousAggregateCount - 1, quantizedRam);
+        Assert.Equal(current.MaxBackgroundWorkers - DarlingManagedPostgres.PolicyJobsPerContinuousAggregate, older.MaxBackgroundWorkers);
+
+        /* The legacy block writes the number bare, the managed file quotes every value. */
+        string Older(string text) => text
+            .Replace($"timescaledb.max_background_workers = {current.MaxBackgroundWorkers}\n", $"timescaledb.max_background_workers = {older.MaxBackgroundWorkers}\n", StringComparison.Ordinal)
+            .Replace($"max_worker_processes = {current.MaxWorkerProcesses}\n", $"max_worker_processes = {older.MaxWorkerProcesses}\n", StringComparison.Ordinal)
+            .Replace($"timescaledb.max_background_workers = '{current.MaxBackgroundWorkers}'", $"timescaledb.max_background_workers = '{older.MaxBackgroundWorkers}'", StringComparison.Ordinal)
+            .Replace($"max_worker_processes = '{current.MaxWorkerProcesses}'", $"max_worker_processes = '{older.MaxWorkerProcesses}'", StringComparison.Ordinal);
+
+        /* Legacy v8 block: the fingerprint (RAM, hypertables) still matches, only the content is stale. */
+        var currentBlock = DarlingManagedPostgres.BuildHardwareSizingConfAppend(quantizedRam, inputs.HypertableCount);
+        var olderBlock = Older(currentBlock);
+        Assert.NotEqual(currentBlock, olderBlock);
+        var fingerprint = DarlingManagedPostgres.BuildHardwareFingerprint(quantizedRam, inputs.HypertableCount);
+        Assert.False(DarlingManagedPostgres.ShouldAppendHardwareSizing("# conf\n" + currentBlock, true, fingerprint, currentBlock));
+        Assert.True(DarlingManagedPostgres.ShouldAppendHardwareSizing("# conf\n" + olderBlock, true, fingerprint, currentBlock));
+        var healed = DarlingManagedPostgres.ReplaceOrAppendHardwareSizingBlock("# conf\n" + olderBlock, currentBlock);
+        Assert.Contains($"timescaledb.max_background_workers = {current.MaxBackgroundWorkers}\n", healed, StringComparison.Ordinal);
+        Assert.DoesNotContain($"timescaledb.max_background_workers = {older.MaxBackgroundWorkers}\n", healed, StringComparison.Ordinal);
+
+        /* darling-managed.conf: an untouched file (header hash matches its body) with the older numbers is replaced. */
+        var rendered = ManagedConfFile.Render(inputs);
+        var olderBody = Older(ManagedConfFile.RenderBody(inputs));
+        Assert.NotEqual(ManagedConfFile.RenderBody(inputs), olderBody);
+        var olderFile = ManagedConfFile.RenderHeader(inputs, ManagedConfFile.ComputeBodyHash(olderBody)) + olderBody;
+        Assert.False(ManagedConfFile.IsHandEdited(olderFile));
+        Assert.True(ManagedConfFile.ShouldReplaceManagedConf(olderFile, rendered));
+        Assert.Contains($"timescaledb.max_background_workers = '{current.MaxBackgroundWorkers}'", rendered, StringComparison.Ordinal);
+        Assert.Contains($"timescaledb.max_background_workers = '{older.MaxBackgroundWorkers}'", olderFile, StringComparison.Ordinal);
     }
 
     [Fact]

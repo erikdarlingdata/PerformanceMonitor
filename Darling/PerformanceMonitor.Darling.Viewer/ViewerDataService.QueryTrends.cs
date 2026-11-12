@@ -224,7 +224,8 @@ public sealed partial class ViewerDataService
                 interval_start_time_utc AS point_time,
                 interval_end_time_utc,
                 execution_count,
-                avg_duration_us
+                avg_duration_us,
+                snapshot_time
             FROM
             (
                 SELECT
@@ -232,6 +233,7 @@ public sealed partial class ViewerDataService
                     interval_end_time_utc,
                     execution_count,
                     avg_duration_us,
+                    collection_time AS snapshot_time,
                     ROW_NUMBER() OVER
                     (
                         PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
@@ -266,7 +268,8 @@ public sealed partial class ViewerDataService
                 collection_time AS point_time,
                 CAST(NULL AS timestamp) AS interval_end_time_utc,
                 execution_count,
-                avg_duration_us
+                avg_duration_us,
+                CAST(NULL AS timestamp) AS snapshot_time
             FROM query_store_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -287,15 +290,37 @@ public sealed partial class ViewerDataService
                 COALESCE(
                     extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))),
                     extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))
-                ) AS interval_seconds
+                ) AS interval_seconds,
+                /* #8575: an interval whose end is still in the future is OPEN: it has run only until the newest snapshot that
+                   stored one of its rows, so that is the time its totals cover. NULL for a closed interval, whose own
+                   length stays the denominator. */
+                CASE WHEN date_trunc('second', MAX(interval_end_time_utc)) > date_trunc('second', timezone('UTC', now()))
+                     THEN extract(epoch FROM (date_trunc('second', MAX(snapshot_time)) - date_trunc('second', point_time)))
+                END AS open_covered_seconds
             FROM placed
             GROUP BY point_time
+        ),
+        rated AS
+        (
+            /* #8575: an open interval is partial when its covered time is under its whole length. It is then rated over that
+               covered time, and left unrated (NULL, so no rate below) when that is under 60 seconds: a rate over a few seconds is
+               noise. A closed interval has no covered time and keeps its own interval_seconds. */
+            SELECT
+                point_time,
+                total_duration_ms,
+                total_executions,
+                CASE WHEN open_covered_seconds < interval_seconds
+                     THEN CASE WHEN open_covered_seconds >= 60 THEN open_covered_seconds END
+                     ELSE interval_seconds
+                END AS interval_seconds,
+                CASE WHEN open_covered_seconds < interval_seconds THEN open_covered_seconds END AS covered_seconds
+            FROM raw
         )
         SELECT
             point_time AS collection_time,
             CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
             CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
-        FROM raw
+        FROM rated
         ORDER BY point_time
         """;
 
@@ -364,7 +389,8 @@ public sealed partial class ViewerDataService
                 interval_start_time_utc AS point_time,
                 interval_end_time_utc,
                 execution_count,
-                avg_duration_us
+                avg_duration_us,
+                collection_time AS snapshot_time
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   interval_start_time_utc >= $2
@@ -385,7 +411,8 @@ public sealed partial class ViewerDataService
                 collection_time AS point_time,
                 CAST(NULL AS timestamp) AS interval_end_time_utc,
                 execution_count,
-                avg_duration_us
+                avg_duration_us,
+                CAST(NULL AS timestamp) AS snapshot_time
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -408,15 +435,37 @@ public sealed partial class ViewerDataService
                 COALESCE(
                     extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))),
                     extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))
-                ) AS interval_seconds
+                ) AS interval_seconds,
+                /* #8575: an interval whose end is still in the future is OPEN: it has run only until the newest snapshot that
+                   stored one of its rows, so that is the time its totals cover. NULL for a closed interval, whose own
+                   length stays the denominator. */
+                CASE WHEN date_trunc('second', MAX(interval_end_time_utc)) > date_trunc('second', timezone('UTC', now()))
+                     THEN extract(epoch FROM (date_trunc('second', MAX(snapshot_time)) - date_trunc('second', point_time)))
+                END AS open_covered_seconds
             FROM placed
             GROUP BY point_time
+        ),
+        rated AS
+        (
+            /* #8575: an open interval is partial when its covered time is under its whole length. It is then rated over that
+               covered time, and left unrated (NULL, so no rate below) when that is under 60 seconds: a rate over a few seconds is
+               noise. A closed interval has no covered time and keeps its own interval_seconds. */
+            SELECT
+                point_time,
+                total_duration_ms,
+                total_executions,
+                CASE WHEN open_covered_seconds < interval_seconds
+                     THEN CASE WHEN open_covered_seconds >= 60 THEN open_covered_seconds END
+                     ELSE interval_seconds
+                END AS interval_seconds,
+                CASE WHEN open_covered_seconds < interval_seconds THEN open_covered_seconds END AS covered_seconds
+            FROM raw
         )
         SELECT
             point_time AS collection_time,
             CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
             CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
-        FROM raw
+        FROM rated
         ORDER BY point_time
         """;
 

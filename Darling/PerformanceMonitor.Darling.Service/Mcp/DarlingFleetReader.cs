@@ -108,7 +108,7 @@ SELECT s.server_id, COALESCE(s.display_name, s.server_name) AS display_name, s.s
            AND   m.job_name_pattern IS NULL
            AND   m.client_app_pattern IS NULL
        ) AS is_silenced,
-       s.connect_down_since, s.last_connect_error
+       {ConnectDownSinceSql.Healed} AS connect_down_since, s.last_connect_error
 FROM servers s
 WHERE s.is_enabled
 ORDER BY s.server_name";
@@ -638,7 +638,8 @@ WHERE id = 1";
 SELECT
     s.server_id,
     latest.collection_time AS last_collection_time,
-    s.created_date
+    s.created_date,
+    {CollectionAttemptSql.Attempted} AS attempted
 FROM servers AS s
 LEFT JOIN LATERAL
 (
@@ -646,7 +647,7 @@ LEFT JOIN LATERAL
     FROM v_collection_log
     WHERE server_id = s.server_id
     AND   collection_time >= $1
-    AND   {CollectionCycleRow.NotCycleRowSql}
+    AND   {CollectionRunSql.SuccessfulCollectorRun}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest ON TRUE
@@ -669,7 +670,7 @@ CROSS JOIN LATERAL
     FROM v_collection_log
     WHERE server_id = s.server_id
     AND   collection_time < $2
-    AND   {CollectionCycleRow.NotCycleRowSql}
+    AND   {CollectionRunSql.SuccessfulCollectorRun}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest
@@ -698,10 +699,10 @@ AND   s.server_id <> 0";
     /// <c>created_date</c>).
     ///
     /// <para><b>The window, not the retention, is what this read could see.</b> So a server that connected more
-    /// than two days ago and has never written a <c>collection_log</c> row reads Offline here, while the
-    /// viewer and <c>list_servers</c>, whose reads have no window, can still prove it never collected and say
-    /// so. That case is rare: every collector run writes a row whatever its outcome, so it takes a connect no
-    /// sweep followed. A server dark past the retention reads Offline on every surface.</para>
+    /// than two days ago and has never written a SUCCESS row reads Offline here, while the viewer and
+    /// <c>list_servers</c>, whose reads have no window, still read it as awaiting its first collection until the
+    /// retention horizon passes its registration (#8464 names the case: a login that connects but whose every
+    /// collector fails). A server dark past the retention reads Offline on every surface.</para>
     ///
     /// <para><b>A null registration keeps the ladder's reading.</b> The service writes <c>created_date</c> on
     /// every registry insert; a row without one was inserted by hand. The same holds for a server the read did
@@ -711,8 +712,9 @@ AND   s.server_id <> 0";
     /// none.</param>
     /// <param name="registeredAt">The registry's <c>created_date</c> from the same row, or null.</param>
     /// <param name="now">The roll-up's reference instant, the one the window was cut from.</param>
-    internal static ServerFreshness ClassifyWindowedFreshness(DateTime? lastCollection, DateTime? registeredAt, DateTime now, DateTime? connectDownSince = null) =>
-        ServerHealthClassifier.ClassifyFreshness(lastCollection, registeredAt, LastCollectionWindowStart(now), now, connectDownSince);
+    internal static ServerFreshness ClassifyWindowedFreshness(
+        DateTime? lastCollection, DateTime? registeredAt, DateTime now, DateTime? connectDownSince = null, bool attempted = false) =>
+        ServerHealthClassifier.ClassifyFreshness(lastCollection, registeredAt, LastCollectionWindowStart(now), now, connectDownSince, attempted);
 
     /// <summary>Cross-server per-collector 7-day health aggregate — one row per (server, collector) pair carrying
     /// the columns the shared <c>CollectorHealth.HealthStatus</c> banding needs, so the caller counts each
@@ -930,11 +932,33 @@ GROUP BY server_id, collector_name";
         int worstCount = DefaultWorstCount,
         Func<int, CancellationToken, Task<IReadOnlyList<string>?>>? separatelyMonitored = null,
         ILogger? logger = null,
+        IReadOnlyList<int>? allowedTagIds = null,
         CancellationToken cancellationToken = default)
     {
         var now = nowUtc ?? DateTime.UtcNow;
 
         var servers = await ReadServersAsync(postgres, cancellationToken);
+        HashSet<int>? visibleTagIds = null;
+        if (allowedTagIds is not null)
+        {
+            var store = new ServerTagStore(postgres, McpCommandDeadlines.ReadSeconds);
+            var snapshot = await store.ReadSnapshotAsync(consistent: true, cancellationToken);
+            visibleTagIds = new HashSet<int>();
+            var allowedServerIds = new HashSet<int>();
+            foreach (var tagId in allowedTagIds)
+            {
+                if (!snapshot.Tags.Any(tag => tag.Id == tagId))
+                {
+                    continue;
+                }
+
+                visibleTagIds.Add(tagId);
+                visibleTagIds.UnionWith(ServerTagRules.Descendants(snapshot.Tags, tagId));
+                allowedServerIds.UnionWith(ServerTagCoverage.Members(snapshot, tagId));
+            }
+
+            servers.RemoveAll(server => !allowedServerIds.Contains(server.ServerId));
+        }
 
         var cpu = await ReadCpuAsync(postgres, now, cancellationToken);
         var pgCpu = await ReadPgCpuAsync(postgres, now, cancellationToken);
@@ -966,6 +990,23 @@ GROUP BY server_id, collector_name";
         var agentAlertGaps = await ReadAgentAlertGapsAsync(postgres, now, cancellationToken);
         var databaseProtection = await ReadDatabaseProtectionOverdueAsync(postgres, now, cancellationToken);
         var tagForest = await ReadTagForestAsync(postgres, cancellationToken);
+        if (visibleTagIds is not null)
+        {
+            foreach (var serverTags in tags.Values)
+            {
+                serverTags.RemoveAll(tag => !visibleTagIds.Contains(tag.Id));
+            }
+
+            tagForest = tagForest.Where(tag => visibleTagIds.Contains(tag.Id))
+                .Select(tag => new FleetTagNode
+                {
+                    Id = tag.Id,
+                    Name = tag.Name,
+                    ParentId = tag.ParentId is int parentId && visibleTagIds.Contains(parentId) ? parentId : null,
+                    SortOrder = tag.SortOrder,
+                    Colour = tag.Colour,
+                }).ToList();
+        }
         /* #3368: the deadlock band's tiers, read ONCE per roll-up rather than per card. A store reload can
            hot-swap the settings row mid-read, and re-reading per server would let one roll-up band some
            servers on the old pair and the rest on the new one — a mixed reading no configuration ever held,
@@ -1014,11 +1055,12 @@ GROUP BY server_id, collector_name";
 
             cards.Add(BuildCard(
                 server, c, pg, m, mp, t, b, deadlock, pgDeadlock, collected.LastCollection, collectors, serverTags, now,
-                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection, serverAgentAlertGaps, serverDatabaseProtection, serverIdentityCapacity, blockingTiers, serverPgBlocking, serverDatabaseStates));
+                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection, serverAgentAlertGaps, serverDatabaseProtection, serverIdentityCapacity, blockingTiers, serverPgBlocking, serverDatabaseStates,
+                attempted: collected.Attempted));
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest, collectionHealthAgeSeconds,
-            await ReadCollectionStateAsync(postgres, logger, cancellationToken));
+            allowedTagIds is null ? await ReadCollectionStateAsync(postgres, logger, cancellationToken) : null);
     }
 
     /// <summary>Builds one pre-banded card from a server's raw cross-server reads (pure — the reduction the WPF
@@ -1190,7 +1232,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         FleetIdentityCapacity? identityCapacity = null,
         BlockingBandThresholds? blockingTiers = null,
         DarlingPgBlockingReader.PgBlockingCaptureCounts? pgBlocking = null,
-        FleetDatabaseStates? databaseStates = null)
+        FleetDatabaseStates? databaseStates = null,
+        bool attempted = false)
     {
 
         /* #7028: the band and the card read ONE count, the blocking waits (#5644) of the source the alerts would
@@ -1316,7 +1359,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         /* A collection newer than the first failure proves a later connect worked, so a flag whose clearing write was lost does not hold the card
            Offline for the session. The card carries the resolved value, which is also what the web page reads. */
         var connectDownSince = ServerHealthClassifier.EffectiveConnectDownSince(lastCollection ?? olderCollection, server.ConnectDownSince);
-        var freshness = ClassifyWindowedFreshness(lastCollection, registeredAt, now, connectDownSince);
+        var freshness = ClassifyWindowedFreshness(lastCollection, registeredAt, now, connectDownSince, attempted);
         var flags = ServerCollectionStatusRules.FlagsFor(freshness);
         var isOnline = flags.IsOnline;
         var awaitingFirstCollection = flags.AwaitingFirstCollection;
@@ -1381,11 +1424,12 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                DeadlockRatePerHour gives: a PostgreSQL target's raw count is a structural zero, and a rate derived
                from it would publish 0.0/hr against a severity that reads Unknown (#3539 A3). */
             MaxSnapshotWaitMs = blocking.PeakSnapshotWaitMs,
-            BlockingRatePerHour = isPostgres
+            /* #8572: rounded by the one rate rule (two places, and two significant digits for a rare rate), as the health reads round the same rate. Nothing reads this field back, so no band sees the rounding. */
+            BlockingRatePerHour = TrendPayloads.RoundRate(isPostgres
                 ? ServerHealthClassifier.PostgresBlockingRatePerHour(blockingForBand, pgBlocking?.CapturesTotal ?? 0)
                 : blockingForBand.HasValue
                 ? ServerHealthClassifier.BlockingRatePerHour(blockingForBand.Value, deadlockWindow)
-                : null,
+                : null, 2),
             BlockingWindow = deadlockWindow,
             BlockingSeverity = isPostgres
                 ? ServerHealthClassifier.PostgresBlockingSeverity(blockingForBand, pgBlocking?.CapturesTotal ?? 0, blockingTiers)
@@ -1442,6 +1486,23 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             MetricCount = totalMetrics,
         };
     }
+
+    /// <summary>Whether a card is on the needs-attention list: its band is Warning or worse, or it is Healthy and
+    /// carries an advisory tile (#7561).</summary>
+    internal static bool NeedsAttention(FleetServerCard card) =>
+        card.Band != FleetHealthBand.Healthy || card.HasAdvisoryTile;
+
+    /// <summary>
+    /// The cards worst first (#8654), the one order <c>worst_servers</c> and a budgeted cards page share: the
+    /// needs-attention cards lead, then <see cref="ServerHealthClassifier.FleetHealthScore"/> descending (band first,
+    /// Offline over Critical over Warning over Healthy), then display name. <c>worst_servers</c> is the head of this
+    /// list, so a page cut anywhere in it keeps every card that ranks above the first one it leaves out.
+    /// </summary>
+    internal static List<FleetServerCard> WorstFirst(IEnumerable<FleetServerCard> cards) => cards
+        .OrderByDescending(NeedsAttention)
+        .ThenByDescending(c => ServerHealthClassifier.FleetHealthScore(c.Band, c.ToHealthMetrics()))
+        .ThenBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)
+        .ToList();
 
     /// <summary>Reduces the pre-banded cards to the fleet rollup — band counts, cross-server totals (summed from
     /// the cards), and the worst-first ranking. Pure so the reduction is unit-testable without a store.</summary>
@@ -1519,11 +1580,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             if (card.DeadlockSeverity > deadlockTileSeverity) deadlockTileSeverity = card.DeadlockSeverity;
         }
 
-        var problems = cards
-            .Where(c => c.Band != FleetHealthBand.Healthy || c.HasAdvisoryTile)
-            .OrderByDescending(c => ServerHealthClassifier.FleetHealthScore(c.Band, c.ToHealthMetrics()))
-            .ThenBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var problems = WorstFirst(cards.Where(NeedsAttention));
 
         var worst = problems
             .Take(worstCount)
@@ -1654,7 +1711,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                fact; the rate is added because it is the banded one. An unrateable window prints the count
                alone, which is exactly what the band had to go on. */
             parts.Add(c.DeadlockRatePerHour.HasValue
-                ? $"Deadlocks {c.DeadlockCount} ({c.DeadlockRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr)"
+                ? $"Deadlocks {c.DeadlockCount} ({DailyHealthBandCalculator.RatePerHourText(c.DeadlockRatePerHour.Value)}/hr)"
                 : $"Deadlocks {c.DeadlockCount}");
         }
 
@@ -2351,7 +2408,8 @@ AND   {SqlServerCollectedTargetSql}";
             {
                 map[reader.GetInt32(0)] = new LastCollectionRow(
                     reader.IsDBNull(1) ? null : reader.GetDateTime(1),
-                    reader.IsDBNull(2) ? null : reader.GetDateTime(2));
+                    reader.IsDBNull(2) ? null : reader.GetDateTime(2),
+                    Attempted: reader.GetBoolean(3));
             }
         }
 
@@ -2744,7 +2802,7 @@ AND   {SqlServerCollectedTargetSql}";
     /// <param name="RegisteredAt">The server's first successful connect, as the registry recorded it.</param>
     /// <param name="OlderCollection">W1b: the newest collection BEFORE the window, read only for a server the window held
     /// none for, so an offline card can show its real age. Never an input to the freshness rule.</param>
-    internal readonly record struct LastCollectionRow(DateTime? LastCollection, DateTime? RegisteredAt, DateTime? OlderCollection = null);
+    internal readonly record struct LastCollectionRow(DateTime? LastCollection, DateTime? RegisteredAt, DateTime? OlderCollection = null, bool Attempted = false);
     /// <summary>The PostgreSQL deadlock reading (#3539): the summed counter differences, the sample that
     /// showed the newest step, and <paramref name="Intervals"/> — how many differences the sum was taken
     /// over. Its <c>default</c> is zero intervals, which <see cref="BuildCard"/> reads as unmeasured: a

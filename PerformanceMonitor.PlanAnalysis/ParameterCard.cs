@@ -69,6 +69,22 @@ public static partial class ParameterCard
             Sniffed: sniffed);
     }
 
+    /// <summary>The note a runtime cell carries when its value differs from the compiled one.</summary>
+    public const string SniffedNote = "Runtime value differs from compiled: possible parameter sniffing";
+
+    /// <summary>
+    /// The tooltip of one Compiled or Runtime cell. A cell its column trims carries its whole value, so the value
+    /// can be read when the card is too narrow to show it; a sniffed runtime cell carries its value first and
+    /// <see cref="SniffedNote"/> after it, trimmed or not, so neither hides the other; a cell shown whole and not
+    /// sniffed carries nothing.
+    /// </summary>
+    public static string? ValueCellTooltip(string text, bool sniffed, bool trimmed)
+    {
+        if (sniffed)
+            return text.Length == 0 ? SniffedNote : text + Environment.NewLine + SniffedNote;
+        return trimmed && text.Length > 0 ? text : null;
+    }
+
     /// <summary>
     /// The annotation lines the card shows below the table (or in place of the table when there are no
     /// parameters at all), in PerformanceStudio's order: the no-parameters/local-variables state OR the
@@ -91,7 +107,7 @@ public static partial class ParameterCard
             if (unresolvedVariables.Count > 0)
             {
                 annotations.Add(new ParameterCardAnnotation(
-                    $"Local variables detected ({string.Join(", ", unresolvedVariables)}) \u2014 values not captured in plan XML",
+                    $"Local variables detected ({string.Join(", ", unresolvedVariables)}): values not captured in plan XML",
                     ParameterCardAnnotationTone.Warning));
             }
             return annotations;
@@ -113,21 +129,21 @@ public static partial class ParameterCard
 
             annotations.Add(hasOptimizeForUnknown
                 ? new ParameterCardAnnotation(
-                    "OPTIMIZE FOR UNKNOWN \u2014 optimizer used average density estimates instead of sniffed values",
+                    "OPTIMIZE FOR UNKNOWN: optimizer used average density estimates instead of sniffed values",
                     ParameterCardAnnotationTone.Accent)
                 : hasRecompile
                     ? new ParameterCardAnnotation(
-                        "OPTION(RECOMPILE) \u2014 parameter values embedded as literals, not sniffed",
+                        "OPTION(RECOMPILE): parameter values embedded as literals, not sniffed",
                         ParameterCardAnnotationTone.Warning)
                     : new ParameterCardAnnotation(
-                        "Parameter values not captured in the plan \u2014 no compiled values, so the values the optimizer sniffed are not known",
+                        "Parameter values not captured in the plan: no compiled values, so the values the optimizer sniffed are not known",
                         ParameterCardAnnotationTone.Warning));
         }
 
         if (unresolvedVariables.Count > 0)
         {
             annotations.Add(new ParameterCardAnnotation(
-                $"Unresolved variables: {string.Join(", ", unresolvedVariables)} \u2014 not in parameter list",
+                $"Unresolved variables: {string.Join(", ", unresolvedVariables)}, not in parameter list",
                 ParameterCardAnnotationTone.Warning));
         }
 
@@ -140,7 +156,8 @@ public static partial class ParameterCard
     /// tree — the same three exclusions as PerformanceStudio's <c>FindUnresolvedVariables</c>. Table
     /// variable names come from <paramref name="rootNode"/>'s subtree so a table variable read (which
     /// shows up in the query text as an ordinary <c>@name</c> reference) isn't misreported as an
-    /// unresolved local variable.
+    /// unresolved local variable. The references come from <see cref="VariableReferenceScanner"/>, so a
+    /// name inside a string literal, a comment, a quoted identifier or a bracketed name is not one.
     /// </summary>
     public static List<string> FindUnresolvedVariables(
         string queryText, IReadOnlyList<PlanParameter> parameters, PlanNode? rootNode = null)
@@ -156,13 +173,10 @@ public static partial class ParameterCard
         if (rootNode != null)
             CollectTableVariableNames(rootNode, tableVarNames);
 
-        // A pass cut short by a timeout lists the variables found so far.
-        var matches = PlanRegex.Matches(AtVariableRegExp(), queryText, "unresolved variables in the parameter card");
         var seenVars = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (Match match in matches)
+        foreach (var varName in VariableReferenceScanner.Scan(queryText))
         {
-            var varName = match.Value;
             if (seenVars.Contains(varName) || extractedNames.Contains(varName))
                 continue;
             if (varName.StartsWith("@@", StringComparison.OrdinalIgnoreCase))
@@ -192,9 +206,6 @@ public static partial class ParameterCard
 
     [GeneratedRegex(@"OPTIMIZE\s+FOR\s+UNKNOWN", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex OptimizeForUnknownRegExp();
-
-    [GeneratedRegex(@"@\w+", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
-    private static partial Regex AtVariableRegExp();
 }
 
 /// <summary>Which value columns the Parameters card shows, and the compiled column's header text.</summary>

@@ -315,7 +315,7 @@ jobs:
           $version = "${{ steps.version.outputs.VERSION }}"
           dotnet tool install -g vpk --version 1.2.161
           New-Item -ItemType Directory -Force -Path releases/velopack-darlingviewer
-          vpk pack -u PerformanceMonitorDarlingViewer -v $version -p publish/DarlingViewer-velopack -e PerformanceMonitor.Darling.Viewer.exe -o releases/velopack-darlingviewer --channel darlingviewer
+          vpk pack -u PerformanceMonitorDarlingViewer -v $version -p publish/DarlingViewer-velopack -e PerformanceMonitor.Darling.Viewer.exe -o releases/velopack-darlingviewer --channel darlingviewer --packTitle "Performance Monitor Darling Viewer" --packAuthors "Darling Data, LLC"
           $setup = Get-ChildItem releases/velopack-darlingviewer/*Setup.exe | Select-Object -First 1
           Copy-Item $setup.FullName "releases/PerformanceMonitorDarlingViewer-$version-Setup.exe"
 
@@ -1605,6 +1605,15 @@ jobs:
     if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
     uses: ./.github/workflows/darling-linux-store.yml
 
+  # #8017: the Darling Helm chart (darling-helm.yml, the same workflow a pull request touching the chart runs): lint, render
+  # and schema checks, then installs of both store modes on a kind cluster. Gated like the other jobs here and NOT in
+  # publish's needs, for the same reason as the web UI smoke above.
+  darling-helm:
+    name: Darling Helm chart
+    needs: check
+    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
+    uses: ./.github/workflows/darling-helm.yml
+
   # #5745: the WPF smoke check (wpf-smoke.yml, the same workflow a pull request touching Lite runs): the real Lite exe on a
   # seeded data folder, walked with FlaUI. Gated like the other jobs here and NOT in publish's needs, for the same reason
   # as the web UI smoke above. Its screenshots are the run's `wpf-smoke` artifact.
@@ -1896,7 +1905,7 @@ jobs:
       # The v4 action installs cosign v3, which stores the signature as a Sigstore bundle referrer (#7037).
       # Checked: cosign 2.6.5 and 3.0.6 both verify it with the command above.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4.1.2
+        uses: sigstore/cosign-installer@v4.1.3
 
       - name: Sign container image (keyless, Sigstore)
         shell: bash

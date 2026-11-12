@@ -41,12 +41,14 @@ WHERE d.name = @database_name;", connection);
     }
 
     /// <summary>
-    /// Gets top queries by CPU for a server over a time period.
+    /// Gets the Top Queries strip's buckets for a server over a time period, at the width <see cref="SlicerBuckets"/> picks for the
+    /// window: a minute over a short window, an hour over a day.
     /// </summary>
     public async Task<List<TimeSliceBucket>> GetQueryStatsSlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+        var bucketMinutes = SlicerBuckets.MinutesFor(startTime, endTime);
 
         /* #7256: a window that starts after the newest archived row reads the hot table alone. */
         return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
@@ -55,11 +57,13 @@ WHERE d.name = @database_name;", connection);
         {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        /* $4 is the bucket width in minutes, on the grid every width of SlicerBuckets divides. */
+        var bucket = $"time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql})";
 
         command.CommandText = @"
 SELECT
-    date_trunc('hour', collection_time) AS bucket,
+    " + bucket + @" AS bucket,
     COUNT(DISTINCT query_hash) AS query_count,
     COALESCE(SUM(delta_worker_time), 0) / 1000.0 AS total_cpu_ms,
     COALESCE(SUM(delta_elapsed_time), 0) / 1000.0 AS total_elapsed_ms,
@@ -70,13 +74,14 @@ FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3" + dbClause + @"
-GROUP BY date_trunc('hour', collection_time)
+GROUP BY " + bucket + @"
 ORDER BY bucket";
 
         command.CommandText = SwapArchiveView(command.CommandText, "query_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -107,7 +112,36 @@ ORDER BY bucket";
     /// <paramref name="candidates"/> is the ranking cut TopFill asked for.
     /// </summary>
     internal static string TopQueriesByCpuSql(string dbClause, int candidates) => @"
-WITH ranked AS (
+WITH winners AS (
+    /* #8549 pass 1 of 2, as Darling's reads do (#5226): rank every group of the window on the NARROW columns, the grouping key and the
+       ranking sum. The wide row below (forty aggregates and a distinct count that hashes every row's text) used to share the GROUP BY
+       that ranks, so the whole window paid for it, groups that never reached the page included. Everything that decides which groups
+       exist or survive is the old statement's, unchanged: the window, the last-execution floor, the database, exclusion and tag
+       filters, the grouping key, both HAVING predicates, the ordering and its tie-break. */
+    SELECT
+        database_name AS win_database_name,
+        query_hash AS win_query_hash,
+        host_object_name AS win_host_object_name
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + @"
+    GROUP BY database_name, query_hash, host_object_name
+    HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
+    /* #3541 A13: the parallelism floor is part of the QUERY, on the grouped population before the ranking
+       and the cap - see the method's note. $6 = 0 admits every group; NULL max_dop (never captured) reads
+       as 0 and stays out of a filtered page, as the C# arm it replaces did. */
+    AND   COALESCE(MAX(max_dop), 0) >= $6
+    /* #5299 round 3 (O16): the ranking ends on the whole group key, so a tie at the candidate cut picks the same keys in every
+       refill round, as the Darling and Viewer twins do. */
+    ORDER BY SUM(delta_worker_time) DESC, database_name, query_hash, host_object_name
+    LIMIT " + candidates + @"
+),
+ranked AS (
+    /* #8549 pass 2 of 2: the wide row, built for pass 1's winners only, over the same window and floor. The join is the exact
+       NULL-safe match on the grouping key (host_object_name is NULL on every ad-hoc row), and a winner is unique per key, so no
+       row repeats and every figure is what the single pass gave. */
     SELECT
         database_name,
         query_hash,
@@ -159,21 +193,16 @@ WITH ranked AS (
            display count. */
         COUNT(DISTINCT hash(query_text)) AS distinct_texts,
         host_object_name
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + @"
+    FROM v_query_stats AS q
+    JOIN winners AS w
+      ON  q.database_name IS NOT DISTINCT FROM w.win_database_name
+      AND q.query_hash IS NOT DISTINCT FROM w.win_query_hash
+      AND q.host_object_name IS NOT DISTINCT FROM w.win_host_object_name
+    WHERE q.server_id = $1
+    AND   q.collection_time >= $2
+    AND   q.collection_time <= $3
+    AND   q.last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE
     GROUP BY database_name, query_hash, host_object_name
-    HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
-    /* #3541 A13: the parallelism floor is part of the QUERY, on the grouped population before the ranking
-       and the cap — see the method's note. $6 = 0 admits every group; NULL max_dop (never captured) reads
-       as 0 and stays out of a filtered page, as the C# arm it replaces did. */
-    AND   COALESCE(MAX(max_dop), 0) >= $6
-    /* #5299 round 3 (O16): the ranking ends on the whole group key, so a tie at the candidate cut picks the same keys in every
-       refill round, as the Darling and Viewer twins do. */
-    ORDER BY SUM(delta_worker_time) DESC, database_name, query_hash, host_object_name
-    LIMIT " + candidates + @"
 ),
 module AS (
     /* #1568 module attribution: one procedure_stats identity per sql_handle (latest collection_time
@@ -182,19 +211,20 @@ module AS (
        CONVERT(varchar(130), ..., 1) handle text, so the join key lines up; unmatched -> ad hoc.
        #7256: this one stays on v_procedure_stats. Its answer is the NEWEST row of each handle over all history, not the window's, so
        reading the hot table alone could drop a module whose only row is archived. */
+    /* #8549: the newest row of each handle comes from one aggregate, no sort. This was a ROW_NUMBER over every row of the ranked
+       handles, which sorts them (295 ms against 64 ms for 3.46 million procedure_stats rows). arg_max over (collection_time,
+       collection_id) keeps the same tie-break, the row collected last. The three names travel in one struct so they come from the
+       same row: arg_max skips a NULL argument, and a module whose newest row has NULL names must still answer NULL, as before. */
     SELECT
         sql_handle,
-        object_name,
-        schema_name,
-        database_name
+        newest.o AS object_name,
+        newest.s AS schema_name,
+        newest.d AS database_name
     FROM
     (
         SELECT
             sql_handle,
-            object_name,
-            schema_name,
-            database_name,
-            ROW_NUMBER() OVER (PARTITION BY sql_handle ORDER BY collection_time DESC, collection_id DESC) AS rn
+            arg_max({'o': object_name, 's': schema_name, 'd': database_name}, (collection_time, collection_id)) AS newest
         FROM v_procedure_stats
         WHERE server_id = $1
         AND   sql_handle IS NOT NULL
@@ -205,8 +235,8 @@ module AS (
            sql_handle alone, so a handle outside the ranked groups was never used, and a handle inside them keeps the
            same newest row. */
         AND   sql_handle IN (SELECT sql_handle FROM ranked)
-    ) ranked_modules
-    WHERE rn = 1
+        GROUP BY sql_handle
+    ) AS ranked_modules
 ),
 texts AS (
     /* #5381: the representative text is fetched AFTER the ranking, for the candidate groups only, and from the
@@ -1039,12 +1069,14 @@ OPTION(RECOMPILE);',
     }
 
     /// <summary>
-    /// Gets top procedures by CPU for a server.
+    /// Gets the Top Procedures strip's buckets for a server, at the width <see cref="SlicerBuckets"/> picks for the window: a minute
+    /// over a short window, an hour over a day.
     /// </summary>
     public async Task<List<TimeSliceBucket>> GetProcStatsSlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+        var bucketMinutes = SlicerBuckets.MinutesFor(startTime, endTime);
 
         /* #7256: a window that starts after the newest archived row reads the hot table alone. */
         return await ReadWindowSkippingEmptyArchiveAsync("procedure_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
@@ -1053,11 +1085,13 @@ OPTION(RECOMPILE);',
         {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        /* $4 is the bucket width in minutes, on the grid every width of SlicerBuckets divides. */
+        var bucket = $"time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql})";
 
         command.CommandText = @"
 SELECT
-    date_trunc('hour', collection_time) AS bucket,
+    " + bucket + @" AS bucket,
     /* #5449: a procedure that did no work in a cycle has no stored row now (old data still has its zero-delta row), so
        the count is of procedures WITH work: the same number on both. */
     COUNT(DISTINCT object_name) FILTER (WHERE COALESCE(delta_execution_count, 0) > 0 OR COALESCE(delta_worker_time, 0) > 0 OR COALESCE(delta_elapsed_time, 0) > 0) AS proc_count,
@@ -1070,13 +1104,14 @@ FROM v_procedure_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3" + dbClause + @"
-GROUP BY date_trunc('hour', collection_time)
+GROUP BY " + bucket + @"
 ORDER BY bucket";
 
         command.CommandText = SwapArchiveView(command.CommandText, "procedure_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -2168,6 +2203,12 @@ public class QueryTrendPoint
     /// <summary>How many of a bucketed point's collections had no knowable rate and were left out of it (#3897).
     /// Null on an unbucketed point, which is its own single collection — unrated or not, per <see cref="HasRate"/>.</summary>
     public long? UnratedInBucket { get; set; }
+
+    /// <summary>#8575: set only on a Query Store point whose interval was still OPEN when it was last captured: the seconds its
+    /// totals cover (the newest snapshot that stored one of its rows, less the interval's start), shorter than the interval's length.
+    /// The rates are over this, not over the whole interval, and are null when it is under 60 seconds. Null on a closed interval and
+    /// on every other trend. Darling's twin is <c>QueryDurationTrendPoint.PartialCoveredSeconds</c>.</summary>
+    public double? PartialCoveredSeconds { get; set; }
 }
 
 public class QueryStatsRow

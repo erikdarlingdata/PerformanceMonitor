@@ -136,8 +136,7 @@ public partial class ManageServersWindow : Window
                 {
                     LastCollectedUtc = lastCollected,
                     Clock = ViewerTimeHelper.ClockForServerOrMachine(clocks, row.ServerId, TimeZoneInfo.Local, nowUtc),
-                    HistoryAgedOut = lastCollected is null
-                        && ServerSummaryItem.ClassifyFreshness(null, registeredAt, nowUtc) == ServerFreshness.Offline,
+                    HistoryAgedOut = lastCollected is null && ServerSummaryItem.HistoryAgedOut(registeredAt, nowUtc),
                 });
             }
 

@@ -214,7 +214,7 @@ public sealed partial class ViewerDataService
         if (result is null)
         {
             return new ActualPlanResult(ActualPlanStatus.TimedOut, null,
-                "The service did not return the actual plan in time. The query may still be running — try again.");
+                "The service did not return the actual plan in time. The query may still be running. Try again.");
         }
 
         if (result.Status == StatusSucceeded)

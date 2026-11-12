@@ -20,6 +20,110 @@ namespace PerformanceMonitor.Common;
 internal static class McpHelpers
 {
     /// <summary>
+    /// A reply figure rounded to <paramref name="digits"/> places where the reply is built (#8572), so a difference or a sum of stored floats
+    /// does not reach the reader as 48.06999999999999. Null stays null. Only the written figure is rounded: nothing stored or compared goes through here.
+    /// </summary>
+    public static double? RoundTo(double? value, int digits) => value is { } v ? Math.Round(v, digits) : null;
+
+    /// <summary>The <see cref="RoundTo(double?, int)"/> form for a decimal figure.</summary>
+    public static decimal? RoundTo(decimal? value, int digits) => value is { } v ? Math.Round(v, digits) : null;
+
+    /// <summary>The most decimals a figure in a reply may carry (#8572). A double that prints with more is float noise (9.531238439784213), not a measurement.</summary>
+    internal const int MaxReplyDecimals = 6;
+
+    /// <summary>
+    /// A reply tree with its float noise rounded away (#8572): every number written with more than <see cref="MaxReplyDecimals"/> decimals is
+    /// rounded by the one rate rule (<see cref="TrendPayloads.RoundRate(double, int)"/>: two places, and two significant digits for a small figure),
+    /// so 9.531238439784213 reads 9.53 and 0.07894736842105263 reads 0.079. For the replies whose figures come out of a drill-down, a fact's
+    /// metadata or a stored document, where no single field is the one to round. A number with six decimals or fewer, an integer, a string and a
+    /// null are left as they are. The node is changed in place and returned.
+    /// </summary>
+    internal static System.Text.Json.Nodes.JsonNode? RoundFloatNoise(System.Text.Json.Nodes.JsonNode? node)
+    {
+        switch (node)
+        {
+            case System.Text.Json.Nodes.JsonObject obj:
+                foreach (var key in obj.Select(p => p.Key).ToList())
+                {
+                    var child = obj[key];
+                    if (RoundedFigure(child) is { } rounded)
+                    {
+                        obj[key] = rounded;
+                    }
+                    else
+                    {
+                        RoundFloatNoise(child);
+                    }
+                }
+
+                break;
+            case System.Text.Json.Nodes.JsonArray array:
+                for (var i = 0; i < array.Count; i++)
+                {
+                    if (RoundedFigure(array[i]) is { } rounded)
+                    {
+                        array[i] = rounded;
+                    }
+                    else
+                    {
+                        RoundFloatNoise(array[i]);
+                    }
+                }
+
+                break;
+        }
+
+        return node;
+    }
+
+    /// <summary><see cref="RoundFloatNoise(System.Text.Json.Nodes.JsonNode?)"/> for a reply that is already text. Text that is not a JSON document is returned as it came.</summary>
+    internal static string RoundFloatNoise(string json)
+    {
+        System.Text.Json.Nodes.JsonNode? root;
+        try
+        {
+            root = System.Text.Json.Nodes.JsonNode.Parse(json);
+        }
+        catch (JsonException)
+        {
+            return json;
+        }
+
+        if (root is not (System.Text.Json.Nodes.JsonObject or System.Text.Json.Nodes.JsonArray))
+        {
+            return json;
+        }
+
+        return RoundFloatNoise(root)!.ToJsonString();
+    }
+
+    /// <summary>The rounded replacement for a number node that carries float noise, or null when the node is not such a number.</summary>
+    private static System.Text.Json.Nodes.JsonValue? RoundedFigure(System.Text.Json.Nodes.JsonNode? node)
+    {
+        if (node is not System.Text.Json.Nodes.JsonValue value || !value.TryGetValue<double>(out var figure) || !double.IsFinite(figure))
+        {
+            return null;
+        }
+
+        var text = figure.ToString("R", CultureInfo.InvariantCulture);
+        var dot = text.IndexOf('.', StringComparison.Ordinal);
+        if (dot < 0)
+        {
+            return null;
+        }
+
+        var end = text.IndexOfAny(['E', 'e'], dot);
+        var decimals = (end < 0 ? text.Length : end) - dot - 1;
+        if (decimals <= MaxReplyDecimals && end < 0)
+        {
+            return null;
+        }
+
+        var rounded = TrendPayloads.RoundRate(figure, 2);
+        return rounded == figure ? null : System.Text.Json.Nodes.JsonValue.Create(rounded);
+    }
+
+    /// <summary>
     /// Maximum hours of history allowed (7 days).
     /// </summary>
     public const int MaxHoursBack = 168;
@@ -261,7 +365,7 @@ internal static class McpHelpers
 
         if (resolved < 2 * hoursBack)
         {
-            return Refusal("baseline_hours_back", $"The comparison window (the last {hoursBack} hours) and the baseline window (hours {resolved} to {resolved - hoursBack} back) would overlap: baseline_hours_back {resolved} is below 2 x hours_back ({2 * hoursBack}). Pass a baseline_hours_back of at least {2 * hoursBack}, or a smaller hours_back.");
+            return Refusal("baseline_hours_back", $"The comparison window (the last {CountText.Plural(hoursBack, "hour")}) and the baseline window (hours {resolved} to {resolved - hoursBack} back) would overlap: baseline_hours_back {resolved} is below 2 x hours_back ({2 * hoursBack}). Pass a baseline_hours_back of at least {2 * hoursBack}, or a smaller hours_back.");
         }
 
         return null;
@@ -585,6 +689,32 @@ internal static class McpHelpers
         "changes it. WIRE CHANGE: formerly named truncated.";
 
     /// <summary>
+    /// The clock sentence of a SQL Server read whose every stamp is the store's naive UTC: <c>collection_time</c>
+    /// and the bucket starts cut from it, the Extended Events <c>event_time</c> and <c>deadlock_time</c>, Query
+    /// Store's <c>interval_start_time_utc</c>, and a latest snapshot's <c>captured_at</c>. Leading space: it is
+    /// appended to the tool's own prose, ahead of the shared sentences that close a description, so on a split
+    /// description it sits in the guide tail. The one read stamped on the monitored server's clock, Lite's
+    /// <c>get_cpu_utilization</c>, carries its own sentence instead.
+    /// </summary>
+    public const string UtcStampsDescription =
+        " Every stamp here is UTC, not the monitored server's clock (get_server_properties has its utc_offset_minutes).";
+
+    /// <summary>The clock sentence of <c>get_daily_summary_range</c>, whose row is a calendar day cut from UTC
+    /// <c>collection_time</c>.</summary>
+    public const string UtcDayDescription =
+        " summary_date is a UTC day, not the monitored server's (get_server_properties has its utc_offset_minutes).";
+
+    /// <summary>The clock sentence of a PostgreSQL target's time series, whose points are stamped
+    /// <c>collection_time</c>; those targets have no <c>get_server_properties</c> offset to point at.</summary>
+    public const string UtcCollectionTimeDescription =
+        " collection_time is UTC, not the monitored server's clock.";
+
+    /// <summary>The clock sentence of a PostgreSQL target's series whose points are stamped <c>sample_time</c>
+    /// (get_pg_cpu_utilization's Performance Insights buckets).</summary>
+    public const string UtcSampleTimeDescription =
+        " sample_time is UTC, not the monitored server's clock.";
+
+    /// <summary>
     /// #4966: <c>effective_start</c> as every window-floor payload prints it, always as UTC with the trailing Z, on
     /// both SKUs. The served start is either the start that was asked for (already UTC, so a plain "o" printed the Z)
     /// or the floor read off the store (a naive instant, so a plain "o" printed none), and the zone marker used to
@@ -621,7 +751,7 @@ internal static class McpHelpers
     /// </summary>
     public static string SnapshotsWithoutDeltaMessage(string serverName, int hoursBack, long snapshots, DateTime? newestMeasuredDeltaAt, DateTime windowEnd)
     {
-        var message = $"{serverName} stored {snapshots} query_stats snapshot(s) in the last {hoursBack} hour(s), but none carries a measured delta, so no CPU can be attributed to a query in this window. "
+        var message = $"{serverName} stored {CountText.Plural(snapshots, "query_stats snapshot")} in the last {CountText.Plural(hoursBack, "hour")}, but none carries a measured delta, so no CPU can be attributed to a query in this window. "
             + "A CPU figure is the change in a plan's counters between two snapshots of the same plan; a plan sighted once, or sighted again with unmoved counters, stores zero deltas and is left out of the ranking. "
             + "This is not a collection gap, and collection health showing stored rows is consistent with it.";
         if (newestMeasuredDeltaAt is { } newest)

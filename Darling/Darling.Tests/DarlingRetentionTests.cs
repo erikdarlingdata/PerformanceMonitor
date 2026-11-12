@@ -565,9 +565,9 @@ public sealed class DarlingRetentionTests
             tablesPurged: 33, totalRowsDeleted: 1200, totalChunksDropped: 42, tablesFailed: 0);
 
         Assert.Equal("SUCCESS", status);
-        Assert.Contains("33 table(s)", message);
-        Assert.Contains("1200 row(s) deleted", message);
-        Assert.Contains("42 chunk(s) dropped", message);
+        Assert.Contains("33 tables", message);
+        Assert.Contains("1,200 rows deleted", message);
+        Assert.Contains("42 chunks dropped", message);
         Assert.DoesNotContain("failed", message);
     }
 

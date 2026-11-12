@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
 using Xunit;
@@ -625,19 +626,22 @@ public sealed class ComparisonBandingTests
     [Fact]
     public void APostgresSaturationFraction_IsBandedOnItsPeakSessionCount_NeverOnTheFractionInCountSigma()
     {
-        var (baseline, comparison) = Scored([PgSaturation(peak: 20, usable: 100)], [PgSaturation(peak: 60, usable: 100)]);
-        Assert.Equal(20.0, ComparisonBanding.BaselinedValueFor(baseline[0]));
-        Assert.Equal(60.0, ComparisonBanding.BaselinedValueFor(comparison[0]));
+        /* 85 -> 97 of 100 usable: the comparison side crosses the scorer's saturation bar, so the fact is graded above
+           negligible (#8574: two graded-negligible sides take no verdict). */
+        var (baseline, comparison) = Scored([PgSaturation(peak: 85, usable: 100)], [PgSaturation(peak: 97, usable: 100)]);
+        Assert.Equal(85.0, ComparisonBanding.BaselinedValueFor(baseline[0]));
+        Assert.Equal(97.0, ComparisonBanding.BaselinedValueFor(comparison[0]));
+        Assert.True(comparison[0].Severity > 0);
 
-        var row = Compare(baseline, comparison, PgBucket(MetricNames.PgSessionCount, median: 20, mad: 0));
+        var row = Compare(baseline, comparison, PgBucket(MetricNames.PgSessionCount, median: 85, mad: 0));
         Assert.Equal(ComparisonBanding.BandSourceBaseline, row.BandSource);
         Assert.Equal(MetricNames.PgSessionCount, row.BaselineMetric);
-        Assert.Equal(2.0, row.BaselineSigma!.Value, precision: 4); // the #6305 count floor (2 sessions) over 1% of 20
-        Assert.Equal(20.0, row.DeltaSigma!.Value, precision: 2); // 40 / 2 = 20σ raw
+        Assert.Equal(4.25, row.BaselineSigma!.Value, precision: 4); // 5% of the mean, over the 2-session count floor
+        Assert.Equal(2.82, row.DeltaSigma!.Value, precision: 2); // 12 / 4.25 = 2.82 sigma raw
         Assert.Equal(ComparisonBanding.StatusWorse, row.Status);
-        Assert.Equal(0.2, row.BaselineValue!.Value, precision: 6);   // the fraction, the fact's own unit
-        Assert.Equal(0.6, row.ComparisonValue!.Value, precision: 6);
-        Assert.Equal(0.4, row.ValueDelta!.Value, precision: 6);
+        Assert.Equal(0.85, row.BaselineValue!.Value, precision: 6);   // the fraction, the fact's own unit
+        Assert.Equal(0.97, row.ComparisonValue!.Value, precision: 6);
+        Assert.Equal(0.12, row.ValueDelta!.Value, precision: 6);
 
         /* A fraction that moved by one sigma's worth of SESSIONS is stable: 20 → 20.2 of 100. */
         var (sb, sc) = Scored([PgSaturation(20, 100)], [PgSaturation(20.2, 100)]);
@@ -733,15 +737,15 @@ public sealed class ComparisonBandingTests
         Assert.Null(untimed.DeltaSigma);
         Assert.Equal(MetricNames.PgIoReadLatency, untimed.BaselineMetric);
 
-        /* PG_REPLICATION_LAG: 1 MB → 200 MB against a bucket at 1 MB with MAD 67,450 bytes (sigma 100,000). */
-        var (lb, lc) = Scored([PgLag(1_000_000)], [PgLag(200_000_000)]);
+        /* PG_REPLICATION_LAG: 1 MB → 12 GB (over the 10 GB retained-WAL bar, so graded above negligible, #8574) against a bucket at 1 MB with MAD 67,450 bytes (sigma 100,000). */
+        var (lb, lc) = Scored([PgLag(1_000_000)], [PgLag(12_000_000_000)]);
         Assert.Equal(1_000_000.0, ComparisonBanding.BaselinedValueFor(lb[0]));
         var lag = Compare(lb, lc, PgBucket(MetricNames.PgReplayLagBytes, median: 1_000_000, mad: 67_450));
         Assert.Equal(ComparisonBanding.BandSourceBaseline, lag.BandSource);
         Assert.Equal(ComparisonBanding.StatusWorse, lag.Status);
         Assert.Equal(MetricNames.PgReplayLagBytes, lag.BaselineMetric);
         Assert.Equal(100_000.0, lag.BaselineSigma!.Value, precision: 2);
-        Assert.Equal(199_000_000.0, lag.ValueDelta!.Value, precision: 2);
+        Assert.Equal(11_999_000_000.0, lag.ValueDelta!.Value, precision: 2);
         Assert.Equal(AnomalyThresholds.SigmaDisplayCap, lag.DeltaSigma!.Value, precision: 2);
         var (qb, qc) = Scored([PgLag(1_000_000)], [PgLag(1_050_000)]);
         Assert.Equal(ComparisonBanding.StatusStable, Compare(qb, qc, PgBucket(MetricNames.PgReplayLagBytes, 1_000_000, 67_450)).Status);
@@ -879,6 +883,123 @@ public sealed class ComparisonBandingTests
         Metadata = new Dictionary<string, double> { ["wait_time_ms"] = fraction * 14_400_000, ["period_duration_ms"] = 14_400_000 }
     };
 
+    /* ── #8574: a row says which reading it was banded on, and a negligible graded move is not a verdict ── */
+
+    /// <summary>
+    /// #8574: <c>PG_CONNECTION_SATURATION</c> is banded on peak sessions while the row shows the fraction (peak over
+    /// usable). Peak sessions 90 to 95 with the usable ceiling rising 100 to 110 makes the fraction FALL (0.9 to 0.864)
+    /// while the banded reading rises, so a row reading <c>worse</c> beside a falling value_delta looked like a
+    /// contradiction. The row now carries both session readings, with the metric and unit they are in, and its verdict
+    /// agrees with them. A row banded on its shown value carries none of those fields.
+    /// </summary>
+    [Fact]
+    public void ARowBandedOnPeakSessions_CarriesBothSessionReadings_AndItsVerdictAgreesWithThem()
+    {
+        var (baseline, comparison) = Scored([PgSaturation(peak: 90, usable: 100)], [PgSaturation(peak: 95, usable: 110)]);
+        Assert.True(baseline[0].Value > comparison[0].Value); // the fraction fell
+        Assert.True(comparison[0].Severity > 0);              // a graded fact above negligible on one side
+
+        var row = Compare(baseline, comparison, PgBucket(MetricNames.PgSessionCount, median: 80, mad: 0));
+
+        Assert.True(row.ValueDelta < 0);
+        Assert.Equal(90.0, row.BaselineBandedValue!.Value, precision: 6);
+        Assert.Equal(95.0, row.ComparisonBandedValue!.Value, precision: 6);
+        Assert.Equal("peak_total_sessions", row.BandedMetric);
+        Assert.Equal("sessions", row.BandedUnit);
+        Assert.Equal(ComparisonBanding.StatusWorse, row.Status); // the banded reading rose 5 sessions
+        Assert.True(row.DeltaSigma > 0);
+
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(row.ToPayload()));
+        var payload = doc.RootElement;
+        Assert.Equal(90.0, payload.GetProperty("baseline_banded_value").GetDouble());
+        Assert.Equal(95.0, payload.GetProperty("comparison_banded_value").GetDouble());
+        Assert.Equal("peak_total_sessions", payload.GetProperty("banded_metric").GetString());
+        Assert.Equal("sessions", payload.GetProperty("banded_unit").GetString());
+
+        /* PG_WAL_VOLUME_SHIFT is the other key banded on a reading it does not show (its peak, not its mean). */
+        var (wb, wc) = Scored([PgWal(mean: 1_000_000, peak: 1_200_000)], [PgWal(mean: 9_700_000, peak: 12_000_000)]);
+        var wal = Compare(wb, wc, PgBucket(MetricNames.PgWalBytesPerSec, median: 1_000_000, mad: 67_450));
+        Assert.Equal(1_200_000.0, wal.BaselineBandedValue!.Value);
+        Assert.Equal(12_000_000.0, wal.ComparisonBandedValue!.Value);
+        Assert.Equal("peak_wal_bytes_per_sec", wal.BandedMetric);
+        Assert.Equal("bytes_per_second", wal.BandedUnit);
+
+        /* A row banded on the value it shows is unchanged: no banded_* field at all. */
+        var (cb, cc) = Scored([Cpu(50)], [Cpu(95)]);
+        var cpu = Compare(cb, cc, CpuBucket(median: 50, mad: 2));
+        Assert.Null(cpu.BandedMetric);
+        using var cpuDoc = JsonDocument.Parse(JsonSerializer.Serialize(cpu.ToPayload()));
+        Assert.DoesNotContain(cpuDoc.RootElement.EnumerateObject(), p => p.Name.Contains("banded", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #8574: a graded fact the scorer rates severity 0 in both windows is a move between two values it grades as
+    /// negligible, which the absolute band already refuses to call a verdict. Peak sessions 20 to 60 of 100 usable is
+    /// +20 sigma against this bucket yet sits under the saturation bar both times: stable, not counted in the summary's
+    /// worse or in families_worse, and the row keeps delta_sigma and beyond_anomaly_cutoff so the move stays visible.
+    /// A fact the scorer NEVER grades (SESSION_STATS, PG_TPS) is at
+    /// severity 0 because it is context, so its baseline verdict stands.
+    /// </summary>
+    [Fact]
+    public void AGradedFactNegligibleOnBothSides_GetsNoVerdict_ButAnUngradedContextFactKeepsItsBaselineVerdict()
+    {
+        var (baseline, comparison) = Scored([PgSaturation(peak: 20, usable: 100)], [PgSaturation(peak: 60, usable: 100)]);
+        Assert.Equal(0.0, baseline[0].Severity);
+        Assert.Equal(0.0, comparison[0].Severity);
+        Assert.True(FactScorer.IsGraded(baseline[0]));
+
+        var dispersion = new Dictionary<string, BaselineBucket> { [MetricNames.PgSessionCount] = PgBucket(MetricNames.PgSessionCount, median: 20, mad: 0) };
+        var result = ComparisonBanding.Compare(baseline, comparison, dispersion, coverageCaveat: false);
+        var row = Assert.Single(result.Rows);
+
+        Assert.Equal(ComparisonBanding.BandSourceBaseline, row.BandSource);
+        Assert.Equal(ComparisonBanding.StatusStable, row.Status);
+        Assert.Equal(20.0, row.DeltaSigma!.Value, precision: 2);
+        Assert.True(row.BeyondAnomalyCutoff!.Value);
+        Assert.Equal(40.0, row.ComparisonBandedValue!.Value - row.BaselineBandedValue!.Value, precision: 6); // the move stays visible
+        Assert.Equal(0, result.Worse);
+        Assert.Equal(0, result.Better);
+        Assert.Equal(1, result.Stable);
+        Assert.Equal(0, result.FamiliesWorse);
+        Assert.Equal(0, result.FamiliesBetter);
+
+        using var rules = JsonDocument.Parse(JsonSerializer.Serialize(ComparisonBanding.BandRulesPayload));
+        var baselineRule = rules.RootElement.GetProperty("baseline").GetString()!;
+        Assert.Contains("negligible", baselineRule, StringComparison.Ordinal);
+        Assert.Contains("never grades", baselineRule, StringComparison.Ordinal);
+
+        /* Ungraded context facts: severity 0 is "not graded", so the move keeps its baseline verdict. */
+        var (sb, sc) = Scored([Sessions(180)], [Sessions(260)]);
+        Assert.Equal(0.0, sc[0].Severity);
+        Assert.False(FactScorer.IsGraded(sc[0]));
+        var sessions = Assert.Single(ComparisonBanding.Compare(sb, sc,
+            new Dictionary<string, BaselineBucket> { [MetricNames.SessionCount] = SessionsBucket(median: 180, mad: 0) }, coverageCaveat: false).Rows);
+        Assert.Equal(ComparisonBanding.StatusWorse, sessions.Status);
+    }
+
+    /// <summary>
+    /// #8574: the graded/ungraded split is the scorer's own. Every fact it declares ungraded scores 0 at any reading,
+    /// and the graded keys that compare_analysis sigma-bands score above 0 once a reading clears their bar.
+    /// </summary>
+    [Fact]
+    public void TheScorersUngradedFacts_NeverScore_AndTheGradedKeysDo()
+    {
+        var ungraded = new List<Fact> { Sessions(1e9), PgTps(1e9), PgWal(1e12, 1e12) };
+        var graded = new List<Fact> { Cpu(99), Io(900), PgSaturation(99, 100), PgDeadlocks(1000), PgLag(1e12) };
+        new FactScorer().ScoreAll(ungraded.Concat(graded).ToList());
+
+        foreach (var fact in ungraded)
+        {
+            Assert.False(FactScorer.IsGraded(fact), fact.Key);
+            Assert.Equal(0.0, fact.BaseSeverity);
+        }
+        foreach (var fact in graded)
+        {
+            Assert.True(FactScorer.IsGraded(fact), fact.Key);
+            Assert.True(fact.BaseSeverity > 0, fact.Key);
+        }
+    }
+
     private static Fact Cpu(double avgPercent) => new() { Source = "cpu", Key = "CPU_SQL_PERCENT", Value = avgPercent };
 
     private static Fact Blocking(double eventsPerHour) => new()
@@ -947,7 +1068,7 @@ public sealed class ComparisonBandingTests
     private static Fact PgSaturation(double peak, double usable) => new()
     {
         Source = PgTargetSources.SessionsSource, Key = PgTargetFactKeys.ConnectionSaturation, Value = peak / usable,
-        Metadata = new Dictionary<string, double> { ["peak_total_sessions"] = peak, ["usable_connections"] = usable, ["max_connections"] = usable + 3 }
+        Metadata = new Dictionary<string, double> { ["peak_total_sessions"] = peak, ["usable_connections"] = usable, ["max_connections"] = usable + 3, ["saturation_ratio"] = peak / usable }
     };
 
     private static Fact PgCpu(double percent, bool measured) => new()

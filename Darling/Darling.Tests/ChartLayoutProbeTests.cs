@@ -28,7 +28,7 @@ public sealed class ChartLayoutProbeTests
     {
         var chart = new WpfPlot();
         var window = new Window { Content = new Grid { Children = { chart } }, Width = width, Height = height, Left = 0, Top = 0 };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         ChartDisplayScale.Apply(chart, 1.0);
         ChartStyle.ApplyThemeToChart(chart);
         var xs = Enumerable.Range(0, 40).Select(i => Now.AddHours(-6).AddMinutes(i * 9).ToOADate()).ToArray();

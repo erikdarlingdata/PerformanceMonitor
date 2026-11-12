@@ -221,6 +221,6 @@ public class PlanRegressionRankingAndReplyTextTests : IClassFixture<SharedDuckDb
     {
         var advice = FactAdvice.Compose("CONFIG_MAXDOP", Facts(Maxdop0))!;
 
-        Assert.Equal("MAXDOP is 0 — a single query can fan out across every scheduler", advice.Headline);
+        Assert.Equal("MAXDOP is 0: a single query can fan out across every scheduler", advice.Headline);
     }
 }

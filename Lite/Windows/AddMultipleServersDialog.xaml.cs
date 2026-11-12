@@ -62,6 +62,7 @@ public partial class AddMultipleServersDialog : Window
         _serverManager = serverManager;
         _profileManager = profileManager;
         PreviewGrid.ItemsSource = _rows;
+        _rows.CollectionChanged += (_, _) => NoRowsMessage.Visibility = _rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         PopulateProfilePicker();
     }
 
@@ -133,8 +134,8 @@ public partial class AddMultipleServersDialog : Window
         if (sqlOrSp && !_profileNameTouched)
         {
             string auto = SqlAuthRadio.IsChecked == true
-                ? $"SQL — {UsernameBox.Text.Trim()}"
-                : $"Azure SP — {AzureClientIdBox.Text.Trim()}";
+                ? $"SQL: {UsernameBox.Text.Trim()}"
+                : $"Azure SP: {AzureClientIdBox.Text.Trim()}";
             _suppressProfileNameSync = true;
             ProfileNameBox.Text = auto;
             _suppressProfileNameSync = false;
@@ -196,7 +197,7 @@ public partial class AddMultipleServersDialog : Window
         int badCount = rows.Count(r => !r.IsValid);
         StatusText.Text = rows.Count == 0
             ? ""
-            : $"{newCount} new server(s), {dupCount} duplicate(s), {badCount} invalid line(s).";
+            : $"{CountText.Plural(newCount, "new server")}, {CountText.Plural(dupCount, "duplicate")}, {CountText.Plural(badCount, "invalid line")}.";
     }
 
     // ── Test All (bounded-parallel, cancellable, never-faulting probes) ──────────────────────────────────
@@ -318,7 +319,7 @@ public partial class AddMultipleServersDialog : Window
             using var command = new SqlCommand("SELECT @@VERSION", connection);
             var version = await command.ExecuteScalarAsync(ct) as string;
             var firstLine = version?.Split('\n')[0]?.Trim();
-            row.Status = string.IsNullOrEmpty(firstLine) ? "OK" : "OK — " + firstLine;
+            row.Status = string.IsNullOrEmpty(firstLine) ? "OK" : "OK: " + firstLine;
         }
         catch (OperationCanceledException)
         {
@@ -392,8 +393,8 @@ public partial class AddMultipleServersDialog : Window
             FailedCount = failed;
             var collidedPart = collided > 0 ? $", {collided} collided" : string.Empty;
             StatusText.Text = firstBuildError != null
-                ? $"No servers added — {firstBuildError}."
-                : $"No new servers to add ({skipped} duplicate(s) skipped{collidedPart}).";
+                ? $"No servers added: {firstBuildError}."
+                : $"No new servers to add ({CountText.Plural(skipped, "duplicate")} skipped{collidedPart}).";
             return;
         }
 
@@ -451,7 +452,7 @@ public partial class AddMultipleServersDialog : Window
         }
 
         var notAddedCollided = collided > 0 ? $", {collided} collided" : string.Empty;
-        StatusText.Text = $"No servers added ({skipped} duplicate(s){notAddedCollided}, {failed} failed).";
+        StatusText.Text = $"No servers added ({CountText.Plural(skipped, "duplicate")}{notAddedCollided}, {failed} failed).";
     }
 
     private void MarkRow(int lineNumber, string status)
@@ -583,8 +584,8 @@ public partial class AddMultipleServersDialog : Window
 
     private static string DefaultProfileName(BulkSharedSettings shared) => shared.AuthType switch
     {
-        AuthenticationTypes.SqlServer => $"SQL — {shared.Username}",
-        AuthenticationTypes.ServicePrincipal => $"Azure SP — {shared.AzureClientId}",
+        AuthenticationTypes.SqlServer => $"SQL: {shared.Username}",
+        AuthenticationTypes.ServicePrincipal => $"Azure SP: {shared.AzureClientId}",
         _ => "Bulk credential"
     };
 
@@ -603,7 +604,7 @@ public partial class AddMultipleServersDialog : Window
     {
         if (AuthenticationTypes.RequiresInteractiveSignIn(shared.AuthType))
         {
-            return (null, $"{ServerConnection.AuthenticationDisplayFor(shared.AuthType)} needs a sign-in per server and is not supported in bulk add — use Add Server");
+            return (null, $"{ServerConnection.AuthenticationDisplayFor(shared.AuthType)} needs a sign-in per server and is not supported in bulk add. Use Add Server");
         }
 
         var databaseName = string.IsNullOrWhiteSpace(row.DatabaseName) ? null : row.DatabaseName.Trim();

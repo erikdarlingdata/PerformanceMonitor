@@ -199,7 +199,7 @@ internal static class TrendPayloads
             ? "Each line is one file of the requested database"
             : "Each line is one database's data or log files, pooled (file_type ROWS or LOG); pass database_name to chart one database per file";
         var fold = folded > 0
-            ? $" The {charted.ToString(CultureInfo.InvariantCulture)} with the most I/O stall in the window (read + write ms) have their own line; the other {folded.ToString(CultureInfo.InvariantCulture)} are folded into one '{OtherLabel}' line, pooled collection by collection, so its latency is theirs combined."
+            ? $" The {charted.ToString(CultureInfo.InvariantCulture)} with the most I/O stall in the window (read + write ms) {(charted == 1 ? "has its" : "have their")} own line; the other {folded.ToString(CultureInfo.InvariantCulture)} {(folded == 1 ? "is" : "are")} folded into one '{OtherLabel}' line, pooled collection by collection, so its latency is theirs combined."
             : " Every line that did I/O in the window is shown, heaviest stall first.";
         return grain + "." + fold;
     }
@@ -251,7 +251,7 @@ internal static class TrendPayloads
     /// misspelt database and an idle one both land here and only a list of the real names tells them apart.
     /// </summary>
     public static string FileIoScopeEmptyMessage(string serverName, string scope, int hoursBack) =>
-        $"No read or write activity was recorded for database '{scope}' on {serverName} in the last {hoursBack} hour(s). The name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
+        $"No read or write activity was recorded for database '{scope}' on {serverName} in the last {CountText.Plural(hoursBack, "hour")}. The name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
 
     /// <summary>
     /// <c>get_lock_wait_trend</c>'s data envelope: the family's bucketed rate, and the per-type legend that says
@@ -358,9 +358,10 @@ internal static class TrendPayloads
             ["trend"] = points.Select(p => new
             {
                 time = Stamp(p.BucketStart),
-                wait_time_ms_per_second = p.WaitTimeMsPerSecond,
-                signal_wait_time_ms_per_second = p.SignalWaitTimeMsPerSecond,
-                peak_wait_time_ms_per_second = p.PeakWaitTimeMsPerSecond,
+                /* #8572: the same three places the wait-stats rate above carries, where the reply is built (257.70384995064165 otherwise). */
+                wait_time_ms_per_second = Math.Round(p.WaitTimeMsPerSecond, 3),
+                signal_wait_time_ms_per_second = Math.Round(p.SignalWaitTimeMsPerSecond, 3),
+                peak_wait_time_ms_per_second = McpHelpers.RoundTo(p.PeakWaitTimeMsPerSecond, 3),
             }),
             /* #3653 A5: trailing, after the points, on the data envelope only. */
             ["discontinuities"] = discontinuities,
@@ -699,16 +700,19 @@ internal static class TrendPayloads
     /// <see cref="PerfmonLatestRow"/> publish is rounded here, so Lite and Darling publish the same number for the same
     /// count over the same span.
     /// </summary>
-    internal static double RoundRate(double rate)
+    internal static double RoundRate(double rate, int minDecimals = 4)
     {
         if (rate == 0 || !double.IsFinite(rate))
         {
             return rate;
         }
 
-        var decimals = Math.Clamp(1 - (int)Math.Floor(Math.Log10(Math.Abs(rate))), 4, 15);
+        var decimals = Math.Clamp(1 - (int)Math.Floor(Math.Log10(Math.Abs(rate))), minDecimals, 15);
         return Math.Round(rate, decimals);
     }
+
+    /// <summary><see cref="RoundRate(double, int)"/> for a rate that may be absent: null stays null (#8572).</summary>
+    internal static double? RoundRate(double? rate, int minDecimals = 4) => rate is { } r ? RoundRate(r, minDecimals) : null;
 
     /// <summary>A cumulative counter's delta and the seconds it accrued over, one class at a time: the rated
     /// collections' where any exist; else the unknowable ones' with an interval of 0, the marker a caller must not

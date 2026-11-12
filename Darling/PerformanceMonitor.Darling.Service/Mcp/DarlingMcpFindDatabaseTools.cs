@@ -102,7 +102,7 @@ ORDER BY s.server_name";
                     "empty",
                     rows.Count == 0
                         ? $"No server has a database list in the last {(int)LookBack.TotalDays} days, so nothing was searched for '{requested}'. The database_states collector writes the list every minute by default on a SQL Server target (not on Azure SQL Database)."
-                        : $"No monitored server's newest database list names '{requested}' (searched {rows.Count} server(s) that have a list in the last {(int)LookBack.TotalDays} days). A database that was dropped, renamed, or created since the last list looks the same; servers with no list in that time (Azure SQL Database targets, or a stopped collector) were not searched.");
+                        : NoMatchMessage(requested, rows.Count, (int)LookBack.TotalDays));
             }
 
             return JsonSerializer.Serialize(new
@@ -126,4 +126,8 @@ ORDER BY s.server_name";
             return McpHelpers.FormatError("find_database", ex);
         }
     }
+    /// <summary>The empty answer when the newest database lists were searched and none names the database asked for.</summary>
+    internal static string NoMatchMessage(string requested, int searched, int days) =>
+        $"No monitored server's newest database list names '{requested}' (searched {CountText.Plural(searched, "server")} that {(searched == 1 ? "has" : "have")} a list in the last {days} days). A database that was dropped, renamed, or created since the last list looks the same; servers with no list in that time (Azure SQL Database targets, or a stopped collector) were not searched.";
+
 }

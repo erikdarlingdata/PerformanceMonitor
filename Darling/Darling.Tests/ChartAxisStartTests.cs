@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// #7386: the X axis of a time chart starts at the later of the picked start and the server's data start. The pure rule, then the
 /// real charts of the Viewer (the Overview lanes and the CPU chart) drawn under "Past day" for a server with three hours of history.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ChartAxisStartTests
 {
     private static readonly DateTime End = new(2026, 11, 3, 12, 0, 0, DateTimeKind.Utc);
@@ -114,7 +115,7 @@ public sealed class ChartAxisStartTests
                     new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
                     new DarlingServer(1, "axis-start-test", "axis-start-test", true, null));
                 var window = new Window { Content = tab, Width = 1800, Height = 1000 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     tab.ServerDataStartUtc = dataStart;

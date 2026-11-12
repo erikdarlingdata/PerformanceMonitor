@@ -313,7 +313,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
             var many = await DarlingMcpPvsTools.GetPvsStats(postgres, serverName, 0, Of("Nope1", "Nope2"), ct);
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(many));
             Assert.Contains("the chosen databases", Message(many), StringComparison.Ordinal);
-            Assert.Contains("2 other database(s)", Message(many), StringComparison.Ordinal);
+            Assert.Contains("2 other databases", Message(many), StringComparison.Ordinal);
 
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM pvs_stats WHERE server_id = $1", serverId);
             await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET engine_kind = $2 WHERE server_id = $1", serverId, MonitoredEngineKind.Postgres);

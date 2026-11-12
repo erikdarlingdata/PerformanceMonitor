@@ -192,7 +192,7 @@ WHERE NOT {(collectionGap ? "TRUE" : "FALSE")} OR t < now() - INTERVAL '10 days'
 
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         var message = root.GetProperty("message").GetString()!;
-        Assert.Contains("whole collected history falls inside the last 168 hour(s)", message, StringComparison.Ordinal);
+        Assert.Contains("whole collected history falls inside the last 168 hours", message, StringComparison.Ordinal);
         Assert.Contains("none older than the baseline lookback yet", message, StringComparison.Ordinal);
         Assert.DoesNotContain("raw Query Store data, which starts", message, StringComparison.Ordinal);
         Assert.True(root.GetProperty("hints").GetProperty("window_truncated").GetBoolean());

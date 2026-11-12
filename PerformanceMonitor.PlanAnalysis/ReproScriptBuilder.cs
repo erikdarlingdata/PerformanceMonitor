@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.PlanAnalysis;
 
@@ -55,7 +56,7 @@ public static partial class ReproScriptBuilder
         }
         else
         {
-            warnings.Add("Plan XML not available — parameters could not be extracted");
+            warnings.Add("Plan XML not available: parameters could not be extracted");
         }
 
         /* Plan XML is untrusted input: names, types, and compiled values come straight
@@ -120,7 +121,7 @@ public static partial class ReproScriptBuilder
         var droppedCount = parameters.Count - validParameters.Count;
         if (droppedCount > 0)
         {
-            warnings.Add($"{droppedCount} parameter(s) omitted — the plan's parameter name or data type was not a valid T-SQL identifier. Declare them manually before executing.");
+            warnings.Add($"{CountText.Plural(droppedCount, "parameter")} omitted: the plan's parameter name or data type was not a valid T-SQL identifier. Declare {(droppedCount == 1 ? "it" : "them")} manually before executing.");
         }
 
         if (conflictingNames.Count > 0)
@@ -145,7 +146,7 @@ public static partial class ReproScriptBuilder
         var unresolvedVars = FindUnresolvedVariables(cleanedQuery, parameters);
         if (unresolvedVars.Count > 0)
         {
-            warnings.Add($"Variables in query without values: {string.Join(", ", unresolvedVars)}. These may be local variables — fill in values before executing.");
+            warnings.Add($"Variables in query without values: {string.Join(", ", unresolvedVars)}. These may be local variables: fill in values before executing.");
         }
 
         /* A database name has no legitimate reason to contain a control character or Unicode line/paragraph
@@ -155,7 +156,7 @@ public static partial class ReproScriptBuilder
         var skipUseForControlChars = !string.IsNullOrEmpty(databaseName) && PlanRegex.IsMatch(DatabaseNameHasControlCharsRegex(), databaseName, "control characters in the database name", onTimeout: true);
         if (skipUseForControlChars)
         {
-            warnings.Add("Database name contains control or line-separator characters — USE statement omitted for safety.");
+            warnings.Add("Database name contains control or line-separator characters: USE statement omitted for safety.");
         }
 
         /* Header comment. Every value in it goes through CommentSafe: the database name
@@ -294,7 +295,7 @@ public static partial class ReproScriptBuilder
         {
             if (PlanRegex.IsMatch(queryText, pattern, RegexOptions.IgnoreCase, "temp table references", onTimeout: true))
             {
-                warnings.Add("Query references temp table(s) — reproduction may require creating the temp table first");
+                warnings.Add("Query references temp table(s): reproduction may require creating the temp table first");
                 break;
             }
         }
@@ -316,7 +317,7 @@ public static partial class ReproScriptBuilder
         {
             if (PlanRegex.IsMatch(queryText, pattern, RegexOptions.IgnoreCase, "table variable references", onTimeout: true))
             {
-                warnings.Add("Query may reference table variable(s) — reproduction may require declaring and populating the table variable first");
+                warnings.Add("Query may reference table variable(s): reproduction may require declaring and populating the table variable first");
                 break;
             }
         }
@@ -577,14 +578,11 @@ public static partial class ReproScriptBuilder
         var unresolved = new List<string>();
         var extractedNames = new HashSet<string>(parameters.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
 
-        /* Find all @variable references in the query text */
-        var matches = PlanRegex.Matches(AtVariableRegExp(), queryText, "unresolved variables in the script");
+        /* The @variable references in the query's code: a name inside a literal or a comment is not one. */
         var seenVars = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (Match match in matches)
+        foreach (var varName in VariableReferenceScanner.Scan(queryText))
         {
-            var varName = match.Value;
-
             /* Skip if already seen or if it's in the extracted parameters */
             if (seenVars.Contains(varName) || extractedNames.Contains(varName))
             {
@@ -608,9 +606,6 @@ public static partial class ReproScriptBuilder
 
         return unresolved;
     }
-
-    [GeneratedRegex(@"@\w+", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
-    private static partial Regex AtVariableRegExp();
 
     /// <summary>
     /// Matches a control character or a Unicode line/paragraph separator. A database

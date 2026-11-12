@@ -466,7 +466,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
         AssertTruncatedAt(root.GetProperty("hints"), Anchor.AddDays(-2), "blocked_process_report and deadlocks");
 
         /* #4966: cut at a start, so the "genuinely clear" claim gives way to the cut sentence that points at effective_start. */
-        Assert.Equal($"No blocking or deadlocks recorded for {ServerName} in the last {HoursBack} hour(s). {McpHelpers.CutWindowNothingMessage}", root.GetProperty("message").GetString());
+        Assert.Equal($"No blocking or deadlocks recorded for {ServerName} in the last {PerformanceMonitor.Common.CountText.Plural(HoursBack, "hour")}. {McpHelpers.CutWindowNothingMessage}", root.GetProperty("message").GetString());
     }
 
     /// <summary>#4966: both blocking collectors have run from before the window: the covered text keeps its "genuinely clear" claim.</summary>
@@ -482,7 +482,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
         Assert.Equal("empty", root.GetProperty("status").GetString());
         AssertCovered(root.GetProperty("hints"), WindowStart);
         Assert.Equal(
-            $"No blocking or deadlocks recorded for {ServerName} in the last {HoursBack} hour(s). The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window.",
+            $"No blocking or deadlocks recorded for {ServerName} in the last {PerformanceMonitor.Common.CountText.Plural(HoursBack, "hour")}. The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window.",
             root.GetProperty("message").GetString());
     }
 
@@ -500,7 +500,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
         Assert.Equal("empty", root.GetProperty("status").GetString());
         AssertNothingHeld(root.GetProperty("hints"), "blocked_process_report and deadlocks");
         /* #4966: no start to name, so the sentence says nothing was read. */
-        Assert.Equal($"No blocking or deadlocks recorded for {ServerName} in the last {HoursBack} hour(s). {McpHelpers.CutWindowNothingReadMessage}", root.GetProperty("message").GetString());
+        Assert.Equal($"No blocking or deadlocks recorded for {ServerName} in the last {PerformanceMonitor.Common.CountText.Plural(HoursBack, "hour")}. {McpHelpers.CutWindowNothingReadMessage}", root.GetProperty("message").GetString());
     }
 
     [Fact]

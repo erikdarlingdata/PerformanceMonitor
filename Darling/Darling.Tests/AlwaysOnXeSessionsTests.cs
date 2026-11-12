@@ -1021,6 +1021,49 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.DoesNotContain("max_events_limit", create, StringComparison.Ordinal);
     }
 
+    /* #8528: an ensure that found the sessions stopped and started them leaves that on the loop state, and the Capture Down
+       self-alert, handed the loop state's report, holds its verdict for those captures until their collectors read again. */
+    [Fact]
+    public async Task AnEnsureThatStartsStoppedSessions_LeavesThemAwaitingTheirRead_SoCaptureDownHolds()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        foreach (var kind in new[] { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess, AlwaysOnXeSessionKind.Attention })
+        {
+            rig.Alpha.Started[AlwaysOnXeSessions.SharedNameFor(kind)] = false;
+            rig.Beta.Started[AlwaysOnXeSessions.SharedNameFor(kind)] = false;
+        }
+
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(rig.State, rig.Runner, DateTime.UtcNow, NullLogger.Instance, CancellationToken.None);
+
+        var h = new DarlingSelfAlertTests.Harness();
+        await CaptureDownSeams.ApplyAsync(h.Build(), rig.Runtime.ServerId, "alwayson", new[] { "Blocking", "Deadlock", "Client timeouts" },
+            CaptureDownSeams.ReportOf(rig.State), CancellationToken.None);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    /* #8528: an ensure that found every session running leaves nothing awaiting a read, so a SESSION_MISSING newest row is a capture that is down. */
+    [Fact]
+    public async Task AnEnsureThatFindsTheSessionsRunning_LeavesNothingAwaitingARead_SoCaptureDownFires()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        foreach (var kind in new[] { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess, AlwaysOnXeSessionKind.Attention })
+        {
+            rig.Alpha.Started[AlwaysOnXeSessions.SharedNameFor(kind)] = true;
+            rig.Beta.Started[AlwaysOnXeSessions.SharedNameFor(kind)] = true;
+        }
+
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(rig.State, rig.Runner, DateTime.UtcNow, NullLogger.Instance, CancellationToken.None);
+
+        var h = new DarlingSelfAlertTests.Harness();
+        await CaptureDownSeams.ApplyAsync(h.Build(), rig.Runtime.ServerId, "alwayson", new[] { "Deadlock" },
+            CaptureDownSeams.ReportOf(rig.State), CancellationToken.None);
+
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
     private static CollectorContext AzureContext(string? sessionName) => new()
     {
         ServerId = 1,

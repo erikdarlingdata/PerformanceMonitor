@@ -11,6 +11,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Text.Json;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -20,10 +22,12 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -37,25 +41,31 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DarlingWebNamedTokenTests
 {
-    private const string ListenIp = "192.168.1.205";
+    internal const string ListenIp = "192.168.1.205";
     private const string AllowedCidr = "192.168.1.0/24";
-    private const string SharedToken = "shared-token-value-0123456789";
-    private const string ReaderToken = "reader-token-value-abcdefghijk-1";
-    private const string OperatorToken = "operator-token-value-lmnopqrst-2";
-    private static readonly IPAddress InCidrRemote = IPAddress.Parse("192.168.1.50");
+    internal const string SharedToken = "shared-token-value-0123456789";
+    internal const string ReaderToken = "reader-token-value-abcdefghijk-1";
+    internal const string OperatorToken = "operator-token-value-lmnopqrst-2";
+    /// <summary>A second reader token: the scoped cases sign in one reader scoped to a child tag and one to its parent.</summary>
+    internal const string ParentReaderToken = "parent-reader-token-value-uvwxyz-3";
+    internal static readonly IPAddress InCidrRemote = IPAddress.Parse("192.168.1.50");
 
     /// <summary>One signing key for every server a test builds, so a cookie minted by one server is valid on another and the
     /// revocation cases can present it there; production keeps a per-process random key.</summary>
     private static readonly byte[] SigningKey = Enumerable.Range(0, 32).Select(i => (byte)(i * 7 + 3)).ToArray();
 
-    private static WebTokenEntry Entry(string? name, string? token, string? role) => new() { Name = name, Token = token, Role = role };
+    internal static WebTokenEntry Entry(string? name, string? token, string? role) => new() { Name = name, Token = token, Role = role };
+
+    /// <summary>A reader entry scoped to one server tag.</summary>
+    internal static WebTokenEntry ScopedEntry(string name, string token, params int[] tagIds) =>
+        new() { Name = name, Token = token, Role = WebTokenEntry.ReaderRole, AllowedTagIds = [.. tagIds] };
 
     private static WebNetworkConfig Network(params WebTokenEntry?[] entries) => new() { Tokens = entries.ToList()! };
 
     private static List<string> Check(WebNetworkConfig network, out List<DarlingWebTokenSet.Entry> usable, string shared = SharedToken, IReadOnlyList<string>? mcp = null) =>
         DarlingWebTokenSet.Check(network, shared, mcp, DarlingWebTokenSet.ResolveEntry, out usable);
 
-    private static DarlingWebTokenSet SetFor(params WebTokenEntry[] entries) =>
+    internal static DarlingWebTokenSet SetFor(params WebTokenEntry[] entries) =>
         DarlingWebTokenSet.Resolve(Network(entries), SharedToken, null, null);
 
     private static DarlingWebTokenSet ReaderAndOperator() =>
@@ -95,6 +105,7 @@ public sealed class DarlingWebNamedTokenTests
     [InlineData("web")]
     [InlineData("MCP")]
     [InlineData("unclaimed")]
+    [InlineData("Legacy-Token")]
     [InlineData("Invalid")]
     [InlineData("cli")]
     [InlineData("Viewer")]
@@ -277,19 +288,20 @@ public sealed class DarlingWebNamedTokenTests
 
     /// <summary>The real pipeline, as <see cref="DarlingWebHostGateLiveTests"/> builds it, in network mode with the shared token and
     /// <paramref name="webTokens"/>. The signing key is fixed so a second server reads the first one's cookie.</summary>
-    private static async Task<TestServer> BuildServer(DarlingWebTokenSet? webTokens, CapturingTestLogger? hostLogger = null)
+    internal static async Task<TestServer> BuildServer(DarlingWebTokenSet? webTokens, CapturingTestLogger? hostLogger = null, NpgsqlDataSource? dataSource = null, ReadAdmission? readAdmission = null,
+        ReadLatencyAccumulator? readLatency = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
-        var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        var postgres = dataSource ?? NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
         builder.Services.AddSingleton(postgres);
         DarlingWebHostService.ConfigureResponseCompression(builder.Services);
         var app = builder.Build();
 
         var host = new DarlingWebHostService(
             hostLogger is null ? Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingWebHostService>.Instance : new HostLogger(hostLogger),
-            new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
+            new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache(), readLatency: readLatency, readAdmission: readAdmission);
 
         host.ConfigurePipeline(
             app, postgres, networkMode: true,
@@ -300,6 +312,265 @@ public sealed class DarlingWebNamedTokenTests
 
         await app.StartAsync();
         return app.GetTestServer();
+    }
+
+    [Fact]
+    public async Task BusyScopedRead_DoesNotQueryTheStore()
+    {
+        const string route = "get_wait_stats";
+        var ct = TestContext.Current.CancellationToken;
+        var admission = new ReadAdmission(TimeProvider.System, TimeSpan.Zero, null, maxHeavyReads: 1);
+        using var held = await Task.Run(() => admission.AdmitAsync(ReadSurface.Web, route, ReadWindowBand.SevenDays, ct), ct);
+        Assert.True(held.MayRun);
+
+        var entry = new WebTokenEntry { Name = "finance", Token = ReaderToken, Role = "reader", AllowedTagIds = [41] };
+        var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        using var server = await BuildServer(SetFor(entry), dataSource: postgres, readAdmission: admission);
+        var cookie = await SignIn(server, ReaderToken);
+        // Any attempt to resolve scope from the store now fails before the busy response can be returned.
+        await postgres.DisposeAsync();
+
+        var (response, _) = await Send(server, HttpMethods.Get, "/api/read/get_wait_stats?server=finance-server&hours=168", cookie);
+        Assert.Equal(StatusCodes.Status429TooManyRequests, response.Response.StatusCode);
+    }
+
+    /* ---------------------------------------------------------------- the scoped reader's start check ---------------------------------------------------------------- */
+
+    [Theory]
+    [InlineData(new int[0])]
+    [InlineData(new[] { 0 })]
+    [InlineData(new[] { -1 })]
+    [InlineData(new[] { 42, -1 })]
+    public void Check_RefusesAnEmptyOrNonPositiveTagScope_OnAReader(int[] tagIds)
+    {
+        var problems = Check(Network(ScopedEntry("finance", ReaderToken, tagIds)), out var usable);
+
+        Assert.Empty(usable);
+        var problem = Assert.Single(problems);
+        Assert.Contains("web.network.tokens[0] (finance) must use the reader role and a nonempty list of positive allowedTagIds", problem, StringComparison.Ordinal);
+        Assert.DoesNotContain(ReaderToken, problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Check_RefusesATagScope_OnAnOperator()
+    {
+        var problems = Check(Network(new WebTokenEntry { Name = "ops", Token = OperatorToken, Role = "operator", AllowedTagIds = [42] }), out var usable);
+
+        Assert.Empty(usable);
+        var problem = Assert.Single(problems);
+        Assert.Contains("web.network.tokens[0] (ops) must use the reader role and a nonempty list of positive allowedTagIds", problem, StringComparison.Ordinal);
+        Assert.DoesNotContain(OperatorToken, problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Check_ServesAScopedReaderOnce_WithItsTagIdsMadeDistinct()
+    {
+        var problems = Check(Network(ScopedEntry("finance", ReaderToken, 42, 42, 7)), out var usable);
+
+        Assert.Empty(problems);
+        var entry = Assert.Single(usable);
+        Assert.Equal("finance", entry.Name);
+        Assert.False(entry.CanEdit);
+        Assert.Equal(new[] { 42, 7 }, entry.AllowedTagIds);
+    }
+
+    [Fact]
+    public void Check_ServesAReaderWithNoScope_AsUnscoped_WhetherTheSettingIsOmittedOrNull()
+    {
+        var omitted = Entry("readers", ReaderToken, "reader");
+        var nulled = new WebTokenEntry { Name = "viewers", Token = ParentReaderToken, Role = "reader", AllowedTagIds = null };
+
+        var problems = Check(Network(omitted, nulled), out var usable);
+
+        Assert.Empty(problems);
+        Assert.Equal(2, usable.Count);
+        Assert.All(usable, entry => Assert.Null(entry.AllowedTagIds));
+    }
+
+    [Fact]
+    public void Check_RefusesAScopedAndAnUnscopedReader_ThatShareOneTokenValue()
+    {
+        var problems = Check(Network(ScopedEntry("finance", ReaderToken, 42), Entry("readers", ReaderToken, "reader")), out var usable);
+
+        Assert.Empty(usable);
+        Assert.Contains(problems, problem => problem.Contains("share a token value with another web token: finance, readers", StringComparison.Ordinal));
+        Assert.All(problems, problem => Assert.DoesNotContain(ReaderToken, problem, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ValidateConfig_ReportsTheScopedReaderRule_ThroughTheSameCheck()
+    {
+        var findings = DarlingWebTokenSet.Check(Network(ScopedEntry("finance", ReaderToken, 0)), SharedToken, null, DarlingWebTokenSet.ResolveEntry, out _);
+
+        var finding = Assert.Single(findings);
+        Assert.Contains("must use the reader role and a nonempty list of positive allowedTagIds. The token is not served.", finding, StringComparison.Ordinal);
+    }
+
+    /* ---------------------------------------------------------------- the scoped seat at the gate ---------------------------------------------------------------- */
+
+    private static DarlingWebTokenSet ScopedAndUnscopedReaders() =>
+        SetFor(ScopedEntry("finance", ReaderToken, 41), Entry("readers", ParentReaderToken, "reader"), Entry("ops", OperatorToken, "operator"));
+
+    /// <summary>The write gate refuses a scoped reader for the reason it refuses every reader (the method), before the scope gate
+    /// sees the request: the body is the read-only refusal, and it names neither the scoped route list nor any server.</summary>
+    [Theory]
+    [MemberData(nameof(WriteRoutes))]
+    public async Task AScopedReaderToken_IsRefusedEveryWriteRoute_ByTheReadOnlyGateFirst(string method, string path)
+    {
+        using var server = await BuildServer(ScopedAndUnscopedReaders());
+        var cookie = await SignIn(server, ReaderToken);
+
+        var (ctx, body) = await Send(server, method, path, cookie);
+
+        Assert.Equal(StatusCodes.Status403Forbidden, ctx.Response.StatusCode);
+        Assert.Contains(DarlingWebEndpoints.ReadOnlyAccountText, body, StringComparison.Ordinal);
+        Assert.Equal(DarlingWebStoreWrites.RefusalReason.ReadOnlySeat,
+            System.Text.Json.JsonDocument.Parse(body).RootElement.GetProperty("reason").GetString());
+        Assert.DoesNotContain("scoped", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("/api/read/", body, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("POST", "/api/mute-rules")]
+    [InlineData("POST", "/api/alerts")]
+    [InlineData("PUT", "/api/alerts/3")]
+    public async Task AScopedReaderToken_IsRefusedAMuteRuleAndACustomAlertRuleSave(string method, string path)
+    {
+        using var server = await BuildServer(ScopedAndUnscopedReaders());
+        var cookie = await SignIn(server, ReaderToken);
+
+        var (ctx, body) = await Send(server, method, path, cookie);
+
+        Assert.Equal(StatusCodes.Status403Forbidden, ctx.Response.StatusCode);
+        Assert.Contains(DarlingWebEndpoints.ReadOnlyAccountText, body, StringComparison.Ordinal);
+    }
+
+    /// <summary>The scope gate is deny-by-default: an Admin route, the view list, the people list, the bare alert settings and known
+    /// patterns, and the availability-group routes answer a scoped reader 403 with the fixed sentence before any route runs, and the
+    /// same unscoped reader is admitted past the gate (the store is not reachable here, so its answer is anything but that gate's 403).</summary>
+    [Theory]
+    [InlineData("/api/admin/servers/3")]
+    [InlineData("/api/views")]
+    [InlineData("/api/people")]
+    [InlineData("/api/read/get_alert_settings")]
+    [InlineData("/api/read/get_known_patterns")]
+    [InlineData("/api/ag")]
+    [InlineData("/api/ag/count")]
+    [InlineData("/api/servers")]
+    [InlineData("/api/alerts")]
+    [InlineData("/api/read/get_store_host")]
+    public async Task AScopedReaderToken_IsRefusedEveryManagementAndUnscopedRead_BeforeTheRouteRuns(string path)
+    {
+        using var server = await BuildServer(ScopedAndUnscopedReaders());
+        var scopedCookie = await SignIn(server, ReaderToken);
+        var readerCookie = await SignIn(server, ParentReaderToken);
+
+        var (denied, deniedBody) = await Send(server, HttpMethods.Get, path, scopedCookie);
+        Assert.Equal(StatusCodes.Status403Forbidden, denied.Response.StatusCode);
+        Assert.Contains("This endpoint is unavailable to scoped web tokens.", deniedBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("/api/read/", deniedBody, StringComparison.Ordinal);
+
+        var (admitted, admittedBody) = await Send(server, HttpMethods.Get, path, readerCookie);
+        Assert.DoesNotContain("This endpoint is unavailable to scoped web tokens.", admittedBody, StringComparison.Ordinal);
+        Assert.True(admitted.Response.StatusCode != StatusCodes.Status403Forbidden || path.StartsWith("/api/admin/", StringComparison.Ordinal),
+            path + " answered the unscoped reader " + admitted.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task TheSession_SaysScoped_ForTheScopedReaderOnly()
+    {
+        using var server = await BuildServer(ScopedAndUnscopedReaders());
+
+        foreach (var (token, scoped) in new[] { (ReaderToken, true), (ParentReaderToken, false) })
+        {
+            var cookie = await SignIn(server, token);
+            var (ctx, body) = await Send(server, HttpMethods.Get, "/api/session", cookie);
+            Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+            using var session = System.Text.Json.JsonDocument.Parse(body);
+            Assert.Equal(scoped, session.RootElement.GetProperty("scoped").GetBoolean());
+            Assert.False(session.RootElement.GetProperty("can_edit").GetBoolean());
+            Assert.False(session.RootElement.GetProperty("can_own").GetBoolean());
+            Assert.False(session.RootElement.GetProperty("signed_in_admin").GetBoolean());
+        }
+
+        /* The shared token keeps its edit seat and is not scoped. */
+        var sharedCookie = await SignIn(server, SharedToken);
+        var (sharedCtx, sharedBody) = await Send(server, HttpMethods.Get, "/api/session", sharedCookie);
+        Assert.Equal(StatusCodes.Status200OK, sharedCtx.Response.StatusCode);
+        using var shared = System.Text.Json.JsonDocument.Parse(sharedBody);
+        Assert.False(shared.RootElement.GetProperty("scoped").GetBoolean());
+        Assert.True(shared.RootElement.GetProperty("can_edit").GetBoolean());
+    }
+
+    /* ---------------------------------------------------------------- the read cache ---------------------------------------------------------------- */
+
+    /// <summary>The key the /api/read handler computes for the one-server form of a held view, as an unscoped reader sends it.</summary>
+    internal static string HeldFinOpsKey(ReadAdmission admission, out TimeSpan ttl)
+    {
+        const string route = "get_finops";
+        var query = new[]
+        {
+            new KeyValuePair<string, string?>("server", "finance-server"),
+            new KeyValuePair<string, string?>("view", "optimization"),
+        };
+        var band = DarlingWebEndpoints.WebWindowBand(route, _ => null);
+        var serverHeld = ReadAdmission.IsServerHeldRead(route, "finance-server", "optimization");
+        Assert.True(serverHeld);
+        ttl = ReadResultCache.TtlFor(route, band, false, "optimization", serverHeld);
+        return ReadCacheKey.ForWeb(route, query, admission.Cache.Generation, admission.Cache, ttl, heldFromStore: true);
+    }
+
+    /// <summary>A held entry an unscoped reader filled is served to the next unscoped reader and never to a scoped one: the key carries
+    /// no caller identity, so the scoped seat skips the cache and goes to the store, which is not reachable here. The entry stays as it
+    /// was, so the scoped read replaced nothing either.</summary>
+    [Fact]
+    public async Task AScopedReader_IsNotServedTheHeldFinOpsEntry_AnUnscopedReaderFilled()
+    {
+        var admission = new ReadAdmission(TimeProvider.System, TimeSpan.Zero, null);
+        Assert.True(admission.IsCached(ReadSurface.Web, "get_finops", null, fleetRead: false, serverHeld: true));
+        var key = HeldFinOpsKey(admission, out var ttl);
+        const string canned = """{"view":"optimization","served_from":"held-entry"}""";
+        Assert.True(admission.Cache.TryStore(key, canned, ttl));
+
+        var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        using var server = await BuildServer(ScopedAndUnscopedReaders(), dataSource: postgres, readAdmission: admission);
+        var scopedCookie = await SignIn(server, ReaderToken);
+        var readerCookie = await SignIn(server, ParentReaderToken);
+        await postgres.DisposeAsync();
+
+        const string path = "/api/read/get_finops?server=finance-server&view=optimization";
+        var (hit, hitBody) = await Send(server, HttpMethods.Get, path, readerCookie);
+        Assert.Equal(StatusCodes.Status200OK, hit.Response.StatusCode);
+        Assert.Equal(canned, hitBody);
+
+        var (scoped, scopedBody) = await Send(server, HttpMethods.Get, path, scopedCookie);
+        Assert.NotEqual(StatusCodes.Status200OK, scoped.Response.StatusCode);
+        Assert.DoesNotContain("served_from", scopedBody, StringComparison.Ordinal);
+        Assert.True(admission.Cache.TryGet(key, out var still));
+        Assert.Equal(canned, still);
+    }
+
+    /// <summary>A registry read that fails is a fault of the store on the catalog route for a reader with no scope, as it is for a
+    /// scoped one: the fixed failure body, one service log line that names the registry, and a run recorded as an error. The store
+    /// here is a disposed data source, so the registry read is the first thing the route asks it for and it fails at once.</summary>
+    [Fact]
+    public async Task TheCatalog_AnswersARegistryFaultAsTheStoreFault_ForAnUnscopedReader()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        var log = new CapturingTestLogger();
+        var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        using var server = await BuildServer(ReaderAndOperator(), log, postgres, new ReadAdmission(TimeProvider.System, TimeSpan.Zero, null), readLatency);
+        var cookie = await SignIn(server, SharedToken);
+        await postgres.DisposeAsync();
+
+        var (answer, body) = await Send(server, HttpMethods.Get, "/api/catalog?server=finance-server", cookie);
+
+        Assert.Equal(StatusCodes.Status500InternalServerError, answer.Response.StatusCode);
+        Assert.Contains(PerformanceMonitor.Darling.Service.Hosting.DarlingWebFailureLog.GenericMessage, body, StringComparison.Ordinal);
+        Assert.Equal(1, log.Lines.Count(line => line.Contains(DarlingServerResolver.RegistryReadFaultPrefix, StringComparison.Ordinal)));
+        var recorded = readLatency.Drain().Where(sample => sample.Route == DarlingWebEndpoints.CatalogRoute)
+            .Select(sample => sample.Outcome + " x" + sample.Count).ToArray();
+        Assert.Equal([ReadOutcome.Error + " x1"], recorded);
     }
 
     private sealed class HostLogger(CapturingTestLogger inner) : ILogger<DarlingWebHostService>
@@ -313,7 +584,7 @@ public sealed class DarlingWebNamedTokenTests
     }
 
     /// <summary>Signs in through the form POST and returns the session cookie (<c>name=value</c>) the 302 set.</summary>
-    private static async Task<string> SignIn(TestServer server, string token)
+    internal static async Task<string> SignIn(TestServer server, string token)
     {
         var ctx = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, InCidrRemote, token);
         Assert.Equal(StatusCodes.Status302Found, ctx.Response.StatusCode);
@@ -321,12 +592,31 @@ public sealed class DarlingWebNamedTokenTests
         return setCookie[..setCookie.IndexOf(';')];
     }
 
-    private static async Task<(HttpContext Context, string Body)> Send(TestServer server, string method, string path, string? cookie)
+    internal static async Task<(HttpContext Context, string Body)> PostJson(TestServer server, string path, string body, string cookie)
+    {
+        using var content = new MemoryStream(Encoding.UTF8.GetBytes(body));
+        var context = await server.SendAsync(request =>
+        {
+            request.Request.Method = HttpMethods.Post;
+            request.Request.Path = path;
+            request.Request.ContentType = "application/json";
+            request.Request.ContentLength = content.Length;
+            request.Request.Body = content;
+            request.Request.Headers.Host = ListenIp;
+            request.Request.Headers.Cookie = cookie;
+            request.Connection.RemoteIpAddress = InCidrRemote;
+        });
+        return (context, await new StreamReader(context.Response.Body).ReadToEndAsync());
+    }
+
+    internal static async Task<(HttpContext Context, string Body)> Send(TestServer server, string method, string path, string? cookie)
     {
         var ctx = await server.SendAsync(c =>
         {
             c.Request.Method = method;
-            c.Request.Path = path;
+            var queryStart = path.IndexOf('?');
+            c.Request.Path = queryStart < 0 ? path : path[..queryStart];
+            c.Request.QueryString = queryStart < 0 ? QueryString.Empty : new QueryString(path[queryStart..]);
             c.Request.Headers.Host = ListenIp;
             c.Connection.RemoteIpAddress = InCidrRemote;
             if (cookie is not null) c.Request.Headers["Cookie"] = cookie;

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -131,7 +132,7 @@ public static class MonitoringGrantScript
         new(GrantSet.Base, GrantScope.Server, "VIEW ANY DEFINITION", null, true,
             "Catalog visibility. Catalog views hide rows instead of raising an error, so without this the index, object, identity column capacity and availability group collectors see nothing. The identity check also stops on a database where it is missing, rather than report it clean."),
         new(GrantSet.Base, GrantScope.Server, "ALTER ANY EVENT SESSION", null, true,
-            "The deadlock, blocked-process and attention Extended Events sessions."),
+            "The deadlock, blocked-process, attention and schema-changes Extended Events sessions."),
         new(GrantSet.Base, GrantScope.Server, "ALTER TRACE", null, false,
             "Optional: the default-trace collector reads sys.traces. ALTER TRACE is not read-only; withhold it and the collector records a permissions skip."),
         new(GrantSet.Base, GrantScope.Server, "ALTER SETTINGS", null, false,
@@ -651,10 +652,10 @@ public static class MonitoringGrantScript
             return null;
         }
 
-        var text = $"{count} online user database(s) cannot be entered by this login, so the per-database collectors skip them";
+        var text = $"{CountText.Plural(count, "online user database")} cannot be entered by this login, so the per-database collectors skip {(count == 1 ? "it" : "them")}";
         return awsRds
-            ? text + $": Amazon RDS has no CONNECT ANY DATABASE, so run CREATE USER {Quote(principal)} FOR LOGIN {Quote(principal)} in each of them. The --grant-script --rds command prints it for every current database."
-            : text + $": run CREATE USER {Quote(principal)} FOR LOGIN {Quote(principal)} in each of them, or grant CONNECT ANY DATABASE.";
+            ? text + $": Amazon RDS has no CONNECT ANY DATABASE, so give {Quote(principal)} a user in {(count == 1 ? "it" : "each of them")}. The --grant-script --rds command prints the statement for every current database."
+            : text + $": give {Quote(principal)} a user in {(count == 1 ? "it" : "each of them")}, or grant CONNECT ANY DATABASE.";
     }
 
     private static string Quote(string name) => "[" + name.Replace("]", "]]", StringComparison.Ordinal) + "]";
