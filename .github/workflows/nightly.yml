@@ -133,17 +133,38 @@ jobs:
           echo "stamp=${stamp}" >> "$GITHUB_OUTPUT"
           echo "Nightly stamp: ${stamp}"
 
+      # #8731: GitHub fires the schedule hours late, so a manual dispatch can publish this commit's
+      # nightly first and the late scheduled run then rebuilds the SAME commit and replaces the
+      # release's assets (a new build number, a new SHA256SUMS) under an install that already staged
+      # the first one. The publish job creates the `nightly` release with `--target <built commit>`,
+      # so the `nightly` tag IS the commit the release was built from. A scheduled FULL build whose
+      # commit (`github.sha`, dev's tip when it was dispatched) is already that commit skips every
+      # build job. A manual dispatch (from_schedule false) always builds, and a map-only run never
+      # reaches the check: it builds no release, and the test map reads has_changes too. No tag, or
+      # a lookup that fails, builds as before.
       - name: Check for new commits in last 24 hours
         id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FROM_SCHEDULE: ${{ inputs.from_schedule }}
+          MAP_ONLY: ${{ inputs.map_only }}
         run: |
           RECENT=$(git log --since="24 hours ago" --oneline | head -1)
-          if [ -n "$RECENT" ]; then
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
-            echo "New commits found — building nightly"
-          else
+          if [ -z "$RECENT" ]; then
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
             echo "No new commits — skipping nightly build"
+            exit 0
           fi
+          if [ "${FROM_SCHEDULE}" = "true" ] && [ "${MAP_ONLY}" != "true" ]; then
+            NIGHTLY_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/nightly" --jq '.object.sha' 2>/dev/null || true)
+            if [ -n "${NIGHTLY_SHA}" ] && [ "${NIGHTLY_SHA}" = "${GITHUB_SHA}" ]; then
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              echo "The nightly release was already built from ${GITHUB_SHA} — skipping the late scheduled rebuild (#8731)"
+              exit 0
+            fi
+          fi
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          echo "New commits found — building nightly"
 
   build:
     needs: check
