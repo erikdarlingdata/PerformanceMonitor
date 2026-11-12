@@ -33,6 +33,9 @@ export const KEY_SEVERITY_COLORS = "darling.local.severityColors.v1";
 export const KEY_SIDEBAR = "darling.local.sidebar.v1";
 export const KEY_DB_FILTER = "darling.local.dbFilter.v1";
 export const KEY_VIEW_GROUPS = "darling.local.viewGroups.v1";
+/** The PostgreSQL servers this browser has opened (#8554), as hashes of the route's server name (a name is never stored): the server page
+ *  starts a server's first reads before its fleet card arrives, on the SQL Server tabs, unless the server is in this set. */
+export const KEY_PG_SERVERS = "darling.local.pgServers.v1";
 /** The collapsed sidebar groups of ONE store at a front door (#6840), under this key plus "/" and the store's name. A tag id is
  *  handed out by each store on its own, so tag 5 in one store is not tag 5 in another. Server ids are not scoped this way: they
  *  are a hash of the server's name, the same server has the same id in every store, and favourites, acknowledgements and the
@@ -47,6 +50,7 @@ export const MAX_DB_NAMES = 50;
 export const MAX_DB_NAME_LENGTH = 128;
 export const MAX_DB_QUERY_BYTES = 4096;
 const DB_PAIR_OVERHEAD = "&database_name=".length;
+const MAX_PG_SERVERS = 500;
 
 /** The severities with a colour choice, in the order the settings list them, and the palette each falls back to. */
 export const SEVERITIES = ["critical", "warning", "info"];
@@ -79,6 +83,7 @@ let sidebarGrouped = false;
 let dbFilters = new Map(); // server_id -> the chosen database names (1 to MAX_DB_NAMES, kept exactly as chosen)
 let viewGroups = new Set(); // collapsed Custom Views sidebar groups (#6214): "my", or "folder:" + the folder's name
 let sidebarGroups = new Set(); // collapsed sidebar groups: tag ids, plus the fixed ids "favourites" and "untagged"
+let pgServers = new Set(); // hashes of the route names of servers a fleet card called PostgreSQL (#8554), oldest first
 let storeScope = null; // the front door's picked store, or null (store mode: the keys are what they always were)
 let attention = new Map(); // server_id -> { count, critical, latestMs } from the last alert read
 const listeners = new Set();
@@ -172,6 +177,9 @@ export function reload() {
       if (kept) dbFilters.set(id, kept);
     }
   }
+
+  const pg = readJson(KEY_PG_SERVERS);
+  pgServers = new Set(pg && Array.isArray(pg.hashes) ? pg.hashes.filter(Number.isInteger).slice(-MAX_PG_SERVERS) : []);
 
   const s = readJson(KEY_SIDEBAR);
   sidebarCollapsed = !!(s && s.collapsed === true);
@@ -314,6 +322,44 @@ export function setDatabaseFilter(serverId, names) {
   for (const [id, list] of dbFilters) servers[id] = list;
   writeJson(KEY_DB_FILTER, { servers });
   return true;
+}
+
+/** True when at least one server has a saved database filter. A filter is keyed by the fleet card's server id, so a page that
+ *  starts reading before the card arrives (#8554) cannot apply one and only starts when there is none to apply. */
+export function hasDatabaseFilter() {
+  return dbFilters.size > 0;
+}
+
+/* ─────────────────────────── PostgreSQL servers seen (#8554) ─────────────────────────── */
+
+/** FNV-1a over the route's server name: a number to remember, never the name itself. A collision only makes the page skip an early
+ *  start for one server (or make one early start that the card then replaces), neither of which shows. */
+function nameHash(name) {
+  let h = 0x811c9dc5;
+  const text = String(name);
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h;
+}
+
+/** True when a fleet card has called the server named by the route PostgreSQL in this browser before. */
+export function isRememberedPostgres(routeName) {
+  return pgServers.has(nameHash(routeName));
+}
+
+/** Notes what a fleet card said about the server named by the route: PostgreSQL adds it to the set, anything else takes it out. */
+export function rememberEngine(routeName, isPostgres) {
+  const h = nameHash(routeName);
+  if (pgServers.has(h) === (isPostgres === true)) return;
+  if (isPostgres === true) {
+    pgServers.add(h);
+    if (pgServers.size > MAX_PG_SERVERS) pgServers.delete(pgServers.values().next().value);
+  } else {
+    pgServers.delete(h);
+  }
+  writeJson(KEY_PG_SERVERS, { hashes: [...pgServers] });
 }
 
 /* ─────────────────────────── alert count and acknowledgement ─────────────────────────── */

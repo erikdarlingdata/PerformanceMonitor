@@ -361,7 +361,8 @@ const scenarios = {
     const heavy = /get_server_trend|get_memory_trend|get_file_io_trend|get_overview_baselines|get_daily_summary_range/;
     const sent = () => fetchLog.filter((r) => heavy.test(r.url));
     await boot("#/server/alpha/overview");
-    await advance(1);
+    /* No clock step here: the panels' reads start with the page, before the fleet card answers (#8554), so the two the gate lets through
+       are already out and unanswered and the other three wait. A step would answer the two and let the next two through. */
     const before = { sent: sent().length, aborted: sent().some((r) => r.aborted) };
     await go("#/investigations"); await settle();
     const afterLeave = { sent: sent().length, allAborted: sent().length > 0 && sent().every((r) => r.aborted) };
