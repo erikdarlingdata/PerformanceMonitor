@@ -1650,7 +1650,37 @@ public static class DarlingRetention
     /// (DarlingCollectorRunner.GetLastCollectedTimeAsync).
     /// </summary>
     internal static string DeleteSqlFor(ICollectorSchemaInfo schema)
-        => TimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName);
+        => schema is AttentionCollector
+            ? ServerIndexedTimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName)
+            : TimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName);
+
+    /// <summary>
+    /// #8719: <see cref="TimeSlicedDeleteSql"/> for a plain table whose only index is <c>(server_id, {col})</c> and whose
+    /// rows are scattered through the heap (the attention table: a large field store holds tens of millions of rows,
+    /// and inserts reuse freed pages, so one day of rows sits on most of the heap). It deletes exactly the same rows
+    /// as <see cref="TimeSlicedDeleteSql"/>, one oldest day per execution, ended by the same empty-slice rule.
+    /// <para>What changes is how the oldest expired time is found. Each <c>min({col})</c> in the plain shape is a scan of
+    /// every expired index entry, and once a purge has deleted rows from a page that page is no longer all-visible
+    /// until autovacuum reaches it, so the next day's two <c>min()</c> scans fetch most of those heap pages: the DELETE
+    /// then reads the heap three times instead of once. Here the server ids are listed with a loose index scan (one
+    /// index probe per server), each server's oldest expired time is one index probe on <c>(server_id, {col})</c>,
+    /// and the smallest of those is the same global minimum, computed once for both bounds.</para>
+    /// <para>Needs <c>(server_id, {col})</c> as an index: only the attention table (V179) is routed here, and the
+    /// loose scan is unsafe on a table without that index. Table and column come from catalog constants (never user
+    /// input), so interpolation is safe.</para>
+    /// </summary>
+    internal static string ServerIndexedTimeSlicedDeleteSql(string table, string timeColumn)
+        => $"WITH RECURSIVE server_ids(server_id) AS ("
+         + $" SELECT min(server_id) FROM {table}"
+         + $" UNION ALL"
+         + $" SELECT (SELECT min(a.server_id) FROM {table} AS a WHERE a.server_id > server_ids.server_id)"
+         + $" FROM server_ids WHERE server_ids.server_id IS NOT NULL),"
+         + $" oldest AS ("
+         + $" SELECT min((SELECT min(a.{timeColumn}) FROM {table} AS a WHERE a.server_id = server_ids.server_id AND a.{timeColumn} < $1)) AS slice_start"
+         + $" FROM server_ids WHERE server_ids.server_id IS NOT NULL)"
+         + $" DELETE FROM {table} WHERE {timeColumn} < $1"
+         + $" AND {timeColumn} >= (SELECT slice_start FROM oldest)"
+         + $" AND {timeColumn} < (SELECT slice_start FROM oldest) + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'";
 
     /// <summary>
     /// The batched purge statement: delete the OLDEST one-day slice of expired rows per execution —
