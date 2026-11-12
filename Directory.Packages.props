@@ -22,11 +22,11 @@
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.12.0" />
     <PackageVersion Include="Microsoft.Data.SqlClient" Version="7.1.1" />
     <PackageVersion Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="7.1.1" />
-    <PackageVersion Include="Microsoft.Extensions.Configuration" Version="10.0.14" />
-    <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="10.0.14" />
+    <PackageVersion Include="Microsoft.Extensions.Configuration" Version="10.0.15" />
+    <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="10.0.15" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.15" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.15" />
-    <PackageVersion Include="Microsoft.Extensions.Logging" Version="10.0.14" />
+    <PackageVersion Include="Microsoft.Extensions.Logging" Version="10.0.15" />
     <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.15" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.15" />
     <!-- #5943: test projects only (see BannedSymbols.txt beside each test csproj). -->
@@ -36,9 +36,9 @@
     <PackageVersion Include="Npgsql" Version="10.0.3" />
     <PackageVersion Include="ScottPlot.WPF" Version="5.1.59" />
     <PackageVersion Include="System.IO.FileSystem.AccessControl" Version="5.0.0" />
-    <!-- #8650: pinned to 10.0.15 (GHSA-vmv3-wvjp-wqpj) because AWSSDK.PI pulls AWSSDK.Extensions.CborProtocol, whose newest release (4.0.100.26) still depends on the affected 9.0.5.
-         Transitive pinning is off, so the direct reference in Darling.Service does the lifting. Drop both once a CborProtocol release depends on a fixed version. -->
-    <PackageVersion Include="System.Formats.Cbor" Version="10.0.15" />
+    <!-- #8650: AWSSDK 4.1 (PI -> Extensions.CborProtocol) needs System.Formats.Cbor 11.0.0 or later, which also clears GHSA-vmv3-wvjp-wqpj (the old 9.0.5 dependency).
+         Transitive pinning is off, so the direct reference in Darling.Service does the lifting. Drop both once CborProtocol alone brings a fixed version. -->
+    <PackageVersion Include="System.Formats.Cbor" Version="11.0.0" />
     <!-- #5802: pinned to a patched version (10.0.13 or later) until a Microsoft.Data.SqlClient release depends on a patched Pkcs (7.1.1 pulls in 9.0.18); drop the direct references then.
          Transitive pinning is off, so this line alone lifts nothing: a transitive package gets a CentralTransitive lock entry
          that still resolves the lower version (a transitive ProtectedData lock entry showed it). The

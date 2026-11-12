@@ -287,7 +287,7 @@
           "DuckDB.NET.Bindings.Full": "[1.5.6.1, )",
           "DuckDB.NET.Data": "[1.5.6.1, )",
           "Npgsql": "[10.0.3, )",
-          "System.Security.Cryptography.ProtectedData": "[10.0.14, )"
+          "System.Security.Cryptography.ProtectedData": "[10.0.15, )"
         }
       },
       "AWSSDK.S3": {
@@ -346,9 +346,9 @@
       },
       "System.Security.Cryptography.ProtectedData": {
         "type": "CentralTransitive",
-        "requested": "[10.0.14, )",
-        "resolved": "10.0.14",
-        "contentHash": "UuaBUHgmtc9h6CMxaQqFDDJxkS5JVy7XEB+DbtCvD68GFcVM9/AccuNwFpARx8nwCnvjaxzoOBjG3gPz32P1Eg=="
+        "requested": "[10.0.15, )",
+        "resolved": "10.0.15",
+        "contentHash": "AG49oTxB0R4YQJzeIIHRgqyaI3SOT8Q8vEfGUcju2WxOvsBkDJU4FKTQ8gYQAYCxmHOHqyJL0UDGcCf8nzRoiw=="
       }
     }
   }
