@@ -333,6 +333,71 @@ public sealed class ViewerSlowLoadPhasesTests
         Assert.Contains("layout and render", line, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void JobHistory_ALoad_BooksTheGridRead_AndEachChoicesRead_OnItsOwn()
+    {
+        var port = FreePort();
+        string? line = null;
+        List<string> booked = new();
+        RunThemed(async () =>
+        {
+            var tab = new JobHistoryTab();
+            tab.Initialize(new ViewerDataService(ClosedStore(port)));
+            var window = new Window { Content = tab, Width = 1200, Height = 800 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                var timer = SlowClock();
+                await tab.RefreshJobsAsync(timer);
+                booked = await PhasesAsync(timer, 4);
+                line = timer.Finish("Job History");
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        /* The Category list read is what took 21 s in the field and wrote no line: it is booked apart from the grid's read and the server list. */
+        foreach (var phase in new[] { "job history read", "category choices read", "server choices read", "data start read" })
+        {
+            Assert.True(booked.Contains(phase), "got " + string.Join(",", booked) + " want " + phase);
+        }
+
+        Assert.NotNull(line);
+        Assert.Contains("slow load: Job History", line, StringComparison.Ordinal);
+        Assert.Contains("category choices read", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void JobHistory_AFirstOpen_CountsTheWait_AndWritesOneLine()
+    {
+        var port = FreePort();
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            var tab = new JobHistoryTab { FirstOpenSlowThresholdMs = 0, SlowLoadSink = lines.Add };
+            tab.Initialize(new ViewerDataService(ClosedStore(port)));
+            var window = new Window { Content = tab, Width = 1200, Height = 800 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                tab.BeginFirstOpen();
+                await Task.Delay(150);
+                tab.FirstOpenRefreshStarted();
+                await tab.RefreshJobsAsync();
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        var line = Assert.Single(lines);
+        Assert.Contains("slow load: first open > Job History", line, StringComparison.Ordinal);
+        Assert.Contains("waited for the shell to start this refresh", line, StringComparison.Ordinal);
+    }
+
     private static int FreePort()
     {
         var listener = new TcpListener(IPAddress.Loopback, 0);
