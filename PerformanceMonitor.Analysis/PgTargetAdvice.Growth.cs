@@ -254,9 +254,9 @@ public static partial class PgTargetAdvice
 
     private static string FmtDays(double days) => days switch
     {
-        < 1 => $"{days * 24:0.#} hours",
+        < 1 => $"{days * 24:#,##0.#} hours",
         < 60 => $"{days:0} days",
-        < 730 => $"{days / 30.4375:0.#} months",
-        _ => $"{days / 365.25:0.#} years",
+        < 730 => $"{days / 30.4375:#,##0.#} months",
+        _ => $"{days / 365.25:#,##0.#} years",
     };
 }

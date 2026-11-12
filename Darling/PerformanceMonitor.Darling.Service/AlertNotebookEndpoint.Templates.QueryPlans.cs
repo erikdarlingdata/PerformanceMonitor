@@ -54,7 +54,7 @@ internal static partial class AlertNotebookEndpoint
             {
                 ["type"] = "markdown",
                 ["text"] = "The execution plan for a still-running session is one click away from its row " +
-                    "above (Active queries) — this notebook cannot bind `get_plan_xml` without a concrete " +
+                    "above (Active queries). This notebook cannot bind `get_plan_xml` without a concrete " +
                     "`query_hash`, which this alert does not carry as data.",
             });
             cells.Add(TimelinePanel(

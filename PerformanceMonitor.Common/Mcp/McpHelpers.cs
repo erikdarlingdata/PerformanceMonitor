@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 
 namespace PerformanceMonitor.Common;
 
@@ -481,7 +482,7 @@ internal static class McpHelpers
 
         if (hoursBack <= 0)
         {
-            return Refusal("hours_back", $"Invalid hours_back value '{hoursBack}'. Must be a positive integer — a negative or zero window has no meaning and is refused rather than read as its absolute value. This read has no upper bound on hours_back.");
+            return Refusal("hours_back", $"Invalid hours_back value '{hoursBack}'. Must be a positive integer. A negative or zero window has no meaning and is refused rather than read as its absolute value. This read has no upper bound on hours_back.");
         }
 
         return ResolveAsOf(asOf, out endUtc);
@@ -520,7 +521,7 @@ internal static class McpHelpers
                 DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
                 out var parsed))
         {
-            return Refusal("summary_date", $"Invalid summary_date value '{summaryDate}'. Expected an ISO-8601 calendar date, yyyy-MM-dd (e.g. 2026-07-09), read as a UTC day. Other spellings — including 07/09/2026 — are refused rather than guessed at, because 01/02/2026 reads as two different days depending on who wrote it.");
+            return Refusal("summary_date", $"Invalid summary_date value '{summaryDate}'. Expected an ISO-8601 calendar date, yyyy-MM-dd (e.g. 2026-07-09), read as a UTC day. Other spellings, including 07/09/2026, are refused rather than guessed at, because 01/02/2026 reads as two different days depending on who wrote it.");
         }
 
         date = DateTime.SpecifyKind(parsed, DateTimeKind.Utc).Date;
@@ -821,6 +822,7 @@ internal static class McpHelpers
     {
         var now = DateTime.UtcNow;
         endUtc = now;
+        s_asOfAnchor.Value = null;
 
         if (string.IsNullOrWhiteSpace(asOf))
         {
@@ -848,7 +850,30 @@ internal static class McpHelpers
         }
 
         endUtc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+        s_asOfAnchor.Value = endUtc;
         return null;
+    }
+
+    /// <summary>The anchor the current tool call's <c>as_of</c> resolved to, or null when the call named none.
+    /// Set by <see cref="ResolveAsOf"/> in the tool's own flow, so an empty-window sentence can say which window it
+    /// looked at without every reply builder carrying the anchor through its signature.</summary>
+    private static readonly AsyncLocal<DateTime?> s_asOfAnchor = new();
+
+    /// <summary>Sets the anchor <see cref="InTheLast"/> reads, for a reply builder whose own async frame did not resolve
+    /// <c>as_of</c> (the anchor <see cref="ResolveAsOf"/> sets in a nested async method does not flow back to its caller).</summary>
+    public static void AnchorAsOf(DateTime? anchor) => s_asOfAnchor.Value = anchor;
+
+    /// <summary>
+    /// "in the last 24 hours" for a read that ended now, and "in the 24 hours ending at 2026-11-10 12:00 UTC" for a
+    /// read anchored at <c>as_of</c>. An empty-window sentence that says "the last 24 hours" about a window that
+    /// ended at an earlier instant describes a window nobody asked for. <paramref name="span"/> is the counted span
+    /// ("24 hours", "7 days").
+    /// </summary>
+    public static string InTheLast(string span)
+    {
+        return s_asOfAnchor.Value is { } anchor
+            ? string.Create(CultureInfo.InvariantCulture, $"in the {span} ending at {anchor:yyyy-MM-dd HH:mm} UTC")
+            : $"in the last {span}";
     }
 
     /// <summary>
@@ -972,9 +997,9 @@ internal static class McpHelpers
     public static string? ValidateMinMs(double? minMs, string paramName)
     {
         if (minMs is { } value && !double.IsFinite(value))
-            return Refusal(paramName, $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor must be a finite number — NaN and Infinity parse but can never match a run, so the read would come back empty and duration-ranked with nothing to say the floor was unusable. Note that an oversized number overflows to Infinity rather than being rejected as too large.");
+            return Refusal(paramName, $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor must be a finite number. NaN and Infinity parse but can never match a run, so the read would come back empty and duration-ranked with nothing to say the floor was unusable. Note that an oversized number overflows to Infinity rather than being rejected as too large.");
         if (minMs is < 0)
-            return Refusal(paramName, $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor cannot be negative — use 0 to admit every row, or omit it entirely.");
+            return Refusal(paramName, $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor cannot be negative. Use 0 to admit every row, or omit it entirely.");
         return null;
     }
 

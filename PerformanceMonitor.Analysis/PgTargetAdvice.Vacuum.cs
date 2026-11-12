@@ -156,7 +156,7 @@ public static partial class PgTargetAdvice
             return $"{FactAdvice.RatioText(oRatio)}× for {FmtHours(oHours)}{oSlope}";
         });
 
-        inv.Append($"The table has been past its line for {trailing:0} consecutive samples spanning {hours:0.#} h{rest}. ");
+        inv.Append($"The table has been past its line for {trailing:0} consecutive samples spanning {hours:#,##0.#} h{rest}. ");
 
         if (slopeComputable)
         {
@@ -188,7 +188,7 @@ public static partial class PgTargetAdvice
         }
 
         if (m.TryGetValue(PgTargetScorer.BacklogHoursSinceLastAutovacuumKey, out var sinceLast))
-            inv.Append($"last_autovacuum was {sinceLast:0.#} h before the window end. ");
+            inv.Append($"last_autovacuum was {sinceLast:#,##0.#} h before the window end. ");
         else
             inv.Append("The table has no last_autovacuum stamp: it has never been autovacuumed since its statistics were last reset. ");
 
@@ -222,7 +222,7 @@ public static partial class PgTargetAdvice
         {
             rem.Append($"autovacuum is reaching this table and losing, so let it work unthrottled HERE rather than server-wide: ALTER TABLE {table} SET (autovacuum_vacuum_cost_delay = 0);, 0 is the engine's own 'no throttling' value (the server default is a 2 ms delay per 200 cost units); a per-table reloption applies at the next run without a restart. Counter-objective: more read and write I/O from autovacuum while it runs on this table. ");
             if (!insertArm && live > 0 && threshold > 0)
-                rem.Append($"If the line itself is the problem, {Fmt(threshold)} dead rows before a run starts, lower this table's own scale factor so runs start earlier and each does less: ALTER TABLE {table} SET (autovacuum_vacuum_scale_factor = {SuggestedScaleFactor(threshold, live):0.###});, that halves the trigger line from its current {threshold / live:P1} of the table. Counter-objective: more frequent, smaller vacuums. ");
+                rem.Append($"If the line itself is the problem, {Fmt(threshold)} dead rows before a run starts, lower this table's own scale factor so runs start earlier and each does less: ALTER TABLE {table} SET (autovacuum_vacuum_scale_factor = {SuggestedScaleFactor(threshold, live):#,##0.###});, that halves the trigger line from its current {threshold / live:P1} of the table. Counter-objective: more frequent, smaller vacuums. ");
         }
         else
         {
@@ -230,7 +230,7 @@ public static partial class PgTargetAdvice
         }
 
         if (insertArm && live > 0 && insertThreshold > 0)
-            rem.Append($"For an append-only table the point is freezing: its insert line sits at {insertThreshold / live:P1} of the table; ALTER TABLE {table} SET (autovacuum_vacuum_insert_scale_factor = {SuggestedScaleFactor(insertThreshold, live):0.###}); halves it so autovacuum visits after fewer inserts and freezes the new pages in smaller batches. Counter-objective: a vacuum pass on the table twice as often. ");
+            rem.Append($"For an append-only table the point is freezing: its insert line sits at {insertThreshold / live:P1} of the table; ALTER TABLE {table} SET (autovacuum_vacuum_insert_scale_factor = {SuggestedScaleFactor(insertThreshold, live):#,##0.###}); halves it so autovacuum visits after fewer inserts and freezes the new pages in smaller batches. Counter-objective: a vacuum pass on the table twice as often. ");
 
         return new AdviceBlock(headline, inv.ToString().TrimEnd(), rem.ToString().TrimEnd());
     }
@@ -635,8 +635,8 @@ public static partial class PgTargetAdvice
 
         var inv = new StringBuilder();
         inv.Append(insertArm
-            ? $"The reloption is off on {table}, and the table has taken {Fmt(inserts)} inserts since its last vacuum against its own insert line of {Fmt(insertThreshold)} (autovacuum_vacuum_insert_threshold + autovacuum_vacuum_insert_scale_factor × {Fmt(live)} live tuples): {ratio:0.#}× the line, for {trailing:0} consecutive samples spanning {FmtHours(hours)}{rest}. "
-            : $"The reloption is off on {table}, and the table carries {Fmt(dead)} dead tuples against its own trigger line of {Fmt(threshold)} (autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × {Fmt(live)} live tuples, reloptions honoured): {ratio:0.#}× the line, for {trailing:0} consecutive samples spanning {FmtHours(hours)}{rest}. ");
+            ? $"The reloption is off on {table}, and the table has taken {Fmt(inserts)} inserts since its last vacuum against its own insert line of {Fmt(insertThreshold)} (autovacuum_vacuum_insert_threshold + autovacuum_vacuum_insert_scale_factor × {Fmt(live)} live tuples): {ratio:#,##0.#}× the line, for {trailing:0} consecutive samples spanning {FmtHours(hours)}{rest}. "
+            : $"The reloption is off on {table}, and the table carries {Fmt(dead)} dead tuples against its own trigger line of {Fmt(threshold)} (autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × {Fmt(live)} live tuples, reloptions honoured): {ratio:#,##0.#}× the line, for {trailing:0} consecutive samples spanning {FmtHours(hours)}{rest}. ");
         inv.Append("The engine computed that line and would have fired; the reloption is the only reason it did not. ");
         if (hasLastAutovacuum)
             inv.Append($"autovacuum last ran on this table {FmtHours(sinceLast)} before the window end. ");
@@ -661,7 +661,7 @@ public static partial class PgTargetAdvice
         rem.Append($"(2) Keep it off and schedule the vacuum yourself: VACUUM (ANALYZE) {table}; off-peak, then on a cadence that beats the {(insertArm ? "insert" : "dead-tuple")} rate. Counter-objective: a manual VACUUM reads every page of the table{(totalBytes > 0 ? $" ({FmtBytes(totalBytes)})" : string.Empty)} and holds SHARE UPDATE EXCLUSIVE while it runs (reads and writes continue, DDL and other vacuums wait), and a schedule that slips becomes this finding again. ");
         rem.Append("Never VACUUM FULL as the first lever: it takes ACCESS EXCLUSIVE, rewrites the whole table and blocks every reader and writer for the duration; it is for reclaiming space AFTER the backlog is under control, if ever. ");
         if (!insertArm && live > 0 && threshold > 0)
-            rem.Append($"If the table was disabled because its runs were too big, re-enable it with a lower line so each run is smaller: ALTER TABLE {table} SET (autovacuum_vacuum_scale_factor = {SuggestedScaleFactor(threshold, live):0.###}); halves the trigger from its current {threshold / live:P1} of the table. Counter-objective: more frequent, smaller vacuums. ");
+            rem.Append($"If the table was disabled because its runs were too big, re-enable it with a lower line so each run is smaller: ALTER TABLE {table} SET (autovacuum_vacuum_scale_factor = {SuggestedScaleFactor(threshold, live):#,##0.###}); halves the trigger from its current {threshold / live:P1} of the table. Counter-objective: more frequent, smaller vacuums. ");
 
         return new AdviceBlock(headline, inv.ToString().TrimEnd(), rem.ToString().TrimEnd());
     }
@@ -673,14 +673,14 @@ public static partial class PgTargetAdvice
     private static string FmtHours(double hours) => hours switch
     {
         < 1 => $"{hours * 60:0} minutes",
-        < 48 => $"{hours:0.#} hours",
-        _ => $"{hours / 24:0.#} days",
+        < 48 => $"{hours:#,##0.#} hours",
+        _ => $"{hours / 24:#,##0.#} days",
     };
 
     private static string FmtBytes(double bytes) => bytes switch
     {
-        >= 1024d * 1024 * 1024 => $"{bytes / (1024d * 1024 * 1024):0.#} GB",
-        >= 1024d * 1024 => $"{bytes / (1024d * 1024):0.#} MB",
-        _ => $"{bytes / 1024d:0.#} kB",
+        >= 1024d * 1024 * 1024 => $"{bytes / (1024d * 1024 * 1024):#,##0.#} GB",
+        >= 1024d * 1024 => $"{bytes / (1024d * 1024):#,##0.#} MB",
+        _ => $"{bytes / 1024d:#,##0.#} kB",
     };
 }

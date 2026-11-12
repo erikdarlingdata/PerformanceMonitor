@@ -84,7 +84,7 @@ public sealed class DarlingMcpCollectorCostTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No cost recorded for collector '{collector_name.Trim()}' in the last {CountText.Plural(days_back, "day")}. " +
+                        $"No cost recorded for collector '{collector_name.Trim()}' {McpHelpers.InTheLast(CountText.Plural(days_back, "day"))}. " +
                         "The service records an hourly aggregate; a collector that has not run in the window has no row.");
                 }
 
@@ -111,7 +111,7 @@ public sealed class DarlingMcpCollectorCostTools
                 return McpHelpers.Status(
                     "empty",
                     "No collector cost recorded yet. The service records an hourly aggregate per (server, collector); " +
-                    "the first lands within an hour of starting on a store at schema V105 or later.");
+                    "the first lands within an hour of the service starting.");
             }
 
             return JsonSerializer.Serialize(new

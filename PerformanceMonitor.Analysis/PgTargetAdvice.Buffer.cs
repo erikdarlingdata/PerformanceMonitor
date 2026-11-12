@@ -198,8 +198,8 @@ public static partial class PgTargetAdvice
     private static string KnobHours(double hours) => hours switch
     {
         < 1 => $"{hours * 60:0} minutes",
-        < 48 => $"{hours:0.#} h",
-        _ => $"{hours / 24:0.#} days",
+        < 48 => $"{hours:#,##0.#} h",
+        _ => $"{hours / 24:#,##0.#} days",
     };
 
     private static partial AdviceBlock? ComposeBuffer(string key, IReadOnlyDictionary<string, Fact> factsByKey)

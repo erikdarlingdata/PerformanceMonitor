@@ -469,7 +469,7 @@ public sealed partial class DarlingWorker
                         new AnalysisPassResult(AnalysisPassStatus.TimedOut, 0,
                             $"analysis exceeded {(int)s_analysisTimeout.TotalSeconds}s"),
                     _ => new AnalysisPassResult(AnalysisPassStatus.Error, 0,
-                        "analysis failed — the pass logged the fault"),
+                        "analysis failed. The pass logged the fault"),
                 };
             }
 

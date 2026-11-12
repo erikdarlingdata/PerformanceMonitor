@@ -95,11 +95,11 @@ public sealed class DarlingMcpPgTrendTools
                     ?? EmptyStatus((await WindowNoticeAsync(emptyAnswer: true)).AsHints(),
                         "empty",
                         engineCounters
-                            ? $"No wait event accrued time on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} on the engine's "
+                            ? $"No wait event accrued time on {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))} on the engine's "
                               + "cumulative wait counters, so there is nothing to follow: nothing waited, or the window holds only "
                               + "each event's first collection (the collector measures an interval from the second one on). "
                               + "get_pg_wait_stats lists the events this server does record."
-                            : $"No wait event gained samples on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}"
+                            : $"No wait event gained samples on {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}"
                               + ", so there is nothing to follow: none was sampled, or the window holds a "
                               + "single collection (a trend needs at least two to difference)."
                               + DarlingMcpPgWaitSamplingTools.DescribeInstrumentForEmpty(
@@ -116,7 +116,7 @@ public sealed class DarlingMcpPgTrendTools
                     ?? EmptyStatus((await WindowNoticeAsync(emptyAnswer: true)).AsHints(),
                         "empty",
                         engineCounters
-                            ? $"No wait time for wait event '{chosen}' on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} on "
+                            ? $"No wait time for wait event '{chosen}' on {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))} on "
                               + "the engine's cumulative wait counters. A point needs a collection with a measured interval, so a "
                               + "window holding only the event's first collection is legitimately empty here even when the event "
                               + "is being counted. get_pg_wait_stats lists the events this server does record."
@@ -430,7 +430,7 @@ public sealed class DarlingMcpPgTrendTools
                             "empty",
                             (askedBackend ?? askedContext) is null
                                 ? $"No backend type recorded any I/O or buffer activity on "
-                                  + $"{resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}, so there is "
+                                  + $"{resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}, so there is "
                                   + "nothing to follow. Buffer HITS count here, not only physical reads and "
                                   + "writes, so this is a genuinely idle window rather than a fully cached "
                                   + "one. pg_stat_io also needs PostgreSQL 16 or later - on an older major "
@@ -456,7 +456,7 @@ public sealed class DarlingMcpPgTrendTools
                     ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_io_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                         "empty",
                         $"No I/O samples for '{chosenBackend}' in the '{chosenContext}' context on "
-                        + $"{resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}. A trend needs at least "
+                        + $"{resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}. A trend needs at least "
                         + "TWO snapshots to difference, so a window holding one collection is legitimately "
                         + "empty here even while the combination is being collected. get_pg_io_stats lists "
                         + "the combinations this server actually reports."), cancellationToken, start);

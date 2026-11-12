@@ -392,7 +392,7 @@ GROUP BY f.queryid";
             shape.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             if (!(bool)(await shape.ExecuteScalarAsync(ct))!)
             {
-                return ("This store has no statement history yet: it predates the history table (migration V163). The service migrates the store at its next start; the first snapshot is taken within an hour after that.", false, null);
+                return ("This store has no statement history yet: it predates the history table. The service migrates the store at its next start; the first snapshot is taken within an hour after that.", false, null);
             }
         }
 

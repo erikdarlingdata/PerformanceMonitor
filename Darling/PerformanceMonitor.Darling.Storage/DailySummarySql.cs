@@ -1060,7 +1060,7 @@ public static class DailySummarySql
         if (string.Equals(routed, RangeSql, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                "Daily-summary CAGG routing found no queries CTE to replace — QueriesCteRaw has drifted from RangeSql (#1661).");
+                "Daily-summary CAGG routing found no queries CTE to replace. QueriesCteRaw has drifted from RangeSql (#1661).");
         }
 
         return routed;
@@ -1123,7 +1123,7 @@ public static class DailySummarySql
             if (string.Equals(singleRouted, RangeSql, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
-                    "Daily-summary CAGG routing found no queries CTE to replace — QueriesCteRaw has drifted from RangeSql (#1661).");
+                    "Daily-summary CAGG routing found no queries CTE to replace. QueriesCteRaw has drifted from RangeSql (#1661).");
             }
 
             return singleRouted;
@@ -1141,7 +1141,7 @@ public static class DailySummarySql
         if (string.Equals(routed, RangeSql, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                "Daily-summary stitched CAGG routing found no queries CTE to replace — QueriesCteRaw has drifted from RangeSql (#1661).");
+                "Daily-summary stitched CAGG routing found no queries CTE to replace. QueriesCteRaw has drifted from RangeSql (#1661).");
         }
 
         return routed;

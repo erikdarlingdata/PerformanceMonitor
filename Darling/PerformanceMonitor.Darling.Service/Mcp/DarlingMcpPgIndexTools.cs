@@ -147,7 +147,7 @@ public sealed class DarlingMcpPgIndexTools
 
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                     "empty",
-                    $"No index bloat rows for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}"
+                    $"No index bloat rows for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}"
                     + ". This collector runs DAILY, so a window shorter than a day can be empty "
                     + "on a perfectly healthy server: widen it before concluding anything. "
                     + coverage.Message), cancellationToken, windowEnd.AddHours(-hours_back));
@@ -396,7 +396,7 @@ public sealed class DarlingMcpPgIndexTools
     internal static string EmptyColumnStatsReply(string displayName, int hoursBack, PgColumnStatsCoverageVerdict coverage) =>
         McpHelpers.Status(
             "empty",
-            $"No column statistics for {displayName} in the last {CountText.Plural(hoursBack, "hour")}. "
+            $"No column statistics for {displayName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}. "
             + "This collector runs DAILY, so a window shorter than a day can be empty on a "
             + "perfectly healthy server - widen it before concluding anything. " + coverage.Message,
             /* #7548: the web panel says one sentence and the grant for a login that cannot read pg_stats, built from this field and not from the message. */

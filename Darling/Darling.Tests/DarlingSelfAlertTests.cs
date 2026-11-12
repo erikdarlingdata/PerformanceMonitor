@@ -844,14 +844,14 @@ public sealed class DarlingSelfAlertTests
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Contains("The Blocking Extended Events session is missing", fired.DetailText, StringComparison.Ordinal);
-        Assert.Equal("Blocking capture is not running \u2014 XE session missing", fired.ShortMessage);
+        Assert.Equal("Blocking capture is not running. XE session missing", fired.ShortMessage);
 
         /* Two sessions: the short message agrees the way the detail does (#6703's round-1 review). */
         var h2 = new Harness();
         await h2.Build().ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Array.Empty<string>(), Ct);
         var both = Assert.Single(h2.Deliverer.Outcomes);
         Assert.Contains("Extended Events sessions are missing", both.DetailText, StringComparison.Ordinal);
-        Assert.EndsWith("capture is not running \u2014 XE sessions missing", both.ShortMessage, StringComparison.Ordinal);
+        Assert.EndsWith("capture is not running. XE sessions missing", both.ShortMessage, StringComparison.Ordinal);
     }
 
     /* ---------------- capture-down on a server whose engine does not run the collector (#6912) ---------------- */
@@ -2483,12 +2483,12 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("not valid until 2026-07-04 12:00:00Z; not being served", early.CurrentValue);
         Assert.Equal("valid at service start", early.ThresholdValue);
         Assert.Equal(
-            "web dashboard TLS certificate NOT YET VALID (valid from 2026-07-04 12:00:00Z) — LAN dashboard is loopback-only",
+            "web dashboard TLS certificate NOT YET VALID (valid from 2026-07-04 12:00:00Z): LAN dashboard is loopback-only",
             early.ShortMessage);
         Assert.Equal(
             "The web dashboard's configured TLS certificate was not yet valid when the service started (not valid until "
-            + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN dashboard is bound LOOPBACK-ONLY — "
-            + "unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. The window opens 2026-07-04 12:00:00Z: "
+            + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN dashboard is bound LOOPBACK-ONLY. "
+            + "Unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. The window opens 2026-07-04 12:00:00Z: "
             + "if that is in the past by any wall clock you trust, this host's clock is behind; if it is genuinely ahead, "
             + "the certificate installed is one issued for a future rotation." + refusedTail,
             early.DetailText);
@@ -2498,9 +2498,9 @@ public sealed class DarlingSelfAlertTests
         var late = Assert.Single(opened.Deliverer.Outcomes);
         Assert.Equal(
             "The web dashboard's configured TLS certificate was not yet valid when the service started (not valid until "
-            + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN dashboard is bound LOOPBACK-ONLY — "
-            + "unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. The window opened 2026-07-04 12:00:00Z, "
-            + "after the service started — the host judged the certificate once, at load, and stays loopback-only on "
+            + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN dashboard is bound LOOPBACK-ONLY. "
+            + "Unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. The window opened 2026-07-04 12:00:00Z, "
+            + "after the service started. The host judged the certificate once, at load, and stays loopback-only on "
             + "that verdict until it is restarted." + refusedTail,
             late.DetailText);
 
@@ -2593,7 +2593,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("mcptlscert", fired.ServerKey);
         Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);   // as unreachable as expired
         Assert.Equal(
-            "MCP server TLS certificate NOT YET VALID (valid from 2026-07-04 12:00:00Z) — LAN MCP endpoint is loopback-only",
+            "MCP server TLS certificate NOT YET VALID (valid from 2026-07-04 12:00:00Z): LAN MCP endpoint is loopback-only",
             fired.ShortMessage);
         Assert.Contains("The MCP server's configured TLS certificate was not yet valid", fired.DetailText);
         Assert.Contains("the LAN MCP endpoint is bound LOOPBACK-ONLY", fired.DetailText);
@@ -2670,7 +2670,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("mcptlscert", fired.ServerKey);
         Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
         Assert.Equal(
-            "MCP server TLS certificate COULD NOT BE LOADED — LAN MCP endpoint is loopback-only", fired.ShortMessage);
+            "MCP server TLS certificate COULD NOT BE LOADED: LAN MCP endpoint is loopback-only", fired.ShortMessage);
         Assert.Contains(LoadFailureReason, fired.DetailText);
         Assert.Contains("refused to expose the LAN MCP endpoint: it is bound LOOPBACK-ONLY", fired.DetailText);
         Assert.Contains("restart the service", fired.DetailText);
@@ -2866,8 +2866,8 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("valid at service start", early.ThresholdValue);
         Assert.Equal(
             "The MCP server's configured TLS certificate was not yet valid when the service started (not valid until "
-            + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN MCP endpoint is bound LOOPBACK-ONLY — "
-            + "unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. The window opens 2026-07-04 12:00:00Z: "
+            + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN MCP endpoint is bound LOOPBACK-ONLY. "
+            + "Unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. The window opens 2026-07-04 12:00:00Z: "
             + "if that is in the past by any wall clock you trust, this host's clock is behind; if it is genuinely ahead, "
             + "the certificate installed is one issued for a future rotation. Correct the system clock or install the "
             + "currently-valid certificate, then restart the service so the host loads it again. "
@@ -3977,7 +3977,7 @@ public sealed class DarlingSelfAlertTests
             dimension.SetValue(rule, "constrained");
 
             Assert.False(rule.MatchesEveryAlert,
-                $"a rule constrained by {dimension.Name} alone still claims to match every alert — "
+                $"a rule constrained by {dimension.Name} alone still claims to match every alert. "
                 + "MuteRule.MatchDescriptions does not know about that dimension");
             Assert.NotEqual("(matches all alerts)", rule.Summary);
         }
@@ -4127,7 +4127,7 @@ public sealed class DarlingSelfAlertTests
         foreach (var id in jobIds)
         {
             list.Add(new StuckPolicyJob(
-                id, "wait_stats", "next_start is -infinity — the scheduler will never run it again",
+                id, "wait_stats", "next_start is -infinity. The scheduler will never run it again",
                 Arm: StuckPolicyJobArm.NextStartNegativeInfinity));
         }
 
@@ -4545,7 +4545,6 @@ public sealed class DarlingSelfAlertTests
                 && x.Message.Contains("crash backoff", StringComparison.Ordinal));
         Assert.Contains("1001", info.Message, StringComparison.Ordinal);
         Assert.Contains("not re-armed, not alerted", info.Message, StringComparison.Ordinal);
-        Assert.Contains("#3591", info.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -4605,8 +4604,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.History.Records);
         Assert.Contains(h.Log.Entries, x => x.Level == Microsoft.Extensions.Logging.LogLevel.Information
-            && x.Message.Contains("running on schedule again", StringComparison.Ordinal)
-            && x.Message.Contains("#3591", StringComparison.Ordinal));
+            && x.Message.Contains("running on schedule again", StringComparison.Ordinal));
 
         /* Fresh first sight afterwards: deferred again, not escalated — the state was dropped. */
         h.Now = h.Now.AddHours(1);
@@ -4638,7 +4636,7 @@ public sealed class DarlingSelfAlertTests
     public void CompressionJobs_TheOldRowShape_DefaultsToTheRearmPath()
     {
         /* The three-argument record every pre-#3591 caller and pin builds is the old semantics, by default. */
-        Assert.False(new StuckPolicyJob(1L, "wait_stats", "next_start is -infinity — the scheduler will never run it again").SchedulerRetries);
+        Assert.False(new StuckPolicyJob(1L, "wait_stats", "next_start is -infinity. The scheduler will never run it again").SchedulerRetries);
     }
 
     /* ---------------- #3816: the self-heal covers every policy family ---------------- */
@@ -4741,7 +4739,7 @@ public sealed class DarlingSelfAlertTests
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Retention Job Stuck", fired.MetricName);
-        Assert.Contains("NOT the #2813 Retention Held condition", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("NOT the Retention Held condition", fired.DetailText, StringComparison.Ordinal);
         Assert.Contains("scheduled = false", fired.DetailText, StringComparison.Ordinal);
     }
 
@@ -4782,7 +4780,6 @@ public sealed class DarlingSelfAlertTests
             h.Log.Entries,
             x => x.Level == Microsoft.Extensions.Logging.LogLevel.Warning);
         Assert.Contains("HELD", warned.Message, StringComparison.Ordinal);
-        Assert.Contains("#1680/#1877", warned.Message, StringComparison.Ordinal);
         Assert.Contains("retention job 9100", warned.Message, StringComparison.Ordinal);
     }
 
@@ -4844,7 +4841,6 @@ public sealed class DarlingSelfAlertTests
         var warned = Assert.Single(
             h.Log.Entries,
             x => x.Level == Microsoft.Extensions.Logging.LogLevel.Debug);
-        Assert.Contains("#4299", warned.Message, StringComparison.Ordinal);
         Assert.Contains("unscheduled by design", warned.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("detector defect", warned.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("drop history", warned.Message, StringComparison.Ordinal);
@@ -6726,7 +6722,6 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
 
         /* The mechanism, by cadence and by issue, and the confirmation line an operator can grep for. */
         Assert.Contains("hourly maintenance tick", detail, StringComparison.Ordinal);
-        Assert.Contains("#3812", detail, StringComparison.Ordinal);
         Assert.Contains("'Retention re-evaluation:'", detail, StringComparison.Ordinal);
 
         /* The restart is OPTIONAL now, and said to be. The two #3297 phrases that made it mandatory must be
@@ -7392,9 +7387,9 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
             <= TimescaleSupport.RefreshPhaseSlotSeconds * 1_000L,
             $"a default of {TimescaleSupport.RefreshSlotPercentOfHourlyCadence}% of an hourly cadence fires at "
             + $"{HourlyCadenceMs * TimescaleSupport.RefreshSlotPercentOfHourlyCadence / 100 / 1_000}s against a "
-            + $"{TimescaleSupport.RefreshPhaseSlotSeconds}s window — after the compression grid's stated "
+            + $"{TimescaleSupport.RefreshPhaseSlotSeconds}s window. After the compression grid's stated "
             + "precondition is already false, which is the failure #3060 is about. The knob cannot move "
-            + "without a rung (V57), so the repair is the grid (#3174)");
+            + "without a rung (V57), so the repair is the grid");
 
         /* The seed must survive its own clamp, asserted through the REAL clamp rather than a copy of its
            bounds — a step fine enough to drive the derived default below the floor would have the clamp
@@ -7936,7 +7931,7 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
             new[] { Mute(StaleDays + 1), ExplicitMute(serverName: DarlingSelfAlertEvaluator.StoreServerLabel) }, Ct);
         var stillFired = Assert.Single(notSuppressed.Deliverer.Outcomes);
         Assert.False(stillFired.Muted,
-            "a rule scoped to the retired constant must not match an opted-in store's rows — the coupling the docs warn about");
+            "a rule scoped to the retired constant must not match an opted-in store's rows. The coupling the docs warn about");
     }
 
     /// <summary>

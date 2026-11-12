@@ -432,7 +432,7 @@ public sealed class RdsLogSource
         {
             throw new InvalidOperationException(
                 $"'{host}' is an Aurora {(parsed.Kind == RdsEndpointKind.ClusterReader ? "reader" : "custom")} "
-                + "endpoint, which does not resolve to a stable instance — it moves between replicas "
+                + "endpoint, which does not resolve to a stable instance. It moves between replicas "
                 + "call to call. Point the target at the cluster writer endpoint or at a specific instance "
                 + "so captured plans belong to a server that can be named.");
         }
@@ -726,7 +726,7 @@ public sealed class RdsLogSource
                 kind == LogFileKind.Csv
                     ? $"RDS listed no PostgreSQL csvlog file for instance '{instanceId}': DescribeDBLogFiles "
                         + "filtered on 'postgresql' returned nothing it could name ending '.csv' (#4053 part c1). "
-                        + "NO LOG WAS OPENED this cycle, so this is not an empty log — whatever this window held is "
+                        + "NO LOG WAS OPENED this cycle, so this is not an empty log. Whatever this window held is "
                         + "unread. This records as a collection ERROR and not as a permissions skip, because no "
                         + "grant fixes it: an instance that only just added csvlog to log_destination and has not "
                         + "rolled a .csv file yet answers this way and clears itself on the first cycle that finds "
@@ -735,7 +735,7 @@ public sealed class RdsLogSource
                     : $"RDS listed no PostgreSQL server log file for instance '{instanceId}': DescribeDBLogFiles "
                         + "filtered on 'postgresql' returned nothing it could name that was not a csvlog/jsonlog "
                         + "sibling (#3997). NO LOG WAS OPENED this cycle, "
-                        + "so this is not an empty log — whatever this window held is unread. This records as a "
+                        + "so this is not an empty log. Whatever this window held is unread. This records as a "
                         + "collection ERROR and not as a permissions skip, because no grant fixes it: an instance "
                         + "that is stopped, still being created, or has just rotated its logs answers this way and "
                         + "clears itself on the first cycle that finds a log, while one that keeps answering this "

@@ -110,7 +110,6 @@ public class PostgresFaultOutcomeTests
            the same breath, so a fresh setup never has to discover the 22021 byte the hard way. */
         Assert.Contains(
             "GRANT EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint)", explanation, StringComparison.Ordinal);
-        Assert.Contains("#4046", explanation, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -221,7 +220,6 @@ public class PostgresFaultOutcomeTests
         Assert.NotNull(explanation);
         Assert.Contains("22021", explanation, StringComparison.Ordinal);
         Assert.Contains("not valid UTF-8", explanation, StringComparison.Ordinal);
-        Assert.Contains("#4046", explanation, StringComparison.Ordinal);
         Assert.Contains(
             "EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint)", explanation, StringComparison.Ordinal);
         Assert.Contains("database 'appdb'", explanation, StringComparison.Ordinal);

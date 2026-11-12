@@ -42,7 +42,7 @@ public sealed class McpToolGuideHeadsSqlTailTests
         ("get_oversized_plan_backlog", "Read last_captured_at/last_expired_at FIRST"),
         ("get_oversized_plan_backlog", "pending+captured+expired+dropped=total_rows"),
         ("get_oversized_plan_backlog", "include_rows requires server_name"),
-        ("get_oversized_plan_backlog", "Permanently empty below schema V121"),
+        ("get_oversized_plan_backlog", "Permanently empty with no over-cap plan"),
     ];
 
     [Fact]
@@ -75,7 +75,7 @@ public sealed class McpToolGuideHeadsSqlTailTests
         Assert.DoesNotContain("#3796", served.Served + served.Tail, StringComparison.Ordinal);
         Assert.DoesNotContain("92-96%", served.Served + served.Tail, StringComparison.Ordinal);
         Assert.Contains("get_collection_health's verdict figure", served.Tail!, StringComparison.Ordinal);
-        Assert.Contains("predates the V137 rung that added the column", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("predates the column", served.Tail!, StringComparison.Ordinal);
     }
 
     /// <summary>D2: <c>include_fleet_median</c>'s parameter description was cut from 322 to 190 characters; its
