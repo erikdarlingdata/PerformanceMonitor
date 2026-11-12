@@ -241,7 +241,7 @@ public sealed class RegressedFromProductiveTests
 
         Assert.Equal(
             "produced 205,431 rows in the seven days before 2026-09-19 16:40:00Z; has reported "
-            + "EXTENSION_MISSING since — a restart or upgrade changed what this collector can read",
+            + "EXTENSION_MISSING since. A restart or upgrade changed what this collector can read",
             CollectorHealthClassifier.FormatRegressedFromProductiveFinding(
                 RowsInPriorWindow, at, CollectorRuntimePrecondition.ExtensionMissingStatus));
     }
