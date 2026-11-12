@@ -865,8 +865,10 @@ jobs:
           if-no-files-found: ignore
 
   # #8753: the live test classes a pull request adds or changes, run again with the test clock pinned to the two edges of the UTC
-  # day: 23:30 on the previous UTC day and 00:30 on the current one. A live test that seeds against the real clock can pass at the
-  # hour its pull request ran and fail at another (#8752); LiveClock.cs reads DARLING_TEST_CLOCK_UTC, and nothing else set it.
+  # day: the next 23:30 and the next 00:30 at or after the real clock when the job starts. A live test that seeds against the real
+  # clock can pass at the hour its pull request ran and fail at another (#8752); LiveClock.cs reads DARLING_TEST_CLOCK_UTC, and
+  # nothing else set it. Both pins are at or after the real clock, as LiveClock.cs asks: a pin behind it makes a class that asks the
+  # product "is this recent" answer for a different instant (#6374), which would fail the job for no reason.
   # The plan job picks the classes (ci-select.py pinned-classes: the live classes of the changed Darling.Tests files, at most 40)
   # and this job runs only when it picked some, on a pull request only. The verdict job folds the result into `CI result` like
   # a test leg's, so a failure here fails the pull request; its log and error annotation name the pinned time.
@@ -937,16 +939,21 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/start-test-pg.ps1 -Mode Start
 
-      # Both times are fixed here, once, so a run that crosses midnight still runs the two passes against one UTC day.
+      # Both times are fixed here, once, so a run that crosses midnight still runs the two passes against one pair of times.
+      # Each is the next such time at or after the real clock now (at 23:45Z the next 23:30 is tomorrow's), never behind it.
       - name: Pin the two UTC times
         id: hours
         shell: pwsh
         run: |
-          $today = [DateTime]::UtcNow.Date
+          $now = [DateTime]::UtcNow
           $format = "yyyy-MM-dd'T'HH:mm:ss'Z'"
-          $late = $today.AddDays(-1).AddHours(23).AddMinutes(30).ToString($format, [System.Globalization.CultureInfo]::InvariantCulture)
-          $early = $today.AddMinutes(30).ToString($format, [System.Globalization.CultureInfo]::InvariantCulture)
-          Write-Host "late-day edge: $late; midnight edge: $early"
+          $lateTime = $now.Date.AddHours(23).AddMinutes(30)
+          if ($lateTime -lt $now) { $lateTime = $lateTime.AddDays(1) }
+          $earlyTime = $now.Date.AddMinutes(30)
+          if ($earlyTime -lt $now) { $earlyTime = $earlyTime.AddDays(1) }
+          $late = $lateTime.ToString($format, [System.Globalization.CultureInfo]::InvariantCulture)
+          $early = $earlyTime.ToString($format, [System.Globalization.CultureInfo]::InvariantCulture)
+          Write-Host "real clock: $($now.ToString($format, [System.Globalization.CultureInfo]::InvariantCulture)); late-day edge: $late; midnight edge: $early"
           "late=$late" >> $env:GITHUB_OUTPUT
           "early=$early" >> $env:GITHUB_OUTPUT
 

@@ -6,8 +6,10 @@
   Run from the repository root, after the build artifact was unpacked and start-test-pg.ps1 started the clusters, as the
   pinned-hours job of pr.yml does. It sets DARLING_TEST_CLOCK_UTC (read only by Darling/Darling.Tests/LiveClock.cs) and runs
   run-ci-leg.ps1 as one leg over the named classes: the same class listing, the same store environment and the same
-  per-class checks every pull request test leg uses. The job calls it twice, once for the late-day edge (23:30 on the
-  previous UTC day) and once for the midnight edge (00:30 on the current UTC day).
+  per-class checks every pull request test leg uses. The job calls it twice, once for the late-day edge (the next 23:30 UTC
+  at or after the real clock) and once for the midnight edge (the next 00:30 UTC at or after the real clock). Both pins are at
+  or after the real clock, as LiveClock.cs asks: a pin behind it makes a class that asks the product "is this recent" answer
+  for a different instant than it seeded (#6374).
 
   A failure prints an error annotation that names the pinned time. A class that fails here and passes in the test legs
   failed because of the hour, not because of the change.
@@ -41,7 +43,7 @@ $global:LASTEXITCODE = 0
 & (Join-Path $PSScriptRoot 'run-ci-leg.ps1') @leg
 $exit = $LASTEXITCODE
 if ($exit -ne 0) {
-    Write-Host "::error title=Failed with the clock pinned to $ClockUtc::The classes $Classes failed with DARLING_TEST_CLOCK_UTC=$ClockUtc ('$Label' pass). If the same classes pass in the test legs at the real clock, the hour of the day is what failed, not the change. LiveClock.cs says how a live test should seed and why a pin behind the real clock can also disagree with the product's own clock."
+    Write-Host "::error title=Failed with the clock pinned to $ClockUtc::The classes $Classes failed with DARLING_TEST_CLOCK_UTC=$ClockUtc ('$Label' pass). If the same classes pass in the test legs at the real clock, the hour of the day is what failed, not the change. LiveClock.cs says how a live test should seed."
     exit $exit
 }
 Write-Host "Pinned-hour pass '$Label' passed at $ClockUtc."
