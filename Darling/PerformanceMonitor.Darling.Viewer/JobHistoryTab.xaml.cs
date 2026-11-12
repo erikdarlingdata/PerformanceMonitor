@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -130,7 +131,7 @@ public partial class JobHistoryTab : UserControl
     /// start only moves later, when old rows are purged. A read that fails hides the note (null makes no claim) and leaves the read
     /// time old, so the next load reads again. A load a newer one has superseded writes nothing.
     /// </summary>
-    private async Task RefreshPickerDataStartAsync(int? serverId, int gen, ViewerLoadTimer? timer = null)
+    private async Task RefreshPickerDataStartAsync(int? serverId, int gen, ViewerLoadTimer? timer = null, CancellationToken cancellationToken = default)
     {
         if (_dataService == null) return;
         if (_oldestRetainedScope == serverId && DateTime.UtcNow - _oldestRetainedReadUtc < ViewerServerTab.ServerDataStartMaxAge)
@@ -142,7 +143,7 @@ public partial class JobHistoryTab : UserControl
         DateTime? oldest;
         try
         {
-            oldest = await ViewerServerTab.Timed(timer, "oldest retained read", _dataService.GetJobHistoryOldestRetainedAsync(serverId));
+            oldest = await ViewerServerTab.Timed(timer, "oldest retained read", _dataService.GetJobHistoryOldestRetainedAsync(serverId, cancellationToken));
         }
         catch
         {
@@ -191,7 +192,9 @@ public partial class JobHistoryTab : UserControl
         }
 
         var timer = loadTimer ?? _firstOpen.Take() ?? new ViewerLoadTimer();
-        var gen = _loads.Claim(nameof(LoadJobsAsync));
+        /* #8549: a newer load cancels this one's store reads (the token below), so a quick re-pick does not leave the older reads running
+           beside the newest, holding pool slots and IO ahead of it. A cancelled read ends the load quietly: see the catch below. */
+        var (gen, loadToken) = _loads.ClaimCancelling(nameof(LoadJobsAsync));
 
         NoJobsMessage.Visibility = Visibility.Collapsed;
         LoadingMessage.Visibility = Visibility.Visible;
@@ -215,7 +218,7 @@ public partial class JobHistoryTab : UserControl
                 windowStartUtc, windowEndUtc, windowIsLive, serverId);
             var refreshChoices = _choicesFreshness.NeedsRead(choicesKey, DateTime.UtcNow);
             using var readFanOut = ViewerReadFanOut.Of(4);
-            var dataStartTask = ViewerServerTab.Timed(timer, "data start read", _dataService.GetJobHistoryDataStartAsync(serverId, sinceUtc, nowUtc));
+            var dataStartTask = ViewerServerTab.Timed(timer, "data start read", _dataService.GetJobHistoryDataStartAsync(serverId, sinceUtc, nowUtc, loadToken));
 
             /* #5562 R6: a range that ended in the past sends its end to the read, so the end bound is applied before the row cap.
                #5703: Status and Category go into the read too. The cap keeps the newest runs of the whole fleet, so a filter applied to
@@ -227,7 +230,7 @@ public partial class JobHistoryTab : UserControl
                beside the grid's read; a failure costs the extra choices and never the grid. */
             var service = _dataService;
             /* The two reads start side by side, here, where the width is declared; JoinChoicesAsync only waits for both. */
-            var serversTask = refreshChoices ? ReadHalfAsync("servers", "server", () => ViewerServerTab.Timed(timer, "server choices read", service.GetJobHistoryServersAsync()), choicesKey) : null;
+            var serversTask = refreshChoices ? ReadHalfAsync("servers", "server", () => ViewerServerTab.Timed(timer, "server choices read", service.GetJobHistoryServersAsync(loadToken)), choicesKey) : null;
             var categoriesTask = refreshChoices
                 ? ReadHalfAsync("categories", "category", () => _categoryCache.GetAsync(choicesKey, DateTime.UtcNow,
                     () => ViewerServerTab.Timed(timer, "category choices read",
@@ -237,7 +240,7 @@ public partial class JobHistoryTab : UserControl
             /* #8133: at All Servers every server with runs in the window is guaranteed its share of the cap, so one busy server cannot fill
                the page alone. */
             _dataService.ShareJobHistoryCapPerServer = true;
-            var readTask = ViewerServerTab.Timed(timer, "job history read", _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap, untilUtc: windowIsLive ? null : windowEndUtc, runStatus: statusFilter, category: categoryFilter));
+            var readTask = ViewerServerTab.Timed(timer, "job history read", _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap, untilUtc: windowIsLive ? null : windowEndUtc, runStatus: statusFilter, category: categoryFilter, cancellationToken: loadToken));
             await ViewerServerTab.AwaitReadWatchingProbeAsync(readTask, dataStartTask, "Job History");
             var all = await readTask;
             readFanOut.Release();
@@ -282,7 +285,7 @@ public partial class JobHistoryTab : UserControl
                and report their own failures; a failure line one of them raises after this stamp stands. */
             StatusChanged?.Invoke($"job history: refreshed {ViewerTimeHelper.RefreshedStamp()}");
 
-            await UpdateAgentStatusAsync(serverId, timer);
+            await UpdateAgentStatusAsync(serverId, timer, loadToken);
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             /* #4966: the rows are bound and the loading note is down; the probe is awaited last. This await settles it whether it
@@ -292,13 +295,14 @@ public partial class JobHistoryTab : UserControl
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             await ShowJobHistoryDataStartAsync(JobHistoryTruncationBanner, dataStartTask, sinceUtc, all);
-            await RefreshPickerDataStartAsync(serverId, gen, timer);
+            await RefreshPickerDataStartAsync(serverId, gen, timer, loadToken);
             await choicesApplied;
             /* #8549: the grid's rows are measured and drawn after this method's own code, so the clock waits for that pass and the line names it. */
             await timer.SettleLayoutAsync(Dispatcher);
         }
         catch (Exception ex)
         {
+            /* A load a newer one cancelled (#8549) ends here with no error line, no stamp and no change to the grid. */
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             StatusChanged?.Invoke($"failed to load job history: {ex.Message}");
@@ -320,13 +324,13 @@ public partial class JobHistoryTab : UserControl
     /// server's Agent status + next scheduled run; across all servers it shows a running/stopped roll-up.
     /// A stopped Agent is drawn in red. Best-effort — an agent_status read failure just clears the indicator.
     /// </summary>
-    private async Task UpdateAgentStatusAsync(int? serverId, ViewerLoadTimer? timer = null)
+    private async Task UpdateAgentStatusAsync(int? serverId, ViewerLoadTimer? timer = null, CancellationToken cancellationToken = default)
     {
         if (_dataService == null) return;
 
         try
         {
-            var statuses = await ViewerServerTab.Timed(timer, "agent status read", _dataService.GetAgentStatusAsync(serverId));
+            var statuses = await ViewerServerTab.Timed(timer, "agent status read", _dataService.GetAgentStatusAsync(serverId, cancellationToken));
 
             var okBrush = TryFindResource("ForegroundMutedBrush") as System.Windows.Media.Brush
                 ?? System.Windows.Media.Brushes.Gray;
@@ -354,6 +358,10 @@ public partial class JobHistoryTab : UserControl
                     : $"Agents: {running}/{statuses.Count} running";
                 AgentStatusIndicator.Foreground = stopped > 0 ? alertBrush : okBrush;
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* A newer load cancelled this one (#8549): it is not a failure, and the newer load writes the indicator. */
         }
         catch (Exception ex)
         {
@@ -406,6 +414,11 @@ public partial class JobHistoryTab : UserControl
             var result = await read();
             _choicesFailures.Succeeded(source);
             return result;
+        }
+        catch (OperationCanceledException)
+        {
+            /* The load that started this read was superseded and cancelled it (#8549): not a failure, and nothing is written. */
+            return null;
         }
         catch (Exception ex)
         {

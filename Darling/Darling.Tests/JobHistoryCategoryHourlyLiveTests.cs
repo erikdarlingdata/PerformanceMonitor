@@ -80,21 +80,22 @@ public sealed class JobHistoryCategoryHourlyLiveTests
     // ── The pass's arithmetic ───────────────────────────────────────────────────────────────
 
     [Fact]
-    public void ThePlan_JoinsTheOldCoverage_WalksBackADay_AndHoldsTheRetentionEdge()
+    public void ThePlan_JoinsTheOldCoverage_WalksBackCatchUpDays_AndHoldsTheRetentionEdge()
     {
         var hour = new DateTime(2026, 11, 12, 10, 0, 0);
+        var step = JobHistoryCategoryHourly.CatchUpDays;
 
-        /* First pass: the last two closed hours, then a day behind them. */
+        /* First pass: the last two closed hours, then the catch-up days behind them. */
         var first = JobHistoryCategoryHourly.Plan(null, null, 365, hour);
         Assert.Equal(hour.AddHours(-2), first.ForwardFrom);
-        Assert.Equal(hour.AddHours(-2).AddDays(-1), first.BackfillFrom);
+        Assert.Equal(hour.AddHours(-2).AddDays(-step), first.BackfillFrom);
         Assert.Equal(hour.AddHours(-2), first.BackfillTo);
-        Assert.Equal(hour.AddHours(-2).AddDays(-1), first.CoveredFrom);
+        Assert.Equal(hour.AddHours(-2).AddDays(-step), first.CoveredFrom);
 
         /* Later pass: the forward range starts two hours before the old end, the backfill continues from the old start. */
         var later = JobHistoryCategoryHourly.Plan(hour.AddDays(-3), hour.AddHours(-1), 365, hour);
         Assert.Equal(hour.AddHours(-3), later.ForwardFrom);
-        Assert.Equal(hour.AddDays(-4), later.BackfillFrom);
+        Assert.Equal(hour.AddDays(-3 - step), later.BackfillFrom);
         Assert.Equal(hour.AddDays(-3), later.BackfillTo);
 
         /* The coverage reaches the retention edge: no backfill, and the start rides the edge as it moves. */
@@ -141,14 +142,14 @@ public sealed class JobHistoryCategoryHourlyLiveTests
         /* No pass has run: no coverage row, so every window reads the old statement. */
         await AssertAllWindowsEqualAsync(dataSource, now, ct);
 
-        /* One pass covers the last two hours and a day behind them: the 3-day windows are still the old statement's. */
+        /* One pass covers the last two hours and the catch-up days behind them: a longer window is still the old statement's. */
         await JobHistoryCategoryHourly.RollUpAsync(connection, now, null, ct);
         var partial = await CoverageAsync(connection, ct);
         Assert.True(partial.To == Floor(now));
-        Assert.True(partial.From > Floor(now).AddDays(-2));
+        Assert.True(partial.From > Floor(now).AddDays(-JobHistoryCategoryHourly.CatchUpDays - 1));
         await AssertAllWindowsEqualAsync(dataSource, now, ct);
 
-        /* The backfill, a day a pass, until the coverage holds the 12 days seeded and the windows read the summary. */
+        /* The backfill, a few days a pass, until the coverage holds the 12 days seeded and the windows read the summary. */
         for (var pass = 0; pass < 14; pass++)
         {
             await JobHistoryCategoryHourly.RollUpAsync(connection, now, null, ct);

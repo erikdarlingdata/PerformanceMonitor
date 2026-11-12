@@ -54,8 +54,12 @@ public static class JobHistoryCategoryHourly
     /// <summary>Closed hours every pass folds again, to count rows written late into an hour that is already folded. Folding is idempotent.</summary>
     public const int RecomputeHours = 2;
 
-    /// <summary>The most days one pass walks the coverage back toward the retention edge.</summary>
-    public const int CatchUpDays = 1;
+    /// <summary>The most days one pass walks the coverage back toward the retention edge. Four (#8549, was one): on a large store a
+    /// day of <c>job_history</c> is about 700,000 rows and its fold costs about 5 seconds cold (7 at worst), so a pass of four stays near 20
+    /// seconds (28 at worst) inside <see cref="PassTimeoutSeconds"/>, and a 30-day window is covered in about 7 hourly passes, not 26. It is
+    /// the last step of the sweep and holds no lock a read waits on (the upsert takes row locks on the summary only). A pass that runs past
+    /// its slice rolls back whole and plans the same range again, so the days a pass takes must stay a small share of the slice.</summary>
+    public const int CatchUpDays = 4;
 
     /// <summary>Command timeout of each statement of the pass.</summary>
     public const int PassTimeoutSeconds = 120;
@@ -295,14 +299,16 @@ WHERE run_hour < $1::timestamp;";
             ? "\n    AND   jh.run_datetime <= $3 + make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) + interval '1 hour'"
             : string.Empty;
 
+        /* #8549: the offset is read for the servers the two parts hold rows for (the summary's range, the raw tail), by a descent per
+           server, not by one pass over every chunk of server_properties. A superset of the servers either part joins is enough. */
+        var serversSql = "SELECT server_id FROM collect.job_history_category_hourly WHERE run_hour >= $1 - interval '1 day'"
+            + (forServer ? $" AND server_id = ${serverParam}" : string.Empty)
+            + " UNION SELECT server_id FROM job_history WHERE collection_time >= $2"
+            + (forServer ? $" AND server_id = ${serverParam}" : string.Empty);
+
         return $@"
 WITH svr AS (
-    SELECT DISTINCT ON (server_id)
-        server_id,
-        utc_offset_minutes
-    FROM server_properties
-    WHERE utc_offset_minutes IS NOT NULL
-    ORDER BY server_id, collection_time DESC
+{DarlingJobHistoryReader.LatestOffsetsSql(serversSql)}
 ),
 rolled AS (
     SELECT h.category_name
