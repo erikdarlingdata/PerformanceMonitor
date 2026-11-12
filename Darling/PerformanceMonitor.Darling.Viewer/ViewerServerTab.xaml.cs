@@ -398,11 +398,11 @@ public partial class ViewerServerTab : UserControl
         }
 
         _refreshInFlight = true;
-        /* #8549: the first load of the tab runs on the first open's clock, so the reads below, which run before the landing sub-tab's own
-           load, are booked by name. Null for every later refresh. */
+        /* #8549: the first load of the tab runs on the first open's clock, so the reads below, which run before or beside the landing
+           sub-tab's own load, are booked by name. Null for every later refresh. */
         var open = TakeFirstOpenTimer();
         /* The clock of the load this refresh starts. A later refresh (a sub-tab pick, a range change, the auto-refresh tick) runs the same
-           reads before its sub-tab's load, so its clock starts here too: its slow-load line names those reads and its total counts them. */
+           reads, so its clock starts here too: its slow-load line names them and its total counts the ones its sub-tab's load waits for. */
         var timer = open ?? new ViewerLoadTimer();
         try
         {
@@ -419,12 +419,17 @@ public partial class ViewerServerTab : UserControl
             await Timed(timer, "server data start read", RefreshServerDataStartAsync());
 
             /* Refresh the toolbar freshness readout in the same pass (after the offset is applied so it renders
-               in the active display mode). Non-critical chrome — its own try/catch keeps it off the load path. */
-            await Timed(timer, "server freshness read", UpdateServerFreshnessLabelAsync());
+               in the active display mode). Non-critical chrome — its own try/catch keeps it off the load path.
+               #8549: it fills the header, and the sub-tab's load reads nothing from it, so it starts here and runs beside that load
+               instead of ahead of it. It writes the readout from this thread when its read answers. */
+            var freshnessRead = Timed(timer, "server freshness read", UpdateServerFreshnessLabelAsync());
 
             /* #1591: same slot, same reasoning — a permission-denied collector is only visible on the Collection
-               Health tab, which is why it went unnoticed. Badge it so it is discoverable from any tab. */
-            await Timed(timer, "permission denied count read", UpdatePermissionDeniedBadgeAsync());
+               Health tab, which is why it went unnoticed. Badge it so it is discoverable from any tab.
+               #8549: beside the load too. Each of the two is booked on the load's clock when it ends, so one that ends while the load
+               runs is on the load's slow-load line with its own time. One still out when the load ends is not on that line, and the
+               line's total, which stops at the load's end, never counts it. */
+            var permissionRead = Timed(timer, "permission denied count read", UpdatePermissionDeniedBadgeAsync());
 
             /* #5562: redraw the picker's resolved range from the clock (a range that slides with now) and refresh its
                "collected every N minutes" note (set for the page on screen in the load loop below, before each tab's load). */
@@ -450,6 +455,15 @@ public partial class ViewerServerTab : UserControl
                     if (InnerTabs.SelectedIndex == loadedTab) FirstPaint.Resolve((InnerTabs.SelectedItem as TabItem)?.Content as DependencyObject);
                 }
                 while (InnerTabs.SelectedIndex != loadedTab);
+
+                /* #8549: the header's two reads are awaited here, so the refresh ends with the readout and the badge written. A refresh
+                   already asked for loads first, with the reads still beside it, and one asked for while they are awaited is seen by
+                   the check below, so it is served and not left behind. Awaiting them a second time costs nothing. */
+                if (!_refreshRequested)
+                {
+                    await freshnessRead;
+                    await permissionRead;
+                }
 
                 /* A refresh asked for while this one ran loads next. Its clock starts at the ask, with the wait behind this load booked. */
                 timer = _refreshRequested ? QueuedRefreshTimer() : null;

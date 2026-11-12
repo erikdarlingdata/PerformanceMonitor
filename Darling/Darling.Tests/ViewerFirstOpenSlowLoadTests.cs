@@ -128,9 +128,11 @@ public sealed class ViewerFirstOpenSlowLoadTests
         Assert.DoesNotContain(lines, l => l.Contains("server tab first open", StringComparison.Ordinal));
     }
 
-    /* A later refresh (a sub-tab pick, a range change, the auto-refresh tick) runs the same reads before its sub-tab's load as the first open
-       does: freshness, permission count, collection interval. They are on that refresh's clock too, so its line names them and its total
-       counts them. The first open here writes nothing (its threshold is out of reach), so the one line is the later refresh's. */
+    /* A later refresh (a sub-tab pick, a range change, the auto-refresh tick) runs the same reads as the first open does. The server clock,
+       data start and collection interval reads run before its sub-tab's load, on that refresh's clock too, so its line names them and its
+       total counts them. The freshness and permission-count reads run beside the load, and the line names one only when it ended before
+       the load did, so neither is asked for here. The first open here writes nothing (its threshold is out of reach), so the one line is
+       the later refresh's. */
     [Fact]
     public void ASlowReadBeforeTheSubTabsLoad_IsNamedInALaterRefreshsSlowLoadLine()
     {
@@ -166,8 +168,8 @@ public sealed class ViewerFirstOpenSlowLoadTests
         var line = Assert.Single(lines);
         Assert.Contains("[later-refresh-alias]", line, StringComparison.Ordinal);
         Assert.DoesNotContain("server tab first open", line, StringComparison.Ordinal);
-        Assert.Contains("server freshness read ", line, StringComparison.Ordinal);
-        Assert.Contains("permission denied count read ", line, StringComparison.Ordinal);
+        Assert.Contains("server clock read ", line, StringComparison.Ordinal);
+        Assert.Contains("server data start read ", line, StringComparison.Ordinal);
         Assert.Contains("collection interval read ", line, StringComparison.Ordinal);
     }
 
@@ -302,6 +304,23 @@ public sealed class ViewerFirstOpenSlowLoadTests
         var line = Assert.Single(lines);
         Assert.Contains("server clock read ", line, StringComparison.Ordinal);
         Assert.DoesNotContain("server freshness read", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("permission denied count read", line, StringComparison.Ordinal);
+    }
+
+    /* A read that runs beside a load is booked when it ends. One that ended while the load ran is on the load's line with its own time.
+       One still out when the load ends is not on the line. */
+    [Fact]
+    public void AReadBesideTheLoad_IsOnItsSlowLoadLine_OnlyWhenItEndedBeforeTheLoadDid()
+    {
+        var timer = new ViewerLoadTimer(slowThresholdMs: 0);
+        var stillOut = new TaskCompletionSource();
+        Assert.Same(Task.CompletedTask, ViewerServerTab.Timed(timer, "server freshness read", Task.CompletedTask));
+        Assert.Same(stillOut.Task, ViewerServerTab.Timed(timer, "permission denied count read", stillOut.Task));
+        var line = timer.Finish("Overview");
+        stillOut.SetResult();
+
+        Assert.NotNull(line);
+        Assert.Contains("server freshness read ", line, StringComparison.Ordinal);
         Assert.DoesNotContain("permission denied count read", line, StringComparison.Ordinal);
     }
 
