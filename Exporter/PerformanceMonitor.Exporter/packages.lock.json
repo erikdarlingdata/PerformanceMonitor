@@ -58,9 +58,9 @@
       },
       "System.Security.Cryptography.ProtectedData": {
         "type": "Direct",
-        "requested": "[10.0.14, )",
-        "resolved": "10.0.14",
-        "contentHash": "UuaBUHgmtc9h6CMxaQqFDDJxkS5JVy7XEB+DbtCvD68GFcVM9/AccuNwFpARx8nwCnvjaxzoOBjG3gPz32P1Eg=="
+        "requested": "[11.0.0, )",
+        "resolved": "11.0.0",
+        "contentHash": "iS9iyAMwLDPFBzTdcREDkzRBYmwy7aENYl7EXxAvnNJNCbl7+UVRgJfWaVLtVjSeDmT3JIItgGODmuAPljXFww=="
       },
       "Apache.Arrow": {
         "type": "Transitive",
@@ -356,9 +356,9 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.1.1, )",
-          "PerformanceMonitor.Common": "[3.12.0, )",
+          "PerformanceMonitor.Common": "[3.13.0, )",
           "System.Security.Cryptography.Pkcs": "[10.0.14, )",
-          "System.Security.Cryptography.ProtectedData": "[10.0.14, )"
+          "System.Security.Cryptography.ProtectedData": "[11.0.0, )"
         }
       },
       "CredentialManagement": {
