@@ -160,7 +160,7 @@ public sealed class PlanRegressionPlanPickLiveTests
     /// </summary>
     private static async Task<(DateTime Floor, List<PlanRegressionDaily.BuiltDay> Built)> SeedAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        var today = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified);
+        var today = DateTime.SpecifyKind(LiveClock.Now().Date, DateTimeKind.Unspecified);
         var floor = PgFactCollector.PlanRegressionWindowFloor(today.AddDays(-14));
 
         await ExecAsync(connection, @"
