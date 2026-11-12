@@ -170,7 +170,14 @@ public sealed partial class ViewerDataService
                7, so dropping one fails loudly and names the file. Both enumerate their files rather than
                globbing, so MOVING a read has to be re-declared instead of silently shrinking the guard. */
             SELECT
-                *,
+                database_name,
+                query_id,
+                plan_id,
+                query_hash,
+                execution_type_desc,
+                replica_role,
+                execution_count,
+                avg_duration_us,
                 ROW_NUMBER() OVER
                 (
                     PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
@@ -178,21 +185,29 @@ public sealed partial class ViewerDataService
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
-            /* #7776: the window is the interval's own start, the expression the slicer's bars are keyed on (QueryStoreSlicerSql, #1892),
-               so a slice's grid rows are the intervals its bars draw. It was collection_time, which trails the interval by up to the
-               interval's length: an interval collected inside the slice but started before it showed here with no bar, and the slice's
-               last interval, collected after its end, was missing. Legacy rows have no interval start and keep collection_time.
-               The collection_time bounds below are chunk exclusion, not filters, with the slicer read's reasoning: the floor is implied
-               by the predicate (an interval is collected after it starts; the hour is clock-skew slack) and the ceiling is the
-               slicer's 30 days (a day of engine maximum interval, the rest collector-outage allowance). They keep the
-               (server_id, collection_time) index and the chunk pruning. */
-            AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-            AND   COALESCE(interval_start_time_utc, collection_time) <= $3
-            AND   collection_time >= $2 - {{CollectionFloorSlackSql}}
-            AND   collection_time <= $3 + {{CollectionCeilingSql}}
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            {{QueryStoreTopRawWindow}}
         ),
 
+        """;
+
+    /// <summary>The raw read's window predicates, the one place both of its passes over <c>query_store_stats</c> take them from (#8549):
+    /// <c>deduped</c> (the narrow pass that ranks) and <c>wide</c> (the pass that fetches the kept keys' rows) read the same rows, so a
+    /// predicate changed in one cannot miss the other. The rows' source is <c>FROM query_store_stats WHERE server_id = $1</c> before it.
+    /// $2 window start, $3 window end (naive UTC), $5 database filter.</summary>
+    private const string QueryStoreTopRawWindow = $$"""
+        /* #7776: the window is the interval's own start, the expression the slicer's bars are keyed on (QueryStoreSlicerSql, #1892),
+           so a slice's grid rows are the intervals its bars draw. It was collection_time, which trails the interval by up to the
+           interval's length: an interval collected inside the slice but started before it showed here with no bar, and the slice's
+           last interval, collected after its end, was missing. Legacy rows have no interval start and keep collection_time.
+           The collection_time bounds below are chunk exclusion, not filters, with the slicer read's reasoning: the floor is implied
+           by the predicate (an interval is collected after it starts; the hour is clock-skew slack) and the ceiling is the
+           slicer's 30 days (a day of engine maximum interval, the rest collector-outage allowance). They keep the
+           (server_id, collection_time) index and the chunk pruning. */
+        AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+        AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+        AND   collection_time >= $2 - {{CollectionFloorSlackSql}}
+        AND   collection_time <= $3 + {{CollectionCeilingSql}}
+        AND   ($5::text[] IS NULL OR database_name = ANY($5))
         """;
 
     /// <summary>
@@ -312,15 +327,31 @@ public sealed partial class ViewerDataService
                 MAX(CAST(max_num_physical_io_reads AS double precision)) AS max_num_physical_io_reads
         """;
 
-    /// <summary>The raw read's <c>ranked</c> and everything below it: <see cref="QueryStoreTopRankedColumns"/> grouped, ranked and
-    /// capped in one step, then <see cref="QueryStoreTopTail"/>. References $1, $4 and $6, plus $2/$3 (#5420: the inline-text
-    /// fallback's window bound, the same $2/$3 the raw prefix binds). The raw dedupe is a window function, so this read keeps its one
-    /// pass over it; the interval-table read has its own head (<see cref="QueryStoreTopTableRankedHead"/>, #8549).</summary>
+    /// <summary>The raw read's <c>keys</c>, <c>wide</c>, <c>ranked</c> and everything below them: <see cref="QueryStoreTopRawRankedHead"/>, then
+    /// <see cref="QueryStoreTopTail"/>. References $1, $4 and $6, plus $2/$3 (#5420: the inline-text fallback's window bound, the same $2/$3
+    /// the raw prefix binds). The interval-table read has its own head (<see cref="QueryStoreTopTableRankedHead"/>, #8549).</summary>
     private const string QueryStoreTopSuffix = QueryStoreTopRawRankedHead + "\n" + QueryStoreTopTail;
 
-    private const string QueryStoreTopRawRankedHead = "        ranked AS (\n            SELECT\n" + QueryStoreTopRankedColumns + "\n" + QueryStoreTopRawRankedFrom;
-
-    private const string QueryStoreTopRawRankedFrom = $$"""
+    /// <summary>
+    /// #8549: the raw read's <c>ranked</c>, in two steps so the window function sorts narrow rows, as <see cref="QueryStoreTopTableRankedHead"/>
+    /// does for the interval table. One step ranked the groups over a dedupe of <c>SELECT *</c>: the window sorted every row of the
+    /// window at its full width, and on a field store that sort wrote 136,690 temp blocks (about 1 GB) and took 10.1 s. <c>deduped</c>
+    /// (in <see cref="QueryStoreTopRawPrefix"/>) now carries the group key and the two columns the rank needs, <c>keys</c> ranks and keeps the
+    /// candidate limit ($6) with the self-statement slot and the tag filter before it (#7736), and <c>wide</c> dedupes the full rows of
+    /// the kept groups only. <c>wide</c> keeps a row's whole dedupe partition or none of it: its filter is on the partition's own columns
+    /// (database_name, query_id, plan_id, execution_type_desc, replica_role, matched NULL-safe), all in PARTITION BY, so every partition it
+    /// ranks has all the rows it has in <c>deduped</c> and <c>rn</c> picks the same row. <c>ranked</c> then matches each kept row to its group
+    /// on all six columns (<see cref="KeyMatch"/>, query_hash included). The rows, their groups and the candidate count are the one-step read's.
+    /// </summary>
+    private const string QueryStoreTopRawRankedHead = $$"""
+        keys AS (
+            SELECT
+                database_name,
+                query_id,
+                plan_id,
+                query_hash,
+                execution_type_desc,
+                replica_role
             FROM deduped
             WHERE rn = 1
             /*SELFKEY:deduped*/
@@ -328,6 +359,42 @@ public sealed partial class ViewerDataService
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY {{QueryStoreWeightedAverage.RankByDuration}} DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $6
+        ),
+        wide AS (
+            /* The same dedupe as deduped above (QueryStoreTopRawPrefix explains it: #1841, #1907), over the rows of the kept groups. */
+            SELECT
+                *,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC, execution_count DESC
+                ) AS rn
+            FROM query_store_stats
+            WHERE server_id = $1
+            {{QueryStoreTopRawWindow}}
+            AND   EXISTS
+                  (
+                      SELECT 1
+                      FROM keys AS k
+                      WHERE COALESCE(k.database_name, '') = COALESCE(query_store_stats.database_name, '') AND (k.database_name IS NULL) = (query_store_stats.database_name IS NULL)
+                      AND   COALESCE(k.query_id, 0) = COALESCE(query_store_stats.query_id, 0) AND (k.query_id IS NULL) = (query_store_stats.query_id IS NULL)
+                      AND   COALESCE(k.plan_id, 0) = COALESCE(query_store_stats.plan_id, 0) AND (k.plan_id IS NULL) = (query_store_stats.plan_id IS NULL)
+                      AND   COALESCE(k.execution_type_desc, '') = COALESCE(query_store_stats.execution_type_desc, '') AND (k.execution_type_desc IS NULL) = (query_store_stats.execution_type_desc IS NULL)
+                      AND   COALESCE(k.replica_role, '') = COALESCE(query_store_stats.replica_role, '') AND (k.replica_role IS NULL) = (query_store_stats.replica_role IS NULL)
+                  )
+        ),
+        ranked AS (
+            SELECT
+        {{QueryStoreTopRankedColumns}}
+            FROM
+            (
+                SELECT
+                    deduped.*
+                FROM wide AS deduped
+                WHERE deduped.rn = 1
+                AND   EXISTS (SELECT 1 FROM keys AS k WHERE {{KeyMatch}})
+            ) AS deduped
+            GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
         ),
         """;
 
@@ -661,6 +728,7 @@ public sealed partial class ViewerDataService
     private async Task<(List<ViewerQueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan)?> TryGetQueryStoreTopQueriesFromTableAsync(
         int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
@@ -678,6 +746,11 @@ public sealed partial class ViewerDataService
                 ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
             if (!plan.UseTable)
             {
+                if (plan.DecisionFailed)
+                {
+                    LogTableReadFallback("Query Store grid", elapsed, "the source decision failed", null);
+                }
+
                 return null;
             }
 
@@ -720,10 +793,25 @@ public sealed partial class ViewerDataService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* Review D4R M2: a permission failure here (a viewer role that can't SELECT the new table on an
-               upgraded store) must not fall back to raw forever with no trace anywhere. */
-            System.Diagnostics.Trace.TraceWarning($"#3953 grid table read fell back to raw: {ex.GetType().Name}: {ex.Message}");
+               upgraded store) must not fall back to raw forever with no trace anywhere. #8549: it goes to the Viewer's own log, with the
+               time spent, because a read cancelled at the deadline never reaches the store's statement history and a Trace line has no listener. */
+            LogTableReadFallback("Query Store grid", elapsed, "the interval-table read failed", ex);
             return null;
         }
+    }
+
+    /// <summary>
+    /// #8549: one Warning line in the Viewer's log each time an interval-table read gives up and the read starts again on raw history: which
+    /// read, how long the failed attempt took, why, and that raw is next. On a field store the first 30-day open spent about 15 s on a
+    /// table read that ran into the read deadline, then read raw; the cancelled statement is not in the store's statement history and
+    /// the fallback was a Trace line nobody listens to, so no log showed where the first 15 s went.
+    /// </summary>
+    private static void LogTableReadFallback(string read, System.Diagnostics.Stopwatch elapsed, string why, Exception? ex)
+    {
+        var detail = ex is null
+            ? ""
+            : $" ({ex.GetType().Name}: {ex.Message}{(ex.InnerException is { } inner ? $" / {inner.GetType().Name}" : "")})";
+        ViewerLogger.Warn("QueryStore", $"{read}: {why} after {elapsed.ElapsedMilliseconds} ms{detail}; retrying on raw history (#8549)");
     }
 
     /// <summary>The ordinal of <c>page_ord</c>, the column after <c>replica_role</c> (#5313): <c>candidate_count</c>
@@ -1242,6 +1330,7 @@ public sealed partial class ViewerDataService
     private async Task<List<TimeSliceBucket>?> TryGetQueryStoreSlicerFromTableAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
@@ -1256,6 +1345,11 @@ public sealed partial class ViewerDataService
                 ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
             if (!plan.UseTable)
             {
+                if (plan.DecisionFailed)
+                {
+                    LogTableReadFallback("Query Store slicer", elapsed, "the source decision failed", null);
+                }
+
                 return null;
             }
 
@@ -1270,7 +1364,7 @@ public sealed partial class ViewerDataService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            System.Diagnostics.Trace.TraceWarning($"#8549 slicer table read fell back to raw: {ex.GetType().Name}: {ex.Message}");
+            LogTableReadFallback("Query Store slicer", elapsed, "the interval-table read failed", ex);
             return null;
         }
     }

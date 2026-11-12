@@ -47,7 +47,8 @@ public sealed class QueryStoreSliceTieBreakSourceTests
     /// </summary>
     private static readonly (string Path, int Sites)[] DedupSites =
     [
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.QueryStore.cs"), 4),
+        /* 5 since #8549: the raw grid read dedupes twice, a narrow pass that ranks and a wide pass that fetches the kept groups' rows. */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.QueryStore.cs"), 5),
         /* Since #5506 the regressions read (the MCP tool and the viewer twin) builds its SQL in one place: one dedup window
            over the raw rows, filtered by four rn = 1 reads. It was two sites in the viewer file and two in the MCP reader. */
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreRegressionBaseline.cs"), 1),
@@ -121,8 +122,9 @@ public sealed class QueryStoreSliceTieBreakSourceTests
            12 -> 18 with #2827: the plan-regression dedup states its ordering once per projected column
            (7) where the window form stated it once, so the same logical site now contributes seven.
            18 -> 19 with #5631: the eighth ordered array_agg in that dedup (avg_rowcount).
-           19 -> 18 with #5506: the viewer's two regressions dedups became the one shared window in Storage. */
-        Assert.Equal(18, total);
+           19 -> 18 with #5506: the viewer's two regressions dedups became the one shared window in Storage.
+           18 -> 19 with #8549: the viewer's raw grid read dedupes twice (narrow, then wide). */
+        Assert.Equal(19, total);
     }
 
     /// <summary>

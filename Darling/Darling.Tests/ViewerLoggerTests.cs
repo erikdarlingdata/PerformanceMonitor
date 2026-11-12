@@ -21,9 +21,8 @@ namespace Darling.Tests;
 ///
 /// <para><c>[Collection("viewer-logger-statics")]</c>: like <c>ViewerLogger</c> itself, this is a process-wide
 /// static singleton, so this is the named place a future class touching it should join. Nothing else does
-/// today. One test method by design: <see cref="ViewerLogger.Shutdown"/> disposes the static flush timer, so
-/// a second <see cref="ViewerLogger.Initialize"/> in the same class would land in its catch and silently
-/// no-op the logger.</para>
+/// today. One test method by design: <see cref="ViewerLogger.Shutdown"/> stops logging until the next
+/// <see cref="ViewerLogger.Initialize"/>, so each test of its own initializes the logger first.</para>
 /// </summary>
 [Collection("viewer-logger-statics")]
 public sealed class ViewerLoggerTests : IDisposable
