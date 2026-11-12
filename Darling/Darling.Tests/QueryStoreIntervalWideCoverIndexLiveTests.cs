@@ -383,16 +383,17 @@ FROM (SELECT d.day + interval '23 hours 30 minutes 0.05 seconds' + g * interval 
         Assert.True(await InsertsSinceVacuumAsync(connection, free, ct) > 0);
 
         /* SHARE conflicts with the vacuum's own lock, as a running autovacuum's does. Plain VACUUM would wait for it until the
-           step's lock_timeout (30 s) ran out; SKIP_LOCKED moves on at once. */
+           step's lock_timeout (30 s) ran out and raise no notice; SKIP_LOCKED moves on at once and says so with a 55P03 notice. */
         await using (var other = new NpgsqlConnection(scratch.ConnectionString))
         {
             await other.OpenAsync(ct);
             await using var transaction = await other.BeginTransactionAsync(ct);
             await ExecAsync(other, $"LOCK TABLE {held} IN SHARE MODE", ct);
 
-            var timer = System.Diagnostics.Stopwatch.StartNew();
+            var skipped = new List<string?>();
+            connection.Notice += (_, e) => skipped.Add(e.Notice.SqlState);
             var step = await QueryStoreIntervalWideCoverIndex.EnsureAsync(connection, QueryStoreIntervalPartitions.Wide, Now, logger, ct);
-            Assert.True(timer.Elapsed < TimeSpan.FromSeconds(15), $"the step must skip a locked leaf, not wait on it: {timer.Elapsed}");
+            Assert.Contains(PostgresErrorCodes.LockNotAvailable, skipped);
             Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, step.Outcome);
             Assert.Equal(0, await InsertsSinceVacuumAsync(connection, free, ct));
             Assert.True(await InsertsSinceVacuumAsync(connection, held, ct) > 0);
