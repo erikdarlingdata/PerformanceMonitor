@@ -95,6 +95,9 @@ public partial class ViewerServerTab : UserControl
     private bool _refreshInFlight;
     private bool _refreshRequested;
 
+    /* #8549: when the refresh now queued (_refreshRequested) was first asked for, as a Stopwatch timestamp. The queued load's clock starts there. */
+    private long _refreshQueuedAt;
+
     /* #1319: per-server global database filter (display-only). Empty set = "All" (unfiltered). */
     private readonly HashSet<string> _selectedDatabases = new(StringComparer.OrdinalIgnoreCase);
     private List<SelectableItem> _databaseFilterItems = new();
@@ -284,6 +287,16 @@ public partial class ViewerServerTab : UserControl
         _firstOpenTimer.BookStep("tab construction", _constructMs);
     }
 
+    /// <summary>#8549: the clock of a refresh that waited behind the one in flight. It starts at the moment the refresh was asked for, and the
+    /// wait is booked as a phase, so the queued load's slow-load line counts the wait and names it.</summary>
+    private ViewerLoadTimer QueuedRefreshTimer()
+    {
+        var waitedMs = (long)System.Diagnostics.Stopwatch.GetElapsedTime(_refreshQueuedAt).TotalMilliseconds;
+        var timer = new ViewerLoadTimer(ViewerLoadTimer.SlowLoadThresholdMs, waitedMs);
+        timer.BookPhaseEndingNow("waited for the refresh in flight", 0);
+        return timer;
+    }
+
     /// <summary>The first open's clock for the load now starting, or null when this is not the tab's first load. Handed out once.</summary>
     private ViewerLoadTimer? TakeFirstOpenTimer()
     {
@@ -375,14 +388,22 @@ public partial class ViewerServerTab : UserControl
     {
         if (_refreshInFlight)
         {
+            if (!_refreshRequested)
+            {
+                _refreshQueuedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+            }
+
             _refreshRequested = true;
             return;
         }
 
         _refreshInFlight = true;
         /* #8549: the first load of the tab runs on the first open's clock, so the reads below, which run before the landing sub-tab's own
-           load, are booked by name. Null for every later refresh, which keeps its per-sub-tab clock. */
+           load, are booked by name. Null for every later refresh. */
         var open = TakeFirstOpenTimer();
+        /* The clock of the load this refresh starts. A later refresh (a sub-tab pick, a range change, the auto-refresh tick) runs the same
+           reads before its sub-tab's load, so its clock starts here too: its slow-load line names those reads and its total counts them. */
+        var timer = open ?? new ViewerLoadTimer();
         try
         {
             /* The time from the tab's activation to this point: the shell's refresh slot was taken by another tab's refresh, or its own
@@ -391,23 +412,23 @@ public partial class ViewerServerTab : UserControl
 
             /* Point the process-wide time helper at THIS server's UTC offset before rendering — only the
                visible tab renders (the viewer's visible-only rule), so its offset wins. Loaded once, cached. */
-            await Timed(open, "server clock read", RefreshServerClockAsync());
-            ClientStep(open, "apply server clock", ApplyServerClockToHelper);
+            await Timed(timer, "server clock read", RefreshServerClockAsync());
+            ClientStep(timer, "apply server clock", ApplyServerClockToHelper);
 
             /* #7386: the server's data start, for the charts' X axis. One cached read for the whole tab. */
-            await Timed(open, "server data start read", RefreshServerDataStartAsync());
+            await Timed(timer, "server data start read", RefreshServerDataStartAsync());
 
             /* Refresh the toolbar freshness readout in the same pass (after the offset is applied so it renders
                in the active display mode). Non-critical chrome — its own try/catch keeps it off the load path. */
-            await Timed(open, "server freshness read", UpdateServerFreshnessLabelAsync());
+            await Timed(timer, "server freshness read", UpdateServerFreshnessLabelAsync());
 
             /* #1591: same slot, same reasoning — a permission-denied collector is only visible on the Collection
                Health tab, which is why it went unnoticed. Badge it so it is discoverable from any tab. */
-            await Timed(open, "permission denied count read", UpdatePermissionDeniedBadgeAsync());
+            await Timed(timer, "permission denied count read", UpdatePermissionDeniedBadgeAsync());
 
             /* #5562: redraw the picker's resolved range from the clock (a range that slides with now) and refresh its
                "collected every N minutes" note (set for the page on screen in the load loop below, before each tab's load). */
-            ClientStep(open, "range picker redraw", RefreshRangePicker);
+            ClientStep(timer, "range picker redraw", RefreshRangePicker);
 
             do
             {
@@ -420,15 +441,18 @@ public partial class ViewerServerTab : UserControl
                     ShowFirstPaintLoading(); // #8647: also the landing sub-tab of the first open, which has no selection event
                     /* L3: a tab switched to during this load changes the page on screen, so its note is set here too, not only
                        at the top of the pass. */
-                    await Timed(open, "collection interval read", UpdateSampleIntervalAsync());
-                    /* The first pass hands the first open's clock on, so the landing sub-tab's reads land in the same line; a second pass
+                    await Timed(timer, "collection interval read", UpdateSampleIntervalAsync());
+                    /* The first pass hands this refresh's clock on, so the sub-tab's reads land in the same line; a second pass
                        (the reader switched tabs mid-load) is an ordinary load on its own clock. */
-                    await LoadInnerTabAsync(loadedTab, open);
-                    open = null;
+                    await LoadInnerTabAsync(loadedTab, timer);
+                    timer = null;
                     /* #8647: whatever on the sub-tab still says "Loading..." after its read was never filled; it must not outlive the read. */
                     if (InnerTabs.SelectedIndex == loadedTab) FirstPaint.Resolve((InnerTabs.SelectedItem as TabItem)?.Content as DependencyObject);
                 }
                 while (InnerTabs.SelectedIndex != loadedTab);
+
+                /* A refresh asked for while this one ran loads next. Its clock starts at the ask, with the wait behind this load booked. */
+                timer = _refreshRequested ? QueuedRefreshTimer() : null;
             }
             while (_refreshRequested);
         }
