@@ -36,9 +36,13 @@ internal sealed class PgStatementTableAttempt
     private readonly bool _forcePass;
     private readonly int _callsAtMost;
     private readonly string? _database;
+    private readonly Func<NpgsqlConnection, CancellationToken, Task<long?>> _dealloc;
 
-    internal PgStatementTableAttempt(NpgsqlConnection connection, int number, bool forcePass, long? deallocAtStart, int callsAtMost = 1, string? database = null)
+    internal PgStatementTableAttempt(
+        NpgsqlConnection connection, int number, bool forcePass, long? deallocAtStart, int callsAtMost = 1, string? database = null,
+        Func<NpgsqlConnection, CancellationToken, Task<long?>>? dealloc = null)
     {
+        _dealloc = dealloc ?? DefaultDeallocAsync;
         _callsAtMost = callsAtMost;
         _database = database;
         Connection = connection;
@@ -54,7 +58,15 @@ internal sealed class PgStatementTableAttempt
     public int Number { get; }
 
     /// <summary>The counter before the body ran; NULL where the server has no <c>pg_stat_statements_info</c>.</summary>
-    public long? DeallocAtStart { get; }
+    public long? DeallocAtStart { get; private set; }
+
+    /// <summary>
+    /// Starts the run's window here: the counter is read again and a pass before this point no longer counts against the run.
+    /// For a body whose measured statements all come after the call and whose reads need nothing the body made before it. A
+    /// body that spends its time on setup (a new service and its first connection under a loaded runner can take seconds)
+    /// makes the setup, and not the measured statements, the span another session's pass has to miss.
+    /// </summary>
+    public async Task RestartWindowAsync(CancellationToken ct) => DeallocAtStart = await _dealloc(Connection, ct);
 
     /// <summary>The counter after the body ran.</summary>
     public long? DeallocAtEnd { get; private set; }
@@ -87,6 +99,8 @@ internal sealed class PgStatementTableAttempt
     internal bool ForcingFailed { get; private set; }
 
     internal void Finish(long? deallocAtEnd) => DeallocAtEnd = deallocAtEnd;
+
+    private static Task<long?> DefaultDeallocAsync(NpgsqlConnection connection, CancellationToken ct) => PgStatementTable.DeallocAsync(connection, ct);
 }
 
 /// <summary>Runs a body under <see cref="PgStatementTableAttempt"/> and reads the module's counters.</summary>
@@ -98,8 +112,13 @@ internal static class PgStatementTable
     /// <summary>The free slots a run secures before its statements: the bodies add a few dozen entries at most, and the margin covers what a background worker on the cluster runs meanwhile.</summary>
     internal const int Headroom = 64;
 
-    /// <summary>The runs a body gets before a pass inside every one of them is a failure.</summary>
-    private const int MaxAttempts = 5;
+    /// <summary>
+    /// The runs a body gets before a pass inside every one of them is a failure. A parallel class that migrates a scratch
+    /// database makes hundreds of new entries a second, and on a loaded runner a pass lands inside about one run in four; five
+    /// runs in a row all took one (#8759). A run is a second or two at most and a run that no pass touched ends the loop, so
+    /// the extra runs cost time only on a runner where they are needed.
+    /// </summary>
+    private const int MaxAttempts = 15;
 
     /// <summary>
     /// The shapes <see cref="ForcePassAsync"/> runs per batch: well under the five percent of the table a pass removes (250
@@ -141,7 +160,7 @@ internal static class PgStatementTable
         for (var number = 1; ; number++)
         {
             await ensureHeadroom(connection, ct);
-            attempt = new PgStatementTableAttempt(connection, number, forcePass && number == 1, await dealloc(connection, ct), forcePassCallsAtMost, forcePassDatabase);
+            attempt = new PgStatementTableAttempt(connection, number, forcePass && number == 1, await dealloc(connection, ct), forcePassCallsAtMost, forcePassDatabase, dealloc);
             ExceptionDispatchInfo? failure = null;
             try
             {

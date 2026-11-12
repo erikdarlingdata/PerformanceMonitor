@@ -393,6 +393,11 @@ public sealed class ViewerQueryTabLoadTests
     {
         await using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync(ct);
+        return await CountCallsAsync(conn, dbId, likePattern, ct);
+    }
+
+    private static async Task<long> CountCallsAsync(NpgsqlConnection conn, long dbId, string likePattern, CancellationToken ct)
+    {
         await using var cmd = new NpgsqlCommand("SELECT COALESCE(SUM(calls), 0)::bigint FROM pg_stat_statements WHERE dbid = $1 AND query LIKE $2", conn);
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
         cmd.Parameters.AddWithValue(likePattern);
@@ -551,6 +556,9 @@ FROM (VALUES
         var dbId = await StartStatementCountingAsync(scratch.ConnectionString, ct);
         await using var table = new NpgsqlConnection(scratch.ConnectionString);
         await table.OpenAsync(ct);
+        /* The count's own connection, open before any run: a connect inside the window is time another session's eviction pass can land in. */
+        await using var counter = new NpgsqlConnection(scratch.ConnectionString);
+        await counter.OpenAsync(ct);
         var bodySucceeded = false;
         ViewerDataService? service = null;
         try
@@ -566,11 +574,17 @@ FROM (VALUES
 
                 await ResetStatementCountAsync(table, dbId, ct);
                 service = new ViewerDataService(scratch.ConnectionString);
+                /* A new service opens a connection of its own on first use, and on a loaded runner that connect takes seconds,
+                   during which a parallel class's pass kept voiding the run (#8759). One read of another table opens it, so the
+                   size read below finds a pooled connection, and the window starts after: the only statements it must hold
+                   are the size read's, the one this test counts, and the count. */
+                await service.GetServiceVersionsAsync(ct);
+                await pass.RestartWindowAsync(ct);
                 var size = await service.GetStoreSizeBytesAsync(ct);
                 Assert.True(size > 0, "a store with no recorded size reads its live size");
                 await pass.BeforeReadAsync(ct);
 
-                var live = await CountCallsAsync(scratch.ConnectionString, dbId, "%pg_database_size%current_database%", ct);
+                var live = await CountCallsAsync(counter, dbId, "%pg_database_size%current_database%", ct);
                 Assert.True(live == 1, $"one live directory walk expected; saw {live}");
             }, forcePass);
             PgStatementTable.AssertNoPassInside(run);
