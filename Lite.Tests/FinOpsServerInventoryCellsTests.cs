@@ -583,7 +583,12 @@ public sealed class FinOpsServerInventoryCellsTests : IDisposable
                 /* The tab's services, without the server picker's own loads: this test drives one Server Inventory load. */
                 typeof(FinOpsTab).GetField("_dataService", Instance)!.SetValue(tab, dataService);
                 typeof(FinOpsTab).GetField("_serverManager", Instance)!.SetValue(tab, serverManager);
-                typeof(FinOpsTab).GetField("_credentialResolver", Instance)!.SetValue(tab, new CredentialResolver(new CredentialService(), null));
+                /* #8754: the live read of every listed server must fail, and fail at once. A real refused connection does not: SqlClient retries a
+                   refused port until its 15 s connect timeout, so every test that listed a server waited 15 s for a failure it expected. A
+                   resolver over a host record that has confirmed no server refuses each connection string before any network call or
+                   credential read, so the live read throws and the row takes the same last-known path a refused connection takes. */
+                typeof(FinOpsTab).GetField("_credentialResolver", Instance)!.SetValue(tab,
+                    new CredentialResolver(new CredentialService(), null, new ServerHostBindings(Path.Combine(_tempDir, "server-hosts.json"))));
 
                 var load = typeof(FinOpsTab).GetMethod("LoadServerInventoryAsync", Instance)!;
                 if (betweenStartUpAndFirstShow is not null)

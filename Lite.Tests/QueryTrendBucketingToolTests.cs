@@ -75,10 +75,7 @@ public sealed class QueryTrendBucketingToolTests : IClassFixture<SharedDuckDbFix
         var asOf = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
         /* One collection a minute for the whole 24-hour window, every one 10 executions and 10 ms of CPU. */
         var first = asOf.AddHours(-24).AddSeconds(30);
-        for (var i = 0; i < 1440; i++)
-        {
-            await SeedQueryAsync(first.AddMinutes(i), executions: 10, cpuUs: 10_000);
-        }
+        await SeedQueriesAsync(first, count: 1440, stepMinutes: 1, executions: 10, cpuUs: 10_000);
 
         var root = JsonDocument.Parse(await McpQueryTools.GetQueryTrend(
             service, _serverManager, Hash, Database, ServerName, 24, asOf.ToString("o"))).RootElement;
@@ -115,10 +112,7 @@ public sealed class QueryTrendBucketingToolTests : IClassFixture<SharedDuckDbFix
         var service = new LocalDataService(_duckDb);
         var asOf = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
         var first = asOf.AddHours(-1).AddSeconds(30);
-        for (var i = 0; i < 60; i++)
-        {
-            await SeedQueryAsync(first.AddMinutes(i), executions: 2, cpuUs: 4_000);
-        }
+        await SeedQueriesAsync(first, count: 60, stepMinutes: 1, executions: 2, cpuUs: 4_000);
 
         var root = JsonDocument.Parse(await McpQueryTools.GetQueryTrend(
             service, _serverManager, Hash, Database, ServerName, 1, asOf.ToString("o"))).RootElement;
@@ -149,10 +143,7 @@ public sealed class QueryTrendBucketingToolTests : IClassFixture<SharedDuckDbFix
         var service = new LocalDataService(_duckDb);
         var asOf = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
         var first = asOf.AddHours(-24).AddSeconds(30);
-        for (var i = 0; i < 1440; i += 5)
-        {
-            await SeedQueryAsync(first.AddMinutes(i), executions: 5, cpuUs: 5_000);
-        }
+        await SeedQueriesAsync(first, count: 288, stepMinutes: 5, executions: 5, cpuUs: 5_000);
 
         var method = typeof(McpQueryTools).GetMethod(nameof(McpQueryTools.GetQueryTrend), BindingFlags.Public | BindingFlags.Static)!;
         var parameters = method.GetParameters();
@@ -188,10 +179,7 @@ public sealed class QueryTrendBucketingToolTests : IClassFixture<SharedDuckDbFix
         var asOf = new DateTime(2026, 11, 5, 12, 17, 0, DateTimeKind.Utc);
         var windowStart = asOf.AddHours(-4);
         var first = windowStart.AddSeconds(30);
-        for (var i = 0; i < 240; i++)
-        {
-            await SeedQueryAsync(first.AddMinutes(i), executions: 3, cpuUs: 3_000);
-        }
+        await SeedQueriesAsync(first, count: 240, stepMinutes: 1, executions: 3, cpuUs: 3_000);
 
         var root = JsonDocument.Parse(await McpQueryTools.GetQueryTrend(
             service, _serverManager, Hash, Database, ServerName, 4, asOf.ToString("o"), bucket_minutes: 60)).RootElement;
@@ -232,7 +220,12 @@ public sealed class QueryTrendBucketingToolTests : IClassFixture<SharedDuckDbFix
         return await (Task<string>)method.Invoke(null, args)!;
     }
 
-    private async Task SeedQueryAsync(DateTime collectionTimeUtc, long executions, long cpuUs)
+    /// <summary>
+    /// <paramref name="count"/> <c>query_stats</c> rows, one every <paramref name="stepMinutes"/> from <paramref name="firstUtc"/>, in ONE
+    /// statement (#8754). One INSERT per row cost a commit each: 1,440 of them took 118 s in the release run for a read that takes
+    /// milliseconds. The rows are the same ones, so the tool reads the same store.
+    /// </summary>
+    private async Task SeedQueriesAsync(DateTime firstUtc, int count, int stepMinutes, long executions, long cpuUs)
     {
         using var readLock = _duckDb.AcquireReadLock();
         if (_seedConn is null)
@@ -247,22 +240,22 @@ INSERT INTO query_stats
     (collection_id, collection_time, server_id, server_name, database_name,
      query_hash, sql_handle, query_plan_hash, last_execution_time, delta_execution_count,
      delta_worker_time, delta_elapsed_time, min_dop, max_dop, query_text)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1, 1, $13)";
-        var naive = DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified);
+SELECT CAST($1 AS BIGINT) + i, CAST($2 AS TIMESTAMP) + to_minutes(CAST(i * $3 AS BIGINT)), $4, $5, $6, $7, '0xSQLH', '0xPLAN',
+       CAST($2 AS TIMESTAMP) + to_minutes(CAST(i * $3 AS BIGINT)), $8, $9, $10, 1, 1, 'SELECT * FROM Orders'
+FROM range(CAST($11 AS BIGINT)) t(i)";
         void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
-        P(_nextId++);
-        P(naive);
+        P(_nextId);
+        P(DateTime.SpecifyKind(firstUtc, DateTimeKind.Unspecified));
+        P((long)stepMinutes);
         P(_serverId);
         P(ServerName);
         P(Database);
         P(Hash);
-        P("0xSQLH");
-        P("0xPLAN");
-        P(naive);
         P(executions);
         P(cpuUs);
         P(cpuUs * 2);
-        P("SELECT * FROM Orders");
+        P((long)count);
         await cmd.ExecuteNonQueryAsync();
+        _nextId += count;
     }
 }
