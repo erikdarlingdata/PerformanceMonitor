@@ -613,7 +613,7 @@ public static class DailySummarySql
     /// <para>Lite's twin has no rollup tier: its calendar reads raw DuckDB, where every day inside retention is
     /// the source itself, and is untouched.</para>
     /// </summary>
-    private static string QueriesCteForCagg(string relation)
+    private static string QueriesCteForCagg(string relation, string? heldDaily = null)
     {
         /* The repair's own target row for this relation: the source it aggregates, that source's time column and
            the CREATE its filter is read from. Looked up rather than restated so the calendar's idea of "what the
@@ -648,13 +648,23 @@ public static class DailySummarySql
         var tailRowPredicate =
             $"server_id = $1 AND collection_time >= $2 AND collection_time < $3 AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling), $2){rawTailGate}";
 
+        /* #8549: the rollup half's (day, query_hash) pairs. With a daily to read, the closed days it holds come from it. */
+        var rollupPairs = heldDaily is null
+            ? $"""
+                SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash
+                        FROM collect.{relation}
+                        WHERE server_id = $1 AND bucket >= $2 AND bucket < $3
+                """
+            : HeldDailyPairs(relation, heldDaily, boundary: null).Pairs;
+        var dailyCtes = heldDaily is null ? string.Empty : HeldDailyPairs(relation, heldDaily, boundary: null).Ctes;
+
         return $"""
         /* #7505: last_day is the newest day the rollup holds a bucket for. raw_from is the first day the rollup
            does NOT hold whole: the day in which the newest bucket ENDS. For a daily rollup, or an hourly one whose
            newest bucket is 23:00, that is the day after last_day. For an hourly rollup that is still behind the
            clock (its refresh runs an hour apart and stops an hour short of now, so it can lag two hours), the newest
            bucket ends inside last_day, so raw_from = last_day and that day is partial. */
-        queries_ceiling AS (
+        {dailyCtes}queries_ceiling AS (
             SELECT date_trunc('day', max(bucket)) AS last_day,
                    date_trunc('day', max(bucket) + INTERVAL '{width} seconds') AS raw_from
             FROM collect.{relation}
@@ -669,9 +679,7 @@ public static class DailySummarySql
             FROM (
             SELECT x.d, COUNT(x.query_hash) AS c
             FROM (
-                SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash
-                FROM collect.{relation}
-                WHERE server_id = $1 AND bucket >= $2 AND bucket < $3
+                {rollupPairs}
             ) AS x
             GROUP BY x.d
             UNION ALL
@@ -713,6 +721,66 @@ public static class DailySummarySql
             GROUP BY u.d
         ),
         """;
+    }
+
+    /// <summary>
+    /// The (day, query_hash) pairs of an interval-honest hourly relation, counting each CLOSED day from its daily relation instead (#8549). A
+    /// distinct over a month of the hourly rollup sorted about 6.3 million rows and spilled to disk on the busiest server of a test store, most
+    /// of the month read. The daily holds the same pairs in about 24 times fewer rows, because it is built from the hourly by
+    /// <c>time_bucket('1 day')</c> over the same columns. Returns the CTE that reads the daily and the pairs that read the CTE.
+    ///
+    /// <para><b>When a day comes from the daily.</b> A day is held when it lies wholly inside <c>[$2, $3)</c> and the daily has a bucket for the
+    /// server at that midnight, the same coverage rule <c>collect.wait_stats_daily</c> follows for the wait totals. A daily bucket is written
+    /// whole, from the hourly buckets of the day, so one row proves the day. The daily refresh ends a day short of now, so yesterday is not held
+    /// until the next UTC midnight: it is read from the hourly with the open day, and the raw tail that follows is unchanged. A window edge that
+    /// cuts a day, a hole in the middle and a day the daily has not reached all read the hourly, which gives that day exactly the pairs it gave
+    /// before.</para>
+    ///
+    /// <para><b>Shape.</b> One range read of the daily over the window gives every held day's pairs at once (the closed days are all one range, so a
+    /// probe per day would scan the daily's chunk once a day, as a first attempt did: 215 ms of a 275 ms month read on a test store). The days that
+    /// range holds are the held days, a small list. The day list over the window, with those days taken out, drives one lateral read of the hourly
+    /// per remaining day, clamped to the window, with <c>OFFSET 0</c> so the planner keeps the list as it is. <paramref name="boundary"/> (a
+    /// day-aligned timestamp literal) keeps the stitched successor half to the days from the stitch boundary on, as its hourly read already was.
+    /// The bucket's upper bound is written <c>bucket &lt;= $3 - 1 day</c>, the same test as the bucket plus a day ending inside the window, so the
+    /// store's index serves it.</para>
+    /// </summary>
+    private static (string Ctes, string Pairs) HeldDailyPairs(string hourly, string daily, string? boundary)
+    {
+        var dayStart = boundary is null ? "$2::timestamp" : $"GREATEST($2::timestamp, {boundary})";
+        var bucketBound = boundary is null ? string.Empty : $" AND bucket >= {boundary}";
+        var hourlyBound = boundary is null ? string.Empty : $" AND h.bucket >= {boundary}";
+
+        var ctes = $"""
+        /* #8549: the closed days the daily holds, as (day, query_hash) pairs, and the days they cover. See HeldDailyPairs. */
+        queries_daily_pairs AS (
+            SELECT DISTINCT bucket AS d, query_hash
+            FROM collect.{daily}
+            WHERE server_id = $1 AND bucket >= $2 AND bucket <= $3 - INTERVAL '1 day'{bucketBound}
+        ),
+        queries_daily_days AS (
+            SELECT DISTINCT d FROM queries_daily_pairs
+        ),
+
+        """;
+
+        var pairs = $"""
+                SELECT d, query_hash FROM queries_daily_pairs
+                        UNION ALL
+                        SELECT r.d, r.query_hash
+                        FROM (
+                            SELECT g.d
+                            FROM generate_series(date_trunc('day', {dayStart}), $3::timestamp - INTERVAL '1 microsecond', INTERVAL '1 day') AS g(d)
+                            WHERE NOT EXISTS (SELECT 1 FROM queries_daily_days AS k WHERE k.d = g.d)
+                            OFFSET 0
+                        ) AS p
+                        CROSS JOIN LATERAL (
+                            SELECT DISTINCT p.d AS d, h.query_hash
+                            FROM collect.{hourly} AS h
+                            WHERE h.server_id = $1 AND h.bucket >= GREATEST(p.d, $2) AND h.bucket < LEAST(p.d + INTERVAL '1 day', $3){hourlyBound}
+                        ) AS r
+                """;
+
+        return (ctes, pairs);
     }
 
     /// <summary>Whether <paramref name="view"/> is a registered rollup, so a daily whose source is that name is hierarchical from it (#8549).</summary>
@@ -804,7 +872,7 @@ public static class DailySummarySql
     /// legacy alone supplies every hour of the floor day (it is live and holds that day whole, before LC
     /// freezes it), and the successor's first live day is the NEXT calendar day.</para>
     /// </summary>
-    private static string QueriesCteForStitchedCagg(string legacy, string successor, DateTime successorFloor)
+    private static string QueriesCteForStitchedCagg(string legacy, string successor, DateTime successorFloor, string? successorDaily = null)
     {
         var legacyTarget = TimescaleSupport.RollupCoverageProbeTargets
             .FirstOrDefault(t => string.Equals(t.View, legacy, StringComparison.Ordinal));
@@ -850,10 +918,21 @@ public static class DailySummarySql
         var tailRowPredicate =
             $"server_id = $1 AND collection_time >= $2 AND collection_time < $3 AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling_successor), (SELECT raw_from FROM queries_ceiling_legacy), $2){rawTailGate}";
 
+        /* #8549: the successor half's (day, query_hash) pairs. The legacy half keeps its hourly read: the successor daily is built from the
+           successor hourly and the legacy daily from the legacy one, and only the successor's count leaves out a restart row (#8651). */
+        var successorPairs = successorDaily is null
+            ? $"""
+                SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash
+                        FROM collect.{successor}
+                        WHERE server_id = $1 AND bucket >= $2 AND bucket < $3 AND bucket >= {boundary}
+                """
+            : HeldDailyPairs(successor, successorDaily, boundary).Pairs;
+        var dailyCtes = successorDaily is null ? string.Empty : HeldDailyPairs(successor, successorDaily, boundary).Ctes;
+
         return $"""
         /* #7505: raw_from is the day in which each side's newest bucket ends, the first day that side does not
            hold whole. See QueriesCteForCagg. */
-        queries_ceiling_legacy AS (
+        {dailyCtes}queries_ceiling_legacy AS (
             SELECT date_trunc('day', max(bucket)) AS last_day,
                    date_trunc('day', max(bucket) + INTERVAL '{legacyWidth} seconds') AS raw_from
             FROM collect.{legacy}
@@ -880,9 +959,7 @@ public static class DailySummarySql
             UNION ALL
             SELECT x.d, COUNT(x.query_hash) AS c
             FROM (
-                SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash
-                FROM collect.{successor}
-                WHERE server_id = $1 AND bucket >= $2 AND bucket < $3 AND bucket >= {boundary}
+                {successorPairs}
             ) AS x
             GROUP BY x.d
             UNION ALL
@@ -1032,8 +1109,15 @@ public static class DailySummarySql
             var relationEnd = singleSplice.IndexOf(" AS ", relationStart, StringComparison.Ordinal);
             var relationName = singleSplice[relationStart..relationEnd];
 
+            /* #8549: the hourly tier's interval-honest relation counts its closed days from the interval daily when the store holds it.
+               The daily tier reads the daily already, and the legacy hourly keeps its own path. */
+            var heldDaily = tier == RetentionTier.Hourly
+                && coverage.HasQueryStatsIntervalDaily
+                && string.Equals(relationName, TimescaleSupport.QueryStatsIntervalHourlyView, StringComparison.Ordinal)
+                    ? TimescaleSupport.QueryStatsIntervalDailyView
+                    : null;
             var singleRouted = RangeSql.Replace(
-                QueriesCteRaw, QueriesCteForCagg(relationName), StringComparison.Ordinal);
+                QueriesCteRaw, QueriesCteForCagg(relationName, heldDaily), StringComparison.Ordinal);
             if (string.Equals(singleRouted, RangeSql, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
@@ -1046,8 +1130,11 @@ public static class DailySummarySql
         var successor = tier == RetentionTier.Hourly
             ? TimescaleSupport.SuccessorOf(legacy)!
             : TimescaleSupport.SupersededDailyRollups.First(p => string.Equals(p.LegacyDaily, legacy, StringComparison.Ordinal)).SuccessorDaily;
+        var successorDaily = tier == RetentionTier.Hourly && coverage.HasQueryStatsIntervalDaily
+            ? TimescaleSupport.QueryStatsIntervalDailyView
+            : null;
         var routed = RangeSql.Replace(
-            QueriesCteRaw, QueriesCteForStitchedCagg(legacy, successor, successorFloor.Value), StringComparison.Ordinal);
+            QueriesCteRaw, QueriesCteForStitchedCagg(legacy, successor, successorFloor.Value, successorDaily), StringComparison.Ordinal);
 
         if (string.Equals(routed, RangeSql, StringComparison.Ordinal))
         {
