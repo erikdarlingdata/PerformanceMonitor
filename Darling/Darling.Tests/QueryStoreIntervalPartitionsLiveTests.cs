@@ -39,9 +39,13 @@ public sealed class QueryStoreIntervalPartitionsLiveTests
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static DateTime Today => DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified);
+    /* #8699: one clock reading per test. The steps take Now and the expectations take Today, and a run that straddles 00:00 UTC
+       must not give them two different days (the partition bound is the product's day of Now plus two). */
+    private readonly DateTime _clock = DateTime.UtcNow;
 
-    private static DateTime Now => DateTime.UtcNow;
+    private DateTime Today => DateTime.SpecifyKind(_clock.Date, DateTimeKind.Unspecified);
+
+    private DateTime Now => _clock;
 
     internal sealed class ListLogger : ILogger
     {
