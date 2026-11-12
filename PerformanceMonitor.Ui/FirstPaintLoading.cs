@@ -76,11 +76,18 @@ public sealed class FirstPaintLoading
                 return;
 
             case DataGrid grid:
+                /* #8728: a grid its own Visibility hides (the Queries sub-tabs' comparison grids sit in the same cell as the main grid and
+                   are collapsed until a comparison is on) gets no "Loading..." and has any it carries ended. It has no rows to wait for and
+                   it is never on screen, so the resolve pass below skipped it and its text stayed up over the main grid's rows. This tests
+                   the grid's own Visibility, not IsVisible: a grid in a sub-tab not yet picked is not IsVisible but still gets its text. */
                 if (show)
                 {
-                    EmptyState.ShowLoadingUntilRead(grid);
+                    if (grid.Visibility == Visibility.Visible)
+                    {
+                        EmptyState.ShowLoadingUntilRead(grid);
+                    }
                 }
-                else if (grid.IsVisible && EmptyState.IsShowingLoading(grid))
+                else if ((grid.IsVisible || grid.Visibility != Visibility.Visible) && EmptyState.IsShowingLoading(grid))
                 {
                     EmptyState.ShowLoading(grid, false);
                 }
