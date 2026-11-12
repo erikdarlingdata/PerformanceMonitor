@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -265,6 +266,161 @@ FROM (SELECT d.day + g * (86400.0 / {rowsPerDay}) * interval '1 second' AS f, g
 
             Assert.Contains("Heap Fetches: 0", plan, StringComparison.Ordinal);
         }
+    }
+
+    /* A leaf's rows inserted since its last vacuum, as the step reads them. Backends flush their statistics after a second or when idle,
+       so a test that writes and then reads at once forces the flush. */
+    private static async Task<long> InsertsSinceVacuumAsync(NpgsqlConnection connection, string leaf, CancellationToken ct)
+    {
+        await ExecAsync(connection, "SELECT pg_stat_force_next_flush()", ct);
+        await ExecAsync(connection, "SELECT 1", ct);
+        return await CountAsync(connection, $"SELECT pg_stat_get_ins_since_vacuum('{leaf}'::regclass)", ct);
+    }
+
+    /* The test stores' leaves would otherwise be vacuumed by autovacuum whenever its launcher visits the scratch database. */
+    private static Task DisableAutovacuumOnLeavesAsync(NpgsqlConnection connection, CancellationToken ct) => ExecAsync(connection, @"
+DO $$
+DECLARE r regclass;
+BEGIN
+    FOR r IN SELECT inhrelid::regclass FROM pg_inherits WHERE inhparent = 'collect.query_store_interval_wide'::regclass LOOP
+        EXECUTE format('ALTER TABLE %s SET (autovacuum_enabled = false)', r);
+    END LOOP;
+END $$;", ct);
+
+    /// <summary>
+    /// The last stretch of each day of rows, as a leaf holds it when autovacuum last ran a fifth of its rows ago: <paramref name="rows"/>
+    /// a day from 23:30 on, on a grid that cannot meet <see cref="SeedAsync"/>'s, so the identity is distinct.
+    /// </summary>
+    private static Task SeedTailAsync(NpgsqlConnection connection, DateTime firstDay, DateTime lastDay, int rows, int servers, CancellationToken ct) =>
+        ExecAsync(connection, string.Create(CultureInfo.InvariantCulture, $@"
+INSERT INTO collect.query_store_interval_wide
+    (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+     query_text, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes,
+     avg_physical_io_reads, runtime_stats_interval_id, interval_start_time_utc)
+SELECT f + interval '30 seconds', (g % {servers}) + 1, 'db', (g / {servers}) % 900, (g / {servers}) % 900, 'Regular', f, f,
+       repeat('x', 100), md5(((g / {servers}) % 900)::text), 1 + g % 50, 1000 + g % 500, 500, 10, 1, 1, 1000000 + g, date_trunc('hour', f)
+FROM (SELECT d.day + interval '23 hours 30 minutes 0.05 seconds' + g * interval '0.1 seconds' AS f, g
+      FROM generate_series(timestamp '{firstDay:yyyy-MM-dd}', timestamp '{lastDay:yyyy-MM-dd}', interval '1 day') AS d(day)
+      CROSS JOIN generate_series(0, {rows - 1}) AS g) AS s;"), ct);
+
+    private static int HeapFetches(string plan) => Regex.Matches(plan, @"Heap Fetches: (\d+)").Sum(m => int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture));
+
+    [Fact]
+    public async Task AClosedLeafWithRowsAddedSinceItsLastVacuum_IsVacuumedByTheStep_SoTheKeysReadScansItWithoutTheHeap()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        var logger = new ListLogger();
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
+        await using var connection = await OpenLeafStoreAsync(scratch, logger, ct);
+        await DisableAutovacuumOnLeavesAsync(connection, ct);
+
+        /* The field shape: a leaf was vacuumed when it was four fifths of its size and took the last fifth of its rows after that
+           (autovacuum's insert trigger waits for 20 percent new rows), so the leaf closes with its newest pages not all-visible. */
+        var firstDay = ClosedDays[3];
+        await SeedAsync(connection, firstDay, ReachableDays[1], 20000, 8, ct);
+        await ExecAsync(connection, "VACUUM (ANALYZE) collect.query_store_interval_wide", ct);
+        await SeedTailAsync(connection, firstDay, ReachableDays[1], 5000, 8, ct);
+        foreach (var day in ClosedDays.Take(4))
+        {
+            await ExecAsync(connection, $"CREATE INDEX CONCURRENTLY IF NOT EXISTS {QueryStoreIntervalWideCoverIndex.ShortIndexName(Leaf(day))} ON {Leaf(day)} "
+                + $"({QueryStoreIntervalWideCoverIndex.KeyColumns}) INCLUDE ({QueryStoreIntervalWideCoverIndex.IncludeColumns})", ct);
+        }
+
+        await ExecAsync(connection, "ANALYZE collect.query_store_interval_wide", ct);
+        var start = Now.AddDays(-30);
+        var before = await ExplainAsync(connection, ViewerDataService.QueryStoreTopTableSql, TopParameters(start), ct);
+        Assert.True(HeapFetches(before) > 0, $"the seed's unvacuumed rows must show as heap fetches on the covering index's scans (it is the shape the step fixes):\n{before}");
+        Assert.True(await InsertsSinceVacuumAsync(connection, Leaf(ClosedDays[0]), ct) > 0);
+
+        await BuildAllAsync(connection, Now, logger, ct);
+        await ExecAsync(connection, "ANALYZE collect.query_store_interval_wide", ct);
+
+        foreach (var day in ClosedDays)
+        {
+            Assert.Equal(0, await InsertsSinceVacuumAsync(connection, Leaf(day), ct));
+        }
+
+        foreach (var (name, plan) in new[]
+        {
+            ("grid keys", await ExplainAsync(connection, ViewerDataService.QueryStoreTopTableSql, TopParameters(start), ct)),
+            ("slicer", await ExplainAsync(connection, ViewerDataService.QueryStoreSlicerTableSql, SlicerParameters(start, Now), ct)),
+        })
+        {
+            foreach (var day in ClosedDays.Take(4))
+            {
+                Assert.Contains($"Index Only Scan using {QueryStoreIntervalWideCoverIndex.ShortIndexName(Leaf(day))}", plan, StringComparison.Ordinal);
+            }
+
+            Assert.True(HeapFetches(plan) == 0, $"the {name} read of a closed leaf the step has vacuumed must not visit the heap:\n{plan}");
+        }
+
+        /* A leaf the upsert can still reach is not the step's to vacuum: it is written all day and autovacuum owns it. */
+        Assert.True(await InsertsSinceVacuumAsync(connection, Leaf(ReachableDays[0]), ct) > 0);
+        Assert.True(await InsertsSinceVacuumAsync(connection, Leaf(ReachableDays[1]), ct) > 0);
+        Assert.DoesNotContain(logger.Lines, line => line.Level >= LogLevel.Warning);
+    }
+
+    [Fact]
+    public async Task TheVacuumOfAClosedLeaf_SkipsALeafAnotherSessionHoldsALockOn_AndTheNextPassDoesIt()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        var logger = new ListLogger();
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
+        await using var connection = await OpenLeafStoreAsync(scratch, logger, ct);
+        await DisableAutovacuumOnLeavesAsync(connection, ct);
+        await SeedAsync(connection, ClosedDays[1], ClosedDays[0], 2000, 2, ct);
+        await BuildAllAsync(connection, Now, logger, ct);
+        await SeedTailAsync(connection, ClosedDays[1], ClosedDays[0], 500, 2, ct);
+        var held = Leaf(ClosedDays[0]);
+        var free = Leaf(ClosedDays[1]);
+        Assert.True(await InsertsSinceVacuumAsync(connection, held, ct) > 0);
+        Assert.True(await InsertsSinceVacuumAsync(connection, free, ct) > 0);
+
+        /* SHARE conflicts with the vacuum's own lock, as a running autovacuum's does. Plain VACUUM would wait for it until the
+           step's lock_timeout (30 s) ran out; SKIP_LOCKED moves on at once. */
+        await using (var other = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await other.OpenAsync(ct);
+            await using var transaction = await other.BeginTransactionAsync(ct);
+            await ExecAsync(other, $"LOCK TABLE {held} IN SHARE MODE", ct);
+
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            var step = await QueryStoreIntervalWideCoverIndex.EnsureAsync(connection, QueryStoreIntervalPartitions.Wide, Now, logger, ct);
+            Assert.True(timer.Elapsed < TimeSpan.FromSeconds(15), $"the step must skip a locked leaf, not wait on it: {timer.Elapsed}");
+            Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, step.Outcome);
+            Assert.Equal(0, await InsertsSinceVacuumAsync(connection, free, ct));
+            Assert.True(await InsertsSinceVacuumAsync(connection, held, ct) > 0);
+            await transaction.RollbackAsync(ct);
+        }
+
+        await BuildAllAsync(connection, Now, logger, ct);
+        Assert.Equal(0, await InsertsSinceVacuumAsync(connection, held, ct));
+        Assert.DoesNotContain(logger.Lines, line => line.Level >= LogLevel.Warning);
+    }
+
+    [Fact]
+    public async Task AVacuumThatFails_IsLoggedAndLeftForAutovacuum_NotThrown()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        var logger = new ListLogger();
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
+        await using var connection = await OpenLeafStoreAsync(scratch, logger, ct);
+
+        /* Retention dropping the leaf between the catalog read and the vacuum is the concrete case. */
+        var vacuumed = await QueryStoreIntervalWideCoverIndex.VacuumAsync(
+            connection, QueryStoreIntervalPartitions.Wide, "collect.query_store_interval_wide_p20200101", logger, ct);
+        Assert.False(vacuumed);
+        Assert.Contains(logger.Lines, line => line.Level == LogLevel.Information && line.Message.Contains("vacuuming", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Lines, line => line.Level >= LogLevel.Warning);
     }
 
     private static List<NpgsqlParameter> TopParameters(DateTime start) => new()
