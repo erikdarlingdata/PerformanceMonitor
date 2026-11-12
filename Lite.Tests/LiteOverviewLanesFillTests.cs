@@ -25,7 +25,8 @@ namespace PerformanceMonitorLite.Tests;
 /// carries X labels and gets room for them, each lane's caption sits in the lane's top left (no left gutter), and the lanes' plot
 /// rectangles still line up.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class LiteOverviewLanesFillTests
 {
     private readonly ITestOutputHelper _output;

@@ -19,7 +19,8 @@ namespace PerformanceMonitorLite.Tests;
 /// runs one test of a class that sets the paths, as a plain method call so the order is the test's own, and reads the three statics
 /// back. The last fact runs the sidebar test and then the status-bar test, the pair that failed when the two shared a process.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class AppPathsRestoredAcrossClassesTests
 {
     [Fact]

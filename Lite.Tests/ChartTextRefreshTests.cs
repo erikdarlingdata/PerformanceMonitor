@@ -34,7 +34,8 @@ namespace PerformanceMonitorLite.Tests;
 /// normal-size colour bar label and a visible colour for a count of one; the Overview's blocking lane labels whole counts; the
 /// five Overview lanes fit a 1280x800 window at the shared plot-area floor and their captions hide the gridline behind them.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ChartTextRefreshTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

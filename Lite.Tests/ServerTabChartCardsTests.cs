@@ -31,7 +31,8 @@ namespace PerformanceMonitorLite.Tests;
 /// only its unit: a name or a parenthesised unit left in the axis title is the defect the card replaces. Read from the rendered
 /// controls, not from the markup.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ServerTabChartCardsTests
 {
     private static readonly BindingFlags Instance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;

@@ -30,7 +30,8 @@ namespace PerformanceMonitorLite.Tests;
 /// columns that leave the free width empty, a headline that runs off the page, and a search box with no placeholder. Each fact reads the
 /// realized result of the real control.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class PageLayoutNitsTests
 {
     private readonly ITestOutputHelper _output;

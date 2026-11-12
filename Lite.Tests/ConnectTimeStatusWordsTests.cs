@@ -24,7 +24,8 @@ namespace PerformanceMonitorLite.Tests;
 /// it. The word, its headline and the sidebar dot's tooltip say the server is connecting. The server tab's header says the same, and
 /// that the first collection is pending, so an Overview chart with no data in the window reads as loading, not as empty.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ConnectTimeStatusWordsTests
 {
     [Fact]

@@ -23,7 +23,8 @@ namespace PerformanceMonitorLite.Tests;
 /// and read back from what it drew: the title is on screen, the plot gets the card's remaining room, an empty card keeps its title
 /// and shows one sentence in place of the plot and its axes, and an empty subtitle takes no room.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ChartPanelTests
 {
     private static readonly Uri LiteTheme = new("pack://application:,,,/PerformanceMonitorLite;component/Themes/DarkTheme.xaml");
