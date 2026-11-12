@@ -85,7 +85,7 @@ public sealed partial class DarlingWorker
         if (startAbsorber)
         {
             _logger.LogInformation(
-                "Fleet sweep width narrowing to {Target} concurrent servers (#2170 knob) - permits retire as in-flight collections finish",
+                "Fleet sweep width narrowing to {Target} concurrent servers (#2170 knob) — permits retire as in-flight collections finish",
                 target);
             _ = Task.Run(() => AbsorbSweepPermitsAsync(gate, stoppingToken), stoppingToken);
         }
@@ -182,8 +182,8 @@ public sealed partial class DarlingWorker
             {
                 _logger.LogInformation(
                     enabled
-                        ? "query_store backfill re-enabled via config - resuming on the next cycle"
-                        : "query_store backfill DISABLED via config (config_service.query_store_backfill_enabled) - loop idling, in-flight slices finish and no new ones start");
+                        ? "query_store backfill re-enabled via config — resuming on the next cycle"
+                        : "query_store backfill DISABLED via config (config_service.query_store_backfill_enabled) — loop idling, in-flight slices finish and no new ones start");
                 lastEnabled = enabled;
             }
 
@@ -228,7 +228,7 @@ public sealed partial class DarlingWorker
                 if (gate is null)
                 {
                     _logger.LogInformation(
-                        "query_store backfill slice on '{Server}' deferred - the tick's Query Store collection is running",
+                        "query_store backfill slice on '{Server}' deferred — the tick's Query Store collection is running (#2165)",
                         runtime.Config.DisplayName);
                     continue;
                 }
@@ -238,7 +238,7 @@ public sealed partial class DarlingWorker
                     () => backfill.RunServerSliceAsync(runtime, stoppingToken),
                     BackfillSliceDeadline,
                     onLateFault: ex => _logger.LogError(ex,
-                        "query_store backfill slice on '{Server}' faulted AFTER being abandoned - this is the wedge's own exception",
+                        "query_store backfill slice on '{Server}' faulted AFTER being abandoned — this is the wedge's own exception (#2148)",
                         runtime.Config.DisplayName),
                     holdUntilStepEnds: gate,
                     cancellationToken: stoppingToken);
@@ -257,9 +257,9 @@ public sealed partial class DarlingWorker
                         break;
                     case AbandonableStepOutcome.Abandoned:
                         _logger.LogError(
-                            "query_store backfill slice on '{Server}' exceeded {Deadline}s and was ABANDONED - " +
+                            "query_store backfill slice on '{Server}' exceeded {Deadline}s and was ABANDONED — " +
                             "the fleet's backfill continues; this server's backfill is quarantined until the " +
-                            "wedged task ends. Defect signal: report with this log.",
+                            "wedged task ends. Defect signal: report with this log (#2148).",
                             runtime.Config.DisplayName, (int)BackfillSliceDeadline.TotalSeconds);
                         break;
                     case AbandonableStepOutcome.SkippedStillRunning:
@@ -268,7 +268,7 @@ public sealed partial class DarlingWorker
                            refuses first and this loop no longer reaches here. Kept because it is the honest
                            report if that ever stops being true. */
                         _logger.LogError(
-                            "query_store backfill slice on '{Server}' skipped - a previously-abandoned slice is still wedged.",
+                            "query_store backfill slice on '{Server}' skipped — a previously-abandoned slice is still wedged (#2148).",
                             runtime.Config.DisplayName);
                         break;
                 }
@@ -459,7 +459,7 @@ public sealed partial class DarlingWorker
         _dailyRunCapLogged = true;
         _logger.LogInformation(
             "Daily collectors run at most {Cap} at a time: the smaller of {Ceiling} and the store's connection pool " +
-            "({Pool}) minus the sweep width ({Width}) minus {Reserve} kept free for reads, and at least 1",
+            "({Pool}) minus the sweep width ({Width}) minus {Reserve} kept free for reads, and at least 1 (#4999)",
             cap, MaxConcurrentDailyRuns, poolMaxSize?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unbounded", sweepWidth, DailyRunPoolReserve);
     }
 
@@ -569,14 +569,14 @@ public sealed partial class DarlingWorker
             if (watch.HoldsPermit)
             {
                 _logger.LogWarning(
-                    "[{Server}] {Collector} daily run has not completed after {Elapsed:F0}s of execution - it keeps one of the {Cap} daily-run permits and its next run is skipped until it ends",
+                    "[{Server}] {Collector} daily run has not completed after {Elapsed:F0}s of execution - it keeps one of the {Cap} daily-run permits and its next run is skipped until it ends (#4999)",
                     watch.ServerName, watch.CollectorName, runningSeconds, _dailyRunPermits.Cap);
             }
             else
             {
                 /* A run detached by name takes no daily-run permit, so the line does not say it keeps one. */
                 _logger.LogWarning(
-                    "[{Server}] {Collector} run has not completed after {Elapsed:F0}s of execution - its next run is skipped until it ends",
+                    "[{Server}] {Collector} run has not completed after {Elapsed:F0}s of execution - its next run is skipped until it ends (#4999)",
                     watch.ServerName, watch.CollectorName, runningSeconds);
             }
         }
@@ -693,7 +693,7 @@ public sealed partial class DarlingWorker
         if (!_dailyRunPermits.TryAcquire())
         {
             _logger.LogDebug(
-                "  [{Server}] {Collector} is waiting for one of {Cap} daily-run permits",
+                "  [{Server}] {Collector} is waiting for one of {Cap} daily-run permits (#4938)",
                 server.Config.DisplayName, collectorName, _dailyRunPermits.Cap);
             await _dailyRunPermits.AcquireAsync(cancellationToken);
         }
@@ -973,7 +973,7 @@ public sealed partial class DarlingWorker
             await upsert.ExecuteNonQueryAsync(cancellationToken);
 
             _logger.LogInformation(
-                "  [{Server}] pg_statement_text => {Count} statement text(s) refreshed",
+                "  [{Server}] pg_statement_text => {Count} statement text(s) refreshed (#2219)",
                 runtime.Config.DisplayName, queryIds.Count);
 
             /* #5320: a refresh that worked writes a SUCCESS row under the same name the failure row uses. Collection
@@ -995,7 +995,7 @@ public sealed partial class DarlingWorker
             /* Deliberately broad — see the summary. The statistics for this cycle are already stored and logged;
                losing their text is not worth failing the sweep over. */
             _logger.LogWarning(
-                "  [{Server}] pg_statement_text refresh failed, statistics are unaffected: {Message}",
+                "  [{Server}] pg_statement_text refresh failed, statistics are unaffected: {Message} (#2219)",
                 runtime.Config.DisplayName, ex.Message);
 
             /* #5320: the failure is also an ERROR row in the collection log under the text fetch's own name, so a
@@ -1502,7 +1502,7 @@ public sealed partial class DarlingWorker
         catch (Exception ex)
         {
             _logger.LogWarning(
-                "Could not reload mute rules after {ElapsedMs} ms - the {Rules} rule(s) already in force "
+                "Could not reload mute rules after {ElapsedMs} ms — the {Rules} rule(s) already in force "
                 + "stay in force until a read succeeds: {Message}",
                 readClock.ElapsedMilliseconds, muteRuleService.GetRules().Count, ex.Message);
             _readFailures.RecordReadFailure(null, "mute-rule reload", readClock.ElapsedMilliseconds);
@@ -1562,7 +1562,7 @@ public sealed partial class DarlingWorker
             if (!desiredById.TryGetValue(id, out var desiredServer))
             {
                 _logger.LogInformation(
-                    "[{Server}] Removed from the monitored set (disabled/deleted) - stopping collection",
+                    "[{Server}] Removed from the monitored set (disabled/deleted) — stopping collection",
                     state.Config.DisplayName);
                 state.Runtime = null;
                 state.LastKnownRuntime = null;
@@ -1616,7 +1616,7 @@ public sealed partial class DarlingWorker
             if (connectionChanged)
             {
                 _logger.LogInformation(
-                    "[{Server}] Definition changed - reconnecting with the new configuration; delta baselines forgotten, "
+                    "[{Server}] Definition changed — reconnecting with the new configuration; delta baselines forgotten, "
                     + "the first pass on the new connection re-baselines (#3653 A5)", desiredServer.DisplayName);
                 state.Runtime = null;
                 state.LastKnownRuntime = null;
@@ -1654,7 +1654,7 @@ public sealed partial class DarlingWorker
         foreach (var addition in desiredById.Values)
         {
             _logger.LogInformation(
-                "[{Server}] Added to the monitored set - will connect on the next sweep", addition.DisplayName);
+                "[{Server}] Added to the monitored set — will connect on the next sweep", addition.DisplayName);
             /* #4757: a server enabled while the service is already running may carry collection_log rows from
                an earlier registration (it was disabled across a restart, so the removal Forget above never
                ran in this process). Start collection-stopped watching it from its first pass, not from the

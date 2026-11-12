@@ -654,7 +654,7 @@ RETURNING s.state_key";
                for months under a green suite. */
             _logger?.LogWarning(
                 "Per-database watermark read failed for server {ServerId} database {Database} on "
-                + "{Table}.{Column} - falling back to the collector's default window, which re-collects "
+                + "{Table}.{Column} — falling back to the collector's default window, which re-collects "
                 + "data already stored: {Message}",
                 serverId, databaseName, tableName, columnName, ex.Message);
         }
@@ -710,7 +710,7 @@ RETURNING s.state_key";
         {
             _logger?.LogWarning(
                 "Per-database watermark read failed for server {ServerId} database {Database} on "
-                + "{Table}.{Column} - falling back to the collector's default window, which re-collects "
+                + "{Table}.{Column} — falling back to the collector's default window, which re-collects "
                 + "data already stored: {Message}",
                 serverId, databaseName, tableName, columnName, ex.Message);
             return (null, null, false);
@@ -786,7 +786,7 @@ RETURNING s.state_key";
                unlikely to time out, but a swallowed failure here sets HasCollectedBefore down the
                first-run path with no trace anywhere — the same silence, one table over. */
             _logger?.LogWarning(
-                "Numeric watermark read failed for server {ServerId} on {Table}.{Column} - falling back "
+                "Numeric watermark read failed for server {ServerId} on {Table}.{Column} — falling back "
                 + "to the collector's first-run path: {Message}",
                 serverId, tableName, columnName, ex.Message);
         }
@@ -833,7 +833,7 @@ RETURNING s.state_key";
     {
         if (_azureMasterInaccessibleSince.TryRemove(serverId, out _))
         {
-            _logger?.LogInformation("[server_id {ServerId}] reconnected - re-probing master for database-scoped collectors.", serverId);
+            _logger?.LogInformation("[server_id {ServerId}] reconnected — re-probing master for database-scoped collectors.", serverId);
         }
 
         /* #4197 part b: drop every cached watermark for this server on reconnect, unconditionally —

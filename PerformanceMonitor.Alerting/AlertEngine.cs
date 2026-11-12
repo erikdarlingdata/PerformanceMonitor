@@ -1646,7 +1646,7 @@ public sealed class AlertEngine
             }
             catch (Exception ex)
             {
-                _logger?.LogWarning("Could not read active sessions for the High CPU card's maintenance annotation on {Server} after {ElapsedMs} ms - the alert fires without it: {Message}",
+                _logger?.LogWarning("Could not read active sessions for the High CPU card's maintenance annotation on {Server} after {ElapsedMs} ms — the alert fires without it: {Message}",
                     serverName, maintenanceClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(key, "CPU maintenance annotation", maintenanceClock.ElapsedMilliseconds);
             }
@@ -3358,7 +3358,7 @@ public sealed class AlertEngine
                             }
                             catch (Exception ex)
                             {
-                                _logger?.LogWarning("Could not resolve Agent job names for the Long-Running Query card on {Server} - the card renders the unresolved form: {Message}",
+                                _logger?.LogWarning("Could not resolve Agent job names for the Long-Running Query card on {Server} — the card renders the unresolved form: {Message}",
                                     serverName, ex.Message);
                                 agentJobNames = s_noAgentJobNames;
                             }

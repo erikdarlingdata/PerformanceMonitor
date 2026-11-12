@@ -98,7 +98,7 @@ public sealed partial class DarlingWorker
                remedy is direct table SELECTs, NOT SQLAgentReaderRole: that role gates the sp_help_job*
                interface only and confers nothing on the base tables this query reads — a #1823 field
                box had the role and still landed here every cycle. */
-            _logger.LogInformation("[{Server}] Skipping recently-failed-job check (needs SELECT on msdb.dbo.sysjobs and sysjobhistory - SQLAgentReaderRole alone is not enough; see the monitoring-login grants in the README): {Message}",
+            _logger.LogInformation("[{Server}] Skipping recently-failed-job check (needs SELECT on msdb.dbo.sysjobs and sysjobhistory — SQLAgentReaderRole alone is not enough; see the monitoring-login grants in the README): {Message}",
                 runtime.Config.DisplayName, ex.Message);
             return new List<FailedJobInfo>();
         }
@@ -175,7 +175,7 @@ public sealed partial class DarlingWorker
                it means the login cannot read what it asked for, the response is to answer nothing rather
                than fail the alert cycle, and SQLAgentReaderRole is NOT the remedy (it gates sp_help_job*
                only). Info because a read-only monitoring login hits this on every Agent-annotated fire. */
-            _logger.LogInformation("[{Server}] Skipping the Agent job-name lookup for the Long-Running Query card (needs SELECT on msdb.dbo.sysjobs and sysjobsteps - SQLAgentReaderRole alone is not enough; see the monitoring-login grants in the README). The card renders the unresolved form: {Message}",
+            _logger.LogInformation("[{Server}] Skipping the Agent job-name lookup for the Long-Running Query card (needs SELECT on msdb.dbo.sysjobs and sysjobsteps — SQLAgentReaderRole alone is not enough; see the monitoring-login grants in the README). The card renders the unresolved form: {Message}",
                 runtime.Config.DisplayName, ex.Message);
             return new Dictionary<AgentJobStepKey, AgentJobStepNames>();
         }
@@ -184,7 +184,7 @@ public sealed partial class DarlingWorker
             /* NOT counted by #3013's swallowed-read counter, for FetchFailedJobsAsync's exact reason: this
                reads the MONITORED SERVER's msdb, not the store, and pooling the two would put a target-side
                outage in a number the operator reads as store contention. */
-            _logger.LogWarning("[{Server}] Agent job-name lookup for the Long-Running Query card errored - the card renders the unresolved form: {Message}",
+            _logger.LogWarning("[{Server}] Agent job-name lookup for the Long-Running Query card errored — the card renders the unresolved form: {Message}",
                 runtime.Config.DisplayName, ex.Message);
             return new Dictionary<AgentJobStepKey, AgentJobStepNames>();
         }
@@ -395,8 +395,8 @@ public sealed partial class DarlingWorker
                     /* The transition BACK is worth one line too: it is the confirmation that an operator's
                        edit actually took, which otherwise requires trusting silence. */
                     _logger.LogInformation(
-                        "[{Server}] now connected to the database it is registered for ('{Database}') - the " +
-                        "earlier mismatch is resolved.",
+                        "[{Server}] now connected to the database it is registered for ('{Database}') — the " +
+                        "earlier mismatch (#2228) is resolved.",
                         server.Config.DisplayName, runtime.ConnectedDatabase);
                 }
             }
@@ -797,7 +797,7 @@ public sealed partial class DarlingWorker
         if (slot is null)
         {
             _logger.LogInformation(
-                "  [{Server}] {Collector} not run at connect: its scheduled daily run is still going",
+                "  [{Server}] {Collector} not run at connect: its scheduled daily run is still going (#4999)",
                 server.Config.DisplayName, collectorName);
             return false;
         }
@@ -1037,7 +1037,7 @@ public sealed partial class DarlingWorker
                         _fleetGateStats?.RecordSkippedSlots(step.Skipped);
                         server.CycleSkips.AddDailyLost(name, step.Skipped, due);
                         _logger.LogInformation(
-                            "  [{Server}] {Collector} skipped today's run: the pass could not hand it off within {Grace} minutes of its run time, so it waits for its next run time, {Next:u}",
+                            "  [{Server}] {Collector} skipped today's run: the pass could not hand it off within {Grace} minutes of its run time, so it waits for its next run time, {Next:u} (#4938)",
                             server.Config.DisplayName, name, CollectorRunTime.GraceMinutes, step.NextDue);
                         continue;
                     }
@@ -1048,7 +1048,7 @@ public sealed partial class DarlingWorker
                     if (_detachedCollectorGates.TryGetValue((runtime.ServerId, name), out var heldGate) && heldGate.IsHeld)
                     {
                         _logger.LogDebug(
-                            "  [{Server}] {Collector} not handed off this tick: its previous daily run still holds its slot",
+                            "  [{Server}] {Collector} not handed off this tick: its previous daily run still holds its slot (#4938)",
                             server.Config.DisplayName, name);
                         continue;
                     }
@@ -1095,7 +1095,7 @@ public sealed partial class DarlingWorker
                     if (server.RefusedBackoff.IsBackedOff(name, now, intervalSpan))
                     {
                         _logger.LogDebug(
-                            "  [{Server}] {Collector} not run this slot: the server has refused it {Streak} times in a row, so it is tried less often until that changes",
+                            "  [{Server}] {Collector} not run this slot: the server has refused it {Streak} times in a row, so it is tried less often until that changes (#6186)",
                             server.Config.DisplayName, name, server.RefusedBackoff.Streak(name));
                         continue;
                     }
@@ -1116,7 +1116,7 @@ public sealed partial class DarlingWorker
                         && await QueryStoreHintsStandsDownAsync(server, runtime, cancellationToken))
                     {
                         _logger.LogDebug(
-                            "  [{Server}] {Collector} not run this slot: its last run found no database to capture, or every Query Store database on the server is a readable secondary, so there is nothing for it to read",
+                            "  [{Server}] {Collector} not run this slot: its last run found no database to capture, or every Query Store database on the server is a readable secondary, so there is nothing for it to read (#8361, #8541)",
                             server.Config.DisplayName, name);
                         continue;
                     }
@@ -1394,7 +1394,7 @@ public sealed partial class DarlingWorker
                 {
                     skippedDaily.Add(name);
                     _logger.LogInformation(
-                        "  [{Server}] snapshot_now skipped {Collector}: its scheduled daily run is still going",
+                        "  [{Server}] snapshot_now skipped {Collector}: its scheduled daily run is still going (#4999)",
                         server.Config.DisplayName, name);
                     continue;
                 }
@@ -2816,7 +2816,7 @@ LIMIT 1";
         if (streak == RefusedCollectorBackoff.FreeRefusals + 1)
         {
             _logger.LogInformation(
-                "  [{Server}] {Collector} refused {Streak} times in a row with the same answer: it is tried less often (up to every {Max}) until the answer changes or it succeeds",
+                "  [{Server}] {Collector} refused {Streak} times in a row with the same answer: it is tried less often (up to every {Max}) until the answer changes or it succeeds (#6186)",
                 server.Config.DisplayName, collectorName, streak, RefusedCollectorBackoff.MaxDelay);
         }
     }
@@ -2881,7 +2881,7 @@ LIMIT 1";
         if (queryStoreGate is null)
         {
             _logger.LogInformation(
-                "  [{Server}] query_store skipped this tick - its Query Store backfill slice is mid-flight. " +
+                "  [{Server}] query_store skipped this tick — its Query Store backfill slice is mid-flight (#2165). " +
                 "Resumes next tick from the same watermark; no rows are lost.",
                 server.Config.DisplayName);
             return 0;
@@ -2923,7 +2923,7 @@ LIMIT 1";
                 _fleetGateStats?.MoveRunToSkipped();
                 server.CycleSkips.AddDailyLost(collectorName, 1, dueUtc ?? skippedAt);
                 _logger.LogWarning(
-                    "  [{Server}] {Collector} skipped this run - its previous daily run has not finished. " +
+                    "  [{Server}] {Collector} skipped this run — its previous daily run has not finished (#4938). " +
                     "It runs again at its next daily interval. {Backlog}.",
                     server.Config.DisplayName, collectorName,
                     DailyRunLimiter.DescribeBacklog(_dailyRunPermits.Waiting, _dailyRunPermits.Cap, _dailyRunPermits.OldestWaitUtc, skippedAt));
@@ -2931,7 +2931,7 @@ LIMIT 1";
             }
 
             _logger.LogInformation(
-                "  [{Server}] {Collector} skipped this tick - a previous detached run has not finished. " +
+                "  [{Server}] {Collector} skipped this tick — a previous detached run has not finished (#2717). " +
                 "Re-reads the live set next tick; no rows are lost.",
                 server.Config.DisplayName, collectorName);
             return 0;
@@ -3882,27 +3882,27 @@ LIMIT 1";
                 server.Runtime = null;
                 server.Liveness.Clear();
                 server.NextConnectAttempt = DateTime.UtcNow.AddSeconds(60);
-                _logger.LogWarning("[{Server}] Connection-level failure - will reconnect", server.Config.DisplayName);
+                _logger.LogWarning("[{Server}] Connection-level failure — will reconnect", server.Config.DisplayName);
             }
             else if (ex is SqlException { Number: -2 })
             {
                 if (probeResult is { Stale: true } stale)
                 {
                     _logger.LogInformation(
-                        "[{Server}] {Collector} timed out, and the liveness probe {ProbeOutcome}, but another run already dropped and reset the connection - nothing more to do",
+                        "[{Server}] {Collector} timed out, and the liveness probe {ProbeOutcome}, but another run already dropped and reset the connection — nothing more to do (#7851)",
                         server.Config.DisplayName, collectorName,
                         stale.Outcome == LivenessProbeOutcome.TimedOut ? "timed out" : "logged in");
                 }
                 else if (probeResult is { Outcome: LivenessProbeOutcome.TimedOut } timedOut)
                 {
                     _logger.LogInformation(
-                        "[{Server}] {Collector} timed out, and so did the liveness probe's own login - keeping the connection, since open sessions answer while new logins wait; probe {Streak} of {Limit} in a row to time out",
+                        "[{Server}] {Collector} timed out, and so did the liveness probe's own login — keeping the connection, since open sessions answer while new logins wait; probe {Streak} of {Limit} in a row to time out (#4710)",
                         server.Config.DisplayName, collectorName, timedOut.TimedOutInARow, LivenessProbeMemo.MaxTimedOutProbesInARow);
                 }
                 else
                 {
                     _logger.LogInformation(
-                        "[{Server}] {Collector} timed out, but a fresh connection answered - keeping the connection",
+                        "[{Server}] {Collector} timed out, but a fresh connection answered — keeping the connection (#4710)",
                         server.Config.DisplayName, collectorName);
                 }
             }

@@ -313,7 +313,7 @@ public sealed partial class DarlingCollectorRunner
                than store rows this server might already hold. The #3099 retry above still applies to
                whatever failure the store write itself produces; this read is not part of that retry. */
             _logger?.LogWarning(
-                "job_history pre-insert dedupe read failed for server {ServerId} - failing this batch " +
+                "job_history pre-insert dedupe read failed for server {ServerId} — failing this batch " +
                 "rather than risk storing duplicate rows: {Message}",
                 server.ServerId, ex.Message);
             throw;
@@ -378,7 +378,7 @@ public sealed partial class DarlingCollectorRunner
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger?.LogWarning(
-                "Deadlock pre-insert dedupe read failed for server {ServerId} - failing this batch " +
+                "Deadlock pre-insert dedupe read failed for server {ServerId} — failing this batch " +
                 "rather than risk storing a duplicate: {Message}",
                 server.ServerId, ex.Message);
             throw;
@@ -1213,7 +1213,7 @@ public sealed partial class DarlingCollectorRunner
                and logging it as one would put a misleading warning per in-flight collector on every
                normal stop. */
             _logger?.LogWarning(
-                "Watermark read failed for server {ServerId} on {Table}.{Column} - falling back to the "
+                "Watermark read failed for server {ServerId} on {Table}.{Column} — falling back to the "
                 + "collector's default window, which re-collects data already stored: {Message}",
                 serverId, tableName, columnName, ex.Message);
         }
@@ -1337,7 +1337,7 @@ public sealed partial class DarlingCollectorRunner
                reads as a first run, and for this collector a first run re-collects the ring buffer's whole
                retained history under stamps the store already holds. */
             _logger?.LogWarning(
-                "Watermark read failed for server {ServerId} on {Table}.{Column}/{UtcColumn} - falling back to the "
+                "Watermark read failed for server {ServerId} on {Table}.{Column}/{UtcColumn} — falling back to the "
                 + "collector's default window, which re-collects data already stored: {Message}",
                 serverId, tableName, columnName, utcColumnName, ex.Message);
         }

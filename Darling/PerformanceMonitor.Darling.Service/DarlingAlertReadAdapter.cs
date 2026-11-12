@@ -2233,7 +2233,7 @@ AND   (e.expected_state = '(ignore)'
                    not a fault: the naming (SQLSTATE + statement family) matches DarlingRetention's own
                    deadlock-retry log so the two halves of this deadlock read the same way in a log search. */
                 logger?.LogInformation(
-                    "Alert pass database-state maintenance deadlocked ({SqlState}) for server {ServerId} - retrying once (the partner clears in milliseconds)",
+                    "Alert pass database-state maintenance deadlocked ({SqlState}) for server {ServerId} — retrying once (the partner clears in milliseconds)",
                     ex.SqlState, serverId);
             }
         }

@@ -1178,7 +1178,7 @@ public sealed partial class DarlingCollectorRunner
             {
                 _warnedProcedureStatsPlanFetchValue = value;
                 _logger?.LogWarning(
-                    "procedureStatsDeferredPlanFetch is '{Value}', which is not off, shadow or on; procedure_stats keeps its inline plan capture.",
+                    "procedureStatsDeferredPlanFetch is '{Value}', which is not off, shadow or on; procedure_stats keeps its inline plan capture (#5158).",
                     value);
             }
 

@@ -214,7 +214,7 @@ SELECT /* PerformanceMonitorLite */
             if (usedPlaintext)
             {
                 logger?.LogWarning(
-                    "Server '{Server}' uses a plaintext password in darling.json - run --encrypt-password and switch to encryptedPassword, or reference it via env:/file:.",
+                    "Server '{Server}' uses a plaintext password in darling.json — run --encrypt-password and switch to encryptedPassword, or reference it via env:/file:.",
                     config.DisplayName);
             }
         }
@@ -541,7 +541,7 @@ SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogDebug(ex, "pg_wait_sampling extension probe did not succeed; treating the extension as absent");
+            logger?.LogDebug(ex, "pg_wait_sampling extension probe did not succeed; treating the extension as absent (#3604)");
             return false;
         }
     }
@@ -704,7 +704,7 @@ SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
         var hasWaitSampling = await ProbeWaitSamplingExtensionAsync(connection, cancellationToken, logger);
 
         logger?.LogInformation(
-            "Connected to PostgreSQL target '{Server}': major {Major} (server_version_num {Num}), {Role}, Aurora: {Aurora}, pg_wait_sampling: {WaitSampling}, pg_stat_statements: {StatementsExtension} - {VersionText}",
+            "Connected to PostgreSQL target '{Server}': major {Major} (server_version_num {Num}), {Role}, Aurora: {Aurora}, pg_wait_sampling: {WaitSampling}, pg_stat_statements: {StatementsExtension} — {VersionText}",
             config.DisplayName, majorVersion, versionNum, isInRecovery ? "reader (in recovery)" : "writer", isAurora,
             hasWaitSampling ? "present (extension_sampled tier)" : isAurora ? "n/a (engine_cumulative tier)" : "absent (service_sampled tier)",
             statementsExtension.ExtensionVersion is { } extversion

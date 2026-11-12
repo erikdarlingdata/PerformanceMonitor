@@ -165,7 +165,7 @@ public sealed class RdsPlanIngestor
                PERMISSIONS and moves on, exactly as the pg_read_file route already does for its own 42501.
                What changes is that the cycle now says WHICH kind of nothing it found. */
             _logger?.LogWarning(
-                "RDS plan log unavailable for {Server}: {Message} - plan capture is skipped for this target "
+                "RDS plan log unavailable for {Server}: {Message} — plan capture is skipped for this target "
                 + "this cycle; every other collector is unaffected.",
                 storageName, ex.Message);
 

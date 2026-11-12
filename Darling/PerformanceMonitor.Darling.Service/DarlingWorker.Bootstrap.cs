@@ -122,7 +122,7 @@ public sealed partial class DarlingWorker
             {
                 _logger.LogWarning(
                     ex,
-                    "Cannot load configuration yet ({Message}) - attempt {Attempt} of {Total}, retrying in " +
+                    "Cannot load configuration yet ({Message}) — attempt {Attempt} of {Total}, retrying in " +
                     "{Delay}s. A file another process is mid-write recovers on its own; a missing, malformed " +
                     "or unreadable one does not and is not retried.",
                     ex.Message, attempt, StartupFailureTriage.Attempts,
@@ -156,7 +156,7 @@ public sealed partial class DarlingWorker
                 {
                     _logger.LogWarning(
                         ex,
-                        "Still cannot load configuration ({Message}) - attempt {Attempt}, retrying in " +
+                        "Still cannot load configuration ({Message}) — attempt {Attempt}, retrying in " +
                         "{Delay}s.",
                         ex.Message, attempt, (int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds);
                 }
@@ -387,7 +387,7 @@ public sealed partial class DarlingWorker
                     {
                         _logger.LogWarning(
                             ex,
-                            "Managed Postgres bootstrap failed, retrying ({Message}) - attempt {Attempt} of " +
+                            "Managed Postgres bootstrap failed, retrying ({Message}) — attempt {Attempt} of " +
                             "{Total}, retrying in {Delay}s. A transiently locked file or a store still coming " +
                             "up recovers on its own; a broken package or a stale credential does not and is " +
                             "not retried.",
@@ -423,7 +423,7 @@ public sealed partial class DarlingWorker
                         {
                             _logger.LogWarning(
                                 ex,
-                                "Managed Postgres bootstrap still has not succeeded ({Message}) - attempt " +
+                                "Managed Postgres bootstrap still has not succeeded ({Message}) — attempt " +
                                 "{Attempt}, retrying in {Delay}s.",
                                 ex.Message, attempt, (int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds);
                         }
@@ -532,9 +532,9 @@ public sealed partial class DarlingWorker
 
             _logger.LogError(ex, 
                 "Could not restrict the ACL on {Path}{Detail} ({Message}). If the owner is not this service, the " +
-                "re-ACL can never succeed - it needs ownership or FullControl - so restarting will not clear this, " +
+                "re-ACL can never succeed — it needs ownership or FullControl — so restarting will not clear this, " +
                 "and the service cannot fix it alone: taking ownership needs a privilege a virtual service account " +
-                "does not have. From an ELEVATED prompt: {Remediation} - after which this service re-asserts the " +
+                "does not have. From an ELEVATED prompt: {Remediation} — after which this service re-asserts the " +
                 "full ACL by itself on the next start.",
                 path, DarlingFileSecurity.DescribeOwnerAndExposure(path), ex.Message, remediation);
         }
@@ -550,7 +550,7 @@ public sealed partial class DarlingWorker
         {
             _logger.LogCritical(
                 "{Path} is READABLE by Users/Authenticated Users/Everyone/INTERACTIVE. It holds every monitored server's " +
-                "encrypted password plus the MCP and web access tokens, all protected with machine-scoped DPAPI - " +
+                "encrypted password plus the MCP and web access tokens, all protected with machine-scoped DPAPI — " +
                 "so any local user who can open this file can recover ALL of it. Remove the inherited read access " +
                 "(or move the install out of a world-readable folder such as one created directly under C:\\).",
                 path);
@@ -626,7 +626,7 @@ public sealed partial class DarlingWorker
             {
                 logger.LogCritical(
                     "Config backup {Path} is READABLE by Users/Authenticated Users/Everyone. It holds the same " +
-                    "machine-scoped DPAPI credential blobs as the live config - any local user who can open it " +
+                    "machine-scoped DPAPI credential blobs as the live config — any local user who can open it " +
                     "can recover ALL of them. Remove the inherited read access.",
                     backup);
             }
@@ -880,7 +880,7 @@ public sealed partial class DarlingWorker
                 ? $"did not finish within {ServiceCommandDeadlines.StartupHostProfileSeconds}s"
                 : ex.Message;
             _logger.LogWarning(
-                "Store host profile check failed at startup ({Reason}) - collection continues; run " +
+                "Store host profile check failed at startup ({Reason}) — collection continues; run " +
                 "--check-settings to retry.", reason);
         }
     }

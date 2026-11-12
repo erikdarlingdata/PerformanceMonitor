@@ -285,7 +285,7 @@ public sealed partial class DarlingCollectorRunner
             await storeConnection.OpenAsync(CancellationToken.None);
 
             _logger?.LogWarning(
-                "Reopened the shared store connection after a Query Store fetch fault on '{Server}' database [{Database}] - the fetch borrows the collector body's connection, and leaving it broken would fail this item's runtime-stats write and abort the rest of the sweep.",
+                "Reopened the shared store connection after a Query Store fetch fault on '{Server}' database [{Database}] — the fetch borrows the collector body's connection, and leaving it broken would fail this item's runtime-stats write and abort the rest of the sweep.",
                 server.Config.DisplayName, databaseName);
 
             return true;
@@ -296,7 +296,7 @@ public sealed partial class DarlingCollectorRunner
                the same connection and PROPAGATE, which is the correct handling of a systemic store failure
                and the behaviour that predates this borrowing. Logged so the cause is visible there. */
             _logger?.LogWarning(ex,
-                "Could not reopen the shared store connection after a Query Store fetch fault on '{Server}' database [{Database}] - the store looks unreachable, so this cycle's remaining writes will fail systemically.",
+                "Could not reopen the shared store connection after a Query Store fetch fault on '{Server}' database [{Database}] — the store looks unreachable, so this cycle's remaining writes will fail systemically.",
                 server.Config.DisplayName, databaseName);
 
             return false;
@@ -944,7 +944,7 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
             if (clamped)
             {
                 _logger?.LogInformation(
-                    "query_store plan fetch on '{Server}' database [{Database}]: candidate cap clamped to {K} - a bound sized this pass, not a measurement.",
+                    "query_store plan fetch on '{Server}' database [{Database}]: candidate cap clamped to {K} — a bound sized this pass, not a measurement.",
                     server.Config.DisplayName, databaseName, cap);
             }
 
@@ -956,7 +956,7 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
             if (backedOff != cap)
             {
                 _logger?.LogInformation(
-                    "query_store plan fetch on '{Server}' database [{Database}]: width narrowed {Cap} -> {Narrowed} after {Failures} consecutive failure(s) - backing off, not giving up; a completed pass restores full width.",
+                    "query_store plan fetch on '{Server}' database [{Database}]: width narrowed {Cap} -> {Narrowed} after {Failures} consecutive failure(s) — backing off, not giving up; a completed pass restores full width.",
                     server.Config.DisplayName, databaseName, cap, backedOff, estimate.ConsecutiveFetchFailures);
                 cap = backedOff;
             }
@@ -1227,7 +1227,7 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
             }
 
             _logger?.LogWarning(ex,
-                "query_store plan fetch failed on '{Server}' database [{Database}] ({Failures} consecutive) - runtime statistics are unaffected, and whatever did not land is still missing from the store, so the next cycle that references it re-selects it at a narrower width.",
+                "query_store plan fetch failed on '{Server}' database [{Database}] ({Failures} consecutive) — runtime statistics are unaffected, and whatever did not land is still missing from the store, so the next cycle that references it re-selects it at a narrower width.",
                 server.Config.DisplayName, databaseName, failed.ConsecutiveFetchFailures);
         }
 
@@ -1460,7 +1460,7 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
             if (textWidth != missing.Count)
             {
                 _logger?.LogInformation(
-                    "query_store text fetch on '{Server}' database [{Database}]: width narrowed {Full} -> {Narrowed} after {Failures} consecutive failure(s) - backing off, not giving up; a completed pass restores full width.",
+                    "query_store text fetch on '{Server}' database [{Database}]: width narrowed {Full} -> {Narrowed} after {Failures} consecutive failure(s) — backing off, not giving up; a completed pass restores full width.",
                     server.Config.DisplayName, databaseName, missing.Count, textWidth, textFailures);
             }
 
@@ -1692,7 +1692,7 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
             }
 
             _logger?.LogWarning(ex,
-                "query_store text fetch failed on '{Server}' database [{Database}] ({Failures} consecutive) - runtime statistics are already written, and whatever did not land is still missing from the store, so the next cycle that references those statements re-selects them at a narrower width.",
+                "query_store text fetch failed on '{Server}' database [{Database}] ({Failures} consecutive) — runtime statistics are already written, and whatever did not land is still missing from the store, so the next cycle that references those statements re-selects them at a narrower width.",
                 server.Config.DisplayName, databaseName, failures);
         }
 

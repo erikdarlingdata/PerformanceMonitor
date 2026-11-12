@@ -2624,7 +2624,7 @@ public sealed partial class DarlingWorker
                     && _pgPoisonWaitHoldLogged.TryAdd(serverKey, true))
                 {
                     _logger.LogDebug(
-                        "[{Server}] PostgreSQL poison wait window unobserved: no pg_wait_stats collector run logged and no row stored in the last {WindowMinutes} min - holding the standing alert(s) rather than announcing Cleared on collector silence",
+                        "[{Server}] PostgreSQL poison wait window unobserved: no pg_wait_stats collector run logged and no row stored in the last {WindowMinutes} min — holding the standing alert(s) rather than announcing Cleared on collector silence (#3653)",
                         runtime.Config.DisplayName, PostgresAlertEvaluator.PoisonWaitWindowMinutes);
                 }
 

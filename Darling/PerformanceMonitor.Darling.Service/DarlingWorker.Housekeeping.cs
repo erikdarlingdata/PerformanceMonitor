@@ -146,7 +146,7 @@ public sealed partial class DarlingWorker
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(
-                "Store settings self-alert: could not read stored managed-conf verdicts after {ElapsedMs} ms - "
+                "Store settings self-alert: could not read stored managed-conf verdicts after {ElapsedMs} ms — "
                 + "the rejected-settings condition stays unresolved this tick: {Message}",
                 readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(null, "store settings self-alert (managed-conf verdicts)", readClock.ElapsedMilliseconds);
@@ -598,7 +598,7 @@ public sealed partial class DarlingWorker
 
             _timescaleAvailable = true;
             _logger.LogInformation(
-                "TimescaleDB is available after all - the store reports the extension present while this service has been running in plain-PostgreSQL mode, so the availability latch flips back on this tick WITHOUT a restart. The store background-job health check that latch gates - the compression-job self-heal, Store Job Over Cadence, Retention Held and Raw Purge Over Horizon - has been skipped on every tick since the start-path detection came back false, and runs again immediately after this line. Hypertable conversion, compression policies, continuous aggregates and the composer's covering indexes are re-converged on this same tick by the store-object convergence pass, which runs a few statements after this line and writes its own 'Store object convergence:' summary - so anything the start path left unbuilt while the latch was false is rebuilt now, not at the next restart. This pass took {ElapsedMs} ms, connection acquisition included.",
+                "TimescaleDB is available after all - the store reports the extension present while this service has been running in plain-PostgreSQL mode, so the availability latch flips back on this tick WITHOUT a restart (#3815). The store background-job health check that latch gates - the compression-job self-heal (#1581), Store Job Over Cadence (#2136), Retention Held (#2813) and Raw Purge Over Horizon (#4299) - has been skipped on every tick since the start-path detection came back false, and runs again immediately after this line. Hypertable conversion, compression policies, continuous aggregates and the composer's covering indexes are re-converged on this same tick by the store-object convergence pass (#3817), which runs a few statements after this line and writes its own 'Store object convergence:' summary — so anything the start path left unbuilt while the latch was false is rebuilt now, not at the next restart. This pass took {ElapsedMs} ms, connection acquisition included.",
                 probeClock.ElapsedMilliseconds);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -741,7 +741,7 @@ public sealed partial class DarlingWorker
                would refresh the same aggregate on two connections at the same time for no gain. */
             if (_materializationHoleRepairRunning)
             {
-                _logger.LogDebug("Retention re-evaluation: skipping the seam-only repair this pass - a full materialization-hole repair is already running in this process and covers the same seam.");
+                _logger.LogDebug("Retention re-evaluation: skipping the seam-only repair this pass — a full materialization-hole repair is already running in this process and covers the same seam.");
             }
             else
             {
@@ -803,7 +803,7 @@ public sealed partial class DarlingWorker
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     _logger.LogWarning(
-                        "Retention re-evaluation: the seam repair could not run this pass - any legacy/successor seam a prior outage opened stands until a later pass retries: {Message}",
+                        "Retention re-evaluation: the seam repair could not run this pass — any legacy/successor seam a prior outage opened stands until a later pass retries: {Message}",
                         ex.Message);
                 }
             }
@@ -851,7 +851,7 @@ public sealed partial class DarlingWorker
                 if (ShouldLaunchMaterializationHoleRepair(_materializationHoleRepairRunning, epochCurrent) && _postgres is not null)
                 {
                     _logger.LogInformation(
-                        "Retention re-evaluation: the repair epoch is stale under the current postmaster start for {StaleRelations} and no repair is running in this process - launching one now (Periodic pass only).",
+                        "Retention re-evaluation: the repair epoch is stale under the current postmaster start for {StaleRelations} and no repair is running in this process — launching one now (Periodic pass only).",
                         string.Join(", ", staleRelations));
 
                     /* Deliberately NOT awaited, the same posture the start path takes for the identical call:
@@ -942,7 +942,7 @@ public sealed partial class DarlingWorker
                 if (!covered)
                 {
                     logger.LogInformation(
-                        "Raw retention purge for {Relation} did not run this pass - not covered (a fresh measurement this pass found Short or Unknown for it).",
+                        "Raw retention purge for {Relation} did not run this pass — not covered (a fresh measurement this pass found Short or Unknown for it).",
                         relation);
                     await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "not_covered", null, null, logger, cancellationToken);
                     continue;
@@ -958,7 +958,7 @@ public sealed partial class DarlingWorker
                 if (!epochMatches)
                 {
                     logger.LogInformation(
-                        "Raw retention purge for {Relation} did not run this pass - the repair epoch is stale or missing (no repair has finished under the CURRENT postmaster start yet).",
+                        "Raw retention purge for {Relation} did not run this pass — the repair epoch is stale or missing (no repair has finished under the CURRENT postmaster start yet).",
                         relation);
                     await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "epoch_stale", null, null, logger, cancellationToken);
                     continue;
@@ -986,7 +986,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                     {
                         /* No job row, or raw holds no chunks at all — nothing to drop, nothing to gate. */
                         logger.LogInformation(
-                            "Raw retention purge for {Relation} did not run this pass - no chunks to evaluate (the job row or the oldest chunk could not be read).",
+                            "Raw retention purge for {Relation} did not run this pass — no chunks to evaluate (the job row or the oldest chunk could not be read).",
                             relation);
                         await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "no_chunks", null, null, logger, cancellationToken);
                         continue;
@@ -1039,7 +1039,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                 if (successorUnresolved)
                 {
                     logger.LogInformation(
-                        "Raw retention purge for {Relation} did not run this pass - a successor's materialization could not be resolved (mid-rebuild, renamed, or dropped), so coverage cannot be confirmed hole-free.",
+                        "Raw retention purge for {Relation} did not run this pass — a successor's materialization could not be resolved (mid-rebuild, renamed, or dropped), so coverage cannot be confirmed hole-free.",
                         relation);
                     await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "gate_unknown", null, null, logger, cancellationToken);
                     continue;
@@ -1048,7 +1048,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                 if (!holeFree)
                 {
                     logger.LogInformation(
-                        "Raw retention purge for {Relation} did not run this pass - a hole was found in the range about to be dropped.",
+                        "Raw retention purge for {Relation} did not run this pass — a hole was found in the range about to be dropped.",
                         relation);
                     await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "hole", null, null, logger, cancellationToken);
                     continue;
@@ -1060,14 +1060,14 @@ AND   j.hypertable_name = '{relation}'", connection))
                 if (!outcome.Ran)
                 {
                     logger.LogInformation(
-                        "Raw retention purge for {Relation} did not run this pass - the run itself failed with SqlState {SqlState} (see the warning above naming the timeout or error).",
+                        "Raw retention purge for {Relation} did not run this pass — the run itself failed with SqlState {SqlState} (see the warning above naming the timeout or error).",
                         relation, outcome.SqlState ?? "(none)");
                     await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "run_failed", outcome.SqlState, null, logger, cancellationToken);
                 }
                 else
                 {
                     logger.LogInformation(
-                        "Raw retention purge for {Relation} ran this pass - covered, epoch matched the current postmaster start, and no hole in the dropped range.",
+                        "Raw retention purge for {Relation} ran this pass — covered, epoch matched the current postmaster start, and no hole in the dropped range.",
                         relation);
                     await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "ran", null, runClock.ElapsedMilliseconds, logger, cancellationToken);
                 }
@@ -1082,7 +1082,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                    is wrapped so a failure recording the outcome never escapes this catch and skips the next
                    relation in the loop. */
                 logger.LogWarning(
-                    "Raw retention purge for {Relation} did not run this pass - the trigger's own gate check failed: {Message}",
+                    "Raw retention purge for {Relation} did not run this pass — the trigger's own gate check failed: {Message}",
                     relation, ex.Message);
 
                 try
@@ -1197,13 +1197,13 @@ AND   j.hypertable_name = '{relation}'", connection))
         catch (OperationCanceledException) when (budget.IsCancellationRequested)
         {
             _logger.LogWarning(
-                "Store object convergence exceeded its {BudgetSeconds}s budget after {ElapsedMs} ms and was cut short - {Steps} step(s) ran, {Changed} changed, and the steps it had not reached are exactly as they were and are retried next hour (and at the next start). Every step is idempotent, so the next pass resumes at the one this pass was inside rather than redoing the ones behind it. A CONVERGED store answers this pass in well under a second; a store that spends five minutes in it is either building something real for the first time - a first hypertable conversion or a first aggregate on an adopted store - or is too slow to answer its own catalog, and which one it is shows in the per-object lines above.",
+                "Store object convergence exceeded its {BudgetSeconds}s budget after {ElapsedMs} ms and was cut short — {Steps} step(s) ran, {Changed} changed, and the steps it had not reached are exactly as they were and are retried next hour (and at the next start). Every step is idempotent, so the next pass resumes at the one this pass was inside rather than redoing the ones behind it. A CONVERGED store answers this pass in well under a second; a store that spends five minutes in it is either building something real for the first time — a first hypertable conversion or a first aggregate on an adopted store — or is too slow to answer its own catalog, and which one it is shows in the per-object lines above.",
                 (long)s_storeObjectConvergenceBudget.TotalSeconds, passClock.ElapsedMilliseconds, tally.Steps, tally.Changed.Count);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(
-                "Store object convergence could not run after {ElapsedMs} ms - every store object stays exactly as it is (a missing rollup family stays missing, a missing baseline relation keeps returning nothing) until the next hour retries or the service restarts: {Message}",
+                "Store object convergence could not run after {ElapsedMs} ms — every store object stays exactly as it is (a missing rollup family stays missing, a missing baseline relation keeps returning nothing) until the next hour retries or the service restarts: {Message}",
                 passClock.ElapsedMilliseconds, ex.Message);
         }
     }
@@ -1309,7 +1309,7 @@ AND   j.hypertable_name = '{relation}'", connection))
             tally.Steps++;
             tally.Failed.Add(step.Name);
             logger.LogWarning(
-                "Store object convergence step '{Step}' failed - whatever it had not yet ensured stays unbuilt until the next hourly pass or the next start retries it (the step's own lines above name any individual object it did isolate): {Message}",
+                "Store object convergence step '{Step}' failed — whatever it had not yet ensured stays unbuilt until the next hourly pass or the next start retries it (the step's own lines above name any individual object it did isolate): {Message}",
                 step.Name, ex.Message);
         }
 
@@ -1821,7 +1821,7 @@ AND   j.hypertable_name = '{relation}'", connection))
             if (PgBaselineProvider.IsCommandTimeout(ex) || (ex is OperationCanceledException && budget.IsCancellationRequested))
             {
                 _logger.LogError(
-                    "Store self-metrics sweep did not finish within its {Timeout}s command timeout - this tick's metrics are skipped and the series gains a one-hour gap (the store side logs this as 'canceling statement due to user request'). If it repeats, the store's sizing queries have outgrown the timeout: {Message}",
+                    "Store self-metrics sweep did not finish within its {Timeout}s command timeout — this tick's metrics are skipped and the series gains a one-hour gap (the store side logs this as 'canceling statement due to user request'). If it repeats, the store's sizing queries have outgrown the timeout: {Message}",
                     StoreSelfMetrics.SweepTimeoutSeconds, ex.Message);
             }
             else

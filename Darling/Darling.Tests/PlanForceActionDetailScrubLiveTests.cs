@@ -133,7 +133,7 @@ public sealed class PlanForceActionDetailScrubLiveTests
            badId, standing in for any real per-row write failure without touching the product's logic. */
         await ExecAsync(connection,
             $"ALTER TABLE collect.plan_force_actions ADD CONSTRAINT chk_4346_forced_failure " +
-            $"CHECK (action_id <> {badId} OR detail NOT LIKE 'state_unavailable: the forcing and automatic-plan-correction state read failed \u2014%')",
+            $"CHECK (action_id <> {badId} OR detail NOT LIKE 'state_unavailable: the forcing and automatic-plan-correction state read failed. An unattended%')",
             ct);
 
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);

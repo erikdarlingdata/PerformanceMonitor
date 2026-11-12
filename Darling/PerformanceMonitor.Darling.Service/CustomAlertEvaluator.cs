@@ -768,7 +768,7 @@ public sealed class CustomAlertEvaluator
         }
 
         logger?.LogWarning(
-            "Custom alert rule enabled-count ceiling hit: at least {Count} enabled rules exist but only the first {Cap} (by id) will be evaluated. The write-path cap should prevent this - a rule was likely inserted bypassing the store; disable the excess.",
+            "Custom alert rule enabled-count ceiling hit: at least {Count} enabled rules exist but only the first {Cap} (by id) will be evaluated. The write-path cap should prevent this — a rule was likely inserted bypassing the store; disable the excess.",
             enabledRows.Count, CustomAlertRuleStore.EnabledRuleCap);
         return enabledRows.Take(CustomAlertRuleStore.EnabledRuleCap).ToList();
     }

@@ -391,7 +391,7 @@ public sealed partial class DarlingCollectorRunner
             {
                 _logger?.LogDebug(
                     "{Collector} on '{Server}': PostgreSQL refused the log slice as not valid in the database encoding; "
-                    + "retrying with the read start moved forward {Shift} byte(s)",
+                    + "retrying with the read start moved forward {Shift} byte(s) (#4735)",
                     collectorName, server.Config.DisplayName, shift + 1);
             }
             catch (PostgresException pg) when (readsLogTail
@@ -406,7 +406,7 @@ public sealed partial class DarlingCollectorRunner
                     _logger?.LogDebug(
                         "{Collector} on '{Server}': PostgreSQL refused the log slice at every read start, so a byte that is "
                         + "not valid in the database encoding is in the window; later cycles make one read until a read "
-                        + "succeeds",
+                        + "succeeds (#4735)",
                         collectorName, server.Config.DisplayName);
                 }
 
@@ -968,7 +968,7 @@ public sealed partial class DarlingCollectorRunner
                                 if (azureRaw < tighterFloor)
                                 {
                                     _logger?.LogWarning(
-                                        "query_store on '{Server}' database [{Database}] adaptive catch-up shrink: {Failures} consecutive failed cycles - window narrowed to {Minutes:F0}m; the skipped range rides the backfill hole.",
+                                        "query_store on '{Server}' database [{Database}] adaptive catch-up shrink: {Failures} consecutive failed cycles — window narrowed to {Minutes:F0}m; the skipped range rides the backfill hole.",
                                         server.Config.DisplayName, databaseName, azureFailures, adaptiveSpan.TotalMinutes);
                                     await RecordQueryStoreBackfillHoleAsync(server.ServerId, databaseName, azureRaw, tighterFloor, dbToken);
                                     context.Watermark = tighterFloor;
@@ -979,7 +979,7 @@ public sealed partial class DarlingCollectorRunner
                                 /* Never-succeeded database: tighten the first-run fallback too (the
                                    review catch); no hole — pre-watermark history is the tail's job. */
                                 _logger?.LogWarning(
-                                    "query_store on '{Server}' database [{Database}] adaptive first-contact shrink: {Failures} consecutive failed cycles - first-run window narrowed to {Minutes:F0}m.",
+                                    "query_store on '{Server}' database [{Database}] adaptive first-contact shrink: {Failures} consecutive failed cycles — first-run window narrowed to {Minutes:F0}m.",
                                     server.Config.DisplayName, databaseName, azureFailures, adaptiveSpan.TotalMinutes);
                                 context.Watermark = tighterFloor;
                             }
@@ -1009,7 +1009,7 @@ public sealed partial class DarlingCollectorRunner
                         if (context.CatchupClampApplied)
                         {
                             _logger?.LogWarning(
-                                "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) - a bounded, logged history hole.",
+                                "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
                                 definition.Name, server.Config.DisplayName, databaseName, WatermarkPolicy.MaxCatchup.TotalHours, context.Watermark);
 
                             /* #2058 (the Azure arm of #2022's hole recording): context.Watermark still
@@ -1310,7 +1310,7 @@ public sealed partial class DarlingCollectorRunner
                     if (capHit || context.PerItemTextBudgetExceeded)
                     {
                         _logger?.LogWarning(
-                            "{Collector} on '{Server}' database [{Database}] hit its per-database collection bound ({Reason}) - shipped {ShippedMB:F1}MB up to {Boundary}; the backlog resumes from that boundary next cycle.",
+                            "{Collector} on '{Server}' database [{Database}] hit its per-database collection bound ({Reason}) — shipped {ShippedMB:F1}MB up to {Boundary}; the backlog resumes from that boundary next cycle.",
                             definition.Name, server.Config.DisplayName, databaseName,
                             capHit ? $"row cap {definition.PerItemRowCountWarnThreshold}" : "text byte budget",
                             context.PerItemTextBytesShipped / (1024.0 * 1024.0),
@@ -1678,7 +1678,7 @@ public sealed partial class DarlingCollectorRunner
             if (cut.ClampFired)
             {
                 _logger?.LogWarning(
-                    "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) - a bounded, logged history hole.",
+                    "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
                     definition.Name, server.Config.DisplayName, item, WatermarkPolicy.MaxCatchup.TotalHours, raw!.Value);
 
                 /* #2022: the clamp opens a hole (raw, clamped) the live path will never
@@ -1712,7 +1712,7 @@ public sealed partial class DarlingCollectorRunner
                     if (current < tighterFloor)
                     {
                         _logger?.LogWarning(
-                            "query_store on '{Server}' database [{Database}] adaptive catch-up shrink: {Failures} consecutive failed cycles - window narrowed to {Minutes:F0}m; the skipped range rides the backfill hole.",
+                            "query_store on '{Server}' database [{Database}] adaptive catch-up shrink: {Failures} consecutive failed cycles — window narrowed to {Minutes:F0}m; the skipped range rides the backfill hole.",
                             server.Config.DisplayName, item, failures, span.TotalMinutes);
                         await RecordQueryStoreBackfillHoleAsync(server.ServerId, item, current, tighterFloor, ct);
                         clamped = tighterFloor;
@@ -1727,7 +1727,7 @@ public sealed partial class DarlingCollectorRunner
                        retrying the full width forever). No hole record: pre-watermark history
                        is the backfill TAIL's job by design. */
                     _logger?.LogWarning(
-                        "query_store on '{Server}' database [{Database}] adaptive first-contact shrink: {Failures} consecutive failed cycles - first-run window narrowed to {Minutes:F0}m.",
+                        "query_store on '{Server}' database [{Database}] adaptive first-contact shrink: {Failures} consecutive failed cycles — first-run window narrowed to {Minutes:F0}m.",
                         server.Config.DisplayName, item, failures, span.TotalMinutes);
                     clamped = tighterFloor;
                 }
@@ -2086,7 +2086,7 @@ public sealed partial class DarlingCollectorRunner
                         if (capHit || context.PerItemTextBudgetExceeded)
                         {
                             _logger?.LogWarning(
-                                "{Collector} on '{Server}' database [{Database}] hit its per-database collection bound ({Reason}) - shipped {ShippedMB:F1}MB up to {Boundary}; the backlog resumes from that boundary next cycle.",
+                                "{Collector} on '{Server}' database [{Database}] hit its per-database collection bound ({Reason}) — shipped {ShippedMB:F1}MB up to {Boundary}; the backlog resumes from that boundary next cycle.",
                                 definition.Name, server.Config.DisplayName, item,
                                 capHit ? $"row cap {definition.PerItemRowCountWarnThreshold}" : "text byte budget",
                                 context.PerItemTextBytesShipped / (1024.0 * 1024.0),
@@ -2259,7 +2259,7 @@ public sealed partial class DarlingCollectorRunner
                         _logger,
                         cancellationToken),
                     onDecision: decision => _logger?.LogDebug(
-                        "Stall probe for {Collector} on '{Server}': {Verdict} - {Reason}",
+                        "Stall probe for {Collector} on '{Server}': {Verdict} — {Reason} (#2880)",
                         definition.Name, server.Config.DisplayName,
                         decision.Fire ? "firing" : "not firing", decision.Reason),
                     cancellationToken: cancellationToken);
@@ -2423,7 +2423,7 @@ public sealed partial class DarlingCollectorRunner
                     baselineRollback?.RollBackBaselines();
                     var budgetSeconds = (int)definition.PerItemWallClockBudget!.Value.TotalSeconds;
                     _logger?.LogWarning(
-                        "{Collector} on '{Server}' reached its {Budget}s wall-clock budget mid-collection - abandoned this cycle, will retry next.",
+                        "{Collector} on '{Server}' reached its {Budget}s wall-clock budget mid-collection — abandoned this cycle, will retry next (#2673).",
                         definition.Name, server.Config.DisplayName, budgetSeconds);
                     return new CollectorRunResult(
                         0,

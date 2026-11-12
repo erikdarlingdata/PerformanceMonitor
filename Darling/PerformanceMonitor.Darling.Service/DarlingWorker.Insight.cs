@@ -202,7 +202,7 @@ public sealed partial class DarlingWorker
         catch (Exception ex)
         {
             _logger.LogWarning(
-                "[{Server}] Same-statement pileup evaluation failed - skipped this cycle; the next sweep re-evaluates a fresher window: {Message}",
+                "[{Server}] Same-statement pileup evaluation failed — skipped this cycle; the next sweep re-evaluates a fresher window: {Message}",
                 server.Config.DisplayName, ex.Message);
         }
     }
@@ -430,7 +430,7 @@ public sealed partial class DarlingWorker
                 catch (TimeoutException)
                 {
                     _logger.LogDebug(
-                        "[{Server}] Analysis pass did not unwind within {Grace}s of shutdown - its residue is classified as shutdown, not fault",
+                        "[{Server}] Analysis pass did not unwind within {Grace}s of shutdown — its residue is classified as shutdown, not fault",
                         displayName, (int)s_analysisShutdownGrace.TotalSeconds);
                 }
                 return new AnalysisPassResult(AnalysisPassStatus.Skipped, 0, "service is stopping");
@@ -439,7 +439,7 @@ public sealed partial class DarlingWorker
             if (finished != analyzeTask)
             {
                 _logger.LogWarning(
-                    "[{Server}] Analysis exceeded {Timeout}s and has not unwound the cancellation raised at that budget - skipped this cycle. This server stays skipped while the pass is in flight, and is reported again if it stays that way; every other server is unaffected.",
+                    "[{Server}] Analysis exceeded {Timeout}s and has not unwound the cancellation raised at that budget — skipped this cycle. This server stays skipped while the pass is in flight, and is reported again if it stays that way; every other server is unaffected.",
                     displayName, (int)s_analysisTimeout.TotalSeconds);
                 return new AnalysisPassResult(AnalysisPassStatus.TimedOut, 0, $"analysis exceeded {(int)s_analysisTimeout.TotalSeconds}s");
             }
@@ -591,7 +591,7 @@ public sealed partial class DarlingWorker
         state.ReportCount++;
 
         _logger.LogError(
-            "[{Server}] Analysis has been in flight for {Minutes:F0} minutes - over {Multiple}x its {Timeout}s budget - and did not stop when cancelled at that budget. {Skipped} analysis cycle(s) have been skipped for this server since, and every later cycle is skipped too until the pass unwinds or the service restarts. Analysis for every other server is unaffected.",
+            "[{Server}] Analysis has been in flight for {Minutes:F0} minutes — over {Multiple}x its {Timeout}s budget — and did not stop when cancelled at that budget. {Skipped} analysis cycle(s) have been skipped for this server since, and every later cycle is skipped too until the pass unwinds or the service restarts. Analysis for every other server is unaffected.",
             displayName, inFlightFor.TotalMinutes, StuckAnalysisMultiple,
             (int)s_analysisTimeout.TotalSeconds, state.SkippedCycles);
     }

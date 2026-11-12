@@ -9496,7 +9496,7 @@ WHERE c.is_enabled";
             if (job.Family == TimescaleSupport.StorePolicyJobFamily.Other)
             {
                 _logger?.LogWarning(
-                    "TimescaleDB policy job {JobId}{Relation} was flagged as stuck ({Reason}) but its family is not one this service has alert text for - not re-armed, not alerted. The detection was widened past the band table; report it",
+                    "TimescaleDB policy job {JobId}{Relation} was flagged as stuck ({Reason}) but its family is not one this service has alert text for — not re-armed, not alerted. The detection was widened past the band table; report it (#3816)",
                     key,
                     string.IsNullOrEmpty(job.HypertableName) ? "" : " on " + job.HypertableName,
                     job.Reason);
@@ -9525,13 +9525,13 @@ WHERE c.is_enabled";
                 if (!string.IsNullOrEmpty(job.HypertableName) && TimescaleSupport.RawRelations.Contains(job.HypertableName))
                 {
                     _logger?.LogDebug(
-                        "TimescaleDB {Label} was reported as stuck while NOT scheduled - this is one of the three raw retention jobs, permanently unscheduled by design, not a coverage hold. Nothing re-armed, nothing alerted; no action needed",
+                        "TimescaleDB {Label} was reported as stuck while NOT scheduled — this is one of the three raw retention jobs, permanently unscheduled by design (#4299), not a #1680/#1877 coverage hold. Nothing re-armed, nothing alerted; no action needed",
                         label);
                     continue;
                 }
 
                 _logger?.LogWarning(
-                    "TimescaleDB {Label} was reported as stuck while NOT scheduled - a paused policy is a HELD one, not an abandoned job, and re-arming it would drop history the coverage gate is protecting. Nothing re-armed, nothing alerted; this is a detector defect worth reporting",
+                    "TimescaleDB {Label} was reported as stuck while NOT scheduled — a paused policy is a HELD one, not an abandoned job, and re-arming it would drop history the #1680/#1877 coverage gate is protecting. Nothing re-armed, nothing alerted; this is a detector defect worth reporting (#3816)",
                     label);
                 continue;
             }
@@ -9554,7 +9554,7 @@ WHERE c.is_enabled";
                        same argument for a refresh or a retention job. */
                     _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.AwaitingSchedulerRetry, job.Family);
                     _logger?.LogInformation(
-                        "TimescaleDB {Label} read {Reason}; the scheduler re-runs a crashed job by itself max(5 minutes, retry_period x consecutive_crashes) after its last job-list reload (about fifteen minutes on this service's retry period), and a re-arm would restart that wait rather than shorten it - not re-armed, not alerted; escalates if still there next check",
+                        "TimescaleDB {Label} read {Reason}; the scheduler re-runs a crashed job by itself max(5 minutes, retry_period x consecutive_crashes) after its last job-list reload (about fifteen minutes on this service's retry period), and a re-arm would restart that wait rather than shorten it — not re-armed, not alerted; escalates if still there next check (#3591, #8302)",
                         label, job.Reason);
                     continue;
                 }
@@ -9711,7 +9711,7 @@ WHERE c.is_enabled";
                    resolve — a lone "Recovered" with no preceding alert would be the very message shape #3575
                    removed. The log carries the outcome instead. */
                 _logger?.LogInformation(
-                    "TimescaleDB {Noun} {JobId} is running on schedule again - the scheduler's own retry cleared its crash backoff; nothing was re-armed or alerted",
+                    "TimescaleDB {Noun} {JobId} is running on schedule again — the scheduler's own retry cleared its crash backoff; nothing was re-armed or alerted (#3591)",
                     band.Noun,
                     key);
                 continue;
@@ -9868,7 +9868,7 @@ WHERE c.is_enabled";
     /// </summary>
     private void LogPolicyJobSummary(PolicyJobCensus census, int rearmed, int fired, bool alertsEnabled)
         => _logger?.LogInformation(
-            "Store job health: {Jobs} jobs read (compression {Compression}, refresh {Refresh}, retention {Retention}{Other}), {Dead} dead, {Hung} stuck, {Stale} stale, {Held} held, {Rearmed} re-armed, {Fired} alerted{Disabled}",
+            "Store job health: {Jobs} jobs read (compression {Compression}, refresh {Refresh}, retention {Retention}{Other}), {Dead} dead, {Hung} stuck, {Stale} stale, {Held} held, {Rearmed} re-armed, {Fired} alerted{Disabled} (#3816)",
             census.Total,
             census.Compression,
             census.Refresh,
@@ -9880,7 +9880,7 @@ WHERE c.is_enabled";
             census.Held,
             rearmed,
             fired,
-            alertsEnabled ? "" : ". Alerts are DISABLED, so nothing was judged this pass");
+            alertsEnabled ? "" : " — alerts are DISABLED, so nothing was judged this pass");
 
     /// <summary>
     /// What one pass of <c>TimescaleSupport.StuckPolicyJobsSql</c> read, per family, and what the classifier

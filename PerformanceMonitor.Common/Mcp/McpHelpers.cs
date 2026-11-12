@@ -859,6 +859,10 @@ internal static class McpHelpers
     /// looked at without every reply builder carrying the anchor through its signature.</summary>
     private static readonly AsyncLocal<DateTime?> s_asOfAnchor = new();
 
+    /// <summary>Sets the anchor <see cref="InTheLast"/> reads, for a reply builder whose own async frame did not resolve
+    /// <c>as_of</c> (the anchor <see cref="ResolveAsOf"/> sets in a nested async method does not flow back to its caller).</summary>
+    public static void AnchorAsOf(DateTime? anchor) => s_asOfAnchor.Value = anchor;
+
     /// <summary>
     /// "in the last 24 hours" for a read that ended now, and "in the 24 hours ending at 2026-11-10 12:00 UTC" for a
     /// read anchored at <c>as_of</c>. An empty-window sentence that says "the last 24 hours" about a window that

@@ -472,12 +472,12 @@ public static class DarlingXeSessions
                     }
                     else if (attentionFault is not null)
                     {
-                        logger?.LogWarning("[{Server}] Could not ensure the attention XE session: {Message} - client-timeout collection will record PERMISSIONS until the login is granted ALTER ANY EVENT SESSION",
+                        logger?.LogWarning("[{Server}] Could not ensure the attention XE session: {Message} — client-timeout collection will record PERMISSIONS until the login is granted ALTER ANY EVENT SESSION",
                             server.Config.DisplayName, ex.Message);
                     }
                     else
                     {
-                        logger?.LogError(ex, "[{Server}] Failed to ensure attention XE session: {Message} - client-timeout collection will record SESSION_MISSING until resolved",
+                        logger?.LogError(ex, "[{Server}] Failed to ensure attention XE session: {Message} — client-timeout collection will record SESSION_MISSING until resolved",
                             server.Config.DisplayName, ex.Message);
                     }
                 }
@@ -494,7 +494,7 @@ public static class DarlingXeSessions
                 outcome.AttentionTransient = attentionEnabled;
             }
 
-            logger?.LogError(ex, "[{Server}] Failed to ensure XE sessions: {Message} - the deadlock, blocked-process and client-timeout runs will fail to connect to read them until resolved",
+            logger?.LogError(ex, "[{Server}] Failed to ensure XE sessions: {Message} — the deadlock, blocked-process and client-timeout runs will fail to connect to read them until resolved",
                 server.Config.DisplayName, ex.Message);
         }
 
@@ -503,7 +503,7 @@ public static class DarlingXeSessions
 
     /// <summary>#7164: a transient ensure failure leaves no fault for the run: the session is probably running, and the ensure is asked again in a few minutes.</summary>
     private static void LogTransientCaptureFault(ILogger? logger, ServerRuntime server, string captureName, Exception ex) =>
-        logger?.LogWarning("[{Server}] Could not ensure the {Capture} XE session because of a transient error: {Message} - asking again in {Minutes} minutes",
+        logger?.LogWarning("[{Server}] Could not ensure the {Capture} XE session because of a transient error: {Message} — asking again in {Minutes} minutes",
             server.Config.DisplayName, captureName, ex.Message, (int)TransientRetryInterval.TotalMinutes);
 
     /// <summary>#6893: a denied create is a permission state the run records as PERMISSIONS, so it is a Warning, like the client-timeout session's (#5640). Any other failure is a capture that broke.</summary>
@@ -511,12 +511,12 @@ public static class DarlingXeSessions
     {
         if (fault.IsPermission)
         {
-            logger?.LogWarning("[{Server}] Could not ensure the {Capture} XE session: {Message} - {Collector} collection will record PERMISSIONS until the login is granted ALTER ANY EVENT SESSION",
+            logger?.LogWarning("[{Server}] Could not ensure the {Capture} XE session: {Message} — {Collector} collection will record PERMISSIONS until the login is granted ALTER ANY EVENT SESSION",
                 server.Config.DisplayName, captureName, ex.Message, collectorWord);
         }
         else
         {
-            logger?.LogError(ex, "[{Server}] Failed to ensure {Capture} XE session: {Message} - {Collector} collection will record SESSION_MISSING until resolved",
+            logger?.LogError(ex, "[{Server}] Failed to ensure {Capture} XE session: {Message} — {Collector} collection will record SESSION_MISSING until resolved",
                 server.Config.DisplayName, captureName, ex.Message, collectorWord);
         }
     }
@@ -568,7 +568,7 @@ public static class DarlingXeSessions
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogError(ex, "[{Server}] Failed to enumerate databases for XE sessions: {Message} - the deadlock and blocked-process runs fail the same enumeration until resolved",
+            logger?.LogError(ex, "[{Server}] Failed to enumerate databases for XE sessions: {Message} — the deadlock and blocked-process runs fail the same enumeration until resolved",
                 server.Config.DisplayName, ex.Message);
             return null;
         }
