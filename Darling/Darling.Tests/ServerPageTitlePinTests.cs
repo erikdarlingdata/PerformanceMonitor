@@ -80,7 +80,7 @@ public sealed class ServerPageTitlePinTests
     {
         var js = ServerJs;
 
-        Assert.Contains("resolveFleetCard(res.data.cards || [], server)", js, StringComparison.Ordinal);
+        Assert.Contains("resolveFleetCard(res.data.cards, server)", js, StringComparison.Ordinal);
         Assert.Contains("current = { server, tab: null };", js, StringComparison.Ordinal);
         Assert.Contains("mount(main, [head, whySlot, tabsSlot, reachSlot, gridNode]);", js, StringComparison.Ordinal);
         Assert.DoesNotContain("server = card.display_name", js, StringComparison.Ordinal);

@@ -712,7 +712,10 @@ function loadServerCard(server, onCard) {
     const res = await apiGetFleet();
     if (res.kind !== "data") return onCard(null, null, { kind: "failed" });
 
-    const found = resolveFleetCard(res.data.cards || [], server);
+    /* A roll-up with no cards at all is a store that has not built its fleet yet, not proof that this server is unknown: like a failed
+       read it leaves the page as it is. */
+    if (!(res.data.cards || []).length) return onCard(null, null, { kind: "failed" });
+    const found = resolveFleetCard(res.data.cards, server);
     const card = found.card;
     /* The reason belongs to the RANKING, not to the card, so it travels as its own value rather than being
        stapled onto the card object — and a server outside the ranking has none, which stays a null here
