@@ -419,8 +419,9 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             shown["indexes_not_in_latest_capture"] = await MissingIndexesAsync(postgres, resolved.ServerId, database_name, windowEnd, candidateFacts, unknown, cancellationToken);
             shown["job_name_matches"] = await JobNameMatchesAsync(postgres, resolved.ServerId, windowEnd, cancellationToken);
 
+            /* #8572: the per-plan averages are stored doubles (0.06421052631578948 ms); the reply is rounded as a whole. */
             /* A dictionary, not an anonymous object: "shown" is this read's own section, not a page cut (the cut-key census reads a `shown =` member as one). */
-            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new Dictionary<string, object?>
+            return DarlingMcpWindowNotice.Finish(McpHelpers.RoundFloatNoise(JsonSerializer.Serialize(new Dictionary<string, object?>
             {
                 ["server"] = resolved.DisplayName,
                 ["database_name"] = database_name,
@@ -438,7 +439,7 @@ public sealed class DarlingMcpPlanForcePrecheckTools
                 ["shown"] = shown,
                 ["unknown"] = unknown.Select(u => new { check = u.Check, reason = u.Reason }),
                 ["note"] = "not_blocked means the force can be tried, not that it is safe or will help. Warnings are for the caller's own instructions to weigh."
-            }, McpHelpers.JsonOptions), notice);
+            }, McpHelpers.JsonOptions)), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

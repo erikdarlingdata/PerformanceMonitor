@@ -28,6 +28,101 @@ internal static class McpHelpers
     /// <summary>The <see cref="RoundTo(double?, int)"/> form for a decimal figure.</summary>
     public static decimal? RoundTo(decimal? value, int digits) => value is { } v ? Math.Round(v, digits) : null;
 
+    /// <summary>The most decimals a figure in a reply may carry (#8572). A double that prints with more is float noise (9.531238439784213), not a measurement.</summary>
+    internal const int MaxReplyDecimals = 6;
+
+    /// <summary>
+    /// A reply tree with its float noise rounded away (#8572): every number written with more than <see cref="MaxReplyDecimals"/> decimals is
+    /// rounded by the one rate rule (<see cref="TrendPayloads.RoundRate(double, int)"/>: two places, and two significant digits for a small figure),
+    /// so 9.531238439784213 reads 9.53 and 0.07894736842105263 reads 0.079. For the replies whose figures come out of a drill-down, a fact's
+    /// metadata or a stored document, where no single field is the one to round. A number with six decimals or fewer, an integer, a string and a
+    /// null are left as they are. The node is changed in place and returned.
+    /// </summary>
+    internal static System.Text.Json.Nodes.JsonNode? RoundFloatNoise(System.Text.Json.Nodes.JsonNode? node)
+    {
+        switch (node)
+        {
+            case System.Text.Json.Nodes.JsonObject obj:
+                foreach (var key in obj.Select(p => p.Key).ToList())
+                {
+                    var child = obj[key];
+                    if (RoundedFigure(child) is { } rounded)
+                    {
+                        obj[key] = rounded;
+                    }
+                    else
+                    {
+                        RoundFloatNoise(child);
+                    }
+                }
+
+                break;
+            case System.Text.Json.Nodes.JsonArray array:
+                for (var i = 0; i < array.Count; i++)
+                {
+                    if (RoundedFigure(array[i]) is { } rounded)
+                    {
+                        array[i] = rounded;
+                    }
+                    else
+                    {
+                        RoundFloatNoise(array[i]);
+                    }
+                }
+
+                break;
+        }
+
+        return node;
+    }
+
+    /// <summary><see cref="RoundFloatNoise(System.Text.Json.Nodes.JsonNode?)"/> for a reply that is already text. Text that is not a JSON document is returned as it came.</summary>
+    internal static string RoundFloatNoise(string json)
+    {
+        System.Text.Json.Nodes.JsonNode? root;
+        try
+        {
+            root = System.Text.Json.Nodes.JsonNode.Parse(json);
+        }
+        catch (JsonException)
+        {
+            return json;
+        }
+
+        if (root is not (System.Text.Json.Nodes.JsonObject or System.Text.Json.Nodes.JsonArray))
+        {
+            return json;
+        }
+
+        return RoundFloatNoise(root)!.ToJsonString();
+    }
+
+    /// <summary>The rounded replacement for a number node that carries float noise, or null when the node is not such a number.</summary>
+    private static System.Text.Json.Nodes.JsonValue? RoundedFigure(System.Text.Json.Nodes.JsonNode? node)
+    {
+        if (node is not System.Text.Json.Nodes.JsonValue value || !value.TryGetValue<double>(out var figure) || !double.IsFinite(figure))
+        {
+            return null;
+        }
+
+        var text = figure.ToString("R", CultureInfo.InvariantCulture);
+        var dot = text.IndexOf('.', StringComparison.Ordinal);
+        if (dot < 0)
+        {
+            return null;
+        }
+
+        var end = text.IndexOfAny(['E', 'e'], dot);
+        var decimals = (end < 0 ? text.Length : end) - dot - 1;
+        if (decimals <= MaxReplyDecimals && end < 0)
+        {
+            return null;
+        }
+
+        var rounded = TrendPayloads.RoundRate(figure, 2);
+        return rounded == figure ? null : System.Text.Json.Nodes.JsonValue.Create(rounded);
+    }
+
     /// <summary>
     /// Maximum hours of history allowed (7 days).
     /// </summary>

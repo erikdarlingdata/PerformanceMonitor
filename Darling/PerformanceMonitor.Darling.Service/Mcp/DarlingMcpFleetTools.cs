@@ -91,12 +91,12 @@ public sealed class DarlingMcpFleetTools
         "did. Everything else on the payload was read for this call. Racing several calls with different " +
         "hours_back values buys nothing on that half and costs the window-bound reads N times over: call once " +
         "with the widest window and derive, or sequence the calls. " +
-        "detail defaults to \"summary\" (#4198): the rollup, band counts and worst_servers, WITHOUT the " +
-        "per-server cards array, #4198 measured that array at 67-81 KB on a fleet this size, large enough " +
+        "detail defaults to \"summary\": the rollup, band counts and worst_servers, WITHOUT the " +
+        "per-server cards array, which measured at 67-81 KB on a fleet this size, large enough " +
         "that Claude Code refused it inline outright. Pass detail=\"cards\" for the per-server cards, " +
         "once you already know which server needs it; cards_included says " +
         "which shape you got, and a summary response's cards_note repeats the lever. A cards answer is held " +
-        "to the 32,768-byte response budget (#8568): the cards are ordered worst first, every card by the " +
+        "to the 32,768-byte response budget: the cards are ordered worst first, every card by the " +
         "worst_servers ranking (the needs-attention servers by score, then the rest by score, name breaking a " +
         "tie), so no card on a page ranks below one left out, and as many whole cards as fit are returned. cards_total is how " +
         "many cards the call selected, card_offset where this page starts, cards_returned how many it holds. " +

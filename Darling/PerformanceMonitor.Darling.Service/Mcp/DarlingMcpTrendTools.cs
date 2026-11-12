@@ -931,7 +931,7 @@ public sealed class DarlingMcpTrendTools
                 {
                     return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, EmptyStatus(
                         "empty",
-                        $"No Query Store samples were recorded for {ScopedServer(resolved.DisplayName, databases)} between {head:o} (the oldest hour the corrected rollup has materialized), and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {head:o} is unserved rather than quiet (the rollup has not materialized it and this read no longer ranks the raw slab for it, #2736): run --backfill-rollups to materialize it. Widening hours_back finds newer samples only; it cannot reach the unserved head.",
+                        $"No Query Store samples were recorded for {ScopedServer(resolved.DisplayName, databases)} between {head:o} (the oldest hour the corrected rollup has materialized), and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {head:o} is unserved rather than quiet (the rollup has not materialized it and this read no longer ranks the raw slab for it): run --backfill-rollups to materialize it. Widening hours_back finds newer samples only; it cannot reach the unserved head.",
                         disclosure, databases), cancellationToken, startUtc);
                 }
 
@@ -1286,7 +1286,7 @@ public sealed class DarlingMcpTrendTools
             routing["unserved_before"] = floor.ToString("o");
             routing["unserved_note"] =
                 "The rollup has not materialized history before unserved_before, and this read no longer " +
-                "falls back to ranking the raw slab for it (that rank is the #2736 timeout): points " +
+                "falls back to ranking the raw slab for it (that rank is what timed out): points " +
                 "before that instant are missing, not zero. Run --backfill-rollups to materialize deeper " +
                 "history.";
         }
@@ -1294,7 +1294,7 @@ public sealed class DarlingMcpTrendTools
         return new TrendDisclosure(
             QueryStoreTrendRouting.SourceWord(route), effectiveStart, windowEndUtc, truncated,
             "1 hour before routing.raw_from, per-interval from it",
-            "Points before routing.raw_from are 1-hour buckets from the corrected Query Store rollup (#1849): " +
+            "Points before routing.raw_from are 1-hour buckets from the corrected Query Store rollup: " +
             "bucketed on the COLLECTION hour, deduped at interval grain, with an interval whose " +
             "snapshots straddle an hour boundary contributing to both adjacent buckets. Points at or " +
             "after routing.raw_from are raw Query Store intervals deduped to their final snapshot and placed " +

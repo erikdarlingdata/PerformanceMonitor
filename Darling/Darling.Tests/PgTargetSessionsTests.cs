@@ -1709,7 +1709,7 @@ public sealed class PgTargetSessionsTests
 
                 Assert.Equal(1.25, card.GetProperty("severity").GetDouble(), precision: 9);
                 Assert.Equal(PgTargetSources.SessionsSource, card.GetProperty("category").GetString());
-                Assert.Equal(90 / 97.0, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9);
+                Assert.Equal(0.93, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9); /* 90 / 97 as the reply writes it (#8572: two places) */
 
                 var advice = card.GetProperty("advice");
                 Assert.Equal("Connections peaked at 93% of the usable ceiling (90 of 97): PostgreSQL refuses the next one, it does not queue it", advice.GetProperty("headline").GetString());
@@ -1786,7 +1786,7 @@ public sealed class PgTargetSessionsTests
                 var findings = root.GetProperty("findings").EnumerateArray().ToList();
                 var card = Assert.Single(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.ConnectionSaturation);
                 Assert.Equal(1.0, card.GetProperty("severity").GetDouble(), precision: 9);
-                Assert.Equal(93 / 97.0, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9);
+                Assert.Equal(0.96, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9); /* 93 / 97 as the reply writes it (#8572: two places) */
                 var advice = card.GetProperty("advice");
                 Assert.Equal("Connections peaked at 96% of the usable ceiling (93 client backends of 97): PostgreSQL refuses the next one, it does not queue it", advice.GetProperty("headline").GetString());
                 var investigation = advice.GetProperty("investigation").GetString()!;
@@ -1819,7 +1819,7 @@ public sealed class PgTargetSessionsTests
                 var findings = root.GetProperty("findings").EnumerateArray().ToList();
                 var card = Assert.Single(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.ConnectionSaturation);
                 Assert.Equal(1.0, card.GetProperty("severity").GetDouble(), precision: 9);
-                Assert.Equal(93 / 97.0, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9);
+                Assert.Equal(0.96, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9); /* 93 / 97 as the reply writes it (#8572: two places) */
                 var advice = card.GetProperty("advice");
                 Assert.Equal("Connections peaked at 96% of the usable ceiling (93 client backends of 97): PostgreSQL refuses the next one, it does not queue it", advice.GetProperty("headline").GetString());
                 var investigation = advice.GetProperty("investigation").GetString()!;
@@ -2198,7 +2198,7 @@ FROM generate_series(0, $6) AS n");
                 var findings = root.GetProperty("findings").EnumerateArray().ToList();
                 var card = Assert.Single(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.ConnectionSaturation);
                 Assert.Equal(1.55, card.GetProperty("severity").GetDouble(), precision: 9);
-                Assert.Equal(90 / 97.0, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9);
+                Assert.Equal(0.93, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9); /* 90 / 97 as the reply writes it (#8572: two places) */
                 var investigation = card.GetProperty("advice").GetProperty("investigation").GetString()!;
                 Assert.Contains("Connections rose to ", investigation, StringComparison.Ordinal);
                 Assert.Contains("this hour of the week's norm while throughput stayed at its norm, arrivals are queueing, not working", investigation, StringComparison.Ordinal);

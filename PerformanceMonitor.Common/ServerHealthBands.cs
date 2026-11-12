@@ -3993,7 +3993,7 @@ namespace PerformanceMonitor.Common
                 && pressure.PeakCollectorPeakRunMs >= pressure.PeakCollectorAvgDurationMs * BimodalTailRatio
                 ? string.Format(
                     CultureInfo.InvariantCulture,
-                    " Its MEAN run is only {0:N0} ms, so its cost is bimodal and any figure built from that mean — the sustained verdict, the heaviest_collectors ranking, and this cycle before #2460 — understates one body by {1:N0} ms.",
+                    " Its MEAN run is only {0:N0} ms, so its cost is bimodal and any figure built from that mean (the sustained verdict, the heaviest_collectors ranking, and the cycle's own cost) understates one body by {1:N0} ms.",
                     Math.Round(pressure.PeakCollectorAvgDurationMs),
                     Math.Round(pressure.PeakCollectorPeakRunMs - pressure.PeakCollectorAvgDurationMs))
                 : string.Empty;
