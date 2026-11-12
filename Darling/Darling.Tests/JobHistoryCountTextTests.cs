@@ -85,7 +85,7 @@ public sealed class JobHistoryCountTextTests
             handler);
 
         /* The load records the read's row count (all.Count, before the Status/Category/column filters) for the handler. */
-        var load = CSharpSourceWalker.BraceBalanced(stripped, stripped.IndexOf('{', stripped.IndexOf("private async Task LoadJobsAsync()", StringComparison.Ordinal)));
+        var load = CSharpSourceWalker.BraceBalanced(stripped, stripped.IndexOf('{', stripped.IndexOf("private async Task LoadJobsAsync(", StringComparison.Ordinal)));
         Assert.Matches(@"_lastReadRowCount\s*=\s*all\s*\.\s*Count\s*;", load);
     }
 
