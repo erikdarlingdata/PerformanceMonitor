@@ -29,7 +29,8 @@ namespace PerformanceMonitorLite.Tests;
 /// shared STA thread with the theme loaded over a store of its own, runs the tab's real Collection Health refresh, and reads what
 /// the card draws.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class CollectionCyclesCardWindowTests
 {
     private const string PreLoginHandshake =

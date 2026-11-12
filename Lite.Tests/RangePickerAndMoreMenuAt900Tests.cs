@@ -36,7 +36,8 @@ namespace Lite.Tests;
 /// 900x600 on a monitor (a popup is placed against the screen, so an off-screen window cannot show where one opens) and read
 /// from what rendered.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class RangePickerAndMoreMenuAt900Tests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

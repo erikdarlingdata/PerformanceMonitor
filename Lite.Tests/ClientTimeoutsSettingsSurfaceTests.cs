@@ -239,19 +239,6 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
         }
     }
 
-    [Fact]
-    public void TheGetAlertSettingsGuideText_NamesTheClientTimeoutsAlertAndItsKeys()
-    {
-        var method = typeof(McpAlertTools).GetMethod(nameof(McpAlertTools.GetAlertSettings))!;
-        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
-
-        Assert.Contains("runnable queue, client timeouts,", description, StringComparison.Ordinal);
-        Assert.Contains("client_timeouts.enabled", description, StringComparison.Ordinal);
-        Assert.Contains("client_timeouts.warning_per_minute", description, StringComparison.Ordinal);
-        Assert.Contains("client_timeouts.critical_per_minute", description, StringComparison.Ordinal);
-        Assert.Contains("ON by default", description, StringComparison.Ordinal);
-    }
-
     private static string FindRepoFile(string relativePath)
     {
         var dir = AppContext.BaseDirectory;

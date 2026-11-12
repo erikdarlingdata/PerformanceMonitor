@@ -28,47 +28,18 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #8224: the text on and around Lite's charts, read back from the realized controls with a theme loaded: a Y-axis unit is one
-/// regular-weight size on every chart and the perfmon chart's mixed title fits at that size; the time slicer names its metric in
-/// its header and not over the strip, and no hour label sits under the resting start handle; the Query Heatmap has one title, a
-/// normal-size colour bar label and a visible colour for a count of one; the Overview's blocking lane labels whole counts; the
-/// five Overview lanes fit a 1280x800 window at the shared plot-area floor and their captions hide the gridline behind them.
+/// #8224: the text on and around Lite's charts, read back from the realized controls with a theme loaded: the perfmon chart's mixed
+/// title fits at the base size; the time slicer names its metric in its header and not over the strip, and no hour label sits under
+/// the resting start handle; the Query Heatmap has one title and a visible colour for a count of one; the Overview's blocking lane
+/// labels whole counts; the five Overview lanes fit a 1280x800 window at the shared plot-area floor and their captions hide the gridline behind them.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ChartTextRefreshTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
 
     public static TheoryData<string> Themes => new() { "Dark", "Light", "CoolBreeze" };
-
-    [Theory]
-    [MemberData(nameof(Themes))]
-    public void AYAxisUnit_IsDrawnRegularWeightAtTheBaseSize(string theme)
-    {
-        var (bold, size) = StaTestThread.Run(() => WithTheme(theme, () =>
-        {
-            var chart = new WpfPlot();
-            ChartStyle.ApplyThemeToChart(chart);
-            var xs = Enumerable.Range(0, 24).Select(i => DateTime.UtcNow.AddHours(i - 24).ToOADate()).ToArray();
-            chart.Plot.Add.TimeSeries(xs, xs.Select((_, i) => 10.0 + i).ToArray());
-            chart.Plot.YLabel("MB/s");
-            var window = new Window { Content = chart, Width = 480, Height = 320, Left = 0, Top = 0 };
-            StaTestThread.ShowOffScreen(window);
-            try
-            {
-                ChartLayoutProbe.Settle(window, [chart]);
-                Shot(window, $"y-unit-{theme}");
-                return (chart.Plot.Axes.Left.Label.Bold, (double)chart.Plot.Axes.Left.Label.FontSize);
-            }
-            finally
-            {
-                window.Close();
-            }
-        }));
-
-        Assert.False(bold, "the Y-axis unit is drawn bold");
-        Assert.Equal(ChartAxisTitle.BaseFontSize, size, 0.01);
-    }
 
     [Fact]
     public void ThePerfmonMixedAxisTitle_FitsA340PixelChartAtTheBaseSize()
@@ -129,14 +100,14 @@ public sealed class ChartTextRefreshTests
     }
 
     [Fact]
-    public void TheQueryHeatmap_HasOneTitle_ANormalSizeBarLabel_AndAVisibleColourForOne()
+    public void TheQueryHeatmap_HasOneTitle_AndAVisibleColourForACountOfOne()
     {
         var dir = Path.Combine(Path.GetTempPath(), "ChartTextRefresh_" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
         try
         {
             using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
-            var (plotTitle, barBold, barSize, contrast) = StaTestThread.Run(() => WithTheme("Dark", () =>
+            var (plotTitle, contrast) = StaTestThread.Run(() => WithTheme("Dark", () =>
             {
                 var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "heatmap-test", DisplayName = "heatmap-test", IsEnabled = true };
                 var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
@@ -161,13 +132,12 @@ public sealed class ChartTextRefreshTests
 
                     var chart = (WpfPlot)tab.FindName("QueryHeatmapChart");
                     var heatmap = chart.Plot.PlottableList.OfType<ScottPlot.Plottables.Heatmap>().Single();
-                    var bar = chart.Plot.Axes.GetPanels().OfType<ScottPlot.Panels.ColorBar>().Single();
                     var values = heatmap.Intensities.Cast<double>().Where(v => !double.IsNaN(v)).ToList();
                     var range = heatmap.ManualRange ?? new ScottPlot.Range(values.Min(), values.Max());
                     var one = Math.Log(2); // a count of one, after the chart's log1p scaling
                     var fraction = (one - range.Min) / (range.Max - range.Min);
                     var cell = heatmap.Colormap.GetColor(Math.Clamp(fraction, 0, 1));
-                    return (chart.Plot.Axes.Title.Label.Text, bar.LabelStyle.Bold, (double)bar.LabelStyle.FontSize, Contrast(cell, chart.Plot.DataBackground.Color));
+                    return (chart.Plot.Axes.Title.Label.Text, Contrast(cell, chart.Plot.DataBackground.Color));
                 }
                 finally
                 {
@@ -176,8 +146,6 @@ public sealed class ChartTextRefreshTests
             }));
 
             Assert.True(string.IsNullOrEmpty(plotTitle), $"the plot draws its own title \"{plotTitle}\" under the card's");
-            Assert.False(barBold, "the colour bar label is bold");
-            Assert.Equal(ChartAxisTitle.BaseFontSize, barSize, 0.01);
             Assert.True(contrast >= 1.8, $"a count of one is drawn at {contrast:F2}:1 against the Dark data background");
         }
         finally

@@ -31,7 +31,8 @@ namespace PerformanceMonitorLite.Tests;
 /// scroll bar while it holds no rows; Job History trims Job and Step; the Wait Stats picker trims a long wait type and never scrolls
 /// sideways at the 900x600 minimum window. The Darling Viewer's twin is ViewerGridCellsTrimOrFitTests in Darling.Tests.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class GridCellsTrimOrFitTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

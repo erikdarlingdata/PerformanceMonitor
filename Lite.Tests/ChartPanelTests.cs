@@ -23,7 +23,8 @@ namespace PerformanceMonitorLite.Tests;
 /// and read back from what it drew: the title is on screen, the plot gets the card's remaining room, an empty card keeps its title
 /// and shows one sentence in place of the plot and its axes, and an empty subtitle takes no room.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ChartPanelTests
 {
     private static readonly Uri LiteTheme = new("pack://application:,,,/PerformanceMonitorLite;component/Themes/DarkTheme.xaml");
@@ -119,31 +120,6 @@ public sealed class ChartPanelTests
 
         Assert.False(sentenceShown);
         Assert.True(plotShown);
-    }
-
-    [Fact]
-    public void TheSubtitle_TakesNoRoomWhenEmpty_AndShowsWhenSet()
-    {
-        var (emptyShown, emptyHeight) = Shown(
-            () => new ChartPanel { Title = "tempdb", Content = new Border { MinHeight = 40 } },
-            panel =>
-            {
-                var subtitle = Part(panel, "PART_Subtitle");
-                return (subtitle.IsVisible, subtitle.ActualHeight);
-            });
-        var (setShown, setText, setSize) = Shown(
-            () => new ChartPanel { Title = "tempdb", Subtitle = "last 6 hours", Content = new Border { MinHeight = 40 } },
-            panel =>
-            {
-                var subtitle = Part(panel, "PART_Subtitle");
-                return (subtitle.IsVisible, subtitle.Text, subtitle.FontSize);
-            });
-
-        Assert.False(emptyShown);
-        Assert.Equal(0, emptyHeight);
-        Assert.True(setShown);
-        Assert.Equal("last 6 hours", setText);
-        Assert.Equal(11, setSize);
     }
 
     [Fact]

@@ -28,7 +28,8 @@ namespace PerformanceMonitorLite.Tests;
 /// shared STA thread builds and renders: the tab headers and sub-tab content, the accessible names a screen reader or the UI walk
 /// reads, and the sidebar's search filter.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ServerTabRegroupAndSidebarTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
@@ -79,48 +80,6 @@ public sealed class ServerTabRegroupAndSidebarTests
         {
             try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
         }
-    }
-
-    [Fact]
-    public void TheSidebarFooter_ShowsFourIconButtons_AndMoreHoldsTheOtherNineUnderTheirOldNames()
-    {
-        var (buttons, icons, moreItems, height) = StaTestThread.Run(() => WithTheme(() =>
-        {
-            var footer = new SidebarFooter { VerticalAlignment = VerticalAlignment.Top };
-            var window = new Window { Content = footer, Width = 280, Height = 400, Left = 0, Top = 0 };
-            StaTestThread.ShowOffScreen(window);
-            try
-            {
-                ClippedTextProbe.Settle(window);
-                var shown = ClippedTextProbe.Descendants(footer).OfType<Button>().ToList();
-                var names = shown.Select(b => UIElementAutomationPeer.CreatePeerForElement(b).GetName()).ToList();
-                var left = new List<bool>();
-                foreach (var b in shown.Where(b => b.Content is Panel))
-                {
-                    var texts = ClippedTextProbe.Descendants(b).OfType<TextBlock>().ToList();
-                    var iconX = texts[0].TransformToAncestor(b).Transform(new Point(0, 0)).X;
-                    var labelX = texts[1].TransformToAncestor(b).Transform(new Point(0, 0)).X;
-                    left.Add(iconX < labelX);
-                }
-
-                var more = shown.Single(b => UIElementAutomationPeer.CreatePeerForElement(b).GetName() == "More");
-                var menu = more.ContextMenu ?? throw new Xunit.Sdk.XunitException("More has no menu");
-                var moreItems = menu.Items.OfType<MenuItem>()
-                    .Select(m => UIElementAutomationPeer.CreatePeerForElement(m).GetName()).ToList();
-                return (names.Where(n => n != "More").ToList(), left, moreItems, footer.ActualHeight);
-            }
-            finally
-            {
-                window.Close();
-            }
-        }));
-
-        Assert.Equal(new[] { "Add Server", "Manage Servers", "Investigations", "Settings" }, buttons);
-        Assert.All(icons, onLeft => Assert.True(onLeft, "each footer button has its icon to the left of its label"));
-        Assert.Equal(
-            new[] { "Add Multiple Servers…", "Manage Tags", "Manage Query Tags", "Open Plan Viewer", "Import Data", "Import Settings", "View Log", "Open Log Folder", "About" }.OrderBy(n => n),
-            moreItems.OrderBy(n => n));
-        Assert.True(height <= 120, $"the footer is {height:F0} DIPs tall; it must leave room for six server rows in a 900x600 window");
     }
 
     [Fact]

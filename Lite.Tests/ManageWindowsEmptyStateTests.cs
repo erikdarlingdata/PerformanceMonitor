@@ -23,7 +23,8 @@ namespace PerformanceMonitorLite.Tests;
 /// Mute Rules with no rules, and Credential Profiles with no profiles. Each window is the real one, rendered with the theme. The
 /// Manage Mute Rules message keeps to one line at the window's own size, so no word ends up alone on a line of its own.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ManageWindowsEmptyStateTests
 {
     [Fact]

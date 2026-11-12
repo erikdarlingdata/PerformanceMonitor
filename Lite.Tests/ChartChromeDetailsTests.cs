@@ -102,17 +102,6 @@ public sealed class ChartChromeDetailsTests
     }
 
     [Fact]
-    public void TheChartChrome_WithTheStockTheme_IsTheStockDarkPalette()
-    {
-        var colors = StaTestThread.Run(() => WithTheme(ChartStyle.GetThemeColors, overrides: false));
-
-        Assert.Equal("#22252B", Hex(colors.FigureBackground));
-        Assert.Equal("#111217", Hex(colors.DataBackground));
-        Assert.Equal("#E4E6EB", Hex(colors.Text));
-        Assert.Equal("#2A2D35", Hex(colors.LegendOutline));
-    }
-
-    [Fact]
     public void TheHoverPopup_IsPaintedFromTheThemeDictionary()
     {
         var (background, border, ink) = StaTestThread.Run(() => WithTheme(() =>

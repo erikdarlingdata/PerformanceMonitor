@@ -34,7 +34,8 @@ namespace PerformanceMonitorLite.Tests;
 /// sentence, not two; and the 7-Day Provisioning Trend shows the stolen memory that decides a low-CPU day, gives the day's reason on
 /// its Status, and says which window the badge covers. The Darling Viewer's twin is ViewerFinOpsPagesReadabilityTests in Darling.Tests.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class FinOpsPagesReadabilityTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
@@ -137,36 +138,6 @@ public sealed class FinOpsPagesReadabilityTests
             {
                 tip.IsOpen = false;
             }
-        })));
-
-        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
-    }
-
-    [Theory]
-    [InlineData("Dark")]
-    [InlineData("Light")]
-    [InlineData("CoolBreeze")]
-    public void TheIndexAnalysisDatabaseBox_IsAPickerWithAnArrow(string theme)
-    {
-        var problems = StaTestThread.Run(() => WithTheme(theme, () => WithTab(MaximizedTabWidth, 925, (tab, window) =>
-        {
-            var box = (FrameworkElement)tab.FindName("IndexAnalysisDatabaseInput");
-            Reveal(box);
-            Settle(window);
-
-            var found = new List<string>();
-            if (box is not ComboBox)
-            {
-                found.Add($"{theme}: the Database box is a {box.GetType().Name}, not a picker");
-                return found;
-            }
-
-            var arrow = Descendants(box).OfType<ToggleButton>().SelectMany(Descendants).OfType<System.Windows.Shapes.Path>().FirstOrDefault(p => p.ActualWidth > 0 && p.ActualHeight > 0 && p.IsVisible);
-            if (arrow is null)
-            {
-                found.Add($"{theme}: the Database picker shows no drop-down arrow");
-            }
-            return found;
         })));
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));

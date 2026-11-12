@@ -29,7 +29,8 @@ namespace PerformanceMonitorLite.Tests;
 /// unloaded is collectable, that a theme switch while it is unloaded leaves its tooltip alone, and that the tooltip catches up with the
 /// theme when the control loads again.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class LanesTooltipThemeLifetimeTests
 {
     private static Uri ThemeUri(string name) => new($"pack://application:,,,/PerformanceMonitorLite;component/Themes/{name}Theme.xaml");
