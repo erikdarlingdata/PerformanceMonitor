@@ -225,6 +225,10 @@ internal sealed class ScratchPostgres : IAsyncDisposable
                 : plainPostgres ? $"CREATE DATABASE \"{databaseName}\" TEMPLATE template0"
                 : $"CREATE DATABASE \"{databaseName}\"",
                 admin.Connection);
+            /* CREATE DATABASE ... TEMPLATE waits for the cluster to finish other databases' creates and drops, and with a
+               parallel suite on one cluster it ran past Npgsql's default 30 seconds and failed a test whose question was not
+               the create (#8699). The scheduler start call in CreateAsync allows 120 seconds for the same reason. */
+            create.CommandTimeout = 120;
             await create.ExecuteNonQueryAsync(cancellationToken);
 
             /* The store's database-default search_path, set before any test connection exists (#8231). MigrateAsync sets the
