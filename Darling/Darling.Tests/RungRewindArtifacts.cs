@@ -787,6 +787,8 @@ DROP TABLE IF EXISTS collect.schema_capture_passes;"),
             """),
         // V263 (#8549): the oldest-run rollup under the Job History note. The probe's sentinel is the relation itself, so the rewind drops whichever shape stands and a re-run of V263 or the ensure sweep makes it again. Safe on a store that never had it.
         new(263, "hasJobHistoryOldestDaily", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.JobHistoryOldestDailyView)),
+        // V264 (#8691): the per-hour drop counts of the oversized-plan backlog. A new table; the rewind drops it and a re-run of V264 makes it again.
+        new(264, "hasOversizedPlanBacklogDropCounts", "DROP TABLE IF EXISTS collect.oversized_plan_backlog_drops;"),
     ];
 
     /// <summary>

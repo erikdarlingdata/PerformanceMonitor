@@ -202,9 +202,10 @@ internal static class OversizedPlanBacklogSweep
     internal const int MaxRowsDroppedPerServerPerTick = 20_000;
 
     /// <summary>
-    /// #8567: how long a row dropped unfetched stays in the table: one day, the day
-    /// <c>get_oversized_plan_backlog</c> counts <c>rows_dropped_last_day</c> over, so every drop of that day is
-    /// still there to count and none outlives it.
+    /// #8567: the day <c>get_oversized_plan_backlog</c> counts <c>rows_dropped_last_day</c> over. Since #8691 it is how long the
+    /// trim keeps its per-hour drop counts (<c>OversizedPlanBacklog.PurgeDropCountsSql</c>), and how long a row an older build
+    /// dropped and held stays in the table (<c>OversizedPlanBacklog.PurgeDroppedSql</c>), so every drop of that day is still
+    /// there to count and none outlives it.
     /// </summary>
     internal static readonly TimeSpan DroppedRowHold = TimeSpan.FromDays(1);
 
@@ -679,11 +680,12 @@ WHERE tqp.query_plan IS NOT NULL;";
     }
 
     /// <summary>
-    /// #8567: holds one server's waiting rows to what the claim can serve, before the claim reads them. Three
-    /// statements, each its own transaction: remove the rows dropped more than <see cref="DroppedRowHold"/> ago,
-    /// drop every never-tried row last sighted before the newest sighting of its query, then drop the least
-    /// recently sighted never-tried rows past <see cref="PendingRowsPerServerCap"/>. A drop is a stamp, not a
-    /// delete, so the read can count it for a day and a re-sighting can undo it.
+    /// #8567: holds one server's waiting rows to what the claim can serve, before the claim reads them. Four
+    /// statements, each its own transaction: remove the rows an older build dropped and held more than <see cref="DroppedRowHold"/>
+    /// ago, remove the drop counts older than that (#8691), drop every never-tried row last sighted before the newest sighting of
+    /// its query, then drop the least recently sighted never-tried rows past <see cref="PendingRowsPerServerCap"/>. A drop deletes
+    /// the row and adds it to the hour's count in the same statement (#8691), so the read counts the day's drops without the
+    /// rows, and a later sighting of the plan inserts it again.
     ///
     /// <para>Never throws, short of a shutdown: a trim that fails is counted on the tally, which makes the pass's
     /// run record a WARNING that says so, and the claim then runs on the backlog as it stands. Reaches no
@@ -714,6 +716,15 @@ WHERE tqp.query_plan IS NOT NULL;";
                 await purge.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
 
+            await using (var purgeCounts = new NpgsqlCommand(OversizedPlanBacklog.PurgeDropCountsSql, connection)
+            {
+                CommandTimeout = OversizedPlanBacklog.CommandTimeoutSeconds,
+            })
+            {
+                purgeCounts.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now - DroppedRowHold });
+                await purgeCounts.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             int superseded;
             await using (var supersede = new NpgsqlCommand(OversizedPlanBacklog.SupersedeSql, connection)
             {
@@ -722,8 +733,9 @@ WHERE tqp.query_plan IS NOT NULL;";
             {
                 supersede.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
                 supersede.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now });
+                supersede.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now - DroppedRowHold });
                 supersede.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = MaxRowsDroppedPerServerPerTick });
-                superseded = await supersede.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                superseded = Convert.ToInt32(await supersede.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
             }
 
             if (tally is not null)
@@ -744,9 +756,10 @@ WHERE tqp.query_plan IS NOT NULL;";
 
                 cap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
                 cap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now });
+                cap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now - DroppedRowHold });
                 cap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = PendingRowsPerServerCap });
                 cap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = MaxRowsDroppedPerServerPerTick });
-                overCap = await cap.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                overCap = Convert.ToInt32(await cap.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
             }
 
             if (tally is not null)

@@ -45,15 +45,17 @@ namespace PerformanceMonitor.Darling.Storage;
 /// (<c>OversizedPlanBacklogSweep.MaxPlansPerServerPerTick</c>) drains them. So each pass first drops, unfetched,
 /// the never-tried rows no claim is going to serve (#8567): every row last sighted before the newest sighting
 /// of its query (<see cref="SupersedeSql"/>), then the least recently sighted rows past the pending cap
-/// (<see cref="DropOverCapSql"/>). A dropped row keeps its place for a day so the read can count it, and then
-/// leaves (<see cref="PurgeDroppedSql"/>).</para>
+/// (<see cref="DropOverCapSql"/>). A dropped row is deleted by the statement that drops it, which adds it to that hour's
+/// count in <c>collect.oversized_plan_backlog_drops</c> (<see cref="CreateDropCountsTableSql"/>, #8691), so the read counts the
+/// day's drops from a few rows per server instead of holding millions of rows for a day to count them.</para>
 ///
 /// <para><b>Two indexes: the primary key, and one for the purge.</b> The key's leading column is
 /// <c>server_id</c>, which is the leading predicate of every access path — the sweep's trim and claim, the
 /// read-surface fallback and the sighting upsert — so each one is served or is a scan of one server's rows, which
 /// the trim holds to the pending cap plus what the sweep itself stamped inside the horizon.
 /// <c>idx_oversized_plan_backlog_dropped</c> (V258) is on <c>(server_id, expired_at)</c> and partial to the rows
-/// dropped unfetched, so <see cref="PurgeDroppedSql"/> reads the rows it deletes and not the server's every row.
+/// dropped unfetched, so <see cref="PurgeDroppedSql"/> reads the rows it deletes and not the server's every row. Since #8691 no
+/// build of this one leaves such a row: the index serves the purge of the rows an older build dropped and held.
 /// It names no column a re-sighting changes on a waiting row, so the upsert stays a heap-only update. An index on
 /// <c>last_seen_at</c> would end that for every re-sighting, which is why retention's daily DELETE has none. An
 /// index chosen for an ORDER BY nobody has measured would be a guess; the ORDER BYs below name the index to add if
@@ -140,6 +142,38 @@ CREATE TABLE IF NOT EXISTS collect.oversized_plan_backlog
         sql_handle,
         statement_start_offset,
         statement_end_offset
+    )
+);";
+
+    /// <summary>#8691: the per-hour drop counts, schema-qualified for the reason <see cref="TableName"/> is.</summary>
+    public const string DropCountsTableName = "collect.oversized_plan_backlog_drops";
+
+    /// <summary>
+    /// #8691: the DDL of the drop counts, owned here for the reason <see cref="CreateTableSql"/> is: the V264 rung concatenates it.
+    ///
+    /// <para>One row per server, collector and UTC hour. <c>rows_dropped</c> is how many rows the trim dropped in that hour, and
+    /// <c>rows_first_seen</c> is how many of the dropped rows were first sighted in that hour, which is what keeps a row the trim
+    /// deleted in the read's <c>rows_added_last_day</c>. The trim writes both in the statement that deletes the rows
+    /// (<see cref="SupersedeSql"/>, <see cref="DropOverCapSql"/>), and <see cref="PurgeDropCountsSql"/> removes the hours before the
+    /// day the read counts, so the table holds about a day of hours per server and collector. The primary key serves the read's
+    /// sums and the purge.</para>
+    ///
+    /// <para>The rows the trim used to keep for that day were 90 percent of the backlog table on a field store (5.17 million of 5.75
+    /// million), and every read of the backlog scanned them only to count them.</para>
+    /// </summary>
+    public const string CreateDropCountsTableSql = @"
+CREATE TABLE IF NOT EXISTS collect.oversized_plan_backlog_drops
+(
+    server_id integer NOT NULL,
+    collector_name text NOT NULL,
+    hour_start timestamp NOT NULL,
+    rows_dropped bigint NOT NULL DEFAULT 0,
+    rows_first_seen bigint NOT NULL DEFAULT 0,
+    CONSTRAINT pk_oversized_plan_backlog_drops PRIMARY KEY
+    (
+        server_id,
+        collector_name,
+        hour_start
     )
 );";
 
@@ -331,10 +365,29 @@ SET last_attempt_at = $7,
         AND   last_attempt_at IS NULL";
 
     /// <summary>
-    /// The tail of both trim statements: stamps the listed rows, and only those of them still waiting untried,
-    /// so a row the sweep attempted or a collector re-sighted in between is left as it now is.
+    /// #8691: the head of both trim statements: the rows they drop are deleted, and the statement goes on to count them
+    /// (<see cref="DeleteAndCountDroppedRows"/>). Until #8691 a drop stamped <c>expired_at</c> and the row stayed a day so the read
+    /// could count it. A held row never kept a plan from coming back: a re-sighting cleared the stamp and the row waited again, so
+    /// a deleted row's re-sighting inserts it again as a new pending row and the backlog ends the same, except that the row's first
+    /// sighting is the new one.
     /// </summary>
-    private const string StampDroppedRows = @") AS dropped
+    private const string DeleteDroppedRowsHead = @"
+WITH gone AS
+(
+DELETE FROM collect.oversized_plan_backlog AS b
+USING
+(";
+
+    /// <summary>
+    /// #8691: the tail of both trim statements. Deletes the listed rows, only those of them still waiting untried, so a row the
+    /// sweep attempted in between is left as it now is, and in the same statement adds them to the hour's counts
+    /// (<see cref="CreateDropCountsTableSql"/>): every row to the hour of $2, the pass's clock, and each row first sighted at or
+    /// after the hour $3 falls in to the hour of that first sighting. $3 is the start of the day the counts are kept for
+    /// (<c>OversizedPlanBacklogSweep.DroppedRowHold</c> before $2): a row first sighted before it can no longer count in any read's
+    /// day. One statement, so a drop is never deleted without being counted, nor counted without being deleted. It returns how many
+    /// rows it dropped.
+    /// </summary>
+    private const string DeleteAndCountDroppedRows = @") AS dropped
 WHERE b.server_id = $1
 AND   b.collector_name = dropped.collector_name
 AND   b.plan_handle = dropped.plan_handle
@@ -343,12 +396,52 @@ AND   b.statement_start_offset = dropped.statement_start_offset
 AND   b.statement_end_offset = dropped.statement_end_offset
 AND   b.captured_at IS NULL
 AND   b.expired_at IS NULL
-AND   b.last_attempt_at IS NULL;";
+AND   b.last_attempt_at IS NULL
+RETURNING
+    b.collector_name,
+    b.first_seen_at
+),
+counted AS
+(
+INSERT INTO collect.oversized_plan_backlog_drops AS d
+(server_id, collector_name, hour_start, rows_dropped, rows_first_seen)
+SELECT
+    $1,
+    c.collector_name,
+    c.hour_start,
+    sum(c.rows_dropped),
+    sum(c.rows_first_seen)
+FROM
+(
+    SELECT
+        g.collector_name,
+        date_trunc('hour', $2::timestamp) AS hour_start,
+        1 AS rows_dropped,
+        0 AS rows_first_seen
+    FROM gone AS g
+    UNION ALL
+    SELECT
+        g.collector_name,
+        date_trunc('hour', g.first_seen_at),
+        0,
+        1
+    FROM gone AS g
+    WHERE g.first_seen_at >= date_trunc('hour', $3::timestamp)
+) AS c
+GROUP BY
+    c.collector_name,
+    c.hour_start
+ON CONFLICT ON CONSTRAINT pk_oversized_plan_backlog_drops DO UPDATE SET
+    rows_dropped = d.rows_dropped + EXCLUDED.rows_dropped,
+    rows_first_seen = d.rows_first_seen + EXCLUDED.rows_first_seen
+)
+SELECT count(*)::integer
+FROM gone;";
 
     /// <summary>
     /// #8567: drops, unfetched, every never-tried pending row of one server ($1) that was last sighted before
-    /// the newest sighting among the never-tried pending rows of its query, stamping <c>expired_at</c> with $2,
-    /// at most $3 rows.
+    /// the newest sighting among the never-tried pending rows of its query, at most $4 rows, and counts them at $2's hour
+    /// (#8691: <see cref="DeleteAndCountDroppedRows"/>, which also says what $3 is). Returns how many it dropped.
     ///
     /// <para><b>One query, many keys.</b> Plan-cache churn re-keys one query's plan under a fresh
     /// <c>plan_handle</c> every time it recompiles, and an ad hoc workload gives one <c>query_hash</c> a fresh
@@ -365,16 +458,12 @@ AND   b.last_attempt_at IS NULL;";
     ///
     /// <para>A row with no <c>query_hash</c> is left alone: the module-grain collector describes none, and its
     /// fallbacks key on the handles, so each such row is a plan of its own. A dropped row is not gone for good:
-    /// a re-sighting clears the stamp (<see cref="UpsertSightingSql"/>) and it waits again.</para>
+    /// a later sighting inserts it again (<see cref="UpsertSightingSql"/>) and it waits again.</para>
     ///
     /// <para>Oldest sighting first under the limit, so a server far over it sheds its stalest rows first and
     /// the rest on later passes.</para>
     /// </summary>
-    public const string SupersedeSql = @"
-UPDATE collect.oversized_plan_backlog AS b
-SET expired_at = $2
-FROM
-(
+    public const string SupersedeSql = DeleteDroppedRowsHead + @"
     SELECT
         " + RowKeyColumns + @"
     FROM
@@ -393,12 +482,13 @@ FROM
     ) AS sighted
     WHERE last_seen_at < newest_sighting_at
     ORDER BY last_seen_at, " + RowKeyColumns + @"
-    LIMIT $3
-" + StampDroppedRows;
+    LIMIT $4
+" + DeleteAndCountDroppedRows;
 
     /// <summary>
-    /// #8567: drops, unfetched, the never-tried pending rows of one server ($1) past the pending cap ($3), least
-    /// recently sighted first, stamping <c>expired_at</c> with $2, at most $4 rows.
+    /// #8567: drops, unfetched, the never-tried pending rows of one server ($1) past the pending cap ($4), least
+    /// recently sighted first, at most $5 rows, and counts them at $2's hour (#8691: <see cref="DeleteAndCountDroppedRows"/>,
+    /// which also says what $3 is). Returns how many it dropped.
     ///
     /// <para>The claim takes never-tried rows largest first, so on a server whose distinct plans arrive faster
     /// than the claim drains them a small plan is never reached, and nothing but the retention horizon removed
@@ -407,11 +497,7 @@ FROM
     /// because a collector only sees a row while its plan is in cache, so those are the handles most likely to
     /// still resolve.</para>
     /// </summary>
-    public const string DropOverCapSql = @"
-UPDATE collect.oversized_plan_backlog AS b
-SET expired_at = $2
-FROM
-(
+    public const string DropOverCapSql = DeleteDroppedRowsHead + @"
     SELECT
         " + RowKeyColumns + @"
     FROM
@@ -427,18 +513,18 @@ FROM
         WHERE server_id = $1
         AND   " + NeverTriedPendingPredicate + @"
     ) AS ranked
-    WHERE sighting_rank > $3
+    WHERE sighting_rank > $4
     ORDER BY sighting_rank DESC
-    LIMIT $4
-" + StampDroppedRows;
+    LIMIT $5
+" + DeleteAndCountDroppedRows;
 
     /// <summary>
-    /// #8567: removes one server's ($1) rows that were dropped unfetched before $2. A dropped row has no content
-    /// and no attempt to keep, so it is held only for the day the read counts it in
-    /// (<c>OversizedPlanBacklogSweep.DroppedRowHold</c>), which is what lets the table level off. A row a fetch
-    /// expired carries <c>last_attempt_at</c> and is not matched: it leaves on the retention horizon. These
-    /// conditions imply the predicate of <c>idx_oversized_plan_backlog_dropped</c> (V258), which is what lets the
-    /// statement read that index.
+    /// #8567: removes one server's ($1) rows that were dropped unfetched before $2. Before #8691 a dropped row stayed in the
+    /// table, held for the day the read counts it in (<c>OversizedPlanBacklogSweep.DroppedRowHold</c>). This build deletes a row
+    /// when it drops it, so what this removes is the rows an older build dropped and held: those of an upgraded store, for a day
+    /// after the upgrade, and those of an older build run against the store again. A row a fetch expired carries
+    /// <c>last_attempt_at</c> and is not matched: it leaves on the retention horizon. These conditions imply the predicate of
+    /// <c>idx_oversized_plan_backlog_dropped</c> (V258), which is what lets the statement read that index.
     /// </summary>
     public const string PurgeDroppedSql = @"
 DELETE FROM collect.oversized_plan_backlog
@@ -446,6 +532,16 @@ WHERE server_id = $1
 AND   captured_at IS NULL
 AND   last_attempt_at IS NULL
 AND   expired_at < $2;";
+
+    /// <summary>
+    /// #8691: removes every server's drop counts for the hours before the hour $1 falls in, $1 being the start of the day the
+    /// counts are kept for (<c>OversizedPlanBacklogSweep.DroppedRowHold</c> before the pass's clock). The hour $1 falls in stays,
+    /// because a read counts from the start of the hour its day starts in. Every server's rather than one's: the table holds about
+    /// a day of hours per server and collector, and a server the sweep no longer reaches keeps no counts past their day.
+    /// </summary>
+    public const string PurgeDropCountsSql = @"
+DELETE FROM collect.oversized_plan_backlog_drops
+WHERE hour_start < date_trunc('hour', $1::timestamp);";
 
     /// <summary>
     /// The read-surface fallback for <c>query_stats</c>: the most recently captured over-cap plan for a

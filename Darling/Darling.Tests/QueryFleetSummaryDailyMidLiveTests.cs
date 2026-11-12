@@ -140,14 +140,16 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
 
     /// <summary>The timeline: <c>end</c> is the window's end (a whole hour), <c>start</c> is mid-day ten days before it, <c>DStart</c> the first
     /// midnight after the start and <c>DEnd</c> the last midnight at or before the end.</summary>
-    private sealed record Timeline(DateTime End, int HoursBack)
+    private sealed record Timeline(DateTime End, int HoursBack, DateTime Now)
     {
         public DateTime Start => End.AddHours(-HoursBack);
         public DateTime DStart => Start == Start.Date ? Start : Start.Date.AddDays(1);
         public DateTime DEnd => End.Date;
 
-        /// <summary>Where the mid route stops reading the daily: a day inside the daily policy's re-read window (four days) stays on the hourly edge.</summary>
-        public DateTime MidEnd => DEnd.AddDays(-4);
+        /// <summary>Where the mid route stops reading the daily: a day inside the daily policy's re-read window (four days before <b>now</b>'s day)
+        /// stays on the hourly edge. Taken from the clock, not from <see cref="DEnd"/>: in the first hour of a UTC day the window's end is moved back an hour
+        /// (a whole hour that is not midnight), so <see cref="DEnd"/> is the previous day while the product's own cutoff already counts from today.</summary>
+        public DateTime MidEnd => new[] { DEnd, (Now - TimescaleSupport.DailyRefreshStartSpan).Date }.Min();
     }
 
     private static Timeline NewTimeline(int baseHours = 240)
@@ -167,7 +169,7 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
             end = end.AddHours(-1);
         }
 
-        return new Timeline(end, hoursBack);
+        return new Timeline(end, hoursBack, now);
     }
 
     /// <summary>Seeds every kind of pair a mid route can meet: one that runs the whole window under two handles, one only on the first

@@ -200,11 +200,12 @@ AND   expired_at IS NULL;");
     }
 
     /// <summary>
-    /// A row dropped unfetched is held for the day the read counts it in and then leaves, so the table levels off.
-    /// A row a fetch found no plan for is not that: it stays until retention's own horizon on its last sighting.
+    /// A row an older build dropped unfetched and held (#8691: a build with the drop counts deletes it at once instead) leaves
+    /// the table a day later, so the rows an upgrade finds held age out. A row a fetch found no plan for is not that: it stays
+    /// until retention's own horizon on its last sighting.
     /// </summary>
     [Fact]
-    public async Task ARowDroppedUnfetched_LeavesTheTableADayLater_AndAFetchExpiryStays()
+    public async Task ALegacyHeldDroppedRow_LeavesTheTableADayLater_AndAFetchExpiryStays()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -259,10 +260,12 @@ ORDER BY plan_handle;"))
     /// <summary>
     /// Only a later sighting of the same query supersedes a waiting row. Rows of one query sighted in the same
     /// collection were in cache together, so each keeps waiting and each is claimed; a row the sweep has tried is
-    /// never dropped; and a dropped row that is sighted again waits again, in place of the rows it now outdates.
+    /// never dropped; and a dropped row that is sighted again waits again, in place of the rows it now outdates. A drop
+    /// deletes the row and counts it by the hour (#8691), so the re-sighting comes back as a new pending row and the read
+    /// counts both drops.
     /// </summary>
     [Fact]
-    public async Task OnlyALaterSightingSupersedes_ATriedRowIsKept_AndAReSightingReturnsADroppedRowToPending()
+    public async Task OnlyALaterSightingSupersedes_ATriedRowIsKept_AndAReSightingOfADroppedPlanComesBackPending()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -301,8 +304,14 @@ VALUES
             claimed.Select(p => p.Observation.PlanHandle).Order(StringComparer.Ordinal));
 
         var verdicts = await VerdictsAsync(postgres, ct);
-        Assert.Equal(DarlingOversizedPlanBacklogReader.VerdictDropped, verdicts["0xEARLIER"]);
+        /* #8691: the drop deleted the row and counted it. Nothing holds it, and the read still says one row was dropped. */
+        Assert.DoesNotContain("0xEARLIER", verdicts.Keys);
         Assert.Equal(4, verdicts.Values.Count(v => v == DarlingOversizedPlanBacklogReader.VerdictPending));
+        var afterFirstDrop = Assert.Single(await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(
+            postgres, ServerId, now.AddDays(-1), ct));
+        Assert.Equal(1, afterFirstDrop.DroppedRows);
+        Assert.Equal(1, afterFirstDrop.RowsDroppedLastDay);
+        Assert.Equal(5, afterFirstDrop.TotalRows);
 
         /* The earlier handle is sighted again: it is the query's newest sighting now, so it waits and the three it outdates do not. */
         var written = await OversizedPlanBacklog.RecordSightingsAsync(
@@ -322,8 +331,18 @@ VALUES
             claimed.Select(p => p.Observation.PlanHandle).Order(StringComparer.Ordinal));
 
         verdicts = await VerdictsAsync(postgres, ct);
-        Assert.Equal(3, verdicts.Values.Count(v => v == DarlingOversizedPlanBacklogReader.VerdictDropped));
+        Assert.Equal(new[] { "0xEARLIER", "0xTRIED" }, verdicts.Keys.Order(StringComparer.Ordinal));
         Assert.Equal(DarlingOversizedPlanBacklogReader.VerdictPending, verdicts["0xTRIED"]);
+
+        /* Four drops in all (the first, then the three it outdated), and the plan that came back is counted as added again. */
+        var afterSecondDrop = Assert.Single(await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(
+            postgres, ServerId, now.AddDays(-1), ct));
+        Assert.Equal(4, afterSecondDrop.DroppedRows);
+        Assert.Equal(4, afterSecondDrop.RowsDroppedLastDay);
+        Assert.Equal(6, afterSecondDrop.TotalRows);
+        Assert.Equal(6, afterSecondDrop.RowsAddedLastDay);
+        Assert.Equal(2, afterSecondDrop.PendingRows);
+        Assert.Equal(600_001, afterSecondDrop.MinObservedBytes);
     }
 
     /// <summary>

@@ -207,6 +207,7 @@ FROM generate_series(1, 120000) AS n;", ct);
         {
             command.Parameters.AddWithValue(NpgsqlDbType.Integer, DBNull.Value);
             command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, LastDaySince);
+            command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DarlingOversizedPlanBacklogReader.DayStartHour(LastDaySince));
         }
 
         var json = (string)(await command.ExecuteScalarAsync(ct))!;

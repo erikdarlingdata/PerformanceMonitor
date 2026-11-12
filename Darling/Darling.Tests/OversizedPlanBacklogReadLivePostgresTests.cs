@@ -162,7 +162,7 @@ VALUES
         Assert.Equal<DateTime?>(new DateTime(2026, 9, 13, 11, 0, 0), registered.LastExpiredAt);
 
         /* A discrete median is one of the seeded sizes, never an interpolation between two of them. */
-        Assert.Contains(registered.MedianObservedBytes, new long[] { 600_000, 700_000, 800_000, 900_000, 1_000_000 });
+        Assert.Contains(registered.MedianObservedBytes!.Value, new long[] { 600_000, 700_000, 800_000, 900_000, 1_000_000 });
         Assert.Equal(600_000L, registered.MinObservedBytes);
         Assert.Equal(1_000_000L, registered.MaxObservedBytes);
 
