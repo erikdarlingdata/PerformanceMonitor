@@ -205,15 +205,22 @@ public sealed class ViewerFirstOpenSlowLoadTests
             {
                 while (true)
                 {
+                    TcpClient? client = null;
                     try
                     {
-                        held.Add(await silent.AcceptTcpClientAsync());
+                        client = await silent.AcceptTcpClientAsync();
                     }
                     catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
                     {
-                        return;
+                        /* The listener closed at the test's end: no more reads to answer. */
                     }
 
+                    if (client is null)
+                    {
+                        break;
+                    }
+
+                    held.Add(client);
                     if (asking)
                     {
                         await tab.RefreshActiveInnerTabAsync();
