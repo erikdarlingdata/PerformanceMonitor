@@ -75,7 +75,7 @@ FROM generate_series(1, {rows}) AS g
 ORDER BY g;"), ct);
 
     /// <summary>The upsert's DO UPDATE SET shape: collection_time rewritten with the changing measures.</summary>
-    private const string UpsertShapedSet =
+    internal const string UpsertShapedSet =
         "collection_time = collection_time + interval '1 minute', last_execution_time = last_execution_time + interval '1 minute', "
         + "execution_count = execution_count + 1, avg_duration_us = avg_duration_us + 1";
 
@@ -199,7 +199,7 @@ FROM pg_index i
 JOIN pg_class ic ON ic.oid = i.indexrelid
 JOIN pg_am am ON am.oid = ic.relam
 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum > 0 AND NOT a.attisdropped
-WHERE i.indrelid = 'collect.query_store_interval_wide'::regclass
+WHERE i.indrelid IN (SELECT p.relid FROM pg_partition_tree('collect.query_store_interval_wide'::regclass) AS p WHERE p.relid <> ALL (@closed::regclass[]))
   AND am.amname <> 'brin'
   AND (a.attnum = ANY (i.indkey::int2[])
        OR EXISTS (SELECT 1 FROM pg_depend d
@@ -207,10 +207,14 @@ WHERE i.indrelid = 'collect.query_store_interval_wide'::regclass
                     AND d.refclassid = 'pg_class'::regclass AND d.refobjid = i.indrelid
                     AND d.refobjsubid = a.attnum))";
 
-    private static async Task<HashSet<string>> NonBrinIndexedColumnsAsync(NpgsqlConnection connection, CancellationToken ct)
+    /* #8549: the parent and every leaf the collector's upsert can still reach, but not the closed day leaves (the ones that may carry
+       the covering index, QueryStoreIntervalWideCoverIndex.IsClosed). The parent's indexes are on every leaf, so scanning the parent
+       alone no longer sees a leaf-only index: the leaves are scanned by their own catalog rows. */
+    private static async Task<HashSet<string>> NonBrinIndexedColumnsAsync(NpgsqlConnection connection, CancellationToken ct, string[]? closed = null)
     {
         var columns = new HashSet<string>(StringComparer.Ordinal);
         await using var command = new NpgsqlCommand(NonBrinIndexedColumnsSql, connection);
+        command.Parameters.Add(new NpgsqlParameter { ParameterName = "closed", NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text, Value = closed ?? Array.Empty<string>() });
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -236,8 +240,14 @@ WHERE i.indrelid = 'collect.query_store_interval_wide'::regclass
             Assert.DoesNotContain(identity, setColumns);
         }
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
-        await using var connection = await OpenMigratedAsync(scratch, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
+        await using var connection = await QueryStoreIntervalWideCoverIndexLiveTests.OpenLeafStoreAsync(scratch, NullLogger.Instance, ct);
+
+        /* #8549: the covering index on the closed day leaves is built first, so the scan below has it to find. */
+        await QueryStoreIntervalWideCoverIndexLiveTests.BuildAllAsync(connection, QueryStoreIntervalRetentionTestKit.Now, NullLogger.Instance, ct);
+        var leaves = await QueryStoreIntervalWideCoverIndex.ReadLeavesAsync(connection, QueryStoreIntervalPartitions.Wide, ct);
+        var closed = leaves.Where(l => QueryStoreIntervalWideCoverIndex.IsClosed(l.Partition, QueryStoreIntervalRetentionTestKit.Now)).Select(l => l.Partition.Name).ToArray();
+        Assert.True(closed.Length >= 5, "the store has closed day leaves, which is where the covering index sits");
 
         /* Every background index the service builds, not the BRIN alone: the census reads the catalog after the product's
            own list has been ensured, so the next member of QueryStoreBackgroundIndexes.All is scanned without an edit here. */
@@ -251,26 +261,34 @@ WHERE i.indrelid = 'collect.query_store_interval_wide'::regclass
 
         /* Data-independent: the catalog, not a seeded update. The scan must see the identity index and the
            first_execution_time index, or it reads nothing. */
-        var indexed = await NonBrinIndexedColumnsAsync(connection, ct);
+        var indexed = await NonBrinIndexedColumnsAsync(connection, ct, closed);
         Assert.Contains("server_id", indexed);
         Assert.Contains("first_execution_time", indexed);
         Assert.Empty(indexed.Intersect(setColumns));
 
+        /* The scan can see the covering index: over every leaf, closed ones included, it reports the columns the upsert sets. That is
+           the rule moved, not weakened: the leaves the upsert can reach carry no index on a column it sets, and a closed leaf, which
+           the upsert cannot update, may. */
+        var everywhere = (await NonBrinIndexedColumnsAsync(connection, ct)).Intersect(setColumns).ToList();
+        Assert.Contains("collection_time", everywhere);
+        Assert.Contains("execution_count", everywhere);
+        Assert.Contains("avg_duration_us", everywhere);
+
         /* The scan can fail: a btree on a SET column is reported ... */
         await ExecAsync(connection, $"CREATE INDEX ix_btree_probe ON {Table} (execution_count)", ct);
-        Assert.Equal(new[] { "execution_count" }, (await NonBrinIndexedColumnsAsync(connection, ct)).Intersect(setColumns));
+        Assert.Equal(new[] { "execution_count" }, (await NonBrinIndexedColumnsAsync(connection, ct, closed)).Intersect(setColumns));
         await ExecAsync(connection, "DROP INDEX collect.ix_btree_probe", ct);
 
         /* ... including a column that only an INCLUDE list or a partial-index predicate mentions ... */
         await ExecAsync(connection, $"CREATE INDEX ix_include_probe ON {Table} (server_id) INCLUDE (query_hash) WHERE plan_type IS NOT NULL", ct);
         Assert.Equal(
             new[] { "plan_type", "query_hash" },
-            (await NonBrinIndexedColumnsAsync(connection, ct)).Intersect(setColumns).OrderBy(name => name, StringComparer.Ordinal));
+            (await NonBrinIndexedColumnsAsync(connection, ct, closed)).Intersect(setColumns).OrderBy(name => name, StringComparer.Ordinal));
         await ExecAsync(connection, "DROP INDEX collect.ix_include_probe", ct);
 
         /* ... and a BRIN on a SET column is not, because it keeps the update HOT. */
         await ExecAsync(connection, $"CREATE INDEX ix_brin_probe ON {Table} USING brin (last_execution_time)", ct);
-        Assert.Empty((await NonBrinIndexedColumnsAsync(connection, ct)).Intersect(setColumns));
+        Assert.Empty((await NonBrinIndexedColumnsAsync(connection, ct, closed)).Intersect(setColumns));
     }
 
     [Fact]
