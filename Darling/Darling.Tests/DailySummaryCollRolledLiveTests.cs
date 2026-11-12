@@ -85,6 +85,50 @@ public sealed class DailySummaryCollRolledLiveTests
     }
 
     /// <summary>
+    /// #8549 (field: 771 ms of a 2.6 s month read): the month window's closed hours are all in the rollup once the backfill has run, so
+    /// the read never goes back to the compressed raw chunks for them. Before, the table kept 7 days and the other three weeks were read
+    /// raw. The window is the Overview's: midnight 30 days back to the end of today. The rollup pass catches up a day at a time, so the
+    /// store gets the passes a 31-day backlog takes. The counts equal the raw read, and they equal the same read with the older hours
+    /// deleted from the table, which is what the 7-day retention left (the older hours are then read raw and found the same).
+    /// </summary>
+    [Fact]
+    public async Task TheMonthWindow_IsServedFromTheRollup_AfterTheBackfill_WithTheSameCountsAsTheRawRead()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the Daily Summary coll live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB is not available on this cluster.");
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var now = LiveClock.Now();
+        var today = DateTime.SpecifyKind(now.Date, DateTimeKind.Unspecified);
+        var currentHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
+        var start = today.AddDays(-30);
+        var end = today.AddDays(1);
+
+        /* Every pass rolls RecomputeHours plus CatchUpHours, so the retention window is filled after this many; one more finds nothing to do. */
+        var passes = (int)Math.Ceiling((CollectionLogHourly.RetentionHours - CollectionLogHourly.RecomputeHours) / (double)CollectionLogHourly.CatchUpHours) + 1;
+        await SeedAndRollUpAsync(connection, start, now, ct, passes);
+
+        /* Every closed hour of the window, from its first hour to the one before the current hour, has a rollup row for the server. */
+        var windowHours = (long)(currentHour - start).TotalHours;
+        var held = await ScalarAsync<long>(connection,
+            $"SELECT count(DISTINCT hour_start) FROM collect.collection_log_hourly WHERE server_id = {ServerId} AND hour_start >= '{Ts(start)}' AND hour_start < '{Ts(currentHour)}'", ct);
+        Assert.Equal(windowHours, held);
+
+        var expected = await ReadRawCollAsync(connection, start, end, ct);
+        Assert.True(expected.Count >= 30, "the window should hold a month of days");
+        Assert.Equal(expected, await ReadSummaryCollAsync(connection, start, end, ct));
+
+        /* The 7-day retention's state: the older hours are not in the table, so the read finds them raw. Same counts. */
+        await ExecAsync(connection, $"DELETE FROM collect.collection_log_hourly WHERE hour_start < '{Ts(currentHour.AddDays(-7))}'", ct);
+        Assert.Equal(expected, await ReadSummaryCollAsync(connection, start, end, ct));
+    }
+
+    /// <summary>
     /// The statement's data pages (scan nodes only, <see cref="ExplainBuffers"/>) with every closed hour of the week rolled are a fraction
     /// of the raw read's. The raw read walks the uncompressed chunks through the time index, two servers' rows to a page.
     /// </summary>
@@ -131,7 +175,7 @@ public sealed class DailySummaryCollRolledLiveTests
     /// second of each hour with a fractional second, with a 1.2 KB message on every row so a page holds a handful. Chunks older than
     /// a week are compressed. Then the rollup runs until it has caught up a week.
     /// </summary>
-    private static async Task SeedAndRollUpAsync(NpgsqlConnection connection, DateTime from, DateTime nowUtc, CancellationToken ct)
+    private static async Task SeedAndRollUpAsync(NpgsqlConnection connection, DateTime from, DateTime nowUtc, CancellationToken ct, int passes = 9)
     {
         await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
         await ExecAsync(connection, $"""
@@ -153,7 +197,7 @@ public sealed class DailySummaryCollRolledLiveTests
             + "WHERE hypertable_schema = 'collect' AND hypertable_name = 'collection_log' AND NOT is_compressed AND range_end <= now() - interval '7 days'", ct);
         await ExecAsync(connection, "ANALYZE collect.collection_log", ct);
 
-        for (var pass = 0; pass < 9; pass++)
+        for (var pass = 0; pass < passes; pass++)
         {
             await CollectionLogHourly.RollUpAsync(connection, nowUtc, null, ct);
         }

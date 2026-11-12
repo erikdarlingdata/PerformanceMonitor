@@ -43,16 +43,20 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class CollectionLogHourly
 {
     /// <summary>
-    /// Hours kept: 7 days plus 3 hours. The health window is 7 days; its first hour is partial and read from the raw log,
-    /// so the table needs every closed hour after it. The margin covers a sweep that runs late.
+    /// Hours kept: 31 days plus 3 hours (#8549). Two reads use the table. The 7-day health read needs the closed hours after its
+    /// partial first hour. The Daily Summary month read (<c>DailySummarySql.RangeSql</c>, window from midnight 30 days back to the end of
+    /// today, so up to 30 * 24 + 23 = 743 hours before the current hour) takes its run and error counts for closed hours from the
+    /// table. When the table kept only 7 days, the other 573 or so hours of the month were read raw from <c>collection_log</c>: on a
+    /// field store that decompressed 109 chunks and read 735,000 rows, 771 ms of a 2.6 s read. Each read takes only the hours inside
+    /// its own window, so keeping more hours changes no answer. The margin covers a sweep that runs late.
     /// </summary>
-    public const int RetentionHours = 7 * 24 + 3;
+    public const int RetentionHours = 31 * 24 + 3;
 
     /// <summary>Closed hours every pass recomputes from the raw log, to count runs written late into an hour.</summary>
     public const int RecomputeHours = 2;
 
     /// <summary>The most missing closed hours one pass rolls up besides the <see cref="RecomputeHours"/> it always
-    /// recomputes, newest first (coordinator ruling on #5810): a store with a 7-day backlog is caught up in about 7
+    /// recomputes, newest first (coordinator ruling on #5810): a store with a 31-day backlog is caught up in about 31
     /// passes, and no pass reads more than its own hours of the raw log (at most this many plus <see cref="RecomputeHours"/>):
     /// the scan is per hour, so a pass late in a backfill reads no more than the first.</summary>
     public const int CatchUpHours = 24;

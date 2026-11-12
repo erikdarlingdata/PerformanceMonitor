@@ -131,12 +131,14 @@ public static class DailySummarySql
         /* #8549: coll counts runs and errors per day, and it read the raw log for the whole window. On a busy store the
            uncompressed chunks hold every server's rows on shared pages, so one server's rows sit two to a heap block and
            a bitmap scan of one chunk read about 4,000 blocks (5.5 s cold for the 30-day window, 19,800 blocks for 40,400
-           rows). The hourly rollup (V186, collect.collection_log_hourly, the table the 7-day health read uses) already
-           holds the same two counts per closed hour, from the same cycle-row exclusion, for the last 7 days: exactly
-           the chunks that are expensive. So closed hours come from it, summed per day, and the raw log is read only for
-           the hours it does not hold: the window's partial edge hours, any closed hour the rollup pass has not reached
-           or failed on (the viewer reads the store directly, so that happens), the open hour, and everything older than
-           the table keeps, which is compressed and cheap. The same island shape as CollectionHealthStatements.ComposedSql,
+           rows). The hourly rollup (V186, collect.collection_log_hourly, the table the 7-day health read uses) holds
+           the same two counts per closed hour, from the same cycle-row exclusion. It keeps 31 days plus 3 hours
+           (CollectionLogHourly.RetentionHours), exactly this window, so closed hours come from it, summed per day, and the raw
+           log is read only for the hours it does not hold: the window's partial edge hours, any closed hour the rollup pass has
+           not reached or failed on (the viewer reads the store directly, so that happens, and a store catches up a day per pass
+           after an upgrade), and the open hour. Until the table kept the month, the older hours were read raw on the
+           assumption that compressed chunks are cheap: on a field store they were not (109 chunks decompressed, 735,000 rows,
+           771 ms of a 2.6 s read). The same island shape as CollectionHealthStatements.ComposedSql,
            bounded by the window on both ends. A rolled hour's row holds every collector that ran in it, so an hour with
            no row is read raw and found empty, which is the raw answer. */
         coll_rolled AS MATERIALIZED (
