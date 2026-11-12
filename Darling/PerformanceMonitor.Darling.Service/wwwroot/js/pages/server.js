@@ -48,7 +48,7 @@
 import { keepScroll, refreshGridInPlace, replaceNodes } from "../refresh-in-place.js";
 import { keepLonePanelsWide } from "../panel-layout.js";
 import { el, mount, apiGet, apiGetFleet, setChartDataStart, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, localizeIsoText, storeHash, clampTileDetails } from "../util.js";
-import { getDatabaseFilter, hasDatabaseFilter, isRememberedPostgres, rememberEngine } from "../viewer-local.js";
+import { getDatabaseFilter, hasDatabaseFilter, isRememberedPostgres, rememberEngine, rememberedServerId, rememberServerId } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
 import { serverTabsFor, isPostgresTarget, findServerTab, tabNote } from "./server-tabs.js";
@@ -415,6 +415,7 @@ export function renderServer(main, server, tabId, opts) {
       if (card) {
         lastCard.set(server, { card, reason, at: Date.now() });
         rememberEngine(server, isPostgresTarget(card));
+        rememberServerId(server, card.server_id);
       }
       fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason);
       fillDatabaseFilter(dbSlot, server, card);
@@ -437,10 +438,15 @@ export function renderServer(main, server, tabId, opts) {
 }
 
 /** Whether the page may start a server's panel reads before its fleet card arrives (#8554). Not for a server this browser has seen as
- *  PostgreSQL (its tab set is the other one), not for a tab only the PostgreSQL set has, and not while any database filter is saved:
- *  a filter is keyed by the card's server id, so reads sent without the card would be the unfiltered ones. */
+ *  PostgreSQL (its tab set is the other one), not for a tab only the PostgreSQL set has, and not while a database filter is saved and
+ *  this browser does not know the server's id: a filter is keyed by the card's server id, so reads sent without it would be the
+ *  unfiltered ones. The one fleet roll-up that gate waits for is the server's own store's, never the other stores' (#8554). */
 function mayStartBeforeCard(server, tabId) {
-  if (isRememberedPostgres(server) || hasDatabaseFilter()) return false;
+  if (isRememberedPostgres(server)) return false;
+  /* A saved filter is looked up by the card's server id. With the id this browser remembered for the server the filter is known now, so the
+     reads leave with it (or without one, when none is saved for it). With no remembered id the filter cannot be told from the route, and the
+     reads wait for the card of this server's own store, as before. */
+  if (hasDatabaseFilter() && rememberedServerId(server) === null) return false;
   return !tabId || serverTabsFor(null).some((t) => t.id === tabId);
 }
 
@@ -574,7 +580,9 @@ function redrawPanels() {
    card's id keys the choice, not the route's name, so a rename keeps it. */
 function applyDatabaseFilter() {
   const card = current.server ? (lastCard.get(current.server) || {}).card : null;
-  const databases = card && !isPostgresTarget(card) && card.server_id ? getDatabaseFilter(card.server_id) : [];
+  /* #8554: before the card is in, the id this browser remembered for the server stands in for it. */
+  const id = card ? card.server_id : current.server ? rememberedServerId(current.server) : null;
+  const databases = (!card || !isPostgresTarget(card)) && id ? getDatabaseFilter(id) : [];
   setActiveDatabaseFilter({ server: current.server, databases });
 }
 
