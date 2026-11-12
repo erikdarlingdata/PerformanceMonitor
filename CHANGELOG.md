@@ -761,6 +761,7 @@ Full entries: [docs/changelog/3.13.md](docs/changelog/3.13.md)
 - **MCP reply text: three more small fixes** ([#8738])
 - **A Job History load stopped by a newer pick now names the read it was waiting on** ([#8549])
 - **A web server page opened by part of a server name now opens that server** ([#8741])
+- **The plan advisory read checks each plan once instead of once per snapshot** ([#8743])
 
 ## [3.12.0] - 2026-10-30
 
@@ -7694,3 +7695,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#8728]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8728
 [#8738]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8738
 [#8741]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8741
+[#8743]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8743
