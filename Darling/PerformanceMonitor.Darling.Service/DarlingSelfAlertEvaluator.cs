@@ -4351,7 +4351,7 @@ internal sealed class DarlingSelfAlertEvaluator
         var sb = new StringBuilder();
         sb.Append(shortMessage).Append('.');
         sb.Append(string.Create(CultureInfo.InvariantCulture,
-            $" This is a REPORT, not an incident (#3712, #7086): the once-a-day copy of what the monitor recorded"
+            $" This is a REPORT, not an incident: the once-a-day copy of what the monitor recorded"
             + $" but did not page between {spanStartUtc:o} and {spanEndUtc:o}, the trailing day only."
             + $" Every item is already readable in get_alert_history (notification_type 'digest', with routing_reason)."
             + $" Nothing here waits on this digest: a condition that later meets its paging bar pages then, as its own alert."));
@@ -4386,14 +4386,14 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             rank++;
             sb.Append(string.Create(CultureInfo.InvariantCulture,
-                $"\n{rank}. {single.Server} — {single.Key} — severity {single.Severity:F2}"));
+                $"\n{rank}. {single.Server} - {single.Key} - severity {single.Severity:F2}"));
             if (!string.IsNullOrEmpty(single.Reason))
             {
-                sb.Append(" — ").Append(single.Reason);
+                sb.Append(" - ").Append(single.Reason);
             }
             if (single.DedupKeys.Count > 0)
             {
-                sb.Append(" — dedup: ").Append(string.Join(", ", single.DedupKeys));
+                sb.Append(" - dedup: ").Append(string.Join(", ", single.DedupKeys));
             }
         }
         if (facts.Singles > facts.TopMovers.Count)
@@ -4963,8 +4963,8 @@ internal sealed class DarlingSelfAlertEvaluator
         var sb = new StringBuilder();
         sb.Append(shortMessage).Append('.');
         sb.Append(string.Create(CultureInfo.InvariantCulture,
-            $" This is a REPORT, not an incident - the fleet sweep's one channel post for the day (#3466's"
-            + $" delivery ruling: the web feed's Fleet Sweeps timeline is the workhorse at full cadence, and"
+            $" This is a REPORT, not an incident - the fleet sweep's one channel post for the day (the web feed's"
+            + $" Fleet Sweeps timeline is the workhorse at full cadence, and"
             + $" channel delivery is bounded at one daily rollup). It covers {spanStartUtc:o} to"
             + $" {spanEndUtc:o} - the trailing day only, never a recap of older history, because the sweep"
             + $" documents are the permanent record and this is their ceiling."));
@@ -9977,7 +9977,7 @@ WHERE c.is_enabled";
                 "retention job",
                 "The archival tier is stalled: this policy is ARMED and the scheduler has stopped running it, " +
                 "so the tier keeps every chunk it was configured to drop and grows for as long as that lasts. " +
-                "This is NOT the #2813 Retention Held condition — that one is a policy the rollup-coverage " +
+                "This is NOT the Retention Held condition: that one is a policy the rollup-coverage " +
                 "gate paused on purpose, which reports scheduled = false and clears with a backfill. This one " +
                 "is scheduled and abandoned, and no backfill affects it.",
                 "The tier drops nothing until the job runs."),

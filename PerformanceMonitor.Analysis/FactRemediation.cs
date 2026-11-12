@@ -616,9 +616,9 @@ public static class FactRemediation
                 ? $"-- query_id = {target.QueryId}, forcing plan_id = {target.PlanId}"
                 : $"-- query_id = {target.QueryId}, best plan_id = {target.PlanId} (not offered as a force)");
             if (!string.IsNullOrEmpty(target.LatestPlanHash))
-                sb.AppendLine($"--   latest plan hash: {OneLine(target.LatestPlanHash)} (cpu/exec {target.LatestCpuPerExecUs:F0} us)");
+                sb.AppendLine($"--   latest plan hash: {OneLine(target.LatestPlanHash)} (cpu/exec {target.LatestCpuPerExecUs.ToString("N0", CultureInfo.InvariantCulture)} us)");
             if (!string.IsNullOrEmpty(target.BestPlanHash))
-                sb.AppendLine($"--   best plan hash:   {OneLine(target.BestPlanHash)}   (cpu/exec {target.BestCpuPerExecUs:F0} us)");
+                sb.AppendLine($"--   best plan hash:   {OneLine(target.BestPlanHash)}   (cpu/exec {target.BestCpuPerExecUs.ToString("N0", CultureInfo.InvariantCulture)} us)");
             AppendBestPlanAge(sb, target);
             sb.AppendLine($"--   regression factor: {target.RegressionFactor:F1}x");
             if (!string.IsNullOrEmpty(target.ReplicaRole))

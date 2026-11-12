@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 
 namespace PerformanceMonitor.Common;
 
@@ -821,6 +822,7 @@ internal static class McpHelpers
     {
         var now = DateTime.UtcNow;
         endUtc = now;
+        s_asOfAnchor.Value = null;
 
         if (string.IsNullOrWhiteSpace(asOf))
         {
@@ -848,7 +850,26 @@ internal static class McpHelpers
         }
 
         endUtc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+        s_asOfAnchor.Value = endUtc;
         return null;
+    }
+
+    /// <summary>The anchor the current tool call's <c>as_of</c> resolved to, or null when the call named none.
+    /// Set by <see cref="ResolveAsOf"/> in the tool's own flow, so an empty-window sentence can say which window it
+    /// looked at without every reply builder carrying the anchor through its signature.</summary>
+    private static readonly AsyncLocal<DateTime?> s_asOfAnchor = new();
+
+    /// <summary>
+    /// "in the last 24 hours" for a read that ended now, and "in the 24 hours ending at 2026-11-10 12:00 UTC" for a
+    /// read anchored at <c>as_of</c>. An empty-window sentence that says "the last 24 hours" about a window that
+    /// ended at an earlier instant describes a window nobody asked for. <paramref name="span"/> is the counted span
+    /// ("24 hours", "7 days").
+    /// </summary>
+    public static string InTheLast(string span)
+    {
+        return s_asOfAnchor.Value is { } anchor
+            ? string.Create(CultureInfo.InvariantCulture, $"in the {span} ending at {anchor:yyyy-MM-dd HH:mm} UTC")
+            : $"in the last {span}";
     }
 
     /// <summary>

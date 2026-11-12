@@ -700,6 +700,20 @@ public sealed class PgTargetQueriesTests
         Assert.DoesNotContain("usual variation", walked.Investigation, StringComparison.Ordinal);
     }
 
+    /// <summary>#8572: a millisecond figure of four digits or more carries its thousands separator, like the call count beside it.</summary>
+    [Fact]
+    public void ComposeBadActorShareAnomaly_GroupsTheThousandsInTheMeanMillisecondFigure()
+    {
+        var named = Detect(HeavyQueryId, 0.612, mean: 0.22, stddev: 0.04, (MediumQueryId, 1), (LightQueryId, 0)).Anomaly!;
+        var card = BadActor(HeavyQueryId, 0.612);
+        card.Metadata["calls"] = 416;
+        card.Metadata["mean_exec_ms"] = 6631.1;
+        var block = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBadActorShare, Lookup(named, card))!;
+
+        Assert.Contains("The statement ran 416 calls averaging 6,631.1 ms per call this window.", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("6631.1", block.Investigation, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ComposeBadActorShareAnomaly_StatesTheShareAgainstTheRoutine_BothSigmas_TheCardsFigures_AndTheCandidateCount()
     {

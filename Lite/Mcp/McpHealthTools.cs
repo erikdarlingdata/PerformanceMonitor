@@ -1233,7 +1233,7 @@ public sealed class McpHealthTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs on {resolved.DisplayName} in the last {CountText.Plural(hours, "hour")} matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.",
+                        $"No collector runs on {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours, "hour"))} matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.",
                         emptyNotice.AsHints());
                 }
 
@@ -1241,7 +1241,7 @@ public sealed class McpHealthTools
                     "empty",
                     McpHelpers.QuietUnlessCut(
                         emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                        factual: $"No collector runs recorded for {resolved.DisplayName} in the last {CountText.Plural(hours, "hour")}",
+                        factual: $"No collector runs recorded for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours, "hour"))}",
                         coveredClaim: ". This server HAS collected before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent runs."),
                     emptyNotice.AsHints());
             }
@@ -1420,12 +1420,12 @@ public sealed class McpHealthTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs fleet-wide in the last {CountText.Plural(hours, "hour")} matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds.");
+                        $"No collector runs fleet-wide {McpHelpers.InTheLast(CountText.Plural(hours, "hour"))} matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds.");
                 }
 
                 return McpHelpers.Status(
                     "empty",
-                    $"No collector runs recorded fleet-wide in the last {CountText.Plural(hours, "hour")}. At least one enabled server has collected before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent runs.");
+                    $"No collector runs recorded fleet-wide {McpHelpers.InTheLast(CountText.Plural(hours, "hour"))}. At least one enabled server has collected before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent runs.");
             }
 
             var result = rows.Select(r => new
@@ -1553,7 +1553,7 @@ public sealed class McpHealthTools
                 return await McpQueryTools.WithEmptyWindowNoticeAsync(everCollected
                     ? McpHelpers.Status(
                         "empty",
-                        $"Nothing was waiting on {resolved.DisplayName} in the last {CountText.Plural(hours, "hour")}. The collector HAS sampled this server, so this is a genuine all-clear for the window rather than missing data.")
+                        $"Nothing was waiting on {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours, "hour"))}. The collector HAS sampled this server, so this is a genuine all-clear for the window rather than missing data.")
                     : McpHelpers.Status(
                         "unavailable",
                         $"No waiting-task samples have EVER been recorded for {resolved.DisplayName}, so this is NOT an all-clear: there is nothing to read. Check that collection is running for this server before concluding it was quiet."),
@@ -1660,8 +1660,8 @@ public sealed class McpHealthTools
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
                             factual: database == null
-                                ? $"No blocking or deadlocks recorded for {resolved.DisplayName} in the last {CountText.Plural(hours, "hour")}"
-                                : $"No blocking{McpDatabaseSelection.ForChosen(new[] { database })} (and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} in the last {CountText.Plural(hours, "hour")}",
+                                ? $"No blocking or deadlocks recorded for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours, "hour"))}"
+                                : $"No blocking{McpDatabaseSelection.ForChosen(new[] { database })} (and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours, "hour"))}",
                             /* #8146: a lossy window keeps the runs but not the all-clear; the lost events were never read. */
                             coveredClaim: emptyLoss is null
                                 ? ". The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window."

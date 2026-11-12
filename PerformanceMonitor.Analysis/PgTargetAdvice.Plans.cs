@@ -179,7 +179,7 @@ public static partial class PgTargetAdvice
 
         var inv = new StringBuilder();
         inv.Append(CultureInfo.InvariantCulture,
-            $"Statement queryid {queryId}: mean execution time per call stepped from {before:0.#} ms to {after:0.#} ms ({FactAdvice.RatioText(ratio)}×, +{after - before:0.#} ms per call) at the moment its captured plan changed");
+            $"Statement queryid {queryId}: mean execution time per call stepped from {before:#,##0.#} ms to {after:#,##0.#} ms ({FactAdvice.RatioText(ratio)}×, +{after - before:#,##0.#} ms per call) at the moment its captured plan changed");
         /* FormatAge is the sessions family's (PgTargetAdvice.Sessions.cs) — one rendering of "how long ago" per class. */
         if (hasFlipAge)
             inv.Append(CultureInfo.InvariantCulture, $" ({FormatAge(flipAgeS)} before the window's end)");
@@ -204,11 +204,11 @@ public static partial class PgTargetAdvice
             var keyedAnomaly = anomaly.Metadata.GetValueOrDefault(PgTargetScorer.PlanAnomalySeriesKey) >= 1.0;
             var peak = anomaly.Metadata.GetValueOrDefault("peak_mean_ms");
             if (!keyedAnomaly)
-                inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION co-fired: the server-wide per-call mean reached {peak:0.#} ms against this hour's baseline, a blunt corroboration, used because no flipped statement has its own history yet.");
+                inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION co-fired: the server-wide per-call mean reached {peak:#,##0.#} ms against this hour's baseline, a blunt corroboration, used because no flipped statement has its own history yet.");
             else if (PgTargetScorer.PlanRegressionAnomalyCorroborates(factsByKey))
-                inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION co-fired for this statement: its own per-call mean reached {peak:0.#} ms against its hour-of-week routine, the statistical reading of the same step.");
+                inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION co-fired for this statement: its own per-call mean reached {peak:#,##0.#} ms against its hour-of-week routine, the statistical reading of the same step.");
             else
-                inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION fired for a DIFFERENT flipped statement (queryid {anomaly.ObjectName}) at {peak:0.#} ms per call against its own routine: more than one plan changed in this window; that deviation is not evidence about this statement.");
+                inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION fired for a DIFFERENT flipped statement (queryid {anomaly.ObjectName}) at {peak:#,##0.#} ms per call against its own routine: more than one plan changed in this window; that deviation is not evidence about this statement.");
         }
         if (PgTargetScorer.SameStatementFired(factsByKey, PgTargetFactKeys.PlanRegression, PgTargetFactKeys.ParameterSensitivity)
             && factsByKey.TryGetValue(PgTargetFactKeys.ParameterSensitivity, out var sensitivity))
@@ -217,13 +217,13 @@ public static partial class PgTargetAdvice
 
         var rem = new StringBuilder();
         rem.Append(CultureInfo.InvariantCulture, $"get_pg_plans for queryid {queryId} shows both plans and when each first appeared; get_pg_top_queries has the statement's text. ");
-        rem.Append(CultureInfo.InvariantCulture, $"The step is {after - before:0.#} ms on every call, {callsAfter:N0} calls since the flip: ");
+        rem.Append(CultureInfo.InvariantCulture, $"The step is {after - before:#,##0.#} ms on every call, {callsAfter:N0} calls since the flip: ");
         rem.Append("PostgreSQL has no plan cache to force the earlier plan back into, so the levers are the planner's inputs: ANALYZE the tables the plan reads (one sample read each) if statistics went stale; a larger statistics target on the column whose estimate hinged the plan (more ANALYZE time and statistics space on it); plan_cache_mode = force_custom_plan when the statement is prepared and its generic plan is the bad one (planning time on every execution); or a rewrite that takes the flipping predicate out of the hinge (an application change).");
 
         return s_planRegressionStatic with
         {
             Headline = string.Format(CultureInfo.InvariantCulture,
-                "Statement queryid {0} got {1}× slower per call when its plan changed ({2:0.#} ms → {3:0.#} ms)", queryId, FactAdvice.RatioText(ratio), before, after),
+                "Statement queryid {0} got {1}× slower per call when its plan changed ({2:#,##0.#} ms → {3:#,##0.#} ms)", queryId, FactAdvice.RatioText(ratio), before, after),
             Investigation = inv.ToString(),
             Remediation = rem.ToString(),
         };
@@ -268,7 +268,7 @@ public static partial class PgTargetAdvice
             inv.Append(CultureInfo.InvariantCulture, $" (in {database})");
         if (hasDistinct)
             inv.Append(nDistinct < 0
-                ? string.Format(CultureInfo.InvariantCulture, ", with n_distinct {0:0.###} (a ratio of the row count: distinct values ≈ {1:0.#}% of rows)", nDistinct, Math.Abs(nDistinct) * 100)
+                ? string.Format(CultureInfo.InvariantCulture, ", with n_distinct {0:#,##0.###} (a ratio of the row count: distinct values ≈ {1:#,##0.#}% of rows)", nDistinct, Math.Abs(nDistinct) * 100)
                 : string.Format(CultureInfo.InvariantCulture, ", with {0:N0} distinct values", nDistinct));
         inv.Append('.');
         if (hasError)
@@ -276,7 +276,7 @@ public static partial class PgTargetAdvice
         inv.Append(" A parameter equal to the common value and one equal to anything else are two different selectivities, so the planner is right to pick two plans; the cost is that each is wrong for the other's parameters.");
         if (PgTargetScorer.SameStatementFired(factsByKey, PgTargetFactKeys.ParameterSensitivity, PgTargetFactKeys.PlanRegression)
             && factsByKey.TryGetValue(PgTargetFactKeys.PlanRegression, out var regression))
-            inv.Append(CultureInfo.InvariantCulture, $" PG_PLAN_REGRESSION fired on this statement in the same window ({regression.Metadata.GetValueOrDefault(PgTargetScorer.PlanMeanMsBeforeKey):0.#} ms → {regression.Metadata.GetValueOrDefault(PgTargetScorer.PlanMeanMsAfterKey):0.#} ms per call): the variance cost something, which is what lifts this card over the story threshold.");
+            inv.Append(CultureInfo.InvariantCulture, $" PG_PLAN_REGRESSION fired on this statement in the same window ({regression.Metadata.GetValueOrDefault(PgTargetScorer.PlanMeanMsBeforeKey):#,##0.#} ms → {regression.Metadata.GetValueOrDefault(PgTargetScorer.PlanMeanMsAfterKey):#,##0.#} ms per call): the variance cost something, which is what lifts this card over the story threshold.");
         else
             inv.Append(" No regression fired on this statement in the window, so this is a mechanism named, not a cost measured: it sits under the story threshold.");
         inv.Append(" The hash count and the skew frequency it was graded on are chosen, not measured (threshold_lineage = 0). queryid is re-keyed by a major upgrade, so occurrence history restarts there.");
@@ -444,9 +444,9 @@ public static partial class PgTargetAdvice
            side, then the qualstats witness), how big the relation is, then the gates and the co-fires. */
         var inv = new StringBuilder();
         inv.Append(CultureInfo.InvariantCulture,
-            $"Statement queryid {queryId} was captured {CountText.Plural((long)(captures ?? 0), "time")} in {observedHours:0.#} observed hours ({PerformanceMonitor.Common.DailyHealthBandCalculator.RatePerHourText(perHour ?? 0, "0.#")} per hour, a lower bound: only executions slower than auto_explain.log_min_duration are logged) with a Seq Scan over {relation} carrying a Filter");
+            $"Statement queryid {queryId} was captured {CountText.Plural((long)(captures ?? 0), "time")} in {observedHours:#,##0.#} observed hours ({PerformanceMonitor.Common.DailyHealthBandCalculator.RatePerHourText(perHour ?? 0, "0.#")} per hour, a lower bound: only executions slower than auto_explain.log_min_duration are logged) with a Seq Scan over {relation} carrying a Filter");
         inv.Append(removedShare is { } share
-            ? string.Format(CultureInfo.InvariantCulture, "; across those captures the filter removed {0:0.#}% of the rows the scan read (Rows Removed by Filter against Actual Rows).", share * 100)
+            ? string.Format(CultureInfo.InvariantCulture, "; across those captures the filter removed {0:#,##0.#}% of the rows the scan read (Rows Removed by Filter against Actual Rows).", share * 100)
             : "; the captured plans carry no Actual Rows (auto_explain.log_analyze is off), so how many rows the filter removed is not known from the plan.");
         if (qualstatsAbsent)
             inv.Append(" The predicate's selectivity cannot be read: pg_extension_availability reports pg_qualstats is not installed in any database, so which columns the statement filters on, and what fraction of evaluated rows they discard, is unknown. Nothing is graded off this fact.");
@@ -455,9 +455,9 @@ public static partial class PgTargetAdvice
             inv.Append(CultureInfo.InvariantCulture, $" pg_qualstats' most selective predicate of this statement on the relation");
             if (columns is not null)
                 inv.Append(CultureInfo.InvariantCulture, $" (columns: {columns})");
-            inv.Append(CultureInfo.InvariantCulture, $" filtered {sel * 100:0.#}% of the rows it evaluated ({rowsFiltered ?? 0:N0} of {rowsEvaluated ?? 0:N0}");
+            inv.Append(CultureInfo.InvariantCulture, $" filtered {sel * 100:#,##0.#}% of the rows it evaluated ({rowsFiltered ?? 0:N0} of {rowsEvaluated ?? 0:N0}");
             if (sampleRate is { } rate && rate < 1)
-                inv.Append(CultureInfo.InvariantCulture, $", sampled at {rate:0.####}: counts are of the sample, not scaled");
+                inv.Append(CultureInfo.InvariantCulture, $", sampled at {rate:#,##0.####}: counts are of the sample, not scaled");
             inv.Append(')');
             if (estimateError is { } err)
                 inv.Append(CultureInfo.InvariantCulture, $"; the planner's worst row estimate on it was off by {FactAdvice.RatioText(err)}×");
@@ -473,9 +473,9 @@ public static partial class PgTargetAdvice
         if (!qualstatsAbsent)
         {
             inv.Append(cleared
-                ? string.Format(CultureInfo.InvariantCulture, " All three gates hold: selective (≥ {0:0}% filtered), large (≥ {1}), recurring (≥ {2:0.#} captures per observed hour), so this is a recurring selective scan of a large relation, not one slow execution.",
+                ? string.Format(CultureInfo.InvariantCulture, " All three gates hold: selective (≥ {0:0}% filtered), large (≥ {1}), recurring (≥ {2:#,##0.#} captures per observed hour), so this is a recurring selective scan of a large relation, not one slow execution.",
                     PgTargetScorer.SeqScanSelectiveFraction * 100, KnobBytes(PgTargetScorer.SeqScanLargeRelationBytes), PgTargetScorer.SeqScanMinCapturesPerHour)
-                : string.Format(CultureInfo.InvariantCulture, " The shape is under this card's bars (selective ≥ {0:0}% filtered, large ≥ {1}, recurring ≥ {2:0.#} captures per observed hour){3}; it is shown, not graded.",
+                : string.Format(CultureInfo.InvariantCulture, " The shape is under this card's bars (selective ≥ {0:0}% filtered, large ≥ {1}, recurring ≥ {2:#,##0.#} captures per observed hour){3}; it is shown, not graded.",
                     PgTargetScorer.SeqScanSelectiveFraction * 100, KnobBytes(PgTargetScorer.SeqScanLargeRelationBytes), PgTargetScorer.SeqScanMinCapturesPerHour,
                     fact.Metadata.GetValueOrDefault("pairs_clearing") > 0 ? " for the top pair, though a lower-ranked pair below clears them" : string.Empty));
         }
@@ -487,7 +487,7 @@ public static partial class PgTargetAdvice
             {
                 var id = PgTargetScorer.SeqScanQueryId(fact, rank)?.ToString(CultureInfo.InvariantCulture) ?? "?";
                 inv.Append(CultureInfo.InvariantCulture, $" queryid {id} at {PerformanceMonitor.Common.DailyHealthBandCalculator.RatePerHourText(Pair(fact, PgTargetScorer.SeqScanCapturesPerHourKey, rank) ?? 0, "0.#")} per hour");
-                if (Pair(fact, PgTargetScorer.SeqScanSelectivityKey, rank) is { } s2) inv.Append(CultureInfo.InvariantCulture, $", {s2 * 100:0.#}% filtered");
+                if (Pair(fact, PgTargetScorer.SeqScanSelectivityKey, rank) is { } s2) inv.Append(CultureInfo.InvariantCulture, $", {s2 * 100:#,##0.#}% filtered");
                 if (Pair(fact, PgTargetScorer.SeqScanHeapBytesKey, rank) is { } h2) inv.Append(CultureInfo.InvariantCulture, $", heap {KnobBytes(h2)}");
                 inv.Append(PgTargetScorer.SeqScanPairClearsEveryGate(fact, rank) ? " (clears every gate)" : " (under the bars)");
                 inv.Append(rank == pairs ? '.' : ';');
@@ -500,12 +500,12 @@ public static partial class PgTargetAdvice
         if (PgTargetScorer.SeqScanTopStatementBadActorFired(factsByKey))
             inv.Append(" PG_BAD_ACTOR fired for the same queryid: the statement doing this scan also holds a large share of the window's execution time, so the scan has a measured cost this window.");
         if (PgTargetScorer.SeqScanTopStatementRegressed(factsByKey) && factsByKey.TryGetValue(PgTargetFactKeys.PlanRegression, out var regression))
-            inv.Append(CultureInfo.InvariantCulture, $" PG_PLAN_REGRESSION fired on the same queryid ({regression.Metadata.GetValueOrDefault(PgTargetScorer.PlanMeanMsBeforeKey):0.#} ms → {regression.Metadata.GetValueOrDefault(PgTargetScorer.PlanMeanMsAfterKey):0.#} ms per call): the statement's plan changed and got slower in the window the scan was captured.");
+            inv.Append(CultureInfo.InvariantCulture, $" PG_PLAN_REGRESSION fired on the same queryid ({regression.Metadata.GetValueOrDefault(PgTargetScorer.PlanMeanMsBeforeKey):#,##0.#} ms → {regression.Metadata.GetValueOrDefault(PgTargetScorer.PlanMeanMsAfterKey):#,##0.#} ms per call): the statement's plan changed and got slower in the window the scan was captured.");
         inv.Append(" This is an advisory-class card: it grades a shape, not a cost, and does not know the relation's write rate or the storage budget. The selectivity, the size and the rate it was graded on are chosen, not measured (threshold_lineage = 0). queryid is re-keyed by a major upgrade, so occurrence history restarts there.");
 
         var rem = new StringBuilder();
         rem.Append(CultureInfo.InvariantCulture, $"get_pg_plans for queryid {queryId} shows the captured plan with the Seq Scan node and its Filter (literals redacted); get_pg_predicate_stats shows the predicate columns, their evaluations and estimate error; get_pg_top_queries has the statement's text, calls and mean time; get_pg_table_bloat has {relation}'s size and dead-tuple share. ");
-        rem.Append(CultureInfo.InvariantCulture, $"The questions before any access path: is the predicate stable (does the statement always filter {relation} on {(columns ?? "these columns")}, or on several)? is {relation} written often (every insert, update and delete would maintain an index on it)? would the storage and that write cost be paid for by the reads saved at {perHour ?? 0:0.#}+ scans per hour? ");
+        rem.Append(CultureInfo.InvariantCulture, $"The questions before any access path: is the predicate stable (does the statement always filter {relation} on {(columns ?? "these columns")}, or on several)? is {relation} written often (every insert, update and delete would maintain an index on it)? would the storage and that write cost be paid for by the reads saved at {perHour ?? 0:#,##0.#}+ scans per hour? ");
         if (qualstatsAbsent)
             rem.Append("Installing pg_qualstats (it must be in shared_preload_libraries, then created in the database the statement runs in) records which predicates are evaluated and how selectively: the witness this card needs before it names a column; its counter-objective is a sampled per-query overhead governed by pg_qualstats.sample_rate. get_pg_extensions shows the state per database.");
         else if (cleared && columns is not null)
@@ -519,7 +519,7 @@ public static partial class PgTargetAdvice
             rem.Append(CultureInfo.InvariantCulture, $"If the answers favour it, the candidate the evidence supports is CREATE INDEX CONCURRENTLY ON {relation} ({columns}); the columns are in pg_qualstats' order of selectivity, which is the order to verify against the statement's text before running it. ");
             rem.Append(CultureInfo.InvariantCulture, $"A new index can cause regressions elsewhere: plan changes on other statements that read {relation}, write amplification on every insert, update and delete to it, and storage, so test it against the workload before it reaches production. ");
             rem.Append(CultureInfo.InvariantCulture, $"Its cost: every insert, update and delete on {relation} maintains it from then on; storage in proportion to the relation's row count and the key width (measure with pg_relation_size once built, {(heapBytes is { } hb ? KnobBytes(hb) + " of heap is the upper bound a single-column btree stays well under" : "the heap size is not known here")}); CONCURRENTLY takes no write lock but runs longer, cannot run inside a transaction, and leaves an INVALID index behind if it fails. ");
-            rem.Append(CultureInfo.InvariantCulture, $"What it might save is an ESTIMATE from the plan's own numbers, not a promise: the captured scans read the whole heap to keep {(1 - (selectivity ?? 0)) * 100:0.#}% of the rows evaluated, and the predicate figures are pg_qualstats' SAMPLE (sample_rate {sampleRate ?? 1:0.####}), not the full count. ");
+            rem.Append(CultureInfo.InvariantCulture, $"What it might save is an ESTIMATE from the plan's own numbers, not a promise: the captured scans read the whole heap to keep {(1 - (selectivity ?? 0)) * 100:#,##0.#}% of the rows evaluated, and the predicate figures are pg_qualstats' SAMPLE (sample_rate {sampleRate ?? 1:#,##0.####}), not the full count. ");
             if (estimateError is { } e && e > 1)
                 rem.Append(CultureInfo.InvariantCulture, $"The planner's estimate on the predicate was off by {FactAdvice.RatioText(e)}×, so ANALYZE {relation} first (one sample read): an index built on a misjudged column may not be chosen. ");
             rem.Append("Only executions slower than auto_explain.log_min_duration were captured, so the scan rate above is the floor of what the scan costs, not its size.");
@@ -532,7 +532,7 @@ public static partial class PgTargetAdvice
         var headline = qualstatsAbsent
             ? string.Format(CultureInfo.InvariantCulture, "Statement queryid {0} scans {1} sequentially in captured plans, but the predicate's selectivity cannot be read: pg_qualstats is not installed", queryId, relation)
             : cleared
-                ? string.Format(CultureInfo.InvariantCulture, "Statement queryid {0} scans {1} ({2}) sequentially at least {3:0.#}× per hour, keeping {4:0.#}% of the rows it reads",
+                ? string.Format(CultureInfo.InvariantCulture, "Statement queryid {0} scans {1} ({2}) sequentially at least {3:#,##0.#}× per hour, keeping {4:#,##0.#}% of the rows it reads",
                     queryId, relation, heapBytes is { } h ? KnobBytes(h) : "size unknown", perHour ?? 0, (1 - (selectivity ?? 0)) * 100)
                 : string.Format(CultureInfo.InvariantCulture, "Statement queryid {0} scans {1} sequentially in captured plans; the shape is under this card's bars", queryId, relation);
 

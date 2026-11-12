@@ -120,7 +120,7 @@ public sealed class McpPerfmonTools
                     /* #7005: the window notice, so an empty answer says whether the store holds the window. */
                     return await McpQueryTools.WithEmptyWindowNoticeAsync(McpHelpers.Status(
                         "unavailable",
-                        $"No trend data for counter '{counter_name}'. No perfmon counters have been collected for this server in the last {hours_back}h yet " +
+                        $"No trend data for counter '{counter_name}'. No perfmon counters have been collected for this server {McpHelpers.InTheLast($"{hours_back} hours")} yet " +
                         "(the collector may not have run, or delta counters need a second collection cycle)."),
                         dataService, QueryWindowRelation.PerfmonStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "perfmon_stats");
 

@@ -4741,7 +4741,7 @@ public sealed class DarlingSelfAlertTests
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Retention Job Stuck", fired.MetricName);
-        Assert.Contains("NOT the #2813 Retention Held condition", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("NOT the Retention Held condition", fired.DetailText, StringComparison.Ordinal);
         Assert.Contains("scheduled = false", fired.DetailText, StringComparison.Ordinal);
     }
 

@@ -1313,7 +1313,7 @@ public sealed class DarlingMcpStoreMetricsTools
                     + $" This block read as '{role}', which is a member of the owner of "
                     + $"{Invariant(evidence.HistoryVisibleJobCount ?? 0)} of {Invariant(evidence.JobCount ?? 0)} jobs "
                     + "and not of the database owner, so the count is a census of THOSE jobs only: "
-                    + $"{CountText.Plural(rowsCount, "row")} with a start in the last {window} hours"
+                    + $"{CountText.Plural(rowsCount, "row")} with a start {McpHelpers.InTheLast($"{window} hours")}"
                     + (newestRow is null ? ", none ever." : $", newest {newestRow}.")
                     + " A job outside that set shows this role nothing, whatever it recorded.";
 
@@ -1324,7 +1324,7 @@ public sealed class DarlingMcpStoreMetricsTools
                     : "a member of every job's owner";
                 var census =
                     $" This block read as '{role}', which is {standing}, so the count is a census: {CountText.Plural(rowsCount, "row")} with a "
-                    + $"start in the last {window} hours"
+                    + $"start {McpHelpers.InTheLast($"{window} hours")}"
                     + (newestRow is null ? ", none ever" : $", newest {newestRow}")
                     + $"; job_stats says {CountText.Plural(ranCount, "job")} started a run in the same window"
                     + (newestRun is null ? "." : $" (newest start {newestRun}).");

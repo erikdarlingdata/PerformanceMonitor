@@ -464,7 +464,7 @@ public sealed partial class DarlingMcpAlertTools
     /// decision is visible per finding. Restates <see cref="DarlingAlertSettings.ResolveUncorroboratedRoute"/>
     /// in prose; the machine-readable half is <c>uncorroborated_route_source</c> beside it.</summary>
     internal const string UncorroboratedRouteNote =
-        "The effective route, resolved store-over-file. config_alert_settings.analysis_uncorroborated_route (V137; "
+        "The effective route, resolved store-over-file. config_alert_settings.analysis_uncorroborated_route ("
         + "set it with update_alert_settings or the Viewer's Settings window (Notifications > Automated Analysis), live in the running service within one "
         + "collection sweep, no restart) wins when it holds 'digest' or 'page'; NULL there defers to darling.json's "
         + "analysis.uncorroboratedRoute, read once at service start; a file value that is neither spelling defers to the "

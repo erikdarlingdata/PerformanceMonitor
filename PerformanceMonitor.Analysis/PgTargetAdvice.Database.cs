@@ -261,8 +261,8 @@ public static partial class PgTargetAdvice
     private static string DbHours(double hours) => hours switch
     {
         < 1 => $"{hours * 60:0} minutes",
-        < 48 => $"{hours:0.#} hours",
-        _ => $"{hours / 24:0.#} days",
+        < 48 => $"{hours:#,##0.#} hours",
+        _ => $"{hours / 24:#,##0.#} days",
     };
 }
 

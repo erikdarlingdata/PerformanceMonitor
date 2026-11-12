@@ -48,7 +48,7 @@ public class AnalysisSinglesDigestTests
 
     private static AnalysisSinglesDigestReader.DigestRoutedRow Row(
         DateTime at, int serverId, string server, string category, string hash8, double severity,
-        string reason = "uncorroborated: a lone fact — 1 fact in the chain and 0 of 5 co-fire checks matched.",
+        string reason = "uncorroborated: a lone fact - 1 fact in the chain and 0 of 5 co-fire checks matched.",
         params string[] dedupKeys)
         => new(at, serverId, server, $"Analysis: {category} [{hash8}]", severity, ContextJson(reason, dedupKeys));
 
@@ -207,6 +207,19 @@ public class AnalysisSinglesDigestTests
 
     /* ---------------- the document ---------------- */
 
+    /// <summary>#8572: the served detail is plain words. No em dash, no tracker number ("#" and three or more digits), no migration number.</summary>
+    [Fact]
+    public void Render_DetailHoldsNoEmDashNoTrackerNumberAndNoMigrationNumber()
+    {
+        var facts = DarlingSelfAlertEvaluator.ExtractSinglesDigestFacts(ThreeSinglesOnTwoServers());
+        var (_, detail) = DarlingSelfAlertEvaluator.RenderAnalysisSinglesDigest(facts, Day.AddDays(-1), Day);
+
+        Assert.DoesNotContain('—', detail);
+        Assert.DoesNotMatch(@"#\d{3,}", detail);
+        Assert.DoesNotMatch(@"\bV\d{2,3}\b", detail);
+        Assert.Contains("1. pm-server-2 - Analysis: anomaly [bbbbbbbb] - severity 1.91", detail, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Render_LeadsWithTheHeadline_ListsMoversWithKeysReasonsAndFingerprints_AndTheFamilyBlocks()
     {
@@ -221,10 +234,10 @@ public class AnalysisSinglesDigestTests
         Assert.Contains(Day.ToString("o"), detail, StringComparison.Ordinal);
 
         /* Top movers: rank, server, the KEY a page would have carried, the severity, the reason, the fingerprints. */
-        Assert.Contains("1. pm-server-2 — Analysis: anomaly [bbbbbbbb] — severity 1.91 — uncorroborated:", detail, StringComparison.Ordinal);
+        Assert.Contains("1. pm-server-2 - Analysis: anomaly [bbbbbbbb] - severity 1.91 - uncorroborated:", detail, StringComparison.Ordinal);
         Assert.Contains("dedup: dk-2a, dk-2b", detail, StringComparison.Ordinal);
-        Assert.Contains("2. pm-server-1 — Analysis: anomaly [aaaaaaaa] — severity 1.62", detail, StringComparison.Ordinal);
-        Assert.Contains("3. pm-server-1 — Analysis: queries [cccccccc] — severity 1.55", detail, StringComparison.Ordinal);
+        Assert.Contains("2. pm-server-1 - Analysis: anomaly [aaaaaaaa] - severity 1.62", detail, StringComparison.Ordinal);
+        Assert.Contains("3. pm-server-1 - Analysis: queries [cccccccc] - severity 1.55", detail, StringComparison.Ordinal);
 
         /* By family, then server. */
         Assert.Contains("- anomaly: 2 singles across 2 servers", detail, StringComparison.Ordinal);
@@ -279,7 +292,7 @@ public class AnalysisSinglesDigestTests
         Assert.Contains("- anomaly: 14 singles across 14 servers", detail, StringComparison.Ordinal);
         Assert.Contains("+ 4 more servers", detail, StringComparison.Ordinal);
         /* The highest severity ranks first — server 14 at 1.64. */
-        Assert.Contains("1. pm-server-14 — ", detail, StringComparison.Ordinal);
+        Assert.Contains("1. pm-server-14 - ", detail, StringComparison.Ordinal);
     }
 
     /* ---------------- the fire shape and lifecycle ---------------- */

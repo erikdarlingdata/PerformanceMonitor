@@ -476,7 +476,7 @@ public sealed class DarlingMcpConfigHistoryTools
                     ? "No configuration change history yet: fewer than two config snapshots have been captured for this server."
                     : $"No configuration change history yet: fewer than two config snapshots have been captured for {databaseScope} on this server.")
                   + " Config is captured when the service connects to the server, so changes appear once a second connect snapshot exists."
-                : $"No configuration changes detected in the last {hoursBack}h across the captured snapshots{(databaseScope is null ? "" : " for " + databaseScope)}.",
+                : $"No configuration changes detected {McpHelpers.InTheLast($"{hoursBack} hours")} across the captured snapshots{(databaseScope is null ? "" : " for " + databaseScope)}.",
             notice.IsUnavailable
                 ? (object)new { server = serverName, snapshot_count = snapshotCount }
                 : (object)new { server = serverName, snapshot_count = snapshotCount, effective_start = notice.EffectiveStart, window_truncated = notice.WindowTruncated, truncation_note = notice.TruncationNote });

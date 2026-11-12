@@ -388,7 +388,7 @@ public sealed class DarlingMcpPgDatabaseTools
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
                     factual: $"No database recorded transactions, block accesses, temp files or deadlocks for {displayName} "
-                        + $"in the last {CountText.Plural(hoursBack, "hour")}, and no statistics reset either. Collection DID run over "
+                        + $"{McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}, and no statistics reset either. Collection DID run over "
                         + "this window - at least two snapshots exist to difference",
                     coveredClaim: " - so this is a genuine all-clear "
                         + "rather than missing data."),
@@ -408,7 +408,7 @@ public sealed class DarlingMcpPgDatabaseTools
         {
             return await DarlingServerOfflineNote.UnavailableAsync(
                 postgres, serverId, displayName,
-                $"Only ONE pg_stat_database snapshot exists for {displayName} in the last {CountText.Plural(hoursBack, "hour")}, "
+                $"Only ONE pg_stat_database snapshot exists for {displayName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}, "
                 + "so this is NOT a report of a quiet server. These are cumulative counters and a windowed "
                 + "difference needs two snapshots before it produces anything at all. On a newly added "
                 + "server this clears itself on the next collection cycle; otherwise widen hours_back.",
@@ -418,7 +418,7 @@ public sealed class DarlingMcpPgDatabaseTools
         return await DarlingServerOfflineNote.UnavailableAsync(
             postgres, serverId, displayName,
             everCollected
-                ? $"No pg_stat_database snapshots were collected for {displayName} in the last {CountText.Plural(hoursBack, "hour")}"
+                ? $"No pg_stat_database snapshots were collected for {displayName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}"
                 + ", so this is NOT an all-clear - the window says nothing either way. Collection HAS "
                 + "run for this server outside the window, so this is a gap rather than a dead collector: "
                 + "widen hours_back, or use get_collection_health to find where it stopped."
