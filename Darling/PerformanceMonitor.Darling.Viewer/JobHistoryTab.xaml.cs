@@ -311,6 +311,13 @@ public partial class JobHistoryTab : UserControl
         }
         finally
         {
+            /* #8549: a load a newer one stopped says so (the newer claim cancels this token), so its line names the read it was waiting on
+               as stopped, not as client work. */
+            if (loadToken.IsCancellationRequested)
+            {
+                timer.MarkSuperseded();
+            }
+
             /* #8549: a slow load names the read or step that was slow. A caller that passed its own clock reads it and logs nothing. */
             if (loadTimer is null)
             {
