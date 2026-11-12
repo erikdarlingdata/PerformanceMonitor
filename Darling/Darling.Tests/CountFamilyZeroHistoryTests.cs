@@ -130,8 +130,8 @@ public sealed class CountFamilyZeroHistoryTests
     // ---------------------------------------------------------------- the advice arm
 
     [Theory]
-    [InlineData("ANOMALY_BLOCKING_SPIKE", 12, "12 blocking events this window — against a month in which this hour saw none", "standard blocking event threshold")]
-    [InlineData("ANOMALY_DEADLOCK_SPIKE", 4, "4 deadlocks this window — against a month in which this hour saw none", "standard deadlock threshold")]
+    [InlineData("ANOMALY_BLOCKING_SPIKE", 12, "12 blocked process reports this window, against a month in which this hour saw none", "standard blocking event threshold")]
+    [InlineData("ANOMALY_DEADLOCK_SPIKE", 4, "4 deadlocks this window, against a month in which this hour saw none", "standard deadlock threshold")]
     public void ZeroHistoryFact_ReadsAsAMeasuredZero_NotAFirstOccurrence(string key, long count, string headline, string thresholdClause)
     {
         var fact = CountFact(key, count, perHour: count / 4.0, ZeroHistory());
@@ -142,7 +142,7 @@ public sealed class CountFamilyZeroHistoryTests
         var block = Compose(fact);
 
         Assert.Equal(headline, block.Headline);
-        Assert.Contains("is not thin — it is a measured ZERO: 30 baseline samples across 30 distinct days, not one of them above zero", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("is not thin, it is a measured ZERO: 30 baseline samples across 30 distinct days, not one of them above zero", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("extremity", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("workload change, a deploy, or a one-off job", block.Investigation, StringComparison.Ordinal);
         Assert.Contains(thresholdClause, block.Remediation, StringComparison.Ordinal);
@@ -159,13 +159,14 @@ public sealed class CountFamilyZeroHistoryTests
     {
         var block = Compose(CountFact("ANOMALY_BLOCKING_SPIKE", 12, perHour: 3.0, Thin()));
 
-        Assert.Equal("12 blocking events this window — first occurrence, no baseline yet", block.Headline);
+        Assert.Equal("12 blocked process reports this window: first occurrence, no baseline yet", block.Headline);
+        // #7537: the blocking spike's text ends with the sentence naming its unit (report rows, not waits).
+        Assert.StartsWith(
+            "12 blocked process reports this window: a first occurrence, with no established baseline for this hour-of-week yet to compare against. " +
+            "Treat it as a new event, not a proven regression: check whether it coincides with a workload change, a deploy, or a one-off before treating it as chronic. This counts blocked process report rows",
+            block.Investigation, StringComparison.Ordinal);
         Assert.Equal(
-            "12 blocking events this window — a first occurrence, with no established baseline for this hour-of-week yet to compare against. " +
-            "Treat it as a new event, not a proven regression: check whether it coincides with a workload change, a deploy, or a one-off before treating it as chronic.",
-            block.Investigation);
-        Assert.Equal(
-            "If it recurs or sustains, it will cross the standard blocking event threshold and surface as a first-class finding " +
+            "If it recurs or sustains, it will cross the standard blocking event threshold and appear on the Recommendations tab " +
             "with its chain or graph detail on a later window; treat it then. A one-time event that matches a known cause needs only awareness.",
             block.Remediation);
     }
@@ -177,11 +178,11 @@ public sealed class CountFamilyZeroHistoryTests
 
         Assert.Equal("deadlock rate spiked to 3× its baseline for this time of week", block.Headline);
         Assert.Equal(
-            "24 deadlocks this window — about 3× the normal rate for this hour-of-week (baseline 2). " +
-            "This is a spike against the time-of-week baseline, not necessarily a sustained problem — check whether it coincides with a workload change or a one-off event.",
+            "24 deadlocks this window, about 3× the normal rate for this hour-of-week (baseline 2). " +
+            "This is a spike against the time-of-week baseline, not necessarily a sustained problem: check whether it coincides with a workload change or a one-off event.",
             block.Investigation);
         Assert.Equal(
-            "If it recurs or sustains, it will cross the standard deadlock threshold and surface as a first-class finding " +
+            "If it recurs or sustains, it will cross the standard deadlock threshold and appear on the Recommendations tab " +
             "with its chain or graph detail on a later window; treat it then. A one-time spike that matches a known event needs only awareness.",
             block.Remediation);
     }
@@ -205,5 +206,59 @@ public sealed class CountFamilyZeroHistoryTests
         var unstampedTrusted = CountFact("ANOMALY_BLOCKING_SPIKE", 24, perHour: 6.0, Trusted());
         unstampedTrusted.Metadata.Remove("baseline_zero_history");
         Assert.Equal(Compose(trusted).Investigation, Compose(unstampedTrusted).Investigation);
+    }
+
+    // #7537: ANOMALY_BLOCKING_SPIKE counts blocked process report rows, BLOCKING_EVENTS counts waits. The spike
+    // text names its unit and says it is not the event count, so two figures for one window are not read as one.
+    [Fact]
+    public void BlockingSpike_NamesItsUnitAsReportRows_AndTheEventCountStaysWaits()
+    {
+        var spike = Compose(CountFact("ANOMALY_BLOCKING_SPIKE", 291, perHour: 72.75, Trusted()));
+
+        Assert.StartsWith("291 blocked process reports this window", spike.Investigation, StringComparison.Ordinal);
+        Assert.StartsWith("blocked process report rate spiked", spike.Headline, StringComparison.Ordinal);
+        Assert.Contains("counts blocked process report rows", spike.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("291 blocking events", spike.Headline + spike.Investigation, StringComparison.Ordinal);
+
+        var events = new Fact
+        {
+            Source = "blocking", Key = "BLOCKING_EVENTS", Value = 181,
+            Metadata = new Dictionary<string, double> { ["event_count"] = 181 },
+        };
+        var block = FactAdvice.Compose("BLOCKING_EVENTS", new Dictionary<string, Fact> { ["BLOCKING_EVENTS"] = events })!;
+
+        Assert.StartsWith("181 blocking events this window", block.Headline, StringComparison.Ordinal);
+        Assert.Contains("Each is one wait", block.Investigation, StringComparison.Ordinal);
+    }
+
+    // #7537: when the detector took its DMV arm the rows are blocking snapshots, not blocked process reports, and the
+    // baseline is still in report rows. The text names the right noun and says the units differ; the report arm is unchanged.
+    [Theory]
+    [InlineData("trusted")]
+    [InlineData("zero")]
+    [InlineData("thin")]
+    public void BlockingSpike_OnTheDmvArm_NamesSnapshotRows_AndSaysTheBaselineIsInReportRows(string shape)
+    {
+        var bucket = shape switch { "trusted" => Trusted(), "zero" => Bucket(mean: 0, stddev: 0, samples: 30, days: 30), _ => Thin() };
+        var fact = CountFact("ANOMALY_BLOCKING_SPIKE", 291, perHour: 72.75, bucket);
+        var report = Compose(fact);
+        fact.Metadata[CountFamilyMetadata.FromDmvSnapshotsKey] = 1;
+        var dmv = Compose(fact);
+
+        Assert.StartsWith("291 blocking snapshot rows this window", dmv.Investigation, StringComparison.Ordinal);
+        Assert.Contains("counts blocking snapshot rows", dmv.Investigation, StringComparison.Ordinal);
+        Assert.Contains("built from snapshot rows too", dmv.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("not measure the same thing", dmv.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("blocked process reports this window", dmv.Headline + dmv.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("is in report rows too", dmv.Investigation, StringComparison.Ordinal);
+        if (shape == "trusted")
+            Assert.StartsWith("blocking snapshot row rate spiked", dmv.Headline, StringComparison.Ordinal);
+        else
+            Assert.StartsWith("291 blocking snapshot rows this window", dmv.Headline, StringComparison.Ordinal);
+
+        // The report arm keeps its wording, and the DMV sentence is gone from it.
+        Assert.StartsWith("291 blocked process reports this window", report.Investigation, StringComparison.Ordinal);
+        Assert.Contains("The baseline it is compared with is in report rows too.", report.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("snapshot", report.Headline + report.Investigation, StringComparison.Ordinal);
     }
 }

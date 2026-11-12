@@ -13,8 +13,10 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using ModelContextProtocol.Protocol;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -68,7 +70,7 @@ public sealed class PgServerConfigOverrideLivePostgresTests
             var snapshot = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-3);
 
             /* Three server-wide rows: two chosen, one at default. */
-            await SeedAsync(connection, ct, snapshot, "work_mem", "4096", "configuration file", "4096", null, null);
+            await SeedAsync(connection, ct, snapshot, "work_mem", "4096", "configuration file", "1024", null, null);
             await SeedAsync(connection, ct, snapshot, "statement_timeout", "30000", "configuration file", "0", null, null);
             await SeedAsync(connection, ct, snapshot, "wal_level", "replica", "default", "replica", null, null);
 
@@ -110,6 +112,18 @@ public sealed class PgServerConfigOverrideLivePostgresTests
             }, overrides);
 
             Assert.Contains("ALTER DATABASE", withOverrides.GetProperty("database_overrides_note").GetString(), StringComparison.Ordinal);
+
+            /* #8320: the note is the product's own prose, so the host's statement filter passes the whole answer
+               through unchanged and a reader gets the explanation, not the withheld marker. */
+            var hostResult = new CallToolResult
+            {
+                Content = new List<ContentBlock> { new TextContentBlock { Text = withOverrides.GetRawText() } },
+            };
+            var swept = SensitiveStatementOutputFilter.Sweep(hostResult);
+            Assert.Equal(
+                withOverrides.GetProperty("database_overrides_note").GetString(),
+                JsonDocument.Parse(((TextContentBlock)swept.Content[0]).Text!).RootElement.GetProperty("database_overrides_note").GetString());
+            Assert.Same(hostResult, swept);
 
             /* Delete the two override rows and the answer must return to the earlier BYTES exactly — the
                section absent, not empty, and nothing else moved. */
@@ -156,8 +170,8 @@ public sealed class PgServerConfigOverrideLivePostgresTests
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
             var snapshot = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-3);
 
-            await SeedAsync(connection, ct, snapshot, "work_mem", "4096", "configuration file", "4096", null, null);
-            await SeedAsync(connection, ct, snapshot, "shared_buffers", "16384", "configuration file", "16384", null, null);
+            await SeedAsync(connection, ct, snapshot, "work_mem", "4096", "configuration file", "1024", null, null);
+            await SeedAsync(connection, ct, snapshot, "shared_buffers", "16384", "configuration file", "1024", null, null);
             await SeedAsync(connection, ct, snapshot, "max_connections", "100", "default", "100", null, null);
             await SeedAsync(connection, ct, snapshot, "work_mem", "262144", "database", null, "tenant_db", null);
             await SeedAsync(connection, ct, snapshot, "work_mem", "1048576", "database+role", null, "tenant_db", "reporting_role");

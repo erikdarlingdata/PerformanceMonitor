@@ -244,7 +244,7 @@ public sealed class PurgeNowBackgroundTests
         Assert.True(Reply(worker.TryStartPurgeNow(_ => gate.Task, null, CancellationToken.None)).GetProperty("started").GetBoolean());
 
         gate.SetResult();
-        await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
+        await worker.PurgeTaskForTests!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         var secondCalled = false;
         var second = worker.TryStartPurgeNow(
@@ -270,7 +270,7 @@ public sealed class PurgeNowBackgroundTests
         Assert.True(Reply(outcome).GetProperty("started").GetBoolean());
         Assert.Contains(log.Lines, line => line.StartsWith("Error:", StringComparison.Ordinal));
 
-        await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
+        await worker.PurgeTaskForTests!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         var again = worker.TryStartPurgeNow(_ => Task.CompletedTask, null, CancellationToken.None);
         Assert.True(Reply(again).GetProperty("started").GetBoolean());
     }
@@ -316,10 +316,10 @@ public sealed class PurgeNowBackgroundTests
         var worker = MakeWorker();
         var start = DateTime.UtcNow;
         Assert.True(worker.TryStartScheduledPurge(start, _ => Task.CompletedTask, CancellationToken.None));
-        await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
+        await worker.PurgeTaskForTests!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         Assert.True(Reply(worker.TryStartPurgeNow(_ => Task.CompletedTask, null, CancellationToken.None)).GetProperty("started").GetBoolean());
-        await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
+        await worker.PurgeTaskForTests!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         /* 24h after the daily launch is still when the next daily purge is due: not earlier, not a day after the
            manual one. */
@@ -333,7 +333,7 @@ public sealed class PurgeNowBackgroundTests
         var worker = MakeWorker();
         var start = DateTime.UtcNow;
         Assert.True(worker.TryStartScheduledPurge(start, _ => Task.CompletedTask, CancellationToken.None));
-        await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
+        await worker.PurgeTaskForTests!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         /* The stamp is start + 24h. An hour later it is still a normal wait. A clock that stepped back to before the
            launch leaves the stamp more than the day it was written with ahead of now, which can only be the step
@@ -362,7 +362,7 @@ public sealed class PurgeNowBackgroundTests
         Assert.False(dailyCalled);
 
         gate.SetResult();
-        await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
+        await worker.PurgeTaskForTests!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         /* The skip left the daily stamp alone, so the very next tick launches it. */
         Assert.True(worker.TryStartScheduledPurge(DateTime.UtcNow, _ => Task.CompletedTask, CancellationToken.None));
@@ -422,7 +422,7 @@ public sealed class PurgeNowBackgroundTests
         Assert.Contains(
             log.Lines,
             line => line.StartsWith("Information:", StringComparison.Ordinal)
-                && line.Contains("Manual purge (purge_now, custom retention 30 day(s))", StringComparison.Ordinal));
+                && line.Contains("Manual purge (purge_now, custom retention 30 days)", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -443,7 +443,7 @@ public sealed class PurgeNowBackgroundTests
 
         var warning = Assert.Single(
             log.Lines, line => line.StartsWith("Warning:", StringComparison.Ordinal) && line.Contains("cut short", StringComparison.Ordinal));
-        Assert.Contains("Manual purge (purge_now, custom retention 30 day(s))", warning, StringComparison.Ordinal);
+        Assert.Contains("Manual purge (purge_now, custom retention 30 days)", warning, StringComparison.Ordinal);
         Assert.Contains("The next daily purge uses the configured retention horizons", warning, StringComparison.Ordinal);
     }
 
@@ -501,7 +501,7 @@ public sealed class PurgeNowBackgroundTests
         var record = Assert.Single(written);
         Assert.Equal("WARNING", record.Status);
         var lines = record.Message.Split('\n');
-        Assert.Contains("Manual purge (purge_now, custom retention 30 day(s))", lines[0], StringComparison.Ordinal);
+        Assert.Contains("Manual purge (purge_now, custom retention 30 days)", lines[0], StringComparison.Ordinal);
         Assert.Single(lines, line => line.StartsWith("(all three raw tables): gate_error - ", StringComparison.Ordinal));
 
         /* And the same line at Information, so the service log carries it too. */
@@ -571,7 +571,7 @@ public sealed class PurgeNowBackgroundTests
     public void ManualPurgeLabel_NamesTheCommand_AndTheCustomHorizonWhenSet()
     {
         Assert.Equal("Manual purge (purge_now)", DarlingRetention.BuildManualPurgeLabel(null));
-        Assert.Equal("Manual purge (purge_now, custom retention 30 day(s))", DarlingRetention.BuildManualPurgeLabel(30));
+        Assert.Equal("Manual purge (purge_now, custom retention 30 days)", DarlingRetention.BuildManualPurgeLabel(30));
     }
 
     [Fact]
@@ -584,7 +584,7 @@ public sealed class PurgeNowBackgroundTests
             paced: true, walBytes: 52_428_800, pacedSeconds: 12, runLabel: label);
 
         Assert.Equal("SUCCESS", status);
-        Assert.StartsWith("Manual purge (purge_now, custom retention 14 day(s)): Purged 33 table(s)", message, StringComparison.Ordinal);
+        Assert.StartsWith("Manual purge (purge_now, custom retention 14 days): Purged 33 tables", message, StringComparison.Ordinal);
         Assert.Contains("store WAL during the purge's batches: 50 MB", message, StringComparison.Ordinal);
     }
 
@@ -594,7 +594,7 @@ public sealed class PurgeNowBackgroundTests
         var (_, message) = DarlingRetention.BuildRunRecordSummary(
             tablesPurged: 33, totalRowsDeleted: 1200, totalChunksDropped: 42, tablesFailed: 0);
 
-        Assert.StartsWith("Purged 33 table(s)", message, StringComparison.Ordinal);
+        Assert.StartsWith("Purged 33 tables", message, StringComparison.Ordinal);
         Assert.DoesNotContain("Manual", message, StringComparison.Ordinal);
     }
 
@@ -629,7 +629,7 @@ public sealed class PurgeNowBackgroundTests
         var text = ViewerServerTab.FormatPurgeSummary(
             "{\"success\":true,\"tablesPurged\":3,\"rowsPurged\":42,\"rowsDeleted\":40,\"chunksDropped\":2}", out var finished);
 
-        Assert.Equal("Purged 42 row(s)/chunk(s) across 3 table(s)", text);
+        Assert.Equal("Purged 42 rows/chunks across 3 tables", text);
         Assert.True(finished);
     }
 

@@ -65,10 +65,32 @@ public partial class ViewerServerTab
 
     private string _queryStatsSlicerMetric = "TotalCpu";
     private List<TimeSliceBucket>? _queryStatsSlicerData;
+    private int _queryStatsRowCount;
+
+    /// <summary>
+    /// The Top Queries grid's own empty sentence (<see cref="TopQueriesEmptyText"/>): the strip above it has samples, so its sentence
+    /// is not showing, and the ranking returned no row. The range load records the count and the strip load words the sentence;
+    /// the slicer handler does both. The strip's own sentence stands when the window holds no samples, and nothing shows over the
+    /// comparison grid.
+    /// </summary>
+    private void UpdateQueryStatsEmptyMessage(int? rowCount = null)
+    {
+        if (rowCount.HasValue) _queryStatsRowCount = rowCount.Value;
+        if (QueryStatsSlicer.EmptyText is not null) return;
+        var text = QueryStatsGrid.Visibility == Visibility.Visible
+            ? TopQueriesEmptyText.Text(_queryStatsRowCount, QueryStatsSlicer.HasData)
+            : null;
+        QueryStatsEmptyMessage.Text = text ?? "";
+        QueryStatsEmptyMessage.Visibility = text is null ? Visibility.Collapsed : Visibility.Visible;
+    }
     private string _procStatsSlicerMetric = "TotalCpu";
     private List<TimeSliceBucket>? _procStatsSlicerData;
     private string _queryStoreSlicerMetric = "TotalCpu";
     private List<TimeSliceBucket>? _queryStoreSlicerData;
+
+    /* #8549: the plan the interval table served the Query Store slicer with on the last range load, or null when raw served it.
+       A slicer drag re-reads the grid alone, so its banner names the slicer's start from this. */
+    private QueryStoreIntervalWide.WideReadPlan? _queryStoreSlicerPlan;
 
     /// <summary>
     /// Wires the Queries tab up-front (from the constructor, after InitializeComponent): the three grids'
@@ -97,6 +119,7 @@ public partial class ViewerServerTab
     /// <see cref="Dispose"/> so the whole tab tears down through one path.</summary>
     private void DisposeQueriesTabHelpers()
     {
+        _barCellMaxesWatch?.Release();
         DisposeQueryTrendHelpers();
     }
 
@@ -139,10 +162,10 @@ public partial class ViewerServerTab
         switch (QueriesSubTabControl.SelectedIndex)
         {
             case PerformanceTrendsSubTabIndex:
-                await LoadPerformanceTrendsAsync(startUtc, endUtc, tierNowUtc);
+                await LoadPerformanceTrendsAsync(startUtc, endUtc, tierNowUtc, timer);
                 break;
             case ActiveQueriesSubTabIndex:
-                await LoadActiveQueriesAsync(startUtc, endUtc);
+                await LoadActiveQueriesAsync(startUtc, endUtc, timer);
                 break;
             case CurrentActiveQueriesSubTabIndex:
                 /* LIVE, on-demand only — never auto-fetch on tab selection or a toolbar-range refresh (a live
@@ -180,6 +203,22 @@ public partial class ViewerServerTab
     /// not land in another load's line or rename it.</summary>
     internal static Task<T> Timed<T>(ViewerLoadTimer? timer, string phase, Task<T> read) => timer?.Track(phase, read) ?? read;
 
+    /// <summary><see cref="Timed{T}"/> for a task with no result (a join of several reads, or a read the caller awaits for effect).</summary>
+    internal static Task Timed(ViewerLoadTimer? timer, string phase, Task read) => timer?.Track(phase, read) ?? read;
+
+    /// <summary>#8549: runs a stretch of client work (a grid build, a chart draw) as a named step on the load's clock, so a slow load's line says
+    /// which step kept the UI thread busy. With no clock (a refresh that is not an inner-tab load) it is just the work.</summary>
+    internal static void ClientStep(ViewerLoadTimer? timer, string step, Action work)
+    {
+        if (timer is null)
+        {
+            work();
+            return;
+        }
+
+        timer.Step(step, work);
+    }
+
     private async Task LoadTopQueriesAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
         timer?.Surface = "Queries > Top Queries by Duration";
@@ -195,6 +234,7 @@ public partial class ViewerServerTab
             var read = dataReadTask.Result;
             var rows = read.Rows;
             _queryStatsFilterMgr!.UpdateData(rows);
+            _queryStatsRowCount = rows.Count;
             SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
             /* #4231 stage 3: an hourly-routed page holds no per-caller detail (see
                ViewerDataService.GetTopQueriesByCpuTierAsync) — the raw-floor banner (#4231 stage 1/2) and this
@@ -216,11 +256,11 @@ public partial class ViewerServerTab
 
     /// <summary>#4231 stage 3: the Queries-tab grid header's hourly-routing disclosure — appended to the
     /// existing "Showing since" banner (#4278) rather than a new widget, per the lane's ruling.</summary>
-    private const string HourlyTierSuffix = " — aggregated hourly: per-caller detail, reads, writes, spills and min/max CPU and duration are not kept, so they show blank";
+    private const string HourlyTierSuffix = ". Aggregated hourly: per-caller detail, reads, writes, spills and min/max CPU and duration are not kept, so they show blank";
 
     /// <summary>#5329: the same disclosure when the io hourly rollup served the grid: it keeps logical reads, physical reads
     /// and logical writes (the grid fills them), so those are not named as blank.</summary>
-    private const string HourlyIoTierSuffix = " — aggregated hourly: per-caller detail, spills and min/max CPU and duration are not kept, so they show blank";
+    private const string HourlyIoTierSuffix = ". Aggregated hourly: per-caller detail, spills and min/max CPU and duration are not kept, so they show blank";
 
     /// <summary>
     /// #5329: the banner suffix an hourly-routed grid carries: <see cref="HourlyTierSuffix"/> plus the window's real edges
@@ -311,14 +351,17 @@ public partial class ViewerServerTab
            ordinary read (M1) — null tells the gate this end is open. */
         var dataReadTask = Timed(timer, "grid read", _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null, tags: tagFilter));
         /* Walk finding D15: the slicer's read starts beside the grid's (see LoadTopQueriesAsync). */
-        var slicerTask = Timed(timer, "slicer read", _dataService.GetQueryStoreSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        var slicerTask = Timed(timer, "slicer read", _dataService.GetQueryStoreSlicerWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
         try
         {
             await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Store");
             var (rows, widePlan) = dataReadTask.Result;
             _queryStoreFilterMgr!.UpdateData(rows);
             SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
-            UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store"), startUtc, widePlan: widePlan);
+            /* #8549: the banner names the slicer's start from the source that served the slicer, so it is written once that read has answered. */
+            var slicerPlan = await QueryStoreSlicerPlanAsync(slicerTask);
+            _queryStoreSlicerPlan = slicerPlan;
+            UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store"), startUtc, widePlan: widePlan, slicerPlan: slicerPlan);
             await LoadQueryStoreSlicerAsync(startUtc, endUtc, slicerTask);
         }
         catch
@@ -341,15 +384,15 @@ public partial class ViewerServerTab
     /// invariant culture (<see cref="BannerTime"/>).
     /// </summary>
     internal static void UpdateTruncationBanner(TextBlock banner, DateTime? floor, DateTime requestedStartUtc, string? tierSuffix = null,
-        HourlyServed? hourly = null, QueryStoreIntervalWide.WideReadPlan? widePlan = null)
+        HourlyServed? hourly = null, QueryStoreIntervalWide.WideReadPlan? widePlan = null, QueryStoreIntervalWide.WideReadPlan? slicerPlan = null)
     {
-        /* #5562 R7: every banner site's floor (the probe answer the site already awaited) also feeds the picker's "Data starts"
-           note of the tab the banner is on screen in. One feed here covers each site, the event surfaces included. */
-        ViewerDataStartNote.Feed(banner, floor);
-
         /* #4689: when the interval table served, the rows start at the plan's EffectiveStart, not at raw's
-           floor. The banner names that start and the bound that set it; the slicer still reads raw, so a
-           truncated raw floor is named beside it. The raw route's banner below is unchanged.
+           floor. The banner names that start and the bound that set it, and the slicer's start beside it when
+           the slicer starts somewhere else.
+           #8549: the slicer's start is its own source's. The interval table serves the Query Store slicer over a
+           window of seven days or more (slicerPlan is the plan that served it), and raw serves every other slicer
+           (slicerPlan is null), so the slicer's start is that plan's EffectiveStart or raw's floor. A slicer that
+           starts at the instant "Showing since" names is not named again.
            #5329: the same shape when the HOURLY rollups served: the grid starts at this server's first bucket
            (the Query Stats / Procedure Stats arms' per-server probe), so "Showing since" names that start and raw's
            floor is named as the slicer's. An hourly read that found no bucket has no start to name (the grid is
@@ -362,11 +405,14 @@ public partial class ViewerServerTab
             servedStart = hourly!.Value.FirstBucket;
         }
 
+        var slicerTableStart = slicerPlan?.EffectiveStart;
         if (servedStart is not null || hourlyServed)
         {
             var wideTruncated = RawWindowFloor.IsTruncated(servedStart, requestedStartUtc);
-            /* The slicer and comparison read raw whatever tier served the grid, so a truncated raw floor is
-               named whether or not the grid itself was cut. */
+            /* The grid's start here is servedStart, so the floor is the slicer's alone: the interval table's start
+               when that table served the slicer, raw's otherwise. A truncated one is named whether or not the grid
+               itself was cut. */
+            floor = slicerTableStart ?? floor;
             var slicerTruncated = RawWindowFloor.IsTruncated(floor, requestedStartUtc);
             if (wideTruncated || slicerTruncated || !string.IsNullOrEmpty(tierSuffix))
             {
@@ -379,8 +425,9 @@ public partial class ViewerServerTab
                 string text;
                 if (wideTruncated)
                 {
-                    text = $"Showing since {BannerTime(servedStart!.Value)}{startReason}"
-                        + (slicerSince is null ? string.Empty : $" · slicer since {slicerSince}");
+                    var showingSince = BannerTime(servedStart!.Value);
+                    text = $"Showing since {showingSince}{startReason}"
+                        + (slicerSince is null || slicerSince == showingSince ? string.Empty : $" · slicer since {slicerSince}");
                 }
                 else if (hourlyServed && hourly!.Value.FirstBucket is null)
                 {
@@ -410,19 +457,57 @@ public partial class ViewerServerTab
         }
 
         var truncated = RawWindowFloor.IsTruncated(floor, requestedStartUtc);
+        /* #8549: raw served the grid and the interval table served the slicer (the grid's gate said raw, the slicer's
+           said the table). A cut table start is the slicer's, named beside the grid's unless it is the same instant. */
+        var gridSince = truncated ? BannerTime(RawWindowFloor.EffectiveStart(floor, requestedStartUtc)) : null;
+        var tableSlicerSince = RawWindowFloor.IsTruncated(slicerTableStart, requestedStartUtc)
+            ? BannerTime(RawWindowFloor.EffectiveStart(slicerTableStart, requestedStartUtc))
+            : null;
+        if (tableSlicerSince == gridSince)
+        {
+            tableSlicerSince = null;
+        }
+
         /* #4231 stage 3: the raw-floor truncation and the hourly-tier suffix are independent facts (a window
            can be BOTH aged past raw's floor and routed to the hourly rollup) — so the banner shows whenever
            either is true, not only when the raw floor was cut. */
-        if (!truncated && string.IsNullOrEmpty(tierSuffix))
+        if (!truncated && tableSlicerSince is null && string.IsNullOrEmpty(tierSuffix))
         {
             banner.Visibility = Visibility.Collapsed;
             return;
         }
 
-        banner.Text = truncated
-            ? $"Showing since {BannerTime(RawWindowFloor.EffectiveStart(floor, requestedStartUtc))}{tierSuffix}"
-            : $"Showing {BannerTime(requestedStartUtc)}{tierSuffix}";
+        if (tableSlicerSince is not null)
+        {
+            banner.Text = (truncated
+                ? $"Showing since {gridSince} · slicer since {tableSlicerSince}"
+                : $"Slicer since {tableSlicerSince} (the grid shows the full window)") + tierSuffix;
+        }
+        else
+        {
+            banner.Text = truncated
+                ? $"Showing since {gridSince}{tierSuffix}"
+                : $"Showing {BannerTime(requestedStartUtc)}{tierSuffix}";
+        }
+
         banner.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>
+    /// #8549: the plan the interval table served the Query Store slicer with, or null when raw served it. Null too when the slicer's
+    /// read failed: the load's own await of that read reports the failure, and the banner then names no slicer start of the table's.
+    /// </summary>
+    internal static async Task<QueryStoreIntervalWide.WideReadPlan?> QueryStoreSlicerPlanAsync(
+        Task<(List<TimeSliceBucket> Buckets, QueryStoreIntervalWide.WideReadPlan? Plan)> slicerRead)
+    {
+        try
+        {
+            return (await slicerRead).Plan;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -463,6 +548,11 @@ public partial class ViewerServerTab
         try
         {
             return (false, await probe);
+        }
+        catch (OperationCanceledException)
+        {
+            /* A tab that cancelled its own superseded load (#8549) cancelled the probe too: no banner for it and no warning. */
+            return (false, null);
         }
         catch (Exception ex)
         {
@@ -619,7 +709,8 @@ public partial class ViewerServerTab
         if (data.Count == 0)
             QueryStatsSlicer.ShowEmpty("No query statistics in the selected time window.");
         else
-            QueryStatsSlicer.LoadData(data, "Total CPU (ms)", startUtc, endUtc);
+            QueryStatsSlicer.LoadData(data, "Total CPU (ms)", startUtc, endUtc, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(startUtc, endUtc));
+        UpdateQueryStatsEmptyMessage();
     }
 
     private async void OnQueryStatsSlicerChanged(object? sender, SlicerRangeEventArgs e)
@@ -633,6 +724,7 @@ public partial class ViewerServerTab
             var read = dataReadTask.Result;
             var rows = read.Rows;
             _queryStatsFilterMgr!.UpdateData(rows);
+            UpdateQueryStatsEmptyMessage(rows.Count);
             UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), e.StartUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
             await RefreshQueryStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
@@ -650,7 +742,7 @@ public partial class ViewerServerTab
         if (data.Count == 0)
             ProcStatsSlicer.ShowEmpty("No procedure statistics in the selected time window.");
         else
-            ProcStatsSlicer.LoadData(data, "Total CPU (ms)", startUtc, endUtc);
+            ProcStatsSlicer.LoadData(data, "Total CPU (ms)", startUtc, endUtc, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(startUtc, endUtc));
     }
 
     private async void OnProcStatsSlicerChanged(object? sender, SlicerRangeEventArgs e)
@@ -674,15 +766,48 @@ public partial class ViewerServerTab
         }
     }
 
-    private async Task LoadQueryStoreSlicerAsync(DateTime startUtc, DateTime endUtc, Task<List<TimeSliceBucket>> read)
+    private async Task LoadQueryStoreSlicerAsync(DateTime startUtc, DateTime endUtc, Task<(List<TimeSliceBucket> Buckets, QueryStoreIntervalWide.WideReadPlan? Plan)> read)
     {
-        var data = await read;
+        var data = (await read).Buckets;
         _queryStoreSlicerData = data;
         _queryStoreSlicerMetric = "TotalCpu";
         if (data.Count == 0)
-            QueryStoreSlicer.ShowEmpty("No Query Store data in the selected time window.");
+        {
+            QueryStoreSlicer.ShowEmpty(QueryStoreEmptyWindowText);
+            await ShowQueryStoreEmptyReasonAsync(QueryStoreSlicer, _dataService, _server);
+        }
         else
-            QueryStoreSlicer.LoadData(data, "Total CPU (ms)", startUtc, endUtc);
+            QueryStoreSlicer.LoadData(data, "Total CPU (ms)", startUtc, endUtc, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(startUtc, endUtc));
+    }
+
+    /// <summary>What the Query Store panel says over a window that holds no rows.</summary>
+    internal const string QueryStoreEmptyWindowText = "No Query Store data in the selected time window.";
+
+    /// <summary>
+    /// #8541: the step that follows the Query Store panel saying its window is empty. It asks the store why
+    /// (<see cref="ViewerDataService.GetQueryStoreEmptyReasonAsync"/>) and shows the answer on the same slicer: the readable-secondary
+    /// sentence the MCP reads give, in place of the empty-window sentence, or the stale-capture sentence after it. The empty-window
+    /// sentence shows first and stays when the store has no reason to give. Nothing is shown when the slicer moved on while the
+    /// store was asked (it loaded data, or says something else).
+    /// </summary>
+    internal static async Task ShowQueryStoreEmptyReasonAsync(TimeRangeSlicerControl slicer, ViewerDataService dataService, DarlingServer server)
+    {
+        ArgumentNullException.ThrowIfNull(slicer);
+        ArgumentNullException.ThrowIfNull(dataService);
+        ArgumentNullException.ThrowIfNull(server);
+
+        var shown = slicer.EmptyText;
+        if (shown is null)
+        {
+            return;
+        }
+
+        var (readableSecondary, staleCapture) = await dataService.GetQueryStoreEmptyReasonAsync(server.ServerId, server.DisplayName);
+        var text = readableSecondary ?? (staleCapture is null ? null : shown + " " + staleCapture);
+        if (text is not null && ReferenceEquals(slicer.EmptyText, shown))
+        {
+            slicer.ShowEmpty(text);
+        }
     }
 
     private async void OnQueryStoreSlicerChanged(object? sender, SlicerRangeEventArgs e)
@@ -692,11 +817,13 @@ public partial class ViewerServerTab
             var tagFilter = await CurrentQueryTagFilterAsync();
             var floorTask = _dataService.GetQueryStoreWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
             /* #3953 clause 4: a slicer selection is always a literal, user-drawn sub-range, never a preset. */
-            var dataReadTask = _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: e.EndUtc, tags: tagFilter);
+            var dataReadTask = _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: e.EndUtc, tags: tagFilter);
             await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Store");
-            var rows = dataReadTask.Result;
+            var (rows, widePlan) = dataReadTask.Result;
             _queryStoreFilterMgr!.UpdateData(rows);
-            UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store"), e.StartUtc);
+            /* #8549: the interval table can serve a dragged range too, so the banner takes the grid's plan as a range load's does. The
+               drag does not re-read the slicer, so the slicer's start is still the one its last read reported. */
+            UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store"), e.StartUtc, widePlan: widePlan, slicerPlan: _queryStoreSlicerPlan);
             await RefreshQueryStoreComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)

@@ -25,14 +25,14 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DarlingBlockingReaderServerClockTests
 {
-    /* The XE select is 37 columns wide: event_time first, the six server-local stamps at 25..30, and the row's store key last (collection_time, blocked_report_id at 35, 36; #5236). */
+    /* The XE select is 38 columns wide: event_time first, the six server-local stamps at 25..30, the row's store key at 35 and 36 (collection_time, blocked_report_id; #5236) and the report's own head open transaction count last (37; #7497). */
     private static readonly int[] XeStamps = [25, 26, 27, 28, 29, 30];
 
     /* The DMV select is 24 columns wide: event_time first, the two transaction stamps at 18 and 19, then (#5632) the head blocker's sign-in
        time and last request end time at 20 and 21 (both server-local), its open transaction count at 22 and its log bytes at 23. */
     private static readonly int[] DmvStamps = [18, 19, 20, 21];
 
-    private static DataTable XeTable() => Table(37, [0, .. XeStamps]);
+    private static DataTable XeTable() => Table(38, [0, .. XeStamps]);
 
     private static DataTable DmvTable() => Table(24, [0, .. DmvStamps]);
 
@@ -148,6 +148,7 @@ public sealed class DarlingBlockingReaderServerClockTests
             var table = Table(35, [0, .. XeStamps]);
             table.Columns.Add("c35", typeof(DateTime));
             table.Columns.Add("c36", typeof(long));
+            table.Columns.Add("c37", typeof(int));
             AddRow(table, [(0, Naive(2026, 11, 2, 15)), .. values]);
             return table;
         }
@@ -169,6 +170,56 @@ public sealed class DarlingBlockingReaderServerClockTests
         Assert.Null(dmv.BlockedReportId);
         Assert.False(dmv.HasBlockedPlan);
         Assert.False(dmv.HasBlockingPlan);
+    }
+
+    /// <summary>
+    /// #7497: the XE select's last column (ordinal 37) is the report's own <c>blocking_open_transaction_count</c>. A stored value maps
+    /// through, a NULL (a row stored before V241, or a report with no trancount) stays null and is not folded into 0, and the DMV select
+    /// (which carries the count at its own ordinal 22) is unaffected.
+    /// </summary>
+    [Fact]
+    public void MapXeRow_ReadsTheReportsOwnHeadOpenTransactionCount_AtOrdinal37_AndKeepsNullNull()
+    {
+        static DataTable Counted(params (int Ordinal, object Value)[] values)
+        {
+            var table = Table(37, [0, .. XeStamps]);
+            table.Columns.Add("c37", typeof(int));
+            AddRow(table, [(0, Naive(2026, 11, 2, 15)), .. values]);
+            return table;
+        }
+
+        Assert.Equal(1, ReadXe(Counted((37, 1)), Eastern()).BlockingOpenTransactionCount);
+        Assert.Equal(0, ReadXe(Counted((37, 0)), Eastern()).BlockingOpenTransactionCount);
+        Assert.Null(ReadXe(Counted(), Eastern()).BlockingOpenTransactionCount);
+    }
+
+    /// <summary>
+    /// #7497: a report row that carries its own head open transaction count and last transaction start keeps them when a covering DMV
+    /// row is folded in, and a report row without them takes the DMV row's. A DMV row with no value does not erase a report's.
+    /// </summary>
+    [Fact]
+    public void DroppedDmvRow_FillsTheOpenTransactionCountAndLastTranStartOnlyWhereTheReportRowHasNone()
+    {
+        var t = Naive(2026, 11, 2, 15, 1);
+        var own = new DarlingBlockingReader.BlockedProcessReadRow
+        {
+            EventTime = t, BlockedSpid = 51, BlockingSpid = 60, BlockingOpenTransactionCount = 1, BlockingLastTranStartedUtc = t.AddHours(-1),
+        };
+        var bare = new DarlingBlockingReader.BlockedProcessReadRow { EventTime = t, BlockedSpid = 52, BlockingSpid = 61 };
+        DarlingBlockingReader.BlockedProcessReadRow Dmv(int blocked, int blocking, int? count) => new()
+        {
+            EventTime = t.AddSeconds(20), BlockedSpid = blocked, BlockingSpid = blocking, Source = PerformanceMonitor.Alerting.BlockedProcessAlertRow.DmvSnapshotSource,
+            BlockingOpenTransactionCount = count, BlockingLastTranStartedUtc = t.AddHours(-3),
+        };
+        var items = new System.Collections.Generic.List<DarlingBlockingReader.BlockedProcessReadRow> { own, bare };
+
+        PerformanceMonitor.Alerting.BlockedProcessReportMerge.AppendDmvFallbackRows(items,
+            new System.Collections.Generic.List<DarlingBlockingReader.BlockedProcessReadRow> { Dmv(51, 60, 5), Dmv(52, 61, 3) });
+
+        Assert.Equal(1, own.BlockingOpenTransactionCount);
+        Assert.Equal(t.AddHours(-1), own.BlockingLastTranStartedUtc);
+        Assert.Equal(3, bare.BlockingOpenTransactionCount);
+        Assert.Equal(t.AddHours(-3), bare.BlockingLastTranStartedUtc);
     }
 
     /// <summary>

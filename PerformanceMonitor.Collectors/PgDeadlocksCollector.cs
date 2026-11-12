@@ -105,7 +105,11 @@ public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDea
 
        The prefix clause is PgDeadlockLogParser's own (#4041), with '[^[\n]' as ARE's spelling of its '[^\[\n]':
        the fraction optional, fields allowed between the zone and the pid, and the managed family beside the
-       space one. The pattern
+       space one. The gap before the pid bracket passes the exact text '[local]' and no other bracket (#7182
+       round 4): %r and %h render '[local]' for a Unix-socket session, so '%m %r [%p] ' and the RDS default
+       '%t:%r:%u@%d:[%p]:' write one before the pid, and a gap that could not pass it dropped every deadlock from a
+       local-socket session while log_line_prefix_readable read met. '[local]' is not '[digits]', so the gap still
+       cannot consume the real pid bracket and a forged '[1] 424242 ERROR:' later in the line stays unreachable. The pattern
        carried only '%m [%p] ' with its fraction required, so a self-hosted target logging under '%t' (pgBadger's
        '%t [%p]: user=%u,db=%d,...'), under '%m %u@%d [%p] ' or under a colon-delimited prefix offered no
        candidate and read as a server with no deadlocks, while the assembler behind it would have read every one.
@@ -152,7 +156,7 @@ FROM (
     FROM tail
     CROSS JOIN LATERAL regexp_matches(
          tail.body,
-         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? (?:[^ \n]+ (?:(?!:  )[^[\n])*\[\d+\]|[^ :\n]+:[^[\n]*\[\d+\])(?:(?!:  )[^\n])*" + DeadlockMarkerLiteral + @"\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*" + DeadlockMarkerLiteral + @")\d{4}-\d\d-\d\d [^\n]*\n)?)',
+         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? (?:[^ \n]+ (?:(?!:  )(?:[^[\n]|\[local\]))*\[\d+\]|[^ :\n]+:(?:[^[\n]|\[local\])*\[\d+\])(?:(?!:  )[^\n])*" + DeadlockMarkerLiteral + @"\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*" + DeadlockMarkerLiteral + @")\d{4}-\d\d-\d\d [^\n]*\n)?)',
          'gn') WITH ORDINALITY AS mm(m, ord)
     ORDER BY tail.part DESC, mm.ord DESC
     LIMIT " + MatchFetchLiteral + @"
@@ -213,7 +217,7 @@ FROM (
     FROM tail
     CROSS JOIN LATERAL regexp_matches(
          pg_catalog.encode(tail.body, 'escape'),
-         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? (?:[^ \n]+ (?:(?!:  )[^[\n])*\[\d+\]|[^ :\n]+:[^[\n]*\[\d+\])(?:(?!:  )[^\n])*" + DeadlockMarkerLiteral + @"\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*" + DeadlockMarkerLiteral + @")\d{4}-\d\d-\d\d [^\n]*\n)?)',
+         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? (?:[^ \n]+ (?:(?!:  )(?:[^[\n]|\[local\]))*\[\d+\]|[^ :\n]+:(?:[^[\n]|\[local\])*\[\d+\])(?:(?!:  )[^\n])*" + DeadlockMarkerLiteral + @"\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*" + DeadlockMarkerLiteral + @")\d{4}-\d\d-\d\d [^\n]*\n)?)',
          'gn') WITH ORDINALITY AS mm(m, ord)
     WHERE pg_catalog.position(tail.body, '" + DeadlockMarkerLiteral + @"'::bytea) > 0
     ORDER BY tail.part DESC, mm.ord DESC

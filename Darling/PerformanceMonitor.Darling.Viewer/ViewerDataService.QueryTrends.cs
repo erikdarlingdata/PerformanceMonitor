@@ -41,7 +41,10 @@ public sealed class QueryTrendPoint
 /// <param name="EffectiveStartUtc">The first served point, or the requested start when nothing came back — <see cref="DurationTrendRouting.DescribeCoverage"/>.</param>
 /// <param name="Truncated">True when the series' head sits more than <see cref="DurationTrendRouting.TruncationSlack"/> after the requested start: the tier did not hold the window's head.</param>
 /// <param name="BucketMinutes">The width the raw tier gathered its points at (#4234), or 0 when every point is one collection (every bucket held one, or the tier is hourly).</param>
-public sealed record QueryTrendSeries(List<QueryTrendPoint> Points, RetentionTier Tier, DateTime EffectiveStartUtc, bool Truncated, int BucketMinutes = 0)
+/// <param name="StartOlderThanTier">True when the series is truncated AND the requested start is older than the tier that answered keeps (#7416 item 21): the only case the chart may say the earlier part aged out.</param>
+/// <param name="TierKeepsDays">How many days the answering tier keeps, or null when it keeps everything (<see cref="DurationTrendRouting.TierKeepsDays"/>).</param>
+public sealed record QueryTrendSeries(List<QueryTrendPoint> Points, RetentionTier Tier, DateTime EffectiveStartUtc, bool Truncated, int BucketMinutes = 0,
+    bool StartOlderThanTier = false, int? TierKeepsDays = null)
 {
     /// <summary>The payload word for the tier — <see cref="DurationTrendRouting.SourceWord"/>, so the chart and the tool use one vocabulary.</summary>
     public string Source => DurationTrendRouting.SourceWord(Tier);
@@ -221,7 +224,8 @@ public sealed partial class ViewerDataService
                 interval_start_time_utc AS point_time,
                 interval_end_time_utc,
                 execution_count,
-                avg_duration_us
+                avg_duration_us,
+                snapshot_time
             FROM
             (
                 SELECT
@@ -229,6 +233,7 @@ public sealed partial class ViewerDataService
                     interval_end_time_utc,
                     execution_count,
                     avg_duration_us,
+                    collection_time AS snapshot_time,
                     ROW_NUMBER() OVER
                     (
                         PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
@@ -263,7 +268,8 @@ public sealed partial class ViewerDataService
                 collection_time AS point_time,
                 CAST(NULL AS timestamp) AS interval_end_time_utc,
                 execution_count,
-                avg_duration_us
+                avg_duration_us,
+                CAST(NULL AS timestamp) AS snapshot_time
             FROM query_store_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -284,15 +290,37 @@ public sealed partial class ViewerDataService
                 COALESCE(
                     extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))),
                     extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))
-                ) AS interval_seconds
+                ) AS interval_seconds,
+                /* #8575: an interval whose end is still in the future is OPEN: it has run only until the newest snapshot that
+                   stored one of its rows, so that is the time its totals cover. NULL for a closed interval, whose own
+                   length stays the denominator. */
+                CASE WHEN date_trunc('second', MAX(interval_end_time_utc)) > date_trunc('second', timezone('UTC', now()))
+                     THEN extract(epoch FROM (date_trunc('second', MAX(snapshot_time)) - date_trunc('second', point_time)))
+                END AS open_covered_seconds
             FROM placed
             GROUP BY point_time
+        ),
+        rated AS
+        (
+            /* #8575: an open interval is partial when its covered time is under its whole length. It is then rated over that
+               covered time, and left unrated (NULL, so no rate below) when that is under 60 seconds: a rate over a few seconds is
+               noise. A closed interval has no covered time and keeps its own interval_seconds. */
+            SELECT
+                point_time,
+                total_duration_ms,
+                total_executions,
+                CASE WHEN open_covered_seconds < interval_seconds
+                     THEN CASE WHEN open_covered_seconds >= 60 THEN open_covered_seconds END
+                     ELSE interval_seconds
+                END AS interval_seconds,
+                CASE WHEN open_covered_seconds < interval_seconds THEN open_covered_seconds END AS covered_seconds
+            FROM raw
         )
         SELECT
             point_time AS collection_time,
             CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
             CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
-        FROM raw
+        FROM rated
         ORDER BY point_time
         """;
 
@@ -361,7 +389,8 @@ public sealed partial class ViewerDataService
                 interval_start_time_utc AS point_time,
                 interval_end_time_utc,
                 execution_count,
-                avg_duration_us
+                avg_duration_us,
+                collection_time AS snapshot_time
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   interval_start_time_utc >= $2
@@ -382,7 +411,8 @@ public sealed partial class ViewerDataService
                 collection_time AS point_time,
                 CAST(NULL AS timestamp) AS interval_end_time_utc,
                 execution_count,
-                avg_duration_us
+                avg_duration_us,
+                CAST(NULL AS timestamp) AS snapshot_time
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -405,15 +435,37 @@ public sealed partial class ViewerDataService
                 COALESCE(
                     extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))),
                     extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))
-                ) AS interval_seconds
+                ) AS interval_seconds,
+                /* #8575: an interval whose end is still in the future is OPEN: it has run only until the newest snapshot that
+                   stored one of its rows, so that is the time its totals cover. NULL for a closed interval, whose own
+                   length stays the denominator. */
+                CASE WHEN date_trunc('second', MAX(interval_end_time_utc)) > date_trunc('second', timezone('UTC', now()))
+                     THEN extract(epoch FROM (date_trunc('second', MAX(snapshot_time)) - date_trunc('second', point_time)))
+                END AS open_covered_seconds
             FROM placed
             GROUP BY point_time
+        ),
+        rated AS
+        (
+            /* #8575: an open interval is partial when its covered time is under its whole length. It is then rated over that
+               covered time, and left unrated (NULL, so no rate below) when that is under 60 seconds: a rate over a few seconds is
+               noise. A closed interval has no covered time and keeps its own interval_seconds. */
+            SELECT
+                point_time,
+                total_duration_ms,
+                total_executions,
+                CASE WHEN open_covered_seconds < interval_seconds
+                     THEN CASE WHEN open_covered_seconds >= 60 THEN open_covered_seconds END
+                     ELSE interval_seconds
+                END AS interval_seconds,
+                CASE WHEN open_covered_seconds < interval_seconds THEN open_covered_seconds END AS covered_seconds
+            FROM raw
         )
         SELECT
             point_time AS collection_time,
             CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
             CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
-        FROM raw
+        FROM rated
         ORDER BY point_time
         """;
 
@@ -431,22 +483,7 @@ public sealed partial class ViewerDataService
     /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/>: a collection the chosen database had no rows in
     /// still counts its seconds, so the rate is the true per-second rate over the bucket.</summary>
     public static readonly string ExecutionCountTrendSql = $"""
-        WITH raw AS
-        (
-            SELECT
-                collection_time,
-                COALESCE(SUM(delta_execution_count) FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4)), 0) AS total_executions,
-                COUNT(*) FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4)) AS matched_rows,
-                CASE WHEN MAX(sample_interval_seconds) IS NULL
-                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                     ELSE NULLIF(MAX(sample_interval_seconds), 0)
-                END AS interval_seconds
-            FROM query_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            GROUP BY collection_time
-        ),
+        WITH {DurationTrendRouting.QueryExecutionCollectionsCte()},
         rated AS
         (
             SELECT
@@ -546,8 +583,11 @@ public sealed partial class ViewerDataService
         }
         /* A bucket start is not a collection the store held (#4234): "data begins" names the first served
            collection's own instant, the instant the MCP payload's effective_start names. */
-        var (effectiveStart, truncated) = DurationTrendRouting.DescribeCoverage(firstServedUtc, startUtc);
-        return new QueryTrendSeries(points, tier, effectiveStart, truncated, bucketMinutes);
+        var rawRetentionApplies = hourlyAvailable(rollups);
+        var (effectiveStart, truncated, startOlderThanTier) = DurationTrendRouting.DescribeCoverage(
+            firstServedUtc, startUtc, DurationTrendRouting.TierFloorUtc(tier, rawRetentionApplies, nowUtc ?? DateTime.UtcNow));
+        return new QueryTrendSeries(points, tier, effectiveStart, truncated, bucketMinutes, startOlderThanTier,
+            DurationTrendRouting.TierKeepsDays(tier, rawRetentionApplies));
     }
 
     /// <summary>
@@ -878,7 +918,9 @@ public sealed partial class ViewerDataService
         }
         /* A bucket start is not a collection the store held (#4234): "data begins" names the first served
            collection's own instant, the instant the MCP payload's effective_start names. */
-        var (effectiveStart, truncated) = DurationTrendRouting.DescribeCoverage(firstServedUtc, startUtc);
-        return new QueryTrendSeries(points, tier, effectiveStart, truncated, bucketMinutes);
+        var (effectiveStart, truncated, startOlderThanTier) = DurationTrendRouting.DescribeCoverage(
+            firstServedUtc, startUtc, DurationTrendRouting.TierFloorUtc(tier, rollups.QueryGrainHourly, nowUtc ?? DateTime.UtcNow));
+        return new QueryTrendSeries(points, tier, effectiveStart, truncated, bucketMinutes, startOlderThanTier,
+            DurationTrendRouting.TierKeepsDays(tier, rollups.QueryGrainHourly));
     }
 }

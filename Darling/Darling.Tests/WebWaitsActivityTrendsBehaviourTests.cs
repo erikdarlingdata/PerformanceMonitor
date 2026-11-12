@@ -73,7 +73,7 @@ public sealed class WebWaitsActivityTrendsBehaviourTests
         Assert.Equal(string.Join(",", FirstFive), read.GetProperty("names").GetString());
         Assert.Equal(FirstFive, Strings(r.GetProperty("chart").GetProperty("labels")));
         Assert.Equal("ms/s", r.GetProperty("chart").GetProperty("unit").GetString());
-        Assert.Contains("baseline discontinuity at", Strings(r.GetProperty("notices")).Single());
+        Assert.Contains("Rates start over there.", Strings(r.GetProperty("notices")).Single());
     }
 
     [Fact]
@@ -114,7 +114,8 @@ public sealed class WebWaitsActivityTrendsBehaviourTests
         Assert.Contains("Running", labels);
         Assert.Equal("sessions", r.GetProperty("chart").GetProperty("unit").GetString());
         Assert.Equal("session_stats", Assert.Single(r.GetProperty("reads").EnumerateArray()).GetProperty("metric").GetString());
-        Assert.Contains("baseline discontinuity at", Strings(r.GetProperty("notices")).Single());
+        // #7416: session counts are levels, so a restart in the window draws no restart notice on them.
+        Assert.Empty(Strings(r.GetProperty("notices")));
         Assert.Contains(Strings(r.GetProperty("notes")), n => n.Contains("application AppOne (4)") && n.Contains("host HostOne (6)"));
     }
 
@@ -155,6 +156,25 @@ public sealed class WebWaitsActivityTrendsBehaviourTests
             var r = Run(scenario);
             Assert.Equal(JsonValueKind.Null, r.GetProperty("chart").ValueKind);
             Assert.Contains("recorded in the last 24 hours", Strings(r.GetProperty("empties")).Single());
+        }
+    }
+
+    /// <summary>
+    /// Every trend read goes through the kept-history read (replaces a source-text pin that named the call): a range wider than the reads
+    /// take is narrowed once to the widest window they take, the panel says so, and the chart still draws. A read that skipped it would
+    /// show the "pick a shorter range" notice and no chart.
+    /// </summary>
+    [Fact]
+    public void ARangeWiderThanTheReadsTake_IsNarrowedOnce_OnAllThreeTrendPanels_AndStillCharts()
+    {
+        var r = Run("tooWide");
+        foreach (var kind in new[] { "latch", "spinlock", "session" })
+        {
+            var panel = r.GetProperty(kind);
+            Assert.Contains("reads at most 168 hours", Strings(panel.GetProperty("notices")).First(), System.StringComparison.Ordinal);
+            Assert.Empty(panel.GetProperty("errors").EnumerateArray());
+            Assert.Equal(JsonValueKind.Object, panel.GetProperty("chart").ValueKind);
+            Assert.Equal(new[] { "300", "168" }, Strings(panel.GetProperty("hours")));
         }
     }
 

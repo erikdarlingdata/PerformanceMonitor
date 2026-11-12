@@ -23,11 +23,14 @@
  * tool own that knob, and this page has no write affordance at all.
  */
 
+import { countWord } from "../plain-text.js";
 import { el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, relTime, parseUtc, rollupTextId,
          fmtInt, fmtMb, fmtMs, fmtPct, fmtBool, fmtText, bandClass, disclosure, localizeIsoText } from "../util.js";
 import { gridTable } from "../panels.js";
 import { pageRangePicker, windowOfSpec } from "../page-range.js";
 import { relativeSpec } from "../time-range.js";
+import { showPageWhenSettled } from "../refresh-in-place.js";
+import { getSession, peekSession } from "../views-api.js";
 
 /* The watch-item state vocabulary — the label each FleetSweepWatchStateMachine state owes an operator. The
    KEYS are the machine's own constants; Darling.Tests.FleetSweepWebFeedTests parses THIS OBJECT and compares
@@ -63,7 +66,7 @@ export async function renderSweeps(main, opts) {
   const storeHostBox = el("div", {});
   const cadenceMeta = el("div", { class: "meta", text: "" });
 
-  mount(main, [
+  const nodes = [
     el("div", { class: "page-head" }, [
       el("h2", { text: "Fleet Sweeps" }),
       el("div", { class: "spacer" }),
@@ -77,7 +80,7 @@ export async function renderSweeps(main, opts) {
     watchBox,
     el("h3", { class: "section-title", text: "Store host" }),
     storeHostBox,
-  ]);
+  ];
 
   /* Independent sections load in parallel; each degrades alone (the triage page's rule). */
   renderCadence(cadenceMeta);
@@ -85,6 +88,9 @@ export async function renderSweeps(main, opts) {
   renderTimeline(timelineBox, detailBox);
   renderWatchItems(watchBox);
   renderStoreHost(storeHostBox, opts);
+  /* #7393: the sections draw as their reads return. A poll leaves the page on screen and swaps this one in once every section has drawn,
+     so a grid the reader scrolled down keeps its place. */
+  showPageWhenSettled(main, "sweeps", nodes, !!(opts && opts.poll === true));
 }
 
 /* ─────────────────────────── the cadence display (read-only) ─────────────────────────── */
@@ -92,6 +98,8 @@ export async function renderSweeps(main, opts) {
 /* The effective cadence, read from the same get_alert_settings the Settings window edits. Display only:
    the web feed reads the knob, it never writes it (lane 2's V124 owns the writes). */
 async function renderCadence(meta) {
+  /* The alert settings are outside a scoped seat's reads; the cadence line is left out rather than asked for and refused. */
+  if (peekSession()?.scoped) return;
   const res = await readTool("get_alert_settings", {});
   const fs = res.kind === "data" && res.data ? res.data.fleet_sweep : null;
   if (!fs) return;
@@ -190,7 +198,7 @@ function sweepDocument(d) {
 
   if (report.post_restart_window) {
     nodes.push(el("div", { class: "strip notice", role: "status" },
-      ["This sweep ran inside the post-restart settle window — fleet staleness here is classified startup-transient, not an outage, except for a server that was already offline before the restart, which stays offline."]));
+      ["This sweep ran inside the post-restart settle window. Fleet staleness here is classified startup-transient, not an outage, except for a server that was already offline before the restart, which stays offline."]));
   }
 
   /* The header tiles: counts the document already carries. Built through ONE closure with the number
@@ -215,6 +223,9 @@ function sweepDocument(d) {
     tile(fmtInt(count(watch.opened)) + " / " + fmtInt(count(watch.closed)), "watch opened / closed"),
     whp ? tile(fmtInt(whp.length), "would have paged", whp.length ? "sweep-tile-band-Critical" : null) : null,
   ]));
+
+  /* #7669: the two pages answer different questions, and a reader who sees one server in two bands needs to be told which is which. */
+  nodes.push(el("div", { class: "sweep-line meta", text: "A band covers what happened in the sweep's span. Fleet Overview shows the state now." }));
 
   /* Changes since the previous sweep — the diff is the feature's acceptance test, so it leads. */
   const changes = report.changes || {};
@@ -269,31 +280,43 @@ function sweepDocument(d) {
   /* The instrument-liveness block, rendered honestly: the verdict, its counters, and every note the
      engine wrote about what it could and could not judge. */
   const liveness = d.instrument_liveness && typeof d.instrument_liveness === "object" ? d.instrument_liveness : {};
-  nodes.push(el("h4", { class: "sweep-section", text: "Instrument liveness" }));
+  nodes.push(el("h4", { class: "sweep-section", text: "Did monitoring keep running?" }));
   nodes.push(livenessBlock(d, liveness));
 
   return el("div", { class: "sweep-doc card" + (d.instruments_alive ? "" : " instruments-dead") }, nodes);
 }
 
-function livenessBlock(d, lv) {
+/* #7562: the rows of the liveness table, in words for a person. */
+export function livenessRows(d, lv) {
+  if (lv.scope === "service") {
+    return [
+      ["Collector service", d.instruments_alive ? "Instruments running" : "The service reported an instrument problem"],
+      ["Scope", "Server lists and totals are limited to this token's tags. Service health describes the shared collector."],
+    ];
+  }
   const rows = [];
-  rows.push(["Verdict", d.instruments_alive ? "alive" : "DEAD", d.instruments_alive ? "sev-Healthy" : "sev-Critical"]);
+  rows.push(["Answer", d.instruments_alive ? "Yes, alerts and collection were running" : "No, something stopped", d.instruments_alive ? "sev-Healthy" : "sev-Critical"]);
   rows.push(["Service started", localTime(lv.service_started_at)]);
-  if (lv.baseline_reset) rows.push(["Pass-counter baseline", "reset by restart — advance not judgeable this sweep"]);
-  rows.push(["Alert passes", fmtInt(lv.alert_passes_total)
-    + (lv.alert_passes_previous != null ? " (previous " + fmtInt(lv.alert_passes_previous) + ")" : " (no baseline)")
-    + (lv.alert_passes_advancing === true ? " — advancing" : lv.alert_passes_advancing === false ? " — frozen" : "")]);
-  rows.push(["Alert read failures", fmtInt(lv.alert_read_failures_total)]);
+  if (lv.baseline_reset) rows.push(["Service restart", "The service restarted, so this sweep cannot tell whether alerts kept running"]);
+  rows.push(["Alert checks run", fmtInt(lv.alert_passes_total)
+    + (lv.alert_passes_previous != null ? " (previous sweep " + fmtInt(lv.alert_passes_previous) + ")" : " (no earlier count to compare)")
+    + (lv.alert_passes_advancing === true ? ", still counting up" : lv.alert_passes_advancing === false ? ", not counting up" : "")]);
+  rows.push(["Alert checks that could not read", fmtInt(lv.alert_read_failures_total)]);
+  return rows;
+}
+
+function livenessBlock(d, lv) {
+  const rows = livenessRows(d, lv);
 
   const faults = asArray(lv.server_read_faults);
   const notes = asArray(lv.notes);
   return el("div", { class: "liveness-block" }, [
-    table(["Instrument", "Reading"], rows.map((r) => [
+    table(["Check", "Result"], rows.map((r) => [
       cellText(r[0]),
       el("td", { class: r[2] || null, text: r[1] }),
     ])),
     faults.length
-      ? el("div", { class: "sweep-line sev-Critical", text: faults.length + " server read fault(s): "
+      ? el("div", { class: "sweep-line sev-Critical", text: countWord(faults.length, "server read fault") + ": "
           + faults.map((f) => f.server + " (" + f.error + ")").join("; ") })
       : null,
     notes.length
@@ -391,7 +414,7 @@ async function renderWatchItems(box) {
         { key: "item", label: "Item", mono: true },
         { key: "state", label: "State", display: (w) => SWEEP_WATCH_STATE_LABELS[w.state] || w.state, cellClass: (w) => watchStateSev(w.state) },
         { key: "position", label: "Position", display: (w) => watchPosition(w, d), copyValue: (w) => watchPosition(w, d), sortValue: (w) => watchPositionRank(w) },
-        { key: "first_seen_at", label: "First seen", format: "reltime" },
+        { key: "first_seen_at", label: "First ever seen", format: "reltime" },
         { key: "last_seen_at", label: "Last seen", format: "reltime" },
         {
           key: "condition",
@@ -405,7 +428,7 @@ async function renderWatchItems(box) {
       ], items)
     : emptyStrip(watchStateShown
         ? "No " + (SWEEP_WATCH_STATE_LABELS[watchStateShown] || watchStateShown).toLowerCase() + " watch items."
-        : "Nothing is open right now — no watch item is open or carried.");
+        : "No watch items are open or carried.");
 
   mount(box, [
     el("div", { class: "sweep-watch-head" }, [el("span", { class: "meta", text: label }), el("div", { class: "spacer" }), toggle]),
@@ -418,7 +441,8 @@ function watchPosition(w, d) {
   if (w.state === "pending") return w.consecutive_hits + " of " + d.entry_bar_sweeps + " hits to open";
   if (w.state === "closed") return "closed";
   if (w.consecutive_misses > 0) return w.consecutive_misses + " of " + d.exit_bar_sweeps + " quiet to close";
-  return w.consecutive_hits + " consecutive hit" + (w.consecutive_hits === 1 ? "" : "s");
+  /* The hits count the current unbroken run, which starts over after a quiet sweep; first_seen_at is the first ever sighting. */
+  return w.consecutive_hits + " consecutive hit" + (w.consecutive_hits === 1 ? "" : "s") + " in the current run";
 }
 
 /* The server cell's text, also what the column sorts, filters and exports: the fallback label is not in the raw
@@ -460,6 +484,7 @@ function watchStateSev(state) {
    the JSON round-trip every tick for a profile that changes only on a hardware or version change — never
    per-tick. A hashchange/first-paint/span-change call (opts.poll not true) always fetches fresh. */
 async function renderStoreHost(box, opts) {
+  if ((await getSession()).scoped) return;
   const isPoll = !!(opts && opts.poll === true);
   if (isPoll && lastStoreHostPayload) {
     renderStoreHostPayload(box, lastStoreHostPayload);
@@ -497,6 +522,19 @@ export function storeSizeText(store, nowMs) {
   return fmtMb(bytesToMb(store.size_bytes)) + (age == null ? (store.size_estimated === true ? " (estimate)" : "") : " (" + form + fmtMs(age * 1000) + " old)");
 }
 
+/* #7562: where the RAM figure came from, said in words and not as the name of a Windows call. */
+function ramSourceText(source) {
+  const s = String(source ?? "");
+  if (s === "GlobalMemoryStatusEx") return "read from Windows";
+  if (s.startsWith("/proc/meminfo")) return "read from the Linux host";
+  if (s.startsWith("GC.GetGCMemoryInfo()")) return "an estimate, because the host gave no reading";
+  return s ? s : "source unknown";
+}
+
+export function ramText(ram) {
+  return fmtMb(bytesToMb(ram.effective_bytes)) + " effective of " + fmtMb(bytesToMb(ram.total_bytes)) + " total, " + ramSourceText(ram.source);
+}
+
 /** The store host card's actual render, split out from the fetch above (#4214 round-1 review) so a poll tick
     can replay a previously fetched payload through the SAME render path a fresh fetch uses. */
 function renderStoreHostPayload(box, p) {
@@ -509,7 +547,7 @@ function renderStoreHostPayload(box, p) {
     [cellText("Platform"), cellText((p.platform || "—") + (p.containerized ? " (containerized)" : ""))],
     [cellText("CPUs"), cellText(fmtInt(p.processor_count))],
     [cellText("Cloud"), cellText(p.cloud && p.cloud.provider ? p.cloud.provider + " (" + fmtText(p.cloud.instance_type) + ")" : "not detected")],
-    [cellText("RAM"), cellText(fmtMb(bytesToMb(ram.effective_bytes)) + " effective of " + fmtMb(bytesToMb(ram.total_bytes)) + " total (" + fmtText(ram.source) + ")")],
+    [cellText("RAM"), cellText(ramText(ram))],
     [cellText("Data volume"), cellText(fmtMb(bytesToMb(vol.free_bytes)) + " free of " + fmtMb(bytesToMb(vol.total_bytes)) + " (" + fmtText(vol.filesystem) + ")" + (vol.note ? " — " + vol.note : ""))],
     [cellText("Managed store"), cellText(fmtBool(p.managed))],
     [cellText("PostgreSQL / TimescaleDB"), cellText(fmtText(store.postgres_version) + " / " + fmtText(store.timescale_version))],

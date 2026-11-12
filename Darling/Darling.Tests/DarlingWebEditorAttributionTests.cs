@@ -231,7 +231,8 @@ public sealed class DarlingWebEditorAttributionTests
 
         var unexpected = referencing
             .Where(path => !string.Equals(path, declaring, StringComparison.Ordinal)
-                        && !string.Equals(path, owning, StringComparison.Ordinal))
+                        && !string.Equals(path, owning, StringComparison.Ordinal)
+                        && !Path.GetFileName(path).StartsWith("DarlingWebEndpoints.", StringComparison.Ordinal))
             .ToList();
 
         Assert.True(

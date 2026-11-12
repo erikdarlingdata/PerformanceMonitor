@@ -85,10 +85,11 @@ public sealed class ComposeQueryStoreStampCompileTests
             rollup, StringComparison.Ordinal);
 
         var stale = arms[1];
-        Assert.Contains("FROM collect.query_store_compose_stamp_built AS b CROSS JOIN LATERAL (SELECT w.* FROM collect.query_store_interval_wide AS w", stale, StringComparison.Ordinal);
-        Assert.Contains("w.server_id = b.server_id AND w.collection_time >= b.hour AND w.collection_time < b.hour + interval '1 hour'", stale, StringComparison.Ordinal);
+        /* #7762: one probe per stale HOUR, with the hour's stale servers in an array. */
+        Assert.Contains("FROM collect.query_store_compose_stamp_built AS b WHERE b.hour >= date_trunc('hour', $1) AND b.hour < $3 AND b.built_seq IS DISTINCT FROM b.late_seq", stale, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY b.hour) AS sh CROSS JOIN LATERAL (SELECT w.* FROM collect.query_store_interval_wide AS w", stale, StringComparison.Ordinal);
+        Assert.Contains("w.server_id = ANY(sh.server_ids) AND w.collection_time >= sh.hour AND w.collection_time < sh.hour + interval '1 hour'", stale, StringComparison.Ordinal);
         Assert.Contains("w.collection_time >= $1 AND w.collection_time < $3 OFFSET 0) AS f", stale, StringComparison.Ordinal);
-        Assert.Contains("b.hour >= date_trunc('hour', $1) AND b.hour < $3 AND b.built_seq IS DISTINCT FROM b.late_seq", stale, StringComparison.Ordinal);
 
         /* The tail starts at $stampThrough (never the window start) and ends at the window end, inclusive as the wide read is. */
         var tail = arms[2];
@@ -303,6 +304,36 @@ public sealed class ComposeQueryStoreStampCompileTests
         Assert.Equal(Compile(TopQueriesOverTime(), served with { QueryStoreStampThrough = null }).Sql, fallback.Sql);
     }
 
+    /// <summary>#7285: the runner's fleet gate (<c>ReadsFleetRollup</c>) answers what the compile does, so the size guard counts the fleet
+    /// table only for a panel whose text reads it. A server scope, a filter, a raw-route server, a group the fleet table lacks and a store
+    /// below V239 all keep the stamp estimate.</summary>
+    [Fact]
+    public void TheReadsFleetRollupGate_AgreesWithTheCompiledText_AndRefusesEveryPanelTheFleetTableCannotServe()
+    {
+        var hashPanel = TopQueriesOverTime();
+        var plan = QueryStoreRankedHarness.Parse(hashPanel);
+        var fleet = Context(Day, Day.AddDays(1), Day.AddHours(20)) with { QueryStoreFleetReady = true };
+        Assert.True(ComposeCompiler.ReadsFleetRollup(plan, fleet));
+        Assert.Contains("query_store_compose_fleet", Compile(hashPanel, fleet).Sql, StringComparison.Ordinal);
+
+        var filtered = Panel("qs_total_cpu_us", null, ",\"timeBucket\":\"minute\",\"topN\":10,\"groupBy\":[\"query_hash\"],\"viz\":\"line\","
+            + "\"filters\":[{\"dimension\":\"database_name\",\"op\":\"like\",\"value\":\"%\"}]");
+        var byModule = Panel("qs_total_cpu_us", null, ",\"topN\":10,\"groupBy\":[\"module_name\"],\"viz\":\"bar\"");
+        var cases = new (string Json, ComposeRunContext Context)[]
+        {
+            (hashPanel, fleet with { Servers = new[] { "srv1" } }),
+            (hashPanel, fleet with { QueryStoreRawServerIds = new[] { 3 } }),
+            (hashPanel, fleet with { QueryStoreFleetReady = false }),
+            (filtered, fleet),
+            (byModule, fleet),
+        };
+        foreach (var (json, context) in cases)
+        {
+            Assert.False(ComposeCompiler.ReadsFleetRollup(QueryStoreRankedHarness.Parse(json), context), json);
+            Assert.DoesNotContain("query_store_compose_fleet", Compile(json, context).Sql, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void EveryPartialTheCompilerCanAsk_ForAQueryStoreMeasure_HasARollupColumn()
     {
@@ -330,7 +361,7 @@ public sealed class ComposeQueryStoreStampCompileTests
     {
         var sql = Compile(TopQueriesOverTime(), Context(Day, Day.AddDays(1), Day.AddHours(20))).Sql.Replace("\r\n", "\n", StringComparison.Ordinal);
         const string Relation = "SELECT f.server_id, f.database_name, f.module_name, f.query_hash, f.collection_time, s.server_name, f.cpu_wsum FROM collect.query_store_compose_stamp AS f JOIN collect.servers AS s ON s.server_id = f.server_id WHERE f.collection_time >= $1 AND f.collection_time < $3 AND EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_built AS b WHERE b.server_id = f.server_id AND b.hour = date_trunc('hour', f.collection_time) AND b.built_seq = b.late_seq) UNION ALL "
-            + "SELECT f.server_id, f.database_name, f.module_name, f.query_hash, f.collection_time, s.server_name, CAST(f.avg_cpu_time_us * f.execution_count AS numeric) AS cpu_wsum FROM collect.query_store_compose_stamp_built AS b CROSS JOIN LATERAL (SELECT w.* FROM collect.query_store_interval_wide AS w WHERE w.server_id = b.server_id AND w.collection_time >= b.hour AND w.collection_time < b.hour + interval '1 hour' AND w.collection_time >= $1 AND w.collection_time < $3 OFFSET 0) AS f JOIN collect.servers AS s ON s.server_id = f.server_id WHERE b.hour >= date_trunc('hour', $1) AND b.hour < $3 AND b.built_seq IS DISTINCT FROM b.late_seq UNION ALL "
+            + "SELECT f.server_id, f.database_name, f.module_name, f.query_hash, f.collection_time, s.server_name, CAST(f.avg_cpu_time_us * f.execution_count AS numeric) AS cpu_wsum FROM (SELECT b.hour, array_agg(b.server_id) AS server_ids FROM collect.query_store_compose_stamp_built AS b WHERE b.hour >= date_trunc('hour', $1) AND b.hour < $3 AND b.built_seq IS DISTINCT FROM b.late_seq GROUP BY b.hour) AS sh CROSS JOIN LATERAL (SELECT w.* FROM collect.query_store_interval_wide AS w WHERE w.server_id = ANY(sh.server_ids) AND w.collection_time >= sh.hour AND w.collection_time < sh.hour + interval '1 hour' AND w.collection_time >= $1 AND w.collection_time < $3 OFFSET 0) AS f JOIN collect.servers AS s ON s.server_id = f.server_id WHERE TRUE UNION ALL "
             + "SELECT f.server_id, f.database_name, f.module_name, f.query_hash, f.collection_time, s.server_name, CAST(f.avg_cpu_time_us * f.execution_count AS numeric) AS cpu_wsum FROM collect.query_store_interval_wide AS f JOIN collect.servers AS s ON s.server_id = f.server_id WHERE f.collection_time >= $3 AND f.collection_time <= $2";
         const string Expected = """
             WITH topn AS (
@@ -339,7 +370,7 @@ public sealed class ComposeQueryStoreStampCompileTests
                 WHERE f.collection_time >= $1
                   AND f.collection_time <= $2
                 GROUP BY f.query_hash
-                ORDER BY value DESC NULLS LAST
+                ORDER BY value DESC NULLS LAST, query_hash
                 LIMIT $4
             )
             SELECT * FROM (

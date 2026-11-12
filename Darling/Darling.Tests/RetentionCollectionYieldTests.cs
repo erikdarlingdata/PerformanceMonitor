@@ -481,7 +481,7 @@ public sealed class RetentionCollectionYieldTests
         Assert.Equal("before table_b", gate.StoppedPlace);
         Assert.Equal(2, gate.TablesNotReached);
         Assert.Equal(2, gate.TablesLeft);
-        Assert.Contains("time budget before table_b, with 2 table(s) not reached", gate.Describe(), StringComparison.Ordinal);
+        Assert.Contains("time budget before table_b, with 2 tables not reached", gate.Describe(), StringComparison.Ordinal);
 
         /* Stopped part-way through a table: "in". */
         var time2 = new FakeTime();
@@ -913,7 +913,7 @@ public sealed class RetentionCollectionYieldTests
             var candidate = Path.Combine(dir.FullName, relative);
             if (File.Exists(candidate))
             {
-                return File.ReadAllText(candidate);
+                return RepoFile.ReadRepoFile(candidate);
             }
         }
 

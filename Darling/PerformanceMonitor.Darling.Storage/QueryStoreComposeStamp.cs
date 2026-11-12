@@ -46,9 +46,10 @@ namespace PerformanceMonitor.Darling.Storage;
 ///
 /// <para><b>Order:</b> stale hours first (a stale hour is one the compiler can no longer serve from the rollup), then the hours
 /// the builder has never done, newest first, so the default one-day window is servable after about 21 builds rather than after
-/// the whole backlog. An hour is built once it is <see cref="BuildLag"/> old: a row leaves its hour at most about 59.5 minutes
-/// plus one collection cycle after its stamp, about 2 h 25 min after the hour starts, so 3 h holds with about 35 minutes
-/// to spare, and the trigger covers whatever is later.</para>
+/// the whole backlog. An hour is built once it is <see cref="BuildLag"/> (90 minutes, #7762) old, when most rows of it have stopped
+/// changing (about H + 1:05 to H + 1:15, estimated). The trigger (V251) marks every row of an hour written from H + 1 h on, so a write after the build
+/// makes the hour stale and the next tick (a 15-minute timer, #7762) rebuilds it; not every hour is rebuilt, and an hour is built 1 + p times, p the
+/// share of hours written after their first build.</para>
 ///
 /// <para><b>The partial columns come from one table</b> (<see cref="PartialColumnMap"/>): the CREATE TABLE in the V173 rung is a
 /// literal (a shipped migration is never regenerated), a test pins it equal to the map, and the builder's expressions and the
@@ -68,17 +69,41 @@ public static class QueryStoreComposeStamp
     public const string InsertTrigger = "trg_query_store_compose_stamp_late_ins";
     public const string UpdateTrigger = "trg_query_store_compose_stamp_late_upd";
 
-    /// <summary>How old an hour must be before the builder does it: build hour H once now is at least H + this.</summary>
-    public static readonly TimeSpan BuildLag = TimeSpan.FromHours(3);
+    /// <summary>The minutes behind <see cref="BuildLag"/>. The one number: <see cref="PlanSql"/> is built from it, so the constant and the
+    /// planner cannot drift.</summary>
+    public const int BuildLagMinutes = 90;
 
-    /// <summary>The trigger marks a row whose hour is more than this before the hour of the writer's clock (the
-    /// <c>WHEN</c> offset). One hour, against <see cref="BuildLag"/> of three: a row is marked from H + 2 h on, and the
-    /// builder reads H from H + 3 h on, so a writer transaction would have to stay open over an hour between its write
-    /// and its commit to land an unmarked row after the build. The offset is a literal in the rung (a shipped migration);
-    /// <see cref="WhenOffsetSql"/> is the text a test compares it to.</summary>
-    public static readonly TimeSpan WhenOffset = TimeSpan.FromHours(1);
+    /// <summary>The same lag as SQL text, for <see cref="PlanSql"/> (a constant cannot be built from the int). A live test builds an hour at the lag and one
+    /// minute before it, so a change to one and not the other fails.</summary>
+    internal const string BuildLagSql = "interval '90 minutes'";
 
-    public const string WhenOffsetSql = "interval '1 hour'";
+    /// <summary>How old an hour must be before the builder does it: build hour H once now is at least H + this (#7762: 90 minutes, from 3 hours, so
+    /// the newest hours leave the panel's tail sooner).
+    /// <para><b>Why 90 minutes is safe.</b> The row trigger (V251, <see cref="WhenOffset"/> zero) marks every row of hour H written from H + 1 h on. A row
+    /// of H written before H + 1 h is unmarked, and the writer that wrote it began its transaction before H + 1 h. The build starts at H + 1 h 30 min at the
+    /// earliest, so a transaction that began in hour H must stay open for over 30 minutes to be open at the build. The collector's transactions last
+    /// seconds (a command times out at 10 s), so that margin only sets how often a build defers. The correctness is the open-writer guard
+    /// (<see cref="OpenWriterSql"/>, <see cref="WriterGuardSql"/>): it defers the build while any writer that began before H + 1 h is open, so after it
+    /// passes every writer of an unmarked row of H has finished and every later writer's rows are marked. The lag never carries the proof.</para>
+    /// </summary>
+    public static readonly TimeSpan BuildLag = TimeSpan.FromMinutes(BuildLagMinutes);
+
+    /// <summary>The trigger marks a row whose hour is more than this before the hour of the writer's clock (the <c>WHEN</c> offset). Zero from V251
+    /// (#7762), one hour in V173's literal: a row is marked from H + 1 h on (it was H + 2 h). More rows are marked, each costing one upsert per (server,
+    /// hour) per transaction, so a build or two more an hour rebuilds an hour that was written after its first build (estimated 1 + p builds an hour,
+    /// p the share of hours written after their first build). The offset is a literal in the rung (a shipped migration is never edited);
+    /// <see cref="LateMarkThresholdSql"/> is the same text, kept here for a test to compare to the rung. The rung does not read it.</summary>
+    public static readonly TimeSpan WhenOffset = TimeSpan.Zero;
+
+    /// <summary>The row trigger's threshold from V251: the hour of the writer's clock (UTC). A row older than it is marked.</summary>
+    public const string LateMarkThresholdSql = "date_trunc('hour', clock_timestamp() AT TIME ZONE 'UTC')";
+
+    /// <summary>
+    /// How far past the start of hour H an open writer can still hold an UNMARKED row of H: one hour (the hour itself) plus <see cref="WhenOffset"/>.
+    /// A row of H is unmarked only while the writer's clock is before H + 1 h, and the writer's transaction began no later than that write. Both
+    /// guards (<see cref="OpenWriterSql"/> and <see cref="BlockedByWriterTail"/>) take this one literal, so they cannot disagree.
+    /// </summary>
+    public const string WriterGuardSql = "interval '1 hour'";
 
     /// <summary>The most hours one tick builds (about 2.6 s each cold, 400 K wide rows at 6.5 us).</summary>
     public const int MaxBuildsPerTick = 6;
@@ -107,13 +132,19 @@ public static class QueryStoreComposeStamp
     /// <summary>The failure record of each hour whose last build threw (#5867): one row per hour, removed when the hour builds.</summary>
     public const string FailuresTable = "collect.query_store_compose_stamp_failures";
 
-    /// <summary>
-    /// The consecutive failures after which an hour is retried once a day instead of every tick (#5867). Three, because the failures a
-    /// retry cures (a deadlock, a lock or serialization failure, a dropped connection, a restart of the store) clear within a tick or
-    /// two, and at the service's hourly tick three failures in a row are three hours of the same error: past that, an hourly retry
-    /// only repeats it, and spends the build's timeout every hour.
-    /// </summary>
-    public const int FailuresBeforeBackoff = 3;
+    /// <summary>How often the service runs the compose build (#7762): the 15-minute timer's period. The worker's timer reads this.</summary>
+    public static readonly TimeSpan ComposeTickInterval = TimeSpan.FromMinutes(15);
+
+    /// <summary>How long failures of one compose hour (or one hash day) go on before it is retried once a day (#5867, #7762): three hours. Three,
+    /// because the failures a retry cures (a deadlock, a lock or serialization failure, a dropped connection, a restart of the store) clear
+    /// within an hour or two: past that, a retry every tick only repeats the error and spends the build's timeout every tick. It was three
+    /// failures of an hourly tick, and it stays three hours of the 15-minute tick (#7762) so a short fault does not hold an hour or a day back for a day.</summary>
+    public static readonly TimeSpan ComposeBackoffAfter = TimeSpan.FromHours(3);
+
+    /// <summary>The consecutive compose-build failures after which an hour is retried once a day: <see cref="ComposeBackoffAfter"/> at one
+    /// attempt per <see cref="ComposeTickInterval"/> (twelve). The compose rollup's failure record, the hash daily rollup's
+    /// failure record (<c>QueryStoreHashDaily</c>, which runs in the same tick), the self-alert and <c>get_store_metrics</c> all read this one count.</summary>
+    public static readonly int ComposeFailuresBeforeBackoff = (int)(ComposeBackoffAfter / ComposeTickInterval);
 
     /// <summary>How long an hour in backoff waits between attempts (#5867): one attempt, and one WARN, a day.</summary>
     public static readonly TimeSpan BackoffInterval = TimeSpan.FromDays(1);
@@ -322,7 +353,101 @@ CREATE TRIGGER trg_query_store_compose_stamp_late_upd
     EXECUTE FUNCTION collect.query_store_compose_stamp_mark_late();
 """;
 
-    /// <summary>The insert column list: <c>collection_time</c>, the partials in map order, then the dimensions.</summary>
+    /// <summary>
+    /// The version of the rung that moves the row trigger's threshold to the hour of the writer's clock (#7762): V251.
+    /// </summary>
+    public const int LateMarkOffsetZeroRungVersion = 251;
+
+    /// <summary>
+    /// V251 (#7762): the V173 trigger function and both row triggers again, with the threshold at the hour of the writer's clock
+    /// (<see cref="LateMarkThresholdSql"/>) instead of one hour before it. A row of hour H written from H + 1 h on is marked (it was H + 2 h), so the
+    /// builder can read H at H + 1 h 30 min (<see cref="BuildLag"/>) and the open-writer guard is one hour (<see cref="WriterGuardSql"/>). V173's text is
+    /// never edited: this is the same function and the same two triggers, replaced. Only the three thresholds differ from <see cref="CreateSql"/>.
+    /// <b>Catalog-only</b>: <c>CREATE OR REPLACE FUNCTION</c> and <c>CREATE TRIGGER</c> on the partitioned parent (cloned onto each leaf without a
+    /// scan, SHARE ROW EXCLUSIVE on the parent and each leaf, so the rung's lock timeout is V173's). Idempotent.
+    /// <b>No gap at the switch:</b> a row written under the old threshold and left unmarked (hour H, written between H + 1 h and H + 2 h) belongs to a
+    /// transaction that committed before this rung's DDL could take its lock (a writer that has written holds ROW EXCLUSIVE on the table, which the
+    /// trigger DDL waits for), and the rung runs before the planner of the build that carries it, so every hour built from then on reads those rows.
+    /// An hour already built stays valid until a marked write moves it. An older build run on a V251 store marks more than it expects and keeps its
+    /// own three-hour lag and two-hour guard, which are the safe side.
+    /// </summary>
+    public const string LateMarkOffsetZeroSql = """
+CREATE OR REPLACE FUNCTION collect.query_store_compose_stamp_mark_late() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $f$
+/* A (server, hour) is bumped at most once per transaction, for V168's reason: an apply is one statement, so tens of
+   thousands of late rows would otherwise update the same validity row again and again, each update leaving another
+   version of the tuple inside the one transaction, and the batch grows quadratically. One bump is enough: the builder
+   reads late_seq before it aggregates, and the batch's rows commit together with the bump. The pairs
+   already bumped are kept in a transaction-local setting (set_config(.., true)), which a rolled-back savepoint undoes
+   together with the bump it recorded. Each key is server_id:hour-number between commas (hour-number is whole hours since
+   1970-01-01), so one lookup is a substring test. After a commit the setting reads back as an empty string, not NULL.
+   An UPDATE marks the hour it moves a row OUT of (OLD) as well as the hour it lands in (NEW): the open interval's row is
+   refreshed with a newer collection_time, so a built hour loses a row. The threshold is the writer's own clock, not the
+   transaction start, and (V251, #7762) the hour of it with no offset: a row of an earlier hour is marked. */
+DECLARE
+    threshold timestamp := date_trunc('hour', clock_timestamp() AT TIME ZONE 'UTC');
+    marked text := coalesce(nullif(current_setting('darling.query_store_compose_stamp_marked', true), ''), ',');
+    sn integer;
+    hn timestamp;
+    kn text;
+    so integer;
+    ho timestamp;
+    ko text;
+BEGIN
+    IF NEW.collection_time < threshold THEN
+        sn := NEW.server_id;
+        hn := date_trunc('hour', NEW.collection_time);
+        kn := ',' || sn || ':' || (extract(epoch FROM hn)::bigint / 3600) || ',';
+        IF position(kn IN marked) > 0 THEN
+            kn := NULL;
+        END IF;
+    END IF;
+
+    IF TG_OP = 'UPDATE' THEN
+        IF OLD.collection_time < threshold THEN
+            so := OLD.server_id;
+            ho := date_trunc('hour', OLD.collection_time);
+            ko := ',' || so || ':' || (extract(epoch FROM ho)::bigint / 3600) || ',';
+            IF position(ko IN marked) > 0 OR ko IS NOT DISTINCT FROM kn THEN
+                ko := NULL;
+            END IF;
+        END IF;
+    END IF;
+
+    IF kn IS NULL AND ko IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    INSERT INTO collect.query_store_compose_stamp_built AS b (server_id, hour, late_seq)
+    SELECT v.s, v.h, 1
+    FROM (VALUES (sn, hn, kn), (so, ho, ko)) AS v (s, h, k)
+    WHERE v.k IS NOT NULL
+    ON CONFLICT (server_id, hour) DO UPDATE SET late_seq = b.late_seq + 1;
+
+    PERFORM set_config('darling.query_store_compose_stamp_marked',
+        marked || CASE WHEN kn IS NOT NULL THEN substr(kn, 2) ELSE '' END || CASE WHEN ko IS NOT NULL THEN substr(ko, 2) ELSE '' END, true);
+    RETURN NULL;
+END
+$f$;
+
+DROP TRIGGER IF EXISTS trg_query_store_compose_stamp_late_ins ON collect.query_store_interval_wide;
+CREATE TRIGGER trg_query_store_compose_stamp_late_ins
+    AFTER INSERT ON collect.query_store_interval_wide
+    FOR EACH ROW
+    WHEN (NEW.collection_time < date_trunc('hour', clock_timestamp() AT TIME ZONE 'UTC'))
+    EXECUTE FUNCTION collect.query_store_compose_stamp_mark_late();
+
+DROP TRIGGER IF EXISTS trg_query_store_compose_stamp_late_upd ON collect.query_store_interval_wide;
+CREATE TRIGGER trg_query_store_compose_stamp_late_upd
+    AFTER UPDATE ON collect.query_store_interval_wide
+    FOR EACH ROW
+    WHEN (OLD.collection_time < date_trunc('hour', clock_timestamp() AT TIME ZONE 'UTC')
+          OR NEW.collection_time < date_trunc('hour', clock_timestamp() AT TIME ZONE 'UTC'))
+    EXECUTE FUNCTION collect.query_store_compose_stamp_mark_late();
+""";
+
     /// <summary>
     /// V189 (#5867): the failure record of the hours whose build threw. One row per hour, written by <see cref="RecordFailureSql"/>
     /// after the failed build rolled back, and deleted by the build that succeeds (in its own transaction) or by the cleanup once the
@@ -466,6 +591,100 @@ GROUP BY {FactAlias}.server_id, {FactAlias}.query_hash;";
 DELETE FROM collect.query_store_hash_hourly
 WHERE hour < $1;";
 
+    /// <summary>The store schema version that has <see cref="FleetTable"/> (V239, #7146).</summary>
+    public const int FleetRungVersion = 239;
+
+    /// <summary>The fleet rollup of the stamp (V239, #7146): the stamp's partials combined across servers, databases and modules, one
+    /// row per exact stamp time and <c>query_hash</c>.</summary>
+    public const string FleetTable = "collect.query_store_compose_fleet";
+
+    /// <summary>
+    /// V239 (#7146): the fleet rollup of <see cref="Table"/> and the ledger column that says which pairs it covers. A PLAIN table on
+    /// every store, as the stamp and the hash-hourly table are (no hypertable, no compression, no Timescale policy): the builder's
+    /// own cleanup removes it by the retention floor (<see cref="GcFleetSql"/>). Same partial columns, names and types as the stamp
+    /// (<see cref="PartialColumnMap"/>), so the compiler combines them with the expressions it uses on the stamp. The grain is the exact
+    /// stamp time and <c>query_hash</c>, never the hour. No unique index, as the stamp: the grain is held by the builder's GROUP BY and
+    /// its one-transaction DELETE and INSERT. <c>fleet_built_seq</c> is the late_seq this table's pair was built against: NULL on every
+    /// pair built before V239 and on a pair a build that does not know the table rebuilt, so the planner rebuilds those hours through the
+    /// ordinary tick and the read does not trust the table for them. Naive UTC.
+    /// </summary>
+    public const string FleetCreateSql = """
+/* V239 (#7146): the fleet rollup of the compose stamp, one row per exact stamp time and query_hash, the stamp's partials combined with
+   sum(), min() and max(). Built by the hourly pass in the stamp's transaction. Plain table on every store kind. Naive UTC. */
+CREATE TABLE IF NOT EXISTS collect.query_store_compose_fleet
+(
+    collection_time timestamp NOT NULL,
+    wide_rows bigint NOT NULL,
+    ec_count bigint,
+    ec_min bigint,
+    ec_max bigint,
+    maxdur_count bigint,
+    maxdur_min bigint,
+    maxdur_max bigint,
+    maxcpu_count bigint,
+    maxcpu_min bigint,
+    maxcpu_max bigint,
+    query_hash text,
+    ec_sum numeric,
+    maxdur_sum numeric,
+    maxcpu_sum numeric,
+    dur_wsum numeric,
+    cpu_wsum numeric
+);
+
+CREATE INDEX IF NOT EXISTS ix_query_store_compose_fleet_time
+ON collect.query_store_compose_fleet (collection_time);
+
+/* The ledger's third sequence: the late_seq this table's pair was built against. NULL on a pair built before V239. */
+ALTER TABLE collect.query_store_compose_stamp_built
+    ADD COLUMN IF NOT EXISTS fleet_built_seq bigint;
+""";
+
+    /// <summary>Clears the hour's fleet rows before they are rebuilt: $1 the hour. Served by the (collection_time) index.</summary>
+    public const string DeleteFleetHourSql = @"
+DELETE FROM collect.query_store_compose_fleet
+WHERE collection_time >= $1
+  AND collection_time < $1 + interval '1 hour';";
+
+    /// <summary>
+    /// Fills the fleet table for one hour from the hour's NEW stamp rows, in the build's transaction: $1 the hour. Counts and sums combine
+    /// with <c>sum()</c>, minima with <c>min()</c>, maxima with <c>max()</c>, each cast back to the stamp column's type, so a fleet
+    /// column is exactly the aggregate of the stamp column over the same rows. The kind comes from the partial's aggregate in
+    /// <see cref="PartialColumnMap"/>.
+    /// </summary>
+    public static readonly string BuildFleetHourInsertSql = $@"
+INSERT INTO collect.query_store_compose_fleet (collection_time, {string.Join(", ", PartialColumnMap.Select(c => c.Column))}, query_hash)
+SELECT s.collection_time, {string.Join(", ", PartialColumnMap.Select(c => $"({FleetCombine(c)}(s.{c.Column}))::{c.SqlType}"))}, s.query_hash
+FROM collect.query_store_compose_stamp AS s
+WHERE s.collection_time >= $1
+  AND s.collection_time < $1 + interval '1 hour'
+GROUP BY s.collection_time, s.query_hash;";
+
+    /// <summary>The aggregate that combines a stamp column across servers, databases and modules: min for a minimum, max for a maximum,
+    /// sum for a count or a sum.</summary>
+    private static string FleetCombine(PartialColumn column) =>
+        column.FactExpression.StartsWith("MIN(", StringComparison.Ordinal) ? "min"
+        : column.FactExpression.StartsWith("MAX(", StringComparison.Ordinal) ? "max"
+        : "sum";
+
+    /// <summary>
+    /// Marks the hour's fleet rows as built from the stamp rows the hour's pairs were built from (#7146): $1 the hour. Sets <c>fleet_built_seq</c>
+    /// to <c>built_seq</c> and nothing else, never <c>late_seq</c>. A writer that bumped a pair's <c>late_seq</c> before or during the fleet-only build
+    /// leaves <c>built_seq</c> behind it, so the pair stays stale for every table and the full build takes the hour. The UPDATE waits for a
+    /// writer's open row lock on the pair and then reads the committed <c>built_seq</c>, so the mark can never put a pair level with a newer <c>late_seq</c>.
+    /// </summary>
+    public const string MarkFleetBuiltSql = @"
+UPDATE collect.query_store_compose_stamp_built
+SET fleet_built_seq = built_seq
+WHERE hour = $1;";
+
+    /// <summary>Removes every fleet row below the floor: $1 the floor, served by the (collection_time) index. By the floor, as
+    /// <see cref="GcHashHourlySql"/>, so rows of an hour a build that predates the table retired still go.</summary>
+    public const string GcFleetSql = @"
+DELETE FROM collect.query_store_compose_fleet
+WHERE collection_time < $1;";
+
+    /// <summary>The insert column list: <c>collection_time</c>, the partials in map order, then the dimensions.</summary>
     private static string InsertColumns() =>
         "collection_time, " + string.Join(", ", PartialColumnMap.Select(c => c.Column)) + ", " + string.Join(", ", DimensionColumns);
 
@@ -521,10 +740,10 @@ WHERE hour < $1;";
     /// <para>Why that is safe on the read: <c>blocked</c> has one consumer, the backlog filter in <c>QueryTagRollupHashRoute.TryPlanAsync</c>. It
     /// only keeps an hour out of the backlog, which decides where the answer starts. It never decides which rows an hour contributes: that is
     /// the ledger's validity facts and the data statement, which share the read's one REPEATABLE READ snapshot, and an hour left out of the
-    /// answer is named in its note. The planner builds an hour only once the store's clock is <see cref="BuildLag"/> (3 hours) past it, so
-    /// a built hour H is over by at least 3 hours, and a writer defers it only when <c>xact_start &lt; H + 2 h</c>, which takes a transaction
-    /// open for over an hour. The collector's transactions last seconds, so the one case this ignores is an unreadable writer open for over an
-    /// hour, which holds the cut back until it closes. The code has no bound on a writer's whole transaction to size a guess by
+    /// answer is named in its note. The planner builds an hour only once the store's clock is <see cref="BuildLag"/> (90 minutes) past it, so
+    /// a built hour H is over by at least 90 minutes, and a writer defers it only when <c>xact_start &lt; H + 1 h</c>, which takes a transaction
+    /// open for over 30 minutes. The collector's transactions last seconds, so the one case this ignores is an unreadable writer open for over
+    /// 30 minutes, which holds the cut back until it closes. The code has no bound on a writer's whole transaction to size a guess by
     /// (<c>ServiceCommandDeadlines.CollectionSweepSeconds</c> bounds one command and nothing encloses the transaction), so the read does not
     /// guess one.</para>
     /// </summary>
@@ -534,21 +753,21 @@ WHERE hour < $1;";
 
     /// <summary>
     /// What follows an hour expression to say "an open writer would defer this hour" against the <c>cutoff</c> CTE
-    /// (<see cref="WriterCutoffSql"/>): the row trigger skips a row within one hour of the writer's clock, so a row of hour H can land
-    /// unmarked only while the store's clock is before H + 2 h (<see cref="OpenWriterSql"/>). The planner and the fleet rollup read both
+    /// (<see cref="WriterCutoffSql"/>): the row trigger (V251) skips a row of the writer's own hour, so a row of hour H can land
+    /// unmarked only while the store's clock is before H + 1 h (<see cref="OpenWriterSql"/>, <see cref="WriterGuardSql"/>). The planner and the fleet rollup read both
     /// use it, so an hour the builder will not build because of a writer is the same hour the read does not wait for.
     /// </summary>
-    internal const string BlockedByWriterTail = " + interval '2 hours' > cutoff.since";
+    internal const string BlockedByWriterTail = " + " + WriterGuardSql + " > cutoff.since";
 
     /// <summary>
     /// The margin guard (#5582 review round 1, narrowed in round 2): the oldest open WRITER OF THE WIDE TABLE (<see cref="WideWriterRowsSql"/>)
     /// that could hold an unmarked row of the hour, if there is one: $1 the hour. The row trigger skips a row whose
-    /// <c>collection_time</c> is within one hour of the hour of the writer's clock (<see cref="WhenOffset"/>), so a row of hour H can land
-    /// unmarked only while the store's clock is before H + 2 h, and the writer's transaction began before that. If such a transaction is
+    /// <c>collection_time</c> is in the hour of the writer's clock (<see cref="WhenOffset"/> is zero from V251), so a row of hour H can land
+    /// unmarked only while the store's clock is before H + 1 h (<see cref="WriterGuardSql"/>), and the writer's transaction began before that. If such a transaction is
     /// still open when the build starts, its rows may commit after the build read them, and nothing would ever mark the pair: the hour
     /// would read as current with the rows missing. So the build waits (it is deferred to the next tick) until no such transaction is
     /// open. After the check passes, every writer of an unmarked row of H has finished, and a writer that starts later writes marked
-    /// rows, because the store's clock is past H + 3 h when the plan picks the hour. A lock is released after the commit is visible
+    /// rows, because the store's clock is past H + 1 h 30 min when the plan picks the hour, and a row written from H + 1 h on is marked. A lock is released after the commit is visible
     /// to other snapshots, so a build that does not see the lock sees the writer's committed rows.
     ///
     /// <para>Round 1 counted every transaction with an xid, so a write to ANY table (or a <c>CREATE TEMP TABLE</c>) deferred the
@@ -565,7 +784,7 @@ SELECT w.pid, w.xact_start, w.application_name, w.backend_type
 FROM (" + WideWriterRowsSql + @"
 ) AS w
 WHERE w.xact_start IS NULL
-   OR (w.xact_start AT TIME ZONE 'UTC') < $1 + interval '2 hours'
+   OR (w.xact_start AT TIME ZONE 'UTC') < $1 + " + WriterGuardSql + @"
 ORDER BY w.xact_start NULLS FIRST, w.pid
 LIMIT 1;";
 
@@ -641,8 +860,8 @@ WHERE collection_time >= $1
     /// <c>hash_built_seq</c> behind, so the pair reads as stale for the hash-hourly table and <see cref="PlanSql"/> rebuilds it.
     /// </summary>
     public const string UpsertBuiltSql = @"
-INSERT INTO collect.query_store_compose_stamp_built AS b (server_id, hour, late_seq, built_seq, hash_built_seq, built_at, source_rows, stamp_rows)
-SELECT x.server_id, $1, 0, COALESCE(l.late_seq, 0), COALESCE(l.late_seq, 0), $2, COALESCE(r.source_rows, 0), COALESCE(r.stamp_rows, 0)
+INSERT INTO collect.query_store_compose_stamp_built AS b (server_id, hour, late_seq, built_seq, hash_built_seq, fleet_built_seq, built_at, source_rows, stamp_rows)
+SELECT x.server_id, $1, 0, COALESCE(l.late_seq, 0), COALESCE(l.late_seq, 0), COALESCE(l.late_seq, 0), $2, COALESCE(r.source_rows, 0), COALESCE(r.stamp_rows, 0)
 FROM
 (
     SELECT u.server_id FROM unnest($3::integer[]) AS u (server_id)
@@ -664,6 +883,7 @@ LEFT JOIN
 ON CONFLICT (server_id, hour) DO UPDATE
 SET built_seq = EXCLUDED.built_seq,
     hash_built_seq = EXCLUDED.hash_built_seq,
+    fleet_built_seq = EXCLUDED.fleet_built_seq,
     built_at = EXCLUDED.built_at,
     source_rows = EXCLUDED.source_rows,
     stamp_rows = EXCLUDED.stamp_rows;";
@@ -698,8 +918,13 @@ ON CONFLICT (hour) DO UPDATE SET built_at = EXCLUDED.built_at;";
     /// <c>built_seq</c> differs from <c>late_seq</c> is a late-write hour, not backlog. $5 is <see cref="MaxExtraBacklogBuilds"/>: backlog hours are
     /// capped at $2 plus $5, the others at $2, so the tick can build its extra backlog hours (<see cref="ChooseExtraBacklog"/>).</para>
     ///
+    /// <para>The seventh column, <c>fleet_only</c> (#7146), is true for a stale hour whose pairs all have <c>built_seq</c> and <c>hash_built_seq</c>
+    /// equal to <c>late_seq</c> and differ only in <c>fleet_built_seq</c>: every hour built before V239. The stamp and the hash-hourly rows of such an
+    /// hour are right, so the tick rebuilds only its fleet rows from its stamp rows (<see cref="BuildFleetHourAsync"/>) and reads no wide-table row.
+    /// It is still a backlog hour for the caps and the order. Any other stale hour takes the full build.</para>
+    ///
     /// <para>The third column, <c>blocked</c>, is true for an hour an open writer of the wide table would defer (<see cref="OpenWriterSql"/>:
-    /// the oldest writer started before the hour plus two hours; a writer with no readable start blocks every hour). The cap is per kind AND
+    /// the oldest writer started before the hour plus one hour (<see cref="WriterGuardSql"/>); a writer with no readable start blocks every hour). The cap is per kind AND
     /// per blocked, so hours that cannot build do not take the build slots of the hours that can: an old, never-built hour still builds
     /// while a writer pins the newest ones (#5582 review round 2). The blocked rows are only counted, for the log; the per-build check stays,
     /// because a writer can start between the plan and the build.</para>
@@ -729,28 +954,29 @@ cutoff AS
 stale AS
 (
     SELECT b.hour, true AS stale, (b.hour" + BlockedByWriterTail + @") AS blocked,
-           NOT bool_or(b.built_seq IS DISTINCT FROM b.late_seq) AS backlog
+           NOT bool_or(b.built_seq IS DISTINCT FROM b.late_seq) AS backlog,
+           NOT bool_or(b.built_seq IS DISTINCT FROM b.late_seq OR b.hash_built_seq IS DISTINCT FROM b.late_seq) AS fleet_only
     FROM collect.query_store_compose_stamp_built AS b
     JOIN collect.query_store_compose_stamp_hours AS h ON h.hour = b.hour
     CROSS JOIN bounds
     CROSS JOIN cutoff
-    WHERE (b.built_seq IS DISTINCT FROM b.late_seq OR b.hash_built_seq IS DISTINCT FROM b.late_seq)
+    WHERE (b.built_seq IS DISTINCT FROM b.late_seq OR b.hash_built_seq IS DISTINCT FROM b.late_seq OR b.fleet_built_seq IS DISTINCT FROM b.late_seq)
       AND b.hour >= bounds.floor_hour
     GROUP BY b.hour, cutoff.since
 ),
 missing AS
 (
-    SELECT g AS hour, false AS stale, (g" + BlockedByWriterTail + @") AS blocked, false AS backlog
+    SELECT g AS hour, false AS stale, (g" + BlockedByWriterTail + @") AS blocked, false AS backlog, false AS fleet_only
     FROM bounds
     CROSS JOIN cutoff
     CROSS JOIN clock
-    CROSS JOIN LATERAL generate_series(bounds.floor_hour, date_trunc('hour', clock.at - interval '3 hours'), interval '1 hour') AS g
+    CROSS JOIN LATERAL generate_series(bounds.floor_hour, date_trunc('hour', clock.at - " + BuildLagSql + @"), interval '1 hour') AS g
     WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_hours AS h WHERE h.hour = g)
 )
-SELECT p.hour, p.stale, p.blocked, p.failures, p.extended, p.backlog
+SELECT p.hour, p.stale, p.blocked, p.failures, p.extended, p.backlog, p.fleet_only
 FROM
 (
-    SELECT u.hour, u.stale, u.blocked, u.backlog, coalesce(f.failures, 0) AS failures,
+    SELECT u.hour, u.stale, u.blocked, u.backlog, u.fleet_only, coalesce(f.failures, 0) AS failures,
            coalesce(f.last_sqlstate = $4::text, false) AS extended,
            row_number() OVER (PARTITION BY u.stale, u.blocked, u.backlog ORDER BY u.hour DESC) AS rn
     FROM (SELECT * FROM stale UNION ALL SELECT * FROM missing) AS u
@@ -766,8 +992,8 @@ ORDER BY p.stale DESC, p.blocked, p.hour DESC;";
     /// Records a failed build of an hour (#5867) and returns its consecutive failures, its next attempt, and whether that is a backoff:
     /// $1 the hour, $2 the SQLSTATE (NULL when the error had none), $3 the error message, $4 the <c>statement_timeout</c> the attempt ran
     /// under, $5 the store clock a test passes (NULL in the service: the store's own, as <see cref="PlanSql"/>'s), $6
-    /// <see cref="FailuresBeforeBackoff"/>, $7 <see cref="ExtendedBuildStatementTimeoutSeconds"/>, $8 <see cref="BackoffInterval"/>, $9 <see cref="StatementTimeoutSqlState"/>. The
-    /// next attempt is the next tick (<c>retry_at</c> = now) until the hour has failed <see cref="FailuresBeforeBackoff"/> times in
+    /// <see cref="ComposeFailuresBeforeBackoff"/>, $7 <see cref="ExtendedBuildStatementTimeoutSeconds"/>, $8 <see cref="BackoffInterval"/>, $9 <see cref="StatementTimeoutSqlState"/>. The
+    /// next attempt is the next tick (<c>retry_at</c> = now) until the hour has failed <see cref="ComposeFailuresBeforeBackoff"/> times in
     /// a row, or until a build under the extended timeout has timed out too; from then on it is one attempt a day. Runs after the
     /// build's transaction rolled back.
     /// </summary>
@@ -800,7 +1026,7 @@ WHERE hour < $1;";
 
     /// <summary>
     /// Every hour with a failure record (#5867), newest first: what <c>get_store_metrics</c> lists and the self-alert reads. An hour is
-    /// in backoff when its next attempt is later than its last failure (it has failed <see cref="FailuresBeforeBackoff"/> times in a row,
+    /// in backoff when its next attempt is later than its last failure (it has failed <see cref="ComposeFailuresBeforeBackoff"/> times in a row,
     /// or timed out under the extended timeout); the others are retried next tick.
     /// </summary>
     public const string ReadFailuresSql = @"
@@ -832,8 +1058,9 @@ WHERE hour < $1;";
     /// <summary>One planned build: <paramref name="Failures"/> is the hour's consecutive failed builds (#5867, 0 for none), and
     /// <paramref name="Extended"/> is true when the last one was a statement timeout, so this attempt runs under
     /// <see cref="ExtendedBuildStatementTimeoutSeconds"/>. <paramref name="Backlog"/> (#6865) is a stale hour that is stale only for the
-    /// hash-hourly table (see <see cref="PlanSql"/>); it is also <paramref name="Stale"/>.</summary>
-    public readonly record struct Build(DateTime Hour, bool Stale, int Failures = 0, bool Extended = false, bool Backlog = false);
+    /// hash-hourly table (see <see cref="PlanSql"/>); it is also <paramref name="Stale"/>. <paramref name="FleetOnly"/> (#7146) is a stale hour that is
+    /// stale only for the fleet table: the tick builds just its fleet rows.</summary>
+    public readonly record struct Build(DateTime Hour, bool Stale, int Failures = 0, bool Extended = false, bool Backlog = false, bool FleetOnly = false);
 
     /// <summary>One hour's failure record (<see cref="ReadFailuresSql"/>, #5867). Times are naive UTC on the store's clock.</summary>
     public readonly record struct HourFailure(
@@ -947,7 +1174,7 @@ WHERE hour < $1;";
                 continue;
             }
 
-            builds.Add(new Build(reader.GetDateTime(0), reader.GetBoolean(1), reader.GetInt32(3), reader.GetBoolean(4), reader.GetBoolean(5)));
+            builds.Add(new Build(reader.GetDateTime(0), reader.GetBoolean(1), reader.GetInt32(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6)));
         }
 
         var normal = ChooseBuilds(builds, MaxBuildsPerTick);
@@ -1092,6 +1319,13 @@ WHERE hour < $1;";
             await hashHourly.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        /* V239 (#7146): the fleet rows below the floor, by the (collection_time) index, in the same transaction. By the floor, as the hash-hourly rows. */
+        await using (var fleet = new NpgsqlCommand(GcFleetSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            fleet.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
+            await fleet.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         /* V221 (#6800): the day table's rows, ledger rows and failure records of every day whose whole day is below the floor, in the same transaction. */
         await QueryStoreHashDaily.GcAsync(connection, transaction, floor, cancellationToken);
 
@@ -1190,6 +1424,20 @@ WHERE hour < $1;";
             await insertHash.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        /* V239 (#7146): the fleet rows of the same hour, from this transaction's new stamp rows. A rebuild of the hour (a stale hour) goes
+           through here too, so the fleet rows are always a fresh aggregate of the hour's stamp rows. fleet_built_seq below is built_seq. */
+        await using (var deleteFleet = NewCommand(DeleteFleetHourSql))
+        {
+            deleteFleet.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await deleteFleet.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var insertFleet = NewCommand(BuildFleetHourInsertSql))
+        {
+            insertFleet.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await insertFleet.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         long sourceRows;
         await using (var count = NewCommand(SourceRowsSql))
         {
@@ -1230,6 +1478,79 @@ WHERE hour < $1;";
         return sourceRows;
     }
 
+    /// <summary>
+    /// Rebuilds one hour's FLEET rows only, from the hour's stamp rows, in one transaction (#7146). For an hour whose stamp and hash-hourly rows are
+    /// valid and only <c>fleet_built_seq</c> differs (<see cref="Build.FleetOnly"/>): every hour built before V239. It reads no wide-table row,
+    /// so the upgrade does not rebuild every retained hour from the wide table. Takes the hour's advisory lock (<see cref="HourLockSql"/>), so it never
+    /// runs beside a full build of the same hour, deletes and inserts the fleet rows as the full build does, then marks the hour's pairs
+    /// (<see cref="MarkFleetBuiltSql"/>). The mark copies <c>built_seq</c>, so a late writer that bumped <c>late_seq</c> leaves the hour stale for the full
+    /// build. No open-writer check: this reads no wide-table row and the stamp rows do not change here. Returns the hour's stamp rows
+    /// (<see cref="SourceRowsSql"/>), never null, as <see cref="BuildHourAsync"/> does when the hour built.
+    /// </summary>
+    public static async Task<long?> BuildFleetHourAsync(
+        NpgsqlConnection connection, DateTime hour, CancellationToken cancellationToken,
+        int statementTimeoutSeconds = BuildStatementTimeoutSeconds, Action<NpgsqlCommand>? commandCreated = null)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentOutOfRangeException.ThrowIfLessThan(statementTimeoutSeconds, 1);
+
+        var hourValue = Unspecified(hour);
+        var commandTimeout = Math.Max(CommandTimeoutSeconds, statementTimeoutSeconds + 30);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        NpgsqlCommand NewCommand(string sql)
+        {
+            var created = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = commandTimeout };
+            commandCreated?.Invoke(created);
+            return created;
+        }
+
+        await using (var timeout = NewCommand(StatementTimeoutSql(statementTimeoutSeconds)))
+        {
+            await timeout.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var advisory = NewCommand(HourLockSql))
+        {
+            advisory.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = HourNumber(hourValue) });
+            await advisory.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var deleteFleet = NewCommand(DeleteFleetHourSql))
+        {
+            deleteFleet.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await deleteFleet.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var insertFleet = NewCommand(BuildFleetHourInsertSql))
+        {
+            insertFleet.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await insertFleet.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var mark = NewCommand(MarkFleetBuiltSql))
+        {
+            mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await mark.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        long sourceRows;
+        await using (var count = NewCommand(SourceRowsSql))
+        {
+            count.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            sourceRows = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken));
+        }
+
+        await using (var clear = NewCommand(ClearFailureSql))
+        {
+            clear.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await clear.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return sourceRows;
+    }
+
     /// <summary>Records a failed build (<see cref="RecordFailureSql"/>, #5867) on <paramref name="connection"/>, outside any transaction.</summary>
     public static async Task<FailureOutcome> RecordFailureAsync(
         NpgsqlConnection connection, DateTime hour, string? sqlState, string reason, int timeoutSeconds, DateTime? storeNow, CancellationToken cancellationToken)
@@ -1242,7 +1563,7 @@ WHERE hour < $1;";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = reason ?? string.Empty });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = timeoutSeconds });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = storeNow is { } at ? Unspecified(at) : DBNull.Value });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = FailuresBeforeBackoff });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = ComposeFailuresBeforeBackoff });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = ExtendedBuildStatementTimeoutSeconds });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = BackoffInterval });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = StatementTimeoutSqlState });
@@ -1304,7 +1625,7 @@ WHERE hour < $1;";
     /// <summary>
     /// One maintenance tick: remove the expired hours, plan, then build each hour in its own transaction. A build that fails is
     /// logged (naming the hour), recorded (<see cref="RecordFailureSql"/>, #5867) and the loop goes on: the next tick retries it, under
-    /// <see cref="ExtendedBuildStatementTimeoutSeconds"/> after a statement timeout, until it has failed <see cref="FailuresBeforeBackoff"/>
+    /// <see cref="ExtendedBuildStatementTimeoutSeconds"/> after a statement timeout, until it has failed <see cref="ComposeFailuresBeforeBackoff"/>
     /// times in a row (or timed out under the extended timeout), and once a day after that. Once <see cref="MaxTickDuration"/> has passed
     /// no further build starts, and the planned hours left are reported as deferred.
     /// </summary>
@@ -1360,7 +1681,11 @@ WHERE hour < $1;";
             var timeoutSeconds = item.Extended ? ExtendedBuildStatementTimeoutSeconds : BuildStatementTimeoutSeconds;
             try
             {
-                if (await BuildHourAsync(connection, item.Hour, nowUtc, cancellationToken, statementTimeoutSeconds: timeoutSeconds) is null)
+                /* #7146: an hour stale only for the fleet table needs just its fleet rows, rebuilt from its stamp rows (no wide-table read). */
+                var built = item.FleetOnly
+                    ? await BuildFleetHourAsync(connection, item.Hour, cancellationToken, statementTimeoutSeconds: timeoutSeconds)
+                    : await BuildHourAsync(connection, item.Hour, nowUtc, cancellationToken, statementTimeoutSeconds: timeoutSeconds);
+                if (built is null)
                 {
                     /* Only a plan hour is "deferred" by a writer: an extra the writer held is opportunistic and is the next tick's backlog, so it is in
                        neither Deferred nor the writer warning's count (it would report hours the plan never held, #6865). */
@@ -1446,7 +1771,10 @@ WHERE hour < $1;";
         /* The extra builds are opportunistic: the ones the budget did not reach are not "deferred", they are the next tick's backlog. */
         var deferred = plan.Count - (started - startedExtra) + deferredForWriters;
         var result = new TickResult(builtStale, builtMissing, failed, removed, deferred, deferredForWriters, planned.HeldBack, backedOff, days.Built, days.Failed, builtBacklog);
-        logger.LogInformation("Query Store compose rollup: built {Built} hour(s) (stale {Stale}, missing {Missing}, backlog {Backlog}), failed {Failed}, deferred {Deferred}, removed {Removed} hour(s), built {DaysBuilt} day(s), failed {DaysFailed} day(s), {ElapsedMs} ms",
+        /* #7762: the timer runs every 15 minutes, so a tick that built, removed, failed and deferred nothing is a Debug line (96 an hour at the
+           Information level would bury the ticks that did work). */
+        var quiet = result.Built == 0 && failed == 0 && deferred == 0 && removed == 0 && days.Built == 0 && days.Failed == 0;
+        logger.Log(quiet ? LogLevel.Debug : LogLevel.Information, "Query Store compose rollup: built {Built} hour(s) (stale {Stale}, missing {Missing}, backlog {Backlog}), failed {Failed}, deferred {Deferred}, removed {Removed} hour(s), built {DaysBuilt} day(s), failed {DaysFailed} day(s), {ElapsedMs} ms",
             result.Built, builtStale, builtMissing, builtBacklog, failed, deferred, removed, days.Built, days.Failed, (long)elapsed().TotalMilliseconds);
         return result;
     }

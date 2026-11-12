@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -34,7 +35,7 @@ internal static class CollectionCycleSkip
     /// return the log as rows (the Collection Log grid and <c>get_collection_log</c>, and their fleet forms) show
     /// the row on purpose, filterable by <c>status = SKIPPED</c>; <c>get_collection_log</c> counts it in
     /// <c>skipped_cycle_rows</c> and not in <c>run_count</c> (#5731).</summary>
-    internal const string CollectorName = "collection_cycle";
+    internal const string CollectorName = CollectionRunSql.CycleRowCollectorName;
 
     /// <summary>The <c>collection_log.status</c> of a skipped-slots row.</summary>
     internal const string Status = "SKIPPED";
@@ -145,7 +146,7 @@ internal static class CollectionCycleSkip
         if (cycleCaused && waitCaused)
         {
             var both = string.Create(CultureInfo.InvariantCulture,
-                $"Collection cycle took {Format(cycleMs)} and the wait overran, so {slotsSkipped} collection slot(s) were skipped across the two. Slowest steps: {listed}. The wait lasted {Format(waitMs)} against a {intervalText} interval; the computer may have slept or hibernated, or the clock stepped forward.{gap}");
+                $"Collection cycle took {Format(cycleMs)} and the wait overran, so {CountText.Plural(slotsSkipped, "collection slot")} {(slotsSkipped == 1 ? "was" : "were")} skipped across the two. Slowest steps: {listed}. The wait lasted {Format(waitMs)} against a {intervalText} interval; the computer may have slept or hibernated, or the clock stepped forward.{gap}");
             return waitMs > top.ElapsedMs
                 ? new CycleSkipReport(slotsSkipped, cycleMs, WaitStepName, waitMs, both)
                 : new CycleSkipReport(slotsSkipped, cycleMs, top.Name, ClampMs(top.ElapsedMs), both);
@@ -154,12 +155,12 @@ internal static class CollectionCycleSkip
         if (cycleCaused)
         {
             var message = string.Create(CultureInfo.InvariantCulture,
-                $"Collection cycle took {Format(cycleMs)}, so {slotsSkipped} collection slot(s) were skipped. Slowest steps: {listed}.{gap}");
+                $"Collection cycle took {Format(cycleMs)}, so {CountText.Plural(slotsSkipped, "collection slot")} {(slotsSkipped == 1 ? "was" : "were")} skipped. Slowest steps: {listed}.{gap}");
             return new CycleSkipReport(slotsSkipped, cycleMs, top.Name, ClampMs(top.ElapsedMs), message);
         }
 
         var overran = string.Create(CultureInfo.InvariantCulture,
-            $"Collection wait overran: it lasted {Format(waitMs)} against a {intervalText} interval, so {slotsSkipped} collection slot(s) were skipped. The cycle itself took {Format(cycleMs)}; the computer may have slept or hibernated, or the clock stepped forward.{gap}");
+            $"Collection wait overran: it lasted {Format(waitMs)} against a {intervalText} interval, so {CountText.Plural(slotsSkipped, "collection slot")} {(slotsSkipped == 1 ? "was" : "were")} skipped. The cycle itself took {Format(cycleMs)}; the computer may have slept or hibernated, or the clock stepped forward.{gap}");
         return new CycleSkipReport(slotsSkipped, cycleMs, WaitStepName, waitMs, overran);
     }
 

@@ -13,12 +13,13 @@
  * API reports it (band = Warning, status text verbatim) — never the red offline treatment.
  */
 
+import { peekSession } from "../views-api.js";
 import { holdsPage, keepScroll, noteRefreshError, replaceNodes, showPage, showRefreshError } from "../refresh-in-place.js";
-import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId, tagPill, frontDoor, currentStore } from "../util.js";
+import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPerHour, fmtPct, fmtMb, fmtMs, windowPhrase, bandClass, rollupTextId, tagPill, frontDoor, currentStore } from "../util.js";
 import { frontDoorStores, healthBandClass, healthLabel, currentFirst, currentMark } from "../store-picker.js";
-import { VIZ, navigateServer } from "../panels.js";
+import { VIZ, navigateServer, navigateServerPanel } from "../panels.js";
 import { favoritesFirst, onChange as onLocalChange } from "../viewer-local.js";
-import { buildTagGroups, cardMatches } from "../fleet-groups.js";
+import { buildTagGroups, cardMatches, tagAncestorNames } from "../fleet-groups.js";
 import { favoriteStar, alertBadge } from "../viewer-local-ui.js";
 import * as api from "../alerts-api.js";
 import { plainText } from "../plain-text.js";
@@ -27,8 +28,9 @@ import { createRule, deleteRule } from "./mute-rules.js";
 const BAND_RANK = { Offline: 0, Critical: 1, Warning: 2, Healthy: 3 };
 
 /** Client-side card orderings (M8). Severity is the default; CPU sorts busiest-first (grids default DESC). */
-const SORTS = {
-  severity: (a, b) => (BAND_RANK[a.band] ?? 9) - (BAND_RANK[b.band] ?? 9) || a.display_name.localeCompare(b.display_name),
+export const SORTS = {
+  /* #7561: inside one band, a server with a tile no band reads (has_advisory_tile, set by the service) sorts above one without. */
+  severity: (a, b) => (BAND_RANK[a.band] ?? 9) - (BAND_RANK[b.band] ?? 9) || (b.has_advisory_tile ? 1 : 0) - (a.has_advisory_tile ? 1 : 0) || a.display_name.localeCompare(b.display_name),
   name: (a, b) => a.display_name.localeCompare(b.display_name),
   cpu: (a, b) =>
     (b.total_cpu_percent ?? b.cpu_percent ?? -1) - (a.total_cpu_percent ?? a.cpu_percent ?? -1) ||
@@ -72,8 +74,39 @@ function writeStored(key, value) { try { localStorage.setItem(key, value); } cat
    client-side approximation of "needs attention" would eventually disagree with the number that sent the
    reader here, which is this defect wearing a new hat. R1 still holds — no threshold is re-derived here, a
    server-computed band is read. */
-function cardNeedsAttention(c) {
-  return c.band !== "Healthy";
+export function cardNeedsAttention(c) {
+  /* #7561: a Healthy band with a tile no band reads (a warning identity column, an Agent alert gap, an overdue backup) is still listed. */
+  return c.band !== "Healthy" || c.has_advisory_tile === true;
+}
+
+/* #7561: how many servers the overview's problem list holds: the rows it lists plus the ones past its cap. The "All N servers healthy" line shows only when
+   this is 0. It is the server's own problem list (band not Healthy, or a tile no band reads), not the band counts alone, which leave out a Healthy-banded
+   server with a warning tile. */
+export function problemServerCount(d) {
+  return ((d && d.worst_servers) || []).length + ((d && d.additional_problem_count) || 0);
+}
+
+/* #8095: a Healthy-banded card the problem list holds for a tile no band reads (#7561). The roll-up's band tiles leave such a server under
+   Healthy, so every count that includes it says how many of its servers are of this kind: "1 Critical" above "3 need attention" is then
+   reconcilable on one screen. The predicate and the bands are the service's and are not changed here. */
+export function isHealthyWithAdvisory(c) {
+  return c.band === "Healthy" && c.has_advisory_tile === true;
+}
+
+function advisorySplit(n) {
+  return n > 0 ? " (" + n + " healthy with " + (n === 1 ? "an advisory" : "advisories") + ")" : "";
+}
+
+/* How many of the cards the attention filter left are Healthy with an advisory. Set by redrawCards from the filtered list it draws, read by
+   attentionNotice beside the count, so the notice's sentence and the grid come from the same list. */
+let shownHealthyWithAdvisories = 0;
+
+/** The overflow line under the problem list: the servers past the list's cap, and how many of those are Healthy with an advisory. A card the
+    list already names is in the rows, not past them, so it is not counted again. */
+export function moreNeedAttentionText(d) {
+  const listed = new Set(((d && d.worst_servers) || []).map((r) => r.display_name));
+  const advisory = ((d && d.cards) || []).filter((c) => isHealthyWithAdvisory(c) && !listed.has(c.display_name)).length;
+  return "+ " + d.additional_problem_count + " more need attention" + advisorySplit(advisory);
 }
 
 /* What the filter did, shown beside the cards it left. Word-for-word the desktop viewer's
@@ -144,7 +177,9 @@ function noPatterns(rule) {
     && rule.query_text_pattern == null
     && rule.wait_type_pattern == null
     && rule.job_name_pattern == null
-    && rule.client_app_pattern == null;
+    && rule.client_app_pattern == null
+    /* #7040: a rule that repeats on a schedule mutes only inside its windows, so it is not a whole-server silence. */
+    && rule.recur_start_time == null;
 }
 
 /** A whole-server silence keyed on this server's id. Enabled/expiry are not part of the match (as on the desktop). */
@@ -319,9 +354,45 @@ function showStoreFailure(body, inPlace, message) {
 }
 
 function storeFleetBody(d, store, own) {
-  if (!d.total_servers) return [emptyStrip("No servers are enabled in this store yet.")];
+  if (!d.total_servers) return [emptyStrip(peekSession()?.scoped ? "No servers are in this token's scope." : "No servers are enabled in this store yet.")];
   const cards = (d.cards || []).slice().sort(SORTS.severity);
-  return [rollup(d), el("div", { class: "grid server-grid" }, cards.map((c) => serverCard(c, store, own)))];
+  /* #8095: the single-store page's reading aids, inside the section: the problem list, its overflow line and the updated stamp. The controls
+     (Search, the attention filter, grouping, Silence) stay out, as renderStoreFleets says. The overflow line is a count alone here, because
+     there is no filter for it to switch on, and a row of the list opens its server in this section's store. */
+  return [
+    rollup(d),
+    ...storeAttentionNodes(d, store),
+    el("div", { class: "grid server-grid" }, cards.map((c) => serverCard(c, store, own))),
+    el("div", { class: "meta fleet-store-updated", text: "Updated " + localTime(d.generated_at) }),
+  ];
+}
+
+/** A store section's all-healthy line, or its "Needs attention" list with the overflow count (#2437, #7561), the single-store page's shape
+    without the page's filter: the overflow line is a count alone here, and a row opens its server in `store`. */
+function storeAttentionNodes(d, store) {
+  if (problemServerCount(d) === 0) {
+    return [
+      el("div", { class: "all-healthy" }, [
+        el("span", { class: "dot band-Healthy" }),
+        "All " + d.total_servers + " server" + (d.total_servers === 1 ? "" : "s") + " healthy.",
+      ]),
+    ];
+  }
+  const nodes = [
+    el("h3", { class: "section-title", text: "Needs attention" }),
+    VIZ.bandlist(d, {
+      rowsKey: "worst_servers",
+      primaryKey: "display_name",
+      bandKey: "band",
+      bandLabelKey: "band_label",
+      advisoryKey: "advisory_tiles",
+      reasonKey: "reason",
+      navKey: "display_name",
+      navStore: store,
+    }),
+  ];
+  if ((d.additional_problem_count || 0) > 0) nodes.push(el("div", { class: "attention-more muted", text: moreNeedAttentionText(d) }));
+  return nodes;
 }
 
 export async function renderFleet(main, opts) {
@@ -350,14 +421,15 @@ export async function renderFleet(main, opts) {
 
   if (!d.total_servers) {
     nodes.push(
-      emptyStrip("No servers are enabled yet. Add one in the desktop Viewer (Add Server) or with --add-server, and cards appear here as collection begins.")
+      emptyStrip(peekSession()?.scoped
+        ? "No servers are in this token's scope."
+        : "No servers are enabled yet. Add one in the desktop Viewer (Add Server) or with --add-server, and cards appear here as collection begins.")
     );
     showPage(main, "fleet", nodes);
     return;
   }
 
-  const problems = d.critical_count + d.warning_count + d.offline_count;
-  if (problems === 0) {
+  if (problemServerCount(d) === 0) {
     nodes.push(
       el("div", { class: "all-healthy" }, [
         el("span", { class: "dot band-Healthy" }),
@@ -372,6 +444,7 @@ export async function renderFleet(main, opts) {
         primaryKey: "display_name",
         bandKey: "band",
         bandLabelKey: "band_label",
+        advisoryKey: "advisory_tiles",
         reasonKey: "reason",
         navKey: "display_name",
       })
@@ -386,7 +459,7 @@ export async function renderFleet(main, opts) {
       nodes.push(
         el("div", {
           class: "attention-link",
-          text: "+ " + d.additional_problem_count + " more need attention",
+          text: moreNeedAttentionText(d),
           title: "Show only the servers that need attention",
           onActivate: () => setAttentionOnly(true),
         })
@@ -411,7 +484,8 @@ function redrawCards() {
   /* The two filters compose, and the search's result is the denominator the notice reports against. With a
      term typed, "showing 4 of 57" invites reading 4 as the fleet's problem count, which it is not — the other
      53 were not judged healthy, they were never looked at. The label has to mean what the grid holds. */
-  const searched = lastCards.filter((c) => cardMatches(c, fleetFilter));
+  const ancestors = tagAncestorNames(lastTags);
+  const searched = lastCards.filter((c) => cardMatches(c, fleetFilter, ancestors));
   const matched = (attentionOnly ? searched.filter(cardNeedsAttention) : searched)
     .slice()
     .sort(favoritesFirst(SORTS[fleetSort] || SORTS.severity));
@@ -421,6 +495,7 @@ function redrawCards() {
      page head scrolls away, so a reader who has scrolled down to the grid would see a short fleet and nothing
      saying why. A filtered grid that looks unfiltered is a worse defect than the dead end it replaced, so the
      notice sits on the grid and carries its own way out. */
+  shownHealthyWithAdvisories = matched.filter(isHealthyWithAdvisory).length;
   const notice = attentionOnly ? attentionNotice(matched.length, searched.length) : null;
 
   if (fleetGrouped && lastTags.length) {
@@ -457,9 +532,10 @@ function attentionNotice(shown, total) {
   const label = term ? "Needs attention only, matching “" + term + "”" : "Needs attention only";
   const searchFoundNothing = term !== "" && total === 0;
   const kind = searchFoundNothing ? "none" : shown > 0 ? "warn" : "ok";
+  /* #8095: the count is the viewer's sentence; the split after it says how many of the shown cards are Healthy with an advisory. */
   const sentence = searchFoundNothing
     ? label + " — nothing matches that term, so no server was judged."
-    : label + " — " + attentionCountText(shown, total, term !== "") + ".";
+    : label + " — " + attentionCountText(shown, total, term !== "") + advisorySplit(shownHealthyWithAdvisories) + ".";
 
   return el("div", { class: "attention-note " + kind, role: "status" }, [
     el("span", { text: sentence }),
@@ -591,7 +667,7 @@ function attentionControl() {
   attentionToggle = cb;
   return el("label", {
     class: "attention-control",
-    title: "Show only the cards that are not Healthy — Critical, Warning or Offline. Uncheck to show the whole fleet again.",
+    title: "Show only the servers that need attention: any band other than Healthy, or a Healthy band with a warning tile. Uncheck to show the whole fleet again.",
   }, [cb, el("span", { text: "Needs attention only" })]);
 }
 
@@ -721,7 +797,8 @@ export function rollup(d) {
     ]),
     el("div", { class: "rollup-divider" }),
     el("div", { class: "rollup-group" }, [
-      tile(d.total_blocking_events, "Blocking (recent)", totalClass(d.total_blocking_severity)),
+      /* #7616 / #3631: the total adds SQL Server blocked waits and PostgreSQL blocking captures, so the hover names the unit(s) the fleet has. */
+      tile(d.total_blocking_events, "Blocking (recent)", totalClass(d.total_blocking_severity), null, d.total_blocking_detail ? plainText(d.total_blocking_detail) : null),
       /* The API's own note rides along as the tile's title — the causes and the two windows, in the words the
          service already renders for get_fleet_overview, so the hover is DETAIL on a signal that is already
          visible rather than the only place the signal exists. */
@@ -752,14 +829,16 @@ function serverCard(c, store, own = true) {
   /* #3935: an Offline card's last collection can be days old, or absent (nothing in the fleet read's
      window), so it reads as an age, never as a bare time of day that implies today. */
   const lastCollect =
-    c.is_online === false
+    c.connect_down_since
+      ? " · unreachable since " + relTime(c.connect_down_since) + (c.last_collection ? " · last collect " + relTime(c.last_collection) : "")
+      : c.is_online === false
       ? c.last_collection
         ? " · last collect " + relTime(c.last_collection)
         : " · " + DARK_PAST_WINDOW
       : " · last collect " + localClock(c.last_collection);
   const statusLine = c.awaiting_first_collection
     ? el("div", { class: "status-line awaiting", text: c.status })
-    : el("div", { class: "status-line", text: c.status + lastCollect + coverage });
+    : el("div", { class: "status-line", text: c.status + lastCollect + coverage, ...(c.connect_down_since && c.last_connect_error ? { title: c.last_connect_error } : {}) });
 
   return el(
     "div",
@@ -770,14 +849,14 @@ function serverCard(c, store, own = true) {
         /* #2031: a muted-bell right of the dot when a whole-server alert silence is active, so a silenced
            server stops looking healthy-quiet. The Silence / Unsilence button beside it shows for an editing seat. */
         effectiveSilenced(c) ? el("span", { class: "silenced-bell", title: "Alerts silenced for this server", role: "img", "aria-label": "Alerts silenced" }) : null,
-        el("span", { class: "title", text: c.display_name }),
+        el("span", { class: "title", title: c.display_name, text: c.display_name }), /* #7479: the title ellipsizes in a 260 px card; the full name is on hover */
         own ? alertBadge(c.server_id) : null,
         own ? favoriteStar(c.server_id) : null,
         own ? silenceButton(c) : null,
       ]),
       statusLine,
       tagPills(c),
-      metricBands(c),
+      metricBands(c, store),
     ]
   );
 }
@@ -797,7 +876,7 @@ function serverCard(c, store, own = true) {
    wrote a collection, or the read failed) is there no date, and the page then says what is known: the window's bound. */
 export const DARK_PAST_WINDOW = "last collected more than 2 days ago";
 
-export function metricBands(c) {
+export function metricBands(c, store) {
   const threadsValue =
     c.threads_severity === "Unknown"
       ? "n/a"
@@ -805,7 +884,7 @@ export function metricBands(c) {
       ? fmtInt(c.requests_waiting_for_threads) + " starved"
       : c.available_threads != null
       ? fmtInt(c.available_threads) + " free"
-      : "ok";
+      : "OK";
   /* W19 (#5644): the tile value reads "N free", so the line under it must not repeat N over the total (that read as
      N in use). It says how many are in use, of the total. */
   const threadsInUse =
@@ -827,29 +906,54 @@ export function metricBands(c) {
   /* #3281: on a serverless PostgreSQL target cpuValue above is percent of the capacity CURRENTLY ALLOCATED,
      which is NOT what cpu_severity banded — so the detail names the figure that did, and the ceiling it is a
      fraction of. Without it the chip reads a green 100% and the band looks broken. */
+  /* #7682: a SQL Server that cannot report host CPU (Linux before 2025 CU1) has a SQL figure and no total. The chip says "SQL CPU", so the
+     line under it says why, instead of repeating "SQL 41%". A PostgreSQL target keeps the plain "CPU" label. */
+  const noHostFigure = c.total_cpu_percent == null && c.cpu_percent != null && c.other_process_cpu_percent == null && c.is_postgres !== true;
   const cpuDetail =
     c.acu_utilization_percent != null
       ? "ACU " +
         fmtPct(c.acu_utilization_percent) +
         (c.max_configured_acu != null ? " of " + c.max_configured_acu + " configured" : "")
+      : noHostFigure
+      ? "host CPU not reported"
       : c.cpu_percent != null
       ? "SQL " + fmtPct(c.cpu_percent) + (c.other_process_cpu_percent != null ? " · other " + fmtPct(c.other_process_cpu_percent) : "")
       : null;
 
-  const memValue = c.has_memory_pressure ? fmtInt(c.memory_waiter_count) + " waiters" : "ok";
+  /* #7560: PostgreSQL has no memory-grant reading, so its Memory chip says "n/a" as CPU and Threads do when they have none. The reply
+     sends has_memory_pressure null there, and the false it used to send printed "OK" beside a gray Unknown band. */
+  const memValue = c.has_memory_pressure == null ? "n/a" : c.has_memory_pressure ? fmtInt(c.memory_waiter_count) + " waiters" : "OK";
   const memDetail =
     c.memory_mb != null
       ? fmtMb(c.memory_mb) + (c.buffer_pool_mb != null ? " · BP " + fmtMb(c.buffer_pool_mb) : "")
       : null;
 
-  const blockingDetail = c.blocking_count > 0 && c.max_blocking_wait_ms > 0 ? "max wait " + fmtMs(c.max_blocking_wait_ms) : null;
+  /* #7507: both tiles count the roll-up's window (the one hour /api/fleet answers by default), which nothing on the page said — and
+     the Range control beside them reads "Past day". The window comes off the card (apiGetFleet stamps it from the reply), and a chip
+     with no events still names it. A card with no stamped window keeps the details it had. */
+  const windowWords = windowPhrase(c.window_hours);
+  const blockingWait = c.blocking_count > 0 && c.max_blocking_wait_ms > 0 ? "max wait " + fmtMs(c.max_blocking_wait_ms) : null;
+  const blockingDetail = [windowWords, blockingWait].filter(Boolean).join(" · ") || null;
+  const blockingUnmeasured = c.is_postgres === true && c.blocking_measured !== true;
+  const blockingValue = blockingUnmeasured
+    ? "n/a"
+    : c.is_postgres === true
+    ? fmtInt(c.blocking_count) + (c.blocking_count === 1 ? " capture" : " captures")
+    : fmtInt(c.blocking_count);
+  const blockingChipDetail = blockingUnmeasured
+    ? "no blocking capture ran" + (windowWords ? " " + windowWords : "")
+    : c.is_postgres === true && c.blocking_detail
+    ? c.blocking_detail
+    : c.is_postgres === true && c.blocking_captures != null
+    ? [windowWords, "of " + fmtInt(c.blocking_captures) + " sampled"].filter(Boolean).join(" · ")
+    : blockingDetail;
   /* #3368: the chip's VALUE is the count and its colour is banded on the RATE, so the detail carries the
      rate — a chip that bands on a figure it does not show leaves "Deadlocks 3" against an amber border with
      no way to see which tier was crossed, and "3" is the same string over an hour and over a day. Null when
      the window was too short to normalise, which is the reading the band itself had to go on. */
-  const deadlockRate = c.deadlock_rate_per_hour != null ? fmtNum(c.deadlock_rate_per_hour) + "/hr" : null;
+  const deadlockRate = c.deadlock_rate_per_hour != null ? fmtPerHour(c.deadlock_rate_per_hour) + "/hr" : null;
   const deadlockLast = c.deadlock_count > 0 && c.deadlock_last_seen ? "last " + relTime(c.deadlock_last_seen) : null;
-  const deadlockDetail = [deadlockRate, deadlockLast].filter(Boolean).join(" · ") || null;
+  const deadlockDetail = [windowWords, deadlockRate, deadlockLast].filter(Boolean).join(" · ") || null;
 
   /* #2779: a server that has stopped collecting has stale collector counts — its collectors are not "OK", they
      are unmeasured. collector_severity keys only on the FAILING count (a stale collector is neither healthy nor
@@ -863,27 +967,38 @@ export function metricBands(c) {
      with collector_severity "Unknown" from the shared band, and its value reads "n/a" — the chip's word for a
      metric with no reading (the Threads chip's) — rather than "OK". R1: the severity is read off the card, not
      re-derived here; only the WORD keys on the count, and only so a green word never sits under a grey chip. */
+  /* #7590: the service's own connect to this server has failed, so no collector can run. The Collectors chip does not say OK (or Stale, which
+     reads as a slow server): it says collection is waiting on the connection. The other chips keep the last collected values, greyed and
+     labelled with their age, because those values are all that is known. */
+  const unreachable = !!c.connect_down_since;
+  const lastKnown = unreachable ? "last known, " + (c.last_collection ? relTime(c.last_collection) : "no value") : null;
+  const known = (detail) => (unreachable ? [lastKnown, detail].filter(Boolean).join(" · ") : detail);
+  const sevOf = (sev) => (unreachable ? "Unknown" : sev);
   const collectorsStale = c.is_online === false;
-  const collectorsValue = collectorsStale
+  const collectorsValue = unreachable
+    ? "Waiting"
+    : collectorsStale
     ? "Stale"
     : c.failed_collector_count > 0
     ? fmtInt(c.failed_collector_count) + " failing"
     : c.collector_count > 0
     ? "OK"
     : "n/a";
-  const collectorsDetail = collectorsStale
+  const collectorsDetail = unreachable
+    ? "waiting on the connection · " + (c.last_connect_error ? c.last_connect_error : "server unreachable")
+    : collectorsStale
     ? "no recent collection · " + (c.last_collection ? "last " + relTime(c.last_collection) : DARK_PAST_WINDOW)
     : c.collector_count > 0
-    ? fmtInt(c.healthy_collector_count) + " healthy · " + (c.warning_collector_count > 0 ? fmtInt(c.warning_collector_count) + " warning · " : "") + fmtInt(c.failed_collector_count) + " failing" + (c.not_collected_collector_count > 0 ? " · " + fmtInt(c.not_collected_collector_count) + " not collected" : "") + (c.no_permission_collector_count > 0 ? " · " + fmtInt(c.no_permission_collector_count) + " no permission" : "")
+    ? fmtInt(c.healthy_collector_count) + " healthy · " + (c.warning_collector_count > 0 ? fmtInt(c.warning_collector_count) + " warning · " : "") + fmtInt(c.failed_collector_count) + " failing" + (c.not_collected_collector_count > 0 ? " · " + fmtInt(c.not_collected_collector_count) + " not collected" : "") + (c.no_permission_collector_count > 0 ? " · " + fmtInt(c.no_permission_collector_count) + " need setup" : "")
     : "no collector banded yet";
-  const collectorsSeverity = collectorsStale ? "Unknown" : c.collector_severity;
+  const collectorsSeverity = collectorsStale || unreachable ? "Unknown" : c.collector_severity;
 
   /* #5489: a server whose newest collection is past the fleet's offline mark (is_online === false, the same
      signal the Collectors chip above and the card's status line read) has no CURRENT reading. The values the
      read still holds are the last ones collected, days ago: a 0% CPU, "ok" memory and 77 free threads off a
      12-day-old row read as live health beside a CPU chart that says it has no data. So the five measurement
      chips read "n/a" in the neutral Unknown tone, and each says when the last collection was. */
-  if (c.is_online === false) {
+  if (c.is_online === false && !unreachable) {
     const staleDetail = c.last_collection ? "last collected " + relTime(c.last_collection) : DARK_PAST_WINDOW;
     return el("div", { class: "metric-bands stale" }, [
       chip("CPU", "n/a", "Unknown", staleDetail),
@@ -898,21 +1013,42 @@ export function metricBands(c) {
   return el("div", { class: "metric-bands" }, [
     /* W19 (#5644): total_cpu_percent is the whole box (SQL Server plus other processes); FinOps reads the SQL Server
        process alone, so this chip says which one it shows. The cpu_percent fallback (a PostgreSQL target) stays "CPU". */
-    chip(c.total_cpu_percent != null ? "Total CPU" : "CPU", cpuValue, c.cpu_severity, cpuDetail),
-    chip("Threads", threadsValue, c.threads_severity, threadsDetail),
-    chip("Memory", memValue, c.memory_severity, memDetail),
-    chip("Blocking", fmtInt(c.blocking_count), c.blocking_severity, blockingDetail),
-    chip("Deadlocks", fmtInt(c.deadlock_count), c.deadlock_severity, deadlockDetail),
+    /* #7682: a server that cannot report host CPU (SQL Server on Linux before 2025 CU1) has a SQL figure and no total, and the chip says so. */
+    chip(c.total_cpu_percent != null ? "Total CPU" : noHostFigure ? "SQL CPU" : "CPU", cpuValue, sevOf(c.cpu_severity), known(cpuDetail)),
+    chip("Threads", threadsValue, sevOf(c.threads_severity), known(threadsDetail)),
+    chip("Memory", memValue, sevOf(c.memory_severity), known(memDetail)),
+    /* #7616 / #7654: a PostgreSQL target's Blocking is how many of its per-minute blocking captures saw any blocking, so the value names that unit.
+       A measured 0 prints "0 captures". "n/a" is only for a target with no capture in the window, and the detail says so in words. */
+    chip("Blocking", blockingValue, sevOf(c.blocking_severity), known(blockingChipDetail)),
+    chip("Deadlocks", fmtInt(c.deadlock_count), sevOf(c.deadlock_severity), known(deadlockDetail)),
     chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail, true),
     /* #6875: a chip only when a column is at the warning bar or past it. It is not a band: nothing above reads it, and a server without one shows no extra chip. */
-    ...identityCapacityChip(c),
+    ...identityCapacityChip(c, store),
     /* #6874: a chip only when the server's Agent alert setup has a gap. It is not a band: nothing above reads it, and a
        server without a gap shows no extra chip. */
     ...agentAlertChip(c),
     /* #6873: a chip only when a full backup, a log backup or a CHECKDB is overdue. It is not a band: nothing above reads it, and a
        server with nothing overdue (or a platform-managed one) shows no extra chip. The words come from the server. */
     ...databaseProtectionChip(c),
+    /* #7647: a chip when a database's state deviates (a Critical one bands the server), and a muted "n/a" when the state is not collected, never a 0 or an OK. */
+    ...databaseStateChip(c),
   ]);
+}
+
+/* #7647: names at most three databases, then "and N more". The service sends the Critical states first. */
+export function databaseStateDetail(ds) {
+  const shown = ds.deviations.slice(0, 3).map((d) => d.database + " " + d.state);
+  const more = ds.deviations.length - shown.length;
+  return shown.join(", ") + (more > 0 ? " and " + fmtInt(more) + " more" : "");
+}
+
+function databaseStateChip(c) {
+  const ds = c.database_states;
+  if (!ds) return [];
+  if (ds.collected === false) return [chip("Database state", "n/a", "Unknown", "Database state is not collected on this server.")];
+  if (!ds.deviation_count) return [];
+  const n = ds.deviation_count;
+  return [chip("Database state", fmtInt(n) + (n === 1 ? " database" : " databases"), ds.critical_count > 0 ? "Critical" : "Warning", databaseStateDetail(ds), true)];
 }
 
 function agentAlertChip(c) {
@@ -921,28 +1057,57 @@ function agentAlertChip(c) {
   return [chip("Agent alerts", fmtInt(gaps.length) + (gaps.length === 1 ? " gap" : " gaps"), "Warning", gaps.map((g) => g.message).join(" "))];
 }
 
+/* #7416: the count says what it counts. The Health Checks panel counts databases ("11 of 13 judged databases overdue"), and 25 overdue items
+   beside it read as a second, different number for the same thing. */
+export function databaseProtectionValue(overdue) {
+  const databases = new Set(overdue.map((o) => String(o.database).toLowerCase())).size;
+  return fmtInt(overdue.length) + (overdue.length === 1 ? " item" : " items") + " on " + fmtInt(databases) + (databases === 1 ? " database" : " databases");
+}
+
 function databaseProtectionChip(c) {
   const overdue = c.database_protection_overdue;
   if (!Array.isArray(overdue) || overdue.length === 0) return [];
-  return [chip("Protection", fmtInt(overdue.length) + " overdue", "Warning", overdue.map((o) => o.text).join(", "))];
+  return [chip("Protection", databaseProtectionValue(overdue), "Warning", overdue.map((o) => o.text).join(", "))];
 }
 
 /* A short non-color severity cue so severity isn't conveyed by border color alone (M2). */
 const SEV_BADGE = { Critical: "CRIT", Warning: "WARN" };
 
-function identityCapacityChip(c) {
+/* The service sends the remaining count as a digit string because an identity bigint does not fit a JSON number. Number() would round it above 2^53,
+   so group the digits themselves (BigInt keeps every digit and a leading minus, and groups in the reader's locale like fmtInt). */
+function groupDigits(v) {
+  const s = String(v).trim();
+  return /^-?\d+$/.test(s) ? BigInt(s).toLocaleString() : fmtInt(v);
+}
+
+/* #7416: the tile names the fullest column and its figures, and a click opens the Identity Capacity panel that lists every column. A service that
+   sends no column (an older one) keeps the generic sentence. */
+export function identityCapacityDetail(ic) {
+  const n = ic.columns_at_bar;
+  if (!ic.worst_column) return "At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is " + ic.worst_band + ".";
+  const name = [ic.worst_database, ic.worst_table, ic.worst_column].filter(Boolean).join(".");
+  const pct = ic.worst_percent_used == null ? "" : ": " + fmtNum(ic.worst_percent_used, ic.worst_percent_used >= 99.95 || ic.worst_percent_used === 0 ? 0 : 1) + "% used";
+  const left = ic.worst_values_remaining == null ? "" : ", " + groupDigits(ic.worst_values_remaining) + " left";
+  return name + pct + left + (n > 1 ? ". The fullest of " + fmtInt(n) + " columns at 70% or more." : ".");
+}
+
+function identityCapacityChip(c, store) {
   const ic = c.identity_capacity;
   if (!ic || !ic.columns_at_bar) return [];
   const n = ic.columns_at_bar;
-  return [chip("Identity capacity", fmtInt(n) + (n === 1 ? " column" : " columns"), ic.worst_band === "critical" ? "Critical" : "Warning",
-    "At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is " + ic.worst_band + ".")];
+  const server = c.server_name || c.display_name;
+  return [chip("Identity capacity", fmtInt(n) + (n === 1 ? " column" : " columns"), ic.worst_band === "critical" ? "Critical" : "Warning", identityCapacityDetail(ic), true, (e) => {
+    /* The card around the tile opens the server; the tile opens the panel, so it keeps the click to itself. */
+    if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+    navigateServerPanel(server, store, "config", "Identity Capacity");
+  })];
 }
 
-/* wrapDetail: the Collectors chip's count line is the one detail that carries counts a person acts on (not collected, no permission,
+/* wrapDetail: the Collectors chip's count line is the one detail that carries counts a person acts on (not collected, need setup,
    #6932), and a nowrap ellipsis cut the newest clause off at every width, so it wraps and the other chips keep their one line. */
-function chip(label, value, sev, detail, wrapDetail) {
+function chip(label, value, sev, detail, wrapDetail, onActivate) {
   const badge = SEV_BADGE[sev];
-  return el("div", { class: "metric-chip sev-" + (sev || "Unknown") }, [
+  return el("div", { class: "metric-chip sev-" + (sev || "Unknown") + (onActivate ? " clickable" : ""), ...(onActivate ? { onActivate, title: "Open the panel" } : {}) }, [
     el("div", { class: "label" }, [
       el("span", { text: label }),
       badge ? el("span", { class: "sev-badge", text: badge }) : null,

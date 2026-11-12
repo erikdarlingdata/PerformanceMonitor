@@ -47,6 +47,8 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
     private readonly DuckDbInitializer _duckDb;
     private DuckDBConnection? _seedConn;
     private long _nextId = 1;
+    /* The server the seeders write rows for; a test that reads through the tool sets it to the tool's own id. */
+    private int _seedServerId = ServerId;
 
     public ForcePlanTargetStateTests(SharedDuckDbFixture fixture)
     {
@@ -132,6 +134,40 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
         Assert.Contains("intervene only if it reverts or expires", projected.Guidance, StringComparison.Ordinal);
         /* ForceSql stays for the operator who has read all that and decided. */
         Assert.Contains("sp_query_store_force_plan @query_id = 123, @plan_id = 99", projected.ForceSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ANewerExpiredState_MakesTheOlderAutoForcedSiblingStale_AndTheGuidanceSaysTheEngineHasBackedOut()
+    {
+        /* #8628, the Lite twin of the Darling gate tests: plan 55 of the query was seen AUTO-forced at the snapshot, and the
+           correction state two minutes later says Expired and that plan 55 is not forced. The older row must not raise
+           apc_owns_it, and "intervene only if it reverts or expires" must not be said about a state that already is. */
+        var t = Target();
+        var projected = Project(t, State(
+            otherForcedPlan: 55, otherForcingType: "AUTO",
+            apcState: "Expired", apcReason: "StatisticsChanged", apcLastGood: 55, apcLastGoodForced: false, flgp: "ON"));
+
+        Assert.True(projected.Eligible);
+        Assert.Empty(projected.Blockers);
+        Assert.Contains("is currently Expired (StatisticsChanged) for query 123 via plan 55 (not the plan proposed here, 99)", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("the engine has backed out of it, so a manual force here is yours to decide", projected.Guidance, StringComparison.Ordinal);
+        Assert.DoesNotContain("intervene only if", projected.Guidance, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARevertedTarget_StaysBlocked_AndItsGuidanceNamesTheBlockerAndTheBackedOutEngine()
+    {
+        var t = Target();
+        var projected = Project(t, State(
+            planForced: true, forcingType: "AUTO",
+            apcState: "Reverted", apcReason: "VerificationForcedQueryRecompile", apcLastGood: 99, apcLastGoodForced: false, flgp: "ON"));
+
+        Assert.False(projected.Eligible);
+        Assert.DoesNotContain(ForcePlanBlockerNames.ApcOwnsIt, projected.Blockers);
+        Assert.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, projected.Blockers);
+        Assert.Contains("the engine has backed out of it, but this target is not eligible: forcing_failed_on_this_plan (", projected.Guidance, StringComparison.Ordinal);
+        Assert.DoesNotContain("yours to decide", projected.Guidance, StringComparison.Ordinal);
+        Assert.DoesNotContain("intervene only if", projected.Guidance, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -494,7 +530,7 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
     public void StateReaderSql_IsTheDarlingText_ButForTheViewNamesAndTheCasts()
     {
         var lite = ForcePlanTargetStateReader.SqlTemplate;
-        var darling = ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingForcePlanTargetStateReader.cs");
+        var darling = ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Analysis/DarlingForcePlanTargetStateReader.cs");
         const string marker = "public const string SqlTemplate = @\"";
         var darlingSql = darling[(darling.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..];
         darlingSql = darlingSql[..darlingSql.IndexOf("\";", StringComparison.Ordinal)];
@@ -556,7 +592,7 @@ INSERT INTO query_store_stats
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)";
             cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
             cmd.Parameters.Add(new DuckDBParameter { Value = Naive(at) });
-            cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = _seedServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = "Srv" });
             cmd.Parameters.Add(new DuckDBParameter { Value = Db });
             cmd.Parameters.Add(new DuckDBParameter { Value = queryId });
@@ -598,7 +634,7 @@ INSERT INTO plan_correction
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = Naive(at) });
-        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = _seedServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = "Srv" });
         cmd.Parameters.Add(new DuckDBParameter { Value = database });
         cmd.Parameters.Add(new DuckDBParameter { Value = flgp });
@@ -647,8 +683,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             new(Db, 123, 99, ReplicaRole: "Secondary"),
         };
 
-        var service = new LocalDataService(_duckDb);
-        var states = await service.GetForcePlanTargetStatesAsync(ServerId, targets);
+        var states = await ReadStatesAsync(targets);
 
         Assert.Equal(4, states.Count);
 
@@ -697,6 +732,17 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Null(projected[2].StateNote);
     }
 
+    /* The product read: the analysis service's own handle, which the MCP analysis tools use (the force-plan state has no
+       LocalDataService entry point). A failed read comes back as a reason, so an unavailable state fails the test. */
+    private async Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadStatesAsync(IReadOnlyList<ForcePlanTarget> targets)
+    {
+        var finding = new AnalysisFinding { Remediation = new RemediationAction("PLAN_REGRESSION", "force", targets) };
+        var (states, reason) = await new PerformanceMonitorLite.Analysis.AnalysisService(_duckDb)
+            .TryGetForcePlanTargetStatesAsync(ServerId, [finding]);
+        Assert.Null(reason);
+        return states!;
+    }
+
     [Fact]
     public async Task Reader_CarriesTheRegressedPlanId_AndItReachesTheGuidance()
     {
@@ -708,8 +754,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
         var worse = new ForcePlanTarget(Db, 123, 7);
         var noRecommendation = new ForcePlanTarget(Db, 124, 7);
-        var service = new LocalDataService(_duckDb);
-        var states = await service.GetForcePlanTargetStatesAsync(ServerId, new[] { worse, noRecommendation });
+        var states = await ReadStatesAsync(new[] { worse, noRecommendation });
 
         var state = states[ForcePlanTargetKey.Of(worse)];
         Assert.Equal("Active", state.ApcState);
@@ -732,8 +777,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         await SeedPlanCorrectionAsync(now.AddMinutes(-10), "Other", "OFF", null, null, null, null, null, null, null);
         await SeedPlanCorrectionAsync(now.AddHours(-30), "Old", "ON", null, null, null, null, null, null, null);
 
-        var service = new LocalDataService(_duckDb);
-        var states = await service.GetForcePlanTargetStatesAsync(ServerId,
+        var states = await ReadStatesAsync(
             new List<ForcePlanTarget> { new(Db, 1, 1), new("Other", 2, 2), new("Old", 3, 3) });
 
         var earlier = states[new ForcePlanTargetKey(Db, 1, 1)];
@@ -748,14 +792,508 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task Reader_OnAnEmptyStore_ReturnsAnEmptyStateForEachTarget_SoTheProjectionSaysUnknown()
     {
-        var service = new LocalDataService(_duckDb);
         var t = Target();
-        var states = await service.GetForcePlanTargetStatesAsync(ServerId, new[] { t });
+        var states = await ReadStatesAsync(new[] { t });
         var state = Assert.Single(states).Value;
         Assert.True(state.IsEmpty);
 
         var projected = Assert.Single(FactRemediation.BuildStructuredRemediation(Action(t), states)!.ForcePlanTargets);
         Assert.True(projected.Eligible);
         Assert.Contains("within the last 24 hours", projected.StateNote, StringComparison.Ordinal);
+    }
+
+    /* ------------------------------------------------------------------ 7. the copy-paste text follows the verdict (#8542) */
+
+    /// <summary>The lines of a remediation text that SQL Server would run: everything that is not a comment.</summary>
+    private static List<string> RunnableLines(string? sql) =>
+        (sql ?? string.Empty).Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0 && !line.StartsWith("--", StringComparison.Ordinal))
+            .ToList();
+
+    private static bool Forces(IEnumerable<string> runnableLines, long queryId, long planId) =>
+        runnableLines.Any(line =>
+            line.Contains("sp_query_store_force_plan", StringComparison.Ordinal) &&
+            line.Contains($"@query_id = {queryId},", StringComparison.Ordinal) &&
+            line.Contains($"@plan_id = {planId};", StringComparison.Ordinal));
+
+    /// <summary>
+    /// #8542, through the tool and the store: one persisted PLAN_REGRESSION finding with three targets.
+    /// The store says automatic plan correction withdrew its recommendation for the second target's plan
+    /// and that forcing the third target's plan is failing. The reply's own structured_remediation marks
+    /// those two ineligible, so its remediation_command gives no runnable force statement for them and
+    /// names them with their blockers in comments. A fourth target is parameter-sensitive and nothing
+    /// in the store is against it: the reply marks it ineligible too, and it is the one exception, its
+    /// statement staying under a caution (#2138).
+    /// </summary>
+    [Fact]
+    public async Task GetAnalysisFindings_RemediationCommand_WithholdsTheStatementTheStoreBlocks_AndKeepsItForAParameterSensitiveTarget()
+    {
+        var tempDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ForcePlanEligibility_" + Guid.NewGuid().ToString("N")[..8]);
+        System.IO.Directory.CreateDirectory(tempDir);
+        try
+        {
+            var serverManager = new ServerManager(tempDir);
+            var server = new PerformanceMonitorLite.Models.ServerConnection { ServerName = "TestServer", DisplayName = "TestServer" };
+            serverManager.AddServer(server);
+            _seedServerId = RemoteCollectorService.GetDeterministicHashCode(
+                RemoteCollectorService.GetServerNameForStorage(server));
+
+            var now = DateTime.UtcNow;
+            var seen = now.AddMinutes(-20);
+
+            /* Query 201 / plan 11: collected, not forced, never failed. Eligible. */
+            await SeedQueryStoreAsync(seen, 201, 11, forced: false, "NONE", 0, "NONE");
+            /* Query 202 / plan 12: the engine recommended this plan and withdrew the recommendation. */
+            await SeedPlanCorrectionAsync(seen, Db, "OFF", 202, "Expired", "TempTableChanged", 12, null, false, null);
+            /* Query 203 / plan 13: forcing this plan is already failing. */
+            await SeedQueryStoreAsync(seen, 203, 13, forced: false, "NONE", 2, "GENERAL_FAILURE");
+            /* Query 204 / plan 14: collected, not forced, never failed, and parameter-sensitive. */
+            await SeedQueryStoreAsync(seen, 204, 14, forced: false, "NONE", 0, "NONE");
+
+            var finding = new AnalysisFinding
+            {
+                FindingId = 854201,
+                AnalysisTime = now,
+                ServerId = _seedServerId,
+                ServerName = "TestServer",
+                TimeRangeStart = now.AddHours(-4),
+                TimeRangeEnd = now,
+                Severity = 1.6,
+                Confidence = 0.9,
+                Category = "queries",
+                StoryPath = "PLAN_REGRESSION",
+                StoryPathHash = "force_eligibility_hash",
+                StoryText = "planted finding",
+                RootFactKey = "PLAN_REGRESSION",
+                RootFactValue = 1.0,
+                FactCount = 1,
+                IncidentId = "force-eligibility-test",
+                Remediation = Action(Target(201, 11), Target(202, 12), Target(203, 13), Target(204, 14, psp: true))
+            };
+            var context = new AnalysisContext
+            {
+                ServerId = _seedServerId,
+                ServerName = "TestServer",
+                TimeRangeStart = now.AddHours(-4),
+                TimeRangeEnd = now
+            };
+            await new PerformanceMonitorLite.Analysis.FindingStore(_duckDb)
+                .InsertFindingsAsync(new List<AnalysisFinding> { finding }, context);
+
+            var json = await PerformanceMonitorLite.Mcp.McpAnalysisTools.GetAnalysisFindings(
+                new PerformanceMonitorLite.Analysis.AnalysisService(_duckDb), serverManager, "TestServer", 24);
+
+            using var doc = JsonDocument.Parse(json);
+            var reply = Assert.Single(doc.RootElement.GetProperty("findings").EnumerateArray());
+            var targets = reply.GetProperty("structured_remediation").GetProperty("force_plan_targets").EnumerateArray().ToList();
+            Assert.Equal(4, targets.Count);
+
+            /* The fixture produced the verdicts the issue names, each from the store's own rows. */
+            var verdicts = targets.ToDictionary(
+                t => t.GetProperty("query_id").GetInt64(),
+                t => (Eligible: t.GetProperty("eligible").GetBoolean(),
+                      PlanId: t.GetProperty("plan_id").GetInt64(),
+                      Blockers: t.GetProperty("blockers").EnumerateArray().Select(b => b.GetString()!).ToArray()));
+            Assert.True(verdicts[201].Eligible);
+            Assert.Equal(new[] { ForcePlanBlockerNames.ApcWithdrewIt }, verdicts[202].Blockers);
+            Assert.Equal(new[] { ForcePlanBlockerNames.ForcingFailedOnThisPlan }, verdicts[203].Blockers);
+            Assert.False(verdicts[204].Eligible);
+            Assert.Equal(new[] { ForcePlanBlockerNames.ParameterSensitivityCoFired }, verdicts[204].Blockers);
+
+            var command = reply.GetProperty("remediation_command").GetString();
+            var runnable = RunnableLines(command);
+
+            /* The rule, target by target: a statement is given when the verdict is eligible, and withheld when
+               the store blocks the target. The one exception is a target whose only blockers are the two it
+               carries from its own finding (parameter sensitivity, secondary replica): the reply marks it
+               ineligible, and its statement stays, under its caution or disclosure. */
+            foreach (var (queryId, verdict) in verdicts)
+            {
+                var ownEvidenceOnly = !verdict.Eligible && verdict.Blockers.All(b =>
+                    b is ForcePlanBlockerNames.ParameterSensitivityCoFired or ForcePlanBlockerNames.SecondaryReplicaEvidence);
+                var statementExpected = verdict.Eligible || ownEvidenceOnly;
+                Assert.True(
+                    statementExpected == Forces(runnable, queryId, verdict.PlanId),
+                    $"query {queryId} / plan {verdict.PlanId} is eligible: {verdict.Eligible} with blockers [{string.Join(", ", verdict.Blockers)}], but remediation_command " +
+                    $"{(Forces(runnable, queryId, verdict.PlanId) ? "gives" : "does not give")} a runnable force statement for it");
+            }
+
+            /* The exception, by name: ineligible in the verdict, and still handed over. */
+            Assert.True(Forces(runnable, 204, 14), "the parameter-sensitive target is ineligible and keeps its statement under its caution");
+
+            /* The ineligible targets are named with their blockers, in comments. */
+            var comments = (command ?? string.Empty).Split('\n')
+                .Select(line => line.Trim())
+                .Where(line => line.StartsWith("--", StringComparison.Ordinal))
+                .ToList();
+            Assert.Contains(comments, line => line.Contains("query_id = 202", StringComparison.Ordinal) && line.Contains("plan_id = 12", StringComparison.Ordinal));
+            Assert.Contains(comments, line => line.Contains(ForcePlanBlockerNames.ApcWithdrewIt, StringComparison.Ordinal) && line.Contains("TempTableChanged", StringComparison.Ordinal));
+            Assert.Contains(comments, line => line.Contains("query_id = 203", StringComparison.Ordinal) && line.Contains("plan_id = 13", StringComparison.Ordinal));
+            Assert.Contains(comments, line => line.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, StringComparison.Ordinal));
+        }
+        finally
+        {
+            _seedServerId = ServerId;
+            try { System.IO.Directory.Delete(tempDir, recursive: true); }
+            catch { /* best-effort cleanup */ }
+        }
+    }
+
+    /// <summary>
+    /// #8542, through the Recommendations cards' own read: the same three targets and the same store rows
+    /// as the tool test above. The card's copy-paste command gives the statement for the target the
+    /// store holds nothing against, and names the two the store blocks with their blockers.
+    /// </summary>
+    [Fact]
+    public async Task RecommendationCard_WithholdsTheStatement_ForATargetTheStoreBlocks()
+    {
+        _seedServerId = 854203;
+        try
+        {
+            var now = DateTime.UtcNow;
+            var seen = now.AddMinutes(-20);
+            await SeedQueryStoreAsync(seen, 201, 11, forced: false, "NONE", 0, "NONE");
+            await SeedPlanCorrectionAsync(seen, Db, "OFF", 202, "Expired", "TempTableChanged", 12, null, false, null);
+            await SeedQueryStoreAsync(seen, 203, 13, forced: false, "NONE", 2, "GENERAL_FAILURE");
+
+            var finding = new AnalysisFinding
+            {
+                FindingId = 854203,
+                AnalysisTime = now,
+                ServerId = _seedServerId,
+                ServerName = "TestServer",
+                TimeRangeStart = now.AddHours(-4),
+                TimeRangeEnd = now,
+                Severity = 1.6,
+                Confidence = 0.9,
+                Category = "queries",
+                StoryPath = "PLAN_REGRESSION",
+                StoryPathHash = "force_card_hash",
+                StoryText = "planted finding",
+                RootFactKey = "PLAN_REGRESSION",
+                RootFactValue = 1.0,
+                FactCount = 1,
+                IncidentId = "force-card-test",
+                Remediation = Action(Target(201, 11), Target(202, 12), Target(203, 13))
+            };
+            var context = new AnalysisContext
+            {
+                ServerId = _seedServerId,
+                ServerName = "TestServer",
+                TimeRangeStart = now.AddHours(-4),
+                TimeRangeEnd = now
+            };
+            var findingStore = new PerformanceMonitorLite.Analysis.FindingStore(_duckDb);
+            await findingStore.InsertFindingsAsync(new List<AnalysisFinding> { finding }, context);
+
+            var cards = await new PerformanceMonitorLite.Analysis.Recommendations.LiteRecommendationsReader(findingStore)
+                .GetRecommendationsAsync(_seedServerId, "TestServer");
+
+            var card = Assert.Single(cards);
+            var runnable = RunnableLines(card.CopyPasteSql);
+            Assert.True(Forces(runnable, 201, 11), "the target the store holds nothing against keeps its statement");
+            Assert.False(Forces(runnable, 202, 12), "plan 12 is apc_withdrew_it in the store, and the card must not give a runnable force statement for it");
+            Assert.False(Forces(runnable, 203, 13), "plan 13 is forcing_failed_on_this_plan in the store, and the card must not give a runnable force statement for it");
+            Assert.Contains(ForcePlanBlockerNames.ApcWithdrewIt, card.CopyPasteSql, StringComparison.Ordinal);
+            Assert.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, card.CopyPasteSql, StringComparison.Ordinal);
+        }
+        finally
+        {
+            _seedServerId = ServerId;
+        }
+    }
+
+    /// <summary>
+    /// #8542: only the store's forcing state withholds a statement. A parameter-sensitive target and a
+    /// target measured on a secondary carry their caution and disclosure WITH the statement (#1882,
+    /// #2138), with no state and with a state that holds nothing against them.
+    /// </summary>
+    [Fact]
+    public void CopyPasteCommand_KeepsTheStatement_ForATargetOnlyItsOwnEvidenceCautions()
+    {
+        var clean = Target(201, 11);
+        var psp = Target(202, 12, psp: true);
+        var secondary = Target(203, 13, replica: "Secondary");
+        var action = Action(clean, psp, secondary);
+        var quiet = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer)
+        {
+            [ForcePlanTargetKey.Of(clean)] = State(planForced: false, forcingType: "NONE", failures: 0),
+            [ForcePlanTargetKey.Of(psp)] = State(planForced: false, forcingType: "NONE", failures: 0),
+            [ForcePlanTargetKey.Of(secondary)] = State(planForced: false, forcingType: "NONE", failures: 0),
+        };
+
+        foreach (var sql in new[] { FactRemediation.RenderCopyPasteCommand(action), FactRemediation.RenderCopyPasteCommand(action, quiet) })
+        {
+            var runnable = RunnableLines(sql);
+            Assert.True(Forces(runnable, 201, 11), "the clean target keeps its statement");
+            Assert.True(Forces(runnable, 202, 12), "the parameter-sensitive target keeps its statement under its caution");
+            Assert.True(Forces(runnable, 203, 13), "the secondary-replica target keeps its statement under its disclosure");
+        }
+    }
+
+    /// <summary>
+    /// #8542: a parameter-sensitive target the store ALSO blocks gets no statement, and the comment names
+    /// every blocker of the gate, the store's and the target's own.
+    /// </summary>
+    [Fact]
+    public void CopyPasteCommand_WithholdsTheStatement_WhenTheStoreBlocksAParameterSensitiveTarget()
+    {
+        var psp = Target(202, 12, psp: true);
+        var sql = FactRemediation.RenderCopyPasteCommand(
+            Action(Target(201, 11), psp),
+            For(psp, State(apcState: "Expired", apcReason: "TempTableChanged", apcLastGood: 12)));
+
+        var runnable = RunnableLines(sql);
+        Assert.True(Forces(runnable, 201, 11));
+        Assert.False(Forces(runnable, 202, 12));
+        Assert.Contains(ForcePlanBlockerNames.ApcWithdrewIt, sql, StringComparison.Ordinal);
+        Assert.Contains(ForcePlanBlockerNames.ParameterSensitivityCoFired, sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #8542: when the store blocks every target the command is still text (the targets and their blockers,
+    /// in comments), it says no statement is offered, and it holds nothing SQL Server would run.
+    /// </summary>
+    [Fact]
+    public void CopyPasteCommand_WhenTheStoreBlocksEveryTarget_SaysSo_AndHoldsNoStatement()
+    {
+        var withdrawn = Target(202, 12);
+        var failing = Target(203, 13);
+        var states = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer)
+        {
+            [ForcePlanTargetKey.Of(withdrawn)] = State(apcState: "Expired", apcReason: "TempTableChanged", apcLastGood: 12),
+            [ForcePlanTargetKey.Of(failing)] = State(failures: 2, failureReason: "GENERAL_FAILURE"),
+        };
+
+        var sql = FactRemediation.RenderCopyPasteCommand(Action(withdrawn, failing), states);
+
+        Assert.False(string.IsNullOrWhiteSpace(sql));
+        Assert.Empty(RunnableLines(sql));
+        Assert.Contains("query_id = 202", sql, StringComparison.Ordinal);
+        Assert.Contains("query_id = 203", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #8542: a database name, a replica role, a plan hash and a blocker's evidence are all text from the
+    /// monitored server. A line break in any of them stays inside the comment it is written in, so a
+    /// blocked target's text holds nothing SQL Server would run.
+    /// </summary>
+    [Fact]
+    public void ALineBreakInCollectedText_StaysInsideTheComment_ForABlockedTarget()
+    {
+        const string injected = "\nEXEC sys.sp_query_store_force_plan @query_id = 7, @plan_id = 9;";
+        var database = "Sales" + injected;
+        var target = new ForcePlanTarget(database, 202, 12, "0xBEST" + injected, "0xLATEST" + injected, 9000, 1200, 7.5, "Secondary" + injected);
+        var states = For(target, State(apcState: "Expired", apcReason: "TempTableChanged" + injected, apcLastGood: 12));
+
+        Assert.Empty(RunnableLines(FactRemediation.RenderCopyPasteCommand(Action(target), states)));
+
+        var finding = new AnalysisFinding
+        {
+            RootFactKey = "PLAN_REGRESSION",
+            DrillDown = new Dictionary<string, object>
+            {
+                ["regressed_queries"] = new[]
+                {
+                    new Dictionary<string, object>
+                    {
+                        ["database"] = database,
+                        ["query_id"] = 202L,
+                        ["best_plan_id"] = 12L,
+                        ["regression_factor"] = 7.5,
+                        ["replica_role"] = "Secondary" + injected,
+                        ["best_plan_hash"] = "0xBEST" + injected,
+                        ["latest_plan_hash"] = "0xLATEST" + injected
+                    }
+                }
+            }
+        };
+
+        Assert.Empty(RunnableLines(FactRemediation.GenerateForFinding(finding, states)));
+    }
+
+    /// <summary>
+    /// #8542: a finding with no persisted action renders its statements from its drill-down, so the state
+    /// read takes that finding's targets from the drill-down too and the store's verdict reaches them.
+    /// </summary>
+    [Fact]
+    public async Task StateRead_CoversAFindingWithNoPersistedAction_ThroughItsDrillDown()
+    {
+        await SeedPlanCorrectionAsync(DateTime.UtcNow.AddMinutes(-20), Db, "OFF", 202, "Expired", "TempTableChanged", 12, null, false, null);
+
+        var finding = new AnalysisFinding
+        {
+            RootFactKey = "PLAN_REGRESSION",
+            DrillDown = new Dictionary<string, object>
+            {
+                ["regressed_queries"] = new[]
+                {
+                    new Dictionary<string, object>
+                    {
+                        ["database"] = Db,
+                        ["query_id"] = 202L,
+                        ["best_plan_id"] = 12L,
+                        ["regression_factor"] = 7.5
+                    }
+                }
+            }
+        };
+
+        var (states, reason) = await new PerformanceMonitorLite.Analysis.AnalysisService(_duckDb)
+            .TryGetForcePlanTargetStatesAsync(ServerId, [finding]);
+
+        Assert.Null(reason);
+        Assert.True(states!.TryGetValue(new ForcePlanTargetKey(Db, 202, 12), out var state), "the drill-down's target was not read");
+        Assert.False(Forces(RunnableLines(FactRemediation.GenerateForFinding(finding, states)), 202, 12));
+        Assert.Equal("Expired", state!.ApcState);
+    }
+
+    private static AnalysisFinding DrillDownFinding(params (long QueryId, long PlanId)[] rows) => new()
+    {
+        RootFactKey = "PLAN_REGRESSION",
+        DrillDown = new Dictionary<string, object>
+        {
+            ["regressed_queries"] = rows.Select(row => new Dictionary<string, object>
+            {
+                ["database"] = Db,
+                ["query_id"] = row.QueryId,
+                ["best_plan_id"] = row.PlanId,
+                ["regression_factor"] = 7.5
+            }).ToArray()
+        }
+    };
+
+    /// <summary>
+    /// #8542: a failed state read withholds nothing and says so. Every statement stays, and the text opens
+    /// with the renderer's not-checked line, in the command, the preview and the Lite card. With no state
+    /// and no reason the text carries no such line.
+    /// </summary>
+    [Fact]
+    public void AFailedStateRead_KeepsEveryStatement_AndTheTextOpensBySayingNothingWasChecked()
+    {
+        const string reason = "the forcing and automatic-plan-correction state read failed (TimeoutException)";
+        var action = Action(Target(201, 11), Target(202, 12));
+
+        var command = FactRemediation.RenderCopyPasteCommand(action, states: null, stateUnavailableReason: reason);
+        Assert.StartsWith(FactRemediation.StateNotReadPrefix, command, StringComparison.Ordinal);
+        Assert.True(Forces(RunnableLines(command), 201, 11));
+        Assert.True(Forces(RunnableLines(command), 202, 12));
+        Assert.DoesNotContain(FactRemediation.StateNotReadPrefix, FactRemediation.RenderCopyPasteCommand(action, states: null, stateUnavailableReason: null), StringComparison.Ordinal);
+
+        var finding = DrillDownFinding((201, 11), (202, 12));
+        var preview = FactRemediation.GenerateForFinding(finding, states: null, stateUnavailableReason: reason);
+        Assert.StartsWith(FactRemediation.StateNotReadPrefix, preview, StringComparison.Ordinal);
+        Assert.True(Forces(RunnableLines(preview), 201, 11));
+        Assert.DoesNotContain(FactRemediation.StateNotReadPrefix, FactRemediation.GenerateForFinding(finding, states: null, stateUnavailableReason: null), StringComparison.Ordinal);
+
+        var card = PerformanceMonitorLite.Analysis.Recommendations.LiteRecommendationsReader.MapFinding(
+            new AnalysisFinding { RootFactKey = "PLAN_REGRESSION", Remediation = action }, "TestServer",
+            forcePlanStates: null, forcePlanStateUnavailableReason: reason);
+        Assert.StartsWith(FactRemediation.StateNotReadPrefix, card.CopyPasteSql, StringComparison.Ordinal);
+        Assert.True(Forces(RunnableLines(card.CopyPasteSql), 202, 12));
+
+        /* A text whose every target has a state row never opens with the line, whatever the rows hold. */
+        var readStates = For(Target(202, 12), State(failures: 2, failureReason: "GENERAL_FAILURE"));
+        readStates[ForcePlanTargetKey.Of(Target(201, 11))] = State(planForced: false, forcingType: "NONE", failures: 0);
+        var read = FactRemediation.RenderCopyPasteCommand(action, readStates);
+        Assert.False(read!.StartsWith(FactRemediation.StateNotReadPrefix, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #8542: a target the state read found no row for keeps its statement, and the line above that
+    /// statement says its state is unknown and to check before forcing, as structured_remediation's
+    /// state_note does. The reader's all-null row and a missing key read the same. A target whose state
+    /// was read and holds nothing against it carries no such line.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ATargetTheStateReadFoundNoRowFor_KeepsItsStatement_UnderALineSayingItsStateIsUnknown(bool allNullRow)
+    {
+        var unknown = Target(201, 11);
+        var quiet = Target(202, 12);
+        var states = For(quiet, State(planForced: false, forcingType: "NONE", failures: 0));
+        if (allNullRow)
+            states[ForcePlanTargetKey.Of(unknown)] = Empty();
+
+        var note = FactRemediation.BuildStructuredRemediation(Action(unknown, quiet), states)!.ForcePlanTargets[0].StateNote;
+        Assert.StartsWith("unknown:", note, StringComparison.Ordinal);
+
+        var texts = new[]
+        {
+            FactRemediation.RenderCopyPasteCommand(Action(unknown, quiet), states),
+            FactRemediation.GenerateForFinding(DrillDownFinding((201, 11), (202, 12)), states),
+        };
+        foreach (var text in texts)
+        {
+            var lines = (text ?? string.Empty).Split('\n').Select(line => line.Trim()).ToList();
+            Assert.True(Forces(RunnableLines(text), 201, 11), "the target with no state row keeps its statement");
+            Assert.True(Forces(RunnableLines(text), 202, 12), "the target with a quiet state keeps its statement");
+
+            var notChecked = lines.Where(line => line.StartsWith(FactRemediation.StateNotReadPrefix, StringComparison.Ordinal)).ToList();
+            Assert.True(notChecked.Count == 1, $"one target has no state row, and {notChecked.Count} lines say a state is unknown in:{Environment.NewLine}{text}");
+            Assert.Contains("unknown", notChecked[0], StringComparison.Ordinal);
+            Assert.Contains("before forcing", notChecked[0], StringComparison.Ordinal);
+
+            /* The line is the unknown target's: above its statement, which is the first of the two. */
+            var at = lines.IndexOf(notChecked[0]);
+            var unknownStatement = lines.FindIndex(line => Forces([line], 201, 11));
+            var quietStatement = lines.FindIndex(line => Forces([line], 202, 12));
+            Assert.True(at < unknownStatement && unknownStatement < quietStatement,
+                $"the unknown-state line sits above the statement of the target it is about in:{Environment.NewLine}{text}");
+        }
+    }
+
+    /// <summary>
+    /// #8542: a state read that faults gives back the exception's type and never its message, because the
+    /// reason goes into the command text a card shows and a notification sends. The store here is a file
+    /// in a folder that does not exist, so the fault's message names that path.
+    /// </summary>
+    [Fact]
+    public async Task AFailedStateRead_NamesTheExceptionsType_AndNeverItsMessage()
+    {
+        const string marker = "marker8542inthepath";
+        var missing = System.IO.Path.Combine(System.IO.Path.GetTempPath(), marker + Guid.NewGuid().ToString("N")[..8], "nowhere", "store.duckdb");
+        using var store = new DuckDbInitializer(missing);
+
+        var (states, reason) = await PerformanceMonitorLite.Analysis.AnalysisService.ReadForcePlanTargetStatesAsync(
+            store, ServerId, [new AnalysisFinding { RootFactKey = "PLAN_REGRESSION", Remediation = Action(Target(201, 11)) }]);
+
+        Assert.Null(states);
+        Assert.False(string.IsNullOrWhiteSpace(reason), "a read over a store that cannot be opened fails, and says so");
+        Assert.DoesNotContain(marker, reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Exception", reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #8542: the notification's remediation T-SQL is built over the same state. The message gives the
+    /// force statement for the target the store holds nothing against and none for the two it blocks,
+    /// and names their blockers.
+    /// </summary>
+    [Fact]
+    public void NotificationAdvice_GivesNoForceStatement_ForATargetTheStoreBlocks()
+    {
+        var finding = DrillDownFinding((201, 11), (202, 12), (203, 13));
+        var states = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer)
+        {
+            [new ForcePlanTargetKey(Db, 201, 11)] = State(planForced: false, forcingType: "NONE", failures: 0),
+            [new ForcePlanTargetKey(Db, 202, 12)] = State(apcState: "Expired", apcReason: "TempTableChanged", apcLastGood: 12),
+            [new ForcePlanTargetKey(Db, 203, 13)] = State(failures: 2, failureReason: "GENERAL_FAILURE"),
+        };
+
+        var context = PerformanceMonitor.Notifications.FindingMessageFormatter.BuildContext(finding, 1.5, states);
+        var text = string.Join("\n", context.Details.Select(detail => detail.Body ?? string.Empty));
+        var runnable = RunnableLines(text);
+
+        Assert.True(Forces(runnable, 201, 11), "the target the store holds nothing against keeps its statement");
+        Assert.False(Forces(runnable, 202, 12), "plan 12 is apc_withdrew_it in the store, and the notification must not carry a runnable force statement for it");
+        Assert.False(Forces(runnable, 203, 13), "plan 13 is forcing_failed_on_this_plan in the store, and the notification must not carry a runnable force statement for it");
+        Assert.Contains(ForcePlanBlockerNames.ApcWithdrewIt, text, StringComparison.Ordinal);
+        Assert.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, text, StringComparison.Ordinal);
+
+        /* A failed read reaches the message too. */
+        var unread = PerformanceMonitor.Notifications.FindingMessageFormatter.BuildContext(finding, 1.5, null, "the read failed (TimeoutException)");
+        Assert.Contains(unread.Details, detail => (detail.Body ?? string.Empty).StartsWith(FactRemediation.StateNotReadPrefix, StringComparison.Ordinal));
     }
 }

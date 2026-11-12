@@ -36,9 +36,6 @@ export const MINIMUM_SPAN_MS = 5 * MINUTE_MS;
 /** A tab note appears when the span holds fewer than this many samples. */
 export const MIN_SAMPLES = 3;
 
-/** The data-start note appears when the range starts more than this long before the data does. */
-export const DATA_START_SLACK_MS = 90 * MINUTE_MS;
-
 const MAX_RELATIVE_MS = 36500 * DAY_MS;
 const LAST_DAY_MS = Date.UTC(9999, 11, 31, 23, 59, 59, 999);
 const EXAMPLES = "Try 45m, 3 days, last month, Oct 1 - Oct 2 or 1:00 am - 7:00 am.";
@@ -71,16 +68,6 @@ export function browserZone() {
     return new Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   } catch {
     return "UTC";
-  }
-}
-
-/** True when Intl knows the zone name. */
-export function isKnownZone(zone) {
-  try {
-    formatterFor(zone);
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -174,9 +161,15 @@ export function isoZ(ms) {
   return new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(".000Z", "Z");
 }
 
+/** The whole minutes in a span, floored (#7940): the one minute count a length is named, identified and measured by, so "7.5 minutes" is
+ *  7 minutes in its name, its id and its length text alike, and the id reads back as the range the name says. */
+function wholeMinutes(spanMs) {
+  return Math.floor(Math.max(0, spanMs) / MINUTE_MS);
+}
+
 /** The length of a span as the picker words it: "3d" for three days and some hours, "7h 1m" under a day, "45m". Floors. */
 export function formatLength(spanMs) {
-  const totalMinutes = Math.floor(Math.max(0, spanMs) / MINUTE_MS);
+  const totalMinutes = wholeMinutes(spanMs);
   if (totalMinutes >= 1440) return Math.floor(totalMinutes / 1440) + "d";
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
@@ -250,7 +243,7 @@ export function specId(spec) {
       if (s === 30 * DAY_MS) return "1mo";
       if (s % DAY_MS === 0) return s / DAY_MS + "d";
       if (s % HOUR_MS === 0) return s / HOUR_MS + "h";
-      return roundEven(s / MINUTE_MS) + "m";
+      return wholeMinutes(s) + "m";
     }
     case "calendar":
       return spec.period;
@@ -297,11 +290,6 @@ export function specFromId(id) {
   }
 }
 
-/** The spec for a count of whole hours (the legacy `hours` the reads and old settings carry), or null. */
-export function fromLegacyHours(hours) {
-  return Number.isFinite(hours) && hours > 0 ? relativeSpec(hours * HOUR_MS) : null;
-}
-
 /** The whole hours of a relative spec, or null when it is not a whole number of hours (or not relative). */
 export function wholeHours(spec) {
   return spec.kind === "relative" && spec.spanMs % HOUR_MS === 0 ? spec.spanMs / HOUR_MS : null;
@@ -319,7 +307,7 @@ function pastLength(spanMs) {
     count = spanMs / HOUR_MS;
     unit = "hour";
   } else {
-    count = roundEven(spanMs / MINUTE_MS);
+    count = wholeMinutes(spanMs);
     unit = "minute";
   }
   return count === 1 ? unit : count + " " + unit + "s";
@@ -446,12 +434,6 @@ export function resolveSpec(spec, nowMs, zone) {
   if (spec.kind === "calendar" && end <= start) return fail("too_short", specName(spec) + " has only just started. Pick another range.");
   if (spec.kind !== "calendar" && end - start < MINIMUM_SPAN_MS) return fail("too_short", shortMessage(end - start));
   return { ok: true, range: buildRange(spec, start, end, live, zone, nowMs) };
-}
-
-/** The current length of a spec ("7h 1m" for Today, "2m" just after midnight), or null when it cannot be used right now (a calendar period at exactly its start, zero length). */
-export function currentLength(spec, nowMs, zone) {
-  const r = resolveSpec(spec, nowMs, zone);
-  return r.ok ? r.range.length : null;
 }
 
 /* ───────────────────────────────── the typed-range parser ───────────────────────────────── */
@@ -824,14 +806,6 @@ export function intervalText(intervalMs) {
 export function sampleIntervalNote(spanMs, intervalMs) {
   if (!(intervalMs > 0) || spanMs >= intervalMs * MIN_SAMPLES) return null;
   return "Data here is collected every " + intervalText(intervalMs) + ".";
-}
-
-/** "Data starts Oct 3, 2:00 pm" when the range starts more than 90 minutes before the data does, else null. */
-export function dataStartNote(range, dataStartMs) {
-  if (dataStartMs == null || range.startMs >= dataStartMs - DATA_START_SLACK_MS) return null;
-  const nowYear = wallYear(range.nowMs, range.zone);
-  const showYear = wallYear(range.startMs, range.zone) !== nowYear || wallYear(range.endMs, range.zone) !== nowYear;
-  return "Data starts " + formatBound(dataStartMs, { zone: range.zone, showYear }, false);
 }
 
 /** An instant as the text a date-time box and the typed grammar both read, in the zone: "2026-10-01 13:00" (seconds only when not zero). */

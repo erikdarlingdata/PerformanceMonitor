@@ -221,8 +221,12 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(14) ? 0 : Convert.ToInt32(reader.GetValue(14), CultureInfo.InvariantCulture)));
         }
 
-        return KeepOneRowPerDeltaKey(rows, context.Target.IsAzureSqlDb);
+        return DeltaBaselineRollbackRows.Capture(KeepOneRowPerDeltaKey(rows, context.Target.IsAzureSqlDb), context, BaselineGroups, DeltaKey);
     }
+
+    /* The delta groups WritePayload advances for each row, captured at the end of the read so a write that fails
+       before the rows are stored can hand them back (DeltaBaselineRollbackRows). */
+    private static readonly string[] BaselineGroups = { "file_io_reads", "file_io_writes", "file_io_read_bytes", "file_io_write_bytes", "file_io_stall_read", "file_io_stall_write", "file_io_stall_queued_read", "file_io_stall_queued_write" };
 
     /// <summary>
     /// #6438: the delta key is "{database}|{file}", so two rows of one pass that share it difference against

@@ -53,7 +53,26 @@
                 <ComboBox x:Name="SeveritiesCombo" Width="180"
                           ToolTip="Which alerts this route takes. Both: Warning and Critical. Critical only, or Warning only: an alert of the other severity skips this route and goes to the next matching route, then to the default channels."/>
             </StackPanel>
-            <TextBlock x:Name="ScopeNoteText" Foreground="{DynamicResource ForegroundMutedBrush}"
+            <!-- #6979: whether the route posts a Slack or Teams notice when an agent files a report on one of its requests. -->
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
+                <TextBlock Text="Report notice" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <ComboBox x:Name="ReportNoticeCombo" Width="260"
+                          ToolTip="Whether this route posts a notice to its Slack or Teams channel when an agent files a report. Off: no notice (the default). Needs a person or made a change: only a report that says a person is needed, or whose request changed something. All reports: every report. An empty Slack or Teams channel on the route uses the channel from Settings."/>
+            <TextBlock x:Name="ReportNoticeHint" Margin="8,0,0,0" VerticalAlignment="Center"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"
+                           Text="Needs an agent level above Off."/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
+                <TextBlock Text="Action approval" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <ComboBox x:Name="ActionApprovalCombo" Width="260"
+                          ToolTip="At Act on servers (Level 3): Required makes each server action wait for a person to approve it (the default). Off lets the agent run it without approval."/>
+                <CheckBox x:Name="ApprovalSinglePersonCheck" Margin="12,0,0,0" VerticalAlignment="Center"
+                          Content="The person who asked may approve"
+                          ToolTip="Off (the default): a second person approves an action that a person asked for. On: the person who asked may approve it too."/>
+            </StackPanel>
+            <TextBlock x:Name="ApprovalNobodyText" Visibility="Collapsed" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,4"
+                       Foreground="{DynamicResource ForegroundMutedBrush}" AutomationProperties.Name="Nobody can approve"/>
+            <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}"
                        TextWrapping="Wrap" HorizontalAlignment="Left"
                        Text="Generic webhook headers and the body template stay app-wide: set them in Notifications. A route changes only where the post goes."/>
         </StackPanel>
@@ -66,7 +85,7 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <ComboBox Grid.Column="0" x:Name="FamilyCombo" SelectedIndex="0" SelectionChanged="FamilyCombo_SelectionChanged"
-                      ToolTip="A family routes every alert in it. Choose 'Exact metric name…' to route one alert by its metric_name (as shown in Alert History); an exact route also catches that alert's recovery. 'Every metric (*)' appears once a server or a tag is chosen, and catches whatever no other route for that scope matches.">
+                      ToolTip="A family routes every alert in it. Choose 'Exact metric name…' to route one alert by its metric_name (as shown in Alert History); an exact route also catches that alert's recovery. 'Every analysis finding (Analysis: *)' catches every analysis finding and can be used at any scope; within one scope it comes after a route for the finding's category and before a family. 'Every metric (*)' appears once a server or a tag is chosen, and catches whatever no other route for that scope matches.">
                 <!-- Items are filled in code from AlertFamily.All so the list is the closed taxonomy, never a copy. -->
             </ComboBox>
             <TextBox Grid.Column="2" x:Name="ExactMetricBox" IsEnabled="False"
@@ -90,6 +109,7 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
             <TextBlock Grid.Row="0" Grid.Column="0" Text="Teams webhook URL" VerticalAlignment="Center" Margin="0,0,8,6"/>
@@ -100,7 +120,7 @@
 
             <TextBlock Grid.Row="2" Grid.Column="0" Text="Generic webhook URL" VerticalAlignment="Center" Margin="0,0,8,6"/>
             <TextBox Grid.Row="2" Grid.Column="1" x:Name="GenericUrlBox" Margin="0,0,0,6"
-                     ToolTip="Headers, body template and proxy come from the Notifications section — a route redirects the POST, it does not re-author it."/>
+                     ToolTip="Headers, body template and proxy come from the Notifications section: a route redirects the POST, it does not re-author it."/>
 
             <!-- #5998: the signing key of this route's own generic URL. Made, rotated and removed here at once, not with OK. -->
             <TextBlock Grid.Row="3" Grid.Column="0" Text="Signing key" VerticalAlignment="Top" Margin="0,4,8,6"/>
@@ -122,11 +142,20 @@
 
             <TextBlock Grid.Row="4" Grid.Column="0" Text="PagerDuty routing key" VerticalAlignment="Center" Margin="0,0,8,6"/>
             <TextBox Grid.Row="4" Grid.Column="1" x:Name="PagerDutyKeyBox" Margin="0,0,0,6"
-                     ToolTip="An Events API v2 integration key — a different PagerDuty SERVICE for this family. The EU-region flag and proxy come from the Notifications section."/>
+                     ToolTip="An Events API v2 integration key: a different PagerDuty SERVICE for this family. The EU-region flag and proxy come from the Notifications section."/>
 
             <TextBlock Grid.Row="5" Grid.Column="0" Text="Email recipients" VerticalAlignment="Center" Margin="0,0,8,6"/>
             <TextBox Grid.Row="5" Grid.Column="1" x:Name="SmtpRecipientsBox" Margin="0,0,0,6"
                      ToolTip="Comma-separated. Redirects email only: the SMTP host, from-address and credentials come from the Notifications section, so email is delivered only where those are set."/>
+
+            <!-- #7656: the Slack channel id the bot posts this route's investigation request threads into. Not a webhook: the bot token lives in Notifications. -->
+            <TextBlock Grid.Row="6" Grid.Column="0" Text="Slack bot channel" VerticalAlignment="Top" Margin="0,4,8,6"/>
+            <StackPanel Grid.Row="6" Grid.Column="1" Margin="0,0,0,6">
+                <TextBox x:Name="SlackBotChannelBox" Margin="0,0,0,4"
+                         ToolTip="The channel id (C or G, then capital letters and digits, for example C0123ABCDEF), not the channel's name. Blank: this route opens no threads."/>
+                <TextBlock x:Name="SlackBotSetupText" FontSize="11" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           Text="The bot posts one thread per investigation request into this channel, as the bot, not through the alert webhook. Blank opens no threads.&#x0a;Requests that opened before you set the channel get no thread. A post not sent within 7 days of its event is never sent.&#x0a;Make one Slack app and install it once with every scope it needs. Bot token scopes: chat:write, app_mentions:read, channels:history and groups:history. App-level token scope: connections:write. Save both tokens in Notifications.&#x0a;Invite the bot to the channel: it posts only in channels it belongs to, and a post to one it is not in fails with not_in_channel. A private channel works once the bot is invited.&#x0a;Store the channel id, not the name. Names change; ids do not. An id starts with C or G and is shown in the channel's details in Slack.&#x0a;Use a channel of its own for the bot: during an alert storm the alert webhook posts in bursts of 40 to 86 messages a minute, and request threads are hard to follow next to them. A shared channel still works.&#x0a;After the app is reinstalled with new scopes, check every alert webhook still posts.&#x0a;The data detail setting decides what a thread shows. Full, the default, posts literals such as names and values into the thread, and every member of the channel can read them.&#x0a;One Slack app per store for buttons and mentions: Socket Mode hands each event to one of the app's open connections, so two stores listening on one app acknowledge and lose each other's events, and Slack never retries an acknowledged event. On a shared app, set the app-level token on one store only; the other stores post threads, with no buttons or mentions. A store still acts only on events from channels set on its own routes, and warns when events keep arriving for channels it does not own.&#x0a;The app-level token turns the listener on: saved, the service holds two Socket Mode connections and hears presses and mentions in its channels; blank, it does not listen. Generate it on the app's Basic Information page under App-Level Tokens with the connections:write scope, and save it only in Notifications here or on the web Admin page, never through an agent or an MCP call, where it would sit in the agent's transcript. The app manifest and the full setup are in docs/darling/slack-bot.md."/>
+            </StackPanel>
         </Grid>
 
         <!-- #5632: the agent channel. Not a destination: it says whether a matching alert also opens an investigation

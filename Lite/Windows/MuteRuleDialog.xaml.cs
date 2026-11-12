@@ -21,6 +21,7 @@ public partial class MuteRuleDialog : Window
     public MuteRuleDialog(MuteRule? existingRule = null)
     {
         InitializeComponent();
+        AppendCensusMetrics();
 
         if (existingRule != null)
         {
@@ -45,6 +46,9 @@ public partial class MuteRuleDialog : Window
             ServerNameBox.Text = context.ServerName;
         if (!string.IsNullOrEmpty(context.MetricName))
             SelectMetric(context.MetricName);
+        else
+            /* #8350: an alert with no metric name cannot be muted by type. Say so, instead of leaving "(any)" to read as a choice. */
+            MetricScopeNote.Visibility = Visibility.Visible;
         if (!string.IsNullOrEmpty(context.DatabaseName))
             DatabasePatternBox.Text = context.DatabaseName;
         if (context.SeedQueryTextPattern(PerformanceMonitor.Common.SensitiveStatements.Text) is { } seededQueryText)
@@ -55,6 +59,34 @@ public partial class MuteRuleDialog : Window
             JobNamePatternBox.Text = context.JobName;
         if (!string.IsNullOrEmpty(context.ClientAppName))
             ClientAppPatternBox.Text = context.ClientAppName;
+    }
+
+    /// <summary>
+    /// The Metric list names every alert type Lite judges mute rules for, read from the shared census
+    /// (<see cref="MuteRuleMetricList.For"/>: the performance and agent-job families, without the PostgreSQL names), after the
+    /// entries the markup lists first, so an alert of any of those types can be muted by type alone.
+    /// </summary>
+    private void AppendCensusMetrics()
+    {
+        foreach (var metric in MuteRuleMetricList.For(new[] { AlertFamily.Performance, AlertFamily.AgentJobs }, sqlServerOnly: true))
+        {
+            if (IndexOfMetric(metric) < 0)
+                MetricCombo.Items.Add(new ComboBoxItem { Content = metric });
+        }
+    }
+
+    private int IndexOfMetric(string metricName)
+    {
+        for (int i = 0; i < MetricCombo.Items.Count; i++)
+        {
+            if (MetricCombo.Items[i] is ComboBoxItem item &&
+                string.Equals(item.Content?.ToString(), metricName, StringComparison.OrdinalIgnoreCase))
+            {
+                return i;
+            }
+        }
+
+        return -1;
     }
 
     private void PopulateFromRule(MuteRule rule)
@@ -70,28 +102,59 @@ public partial class MuteRuleDialog : Window
         if (!string.IsNullOrEmpty(rule.MetricName))
             SelectMetric(rule.MetricName);
 
-        if (rule.ExpiresAtUtc == null)
-            ExpirationCombo.SelectedIndex = 3;
+        /* #7173: a rule that already expires keeps that moment unless the operator picks another: the first entry stands for the
+           stored expiry, so an edit that never touches the combo cannot stretch a window or bring an expired rule back to life. */
+        if (rule.ExpiresAtUtc is { } storedExpiry)
+        {
+            _keptExpiry = storedExpiry;
+            ExpirationCombo.Items.Insert(0, new ComboBoxItem { Content = KeepExpiryLabel(storedExpiry, DateTime.UtcNow) });
+            ExpirationCombo.SelectedIndex = 0;
+        }
         else
         {
-            var remaining = rule.ExpiresAtUtc.Value - DateTime.UtcNow;
-            if (remaining.TotalHours <= 1.5) ExpirationCombo.SelectedIndex = 0;
-            else if (remaining.TotalHours <= 25) ExpirationCombo.SelectedIndex = 1;
-            else ExpirationCombo.SelectedIndex = 2;
+            ExpirationCombo.SelectedIndex = 3;
         }
     }
 
+    private DateTime? _keptExpiry;
+
+    /// <summary>The expiry the Expires After combo stands for (#7173). When the rule being edited already expires, entry 0 is "Keep"
+    /// and the entries after it are the four presets; otherwise the entries are the four presets alone.</summary>
+    internal static DateTime? ExpiryFromSelection(int selectedIndex, DateTime? keptExpiry, DateTime nowUtc)
+    {
+        if (keptExpiry.HasValue)
+        {
+            if (selectedIndex == 0)
+                return keptExpiry;
+            selectedIndex--;
+        }
+        return selectedIndex switch
+        {
+            0 => nowUtc.AddHours(1),
+            1 => nowUtc.AddHours(24),
+            2 => nowUtc.AddDays(7),
+            _ => null
+        };
+    }
+
+    /// <summary>The text of the "Keep" entry: the stored expiry in local time, marked when it has already passed.</summary>
+    internal static string KeepExpiryLabel(DateTime expiresAtUtc, DateTime nowUtc) =>
+        expiresAtUtc <= nowUtc
+            ? $"Keep: {expiresAtUtc.ToLocalTime():g} (expired)"
+            : $"Keep: {expiresAtUtc.ToLocalTime():g}";
+
+
+    /// <summary>
+    /// Selects <paramref name="metricName"/>, adding it to the list first when nothing names it: an analysis finding's or a
+    /// custom rule's metric is minted per finding or rule, and the engines still judge mute rules against that exact name,
+    /// so the rule keeps the alert's own type instead of falling back to "(any)" (#8350).
+    /// </summary>
     private void SelectMetric(string metricName)
     {
-        for (int i = 0; i < MetricCombo.Items.Count; i++)
-        {
-            if (MetricCombo.Items[i] is ComboBoxItem item &&
-                string.Equals(item.Content?.ToString(), metricName, StringComparison.OrdinalIgnoreCase))
-            {
-                MetricCombo.SelectedIndex = i;
-                return;
-            }
-        }
+        var index = IndexOfMetric(metricName);
+        if (index < 0)
+            index = MetricCombo.Items.Add(new ComboBoxItem { Content = metricName });
+        MetricCombo.SelectedIndex = index;
     }
 
     private void Save_Click(object sender, RoutedEventArgs e)
@@ -115,13 +178,7 @@ public partial class MuteRuleDialog : Window
         else
             Rule.MetricName = null;
 
-        Rule.ExpiresAtUtc = ExpirationCombo.SelectedIndex switch
-        {
-            0 => DateTime.UtcNow.AddHours(1),
-            1 => DateTime.UtcNow.AddHours(24),
-            2 => DateTime.UtcNow.AddDays(7),
-            _ => null
-        };
+        Rule.ExpiresAtUtc = ExpiryFromSelection(ExpirationCombo.SelectedIndex, _keptExpiry, DateTime.UtcNow);
 
         if (Rule.ServerName == null && Rule.MetricName == null && Rule.DatabasePattern == null
             && Rule.QueryTextPattern == null && Rule.WaitTypePattern == null && Rule.JobNamePattern == null
@@ -149,10 +206,11 @@ public partial class MuteRuleDialog : Window
 
         /* #1839's "Blocking Wait Time" carries the same blocked-process context as "Blocking Detected",
            so it offers the same database/query-text pattern fields. */
-        bool showDatabase = metric is null or "(any)" or "Blocking Detected" or "Blocking Wait Time" or "Deadlocks Detected" or "Long-Running Query" or AlertFamily.ClientTimeoutsMetric;
+        /* Database State carries the database whose state changed, so a rule from it is scoped to that database. */
+        bool showDatabase = metric is null or "(any)" or "Blocking Detected" or "Blocking Wait Time" or "Deadlocks Detected" or "Long-Running Query" or "Database State" or AlertFamily.ClientTimeoutsMetric;
         bool showWaitType = metric is null or "(any)" or "Poison Wait" or "Long-Running Query";
         bool showQueryText = metric is null or "(any)" or "Blocking Detected" or "Blocking Wait Time" or "Long-Running Query";
-        bool showJobName = metric is null or "(any)" or "Long-Running Job";
+        bool showJobName = metric is null or "(any)" or "Long-Running Job" or "Failed Agent Job";
         /* #5640: Client Timeouts offers Database AND Client Application, the two dimensions its alert carries, so the
            same "Mute this alert" click makes the same rule here, in the viewer and on the web page. */
         bool showClientApp = metric is null or "(any)" or AlertFamily.ClientTimeoutsMetric;
@@ -163,8 +221,23 @@ public partial class MuteRuleDialog : Window
         JobNameLabel.Visibility = JobNamePatternBox.Visibility = showJobName ? Visibility.Visible : Visibility.Collapsed;
         ClientAppLabel.Visibility = ClientAppPatternBox.Visibility = showClientApp ? Visibility.Visible : Visibility.Collapsed;
 
+        /* A box whose row partner is hidden takes the whole row: the two columns are for two boxes side by side, and a box left alone
+           in one of them is half the dialog wide and cuts the value it opened with. */
+        PlaceRow(DatabaseLabel, DatabasePatternBox, WaitTypeLabel, WaitTypePatternBox, showDatabase && showWaitType);
+        PlaceRow(QueryTextLabel, QueryTextPatternBox, JobNameLabel, JobNamePatternBox, showQueryText && showJobName);
+
         PatternFieldsGrid.Visibility = (showDatabase || showWaitType || showQueryText || showJobName || showClientApp)
             ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>Lays a row's two boxes out side by side when <paramref name="both"/> show; otherwise the one that shows spans the row from its left edge.</summary>
+    private static void PlaceRow(UIElement leftLabel, UIElement leftBox, UIElement rightLabel, UIElement rightBox, bool both)
+    {
+        foreach (var element in new[] { leftLabel, leftBox, rightLabel, rightBox })
+        {
+            Grid.SetColumn(element, both && (element == rightLabel || element == rightBox) ? 2 : 0);
+            Grid.SetColumnSpan(element, both ? 1 : 3);
+        }
     }
 
     private void ApplyDefaultExpiration()

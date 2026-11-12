@@ -55,7 +55,7 @@ SET search_path = fakeset, pg_catalog, public;";
     private static async Task<(ScratchPostgres Scratch, NpgsqlConnection Connection)> StartAsync(CancellationToken ct, bool withFakes = true)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the statement history snapshot's live pins (each mints its own scratch database).");
-        var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);

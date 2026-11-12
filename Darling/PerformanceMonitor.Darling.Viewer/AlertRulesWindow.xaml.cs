@@ -16,6 +16,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -265,7 +266,8 @@ public partial class AlertRulesWindow : Window
 
     private void RulesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (_canWrite)
+        /* A double-click on a header, the scrollbar or the empty area is not a row (#7210). */
+        if (_canWrite && DataGridRowHit.IsOnRow(e.OriginalSource))
         {
             EditRule_Click(sender, e);
         }

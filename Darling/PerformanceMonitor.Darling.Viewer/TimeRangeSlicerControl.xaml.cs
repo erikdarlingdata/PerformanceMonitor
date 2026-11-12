@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -40,6 +41,9 @@ public partial class TimeRangeSlicerControl : UserControl
 
     private DateTime? _requestedStartUtc;
     private DateTime? _requestedEndUtc;
+    /// <summary>The width of the strip's buckets, as the host passed it to <see cref="LoadData"/>: the width of the read that grouped the rows, so the
+    /// fill, the end of the span and the selection's snap all land on its stamps. An hour unless the host says otherwise.</summary>
+    private int _bucketMinutes = 60;
     private string _metricLabel = "Sessions";
     private bool _isExpanded = true;
     private string? _emptyText;
@@ -78,7 +82,29 @@ public partial class TimeRangeSlicerControl : UserControl
         InitializeComponent();
         SlicerBorder.SizeChanged += (_, _) => Redraw();
         IsVisibleChanged += (_, _) => { if (IsVisible) Redraw(); };
+        // #8219: a window under 700 DIPs high (the 900x600 minimum is one) gets the compact 70 strip; Lite's slicer does the same.
+        Loaded += (_, _) =>
+        {
+            UnhookWindow();
+            _hookedWindow = Window.GetWindow(this);
+            if (_hookedWindow is not null) _hookedWindow.SizeChanged += OnWindowSizeChanged;
+            ApplyHeight();
+        };
+        Unloaded += (_, _) => UnhookWindow();
     }
+
+    private Window? _hookedWindow;
+
+    private void OnWindowSizeChanged(object sender, SizeChangedEventArgs e) => ApplyHeight();
+
+    private void UnhookWindow()
+    {
+        if (_hookedWindow is not null) _hookedWindow.SizeChanged -= OnWindowSizeChanged;
+        _hookedWindow = null;
+    }
+
+    private void ApplyHeight() =>
+        SlicerBorder.Height = Window.GetWindow(this) is { ActualHeight: > 0 and < 700 } ? 70 : 130;
 
     public bool IsExpanded
     {
@@ -95,12 +121,14 @@ public partial class TimeRangeSlicerControl : UserControl
     /// Loads slicer data. All timestamps must be UTC.
     /// requestedStartUtc/requestedEndUtc define the full time window so the slicer
     /// shows the correct span even when data is sparse. Empty hours get zero-value buckets.
-    /// Selection defaults to the full range (no filtering until user interacts).
+    /// Selection defaults to the full range (no filtering until user interacts). A narrowed selection survives a reload
+    /// (<see cref="SlicerReloadSelection.Carry"/>) and is sent to the host again through <see cref="RangeChanged"/>, so the grid,
+    /// which the host loaded for the whole window, reads the range the highlight shows.
     /// </summary>
     public void LoadData(List<TimeSliceBucket> data, string metricLabel,
-        DateTime? requestedStartUtc = null, DateTime? requestedEndUtc = null)
+        DateTime? requestedStartUtc = null, DateTime? requestedEndUtc = null, int bucketMinutes = 60)
     {
-        // Preserve selection if we already have data (auto-refresh)
+        // A narrowed selection is kept across a reload (auto-refresh) as its two instants, re-placed on the new span below.
         DateTime? prevStart = null, prevEnd = null;
         if (_data.Count > 0 && (_rangeStart > 0 || _rangeEnd < 1.0))
         {
@@ -110,15 +138,18 @@ public partial class TimeRangeSlicerControl : UserControl
 
         _requestedStartUtc = requestedStartUtc;
         _requestedEndUtc = requestedEndUtc;
-        _data = FillEmptyBuckets(data, requestedStartUtc, requestedEndUtc);
+        _bucketMinutes = bucketMinutes;
+        _data = FillEmptyBuckets(data, requestedStartUtc, requestedEndUtc, _bucketMinutes);
         _runs = StripGaps.RunsOverFilledBuckets(_data.Select(d => d.BucketTime).ToList(), data.Select(d => d.BucketTime).ToList());
         _emptyText = null;
+        ShowSlicer();
         _metricLabel = metricLabel;
 
-        if (prevStart.HasValue && prevEnd.HasValue && _data.Count >= 2)
+        var carried = _data.Count >= 2 ? SlicerReloadSelection.Carry(prevStart, prevEnd, DataStartUtc, DataEndUtc) : null;
+        if (carried is { } selection)
         {
-            _rangeStart = NormAtUtc(prevStart.Value);
-            _rangeEnd = NormAtUtc(prevEnd.Value);
+            _rangeStart = selection.Start;
+            _rangeEnd = selection.End;
         }
         else
         {
@@ -128,6 +159,11 @@ public partial class TimeRangeSlicerControl : UserControl
 
         UpdateRangeLabel();
         Redraw();
+
+        /* The host loads its grid for the whole window before it loads the slicer, so a carried selection goes to the grid the
+           way the handles send one: the grid then reads the range the highlight shows. */
+        if (carried is not null)
+            FireRangeChanged();
     }
 
     /// <summary>
@@ -145,12 +181,45 @@ public partial class TimeRangeSlicerControl : UserControl
         _rangeStart = 0;
         _rangeEnd = 1.0;
         _emptyText = text;
+        /* #8197: with a message host the sentence shows once in the grid area and the slicer band goes; without one the slicer still draws it itself. */
+        if (EmptyMessage is { } host)
+        {
+            host.Text = text;
+            host.Visibility = Visibility.Visible;
+            Visibility = Visibility.Collapsed;
+        }
         UpdateRangeLabel();
         Redraw();
     }
 
+    /// <summary>
+    /// #8197: the <c>EmptyHint</c> text in the grid area that shows the empty-window sentence instead of this slicer, which collapses while the
+    /// window is empty. Bound by element name, so a slicer without one keeps drawing its own sentence.
+    /// </summary>
+    public static readonly DependencyProperty EmptyMessageProperty =
+        DependencyProperty.Register(nameof(EmptyMessage), typeof(TextBlock), typeof(TimeRangeSlicerControl));
+
+    public TextBlock? EmptyMessage
+    {
+        get => (TextBlock?)GetValue(EmptyMessageProperty);
+        set => SetValue(EmptyMessageProperty, value);
+    }
+
+    /// <summary>Data is back: the slicer shows again and its message host goes away.</summary>
+    private void ShowSlicer()
+    {
+        Visibility = Visibility.Visible;
+        if (EmptyMessage is { } host)
+        {
+            host.Visibility = Visibility.Collapsed;
+        }
+    }
+
     /// <summary>The empty-window text (null when the slicer holds data); exposed for the tests.</summary>
     public string? EmptyText => _emptyText;
+
+    /// <summary>Whether the strip holds buckets for the loaded window: the grid beside it words its own empty state from this.</summary>
+    public bool HasData => _data.Count > 0;
 
     private void DrawEmptyText()
     {
@@ -163,11 +232,10 @@ public partial class TimeRangeSlicerControl : UserControl
         {
             Text = _emptyText,
             FontSize = 12,
-            FontStyle = FontStyles.Italic,
             TextAlignment = TextAlignment.Center,
             TextWrapping = TextWrapping.Wrap,
-            MaxWidth = Math.Min(520, Math.Max(40, w - 16)),
-            Foreground = FindBrush("ForegroundDimBrush", "#C7CBD4"),
+            MaxWidth = Math.Max(40, w - 16),
+            Foreground = FindBrush("ForegroundMutedBrush", "#A8AEBA"),
             IsHitTestVisible = false,
         };
         tb.Measure(new Size(tb.MaxWidth, double.PositiveInfinity));
@@ -209,28 +277,28 @@ public partial class TimeRangeSlicerControl : UserControl
     // ── Time mapping ──
 
     private DateTime DataStartUtc => _requestedStartUtc ?? _data[0].BucketTime;
-    private DateTime DataEndUtc => _requestedEndUtc ?? _data[^1].BucketTime.AddHours(1);
+    private DateTime DataEndUtc => _requestedEndUtc ?? _data[^1].BucketTime.AddMinutes(_bucketMinutes);
 
     /// <summary>
-    /// Fills in zero-value buckets for hours with no data so the slicer
+    /// Fills in zero-value buckets for the buckets with no data so the slicer
     /// spans the full requested time range.
     /// </summary>
     private static List<TimeSliceBucket> FillEmptyBuckets(
-        List<TimeSliceBucket> data, DateTime? requestedStart, DateTime? requestedEnd)
+        List<TimeSliceBucket> data, DateTime? requestedStart, DateTime? requestedEnd, int bucketMinutes)
     {
         if (data.Count == 0 || !requestedStart.HasValue || !requestedEnd.HasValue)
             return data;
 
-        var floorStart = FloorToHour(requestedStart.Value);
-        // Floor the end too — we don't want a bucket for the current partial hour extending into the future
-        var floorEnd = FloorToHour(requestedEnd.Value);
+        var floorStart = SlicerBuckets.Floor(requestedStart.Value, bucketMinutes);
+        // Floor the end too — we don't want a bucket for the current partial bucket extending into the future
+        var floorEnd = SlicerBuckets.Floor(requestedEnd.Value, bucketMinutes);
 
         var existing = new Dictionary<long, TimeSliceBucket>();
         foreach (var b in data)
-            existing[FloorToHour(b.BucketTime).Ticks] = b;
+            existing[SlicerBuckets.Floor(b.BucketTime, bucketMinutes).Ticks] = b;
 
         var result = new List<TimeSliceBucket>();
-        for (var t = floorStart; t <= floorEnd; t = t.AddHours(1))
+        for (var t = floorStart; t <= floorEnd; t = t.AddMinutes(bucketMinutes))
         {
             if (existing.TryGetValue(t.Ticks, out var bucket))
                 result.Add(bucket);
@@ -254,11 +322,34 @@ public partial class TimeRangeSlicerControl : UserControl
         return Math.Clamp((double)(utc.Ticks - DataStartUtc.Ticks) / span, 0, 1);
     }
 
+    /// <summary>
+    /// The labels along the time axis (#4766, #8224): one at every whole wall-clock multiple of a step in <paramref name="zone"/>
+    /// between the two instants (both ends inclusive), each as the instant it sits at and its wall time as "MM/dd HH:mm". The step
+    /// is the finest one the chart axes use that leaves at most <paramref name="widthPx"/> / <paramref name="minSpacingPx"/> labels
+    /// across the span (two at the least), so the labels sit on whole hours of the zone rather than at even fractions of a span that
+    /// starts wherever the data does. The same rule as Lite's slicer. Pure: it reads no control state.
+    /// </summary>
+    internal static IReadOnlyList<(DateTime Utc, string Text)> SlicerLabels(
+        DateTime startUtc, DateTime endUtc, double widthPx, double minSpacingPx, TimeZoneInfo zone)
+    {
+        if (endUtc <= startUtc || widthPx <= 0 || minSpacingPx <= 0)
+            return Array.Empty<(DateTime Utc, string Text)>();
+
+        var target = Math.Max(2, (int)(widthPx / minSpacingPx));
+        var step = DisplayZoneTickGenerator.ChooseStep(endUtc - startUtc, target);
+        var ticks = DisplayZone.WallTicks(startUtc, endUtc, step, zone);
+        var labels = new List<(DateTime Utc, string Text)>(ticks.Count);
+        foreach (var (utc, wall) in ticks)
+            labels.Add((utc, wall.ToString("MM/dd HH:mm", CultureInfo.InvariantCulture)));
+        return labels;
+    }
+
     // ── Drawing ──
 
     public void Redraw()
     {
         SlicerCanvas.Children.Clear();
+        MetricLabel.Text = _data.Count < 1 ? "" : _metricLabel;
         if (_data.Count < 1) { DrawEmptyText(); return; }
 
         var w = SlicerBorder.ActualWidth;
@@ -314,32 +405,24 @@ public partial class TimeRangeSlicerControl : UserControl
         }
         SlicerCanvas.Children.Add(new Path { Data = lineGeo, Stroke = lineBrush, StrokeThickness = 1.5 });
 
-        // X-axis labels — evenly spaced by TIME, skip if too close
+        // X-axis labels — whole wall-clock multiples of a round step in the display zone (#4766), as Lite's slicer labels them; skip if too close
         var labelBrush = FindBrush("SlicerLabelBrush", "#E4E6EB");
         const double minLabelSpacingPx = 90;
+        const double labelHalfWidth = 25;
         double lastLabelX = -minLabelSpacingPx;
-        int targetLabels = Math.Max(2, (int)(w / minLabelSpacingPx));
-        var timeStep = (DataEndUtc - DataStartUtc).TotalHours / targetLabels;
-        for (int tick = 0; tick <= targetLabels; tick++)
+        foreach (var (tickUtc, text) in SlicerLabels(DataStartUtc, DataEndUtc, w, minLabelSpacingPx, ViewerTimeHelper.CurrentDisplayZone()))
         {
-            var tickTime = DataStartUtc.AddHours(tick * timeStep);
-            var x = NormAtUtc(tickTime) * w;
+            var x = NormAtUtc(tickUtc) * w;
             if (x - lastLabelX < minLabelSpacingPx) continue;
-            if (x < 10 || x > w - 40) continue;
-            var dt = ViewerTimeHelper.ForDisplay(tickTime).ToString("MM/dd HH:mm");
-            var tb = new TextBlock { Text = dt, FontSize = 9, Foreground = labelBrush };
-            Canvas.SetLeft(tb, x - 25);
+            /* #8224: a label is centred on its instant, so one whose left edge would sit under the start handle at rest (the
+               handle's width from the left edge) is left out rather than cut; the right edge keeps the same room. */
+            if (x - labelHalfWidth < HandleWidthPx + 2 || x > w - 40) continue;
+            var tb = new TextBlock { Text = text, FontSize = 9, Foreground = labelBrush };
+            Canvas.SetLeft(tb, x - labelHalfWidth);
             Canvas.SetTop(tb, chartBottom + 2);
             SlicerCanvas.Children.Add(tb);
             lastLabelX = x;
         }
-
-        // Metric label top-right
-        var metricBrush = FindBrush("SlicerToggleBrush", "#E4E6EB");
-        var metricTb = new TextBlock { Text = _metricLabel, FontSize = 13, FontWeight = FontWeights.SemiBold, Foreground = metricBrush };
-        Canvas.SetLeft(metricTb, w - 120);
-        Canvas.SetTop(metricTb, 2);
-        SlicerCanvas.Children.Add(metricTb);
 
         // Selection overlays
         var overlayBrush = FindBrush("SlicerOverlayBrush", "#99000000");
@@ -606,19 +689,16 @@ public partial class TimeRangeSlicerControl : UserControl
     private void FireRangeChanged()
     {
         if (_data.Count == 0) return;
-        // Snap to hour boundaries so slider positions align with the hourly buckets shown in the graph
-        var startUtc = FloorToHour(UtcAtNorm(_rangeStart));
-        var endUtc = CeilToHour(UtcAtNorm(_rangeEnd));
+        /* Snap to bucket boundaries so slider positions align with the buckets shown in the graph, inside the loaded window:
+           the grid's own load reads exactly that window, so the range sent never reaches past its ends and the "All" chip reads
+           the rows the load reads. */
+        var startUtc = SlicerBuckets.Floor(UtcAtNorm(_rangeStart), _bucketMinutes);
+        var endUtc = SlicerBuckets.Ceiling(UtcAtNorm(_rangeEnd), _bucketMinutes);
+        var windowStart = DateTime.SpecifyKind(DataStartUtc, DateTimeKind.Utc);
+        var windowEnd = DateTime.SpecifyKind(DataEndUtc, DateTimeKind.Utc);
+        if (startUtc < windowStart) startUtc = windowStart;
+        if (endUtc > windowEnd) endUtc = windowEnd;
         RangeChanged?.Invoke(this, new SlicerRangeEventArgs(startUtc, endUtc));
-    }
-
-    private static DateTime FloorToHour(DateTime dt) =>
-        new DateTime(dt.Year, dt.Month, dt.Day, dt.Hour, 0, 0, dt.Kind);
-
-    private static DateTime CeilToHour(DateTime dt)
-    {
-        var floored = FloorToHour(dt);
-        return floored == dt ? dt : floored.AddHours(1);
     }
 }
 

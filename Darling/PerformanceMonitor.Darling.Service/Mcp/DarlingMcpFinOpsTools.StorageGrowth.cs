@@ -94,7 +94,7 @@ public sealed partial class DarlingMcpFinOpsTools
             .ToList();
 
     private static decimal? RoundGrowth(decimal? value, int places) =>
-        value is decimal v ? Math.Round(v, places, MidpointRounding.AwayFromZero) : null;
+        value is decimal v ? FinOpsWireFigures.Clean(Math.Round(v, places, MidpointRounding.AwayFromZero)) : null;
 
     /// <summary>One database's row; the note is the desktop's text.</summary>
     internal static object StorageGrowthDatabaseRow(StorageGrowthDto r) => new
@@ -134,14 +134,15 @@ public sealed partial class DarlingMcpFinOpsTools
     /// <summary>
     /// The ranked objects' rows with their heatmap cells, built the viewer's way: rank, then pivot the day samples
     /// (rows bottom to top, so the biggest grower is the last matrix row), then band the matrix. Days are the
-    /// distinct sample days, ascending.
+    /// calendar days from the first sample day to the last, ascending; a day with no sample keeps its place with empty cells.
     /// </summary>
     internal static (List<string> Days, List<object> Rows) StorageGrowthObjectRows(
         IReadOnlyList<ObjectSizeGrowthDto> ranked, IEnumerable<FinOpsObjectDaySample> samples)
     {
         var keysTopFirst = ranked.Select(StorageGrowthObjectKey).ToList();
         var shown = keysTopFirst.ToHashSet(StringComparer.Ordinal);
-        var matrix = FinOpsHeatmapBuilder.BuildMatrix(Enumerable.Reverse(keysTopFirst).ToList(), samples.Where(x => shown.Contains(x.ObjectKey)));
+        var matrix = FinOpsHeatmapBuilder.WithEveryCalendarDay(
+            FinOpsHeatmapBuilder.BuildMatrix(Enumerable.Reverse(keysTopFirst).ToList(), samples.Where(x => shown.Contains(x.ObjectKey))));
         var bands = FinOpsHeatmapBuilder.MatrixLogBands(matrix, StorageGrowthBandCount);
         var days = matrix.Days.Select(McpHelpers.FormatEffectiveStart).ToList();
         var rows = new List<object>();

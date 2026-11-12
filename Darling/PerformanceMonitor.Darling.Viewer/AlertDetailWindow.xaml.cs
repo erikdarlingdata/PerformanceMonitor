@@ -35,7 +35,10 @@ public partial class AlertDetailWindow : Window
     /// <param name="openFullChain">The link to the server's Blocking or Deadlocks view, or the tab the alert belongs on, at the alert's
     /// time (#5847): its text names where it opens, since the shell, which knows the engine, chose both; null hides the link.</param>
     /// <param name="sizeStore">Where the window's last size is kept (#5847); null keeps no size.</param>
-    public AlertDetailWindow(ViewerAlertRow item, AlertChainOpener? openFullChain = null, ISizeStore? sizeStore = null)
+    /// <param name="attachedFindings">The findings held back from paging because this engine alert was open (#7084 part 4), one
+    /// display line each, read by the caller when the window opens; null or empty hides the row.</param>
+    public AlertDetailWindow(ViewerAlertRow item, AlertChainOpener? openFullChain = null, ISizeStore? sizeStore = null,
+        IReadOnlyList<string>? attachedFindings = null)
     {
         InitializeComponent();
         _item = item;
@@ -78,6 +81,13 @@ public partial class AlertDetailWindow : Window
             MutedBanner.Visibility = Visibility.Visible;
         }
 
+        if (attachedFindings is { Count: > 0 })
+        {
+            AttachedFindingsText.Text = string.Join(Environment.NewLine, attachedFindings);
+            AttachedFindingsLabel.Visibility = Visibility.Visible;
+            AttachedFindingsText.Visibility = Visibility.Visible;
+        }
+
         /* Prefer the structured context (advice / remediation T-SQL / drill-down) persisted as
            context_json; fall back to the flat detail_text for rows that have no context. */
         if (TryBuildDetailViews(item.ContextJson, out var views))
@@ -91,6 +101,15 @@ public partial class AlertDetailWindow : Window
             DetailTextBox.Text = item.DetailText;
             DetailTextBox.Visibility = Visibility.Visible;
             DetailPanel.Visibility = Visibility.Visible;
+        }
+
+        /* #7124: why the alert was held or paged, from the persisted routing decision; collapsed when the row has none. */
+        var routingReason = AlertDetailText.RoutingReasonFromJson(item.ContextJson);
+        if (routingReason is not null)
+        {
+            RoutingReasonText.Text = routingReason;
+            RoutingReasonLabel.Visibility = Visibility.Visible;
+            RoutingReasonText.Visibility = Visibility.Visible;
         }
 
         /* #5642: the fire-time sample-age line, read from the persisted context and never measured against
@@ -159,12 +178,19 @@ public partial class AlertDetailWindow : Window
         CopyStatusText.Visibility = Visibility.Visible;
     }
 
-    /* #5847: close this modal window first, so the server's view it opens is not behind it. */
+    /// <summary>
+    /// #7554: the link's action, held back until the dialog is gone. The link used to run it right after <c>Close()</c>, inside the
+    /// dialog's own click handler: it selected the server tab, then WPF gave keyboard focus back to the Alert History grid that
+    /// had it before the dialog, and a tab selects itself when focus lands inside it, so the user stayed on Alert History.
+    /// The caller takes this once <c>ShowDialog</c> has returned (<see cref="AlertsHistoryTab.ShowDetailDialog"/>).
+    /// </summary>
+    internal Action? DeferredOpen { get; private set; }
+
+    /* #5847: close this modal window first, so the server's view it opens is not behind it. #7554: the open itself waits for the caller. */
     private void FullChainLink_Click(object sender, RoutedEventArgs e)
     {
-        var open = _openFullChain;
+        DeferredOpen = _openFullChain;
         Close();
-        open?.Invoke();
     }
 
     /* #5847: open at the size the user last left it, never below the window's minimum. */

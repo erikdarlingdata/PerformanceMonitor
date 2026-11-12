@@ -16,7 +16,8 @@
          the window off-screen with the buttons unreachable (NoResize left no recovery). The form scrolls
          in a star row, the status + buttons are pinned OUTSIDE the scroll so they are always visible,
          and MaxHeight clamps the window to the work area - the Dashboard twin's proven shape. -->
-    <Grid Margin="16">
+    <!-- A form's width when the window is wider: the boxes stay one width and the window's spare width is even on both sides. -->
+    <Grid Margin="16" MaxWidth="560">
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
@@ -38,7 +39,7 @@
                 </Grid.RowDefinitions>
 
         <!-- Header -->
-        <TextBlock Grid.Row="0" Text="Add SQL Server Connection" FontSize="18" FontWeight="Bold" Margin="0,0,0,15"
+        <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Add SQL Server Connection" FontSize="18" FontWeight="Bold" Margin="0,0,0,15"
                    Foreground="{DynamicResource ForegroundBrush}"/>
 
         <!-- Server Name -->
@@ -79,18 +80,18 @@
                 <RadioButton x:Name="EntraMfaAuthRadio" Content="Microsoft _Entra MFA" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed"
                              ToolTip="Interactive authentication with MFA for Azure SQL Database."/>
-                <RadioButton x:Name="ServicePrincipalAuthRadio" Content="Azure — Service _Principal" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="ServicePrincipalAuthRadio" Content="Azure: Service _Principal" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,4,0,0"
                              ToolTip="Non-interactive Azure SQL auth using an Entra app registration (client id + secret)."/>
-                <RadioButton x:Name="ManagedIdentityAuthRadio" Content="Azure — _Managed Identity" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="ManagedIdentityAuthRadio" Content="Azure: _Managed Identity" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,4,0,0"
                              ToolTip="Non-interactive Azure SQL auth using the managed identity of the Azure resource running Lite."/>
-                <RadioButton x:Name="EntraDefaultAuthRadio" Content="Azure — Existing Sign-_In (az login)" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="EntraDefaultAuthRadio" Content="Azure: Existing Sign-_In (az login)" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,4,0,0"
-                             ToolTip="Signs in as the Azure identity already established on this machine — an az login session, an Azure PowerShell session, a Visual Studio sign-in, the AZURE_CLIENT_ID/AZURE_CLIENT_SECRET environment variables, or a managed identity. Never prompts, and does not use the Windows account broker that Microsoft Entra MFA depends on. Requires one of those to exist already."/>
-                <RadioButton x:Name="EntraDeviceCodeAuthRadio" Content="Azure — _Device Code (browser on any device)" Foreground="{DynamicResource ForegroundBrush}"
+                             ToolTip="Signs in as the Azure identity already established on this machine: an az login session, an Azure PowerShell session, a Visual Studio sign-in, the AZURE_CLIENT_ID/AZURE_CLIENT_SECRET environment variables, or a managed identity. Never prompts, and does not use the Windows account broker that Microsoft Entra MFA depends on. Requires one of those to exist already."/>
+                <RadioButton x:Name="EntraDeviceCodeAuthRadio" Content="Azure: _Device Code (browser on any device)" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,4,0,0"
-                             ToolTip="Shows a short code and a URL. You sign in by entering that code in a browser on any device, including a phone, and this app receives the token. It does not use the Windows account broker and does not read a cached credential from a user profile, so it works when Microsoft Entra MFA and Existing Sign-In do not — including from a process launched as a different Windows account. Interactive: expect one code window per run of the app, collection included."/>
+                             ToolTip="Shows a short code and a URL. You sign in by entering that code in a browser on any device, including a phone, and this app receives the token. It does not use the Windows account broker and does not read a cached credential from a user profile, so it works when Microsoft Entra MFA and Existing Sign-In do not, including from a process launched as a different Windows account. Interactive: expect one code window per run of the app, collection included."/>
             </StackPanel>
         </StackPanel>
 
@@ -127,7 +128,7 @@
             <TextBox x:Name="ManagedIdentityClientIdBox" Margin="0,0,0,8"
                      ToolTip="Leave blank to use the system-assigned managed identity. Set to a client id to use a specific user-assigned identity."/>
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"
-                       Text="Managed Identity only works when Lite is running on an Azure VM / resource that has a managed identity assigned — not on a typical workstation. Use Service Principal for non-interactive auth from a workstation."/>
+                       Text="Managed Identity only works when Lite is running on an Azure VM / resource that has a managed identity assigned, not on a typical workstation. Use Service Principal for non-interactive auth from a workstation."/>
         </StackPanel>
 
         <!-- Existing Azure sign-in (ActiveDirectoryDefault). No input fields: the mode takes no
@@ -137,11 +138,11 @@
              sign-in window, and a user who learns that from the failure has learned it too late. -->
         <StackPanel Grid.Row="7" x:Name="EntraDefaultPanel" Visibility="Collapsed" Margin="0,0,0,12">
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"
-                       Text="Signs in as the Azure identity already established on this machine, and never shows a prompt. It looks for, in order: the AZURE_CLIENT_ID / AZURE_CLIENT_SECRET environment variables, a workload identity, a managed identity, a Visual Studio or VS Code sign-in, an Azure CLI session (az login), an Azure PowerShell session, and an Azure Developer CLI session. If none of those exists, the connection fails — it will not ask you to sign in. Run &quot;az login&quot; in a terminal first if you are not sure."/>
+                       Text="Signs in as the Azure identity already established on this machine, and never shows a prompt. It looks for, in order: the AZURE_CLIENT_ID / AZURE_CLIENT_SECRET environment variables, a workload identity, a managed identity, a Visual Studio or VS Code sign-in, an Azure CLI session (az login), an Azure PowerShell session, and an Azure Developer CLI session. If none of those exists, the connection fails. It will not ask you to sign in. Run &quot;az login&quot; in a terminal first if you are not sure."/>
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,6,0,0"
-                       Text="Because the list is searched in that order, this connects as whichever identity comes first — not necessarily the one you signed into Windows with. If several are set up on this machine and you need a specific identity, use Azure — Service Principal, which names it."/>
+                       Text="Because the list is searched in that order, this connects as whichever identity comes first, not necessarily the one you signed into Windows with. If several are set up on this machine and you need a specific identity, use Azure: Service Principal, which names it."/>
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,6,0,0"
-                       Text="Unlike Microsoft Entra MFA, this never asks the Windows account broker for anything, so the broker cannot refuse it. That is the failure this option exists to route around — but it has not yet been confirmed against a live Microsoft Entra tenant, so please report what happens."/>
+                       Text="Unlike Microsoft Entra MFA, this never asks the Windows account broker for anything, so the broker cannot refuse it. That is the failure this option exists to route around, but it has not yet been confirmed against a live Microsoft Entra tenant, so please report what happens."/>
         </StackPanel>
 
         <!-- Device code (ActiveDirectoryDeviceCodeFlow). No input fields, for a different reason than
@@ -152,13 +153,13 @@
              happens is a window with a code in it and a three-minute clock. -->
         <StackPanel Grid.Row="7" x:Name="EntraDeviceCodePanel" Visibility="Collapsed" Margin="0,0,0,12">
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"
-                       Text="When you press Test or Save, a small window appears with a short code and a sign-in URL. Open that URL in a browser — on this machine or on a phone — enter the code, and sign in as you normally would, MFA included. This app never sees your password."/>
+                       Text="When you press Test or Save, a small window appears with a short code and a sign-in URL. Open that URL in a browser (on this machine or on a phone). Enter the code and sign in as you normally would, MFA included. This app never sees your password."/>
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,6,0,0"
                        Text="You have about three minutes. That limit is the SQL driver's, not this app's, and it cannot be raised from here. Closing the code window gives up and returns you to this dialog."/>
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,6,0,0"
                        Text="Choose this when Microsoft Entra MFA fails with a broker error (0x80070520) or when Existing Sign-In cannot find your az login session: it uses neither the Windows account broker nor your user profile, so neither can be the thing that blocks it."/>
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,6,0,0"
-                       Text="Interactive, the same as Microsoft Entra MFA, and that has one consequence worth knowing: the periodic online/offline check skips these servers, but data collection does not. Expect one code window per run of the app — including on an unattended collection cycle shortly after Lite starts — after which the token is reused for the rest of the run. Closing a code window without signing in stops it being raised again until you open the server yourself."/>
+                       Text="Interactive, the same as Microsoft Entra MFA, and that has one consequence worth knowing: the periodic online/offline check skips these servers, but data collection does not. Expect one code window per run of the app (including on an unattended collection cycle shortly after Lite starts), after which the token is reused for the rest of the run. Closing a code window without signing in stops it being raised again until you open the server yourself."/>
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,6,0,0"
                        Text="Not yet confirmed against a live Microsoft Entra tenant, so please report what happens."/>
         </StackPanel>
@@ -217,8 +218,8 @@
                 <ComboBox x:Name="AlertDeliveryOverrideBox" Width="240" SelectedIndex="0"
                           ToolTip="How deadlock/blocking alerts for THIS server are delivered. 'Use global setting' follows the app-wide Alerts setting; override to force Summary or Per-event for just this server.">
                     <ComboBoxItem Content="Use global setting"/>
-                    <ComboBoxItem Content="Summary — one card per cycle"/>
-                    <ComboBoxItem Content="Per-event — one notification per incident"/>
+                    <ComboBoxItem Content="Summary: one card per cycle"/>
+                    <ComboBoxItem Content="Per-event: one notification per incident"/>
                 </ComboBox>
             </StackPanel>
         </StackPanel>

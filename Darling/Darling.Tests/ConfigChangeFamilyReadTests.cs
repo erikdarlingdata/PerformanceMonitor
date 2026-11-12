@@ -155,7 +155,7 @@ public sealed class ConfigChangeFamilyReadTests
         Assert.Equal("Sales", fact.DatabaseName);
         Assert.Equal(2, fact.Metadata[ConfigChangeAttribution.MetaChangeFamily]);
         Assert.Equal("db|recovery_model|FULL|SIMPLE|Sales", fact.ObjectName);
-        Assert.StartsWith("Database configuration changed: `Sales` recovery_model FULL → SIMPLE", FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!.Headline, StringComparison.Ordinal);
+        Assert.StartsWith("Database configuration changed: the recovery model of `Sales` changed from FULL to SIMPLE", FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!.Headline, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -187,7 +187,7 @@ public sealed class ConfigChangeFamilyReadTests
         Assert.Equal(1, young.Metadata[ConfigChangeAttribution.MetaNotYetComparable]);
         Assert.Equal(0, young.Metadata[ConfigChangeAttribution.MetaBetter]);
         var youngAdvice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { young }.ToFactLookup())!;
-        Assert.EndsWith("— effect not yet comparable", youngAdvice.Headline, StringComparison.Ordinal);
+        Assert.EndsWith(", effect not yet comparable", youngAdvice.Headline, StringComparison.Ordinal);
         Assert.DoesNotContain("moved beyond band", youngAdvice.Headline, StringComparison.Ordinal);
         Assert.DoesNotContain("resolved (better)", youngAdvice.Investigation, StringComparison.Ordinal);
         Assert.Contains("the after half covers only 10 minutes", youngAdvice.Investigation, StringComparison.Ordinal);

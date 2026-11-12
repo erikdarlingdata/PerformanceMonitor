@@ -62,12 +62,7 @@ jobs:
         id: main
         shell: pwsh
         run: |
-          # main does not carry Directory.Build.props until the release that centralises the
-          # version (#3222) lands there, so fall back to deprecated/Dashboard/Dashboard.csproj,
-          # which is where main declares its version. That release PR has to be able to pass
-          # against a main that predates the file. Removable once main has it.
           $path = 'main-branch/Directory.Build.props'
-          if (-not (Test-Path $path)) { $path = 'main-branch/deprecated/Dashboard/Dashboard.csproj' }
           $version = ([xml](Get-Content $path)).Project.PropertyGroup.Version | Where-Object { $_ }
           # Two empty reads compare EQUAL, so an unguarded pair fails this gate for the wrong reason
           # while one empty side passes it for the wrong reason.

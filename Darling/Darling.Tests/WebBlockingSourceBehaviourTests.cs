@@ -61,11 +61,13 @@ public sealed class WebBlockingSourceBehaviourTests
         }
     }
 
-    /// <summary>The source lines every panel with that title drew, one entry per panel.</summary>
-    private static string[][] Lines(JsonElement r, string title) =>
+    /// <summary>The source rows above the chart and the heading's subtitle spans of every panel with that title, one entry per panel.</summary>
+    private static (string[] Rows, string[] Subtitles)[] Lines(JsonElement r, string title) =>
         r.GetProperty("panels").EnumerateArray()
             .Where(p => p.GetProperty("title").GetString() == title)
-            .Select(p => p.GetProperty("strips").EnumerateArray().Select(s => s.GetString()!).ToArray())
+            .Select(p => (
+                p.GetProperty("strips").EnumerateArray().Select(s => s.GetString()!).ToArray(),
+                p.GetProperty("subtitles").EnumerateArray().Select(s => s.GetString()!).ToArray()))
             .ToArray();
 
     [Theory]
@@ -76,12 +78,15 @@ public sealed class WebBlockingSourceBehaviourTests
         var r = Run(scenario);
 
         /* Blocking Events and Blocking Severity are on the Blocking tab (the Overview draws blocking as one of its five strips, #6291). */
+        /* #7543: the source is a span of the heading's subtitle, beside the window label, and no row above the chart takes height from the plot. */
         var events = Lines(r, trendTitle);
         Assert.Single(events);
-        Assert.All(events, lines => Assert.Equal(new[] { expected }, lines));
+        Assert.Empty(events[0].Rows);
+        Assert.Equal(new[] { " last 24 hours", " " + expected }, events[0].Subtitles);
         var severity = Lines(r, "Blocking Severity");
         Assert.Single(severity);
-        Assert.Equal(new[] { expected }, severity[0]);
+        Assert.Empty(severity[0].Rows);
+        Assert.Equal(new[] { " last 24 hours", " " + expected }, severity[0].Subtitles);
     }
 
     [Theory]
@@ -94,6 +99,27 @@ public sealed class WebBlockingSourceBehaviourTests
         var r = Run(scenario);
 
         Assert.All(r.GetProperty("panels").EnumerateArray(), p => Assert.Empty(p.GetProperty("strips").EnumerateArray()));
+        Assert.All(r.GetProperty("panels").EnumerateArray(), p => Assert.DoesNotContain(p.GetProperty("subtitles").EnumerateArray(), s => s.GetString()!.Contains("Source:", System.StringComparison.Ordinal)));
+    }
+
+    /// <summary>
+    /// #7682: the CPU tab's CPU Utilization chart on a server that cannot report host CPU (SQL Server on Linux before 2025 CU1) draws the SQL line
+    /// alone and says why under it. Other and Total are null on every sample there, and a line of nulls drawn as zeros or a legend entry with no line
+    /// would claim the host was measured. A server that does report it keeps all three lines and gets no note.
+    /// </summary>
+    [Theory]
+    [InlineData("cpuLinux", new[] { "SQL CPU %" }, 1)]
+    [InlineData("cpuMeasured", new[] { "SQL CPU %", "Other %", "Total %" }, 0)]
+    public void CpuUtilization_WithNoHostFigure_DrawsTheSqlLineAndSaysWhy(string scenario, string[] labels, int notes)
+    {
+        var r = Run(scenario);
+
+        var chart = Assert.Single(r.GetProperty("charts").EnumerateArray(), c => c.GetProperty("title").GetString() == "CPU Utilization");
+        Assert.Equal(labels, chart.GetProperty("labels").EnumerateArray().Select(l => l.GetString()!).ToArray());
+        var panel = Assert.Single(r.GetProperty("panels").EnumerateArray(), p => p.GetProperty("title").GetString() == "CPU Utilization");
+        var shown = panel.GetProperty("notices").EnumerateArray().Select(n => n.GetString()!).ToArray();
+        Assert.Equal(notes, shown.Length);
+        Assert.All(shown, n => Assert.Contains("cannot report host CPU", n, System.StringComparison.Ordinal));
     }
 
     /// <summary>The empty sentences every panel of one tab drew, for the panels with that title.</summary>
@@ -138,7 +164,7 @@ public sealed class WebBlockingSourceBehaviourTests
 
         Assert.DoesNotContain("\"Blocking Events\"", tabs);
         Assert.DoesNotContain("\"Blocking Events\"", templates);
-        Assert.Single(System.Text.RegularExpressions.Regex.Matches(tabs, "line\\(\"Blocked process report trend\", \"get_blocking_trend\""));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(tabs, "linePanel\\(\"Blocked process report trend\", \"get_blocking_trend\""));
         Assert.Contains("const BLOCKING_REPORT_SERIES = [{ key: \"count\", label: \"Reports\" }];", tabs);
         Assert.DoesNotContain("No blocking events in this window — an empty trend", tabs);
         /* The starter dashboard panel has no collector tag to follow, so it words itself for both sources. */
@@ -189,7 +215,7 @@ public sealed class WebBlockingSourceBehaviourTests
         var r = Run("dmv");
 
         var titles = r.GetProperty("panels").EnumerateArray()
-            .Where(p => p.GetProperty("strips").GetArrayLength() > 0)
+            .Where(p => p.GetProperty("subtitles").EnumerateArray().Any(s => s.GetString()!.Contains("Source:", System.StringComparison.Ordinal)))
             .Select(p => p.GetProperty("title").GetString())
             .ToArray();
         Assert.Equal(new[] { "Blocking snapshot trend", "Blocking Severity" }, titles);

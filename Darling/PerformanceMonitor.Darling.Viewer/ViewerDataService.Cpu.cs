@@ -29,7 +29,14 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// (see <see cref="CpuUtilizationSql"/>, #1262), so both consumers plot it as the UTC instant
 /// like every other Darling series.
 /// </summary>
-public sealed record CpuUtilizationSample(DateTime SampleTime, double SqlServerCpu, double OtherProcessCpu);
+public sealed record CpuUtilizationSample(DateTime SampleTime, double SqlServerCpu, double? OtherProcessCpu, double? TotalCpu)
+{
+    /// <summary>A sample whose total is the SQL figure plus the other-process figure, null with the latter.</summary>
+    public CpuUtilizationSample(DateTime sampleTime, double sqlServerCpu, double? otherProcessCpu)
+        : this(sampleTime, sqlServerCpu, otherProcessCpu, otherProcessCpu is null ? null : sqlServerCpu + otherProcessCpu)
+    {
+    }
+}
 
 public sealed partial class ViewerDataService
 {
@@ -38,7 +45,7 @@ public sealed partial class ViewerDataService
     /// average-per-collection roll-up), feeding both the CPU tab's scatter chart and — since W1d — the
     /// Overview's CPU lane. The window filters on <c>collection_time</c> (the naive-UTC collection
     /// prefix — the reliable clock every Darling read windows on); a NULL
-    /// <c>other_process_cpu_utilization</c> (SQL on Linux, #1048) reads as 0.
+    /// <c>other_process_cpu_utilization</c> (SQL on Linux, #1048) reads as null, not 0 (#7682).
     ///
     /// <para><b>sample_time de-skew (#1262).</b> Unlike every other stored column, <c>sample_time</c> is
     /// the MONITORED SERVER'S LOCAL wall clock (<c>SYSDATETIME()</c> on the server, minus each
@@ -76,9 +83,8 @@ public sealed partial class ViewerDataService
     /// starts from; the outer query buckets it to <see cref="TrendBuckets.AutoMinutes"/>'s width (up to ~60
     /// ring-buffer samples per collection, unbounded over a wide window — the #4234 issue's own measured
     /// number, 10,080 rows over 7 days with no cap). Both CPU columns are gauges (ruling item 2): a NULL
-    /// <c>other_process_cpu_utilization</c> (SQL on Linux, #1048) is COALESCEd to 0 before averaging, matching
-    /// the reader's old per-row "NULL reads as 0" rule exactly rather than letting Postgres's NULL-skipping
-    /// AVG silently change what a bucket with a mix of Windows/Linux-shaped rows would show. Neither consumer
+    /// <c>other_process_cpu_utilization</c> (SQL on Linux before 2025 CU1, #1048) is NOT 0 (#7682): a bucket whose
+    /// rows all lack it returns null for other and total, and a mixed bucket averages only the rows that have it. Neither consumer
     /// draws a peak line (the CPU tab's own chart and the Overview lane both plot a plain SQL/Total pair), so
     /// there is no MAX column. <c>first_sample_time</c>/<c>sample_count</c> ride along, unused in the SQL
     /// itself, so the C# reader can stamp a bucket that merged nothing at its one sample's own raw time
@@ -110,10 +116,12 @@ public sealed partial class ViewerDataService
         SELECT
             GREATEST(date_bin(CAST($3 AS integer) * INTERVAL '1 minute', sample_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
             AVG(COALESCE(sqlserver_cpu_utilization, 0)) AS sqlserver_cpu_utilization,
-            /* NULL other-process CPU (SQL on Linux) reads as 0 before averaging, like Lite's CPU chart reads it per row. */
-            AVG(COALESCE(other_process_cpu_utilization, 0)) AS other_process_cpu_utilization,
+            /* NULL other-process CPU (SQL on Linux before 2025 CU1, #7682) is not 0: AVG skips it, so a bucket whose rows
+               all lack it is NULL, and a mixed bucket averages the rows that have it. The total follows the same rule. */
+            AVG(other_process_cpu_utilization) AS other_process_cpu_utilization,
             MIN(sample_time) AS first_sample_time,
-            COUNT(*) AS sample_count
+            COUNT(*) AS sample_count,
+            AVG(CASE WHEN other_process_cpu_utilization IS NOT NULL THEN COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization END) AS total_cpu
         FROM raw
         GROUP BY 1
         ORDER BY 1
@@ -145,7 +153,7 @@ public sealed partial class ViewerDataService
         });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
 
-        var rows = new List<(DateTime BucketStart, DateTime FirstSampleTime, double SqlCpu, double OtherCpu)>();
+        var rows = new List<(DateTime BucketStart, DateTime FirstSampleTime, double SqlCpu, double? OtherCpu, double? TotalCpu)>();
         var everyBucketSingleton = true;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -160,7 +168,8 @@ public sealed partial class ViewerDataService
                 reader.GetDateTime(0),
                 reader.GetDateTime(3),
                 reader.GetDouble(1),
-                reader.GetDouble(2)));
+                reader.IsDBNull(2) ? null : reader.GetDouble(2),
+                reader.IsDBNull(5) ? null : reader.GetDouble(5)));
         }
 
         var samples = new List<CpuUtilizationSample>(rows.Count);
@@ -169,7 +178,8 @@ public sealed partial class ViewerDataService
             samples.Add(new CpuUtilizationSample(
                 everyBucketSingleton ? row.FirstSampleTime : row.BucketStart,
                 row.SqlCpu,
-                row.OtherCpu));
+                row.OtherCpu,
+                row.TotalCpu));
         }
 
         return samples;

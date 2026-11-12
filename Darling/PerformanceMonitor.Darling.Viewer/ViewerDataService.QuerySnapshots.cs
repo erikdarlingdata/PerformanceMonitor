@@ -149,17 +149,32 @@ public sealed partial class ViewerDataService
     /// the only one of the three snapshot reads that caps; <c>session_id, request_id</c> break ties so the
     /// cap is deterministic. The trailing <c>total_count</c> column is the pre-cap match count, read by
     /// <see cref="ReadQuerySnapshotsWithTotalAsync"/>. $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// A <c>WAITFOR</c> row stays when another row of the SAME capture names it as its blocker: the classic head
+    /// blocker is a session sitting in <c>WAITFOR</c> with an open transaction, and the grid keeps it so the row a
+    /// victim's blocking session id points at is on the grid. Same capture, not same window, because session ids are reused.
     /// </summary>
     public static readonly string LatestQuerySnapshotsSql = $"""
         SELECT
         {QuerySnapshotColumns},
             COUNT(*) OVER () AS total_count
         FROM query_snapshots
+        LEFT JOIN (
+            SELECT DISTINCT collection_time AS head_time, blocking_session_id AS head_session
+            FROM query_snapshots
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   blocking_session_id > 0
+            AND   blocking_session_id <> session_id
+        ) AS h
+          ON  h.head_time = query_snapshots.collection_time
+          AND h.head_session = query_snapshots.session_id
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        AND   query_text NOT LIKE 'WAITFOR%'
+        AND   ($5::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate})
+        AND   (query_text NOT LIKE 'WAITFOR%' OR h.head_session IS NOT NULL)
         ORDER BY collection_time DESC, cpu_time_ms DESC, session_id, request_id
         LIMIT {MaxLatestQuerySnapshotRows}
         """;
@@ -168,29 +183,44 @@ public sealed partial class ViewerDataService
     /// The "Latest Snapshot" button read — the newest STORED capture only (all rows sharing
     /// MAX(collection_time) for the server). Erik's decision: the viewer reads only what the collector
     /// stored, so this replaces Lite's live-server query with the newest persisted snapshot batch —
-    /// the closest stored analogue of Lite's point-in-time "currently running" view. $1 server_id.
+    /// the closest stored analogue of Lite's point-in-time "currently running" view. $1 server_id, $2 database filter, $3 include the monitor's statements.
+    /// The anchor applies the $3 predicate too (#7573): "latest" is the newest capture that has rows the grid shows, so a capture holding only the monitor's
+    /// statements does not empty the read and read as "No snapshots stored" while older captures hold application rows.
+    /// A <c>WAITFOR</c> row of the capture stays when another row of it names it as its blocker, as <see cref="LatestQuerySnapshotsSql"/> keeps it,
+    /// so the grid this read feeds shows the head blocker too.
     /// </summary>
     public static readonly string LatestQuerySnapshotBatchSql = $"""
         SELECT
         {QuerySnapshotColumns}
         FROM query_snapshots
         WHERE server_id = $1
-        AND   collection_time = (SELECT MAX(collection_time) FROM query_snapshots WHERE server_id = $1)
+        AND   collection_time = (SELECT MAX(collection_time) FROM query_snapshots WHERE server_id = $1
+                                 AND ($3::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}))
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
-        AND   query_text NOT LIKE 'WAITFOR%'
+        AND   ($3::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate})
+        AND   (query_text NOT LIKE 'WAITFOR%' OR EXISTS (
+                  SELECT 1
+                  FROM query_snapshots AS b
+                  WHERE b.server_id = query_snapshots.server_id
+                  AND   b.collection_time = query_snapshots.collection_time
+                  AND   b.blocking_session_id = query_snapshots.session_id
+                  AND   b.session_id <> b.blocking_session_id))
         ORDER BY cpu_time_ms DESC
         """;
 
     /// <summary>Active-Queries grid rows over [<paramref name="startUtc"/>, <paramref name="endUtc"/>], newest
     /// <see cref="MaxLatestQuerySnapshotRows"/> only. TotalCount is the full window's pre-cap match count, so
     /// the caller can show a "showing newest N of total" note when the window holds more than the cap.</summary>
+    #pragma warning disable CA1068 // #7573: includeMonitor trails the token on purpose; putting it before would shift every positional caller
     public async Task<(int TotalCount, List<ViewerQuerySnapshotRow> Rows)> GetLatestQuerySnapshotsAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default, bool includeMonitor = false)
+    #pragma warning restore CA1068
     {
         await using var command = _dataSource.CreateCommand(LatestQuerySnapshotsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = includeMonitor });
         return await ReadQuerySnapshotsWithTotalAsync(command, cancellationToken);
     }
 
@@ -212,6 +242,7 @@ public sealed partial class ViewerDataService
         AND   collection_time <= $3
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
         AND   wait_type IN ($4, $4 || ' ')
+        AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
         AND   query_text NOT LIKE 'WAITFOR%'
         ORDER BY collection_time DESC, cpu_time_ms DESC
         """;
@@ -233,13 +264,16 @@ public sealed partial class ViewerDataService
     /// no snapshots are stored) — backs the "Latest Snapshot" button. The batch time is taken from the
     /// returned rows (all share one collection_time).
     /// </summary>
+    #pragma warning disable CA1068 // #7573: includeMonitor trails the token on purpose; putting it before would shift every positional caller
     public async Task<(DateTime? BatchTime, List<ViewerQuerySnapshotRow> Rows)> GetLatestQuerySnapshotBatchAsync(
-        int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default, bool includeMonitor = false)
+    #pragma warning restore CA1068
     {
         await using var command = _dataSource.CreateCommand(LatestQuerySnapshotBatchSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = includeMonitor });
         var rows = await ReadQuerySnapshotsAsync(command, cancellationToken);
         DateTime? batchTime = rows.Count > 0 ? rows[0].CollectionTime : null;
         return (batchTime, rows);
@@ -315,7 +349,7 @@ public sealed partial class ViewerDataService
         {
             SessionId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
             DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-            ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
+            ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : ElapsedTimeText.WithoutZeroDays(reader.GetString(2)),
             QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
             Status = reader.IsDBNull(4) ? "" : reader.GetString(4),
             BlockingSessionId = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
@@ -388,13 +422,14 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// Hourly Active-Queries buckets for the slicer — Lite's <c>GetActiveQuerySlicerDataAsync</c>
-    /// (Blocking.cs:72) ported. Buckets by <c>date_trunc('hour', collection_time)</c>; the default
+    /// (Blocking.cs:72) ported. Buckets at the width <see cref="SlicerBuckets"/> picks for the window ($6 minutes, on the grid every
+    /// width of it divides: a minute over a short window, an hour over a day); the default
     /// metric is session count (Value = SessionCount), matching Lite's "Sessions" slicer label.
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
-    public const string ActiveQuerySlicerSql = """
+    public static readonly string ActiveQuerySlicerSql = $"""
         SELECT
-            date_trunc('hour', collection_time) AS bucket,
+            date_bin(CAST($6 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}) AS bucket,
             COUNT(*) AS session_count,
             COALESCE(SUM(cpu_time_ms), 0) AS total_cpu,
             COALESCE(SUM(total_elapsed_time_ms), 0) AS total_elapsed,
@@ -406,7 +441,8 @@ public sealed partial class ViewerDataService
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        GROUP BY date_trunc('hour', collection_time)
+        AND   ($5::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate})
+        GROUP BY 1
         ORDER BY bucket
         """;
 
@@ -424,8 +460,10 @@ public sealed partial class ViewerDataService
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>Hourly Active-Queries slicer buckets over the window (Value = session count).</summary>
+    #pragma warning disable CA1068 // #7573: includeMonitor trails the token on purpose; putting it before would shift every positional caller
     public async Task<List<TimeSliceBucket>> GetActiveQuerySlicerDataAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default, bool includeMonitor = false)
+    #pragma warning restore CA1068
     {
         var items = new List<TimeSliceBucket>();
 
@@ -433,6 +471,8 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = includeMonitor });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = SlicerBuckets.MinutesFor(startUtc, endUtc) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

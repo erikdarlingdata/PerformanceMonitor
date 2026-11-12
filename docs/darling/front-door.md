@@ -130,6 +130,8 @@ The front door decides where a call goes in this order.
 
 The fan-out tools that take no server are the names in `DarlingFrontDoorRouting.FanOutTools` in the service source. That list is the one place the routing reads, and a read tool that is in no list is fanned out.
 
+`find_queries_by_text` is one of those reads: with no `server_name` it is fanned out, so each store searches the plan-cache text of its own servers and answers with its own trigram index state (a store whose index is not ready answers with the refusal that names it).
+
 
 
 A test in the build fails if any tool is in no class, so a new tool cannot go missing from this routing.
@@ -176,6 +178,10 @@ If a caller disconnects, the front door cancels the calls it has in flight to th
 A named MCP token can have the `agent` role (see [MCP configuration](configuration-mcp.md)). When the caller holds that role, the front door sends the call with the store's agent-role token (`mcpEncryptedAgentToken` or `mcpAgentToken`). It never falls back to the operator token.
 
 If the store has no agent-role token, the store is not called. The caller gets an `unavailable` message that says no agent-role token is configured. So an agent never reaches a store with the operator token. The operator token skips the limits that the store sets for agents.
+
+### The caller's data detail level
+
+A named MCP token can narrow the data detail it is served, with `dataDetail` in `mcp.tokens` (see [MCP configuration](configuration-mcp.md)). Below `full`, the front door sends its whole resolved level to the store in an `X-Darling-Data-Detail` header with each forwarded call. That level is the strictest of the front door's own `mcp.dataDetail`, the calling token's `dataDetail` and any level the call was itself sent. The store serves the strictest of the header's level and its own levels (its `mcp.dataDetail` and its own token's `dataDetail`). Free text such as a report's `root_cause` then comes back masked at the caller's level, even when the store is at `full`. The header can only narrow: a missing or unrecognized value changes nothing. A store from an older build ignores the header and answers at its own level.
 
 ## The web dashboard
 

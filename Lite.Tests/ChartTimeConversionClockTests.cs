@@ -113,7 +113,7 @@ public sealed class ChartTimeConversionClockTests
     {
         var source = CodeOnly(ReadLite("Controls", "CorrelatedTimelineLanesControl.xaml.cs"));
 
-        var refresh = MethodBody(source, "public async Task RefreshAsync(");
+        var refresh = MethodBody(source, "public async Task<string?> RefreshAsync(");
         Assert.DoesNotContain("AddMinutes(", refresh, StringComparison.Ordinal);
         Assert.DoesNotContain("utcOffset", refresh, StringComparison.Ordinal);
         Assert.DoesNotContain("UtcOffsetMinutes", refresh, StringComparison.Ordinal);
@@ -121,7 +121,7 @@ public sealed class ChartTimeConversionClockTests
         Assert.Contains("d.SampleTimeUtc.ToOADate()", refresh, StringComparison.Ordinal);
         Assert.Contains("d.CollectionTime.ToOADate()", refresh, StringComparison.Ordinal);
 
-        var sync = MethodBody(source, "private void SyncXAxes(");
+        var sync = MethodBody(source, "void SyncXAxes(");
         Assert.DoesNotContain("AddMinutes(", sync, StringComparison.Ordinal);
         Assert.DoesNotContain("utcOffset", sync, StringComparison.Ordinal);
         Assert.Contains("GetXAxisWindow(hoursBack, fromDate, toDate, DateTime.UtcNow)", sync, StringComparison.Ordinal);

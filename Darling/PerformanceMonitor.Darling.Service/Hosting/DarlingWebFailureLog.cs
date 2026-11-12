@@ -84,12 +84,47 @@ internal static class DarlingWebFailureLog
     /// <see cref="Mcp.DarlingServerResolver.RegistryReadFaultPrefix"/>) means the token can only match where a
     /// real SQLSTATE sits, not wherever the digits happen to recur later in the same sentence.</para>
     /// </summary>
-    private static readonly Regex s_sentenceTimeoutToken = new(
-        $@"^(Error during [^:]+: |Error running query: |{Regex.Escape(Mcp.DarlingServerResolver.RegistryReadFaultPrefix)})57014: ",
-        RegexOptions.Compiled);
+    private static readonly Regex s_sentenceTimeoutToken = SentenceTokenRegex("57014");
 
     internal static bool IsStatementTimeoutSentence(string sentence) =>
         sentence is not null && s_sentenceTimeoutToken.IsMatch(sentence);
+
+    /// <summary>#7938: the same anchored shape for the store's <c>temp_file_limit</c> refusal (SQLSTATE 53400,
+    /// <c>configuration_limit_exceeded</c>, #4605): a tool that caught the store refusing a read's on-disk spill leaves
+    /// <c>"Error during {op}: 53400: temporary file size exceeds temp_file_limit (…)"</c>, and
+    /// <see cref="ReadOutcomeClassifier.ClassifySentence"/> records it as <see cref="ReadOutcome.Limit"/>, the answer
+    /// <see cref="ReadOutcomeClassifier.Classify(Exception, System.Threading.CancellationToken)"/> gives the live exception.</summary>
+    private static readonly Regex s_sentenceLimitToken = SentenceTokenRegex(ReadOutcomeClassifier.ConfigurationLimitExceeded);
+
+    internal static bool IsConfigurationLimitSentence(string sentence) =>
+        sentence is not null && s_sentenceLimitToken.IsMatch(sentence);
+
+    /// <summary>The sentence matcher for one SQLSTATE: the token right after one of the three known prefixes, and nowhere else.</summary>
+    private static Regex SentenceTokenRegex(string sqlState) => new(
+        $@"^(Error during [^:]+: |Error running query: |{Regex.Escape(Mcp.DarlingServerResolver.RegistryReadFaultPrefix)}){sqlState}: ",
+        RegexOptions.Compiled);
+
+    /// <summary>The same anchored shape for the store's permission-denied SQLSTATE: a tool that caught the store's refusal of a write
+    /// leaves <c>"Error during {op}: 42501: permission denied ..."</c>.</summary>
+    private static readonly Regex s_sentencePermissionToken = new(@"^Error during [^:]+: 42501: ", RegexOptions.Compiled);
+
+    /// <summary>
+    /// The one place a web write the store refuses for privilege becomes the 403 sentence of <see cref="DarlingWebStoreWrites.Refused"/>
+    /// (the web host is on the read-only <c>viewer</c> login when the <c>web</c> login's credential is missing, or the operator's own
+    /// login has no write grant). True only for a write request (<see cref="RequestTracking.IsWrite"/>): a read that the store refuses is
+    /// a fault, not a list-only dashboard, and keeps its 500.
+    /// </summary>
+    internal static bool TryWriteRefusal(string sentence, out string message)
+    {
+        if (s_requestReported.Value is { IsWrite: true } box && sentence is not null && s_sentencePermissionToken.IsMatch(sentence))
+        {
+            message = DarlingWebStoreWrites.Refused("make this change", box.ManagedStore, webLoginWrite: true);
+            return true;
+        }
+
+        message = string.Empty;
+        return false;
+    }
 
     /// <summary>The SQLSTATE named in the log line, or "(none)" for anything that isn't a
     /// <see cref="PostgresException"/> — a client-side timeout and a plain bug both carry none.</summary>
@@ -119,6 +154,13 @@ internal static class DarlingWebFailureLog
         /// that point is a signed-in caller's failure. A throw before it can come from a caller nobody has authenticated, and the
         /// observer sends that line through a throttle (L1, round 2).</summary>
         public bool PassedAuth { get; set; }
+
+        /// <summary>True when the request's method changes state (anything but GET, HEAD and OPTIONS), so a store refusal for privilege
+        /// is a write the web login cannot make and not a read that failed.</summary>
+        public bool IsWrite { get; set; }
+
+        /// <summary>True when the host runs on the managed store, which picks the words of the refusal sentence.</summary>
+        public bool ManagedStore { get; set; }
     }
 
     private static readonly System.Threading.AsyncLocal<RequestTracking?> s_requestReported = new();

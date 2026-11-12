@@ -75,6 +75,7 @@ LIMIT {LIMIT}")
 
     private async Task CollectTopBlockingChains(AnalysisFinding finding, AnalysisContext context)
     {
+        var plan = await _duckDb.PlanArchiveReadAsync("dmv_blocking_snapshots", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -82,32 +83,48 @@ LIMIT {LIMIT}")
         using var cmd = connection.CreateCommand();
         /* BPR + always-on DMV blocking snapshot, so the flat top-blocking list isn't empty when the
            blocked-process-report XE captured nothing (AWS RDS). Worst-by-wait surfaces regardless of
-           source; on a box with both, each may contribute (this is a top-5 list, not a count). */
+           source; on a box with both, each may contribute (this is a top-5 list, not a count).
+
+           #7892: each arm is folded to WAITS through BlockingWaits.WaitsCteSql, the definition the BLOCKING_EVENTS
+           fact counts with. SQL Server writes a report for a still-blocked session every blocked process threshold
+           seconds, each with a longer wait_time_ms, and a DMV snapshot sees a wait once per sample, so a list of
+           reports ordered by wait time was five escalating reports of one wait under a finding that counted it once.
+           A row is the wait's longest report, and wait_reports is how many reports it collapsed. */
         cmd.CommandText = (@"
-SELECT collection_time, database_name, blocked_spid, blocking_spid,
-       wait_time_ms, lock_mode, blocked_sql, blocking_sql, contentious_object
-FROM
-(
-    SELECT collection_time, database_name, blocked_spid, blocking_spid,
+WITH " + BlockingWaits.WaitsCteSql(
+            BlockingWaits.SqlDialect.DuckDb, "xe_waits",
+            @"SELECT collection_time, database_name, blocked_spid, blocking_spid, event_time,
            wait_time_ms, lock_mode,
            blocked_sql_text AS blocked_sql,
            blocking_sql_text AS blocking_sql,
            contentious_object
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3{SCOPE}") + @" AS ev
-
-    UNION ALL
-
-    SELECT collection_time, database_name, blocked_spid, blocking_spid,
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3{SCOPE}") + @" AS ev", reportCount: true) + "," + BlockingWaits.WaitsCteSql(
+            BlockingWaits.SqlDialect.DuckDb, "dmv_waits",
+            @"SELECT collection_time, database_name, blocked_spid, blocking_spid, event_time,
            wait_time_ms, lock_mode,
            blocked_sql_text AS blocked_sql,
            blocking_sql_text AS blocking_sql,
            contentious_object
     FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{SCOPE}
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{SCOPE}", reportCount: true) + @"
+SELECT collection_time, database_name, blocked_spid, blocking_spid,
+       wait_time_ms, lock_mode, blocked_sql, blocking_sql, contentious_object, wait_reports
+FROM
+(
+    SELECT collection_time, database_name, blocked_spid, blocking_spid,
+           wait_time_ms, lock_mode, blocked_sql, blocking_sql, contentious_object, wait_reports
+    FROM xe_waits
+
+    UNION ALL
+
+    SELECT collection_time, database_name, blocked_spid, blocking_spid,
+           wait_time_ms, lock_mode, blocked_sql, blocking_sql, contentious_object, wait_reports
+    FROM dmv_waits
 ) AS combined
 ORDER BY wait_time_ms DESC
 LIMIT 5").Replace("{SCOPE}", SeparatelyMonitoredScope.BprFilter(context.SeparatelyMonitoredDatabases, 4));
 
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -127,7 +144,9 @@ LIMIT 5").Replace("{SCOPE}", SeparatelyMonitoredScope.BprFilter(context.Separate
                 lock_mode = reader.IsDBNull(5) ? "" : reader.GetString(5),
                 blocked_sql = reader.IsDBNull(6) ? "" : McpHelpers.StatementPreview(reader.GetString(6), StatementPreviewLength),
                 blocking_sql = reader.IsDBNull(7) ? "" : McpHelpers.StatementPreview(reader.GetString(7), StatementPreviewLength),
-                contentious_object = reader.IsDBNull(8) ? "" : reader.GetString(8)
+                contentious_object = reader.IsDBNull(8) ? "" : reader.GetString(8),
+                /* #7892: the blocked-process reports, or DMV samples, this one wait collapsed. */
+                report_count = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9))
             });
         }
 
@@ -142,6 +161,9 @@ LIMIT 5").Replace("{SCOPE}", SeparatelyMonitoredScope.BprFilter(context.Separate
     /// </summary>
     private async Task CollectReconstructedBlockingChains(AnalysisFinding finding, AnalysisContext context)
     {
+        /* #7256: the snapshot reads (the window fetch and the by-key text fetch, whose keys come from that window) read the
+           hot table alone for a window newer than the archive. The blocked-process-report reads stay on the view. */
+        var plan = await _duckDb.PlanArchiveReadAsync("dmv_blocking_snapshots", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -183,7 +205,7 @@ LIMIT 5000";
         // (blocked-process-report unavailable, e.g. AWS RDS) still reconstructs.
         await BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
             connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-            context.CancellationToken, includeText: false);
+            context.CancellationToken, includeText: false, plan);
 
         /* #5361: the merge appends every DMV row after the report
            rows, so every row past the report count is DMV-sourced: the source of each level's text read below. */
@@ -210,7 +232,7 @@ LIMIT 5000";
             shownKeys.Where(k => !dmvKeys.Contains(k)).ToList(), context.CancellationToken);
         var dmvText = await BlockingPairRowQuery.ReadChainLevelTextAsync(
             connection.CreateCommand, dmvSource: true, context.ServerId,
-            shownKeys.Where(dmvKeys.Contains).ToList(), context.CancellationToken);
+            shownKeys.Where(dmvKeys.Contains).ToList(), context.CancellationToken, plan);
         (string BlockedSql, string BlockingSql) TextOf(ChainLevel l) =>
             (dmvKeys.Contains(l.Key) ? dmvText : bprText).GetValueOrDefault(l.Key, (string.Empty, string.Empty));
 
@@ -244,6 +266,7 @@ LIMIT 5000";
 
     private async Task CollectLockModeBreakdown(AnalysisFinding finding, AnalysisContext context)
     {
+        var plan = await _duckDb.PlanArchiveReadAsync("wait_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -261,6 +284,7 @@ GROUP BY wait_type
 ORDER BY total_wait_ms DESC
 LIMIT 10";
 
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });

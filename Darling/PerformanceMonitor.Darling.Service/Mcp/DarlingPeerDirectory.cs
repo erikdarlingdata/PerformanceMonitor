@@ -170,7 +170,7 @@ internal static class DarlingPeerDirectory
     private static string Describe(Peer peer) =>
         peer.Covers.Length == 0 ? peer.Name
         : peer.Name.Length == 0 ? peer.Covers
-        : $"{peer.Name} — {peer.Covers}";
+        : $"{peer.Name}: {peer.Covers}";
 
     /// <summary>
     /// The MCP-instructions section (#2339): what this store covers, what the siblings cover, and the
@@ -206,7 +206,7 @@ internal static class DarlingPeerDirectory
             text.Append(
                 "\nThere is NO cross-store connectivity: this server cannot read a peer's data, forward a query to " +
                 "it, or confirm that a peer is up. The peers are DECLARED here, not contacted. So a server that " +
-                "belongs to a peer's coverage must be asked of THAT endpoint — a not-found here is not evidence " +
+                "belongs to a peer's coverage must be asked of THAT endpoint: a not-found here is not evidence " +
                 "the server is unmonitored, and `list_servers` repeats this list as `peer_fleets` for a client " +
                 "that reads tool output rather than these instructions.");
         }
@@ -263,7 +263,7 @@ internal static class DarlingPeerDirectory
             if (snapshot.Peers.Count > 0)
             {
                 text.Append(" It matches no declared peer store's coverage either, so it may genuinely be " +
-                            "unmonitored — but the peer declarations are prose plus optional name patterns, not a " +
+                            "unmonitored, but the peer declarations are prose plus optional name patterns, not a " +
                             "live registry, so check the coverage list before concluding that. Declared peer stores " +
                             "(separate Darling stores with their own MCP endpoints; this server cannot read them): ")
                     .Append(string.Join("; ", snapshot.Peers.Select(Describe)))
@@ -324,7 +324,7 @@ internal static class DarlingPeerDirectory
     /// </summary>
     internal const string NoPeersDeclaredNote =
         "No peer stores are declared (darling.json's \"peers\" block is absent or empty). That means EITHER this is " +
-        "the only Darling store monitoring this fleet, OR the operator has not declared its siblings — this server " +
+        "the only Darling store monitoring this fleet, OR the operator has not declared its siblings: this server " +
         "cannot tell those apart, so a server missing from the list above is not proof that nobody monitors it.";
 
     /// <summary>The <c>peer_fleets</c> note when peers ARE declared: what they are, and what they are not.</summary>

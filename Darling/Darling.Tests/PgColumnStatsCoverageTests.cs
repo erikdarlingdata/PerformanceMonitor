@@ -587,6 +587,10 @@ public sealed class PgColumnStatsCoverageTests
     /// R7 at the surface. The coverage sentence has to ride the POPULATED branch as well, or a partial view
     /// is diagnosed only in the one case where nobody needs the diagnosis. Asserted by counting the prints:
     /// one branch printing it twice would satisfy a presence check.
+    ///
+    /// <para>The MCP tool builds its empty-result envelope in <c>EmptyColumnStatsReply</c>, so that branch's
+    /// print is counted in the helper and the populated branch's in the member. Each has to hold at least
+    /// one, which keeps "one branch printing twice" from passing.</para>
     /// </summary>
     [Fact]
     public void BothSurfacesPrintTheVerdictOnThePopulatedPathToo()
@@ -594,7 +598,19 @@ public sealed class PgColumnStatsCoverageTests
         foreach (var (file, member, _) in Surfaces)
         {
             var code = CSharpSourceWalker.StripCommentsAndStrings(MemberBody(file, member));
-            var prints = code.Split("coverage.Message", StringSplitOptions.None).Length - 1;
+            var prints = CountPrints(code);
+
+            if (string.Equals(member, "GetPgColumnStats", StringComparison.Ordinal))
+            {
+                var emptyBranch = CountPrints(CSharpSourceWalker.StripCommentsAndStrings(MemberBody(file, "EmptyColumnStatsReply")));
+
+                Assert.True(
+                    emptyBranch >= 1 && prints >= 1,
+                    $"{member} prints the coverage verdict {prints} time(s) and its empty reply helper {emptyBranch}; "
+                    + "it has to reach the empty result AND the populated one, or a partial view is only ever "
+                    + "explained when it is total");
+                continue;
+            }
 
             Assert.True(
                 prints >= 2,
@@ -602,6 +618,9 @@ public sealed class PgColumnStatsCoverageTests
                 + "the populated one, or a partial view is only ever explained when it is total");
         }
     }
+
+    private static int CountPrints(string code) =>
+        code.Split("coverage.Message", StringSplitOptions.None).Length - 1;
 
     /// <summary>
     /// R2: neither surface authors its own multi-cause prose. This is the check that would have failed on

@@ -13,6 +13,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -76,10 +77,15 @@ internal sealed class DarlingWebSecurityHeaders
 
     private readonly bool _sendHsts;
 
-    public DarlingWebSecurityHeaders(RequestDelegate next, bool sendHsts = false)
+    private readonly Uri? _publicOrigin;
+
+    /// <param name="publicOrigin">#8323: <c>web.publicBaseUrl</c>'s scheme and host (<see cref="ParsePublicOrigin"/>), or null
+    /// when it is unset; the opener policy's trust decision reads it beside the request's own origin.</param>
+    public DarlingWebSecurityHeaders(RequestDelegate next, bool sendHsts = false, Uri? publicOrigin = null)
     {
         _next = next;
         _sendHsts = sendHsts;
+        _publicOrigin = publicOrigin;
     }
 
     public Task InvokeAsync(HttpContext context)
@@ -102,8 +108,12 @@ internal sealed class DarlingWebSecurityHeaders
             /* An HTML page (the app shell, the sign-in page, the signed-in landing page and the re-navigation page)
                opens in its own browsing context group, so a page on another site that opened it keeps no window
                reference to it (#6286). Nothing here opens a popup or reads window.opener: sign-in is a full-page
-               redirect. */
-            if (headers.ContentType.ToString().StartsWith("text/html", StringComparison.OrdinalIgnoreCase))
+               redirect. #8096: sent only where a browser honours it (IsTrustworthyOrigin): over plain http on a LAN
+               address the browser ignores the header and logs an error on every navigation, in front of any real one.
+               #8323: the configured public origin is judged with the request, for the browser behind a reverse proxy
+               that rewrites Host to this service's own loopback address. */
+            if (headers.ContentType.ToString().StartsWith("text/html", StringComparison.OrdinalIgnoreCase)
+                && IsTrustworthyOrigin(((HttpContext)state).Request, _publicOrigin))
             {
                 headers["Cross-Origin-Opener-Policy"] = "same-origin";
             }
@@ -116,6 +126,72 @@ internal sealed class DarlingWebSecurityHeaders
         }, context);
 
         return _next(context);
+    }
+
+    /// <summary>
+    /// Whether a browser treats the request's origin as trustworthy (a "potentially trustworthy origin" in the Secure
+    /// Contexts specification), which is the only place it honours <c>Cross-Origin-Opener-Policy</c>: https (the
+    /// connection's own scheme, or a configured proxy's forwarded scheme), or a loopback host (<c>localhost</c>,
+    /// <c>127.0.0.1</c>, <c>::1</c>), which a browser treats as secure over plain http. The loopback listeners are
+    /// plain http by design, so the policy still reaches the default dashboard address.
+    /// </summary>
+    internal static bool IsTrustworthyOrigin(HttpRequest request)
+    {
+        if (request.IsHttps)
+        {
+            return true;
+        }
+
+        var host = request.Host.Host;
+        return !string.IsNullOrEmpty(host) && HostHeaderGuard.IsAllowedHost(host, networkListenIp: null);
+    }
+
+    /// <summary>
+    /// #8323: <see cref="IsTrustworthyOrigin(HttpRequest)"/> judged together with the configured public origin
+    /// (<c>web.publicBaseUrl</c>), when there is one: the header is sent only when BOTH are trustworthy.
+    ///
+    /// <para>Behind a reverse proxy that rewrites <c>Host</c> to its upstream address (nginx's <c>proxy_pass</c> does by
+    /// default), the service sees <c>Host: 127.0.0.1:port</c> for every browser on the LAN, so the request alone reads as
+    /// trustworthy while the browser's own origin, the proxy's plain-http name, is what decides whether the header is
+    /// honoured. <paramref name="publicOrigin"/> is that name, so a plain-http public origin withholds the header whatever
+    /// <c>Host</c> says. The other way round, a browser that reaches the network listener directly over plain http at a
+    /// LAN address is untrustworthy whatever the public origin says, so the request side keeps its own veto.</para>
+    ///
+    /// <para>A trusted proxy's forwarded scheme and host (<c>web.network.trustedProxies</c>, the forwarded-headers middleware
+    /// ahead of this one) have already replaced the request's own by the time this runs, so they are what the request side
+    /// judges. A forwarded header from any other address is never read, by that middleware or here.</para>
+    /// </summary>
+    internal static bool IsTrustworthyOrigin(HttpRequest request, Uri? publicOrigin) =>
+        IsTrustworthyOrigin(request) && (publicOrigin is null || IsTrustworthyPublicOrigin(publicOrigin));
+
+    /// <summary>Whether a browser treats <paramref name="publicOrigin"/> as a trustworthy origin: https, or a loopback host
+    /// (<c>localhost</c>, <c>127.0.0.1</c>, <c>::1</c>) over plain http.</summary>
+    internal static bool IsTrustworthyPublicOrigin(Uri publicOrigin)
+    {
+        ArgumentNullException.ThrowIfNull(publicOrigin);
+        if (string.Equals(publicOrigin.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var host = publicOrigin.IdnHost;
+        return !string.IsNullOrEmpty(host) && HostHeaderGuard.IsAllowedHost(host, networkListenIp: null);
+    }
+
+    /// <summary>#8323: <c>web.publicBaseUrl</c> as an absolute http or https URI, or null when it is unset or does not parse
+    /// as one: the same acceptance rule the triage links and the Host allowlist apply to the setting.</summary>
+    internal static Uri? ParsePublicOrigin(string? publicBaseUrl)
+    {
+        var trimmed = publicBaseUrl?.Trim();
+        if (string.IsNullOrEmpty(trimmed)
+            || !Uri.TryCreate(trimmed, UriKind.Absolute, out var uri)
+            || (!string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
+        {
+            return null;
+        }
+
+        return uri;
     }
 
     /// <summary>

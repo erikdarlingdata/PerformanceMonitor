@@ -163,6 +163,18 @@ public sealed class FinOpsLockingPickerBehaviourTests
         Assert.Equal(new[] { "Abacus" }, Strings(step.GetProperty("afterStale")));
     }
 
+    /* #7690: the read's "Complete: ..." sentence is for the MCP reader. The page draws the note only when the list was cut. */
+    [Fact]
+    public void ACompleteList_DrawsNoCompleteStrip_AndACutListDrawsItsCapSentence()
+    {
+        var step = Result.Value.GetProperty("noteStrip");
+        var whole = step.GetProperty("wholeText").GetString()!;
+        var capped = step.GetProperty("cappedText").GetString()!;
+        Assert.Contains("Orders", whole, StringComparison.Ordinal);
+        Assert.DoesNotContain("Complete:", whole, StringComparison.Ordinal);
+        Assert.Contains("TRUNCATED: more than 1 indexes", capped, StringComparison.Ordinal);
+    }
+
     /* Index Analysis shares the box, so it gets the stored spelling too (#5244 L8c). Its list still comes from its own read. */
     [Fact]
     public void IndexAnalysisSendsTheStoredSpelling_Too()

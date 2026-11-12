@@ -114,7 +114,7 @@ public sealed class OverviewLaneBucketingTests : IClassFixture<SharedDuckDbFixtu
         var cpu = await _dataService.GetCpuUtilizationAsync(ServerId, hoursBack: 3, serverClock: ServerClock.Utc);
         Assert.Equal(new[] { t1, t2, t3 }, cpu.Select(r => r.SampleTime).ToArray());
         Assert.Equal(new[] { 40, 55, 70 }, cpu.Select(r => r.SqlServerCpu).ToArray());
-        Assert.Equal(new[] { 5, 6, 7 }, cpu.Select(r => r.OtherProcessCpu).ToArray());
+        Assert.Equal(new int?[] { 5, 6, 7 }, cpu.Select(r => r.OtherProcessCpu).ToArray());
 
         var memory = await _dataService.GetMemoryTrendAsync(ServerId, hoursBack: 3);
         Assert.Equal(new[] { t1, t2, t3 }, memory.Select(r => r.CollectionTime).ToArray());

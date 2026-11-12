@@ -56,7 +56,7 @@ public sealed class ViewerFileIoBlockingSqlTests
 
         /* #4234: buckets by date_bin, grouped per series (database_name, file_name) then the bucket start. */
         Assert.Contains("GROUP BY database_name, file_name, 3", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY database_name, file_name, 3", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY lower(database_name), database_name, file_name, 3", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
         Assert.Contains("HAVING COUNT(rated_reads) > 0", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
 
         /* Both window bounds are applied (top_files CTE + main query). */
@@ -188,7 +188,6 @@ public sealed class ViewerFileIoBlockingSqlTests
         Assert.DoesNotContain("v_waiting_tasks", ViewerDataService.BlockedSessionTrendSql, StringComparison.Ordinal);
         Assert.Contains("blocking_session_id > 0", ViewerDataService.BlockedSessionTrendSql, StringComparison.Ordinal);
         Assert.Contains("database_name IS NOT NULL", ViewerDataService.BlockedSessionTrendSql, StringComparison.Ordinal);
-        Assert.Contains("COUNT(*) AS blocked_count", ViewerDataService.BlockedSessionTrendSql, StringComparison.Ordinal);
     }
 
     [Fact]

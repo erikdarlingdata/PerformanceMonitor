@@ -301,6 +301,39 @@ public sealed class EnumeratedCollectorDriverTests
     }
 
     /// <summary>
+    /// A service stop while a read is in flight reaches the driver as the PROVIDER's exception, not an
+    /// OperationCanceledException: SqlClient reports a cancelled command as a SqlException. The loop must
+    /// still read it as the cancellation it is, so the host's cancellation arm claims the run. Counting it
+    /// as a per-item failure would make a stop look like a failed database, and on the last item an ERROR
+    /// run. One item, so a skip-and-continue returns normally and the assertion below has no cancellation
+    /// to see.
+    /// </summary>
+    [Fact]
+    public async Task RunAsync_AProviderExceptionAfterTheHostStopped_IsACancellation_NotAFailedItem()
+    {
+        using var cts = new CancellationTokenSource();
+        var errors = new List<string>();
+
+        var thrown = await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await EnumeratedCollectorDriver.RunAsync<int>(
+                new[] { "only" },
+                perItemWatermark: null,
+                readItem: async (item, ct) =>
+                {
+                    await cts.CancelAsync();
+                    throw new InvalidOperationException("Operation cancelled by user.");
+                },
+                writeBatch: (batch, ct) => Task.CompletedTask,
+                onItemComplete: (item, count, sqlMs, storageMs) => { },
+                onItemError: (item, ex) => errors.Add(item),
+                cts.Token));
+
+        Assert.Empty(errors);
+        /* The provider's exception travels as the cause, so the cancellation carries the provider's message. */
+        Assert.IsType<InvalidOperationException>(thrown.InnerException);
+    }
+
+    /// <summary>
     /// No budget means the loop is what it always was: the delegates get the caller's own token, not a
     /// linked one. Asserted by IDENTITY rather than by behaviour, because "no wrapper" is the property —
     /// a linked token with no timer behaves identically and would hide an unnecessary allocation per item.

@@ -121,8 +121,9 @@ ON CONFLICT (server_id) DO NOTHING";
     /// unique index on the key, so nothing in the database stops two writers from each finding an address free and
     /// each taking it. Taken first inside the write's transaction, the lock makes the occupancy check that follows
     /// it a check against a table no other identity write is changing, and the transaction's end (commit or
-    /// rollback) releases it. <c>pg_advisory_xact_lock</c> and <c>hashtext</c> are executable by PUBLIC, so the
-    /// read-only <c>viewer</c> role needs no grant: its INSERT still fails with SQLSTATE 42501, as it always did.</para>
+    /// rollback) releases it. <c>hashtext</c> is executable by PUBLIC, and the managed and compose batches grant
+    /// <c>pg_advisory_xact_lock</c> to <c>admin</c>, <c>web</c> and <c>mcp</c> only: the read-only <c>viewer</c> role is refused at the lock
+    /// with SQLSTATE 42501, the code its INSERT always failed with.</para>
     /// </summary>
     public const string MonitoredServerIdentityLockSql = "SELECT pg_advisory_xact_lock(hashtext('config_monitored_servers.identity'))";
 
@@ -259,7 +260,7 @@ AND   port = $5";
     /// queries for the #3145 one: it is the first successful connect, and a server the operator added that the
     /// service has not reached has none, which keeps its dot on "Awaiting first collection".</para>
     /// </summary>
-    public const string ManagedServersSql = @"
+    public const string ManagedServersSql = $@"
 SELECT
     c.server_id,
     COALESCE(s.server_name, c.host) AS server_name,
@@ -270,7 +271,8 @@ SELECT
     s.engine_kind,
     COALESCE(s.sql_engine_edition, 0) AS sql_engine_edition,
     s.postgres_major_version,
-    s.created_date
+    s.created_date,
+    {CollectionAttemptSql.Attempted} AS attempted
 FROM config_monitored_servers c
 LEFT JOIN servers s ON s.server_id = c.server_id
 ORDER BY COALESCE(s.display_name, c.name)";
@@ -439,7 +441,10 @@ GROUP BY s.server_id";
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(7),
                 reader.IsDBNull(8) ? null : reader.GetInt32(8),
-                reader.IsDBNull(9) ? null : reader.GetDateTime(9)));
+                reader.IsDBNull(9) ? null : reader.GetDateTime(9))
+            {
+                Attempted = reader.GetBoolean(10),
+            });
         }
 
         await AttachSameMachineAsync(servers, cancellationToken);
@@ -1001,6 +1006,26 @@ WHERE server_id = $1";
         }
 
         await using var command = MonitoredServerExclusions.CreateSetCommand(_dataSource, serverId, names, ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
+        await ExecuteWriteAsync(command, cancellationToken);
+    }
+
+    /// <summary>One server's "Databases that get Extended Events sessions" list (#7639, V247); empty when none is set or the server is gone.</summary>
+    public async Task<List<string>> GetMonitoredServerXeSessionDatabasesAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        var stored = await MonitoredServerXeSessionDatabases.ReadAsync(_dataSource, serverId, cancellationToken);
+        return stored?.ToList() ?? new List<string>();
+    }
+
+    /// <summary>Rewrites a server's "Databases that get Extended Events sessions" list (#7639, V247). Empty means every database.</summary>
+    public async Task SetMonitoredServerXeSessionDatabasesAsync(int serverId, IEnumerable<string> databases, CancellationToken cancellationToken = default)
+    {
+        var names = MonitoredServerExclusions.Prepare(databases);
+        if (MonitoredServerXeSessionDatabases.Refusal(names) is string refusal)
+        {
+            throw new InvalidOperationException(refusal);
+        }
+
+        await using var command = MonitoredServerXeSessionDatabases.CreateSetCommand(_dataSource, serverId, names, ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
         await ExecuteWriteAsync(command, cancellationToken);
     }
 

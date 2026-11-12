@@ -43,7 +43,9 @@ public sealed record PlanCacheSnapshotRow(
 /// the oldest cached plan's create time — matching the Dashboard, which computes these over the full latest
 /// snapshot. <see cref="SingleUsePlans"/> feeds the derived bloat-level badge
 /// (<see cref="ViewerDataService.ClassifyPlanCacheBloat"/>).</summary>
-public sealed record PlanCacheSummary(long TotalPlans, long SingleUsePlans, DateTime? OldestPlanCreateTime, DateTime? CollectionTime = null);
+public sealed record PlanCacheSummary(
+    long TotalPlans, long SingleUsePlans, DateTime? OldestPlanCreateTime, DateTime? CollectionTime = null,
+    long TotalSizeMb = 0, long CompiledPlans = 0, long CompiledSingleUsePlans = 0, long CompiledSingleUseSizeMb = 0);
 
 /// <summary>The plan-cache bloat classification for the summary badge: the banded severity level plus the
 /// paired recommendation, mirroring install/47's report.plan_cache_bloat.</summary>
@@ -107,7 +109,7 @@ public sealed partial class ViewerDataService
     /// An aggregate with no GROUP BY always returns one row, so an empty window yields (0, NULL).
     /// $1 server_id, $2 start, $3 end (naive UTC).
     /// </summary>
-    public const string PlanCacheSummarySql = """
+    public const string PlanCacheSummarySql = $"""
         WITH latest AS
         (
             SELECT MAX(collection_time) AS mx
@@ -120,34 +122,25 @@ public sealed partial class ViewerDataService
             COALESCE(SUM(total_plans), 0) AS total_plans,
             COALESCE(SUM(single_use_plans), 0) AS single_use_plans,
             MIN(oldest_plan_create_time) AS oldest_plan_create_time,
-            MAX(collection_time) AS collection_time
+            MAX(collection_time) AS collection_time,
+            COALESCE(SUM(total_size_mb), 0) AS total_size_mb,
+            COALESCE(SUM(total_plans) FILTER (WHERE {PlanCacheBloatRule.CompiledPredicateSql}), 0) AS compiled_plans,
+            COALESCE(SUM(single_use_plans) FILTER (WHERE {PlanCacheBloatRule.CompiledPredicateSql}), 0) AS compiled_single_use_plans,
+            COALESCE(SUM(single_use_size_mb) FILTER (WHERE {PlanCacheBloatRule.CompiledPredicateSql}), 0) AS compiled_single_use_size_mb
         FROM v_plan_cache_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT mx FROM latest)
         """;
 
     /// <summary>
-    /// The plan-cache bloat classification (single-use plan bloat), a pure client-side derivation mirroring
-    /// install/47's <c>report.plan_cache_bloat</c> (bloat_level + recommendation) and the Dashboard's
-    /// <c>PlanCacheStatsItem.BloatLevel/Recommendation</c>. The ratio is single-use plans / total plans:
-    /// &gt; 50% CRITICAL, &gt; 30% HIGH, &gt; 20% MEDIUM, else NORMAL; the recommendation flips to the
-    /// "unparameterized queries / Forced Parameterization" hint at the same &gt; 20% threshold. Static + pure
-    /// so it is unit-testable without Postgres. An empty cache (<paramref name="totalPlans"/> == 0) is NORMAL.
+    /// The plan-cache bloat classification (single-use plan bloat), a pure client-side derivation by the one rule
+    /// all surfaces share, <see cref="PlanCacheBloatRule"/> (#7445): a ratio over compiled plans only, and no
+    /// bloat while the single-use plans take under 100 MB. Static + pure so it is unit-testable without Postgres.
     /// </summary>
-    public static PlanCacheBloat ClassifyPlanCacheBloat(long totalPlans, long singleUsePlans)
+    public static PlanCacheBloat ClassifyPlanCacheBloat(PlanCacheSummary summary)
     {
-        double singleUsePercent = totalPlans > 0 ? singleUsePlans * 100.0 / totalPlans : 0.0;
-
-        var level =
-            singleUsePercent > 50 ? "CRITICAL" :
-            singleUsePercent > 30 ? "HIGH" :
-            singleUsePercent > 20 ? "MEDIUM" :
-            "NORMAL";
-
-        var recommendation = singleUsePercent > 20
-            ? "Check for unparameterized queries / Consider Forced Parameterization"
-            : "Plan cache composition is healthy";
-
+        var (level, recommendation) = PlanCacheBloatRule.Classify(
+            summary.TotalPlans, summary.TotalSizeMb, summary.CompiledPlans, summary.CompiledSingleUsePlans, summary.CompiledSingleUseSizeMb);
         return new PlanCacheBloat(level, recommendation);
     }
 
@@ -246,6 +239,10 @@ public sealed partial class ViewerDataService
             reader.IsDBNull(0) ? 0 : reader.GetInt64(0),
             reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
             reader.IsDBNull(2) ? null : reader.GetDateTime(2),
-            reader.IsDBNull(3) ? null : reader.GetDateTime(3));
+            reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+            reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+            reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+            reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+            reader.IsDBNull(7) ? 0 : reader.GetInt64(7));
     }
 }

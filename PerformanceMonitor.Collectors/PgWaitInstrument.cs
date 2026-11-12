@@ -71,6 +71,21 @@ public static class PgWaitInstrument
         + "EXTENSION in the monitored database, then let the service reconnect) moves this target to the "
         + "extension_sampled tier with no other change.";
 
+    /// <summary>
+    /// What the backends figure means on the extension tier (#7428), in the words every read that serves it uses. The
+    /// collector stores <c>count(DISTINCT pid)</c> over pg_wait_sampling's cumulative profile, which keeps a row for every
+    /// pid until a reset, so the figure can only rise between resets. One copy for the MCP read and the Viewer.
+    /// </summary>
+    public const string ExtensionBackendsMeaning =
+        "On the pg_wait_sampling extension the backends figure is the number of distinct backends the profile has recorded "
+        + "for that wait since it last started (a server restart or pg_wait_sampling_reset_profile()), a running total that "
+        + "only rises until a reset. It is not how many backends waited in the window, nor how many waited at once.";
+
+    /// <summary>What the backends figure means on the service tier (#7428): the distinct backends seen in the last sampling window.</summary>
+    public const string ServiceBackendsMeaning =
+        "On the service sampler the backends figure is the number of distinct backends seen in the last sampling window, "
+        + "not a total since the profile started.";
+
     /// <summary>True for exactly the three tokens above; the reads use it to keep an unrecognised state
     /// value from being echoed as an instrument.</summary>
     public static bool IsKnown(string? instrument) =>

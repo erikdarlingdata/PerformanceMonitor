@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -232,6 +233,17 @@ public sealed class FileIoDatabaseFilterLiveTests
             Assert.Equal(2, perFileLegend[5].GetProperty("files").GetInt64());
             Assert.All(perFile.GetProperty("trend").EnumerateArray(), p => Assert.True(p.GetProperty("database_name").GetString() is DbMany or "(other)"));
 
+            /* #7661: under a plot-sized ask the ladder aims at the total across the drawn lines (the ask is one line's share), so the
+               note names that number and not the one-line share it was built from. */
+            var asked = TrendBudget.ChartFor(557);
+            var aimed = asked.AutoFor(TrendPayloads.LinesFor(perFile.GetProperty("series_active").GetInt32()));
+            Assert.True(aimed > asked.AutoPoints, "six lines aim at more than one line's share");
+            var sized = JsonDocument.Parse(await DarlingMcpTrendTools.GetFileIoTrend(
+                postgres, ServerName, 1, asOf, null, DatabaseFilter.One(DbMany), asked, ct)).RootElement;
+            var sizedNote = sized.GetProperty("aggregate_note").GetString()!;
+            Assert.Contains($"near {aimed.ToString("N0", CultureInfo.InvariantCulture)} points", sizedNote, StringComparison.Ordinal);
+            Assert.DoesNotContain($"near {asked.AutoPoints.ToString("N0", CultureInfo.InvariantCulture)} points", sizedNote, StringComparison.Ordinal);
+
             /* Seven chosen databases of a store that holds twelve: per-database lines, the cap applies to the set. A, B, C and
                the many-file database are outside it and appear nowhere. */
             var chosen = Enumerable.Range(1, 7).Select(Crowd).ToArray();
@@ -286,11 +298,13 @@ public sealed class FileIoDatabaseFilterLiveTests
             Assert.Contains("database 'NoSuchDb'", one.GetProperty("message").GetString(), StringComparison.Ordinal);
             Assert.Equal("NoSuchDb", one.GetProperty("database_name").GetString());
 
-            /* The unfiltered quiet-window sentence is unchanged: a window with no rows at all. */
+            /* #7167: an unfiltered window 30 days back is one the store never read, so it does not claim to be quiet (the
+               filtered answers above are about names, and keep their sentences). */
             var quiet = JsonDocument.Parse(await DarlingMcpTrendTools.GetFileIoTrend(
                 postgres, ServerName, 1, end.AddDays(-30).ToString("o"), null, DatabaseFilter.All, TrendBudget.Chart, ct)).RootElement;
             Assert.Equal("empty", quiet.GetProperty("status").GetString());
-            Assert.Contains("genuinely quiet", quiet.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Contains("not a report that nothing happened", quiet.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("genuinely quiet", quiet.GetProperty("message").GetString(), StringComparison.Ordinal);
             Assert.Equal(JsonValueKind.Null, quiet.GetProperty("database_name").ValueKind);
 
             /* A server with no file I/O row ever: the never-collected answer is about the server, filtered or not, and carries

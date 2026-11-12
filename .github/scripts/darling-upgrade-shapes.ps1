@@ -11,7 +11,8 @@
   base is built by hand, because the owner of the extracted files is whatever account ran the service when it
   extracted them, and that is the thing the install/upgrade pre-lock check has to judge correctly.
 
-  Shapes (the leg name is <shape>-<script>):
+  Shapes (the leg name is <shape>-<script>, or <shape>-<script>-pwsh when the script under test runs in PowerShell 7,
+  #6982; every other leg runs it in Windows PowerShell 5.1, and the released base installs always run in 5.1):
     U1  current release in C:\Program Files\PerformanceMonitorDarling, service stopped.      must PASS
         The folder also holds a hand-named darling.json.bak-before-edit, service-owned after the
         base install and its service start (#5649); it must not refuse either script.
@@ -22,13 +23,16 @@
         folder's own write entry, and print the move steps.
 #>
 param(
-    [Parameter(Mandatory)][ValidateSet('U1-install', 'U1-upgrade', 'U2-install', 'U2-upgrade', 'U3-install', 'U3-upgrade', 'U4-install')][string]$Leg,
+    [Parameter(Mandatory)][ValidateSet('U1-install', 'U1-upgrade', 'U2-install', 'U2-upgrade', 'U3-install', 'U3-upgrade', 'U4-install', 'U1-install-pwsh', 'U1-upgrade-pwsh', 'U2-upgrade-pwsh')][string]$Leg,
     [Parameter(Mandatory)][string]$Workspace,
     [Parameter(Mandatory)][string]$CurrentVersion,
     [Parameter(Mandatory)][string]$OldVersion
 )
 $ErrorActionPreference = 'Continue'
-$shape, $which = $Leg.Split('-')
+$shape, $which, $shellSuffix = $Leg.Split('-')
+# #6982: the shell the script under test runs in. The released base installs stay in Windows PowerShell 5.1 (that is what a
+# release's own install did), so only the calls that run the script under test pass this.
+$shell = if ($shellSuffix -eq 'pwsh') { 'pwsh' } else { 'powershell' }
 $svc = 'PerformanceMonitor Darling'
 $HandNamedBackupName = 'darling.json.bak-before-edit'
 $work = 'C:\darling-shapes-work'
@@ -79,16 +83,18 @@ function Get-Zip([string]$version) {
     return $zip
 }
 
-# Runs a script in Windows PowerShell 5.1 (the engine an operator's elevated prompt starts) and returns its exit
-# code and stdout. A child started from pwsh inherits pwsh's PSModulePath and then cannot load Get-Acl, so it is
-# given the machine value. The code comes back as text so 'TIMEOUT' and a number compare the same way.
-function Run-Script([string]$script, [string[]]$scriptArgs, [string]$tag, [int]$timeoutSec = 900) {
+# Runs a script in Windows PowerShell 5.1 (the engine an operator's elevated prompt starts), or in PowerShell 7 when
+# -Shell is pwsh (#6982), and returns its exit code and stdout. A 5.1 child started from pwsh inherits pwsh's
+# PSModulePath and then cannot load Get-Acl, so it is given the machine value; a pwsh child keeps the inherited one.
+# The code comes back as text so 'TIMEOUT' and a number compare the same way.
+function Run-Script([string]$script, [string[]]$scriptArgs, [string]$tag, [int]$timeoutSec = 900, [string]$Shell = 'powershell') {
+    $exe = if ($Shell -eq 'pwsh') { 'pwsh.exe' } else { 'powershell.exe' }
     $out = Join-Path $work "$tag.out.txt"; $err = Join-Path $work "$tag.err.txt"
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$script`"") + $scriptArgs
-    Write-Host "RUN powershell.exe $($argList -join ' ')"
+    Write-Host "RUN $exe $($argList -join ' ')"
     $savedModulePath = $env:PSModulePath
-    $env:PSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine')
-    $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -NoNewWindow
+    if ($Shell -ne 'pwsh') { $env:PSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine') }
+    $p = Start-Process -FilePath $exe -ArgumentList $argList -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -NoNewWindow
     $null = $p.Handle
     $env:PSModulePath = $savedModulePath
     if (-not $p.WaitForExit($timeoutSec * 1000)) { try { $p.Kill() } catch { }; $code = 'TIMEOUT' }
@@ -248,7 +254,7 @@ if ($which -eq 'install') {
     Add-CurrentBuild $root
     Show-State $root
     Say "RUN this checkout's install-darling.ps1"
-    $r = Run-Script (Join-Path $root 'install-darling.ps1') @('-SkipPreflight', '-NoShortcuts') "$Leg-run"
+    $r = Run-Script (Join-Path $root 'install-darling.ps1') @('-SkipPreflight', '-NoShortcuts') "$Leg-run" -Shell $shell
 }
 else {
     $stage = 'C:\Program Files\darling-shapes-stage'
@@ -259,16 +265,26 @@ else {
     $upgradeArgs = @('-SkipHashCheck')
     if ($shape -eq 'U3') {
         # With no service the script cannot find the install root by itself: it must say so and stop.
-        $noRoot = Run-Script (Join-Path $stage 'upgrade-darling.ps1') $upgradeArgs "$Leg-noroot"
+        $noRoot = Run-Script (Join-Path $stage 'upgrade-darling.ps1') $upgradeArgs "$Leg-noroot" -Shell $shell
         if ($noRoot.Code -eq '0' -or $noRoot.Code -eq 'TIMEOUT') { Fail-Leg "upgrade-darling.ps1 with no service registered and no -InstallRoot exited with $($noRoot.Code), expected a refusal" }
         if ($noRoot.Text -notmatch 'is not installed') { Fail-Leg 'upgrade-darling.ps1 with no service registered and no -InstallRoot did not say the service is not installed' }
         $upgradeArgs += @('-InstallRoot', "`"$root`"")
     }
-    $r = Run-Script (Join-Path $stage 'upgrade-darling.ps1') $upgradeArgs "$Leg-run"
+    if ($shell -eq 'pwsh') {
+        # #6982: -Check first. It runs the checks before the service stop plus the backup-folder pre-flight in this shell, changes
+        # nothing, and must pass here, where the real upgrade below must then go through the same step.
+        $check = Run-Script (Join-Path $stage 'upgrade-darling.ps1') ($upgradeArgs + @('-Check')) "$Leg-check" -Shell $shell
+        if ($check.Code -ne 0) { Fail-Leg "upgrade-darling.ps1 -Check under PowerShell 7 exited with $($check.Code), expected 0" }
+        if ($check.Text -notmatch 'Pre-flight passed under PowerShell 7\.\S* \(Core edition\)') { Fail-Leg 'upgrade-darling.ps1 -Check under PowerShell 7 did not report a passed pre-flight under PowerShell 7' }
+        if ((Get-Service -Name $svc -ErrorAction SilentlyContinue) -and (Get-Service -Name $svc).Status -ne 'Stopped') { Fail-Leg 'upgrade-darling.ps1 -Check started the service' }
+        if (Get-ChildItem -LiteralPath $root -Force -Filter '.upgrade-preflight-*' -ErrorAction SilentlyContinue) { Fail-Leg 'upgrade-darling.ps1 -Check left its throwaway folder in the install root' }
+    }
+    $r = Run-Script (Join-Path $stage 'upgrade-darling.ps1') $upgradeArgs "$Leg-run" -Shell $shell
 }
 
 # -- the expectation of the leg ------------------------------------------------------------------------------------
-switch ($Leg) {
+# The expectations are the same in either shell, so the leg's -pwsh suffix is not part of what is switched on.
+switch ("$shape-$which") {
     { $_ -in 'U1-install', 'U1-upgrade', 'U2-install', 'U2-upgrade' } {
         Expect-Success $r "$which-darling.ps1"
         # The upgrade legs start from a service a released install script registered bare, so this also proves the upgrade fixes it.

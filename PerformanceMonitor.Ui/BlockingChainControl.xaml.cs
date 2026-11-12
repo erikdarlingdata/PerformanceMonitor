@@ -125,6 +125,7 @@ public partial class BlockingChainControl : UserControl, IGraphViewer
 
         if (_model.Roots.Count == 0)
         {
+            LayoutUpdated -= FitOnceTheViewerHasASize;
             ShowEmptyState(true);
             return;
         }
@@ -141,6 +142,19 @@ public partial class BlockingChainControl : UserControl, IGraphViewer
             SelectNodeByModel(entry);
             ScrollNodeIntoView(entry);
         }
+
+        // A chain opens fitted (#8534). The viewer's size is known only after a layout pass, and it depends on the properties panel that
+        // the selection above opens, so the fit runs at the end of the first layout pass in which the viewer has a size.
+        LayoutUpdated -= FitOnceTheViewerHasASize;
+        LayoutUpdated += FitOnceTheViewerHasASize;
+    }
+
+    private void FitOnceTheViewerHasASize(object? sender, EventArgs e)
+    {
+        if (ChainScrollViewer.ActualWidth <= 0 || ChainScrollViewer.ActualHeight <= 0) return;
+
+        LayoutUpdated -= FitOnceTheViewerHasASize;
+        ZoomToFit();
     }
 
     private void ShowEmptyState(bool empty)
@@ -537,7 +551,13 @@ public partial class BlockingChainControl : UserControl, IGraphViewer
     private void ZoomIn_Click(object sender, RoutedEventArgs e) => SetZoom(_zoomLevel + ZoomStep);
     private void ZoomOut_Click(object sender, RoutedEventArgs e) => SetZoom(_zoomLevel - ZoomStep);
 
-    private void ZoomFit_Click(object sender, RoutedEventArgs e)
+    private void ZoomFit_Click(object sender, RoutedEventArgs e) => ZoomToFit();
+
+    /// <summary>
+    /// Zooms out until the whole chain is inside the viewer, and never above 100%: a chain that already fits is drawn at 100%, where the
+    /// canvas's alignment puts it in the middle of the viewer.
+    /// </summary>
+    private void ZoomToFit()
     {
         if (ChainCanvas.Width <= 0 || ChainCanvas.Height <= 0) return;
         var viewWidth = ChainScrollViewer.ActualWidth;
@@ -553,7 +573,8 @@ public partial class BlockingChainControl : UserControl, IGraphViewer
         _zoomLevel = Math.Max(MinZoom, Math.Min(MaxZoom, level));
         ZoomTransform.ScaleX = _zoomLevel;
         ZoomTransform.ScaleY = _zoomLevel;
-        ZoomLevelText.Text = $"{(int)(_zoomLevel * 100)}%";
+        // The nearest whole percent (#8491): three Zoom Out steps from 100% land on 0.5499..., which reads 55%, not the truncated 54%.
+        ZoomLevelText.Text = $"{Math.Round(_zoomLevel * 100, MidpointRounding.AwayFromZero)}%";
     }
 
     private void ChainScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)

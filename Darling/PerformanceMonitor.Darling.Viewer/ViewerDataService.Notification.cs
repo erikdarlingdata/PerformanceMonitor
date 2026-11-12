@@ -43,7 +43,8 @@ public sealed partial class ViewerDataService
         "smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy, " +
         "generic_url, generic_headers, generic_body_template, generic_proxy, " +
         "pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve, " +
-        "slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions";
+        "slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions, " +
+        "slack_bot_token, slack_app_token";
 
     /// <summary>The single global notification row (id=1), for the Settings window prefill + migrate-in check.</summary>
     public const string NotificationSelectSql =
@@ -68,10 +69,10 @@ public sealed partial class ViewerDataService
         "SELECT " + NotificationNonSecretColumns + " FROM config_notification WHERE id = 1";
 
     /// <summary>Upserts the single global notification row (Settings window Save). ON CONFLICT rewrites every
-    /// column and bumps <c>config_version</c> via the V17 trigger. $1..$24 in <see cref="NotificationColumns"/> order.</summary>
+    /// column and bumps <c>config_version</c> via the V17 trigger. $1..$26 in <see cref="NotificationColumns"/> order.</summary>
     public const string NotificationUpsertSql = @"
 INSERT INTO config_notification (id, " + NotificationColumns + @", modified_at)
-VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, (now() AT TIME ZONE 'UTC'))
+VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     smtp_host = EXCLUDED.smtp_host,
     smtp_port = EXCLUDED.smtp_port,
@@ -97,6 +98,8 @@ ON CONFLICT (id) DO UPDATE SET
     teams_send_resolutions = EXCLUDED.teams_send_resolutions,
     generic_send_resolutions = EXCLUDED.generic_send_resolutions,
     email_send_resolutions = EXCLUDED.email_send_resolutions,
+    slack_bot_token = EXCLUDED.slack_bot_token,
+    slack_app_token = EXCLUDED.slack_app_token,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>Reads the single global notification row, or null when the store has not seeded it yet. A
@@ -220,6 +223,8 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.TeamsSendResolutions });   // $22
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.GenericSendResolutions }); // $23
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.EmailSendResolutions });   // $24
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.SlackBotToken });       // $25
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.SlackAppToken });       // $26
     }
 
     private static NotificationRow ReadNotificationRow(NpgsqlDataReader reader) => new()
@@ -248,6 +253,8 @@ ON CONFLICT (id) DO UPDATE SET
         TeamsSendResolutions = reader.GetBoolean(21),
         GenericSendResolutions = reader.GetBoolean(22),
         EmailSendResolutions = reader.GetBoolean(23),
+        SlackBotToken = reader.GetString(24),
+        SlackAppToken = reader.GetString(25),
     };
 
     /// <summary>
@@ -285,6 +292,8 @@ ON CONFLICT (id) DO UPDATE SET
         TeamsSendResolutions = reader.GetBoolean(14),
         GenericSendResolutions = reader.GetBoolean(15),
         EmailSendResolutions = reader.GetBoolean(16),
+        SlackBotToken = "",           /* carved (#7656): whoever holds it posts as the bot */
+        SlackAppToken = "",           /* carved (#7656) */
     };
 }
 
@@ -313,6 +322,11 @@ public sealed class NotificationRow
     public string TeamsProxy { get; set; } = "";
     public string SlackUrl { get; set; } = "";
     public string SlackProxy { get; set; } = "";
+
+    /* The Slack bot's tokens (#7656 / V252): the bot token (xoxb-) it posts investigation threads with and the app-level token (xapp-).
+       Sealed like the webhook URLs, to their own slots on this row and to no proxy, and column-REVOKEd from the read-only roles. */
+    public string SlackBotToken { get; set; } = "";
+    public string SlackAppToken { get; set; } = "";
 
     /* Generic webhook (#1506 / V26). GenericUrl and GenericHeaders are secrets — the headers JSON carries
        the Authorization bearer token — and are column-REVOKEd from the read-only viewer role. */
@@ -358,6 +372,8 @@ public sealed class NotificationRow
             && string.Equals(TeamsProxy, other.TeamsProxy, StringComparison.Ordinal)
             && string.Equals(SlackUrl, other.SlackUrl, StringComparison.Ordinal)
             && string.Equals(SlackProxy, other.SlackProxy, StringComparison.Ordinal)
+            && string.Equals(SlackBotToken, other.SlackBotToken, StringComparison.Ordinal)
+            && string.Equals(SlackAppToken, other.SlackAppToken, StringComparison.Ordinal)
             && string.Equals(GenericUrl, other.GenericUrl, StringComparison.Ordinal)
             && string.Equals(GenericHeaders, other.GenericHeaders, StringComparison.Ordinal)
             && string.Equals(GenericBodyTemplate, other.GenericBodyTemplate, StringComparison.Ordinal)

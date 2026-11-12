@@ -114,7 +114,11 @@ public sealed class ViewerBlockingSourceLivePostgresTests
             Assert.Equal(2000, xeOnlyB.TotalDurationMs);
 
             Assert.Equal(Dmv, Assert.Single(await viewer.GetBlockingDurationStatsAsync(DmvOnlyServerId, start, end, null, ct)).Source);
-            Assert.Equal(Dmv, Assert.Single(await viewer.GetBlockingTrendAsync(DmvOnlyServerId, start, end, null, ct)).Source);
+            var dmvOnlyTrend = Assert.Single(await viewer.GetBlockingTrendAsync(DmvOnlyServerId, start, end, null, ct));
+            Assert.Equal(Dmv, dmvOnlyTrend.Source);
+            /* #7219: the rows the DMV arm counted are snapshot rows, not blocked-process reports, and the chart's wording follows the read. */
+            Assert.Equal("Blocking snapshot rows per minute (DMV snapshot)", PerformanceMonitor.Ui.BlockingTrendLabels.LegendFor(new[] { dmvOnlyTrend.Source }));
+            Assert.Equal("snapshot rows", PerformanceMonitor.Ui.BlockingTrendLabels.UnitFor(new[] { dmvOnlyTrend.Source }));
             Assert.Empty(await viewer.GetBlockingDurationStatsAsync(DmvOnlyServerId, start, end, b, ct));
 
             Assert.Empty(await viewer.GetBlockingDurationStatsAsync(EmptyServerId, start, end, null, ct));

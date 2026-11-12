@@ -48,16 +48,16 @@ public sealed class CollectionHealthReadSourceTests : IDisposable
         catch { /* Best-effort cleanup */ }
     }
 
-    private async Task RunAsync(ServerConnection server, string collector, TimeSpan age, string? readSource)
+    private async Task RunAsync(ServerConnection server, string collector, TimeSpan age, string? readSource, string status = "SUCCESS", string? message = null)
     {
         var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, sql_duration_ms, duckdb_duration_ms, read_source)
-                            VALUES ($1, $2, $3, $4, $5, 100, 'SUCCESS', 5, 80, 20, $6)";
+        cmd.CommandText = @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, sql_duration_ms, duckdb_duration_ms, read_source, error_message)
+                            VALUES ($1, $2, $3, $4, $5, 100, $7, 5, 80, 20, $6, $8)";
         void P(object? v) => cmd.Parameters.Add(new DuckDBParameter { Value = v ?? DBNull.Value });
-        P(_nextId++); P(serverId); P(server.ServerName); P(collector); P(DateTime.UtcNow - age); P(readSource);
+        P(_nextId++); P(serverId); P(server.ServerName); P(collector); P(DateTime.UtcNow - age); P(readSource); P(status); P(message);
         await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
@@ -118,6 +118,33 @@ public sealed class CollectionHealthReadSourceTests : IDisposable
         var log = await McpHealthTools.GetCollectionLog(service, servers, server.ServerName);
         Assert.DoesNotContain("read_source", health, StringComparison.Ordinal);
         Assert.DoesNotContain("read_source", log, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7416: the stored message column holds a SUCCESS run's note. The tool and both grid cells keep it out of the error.</summary>
+    [Fact]
+    public async Task ACollectorNoteOnASuccessRun_IsARunNote_NotAnError()
+    {
+        var (service, servers, server) = await StoreAsync("rs-n");
+        await RunAsync(server, "query_store", TimeSpan.FromMinutes(5), null, "SUCCESS", "shred gated: 1");
+        await RunAsync(server, "wait_stats", TimeSpan.FromMinutes(4), null, "ERROR", "login failed");
+        var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+
+        using var doc = JsonDocument.Parse(await McpHealthTools.GetCollectionLog(service, servers, server.ServerName));
+        var runs = doc.RootElement.GetProperty("runs").EnumerateArray().ToList();
+        var ok = runs.Single(r => r.GetProperty("collector").GetString() == "query_store");
+        var failed = runs.Single(r => r.GetProperty("collector").GetString() == "wait_stats");
+        Assert.Equal(JsonValueKind.Null, ok.GetProperty("error_message").ValueKind);
+        Assert.Equal("shred gated: 1", ok.GetProperty("run_note").GetString());
+        Assert.Equal("login failed", failed.GetProperty("error_message").GetString());
+        Assert.Equal(JsonValueKind.Null, failed.GetProperty("run_note").ValueKind);
+
+        var grid = await service.GetRecentCollectionLogAsync(serverId, hoursBack: 1, cancellationToken: TestContext.Current.CancellationToken);
+        var okRow = grid.Single(r => r.CollectorName == "query_store");
+        var failedRow = grid.Single(r => r.CollectorName == "wait_stats");
+        Assert.Equal("", okRow.ErrorFormatted);
+        Assert.Equal("shred gated: 1", okRow.NoteFormatted);
+        Assert.Equal("login failed", failedRow.ErrorFormatted);
+        Assert.Equal("", failedRow.NoteFormatted);
     }
 
     /// <summary>The per-run Collection Log grids' two reads fill the run's read source, and the message cell shows it only on that run.</summary>

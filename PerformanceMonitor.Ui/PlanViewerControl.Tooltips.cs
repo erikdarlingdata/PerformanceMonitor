@@ -20,6 +20,21 @@ public partial class PlanViewerControl
 {
     #region Tooltips
 
+    /// <summary>
+    /// The text colour of a plan warning by its severity, from the theme: <c>PlanWarningCriticalTextBrush</c>, <c>PlanWarningTextBrush</c>
+    /// and <c>PlanWarningInfoTextBrush</c>. Each of the three themes sets them to 4.5:1 or better on the two backgrounds a warning is
+    /// painted on: the tooltip's <c>PlanTooltipBgBrush</c>, and <c>BackgroundLighterBrush</c>, which a Properties section fills its body
+    /// with (#8540). The fixed colours of <see cref="PlanWarningDisplay.WarningSeverityColorHex"/> are the fallback for a host whose
+    /// theme has no such key.
+    /// </summary>
+    private SolidColorBrush WarningSeverityBrush(PlanWarningSeverity severity)
+    {
+        var key = severity == PlanWarningSeverity.Critical ? "PlanWarningCriticalTextBrush"
+            : severity == PlanWarningSeverity.Warning ? "PlanWarningTextBrush" : "PlanWarningInfoTextBrush";
+        return (TryFindResource(key) as SolidColorBrush)
+            ?? new SolidColorBrush((Color)ColorConverter.ConvertFromString(PlanWarningDisplay.WarningSeverityColorHex(severity)));
+    }
+
     private ToolTip BuildNodeTooltip(PlanNode node, List<PlanWarning>? allWarnings = null)
     {
         var tip = new ToolTip
@@ -53,7 +68,7 @@ public partial class PlanViewerControl
 
         // Rows
         AddTooltipSection(stack, "Rows");
-        AddTooltipRow(stack, "Estimated Rows", $"{node.EstimateRows:N1}");
+        AddTooltipRow(stack, "Estimated Rows", MetricFormatter.FormatEstimatedRows(node.EstimateRows));
         if (node.HasActualStats)
         {
             AddTooltipRow(stack, "Actual Rows", $"{node.ActualRows:N0}");
@@ -181,12 +196,12 @@ public partial class PlanViewerControl
 
                 foreach (var (type, severity, count) in distinct)
                 {
-                    var warnColor = PlanWarningDisplay.WarningSeverityColorHex(severity);
+                    var warnBrush = WarningSeverityBrush(severity);
                     var label = count > 1 ? $"\u26A0 {type} ({count})" : $"\u26A0 {type}";
                     stack.Children.Add(new TextBlock
                     {
                         Text = label,
-                        Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor)),
+                        Foreground = warnBrush,
                         FontSize = 11,
                         Margin = new Thickness(0, 2, 0, 0)
                     });
@@ -197,11 +212,11 @@ public partial class PlanViewerControl
                 // Individual node: show full warning messages
                 foreach (var w in warnings)
                 {
-                    var warnColor = PlanWarningDisplay.WarningSeverityColorHex(w.Severity);
+                    var warnBrush = WarningSeverityBrush(w.Severity);
                     stack.Children.Add(new TextBlock
                     {
                         Text = $"\u26A0 {w.WarningType}: {w.Message}",
-                        Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor)),
+                        Foreground = warnBrush,
                         FontSize = 11,
                         TextWrapping = TextWrapping.Wrap,
                         Margin = new Thickness(0, 2, 0, 0)

@@ -153,12 +153,16 @@ internal sealed class DarlingHttpRefusalLog
     /// caller passes <paramref name="nowUtc"/> — so the whole policy is testable without a host, a socket
     /// or a wait.
     /// </summary>
-    public Decision Observe(DarlingRefusalGate gate, string? source, DateTime nowUtc)
+    public Decision Observe(DarlingRefusalGate gate, string? source, DateTime nowUtc, string? state = null)
     {
+        /* #8611: a gate with more than one refusal state names it (the token gate: no header, not a Bearer, a Bearer that misses,
+           held). Each state has its own slot, so a "no header" line never hides the first wrong-token line from the same source. The
+           state is one of a few fixed strings the caller picks, never client text. */
         var key = string.Concat(
             gate.ToString(),
             "|",
-            string.IsNullOrWhiteSpace(source) ? UnknownSource : source);
+            string.IsNullOrWhiteSpace(source) ? UnknownSource : source,
+            state is null ? string.Empty : "|" + state);
 
         lock (_sync)
         {
@@ -288,7 +292,7 @@ internal sealed class DarlingHttpRefusalLog
         DarlingRefusalGate.SignIn => "OIDC sign-in flow (web.network.oidc)",
         DarlingRefusalGate.PreAuthFailure => "failure before the request was authenticated",
         DarlingRefusalGate.JsonContentType => "JSON-only POST check (Content-Type)",
-        DarlingRefusalGate.ReadsOnlyDashboard => $"reads-only dashboard (set web.network.encryptedToken, at least {DarlingHostBinding.MinimumTokenLength} characters, to make changes)",
+        DarlingRefusalGate.ReadsOnlyDashboard => $"reads-only dashboard (set web.network.encryptedToken, at least {DarlingHostBinding.MinimumTokenLength} characters with at least {DarlingHostBinding.MinimumDistinctTokenCharacters} different ones, to make changes)",
         DarlingRefusalGate.TokenSignInSite => "same-site check on the token sign-in form (set web.publicBaseUrl behind a proxy that rewrites Host)",
         _ => gate.ToString(),
     };
@@ -328,8 +332,8 @@ internal sealed class DarlingHttpRefusalLog
         return string.Format(
             CultureInfo.InvariantCulture,
             decision.Aggregated
-                ? " {0} further refusal(s) through this gate, from other sources, were not logged in the last {1} minute(s)."
-                : " {0} further refusal(s) from this source were not logged in the last {1} minute(s).",
+                ? " {0} further refusal(s) through this gate, from other sources, were not logged in the {1} minute(s) after the previous line."
+                : " {0} further refusal(s) from this source were not logged in the {1} minute(s) after the previous line.",
             decision.SuppressedSinceLastLog,
             (int)Math.Round(window.TotalMinutes));
     }
@@ -345,10 +349,11 @@ internal sealed class DarlingHttpRefusalLog
         int statusCode,
         IPAddress? remote,
         string reason,
-        DateTime nowUtc)
+        DateTime nowUtc,
+        string? state = null)
     {
         var source = DescribeSource(remote);
-        var decision = Observe(gate, source, nowUtc);
+        var decision = Observe(gate, source, nowUtc, state);
         if (!decision.Log)
         {
             return;

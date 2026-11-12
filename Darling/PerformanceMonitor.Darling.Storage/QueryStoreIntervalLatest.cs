@@ -495,7 +495,9 @@ WHERE t.server_id = $1;";
         {
             await using var cmd = new NpgsqlCommand(PlanRegressionDaily.BuiltDaysSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
-            cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, windowFloor);
+            /* #7873: the column is timestamp without time zone holding UTC wall time, and Npgsql refuses a Kind=Utc value for that
+               type. The regression baseline's raw read hands in its UTC start's date, which keeps its kind. */
+            cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(windowFloor, DateTimeKind.Unspecified));
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {

@@ -93,7 +93,7 @@ public sealed class ManageQueryTagsBehaviourTests
 
         var first = r.GetProperty("first");
         Assert.Equal(1, first.GetProperty("calls").GetInt32());
-        Assert.Contains("1 child tag(s), 2 hand assignment(s), 1 rule(s) would go with it.", first.GetProperty("text").GetString());
+        Assert.Contains("1 child tag, 2 hand assignments, 1 rule would go with it.", first.GetProperty("text").GetString());
         Assert.Equal(1, first.GetProperty("anyway").GetInt32());
         var calls = r.GetProperty("calls");
         Assert.Equal(2, calls.GetArrayLength());
@@ -146,7 +146,7 @@ public sealed class ManageQueryTagsBehaviourTests
         if (!TryRun("ruleTest", out var test)) return;
         Assert.StartsWith("/api/query-tag-rules/test?field=application&pattern=rep", test.GetProperty("calls")[0].GetProperty("url").GetString());
         var text = test.GetProperty("text").GetString();
-        Assert.Contains("12 key(s) examined, 5 matched: 3 would be tagged, 1 held by a hand assignment, 1 held by a higher rule.", text);
+        Assert.Contains("12 keys examined, 5 matched: 3 would be tagged, 1 held by a hand assignment, 1 held by a higher rule.", text);
         Assert.Contains("would_tag: 0xAA (application = <script>x</script>)", text);
     }
 

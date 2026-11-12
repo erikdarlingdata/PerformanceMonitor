@@ -364,6 +364,11 @@ const scenarios = {
     const root = await build("SRV1");
     return { checked: checkedNames(root), reads: trendReads() };
   },
+  nameOrder: async () => {
+    statNames = ["gamma", "Delta", "beta", "alpha", "Alpha", "Beta"];
+    const root = await build("SRV1");
+    return { listed: listed(root) };
+  },
   checkUncheck: async () => {
     const root = await build("SRV1");
     const before = checkedNames(root);

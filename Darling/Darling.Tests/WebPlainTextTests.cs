@@ -140,7 +140,7 @@ public sealed class WebPlainTextTests
     public void CollectorMeasurementCounts_ReadAsWords()
     {
         var o = Run(["latest run: shred_gated=1 events_read=0 report_xml_empty=0"], out _);
-        Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[0]);
+        Assert.Equal("latest run: shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0, report xml empty: 0", o[0]);
     }
 
     /* #6649: the left-out databases pointer, the baseline window sentence and the memory clerk note's four arms reached the page
@@ -175,6 +175,21 @@ public sealed class WebPlainTextTests
             Assert.DoesNotContain("memory_clerks", line);
             Assert.DoesNotContain("(s)", line);
         }
+    }
+
+    /* #7557: two reads that one tab shows, named one after the other, are that tab once, with a capital when the text or a sentence opens with them. */
+    [Fact]
+    public void TwoReadsOnOneTab_AreThatTabOnce()
+    {
+        var o = Run(
+        [
+            "get_pg_top_queries or get_pg_plans has the statements.",
+            "Try get_pg_top_queries, get_pg_plans for the slow ones.",
+            "Read the captured graphs (get_pg_deadlocks, then get_pg_deadlock_detail for one) for the lock modes.",
+        ], out _);
+        Assert.Equal("The Activity tab has the statements.", o[0]);
+        Assert.Equal("Try the Activity tab for the slow ones.", o[1]);
+        Assert.Equal("Read the captured graphs (the Activity tab for one) for the lock modes.", o[2]);
     }
 
     /* #6750: the empty-baseline sentence and the cut-recent-window sentences, read from the C# that owns them, reach the page without
@@ -235,7 +250,7 @@ public sealed class WebPlainTextTests
     {
         var o = Run(
         [
-            "Each point averages the samples in one 5-minute bucket and is stamped at the bucket's start. A level is averaged, never summed, so a spike inside a bucket is smoothed into its average; narrow the bucket to see it. The width was chosen to keep this answer near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.",
+            "Each point averages the samples in one 5-minute bucket and is stamped at the bucket's start. A level is averaged, never summed, so a spike inside a bucket is smoothed into its average; narrow the bucket to see it. The width was chosen to keep this answer near 1,500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.",
             "wait_time_ms_per_second is recomputed from the summed wait time over the seconds the collections covered.",
             "collisions_per_second is recomputed from the summed delta.",
             "The session counts are levels, averaged, never summed; top_application_name, top_application_connections, top_host_name and top_host_connections are the newest collection's own values in the bucket.",
@@ -307,16 +322,28 @@ public sealed class WebPlainTextTests
         Assert.Contains("starts partway into the window, so", o[0]);
     }
 
+    /* #7682: the CPU tab prints get_cpu_utilization's host_cpu_note under the chart. The raw note names four reply fields and ends "null is not 0";
+       the page says what is not reported and what is drawn, and keeps the engine and version words the reply carries. */
+    [Fact]
+    public void TheHostCpuNote_IsSaidAsWhatIsNotReportedAndWhatIsDrawn()
+    {
+        var o = Run([TrendPayloads.HostCpuUnavailableNote], out _);
+        Assert.Equal("This server cannot report host CPU (SQL Server on Linux before 2025 CU1), so only SQL Server's own CPU is drawn.", o[0]);
+        Assert.DoesNotContain("other_process_cpu", o[0]);
+        Assert.DoesNotContain("peak_total_cpu", o[0]);
+        Assert.DoesNotContain("null is not 0", o[0]);
+    }
+
     /* #5644 W8: the clauses that point an MCP caller at a parameter the page has no control for. */
     [Fact]
     public void ParameterClauses_ForAnMcpCaller_AreDroppedOrSaidInThePagesWords()
     {
         var o = Run(
         [
-            "The width was chosen to keep this answer near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.",
+            "The width was chosen to keep this answer near 1,500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.",
             "TRUNCATED: 300 indexes match and 200 were returned. Rows are ordered by total wait time descending; raise limit to see more.",
-            "TRUNCATED: 9 indexes match database 'x' and 5 were returned. This says nothing about databases outside the filter — raise limit to see more.",
-            "TRUNCATED: 9 indexes match and 5 were returned. This is not evidence that a database was not collected — pass database_name to ask about one, or raise limit.",
+            "TRUNCATED: 9 indexes match database 'x' and 5 were returned. This says nothing about databases outside the filter: raise limit to see more.",
+            "TRUNCATED: 9 indexes match and 5 were returned. This is not evidence that a database was not collected: pass database_name to ask about one, or raise limit.",
             " truncated: 5 of 9 returned; raise limit (now 5) for more.",
             "The row limit of 50 was REACHED: databases[] holds the 50 biggest spillers and the totals above still cover every database - raise limit to see the rest of the rows.",
             "At least one database's statistics WERE reset in this window - see stats_reset_count per database, and raise limit if none of the databases returned shows one - so its totals are lower bounds.",
@@ -324,9 +351,10 @@ public sealed class WebPlainTextTests
             "No active query snapshots on SQL2025 in the last 1 hour(s) matched database_name 'Sales' with blocking_only with wait_type 'LCK_M_X'.",
             "3 sp_server_diagnostics event(s) were captured for SQL2025 in the last 1 hour(s) and none qualified. Events ARE being captured, so this is the healthy answer for this read rather than missing data.",
             "TRUNCATED: 40 groups were in scope; only the top 25 (by name) are returned. Scope by server_name, or raise limit, to see the rest.",
+            "No long-running query completions found in the specified time range. The monitor's own statements are left out. Pass include_monitor=true to include them.",
         ], out _);
 
-        Assert.Equal("The width was chosen to keep this answer near 1500 points; narrow the time range for finer points.", o[0]);
+        Assert.Equal("The width was chosen to keep this answer near 1,500 points; narrow the time range for finer points.", o[0]);
         Assert.Equal("TRUNCATED: 300 indexes match and 200 were returned. Rows are ordered by total wait time descending.", o[1]);
         Assert.EndsWith("outside the filter.", o[2]);
         Assert.EndsWith("filter by database to ask about one.", o[3]);
@@ -337,12 +365,15 @@ public sealed class WebPlainTextTests
         Assert.Contains("matched database 'Sales' with blocking queries only with wait type 'LCK_M_X'.", o[8]);
         Assert.Contains("so this is a normal result, not missing data.", o[9]);
         Assert.EndsWith("Select a single server to see the rest.", o[10]);
+        /* #7684 item 2: the page names its Monitor statements switch, not the MCP argument. */
+        Assert.EndsWith("The monitor's own statements are left out. Turn on Monitor statements to include them.", o[11]);
         foreach (var line in o)
         {
             Assert.DoesNotContain("raise limit", line);
             Assert.DoesNotContain("bucket_minutes", line);
             Assert.DoesNotContain("blocking_only", line);
             Assert.DoesNotContain("healthy answer for this read", line);
+            Assert.DoesNotContain("include_monitor", line);
         }
     }
 
@@ -388,9 +419,9 @@ public sealed class WebPlainTextTests
             "pg_wraparound_stats failed; last_error has the text",
         ], out _);
         Assert.Equal("use Collection Health to find where it stopped", o[0]);
-        Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[1]);
+        Assert.Equal("latest run: shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0, report xml empty: 0", o[1]);
         Assert.Equal("latest run: events read: 4", o[2]);
-        Assert.Equal("latest noted run: shred gated: 1, events read: 0 (3 of 5 runs)", o[3]);
+        Assert.Equal("latest noted run: shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0 (3 of 5 runs)", o[3]);
         Assert.Equal("the freeze-headroom collector failed; Last Error has the text", o[4]);
     }
 
@@ -433,7 +464,7 @@ public sealed class WebPlainTextTests
             "Nothing to report.",
         ], out _);
         Assert.Equal("No findings in the requested time range.", o[0]);
-        Assert.Equal("If a replica is supposed to be attached, check the Replication tab.", o[1]);
+        Assert.Equal("If a replica is supposed to be attached, check the Slots section of the Replication tab.", o[1]);
         Assert.Equal("The Trace Flags collector has never run against this server, while the server itself is up.", o[2]);
         Assert.Equal("No rows. Check the Trace Flags collector's latest successful run.", o[3]);
         Assert.Equal("3 point-in-time fact(s) could still be read here.", o[4]);
@@ -545,6 +576,31 @@ public sealed class WebPlainTextTests
         Assert.Equal(line, o[0]);
         Assert.DoesNotContain("AppliesTo", o[0]);
         Assert.Equal("No stored plan for this query. pg_stat_statements has none.", o[1]);
+    }
+
+    /// <summary>#7690: the Extensions note, the Wait Trend empty text and the Index Bloat note were written for an MCP reader and name a field
+    /// (install_census, exact_measurement_command) or a tier (service_sampled). The page names the panel, the column and the sampler.</summary>
+    [Fact]
+    public void ThePgNotesWrittenForAnMcpReader_NameThePanelTheColumnAndTheSampler()
+    {
+        var extensions = "Per DATABASE, not per cluster: installed_version describes the database the row names. 'available' means the files are present and CREATE EXTENSION would work "
+            + "— usually a one-line fix for an empty panel elsewhere. Rows are the PRODUCT of databases and extension names, so this row list outgrows any row limit on a "
+            + "multi-database host: read install_census for what is installed where, because it is aggregated per extension and no limit touches it.";
+        var waitTrend = "No wait event gained samples on srv in the last 24 hour(s), so there is nothing to follow. This server is on the service_sampled tier "
+            + "(the pg_wait_sampling extension is not installed), so \"none to sample\" was measured over one-second polls in a 30-second window each cycle.";
+        var bloat = "median absolute error is 2.79 percentage points and p90 is 6.63, which is close enough to decide WHICH index to act on and not close enough to "
+            + "justify a REINDEX on its own: use exact_measurement_command for that, on the one index concerned.";
+
+        var o = Run([extensions, waitTrend, bloat], out _);
+
+        Assert.Contains("Each row describes one database, not the whole server", o[0], StringComparison.Ordinal);
+        Assert.Contains("The Extension Install Census shows what is installed where", o[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("install_census", o[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("installed_version", o[0], StringComparison.Ordinal);
+        Assert.Contains("on the service sampler (the pg_wait_sampling extension is not installed)", o[1], StringComparison.Ordinal);
+        Assert.DoesNotContain("service_sampled", o[1], StringComparison.Ordinal);
+        Assert.Contains("on its own. Use the Measure It Exactly column for that, on the one index concerned.", o[2], StringComparison.Ordinal);
+        Assert.DoesNotContain("exact_measurement_command", o[2], StringComparison.Ordinal);
     }
 
     /// <summary>#6178: the sentence the service writes for an Azure SQL Database names the engine on the page, from the real gate text; the

@@ -75,6 +75,18 @@
 
     <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource BorderColor}"/>
     <SolidColorBrush x:Key="BorderLightBrush" Color="{StaticResource BorderLightColor}"/>
+    <!-- #7218: the Availability Groups cards draw their outline from this key. Same value as the Darling Viewer dark theme. -->
+    <SolidColorBrush x:Key="CardBorderBrush" Color="#3A3D45"/>
+    <!-- #8221: the outline of a button, a text box and a combo box, and the track a bar sits on. 3:1 or better against the page and the card
+         on the two light themes, where the pale BorderBrush (a grid line) left them looking like no control at all. -->
+    <SolidColorBrush x:Key="ControlBorderBrush" Color="#3A3D45"/>
+    <!-- #8540: the outline of a check box and a radio button. 3:1 or better against the page and the card, which ControlBorderBrush is not on this theme,
+         so a box that is off shows as a box, and a disabled one can be weaker and still show. -->
+    <SolidColorBrush x:Key="BoxBorderBrush" Color="#7E838E"/>
+    <!-- #8540: the outline of a disabled check box and radio button. 3:1 against the page and the card, so an unchecked box that cannot be changed
+         still shows as a box, and weaker than the outline of an enabled one. -->
+    <SolidColorBrush x:Key="DisabledBoxBorderBrush" Color="#6A6F78"/>
+    <SolidColorBrush x:Key="BarTrackBrush" Color="#1AFFFFFF"/>
 
     <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}"/>
     <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}"/>
@@ -239,7 +251,7 @@
 
     <!-- No Data Message Style (for empty DataGrids) -->
     <Style x:Key="NoDataMessage" TargetType="TextBlock">
-        <Setter Property="Text" Value="No data for the selected time range."/>
+        <Setter Property="Text" Value="No data in the selected time window."/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
         <Setter Property="FontSize" Value="14"/>
         <Setter Property="HorizontalAlignment" Value="Center"/>
@@ -462,6 +474,9 @@
                         <Trigger Property="IsFocused" Value="True">
                             <Setter TargetName="border" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
                         </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.5"/>
+                        </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
@@ -560,7 +575,7 @@
                                  HorizontalAlignment="Left" VerticalAlignment="Center"
                                  Margin="6,4,23,4" Focusable="True"
                                  Background="Transparent" Foreground="{StaticResource ForegroundBrush}"
-                                 Visibility="Hidden" IsReadOnly="{TemplateBinding IsReadOnly}"/>
+                                 Visibility="Hidden" BorderThickness="0" IsReadOnly="{TemplateBinding IsReadOnly}"/>
                         <Popup x:Name="Popup" Placement="Bottom" IsOpen="{TemplateBinding IsDropDownOpen}"
                                AllowsTransparency="True" Focusable="False" PopupAnimation="Slide">
                             <Grid x:Name="DropDown" SnapsToDevicePixels="True"
@@ -577,6 +592,11 @@
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
+                        </Trigger>
+                        <!-- #6452: an IsEditable combo types into PART_EditableTextBox; it was Hidden for good, so the box read blank. -->
+                        <Trigger Property="IsEditable" Value="True">
+                            <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/>
+                            <Setter TargetName="ContentSite" Property="Visibility" Value="Collapsed"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -619,18 +639,85 @@
         </Setter>
     </Style>
 
+    <!-- #8221: the server pickers name each item by the server (a screen reader would say the model type). It lives in the theme, not in the tab,
+         because a tab's BasedOn="{StaticResource {x:Type ComboBoxItem}}" is looked up once when the tab loads and keeps the theme it loaded under. -->
+    <Style x:Key="ServerSelectorItemStyle" TargetType="ComboBoxItem" BasedOn="{StaticResource {x:Type ComboBoxItem}}">
+        <Setter Property="AutomationProperties.Name" Value="{Binding DisplayNameWithIntent, Mode=OneTime}"/>
+    </Style>
+
+    <!-- ============================================ -->
+    <!-- ListBox Style                                -->
+    <!-- ============================================ -->
+    <!-- #4683: the stock (Aero2) ListBox template's IsEnabled=False trigger sets its inner border "Bd" to a
+         white Background (#FFFFFF) and a light-gray BorderBrush (#D9D9D9) BY TargetName, which beats anything
+         a style or the list itself sets. A disabled list therefore rendered as a solid white box in every
+         theme (the sidebar server list while the store is unavailable, #4648). Only the Template can fix that,
+         so this style carries a copy of the stock template with a different disabled trigger: the list keeps
+         its own Background and BorderBrush and only dims. It sets nothing else, so the stock theme style still
+         supplies every other ListBox default, and an enabled list renders exactly as before. The dimming is
+         this theme's own disabled Opacity (the implicit Button, AccentButton, SuccessButton and PasswordBox
+         styles above). -->
+    <Style TargetType="ListBox">
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ListBox">
+                    <Border x:Name="Bd"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            Padding="1"
+                            SnapsToDevicePixels="True">
+                        <ScrollViewer Padding="{TemplateBinding Padding}" Focusable="False">
+                            <ItemsPresenter SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"/>
+                        </ScrollViewer>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.5"/>
+                        </Trigger>
+                        <MultiTrigger>
+                            <MultiTrigger.Conditions>
+                                <Condition Property="IsGrouping" Value="True"/>
+                                <Condition Property="VirtualizingPanel.IsVirtualizingWhenGrouping" Value="False"/>
+                            </MultiTrigger.Conditions>
+                            <Setter Property="ScrollViewer.CanContentScroll" Value="False"/>
+                        </MultiTrigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+
+    <!-- #8222: the keyboard focus cue. A 1 px accent outline instead of the stock dotted box. WPF draws a FocusVisualStyle only
+         when focus arrived by keyboard (Tab, arrows), so a mouse click leaves nothing. The tab styles below name it, and
+         App.InstallKeyboardFocusCue makes it the default for every other control. The brush is a DynamicResource so one style
+         instance follows a theme switch. -->
+    <Style x:Key="KeyboardFocusVisualStyle">
+        <Setter Property="Control.Template">
+            <Setter.Value>
+                <ControlTemplate>
+                    <Rectangle Stroke="{DynamicResource AccentBrush}" StrokeThickness="1" RadiusX="2" RadiusY="2"
+                               SnapsToDevicePixels="True" IsHitTestVisible="False"/>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- ============================================ -->
     <!-- TabControl Style                             -->
     <!-- ============================================ -->
+    <!-- #8169: the tab strip is ONE row that scrolls. The template puts the tabs in a horizontal ScrollViewer beside a "»"
+         button; TabStripOverflow (PerformanceMonitor.Ui) shows the button only while a tab does not fit, lists exactly the
+         tabs that do not fit, selects the one clicked and scrolls it into view. A row that scrolls cannot reorder, so the
+         F18 problem the stock TabPanel had (the row holding the selected tab jumps to the bottom, and the tabs under the
+         cursor change) cannot happen. Same parts as the stock template (the tab strip on top, the selected content below). -->
     <Style TargetType="TabControl">
         <Setter Property="Background" Value="{StaticResource BackgroundBrush}"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="0"/>
-        <!-- F18 (Lite click-through): the stock template lays the tabs out in a TabPanel, which moves the row holding the
-             selected tab to the bottom, so clicking a tab in an upper row swaps the rows and every tab under the cursor changes.
-             A WrapPanel wraps the same way and never reorders its rows. Same parts as the stock template (the tab strip
-             on top, the selected content below). -->
+        <Setter Property="helpers:TabStripOverflow.Enabled" Value="True"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="TabControl">
@@ -639,10 +726,44 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <WrapPanel x:Name="HeaderPanel" Grid.Row="0" IsItemsHost="True" Panel.ZIndex="1"
-                                   KeyboardNavigation.TabIndex="1"
-                                   KeyboardNavigation.TabNavigation="Once"
-                                   KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                        <Grid Grid.Row="0" Panel.ZIndex="1" Margin="{Binding Path=(helpers:TabStripOverflow.HeaderMargin), RelativeSource={RelativeSource TemplatedParent}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <ScrollViewer x:Name="PART_TabStripScroll" Grid.Column="0" Focusable="False"
+                                          HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
+                                <StackPanel x:Name="HeaderPanel" Orientation="Horizontal" IsItemsHost="True"
+                                            KeyboardNavigation.TabIndex="1"
+                                            KeyboardNavigation.TabNavigation="Once"
+                                            KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                            </ScrollViewer>
+                            <Button x:Name="PART_TabOverflowButton" Grid.Column="1" Visibility="Collapsed"
+                                    Content="&#187;" ToolTip="Tabs that do not fit"
+                                    AutomationProperties.Name="More tabs" Focusable="False" Cursor="Hand"
+                                    Foreground="{StaticResource ForegroundBrush}" Padding="10,0">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="overflowBorder" Background="Transparent" CornerRadius="3,3,0,0"
+                                                Padding="{TemplateBinding Padding}">
+                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True">
+                                                <ContentPresenter.Resources>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="FontSize" Value="16"/>
+                                                        <Setter Property="FontWeight" Value="Bold"/>
+                                                    </Style>
+                                                </ContentPresenter.Resources>
+                                            </ContentPresenter>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="overflowBorder" Property="Background" Value="{StaticResource BackgroundLighterBrush}"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
+                        </Grid>
                         <Border x:Name="ContentPanel" Grid.Row="1"
                                 Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}"
@@ -660,20 +781,23 @@
         </Setter>
     </Style>
 
+    <!-- #8169: the main tabs are flat like the Viewer's DarkTabItem: no fill until hovered or selected, and never the
+         accent. The selected tab takes the raised background and full ink; the rest are dim. The #3577 shadow style below
+         still lets a header string, or a custom header's text, inherit the TabItem's Foreground instead of the app
+         TextBlock style (explicit Foregrounds on custom header elements, such as the alert badge, still win). -->
     <Style TargetType="TabItem">
-        <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
-        <!-- ForegroundBrush, not Dim: the header text has always rendered in ForegroundBrush (see the presenter
-             note below), so this keeps the unselected tab exactly as it looked while the selected setter
-             becomes live. -->
-        <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="Foreground" Value="{StaticResource ForegroundDimBrush}"/>
         <Setter Property="BorderThickness" Value="0"/>
-        <Setter Property="Padding" Value="12,8"/>
+        <Setter Property="Padding" Value="14,6"/>
         <Setter Property="Margin" Value="0,0,2,0"/>
+        <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusVisualStyle}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="TabItem">
                     <Border x:Name="border"
                             Background="{TemplateBinding Background}"
+                            BorderBrush="{StaticResource AccentBrush}"
                             BorderThickness="0"
                             CornerRadius="3,3,0,0"
                             Padding="{TemplateBinding Padding}"
@@ -682,38 +806,21 @@
                                           ContentSource="Header"
                                           HorizontalAlignment="Center"
                                           VerticalAlignment="Center">
-                            <!-- #3577: a string header becomes a TextBlock, and this dictionary's app-level
-                                 implicit TextBlock style out-ranks the Foreground that TextBlock would inherit
-                                 from the TabItem (WPF looks an implicit style up past the template boundary into
-                                 Application resources, and a style setter beats an inherited value). So the
-                                 Foreground setters on this style never reached the header text: the selected
-                                 tab always rendered ForegroundBrush on the accent fill — 1.99:1 on Dark, 2.71:1 on
-                                 Cool Breeze. An empty implicit style HERE is found first and shadows the app-level
-                                 one inside the header, so the text inherits the TabItem's Foreground the way
-                                 stock WPF intends. Explicit Foregrounds on custom header elements (the alert
-                                 badge) are local values and still win. -->
                             <ContentPresenter.Resources>
                                 <Style TargetType="TextBlock"/>
                             </ContentPresenter.Resources>
                         </ContentPresenter>
                     </Border>
                     <ControlTemplate.Triggers>
-                        <Trigger Property="IsSelected" Value="True">
-                            <Setter TargetName="border" Property="Background" Value="{StaticResource AccentBrush}"/>
-                            <!-- #3577: was a literal #E4E6EB, 1.99:1 on the accent and dead (see above). Now the
-                                 live on-accent ink: 7.52:1 selected, 9.49:1 selected+hover. -->
-                            <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}"/>
-                        </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="border" Property="Background" Value="{StaticResource BackgroundLighterBrush}"/>
+                            <Setter TargetName="border" Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
+                            <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
                         </Trigger>
-                        <MultiTrigger>
-                            <MultiTrigger.Conditions>
-                                <Condition Property="IsSelected" Value="True"/>
-                                <Condition Property="IsMouseOver" Value="True"/>
-                            </MultiTrigger.Conditions>
-                            <Setter TargetName="border" Property="Background" Value="{StaticResource AccentHoverBrush}"/>
-                        </MultiTrigger>
+                        <Trigger Property="IsSelected" Value="True">
+                            <Setter TargetName="border" Property="Background" Value="Transparent"/>
+                            <Setter TargetName="border" Property="BorderThickness" Value="0,0,0,2"/>
+                            <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
+                        </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
@@ -726,8 +833,9 @@
         <Setter Property="Background" Value="Transparent"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundDimBrush}"/>
         <Setter Property="BorderThickness" Value="0"/>
-        <Setter Property="Padding" Value="10,6"/>
-        <Setter Property="Margin" Value="0,0,4,0"/>
+        <Setter Property="Padding" Value="6,6"/>
+        <Setter Property="Margin" Value="0,0,2,0"/>
+        <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusVisualStyle}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="TabItem">
@@ -754,12 +862,58 @@
         </Setter>
     </Style>
 
+    <!-- #8169: sub-sub tabs, the strip inside a sub-tab. A smaller face and a thinner underline than SubTabItemStyle, so the
+         three levels (main, sub, sub-sub) read as three sizes. -->
+    <Style x:Key="SubSubTabItemStyle" TargetType="TabItem">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="Foreground" Value="{StaticResource ForegroundDimBrush}"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="FontSize" Value="11"/>
+        <Setter Property="Padding" Value="8,4"/>
+        <Setter Property="Margin" Value="0,0,2,0"/>
+        <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusVisualStyle}"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TabItem">
+                    <Border x:Name="border"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{StaticResource AccentBrush}"
+                            BorderThickness="0"
+                            Padding="{TemplateBinding Padding}">
+                        <ContentPresenter ContentSource="Header"
+                                          HorizontalAlignment="Center"
+                                          VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsSelected" Value="True">
+                            <Setter TargetName="border" Property="BorderThickness" Value="0,0,0,1"/>
+                            <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="border" Property="Background" Value="{StaticResource BackgroundLighterBrush}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- #8169: the server tab strip (ServerTab.xaml's MainTabControl): the scrolling strip above, with the sub-tab underline
+         on every tab. -->
+    <Style x:Key="ServerTabStripStyle" TargetType="TabControl" BasedOn="{StaticResource {x:Type TabControl}}">
+        <Setter Property="ItemContainerStyle" Value="{StaticResource SubTabItemStyle}"/>
+    </Style>
+
     <!-- ============================================ -->
     <!-- DataGrid Style                               -->
     <!-- ============================================ -->
     <Style TargetType="DataGrid">
         <Setter Property="helpers:DataGridClipboardBehavior.FixHeaderCopy" Value="True"/>
         <Setter Property="helpers:DataGridSortBehavior.SortDescendingFirst" Value="True"/>
+        <Setter Property="helpers:DataGridFillColumn.Enabled" Value="True"/>
+        <Setter Property="helpers:DataGridHeaderFit.Enabled" Value="True"/>
+        <!-- A text column with no element style of its own ends a too-long text with an ellipsis, as DataGridCellText does. -->
+        <Setter Property="helpers:DataGridCellTrimming.Enabled" Value="True"/>
         <Setter Property="helpers:ScrollPanBehavior.EnableMiddleClickPanning" Value="True"/>
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
@@ -773,8 +927,8 @@
         <Setter Property="HorizontalGridLinesBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="VerticalGridLinesBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="HeadersVisibility" Value="Column"/>
-        <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Visible"/>
-        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Visible"/>
+        <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
     </Style>
 
     <!-- Column header resize gripper -->
@@ -853,6 +1007,12 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+        <!-- #8223: the blank header cell the grid draws after its last column (its filler header, no content) takes the header background without the cell border, so it reads as the rest of the header bar. -->
+        <Style.Triggers>
+            <Trigger Property="Content" Value="{x:Null}">
+                <Setter Property="BorderThickness" Value="0,0,0,1"/>
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <!-- Column header style when filter is active - subtle blue highlight -->
@@ -871,12 +1031,16 @@
     <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}"                Color="{StaticResource AccentForegroundColor}"/>
     <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}"   Color="{StaticResource AccentColor}"/>
     <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}" Color="{StaticResource AccentForegroundColor}"/>
+    <!-- #8306: the control grey the stock scroll viewer paints where its two bars meet (and any other stock chrome that reads it) takes the scroll track's colour. -->
+    <SolidColorBrush x:Key="{x:Static SystemColors.ControlBrushKey}"                       Color="{StaticResource BackgroundDarkColor}"/>
 
     <!-- Named base style for DataGridTextColumn ElementStyles that must set an explicit
          Foreground.  BasedOn this style; keep the unselected Foreground setter in the
          derived style and let this base trigger override it during row selection. -->
     <Style x:Key="DataGridCellText" TargetType="TextBlock">
         <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
+        <!-- A cell too narrow for its text ends it with an ellipsis instead of cutting it at the cell's edge. -->
+        <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
         <Style.Triggers>
             <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=DataGridRow, AncestorLevel=1}, FallbackValue=False}" Value="True">
                 <Setter Property="Foreground" Value="{DynamicResource GridSelectionForegroundBrush}"/>
@@ -887,6 +1051,14 @@
     <!-- Right-aligned text style for numeric DataGrid columns -->
     <Style x:Key="NumericCell" TargetType="TextBlock" BasedOn="{StaticResource DataGridCellText}">
         <Setter Property="TextAlignment" Value="Right"/>
+    </Style>
+
+    <!-- #6225: a cell that holds free text a server stored with its line breaks (a statement, a log message, a plan). Every other
+         cell of a row is centred in it, so a text that makes the row hundreds of pixels tall pushes the numbers out of view and the
+         row reads as blank. The cap keeps the row to a few lines; the tooltip or the cell's full text is where the rest is read. -->
+    <Style x:Key="FreeTextCell" TargetType="TextBlock" BasedOn="{StaticResource DataGridCellText}">
+        <Setter Property="MaxHeight" Value="90"/>
+        <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
     </Style>
 
     <Style TargetType="DataGridCell">
@@ -969,8 +1141,172 @@
     <!-- ============================================ -->
     <!-- ScrollBar Style                              -->
     <!-- ============================================ -->
+    <!-- #8223: the stock scroll bar showed the system thumb (pale grey), white arrows and a black track. A themed one: a thin rounded thumb in the scroll thumb brush,
+         a little brighter on hover, no arrow buttons, and a track that is the grid's own background. Both orientations. -->
+    <!-- #8306: the thumb reads against its track (at least 2:1) in every theme, and brightens to the muted text colour under the pointer. -->
+    <SolidColorBrush x:Key="ScrollBarThumbBrush" Color="#4D525E"/>
+    <SolidColorBrush x:Key="ScrollBarThumbHoverBrush" Color="{StaticResource ForegroundMutedColor}"/>
+
+    <Style x:Key="ScrollBarThumbStyle" TargetType="Thumb">
+        <Setter Property="Background" Value="{StaticResource ScrollBarThumbBrush}"/>
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="IsTabStop" Value="False"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Thumb">
+                    <Border x:Name="thumb" Background="{TemplateBinding Background}" CornerRadius="3" Margin="2"/>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="thumb" Property="Background" Value="{StaticResource ScrollBarThumbHoverBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsDragging" Value="True">
+                            <Setter TargetName="thumb" Property="Background" Value="{StaticResource ScrollBarThumbHoverBrush}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="ScrollBarPageButtonStyle" TargetType="RepeatButton">
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="IsTabStop" Value="False"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RepeatButton">
+                    <Border Background="Transparent"/>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <ControlTemplate x:Key="VerticalScrollBarTemplate" TargetType="ScrollBar">
+        <Border Background="{TemplateBinding Background}">
+            <Track x:Name="PART_Track" IsDirectionReversed="True" Orientation="Vertical">
+                <Track.DecreaseRepeatButton>
+                    <RepeatButton Style="{StaticResource ScrollBarPageButtonStyle}" Command="ScrollBar.PageUpCommand"/>
+                </Track.DecreaseRepeatButton>
+                <Track.Thumb>
+                    <Thumb Style="{StaticResource ScrollBarThumbStyle}" MinHeight="24"/>
+                </Track.Thumb>
+                <Track.IncreaseRepeatButton>
+                    <RepeatButton Style="{StaticResource ScrollBarPageButtonStyle}" Command="ScrollBar.PageDownCommand"/>
+                </Track.IncreaseRepeatButton>
+            </Track>
+        </Border>
+    </ControlTemplate>
+
+    <ControlTemplate x:Key="HorizontalScrollBarTemplate" TargetType="ScrollBar">
+        <Border Background="{TemplateBinding Background}">
+            <Track x:Name="PART_Track" Orientation="Horizontal">
+                <Track.DecreaseRepeatButton>
+                    <RepeatButton Style="{StaticResource ScrollBarPageButtonStyle}" Command="ScrollBar.PageLeftCommand"/>
+                </Track.DecreaseRepeatButton>
+                <Track.Thumb>
+                    <Thumb Style="{StaticResource ScrollBarThumbStyle}" MinWidth="24"/>
+                </Track.Thumb>
+                <Track.IncreaseRepeatButton>
+                    <RepeatButton Style="{StaticResource ScrollBarPageButtonStyle}" Command="ScrollBar.PageRightCommand"/>
+                </Track.IncreaseRepeatButton>
+            </Track>
+        </Border>
+    </ControlTemplate>
+
     <Style TargetType="ScrollBar">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
+        <Setter Property="Stylus.IsFlicksEnabled" Value="False"/>
+        <Setter Property="MinWidth" Value="0"/>
+        <Setter Property="MinHeight" Value="0"/>
+        <Setter Property="Width" Value="12"/>
+        <Setter Property="Template" Value="{StaticResource VerticalScrollBarTemplate}"/>
+        <Style.Triggers>
+            <Trigger Property="Orientation" Value="Horizontal">
+                <Setter Property="Width" Value="Auto"/>
+                <Setter Property="Height" Value="12"/>
+                <Setter Property="Template" Value="{StaticResource HorizontalScrollBarTemplate}"/>
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- ============================================ -->
+    <!-- Expander Style                               -->
+    <!-- ============================================ -->
+    <!-- #8306: the header toggle is a plain chevron in the muted text colour (the accent under the pointer) with nothing behind it, so an expander on a
+         dark or tinted panel shows no stock white disc. Headers expand downward. -->
+    <Style x:Key="ExpanderHeaderToggleStyle" TargetType="ToggleButton">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Padding" Value="0,2"/>
+        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToggleButton">
+                    <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="19"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Path x:Name="Chevron" Data="M 1,2 L 5,6 L 9,2" Stroke="{StaticResource ForegroundMutedBrush}" StrokeThickness="1.6"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <ContentPresenter Grid.Column="1" Margin="4,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="True"
+                                              HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"/>
+                        </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Chevron" Property="Data" Value="M 1,6 L 5,2 L 9,6"/>
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Chevron" Property="Stroke" Value="{StaticResource AccentBrush}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="Expander">
+        <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+        <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Expander">
+                    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
+                        <DockPanel>
+                            <ToggleButton x:Name="HeaderSite" DockPanel.Dock="Top" Style="{StaticResource ExpanderHeaderToggleStyle}"
+                                          IsChecked="{Binding IsExpanded, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"
+                                          Content="{TemplateBinding Header}" ContentTemplate="{TemplateBinding HeaderTemplate}"
+                                          ContentTemplateSelector="{TemplateBinding HeaderTemplateSelector}" ContentStringFormat="{TemplateBinding HeaderStringFormat}"
+                                          Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"
+                                          FontWeight="{TemplateBinding FontWeight}" FontStyle="{TemplateBinding FontStyle}" FontStretch="{TemplateBinding FontStretch}"
+                                          MinWidth="0" MinHeight="0"/>
+                            <ContentPresenter x:Name="ExpandSite" DockPanel.Dock="Bottom" Visibility="Collapsed" Focusable="False"
+                                              HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+                        </DockPanel>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsExpanded" Value="True">
+                            <Setter TargetName="ExpandSite" Property="Visibility" Value="Visible"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- #8306: a splitter that sets no Background takes the scroll thumb's brush, the theme's grab-handle ink, which reads against the page
+         in every theme. The stock style paints it from the system control grey, which this theme maps to the scroll track's colour. -->
+    <Style TargetType="GridSplitter">
+        <Setter Property="Background" Value="{StaticResource ScrollBarThumbBrush}"/>
     </Style>
 
     <!-- ============================================ -->
@@ -1115,6 +1451,13 @@
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="CalendarItem">
+                    <ControlTemplate.Resources>
+                        <!-- The weekday header: the calendar fills its seven title cells from the template under this key, and draws none without it. -->
+                        <DataTemplate x:Key="{x:Static CalendarItem.DayTitleTemplateResourceKey}">
+                            <TextBlock Text="{Binding}" FontSize="11" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,6,0,4"
+                                       Foreground="{StaticResource ForegroundBrush}"/>
+                        </DataTemplate>
+                    </ControlTemplate.Resources>
                     <Border Background="{TemplateBinding Background}"
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}">
@@ -1287,10 +1630,12 @@
     <!-- ============================================ -->
     <!-- CheckBox Style                               -->
     <!-- ============================================ -->
+    <!-- #8540: the box takes BoxBorderBrush, 3:1 or better against the page and the card, so an unchecked box shows on both. -->
+    <!-- A disabled box takes DisabledBoxBorderBrush and a muted mark: weaker than an enabled one, and still 3:1 against the page and the card. -->
     <Style TargetType="CheckBox">
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BoxBorderBrush}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="CheckBox">
@@ -1298,7 +1643,7 @@
                         <BulletDecorator.Bullet>
                             <Border x:Name="Border" Width="16" Height="16"
                                     Background="{StaticResource BackgroundDarkBrush}"
-                                    BorderBrush="{StaticResource BorderBrush}"
+                                    BorderBrush="{StaticResource BoxBorderBrush}"
                                     BorderThickness="1" CornerRadius="2">
                                 <Path x:Name="CheckMark" Width="10" Height="10" Stretch="Fill"
                                       Stroke="{StaticResource AccentBrush}" StrokeThickness="2"
@@ -1321,7 +1666,56 @@
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="Border" Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
-                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource ForegroundMutedBrush}"/>
+                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource DisabledBoxBorderBrush}"/>
+                            <Setter TargetName="CheckMark" Property="Stroke" Value="{StaticResource ForegroundMutedBrush}"/>
+                            <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ============================================ -->
+    <!-- RadioButton Style                            -->
+    <!-- ============================================ -->
+    <!-- The bullet matches the CheckBox above: the theme's control fill and border, the accent for the chosen mark. -->
+    <Style TargetType="RadioButton">
+        <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
+        <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BoxBorderBrush}"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <BulletDecorator Background="Transparent" VerticalAlignment="Center">
+                        <BulletDecorator.Bullet>
+                            <Grid Width="16" Height="16">
+                                <Ellipse x:Name="Border"
+                                         Fill="{StaticResource BackgroundDarkBrush}"
+                                         Stroke="{StaticResource BoxBorderBrush}"
+                                         StrokeThickness="1"/>
+                                <Ellipse x:Name="CheckMark" Width="8" Height="8"
+                                         Fill="{StaticResource AccentBrush}" Visibility="Collapsed"
+                                         HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Grid>
+                        </BulletDecorator.Bullet>
+                        <ContentPresenter Margin="6,0,0,0"
+                                          VerticalAlignment="Center"
+                                          HorizontalAlignment="Left"
+                                          RecognizesAccessKey="True"/>
+                    </BulletDecorator>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="CheckMark" Property="Visibility" Value="Visible"/>
+                            <Setter TargetName="Border" Property="Fill" Value="{StaticResource BackgroundLightBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Border" Property="Stroke" Value="{StaticResource AccentBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Border" Property="Fill" Value="{StaticResource BackgroundDarkBrush}"/>
+                            <Setter TargetName="Border" Property="Stroke" Value="{StaticResource DisabledBoxBorderBrush}"/>
+                            <Setter TargetName="CheckMark" Property="Fill" Value="{StaticResource ForegroundMutedBrush}"/>
                             <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
@@ -1347,13 +1741,16 @@
                             BorderThickness="{TemplateBinding BorderThickness}"
                             Padding="{TemplateBinding Padding}"
                             CornerRadius="4">
-                        <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                        <StackPanel IsItemsHost="True" Grid.IsSharedSizeScope="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
                     </Border>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
     </Style>
 
+    <!-- #8222: no fixed icon column. The icon cell is as wide as the widest icon in the menu (Grid.IsSharedSizeScope on the
+         ContextMenu), so a menu with no icons has none, and the current item of a menu (IsChecked) gets an accent bar and the
+         accent colour instead of an empty reserved column. -->
     <Style TargetType="MenuItem">
         <Setter Property="Background" Value="Transparent"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
@@ -1363,17 +1760,23 @@
                     <Border x:Name="Border" Background="{TemplateBinding Background}" BorderThickness="0">
                         <Grid>
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="26" SharedSizeGroup="MenuItemIconColumnGroup"/>
+                                <ColumnDefinition Width="Auto" SharedSizeGroup="MenuItemIconColumnGroup"/>
                                 <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="17"/>
                             </Grid.ColumnDefinitions>
-                            <!-- Icon column -->
-                            <Border x:Name="IconColumn" Grid.Column="0" Background="Transparent"/>
-                            <ContentPresenter x:Name="Icon" Grid.Column="0" Margin="4,0,6,0" VerticalAlignment="Center" ContentSource="Icon"/>
-                            <ContentPresenter Grid.Column="1" Margin="8,4" VerticalAlignment="Center" ContentSource="Header" RecognizesAccessKey="True"/>
+                            <ContentPresenter x:Name="Icon" Grid.Column="0" Margin="10,0,0,0" VerticalAlignment="Center" ContentSource="Icon"/>
+                            <ContentPresenter Grid.Column="1" Margin="10,4" VerticalAlignment="Center" ContentSource="Header" RecognizesAccessKey="True"/>
+                            <Border x:Name="CheckMark" Grid.ColumnSpan="2" Width="3" HorizontalAlignment="Left"
+                                    Background="{StaticResource AccentBrush}" Visibility="Collapsed"/>
                         </Grid>
                     </Border>
                     <ControlTemplate.Triggers>
+                        <Trigger Property="Icon" Value="{x:Null}">
+                            <Setter TargetName="Icon" Property="Margin" Value="0"/>
+                        </Trigger>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="CheckMark" Property="Visibility" Value="Visible"/>
+                            <Setter Property="Foreground" Value="{StaticResource AccentBrush}"/>
+                        </Trigger>
                         <Trigger Property="IsHighlighted" Value="True">
                             <Setter TargetName="Border" Property="Background" Value="{StaticResource BackgroundLighterBrush}"/>
                         </Trigger>
@@ -1393,6 +1796,17 @@
         <Setter Property="Background" Value="{StaticResource BorderBrush}"/>
         <Setter Property="Margin" Value="0,4"/>
         <Setter Property="Height" Value="1"/>
+    </Style>
+    <!-- A separator inside a menu takes this key, not the Separator style, and its stock template insets the line past an icon
+         column. This one spans the menu in the theme's separator brush. -->
+    <Style x:Key="{x:Static MenuItem.SeparatorStyleKey}" TargetType="Separator" BasedOn="{StaticResource {x:Type Separator}}">
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Separator">
+                    <Border Background="{TemplateBinding Background}" SnapsToDevicePixels="True"/>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <!-- ============================================ -->
@@ -1422,6 +1836,11 @@
     <!-- Plan Viewer Resources                        -->
     <!-- ============================================ -->
     <SolidColorBrush x:Key="PlanTooltipBgBrush" Color="#1A1D23"/>
+    <!-- #8540: the text colour of a plan warning by severity, in an operator's tooltip and in the Properties panel's warning headers.
+         4.5:1 or better on PlanTooltipBgBrush and on BackgroundLighterBrush, which a Properties section fills its body with. -->
+    <SolidColorBrush x:Key="PlanWarningCriticalTextBrush" Color="#E57373"/>
+    <SolidColorBrush x:Key="PlanWarningTextBrush" Color="#FFB347"/>
+    <SolidColorBrush x:Key="PlanWarningInfoTextBrush" Color="#2eaef1"/>
     <SolidColorBrush x:Key="PlanTooltipBorderBrush" Color="#3A3D45"/>
     <SolidColorBrush x:Key="PlanPanelTextBrush" Color="#E4E6EB"/>
     <SolidColorBrush x:Key="PlanPanelMutedBrush" Color="#E4E6EB"/>

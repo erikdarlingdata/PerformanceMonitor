@@ -109,7 +109,8 @@ public static class ViewerWebhookSealing
     public static bool NeedsKey(NotificationRow row, NotificationRow? stored) =>
         NeedsKey(row.TeamsUrl, stored?.TeamsUrl) || NeedsKey(row.SlackUrl, stored?.SlackUrl)
         || NeedsKey(row.GenericUrl, stored?.GenericUrl) || NeedsKey(row.GenericHeaders, stored?.GenericHeaders)
-        || NeedsKey(row.PagerDutyRoutingKey, stored?.PagerDutyRoutingKey);
+        || NeedsKey(row.PagerDutyRoutingKey, stored?.PagerDutyRoutingKey)
+        || NeedsKey(row.SlackBotToken, stored?.SlackBotToken) || NeedsKey(row.SlackAppToken, stored?.SlackAppToken);
 
     /// <summary>Whether any webhook value on the route needs the key.</summary>
     public static bool NeedsKey(NotificationRouteRow row, NotificationRouteRow? stored) =>
@@ -133,6 +134,9 @@ public static class ViewerWebhookSealing
             row.GenericHeaders, stored?.GenericHeaders, "generic_headers", where, row.GenericProxy, stored?.GenericProxy,
             row.GenericUrl, stored?.GenericUrl, "generic webhook headers", sealer, refusal);
         row.PagerDutyRoutingKey = ResolveValue(row.PagerDutyRoutingKey, stored?.PagerDutyRoutingKey, "pagerduty", where, row.PagerDutyProxy, stored?.PagerDutyProxy, null, null, "PagerDuty routing key", sealer, refusal);
+        /* #7656: the Slack bot's tokens are bound to no proxy, so a Slack proxy change leaves them as they are. */
+        row.SlackBotToken = ResolveValue(row.SlackBotToken, stored?.SlackBotToken, PasswordBinding.SlackBotTokenSlot, where, null, null, null, null, "Slack bot token", sealer, refusal);
+        row.SlackAppToken = ResolveValue(row.SlackAppToken, stored?.SlackAppToken, PasswordBinding.SlackAppTokenSlot, where, null, null, null, null, "Slack app-level token", sealer, refusal);
     }
 
     /// <summary>

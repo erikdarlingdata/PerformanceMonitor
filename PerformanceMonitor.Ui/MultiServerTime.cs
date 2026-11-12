@@ -43,6 +43,30 @@ namespace PerformanceMonitor.Ui
         public static TimeDisplayMode EffectiveMode(TimeDisplayMode chosen, bool mixedServers)
             => mixedServers && chosen == TimeDisplayMode.ServerTime ? TimeDisplayMode.LocalTime : chosen;
 
+        /// <summary>
+        /// The zone a view of several servers reads on and reads typed text in, for the mode chosen: UTC in UTC mode, and this
+        /// machine's zone (<paramref name="machine"/>) in Local mode and in Server mode, which has no one server clock to apply
+        /// (<see cref="EffectiveMode"/>). The one place that rule becomes a zone, so a mixed list's rows, its picker and its notes
+        /// agree. The machine's zone is an argument so a test names it.
+        /// </summary>
+        public static System.TimeZoneInfo MixedZone(TimeDisplayMode chosen, System.TimeZoneInfo machine)
+            => EffectiveMode(chosen, mixedServers: true) == TimeDisplayMode.UTC ? System.TimeZoneInfo.Utc : machine;
+
+        /// <summary><see cref="MixedZone(TimeDisplayMode, System.TimeZoneInfo)"/> on this machine's zone.</summary>
+        public static System.TimeZoneInfo MixedZone(TimeDisplayMode chosen) => MixedZone(chosen, System.TimeZoneInfo.Local);
+
+        /// <summary>The word that names the clock of <paramref name="mode"/> in a header or a note: "UTC", "local" or "server".</summary>
+        public static string ZoneWord(TimeDisplayMode mode) => mode switch
+        {
+            TimeDisplayMode.UTC => "UTC",
+            TimeDisplayMode.LocalTime => "local",
+            _ => "server",
+        };
+
+        /// <summary>The word for the one clock a view of several servers reads on (<see cref="MixedZone(TimeDisplayMode)"/>): "UTC" or
+        /// "local", never "server".</summary>
+        public static string MixedZoneWord(TimeDisplayMode chosen) => ZoneWord(EffectiveMode(chosen, mixedServers: true));
+
         /// <summary>The UTC offset as one label, "UTC-04:00" or "UTC+00:00": the spelling the time range picker uses, so
         /// every label that names a server's offset reads the same (#6137).</summary>
         public static string OffsetLabel(int utcOffsetMinutes)

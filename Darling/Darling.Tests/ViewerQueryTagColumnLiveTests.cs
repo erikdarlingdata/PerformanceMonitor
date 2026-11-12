@@ -62,6 +62,18 @@ public sealed class ViewerQueryTagColumnLiveTests
         }
     }
 
+    /// <summary>Counts a seeded table's rows for the test server in the window, straight from the store. The table name is a fixed literal from the callers.</summary>
+    private static async Task<long> CountRowsAsync(string table, DateTime start, DateTime end, CancellationToken ct)
+    {
+        await using var connection = new NpgsqlConnection(ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new NpgsqlCommand($"SELECT count(*) FROM collect.{table} WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3", connection);
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(DarlingMcpTestData.Naive(start));
+        command.Parameters.AddWithValue(DarlingMcpTestData.Naive(end));
+        return (long)(await command.ExecuteScalarAsync(ct))!;
+    }
+
     private static async Task CleanupAsync(NpgsqlConnection c, CancellationToken ct) =>
         await DarlingMcpTestData.ExecAsync(c, ct,
             $@"DELETE FROM query_stats WHERE server_id = {ServerId}; DELETE FROM procedure_stats WHERE server_id = {ServerId};
@@ -158,19 +170,36 @@ public sealed class ViewerQueryTagColumnLiveTests
         var batch = await viewer.ResolveQueryTagFilterAsync("ViewerTagBatch", ct);
         var untagged = await viewer.ResolveQueryTagFilterAsync(ViewerDataService.UntaggedChoice, ct);
 
+        var storedStoreRows = await CountRowsAsync("query_store_stats", start, end, ct);
         var store = await viewer.GetQueryStoreTopQueriesAsync(ServerId, start, end, 10, null, null, null, ct);
-        Assert.Equal("ViewerTagBatch", store.Single(r => r.QueryHash == Bat).QueryTag);
+        var batchStoreRow = store.SingleOrDefault(r => r.QueryHash == Bat);
+        Assert.True(batchStoreRow is not null,
+            $"{Bat} was not in the Query Store read. query_store_stats rows in the store for server {ServerId} in the window: {storedStoreRows}. "
+            + $"Hashes the read returned: [{string.Join(", ", store.Select(r => r.QueryHash))}].");
+        Assert.Equal("ViewerTagBatch", batchStoreRow.QueryTag);
         Assert.Equal([Bat], (await viewer.GetQueryStoreTopQueriesAsync(ServerId, start, end, 1, null, null, batch, ct)).Select(r => r.QueryHash));
         Assert.Equal([Hog], (await viewer.GetQueryStoreTopQueriesAsync(ServerId, start, end, 10, null, null, untagged, ct)).Select(r => r.QueryHash));
 
+        // #7361: this lookup failed once in CI with no matching row. Count the stored rows first so the next failure says whether
+        // they were gone from the store or only missing from the read.
+        var storedProcRows = await CountRowsAsync("procedure_stats", start, end, ct);
         var procs = await viewer.GetTopProceduresByCpuRoutedAsync(ServerId, start, end, 10, null, null, ct);
-        Assert.Equal("ViewerTagProd / ViewerTagOrders", procs.Rows.Single(r => r.ObjectName == "usp_VTagOrders").QueryTag);
+        var ordersRow = procs.Rows.SingleOrDefault(r => r.ObjectName == "usp_VTagOrders");
+        Assert.True(ordersRow is not null,
+            $"usp_VTagOrders was not in the procedures read. procedure_stats rows in the store for server {ServerId} in the window: {storedProcRows}. "
+            + $"Names the read returned: [{string.Join(", ", procs.Rows.Select(r => r.ObjectName))}].");
+        Assert.Equal("ViewerTagProd / ViewerTagOrders", ordersRow.QueryTag);
         var orders = await viewer.ResolveQueryTagFilterAsync("ViewerTagOrders", ct);
         Assert.Equal(["usp_VTagOrders"], (await viewer.GetTopProceduresByCpuRoutedAsync(ServerId, start, end, 1, null, orders, ct)).Rows.Select(r => r.ObjectName));
         Assert.Equal(["usp_VTagPlain"], (await viewer.GetTopProceduresByCpuRoutedAsync(ServerId, start, end, 10, null, untagged, ct)).Rows.Select(r => r.ObjectName));
 
-        var longs = await viewer.GetRecentLongQueryCompletionsAsync(ServerId, start, end, null, null, ct);
-        Assert.Equal("ViewerTagBatch", longs.Single(r => r.QueryHash == Bat).QueryTag);
-        Assert.Equal([Hog], (await viewer.GetRecentLongQueryCompletionsAsync(ServerId, start, end, null, untagged, ct)).Select(r => r.QueryHash));
+        var storedLongRows = await CountRowsAsync("long_query_completions", start, end, ct);
+        var longs = await viewer.GetRecentLongQueryCompletionsAsync(ServerId, start, end, null, null, cancellationToken: ct);
+        var batchLongRow = longs.SingleOrDefault(r => r.QueryHash == Bat);
+        Assert.True(batchLongRow is not null,
+            $"{Bat} was not in the long query completions read. long_query_completions rows in the store for server {ServerId} in the window: {storedLongRows}. "
+            + $"Hashes the read returned: [{string.Join(", ", longs.Select(r => r.QueryHash))}].");
+        Assert.Equal("ViewerTagBatch", batchLongRow.QueryTag);
+        Assert.Equal([Hog], (await viewer.GetRecentLongQueryCompletionsAsync(ServerId, start, end, null, untagged, cancellationToken: ct)).Select(r => r.QueryHash));
     });
 }

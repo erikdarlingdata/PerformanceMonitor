@@ -162,7 +162,8 @@ public partial class ServerTab : UserControl
         SetDrillDownTimeRange(fromDate, toDate);
 
         SelectActiveQueriesForDrillDown();
-        var snapshots = await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate));
+        var includeMonitor = ActiveQueriesIncludeMonitor;
+        var snapshots = await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate, includeMonitor: includeMonitor));
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
         LiveSnapshotIndicator.Text = DrillDownIndicatorText(fromDate, toDate, GetPickerZone());
         _ = LoadActiveQueriesSlicerAsync();
@@ -210,7 +211,8 @@ public partial class ServerTab : UserControl
         SelectActiveQueriesForDrillDown();
 
         AppLogger.Info("DrillDown", $"Calling GetLatestQuerySnapshotsAsync with fromDate={fromDate:O}, toDate={toDate:O}");
-        var snapshots = await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate));
+        var includeMonitor = ActiveQueriesIncludeMonitor;
+        var snapshots = await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate, includeMonitor: includeMonitor));
         AppLogger.Info("DrillDown", $"Got {snapshots.Count} snapshots");
 
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
@@ -258,7 +260,6 @@ public partial class ServerTab : UserControl
     {
         /* The drill's window is held as the instants it names (#4766, #5562): a fixed range, which the picker shows in the
            display zone. It is held exactly as handed and never widened (R3): every drill caller passes 15 minutes or more. */
-        _probedFloors.Clear();
 
         // Hold it without triggering a refresh (Value raises no RangeChanged; the flag covers a handler that might)
         _suppressRangeRefresh = true;

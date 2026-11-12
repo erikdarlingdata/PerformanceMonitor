@@ -37,7 +37,7 @@ It signs in as **whichever Azure identity is already established on the machine*
 
 Darling does not offer this mode. The Darling service connects with Windows, SQL Server, Service Principal and Managed Identity only, so its Viewer refuses this mode when you save a server. To connect to Azure SQL as a named Azure identity from Darling, use Service Principal or Managed Identity.
 
-**Not yet confirmed against a live Entra tenant.** The mechanism above is read off the pinned `Microsoft.Data.SqlClient` 7.0.2 and `Azure.Identity` 1.18.0 sources, and the behaviour is pinned by tests; nobody here has a tenant to run it against. Treat it as worth trying rather than as known to work, and please report what happens.
+Not yet confirmed against a live Entra tenant. The mechanism above is read off the pinned `Microsoft.Data.SqlClient` 7.1.1 and `Azure.Identity` 1.18.0 sources. Tests pin the behaviour. Nobody here has a tenant to run it against. Treat it as worth trying rather than as known to work, and please report what happens.
 
 ### Device Code (Lite only, `ActiveDirectoryDeviceCodeFlow`)
 
@@ -59,7 +59,7 @@ Two things worth knowing before you pick it:
 
 Darling does not offer this mode. The service is a headless collector with nobody to read a code, so its Viewer refuses this mode when you save a server. Darling connects with Windows, SQL Server, Service Principal and Managed Identity only.
 
-**Not yet confirmed against a live Entra tenant.** The mechanism above is read off the pinned `Microsoft.Data.SqlClient` 7.0.2 and `Microsoft.Identity.Client` 4.84.2 sources, and the behaviour is pinned by tests; nobody here has a tenant to run it against. Treat it as worth trying rather than as known to work, and please report what happens.
+Not yet confirmed against a live Entra tenant. The mechanism above is read off the pinned `Microsoft.Data.SqlClient` 7.1.1 and `Microsoft.Identity.Client` 4.84.2 sources. Tests pin the behaviour. Nobody here has a tenant to run it against. Treat it as worth trying rather than as known to work, and please report what happens.
 
 ### Credential Profiles (Lite, fleet onboarding)
 

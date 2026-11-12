@@ -35,7 +35,7 @@ public sealed class McpToolGuideHeadsAnalyzeQueryPlanTests
     private static readonly string[] HeadFacts =
     [
         "Analyzes query_hash's latest plan.",
-        "No plan: not_collected if the engine can't collect query_stats, else unavailable.",
+        "No plan: not_collected on Lite or if engine lacks query_stats, else unavailable.",
         "labelled impact_basis",
         "corroboration for a statement already measured slow, never a diagnosis",
         "every row carries the fixed caveat (regression risk for other plans, write cost)",
@@ -68,7 +68,7 @@ public sealed class McpToolGuideHeadsAnalyzeQueryPlanTests
         Assert.StartsWith("Analyzes a stored execution plan captured from query stats by query_hash.", served.Tail!, StringComparison.Ordinal);
         Assert.Contains("Use after get_top_queries_by_cpu to understand why a query is expensive.", served.Tail!, StringComparison.Ordinal);
         Assert.Contains("operators_returned / total_operators / truncated", served.Tail!, StringComparison.Ordinal);
-        Assert.Contains("operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("operators_ranked_by: measured self_elapsed_ms (the operator's own time, its children's time excluded, null on an exchange, whose elapsed is time waiting on its neighbours rather than work, so it ranks after every operator with an own time) when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.", served.Tail!, StringComparison.Ordinal);
         Assert.Contains("an index is a per-table commitment with write cost and regression risk for other plans, so test it", served.Tail!, StringComparison.Ordinal);
     }
 }

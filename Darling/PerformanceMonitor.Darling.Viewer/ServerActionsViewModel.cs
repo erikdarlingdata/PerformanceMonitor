@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -137,7 +136,7 @@ public sealed class ServerActionViewRow
     /// <summary>The change time, the sort key of the Changed column.</summary>
     public DateTime? ChangedAtUtc => State.UpdatedAtUtc;
 
-    public string ChangedDisplay => State.UpdatedAtUtc is DateTime at ? at.ToLocalTime().ToString("g", CultureInfo.CurrentCulture) : "";
+    public string ChangedDisplay => State.UpdatedAtUtc is DateTime at ? ViewerTimeHelper.FormatFleetWide(at, "yyyy-MM-dd HH:mm") : "";
 
     /// <summary>One row per server and per action its engine can run, plus any switch that is on but that the engine cannot run (listed with a note so it can be turned off).</summary>
     public static IReadOnlyList<ServerActionViewRow> From(IEnumerable<ServerActionSwitchRow> servers) =>

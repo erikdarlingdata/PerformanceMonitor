@@ -76,12 +76,17 @@ internal static class FinOpsServerChoice
         return !crossServer && server != null && server.IsPostgres ? PostgresNotCollected : null;
     }
 
+    /// <summary>The words Server Inventory is empty with. A store whose every target is PostgreSQL never collects server properties, so it says
+    /// <see cref="PostgresNotCollected"/>, not "yet": nothing is coming. Any other store has a snapshot still to come.</summary>
+    internal static string InventoryEmptyText(IReadOnlyCollection<DarlingServer>? configured) =>
+        configured is { Count: > 0 } && configured.All(s => s.IsPostgres) ? PostgresNotCollected : "No server property data collected yet";
+
     /// <summary>The reader's <c>include_removed</c> flag for the Server Inventory "Show removed servers" checkbox: on only when checked, off when unchecked or unset.</summary>
     internal static bool IncludeRemoved(bool? showRemovedChecked) => showRemovedChecked == true;
 
-    /// <summary>The Server Inventory "N server(s)" line, with the web page's "(removed servers included)" when the box was ticked for the read that produced the list. Blank for an empty list.</summary>
+    /// <summary>The Server Inventory "3 servers" line, with the web page's "(removed servers included)" when the box was ticked for the read that produced the list. Blank for an empty list.</summary>
     internal static string InventoryCountText(int count, bool removedIncluded) =>
-        count > 0 ? $"{count} server(s)" + (removedIncluded ? " (removed servers included)" : "") : "";
+        count > 0 ? PerformanceMonitor.Common.CountText.Plural(count, "server") + (removedIncluded ? " (removed servers included)" : "") : "";
 }
 
 /// <summary>

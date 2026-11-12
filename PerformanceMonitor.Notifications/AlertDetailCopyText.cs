@@ -56,6 +56,13 @@ public static class AlertDetailCopyText
            flat detail_text. */
         var structured = AlertContextSerializer.TryDeserialize(contextJson, out var context) && context.Details.Count > 0;
 
+        /* #7124: why the alert was held or paged, above the sample age as both windows show it. */
+        var routingReason = AlertDetailText.RoutingReasonFromJson(contextJson);
+        if (routingReason is not null)
+        {
+            AppendLine(text, "Routing reason", routingReason);
+        }
+
         /* #5642's fire-time sample age, once, where both windows show it: the header row under Status. The flat text
            may already carry the line, and then it is not repeated. */
         var ageLine = AlertDetailText.SampleAgeLineFromJson(contextJson, structured ? null : detailText);

@@ -1,4 +1,4 @@
-/* Runs the shipped Optimization and High Impact tabs (wwwroot/js/pages/finops) against a
+/* Runs the shipped Optimization, High Impact and Database Resources tabs (wwwroot/js/pages/finops) against a
    recording fetch and a node-tree DOM, and prints as one line of JSON what each tab asked for: the first build, a change
    of the Window picker, a rebuild for the same server (the 60 s poll) and a build for another server.
        node finops-window-picker-harness.mjs <path to wwwroot/js> */
@@ -84,7 +84,8 @@ try {
       'export function zoomableLineChart() { return el("div", {}); }\nexport function chartZoomScope() { return ""; }\n'
   );
   const out = {};
-  for (const name of ["optimization", "high-impact"]) {
+  /* #7922: Database Resources is in the same loop, so its rebuild for the same server is held to the same pick. */
+  for (const name of ["optimization", "high-impact", "database-resources"]) {
     const { tab } = await import(pathToFileURL(path.join(scratch, "pages", "finops", name + ".js")).href);
     const run = async (server, pick) => {
       fetches.length = 0;
@@ -145,6 +146,14 @@ try {
     solo: stamp("2026-03-02T12:00:00Z"),
     lower: stamp("2026-03-03T13:00:00Z"),
   };
+  // #7695: a High Impact row whose figures span several databases names the busiest one, then "+ N more" with a tooltip.
+  const { tab: highImpact } = await import(pathToFileURL(path.join(scratch, "pages", "finops", "high-impact.js")).href);
+  const titles = (node) => [node.attrs.title, ...node.children.flatMap(titles)].filter(Boolean);
+  const hiRow = (name, count) => ({ query_hash: "0xAA", database_name: name, database_count: count, total_executions: 5, sample_query_text: "select 1" });
+  body = JSON.stringify({ rows: [hiRow("Zeta", 2), { ...hiRow("Solo", 1), query_hash: "0xBB" }, { ...hiRow("Old", undefined), query_hash: "0xCC" }], hours_back: 24 });
+  const rootHi = highImpact.build("srv-hi", {});
+  await new Promise((r) => setTimeout(r, 20));
+  out.highImpactDatabases = { text: rootHi.textContent, titles: titles(rootHi) };
   console.log(JSON.stringify(out));
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });

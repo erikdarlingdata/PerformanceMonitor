@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -61,27 +62,35 @@ internal static class DarlingPlanCacheSchedulerReader
 
 
     /// <summary>
-    /// The plan-cache bloat classification — <c>report.plan_cache_bloat</c> / the viewer's
-    /// <c>ClassifyPlanCacheBloat</c> (#1410), reproduced. The ratio is single-use plans / total plans:
-    /// &gt; 50% CRITICAL, &gt; 30% HIGH, &gt; 20% MEDIUM, else NORMAL; the recommendation flips at &gt; 20%.
-    /// An empty cache (totalPlans == 0) is NORMAL.
+    /// The plan-cache bloat classification, the one rule in <see cref="PlanCacheBloatRule"/> (#7445) that Lite and the
+    /// Viewer also use: a ratio over compiled plans only (no parse trees or extended procedures), and no bloat
+    /// below a 100 MB single-use floor. An empty cache is NORMAL.
     /// </summary>
-    public static (string Level, string Recommendation) ClassifyPlanCacheBloat(long totalPlans, long singleUsePlans)
+    public static (string Level, string Recommendation) ClassifyPlanCacheBloat(IReadOnlyCollection<PlanCacheGroupRow> groups) =>
+        ClassifyPlanCacheBloat(SumPlanCache(groups));
+
+    /// <summary>Classifies from the summed figures, so a caller that also serves those figures (the tool's reply)
+    /// serves the same numbers that decided the level.</summary>
+    public static (string Level, string Recommendation) ClassifyPlanCacheBloat(PlanCacheFigures figures) =>
+        PlanCacheBloatRule.Classify(
+            figures.TotalPlans, figures.TotalSizeMb, figures.CompiledPlans, figures.CompiledSingleUsePlans, figures.CompiledSingleUseSizeMb);
+
+    /// <summary>The whole-cache and compiled-only sums of the latest snapshot's groups: the one place they are
+    /// computed (#7445), for both the bloat level and the tool's <c>compiled_*</c> reply fields.</summary>
+    public static PlanCacheFigures SumPlanCache(IReadOnlyCollection<PlanCacheGroupRow> groups)
     {
-        double singleUsePercent = totalPlans > 0 ? singleUsePlans * 100.0 / totalPlans : 0.0;
-
-        var level =
-            singleUsePercent > 50 ? "CRITICAL" :
-            singleUsePercent > 30 ? "HIGH" :
-            singleUsePercent > 20 ? "MEDIUM" :
-            "NORMAL";
-
-        var recommendation = singleUsePercent > 20
-            ? "Check for unparameterized queries / Consider Forced Parameterization"
-            : "Plan cache composition is healthy";
-
-        return (level, recommendation);
+        var compiled = groups.Where(g => PlanCacheBloatRule.IsCompiled(g.CacheObjType)).ToList();
+        return new PlanCacheFigures(
+            groups.Sum(g => (long)g.TotalPlans), groups.Sum(g => (long)g.TotalSizeMb),
+            groups.Sum(g => (long)g.SingleUsePlans), groups.Sum(g => (long)g.SingleUseSizeMb),
+            compiled.Sum(g => (long)g.TotalPlans), compiled.Sum(g => (long)g.SingleUsePlans), compiled.Sum(g => (long)g.SingleUseSizeMb));
     }
+
+    /// <summary>Plan-cache sums over every cache type, and over compiled plans only (parse trees and extended
+    /// procedures left out).</summary>
+    public sealed record PlanCacheFigures(
+        long TotalPlans, long TotalSizeMb, long SingleUsePlans, long SingleUseSizeMb,
+        long CompiledPlans, long CompiledSingleUsePlans, long CompiledSingleUseSizeMb);
 
     /* ─────────────────────────── cpu scheduler (latest snapshot) ─────────────────────────── */
 

@@ -60,8 +60,8 @@ public sealed class QueryStoreClutterTests
     /// nothing about capture mode is a MEASURED one; a fixture about the pre-rung null passes null explicitly.</param>
     private static DarlingQueryStoreClutterReader.ConfigRow Config(
         string db, string actual = "READ_WRITE", int readonlyReason = 0, long current = 4096, long max = 8192, long maxPlans = 200,
-        string? captureMode = "AUTO") =>
-        new(1, db, actual, "READ_WRITE", readonlyReason, current, max, "AUTO", 21, maxPlans, 60, new DateTime(2026, 9, 20, 11, 30, 0), captureMode);
+        string? captureMode = "AUTO", string desired = "READ_WRITE") =>
+        new(1, db, actual, desired, readonlyReason, current, max, "AUTO", 21, maxPlans, 60, new DateTime(2026, 9, 20, 11, 30, 0), captureMode);
 
     /* ─────────────────────────── the judgment ─────────────────────────── */
 
@@ -102,6 +102,23 @@ public sealed class QueryStoreClutterTests
         var (verdict, reasons) = QueryStoreClutter.Judge(null, null, Config("db", "OFF"));
         Assert.Equal(HealthSeverity.Unknown, verdict);
         Assert.Equal(new[] { QueryStoreClutter.ReasonQueryStoreOff }, reasons);
+    }
+
+    /* #7675: a store in ERROR has stopped recording, so the rows the other arms read are old and unchanging. It gets its own reason
+       and no band, even when those rows would grade Critical (before, plan churn graded it as a recording store). */
+    [Theory]
+    [InlineData("ERROR")]
+    [InlineData("error")]
+    public void QueryStoreError_IsUnknownWithTheReason_EvenWhenTheOtherArmsWouldGradeIt(string state)
+    {
+        var (verdict, reasons) = QueryStoreClutter.Judge(
+            ReadCost("db", 10, 10, 95), Churn("db", QueryStoreClutter.PlansPerQueryP95Critical), Config("db", state, desired: "OFF"));
+        Assert.Equal(HealthSeverity.Unknown, verdict);
+        Assert.Equal(new[] { QueryStoreClutter.ReasonQueryStoreError }, reasons);
+
+        var row = Assert.Single(QueryStoreClutter.Compose([ReadCost("db", 10, 10, 95)], [Churn("db", QueryStoreClutter.PlansPerQueryP95Critical)], [Config("db", state, desired: "OFF")]));
+        Assert.Equal(HealthSeverity.Unknown, row.Verdict);
+        Assert.Contains(QueryStoreClutter.Recommendations(row), line => line.Contains("ERROR state", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -181,7 +198,7 @@ public sealed class QueryStoreClutterTests
     }
 
     [Fact]
-    public void Config_BandsStorageNearTheCap_AndAnOperatorReadOnlyAsCritical()
+    public void Config_BandsStorageNearTheCap_AndAStorageCapReadOnlyAsCritical()
     {
         var (v1, r1) = QueryStoreClutter.Judge(null, null, Config("db", current: 7373, max: 8192)); /* 90.0% */
         Assert.Equal(HealthSeverity.Warning, v1);
@@ -195,6 +212,85 @@ public sealed class QueryStoreClutterTests
         Assert.Equal(HealthSeverity.Critical, v3);
         Assert.Contains(QueryStoreClutter.ReasonQueryStoreReadOnly, r3);
         Assert.Contains(QueryStoreClutter.ReasonStorageNearCap, r3);
+    }
+
+    /* #7454: READ_ONLY is Critical only when a capacity bit is set. A database-state bit, or an operator's own
+       OPERATION_MODE = READ_ONLY (reason 0, desired READ_ONLY), is a reason with no band, as qs_off is. The
+       capacity bit decides when both kinds are set. */
+    [Theory]
+    [InlineData(65536, "READ_WRITE", HealthSeverity.Critical, QueryStoreClutter.ReasonQueryStoreReadOnly)]
+    [InlineData(131072, "READ_WRITE", HealthSeverity.Critical, QueryStoreClutter.ReasonQueryStoreReadOnly)]
+    [InlineData(262144, "READ_WRITE", HealthSeverity.Critical, QueryStoreClutter.ReasonQueryStoreReadOnly)]
+    [InlineData(524288, "READ_WRITE", HealthSeverity.Critical, QueryStoreClutter.ReasonQueryStoreReadOnly)]
+    [InlineData(65536 | 1, "READ_WRITE", HealthSeverity.Critical, QueryStoreClutter.ReasonQueryStoreReadOnly)]
+    [InlineData(1, "READ_WRITE", HealthSeverity.Unknown, QueryStoreClutter.ReasonReadOnlyDatabaseState)]
+    [InlineData(2, "READ_WRITE", HealthSeverity.Unknown, QueryStoreClutter.ReasonReadOnlyDatabaseState)]
+    [InlineData(4, "READ_WRITE", HealthSeverity.Unknown, QueryStoreClutter.ReasonReadOnlyDatabaseState)]
+    [InlineData(1 | 2, "READ_WRITE", HealthSeverity.Unknown, QueryStoreClutter.ReasonReadOnlyDatabaseState)]
+    [InlineData(0, "READ_ONLY", HealthSeverity.Unknown, QueryStoreClutter.ReasonReadOnlyOperator)]
+    [InlineData(0, "READ_WRITE", HealthSeverity.Unknown, QueryStoreClutter.ReasonReadOnlyDatabaseState)]
+    public void ReadOnly_IsCriticalOnlyForACapacityBit(int readonlyReason, string desired, HealthSeverity expectedVerdict, string expectedReason)
+    {
+        var config = Config("db", "READ_ONLY", readonlyReason: readonlyReason, desired: desired);
+
+        var (verdict, reasons) = QueryStoreClutter.Judge(null, null, config);
+
+        Assert.Equal(expectedVerdict, verdict);
+        Assert.Equal(new[] { expectedReason }, reasons);
+    }
+
+    [Fact]
+    public void ReadOnlyForTheDatabaseState_StillLetsTheOtherArmsGrade_AndSaysItIsNotClutter()
+    {
+        var rows = QueryStoreClutter.Compose(
+            [],
+            [Churn("db", QueryStoreClutter.PlansPerQueryP95Critical)],
+            [Config("db", "READ_ONLY", readonlyReason: 1, current: 8192, max: 8192)]);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(HealthSeverity.Critical, row.Verdict); /* plan churn, not the read-only state */
+        Assert.Contains(QueryStoreClutter.ReasonReadOnlyDatabaseState, row.Reasons);
+        Assert.Contains(QueryStoreClutter.ReasonStorageNearCap, row.Reasons);
+        Assert.DoesNotContain(QueryStoreClutter.ReasonQueryStoreReadOnly, row.Reasons);
+
+        var text = string.Join(" ", QueryStoreClutter.Recommendations(row));
+        Assert.Contains("database is read-only", text, StringComparison.Ordinal);
+        Assert.Contains("not clutter", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("terminal state", text, StringComparison.Ordinal);
+
+        var capped = Assert.Single(QueryStoreClutter.Compose([], [], [Config("db", "READ_ONLY", readonlyReason: 65536)]));
+        var cappedText = string.Join(" ", QueryStoreClutter.Recommendations(capped));
+        Assert.Contains("storage cap reached", cappedText, StringComparison.Ordinal);
+        Assert.Contains("terminal state", cappedText, StringComparison.Ordinal);
+    }
+
+    /* #7454 review: READ_ONLY with reason 0 (or only bits that are none of 1, 2, 4) while desired_state is
+       READ_WRITE has no recorded cause. get_query_store_health calls that shape the classic silent failure, so the
+       sentence must say the cause is unrecorded and point at the health tool and the error log, and must not tell
+       the reader it is the database's benign state. A documented state bit keeps its "not clutter" wording. */
+    [Theory]
+    [InlineData(0)]
+    [InlineData(16)]
+    [InlineData(1024 | 16)]
+    public void ReadOnlyWithNoDocumentedReason_SaysTheCauseIsNotRecorded_NotThatItIsBenign(int readonlyReason)
+    {
+        var row = Assert.Single(QueryStoreClutter.Compose(
+            [], [], [Config("db", "READ_ONLY", readonlyReason: readonlyReason, desired: "READ_WRITE")]));
+        Assert.Contains(QueryStoreClutter.ReasonReadOnlyDatabaseState, row.Reasons);
+
+        var text = string.Join(" ", QueryStoreClutter.Recommendations(row));
+
+        Assert.Contains("the cause is not recorded", text, StringComparison.Ordinal);
+        Assert.Contains("get_query_store_health", text, StringComparison.Ordinal);
+        Assert.Contains("error log", text, StringComparison.Ordinal);
+        Assert.Contains("do not treat it as benign", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("database's state, not clutter", text, StringComparison.Ordinal);
+
+        var documented = Assert.Single(QueryStoreClutter.Compose(
+            [], [], [Config("db", "READ_ONLY", readonlyReason: 4, desired: "READ_WRITE")]));
+        var documentedText = string.Join(" ", QueryStoreClutter.Recommendations(documented));
+        Assert.Contains("database's state, not clutter", documentedText, StringComparison.Ordinal);
+        Assert.DoesNotContain("the cause is not recorded", documentedText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -460,7 +556,7 @@ public sealed class QueryStoreClutterTests
         Assert.Contains("never NONE", description, StringComparison.Ordinal);
         /* #3898 re-point: the "(#3796)" issue reference came off the wire (D4); the rung-naming rule it sat
            beside ("predates the V137 rung that added the column") stays, verbatim, in the guide tail. */
-        Assert.Contains("V137", description, StringComparison.Ordinal);
+        Assert.Contains("capture_mode_known", description, StringComparison.Ordinal);
 
         /* the page dialect and the window floor's shared clause */
         Assert.Contains("truncated is the page cut", description, StringComparison.Ordinal);
@@ -476,13 +572,14 @@ public sealed class QueryStoreClutterTests
     }
 
     [Fact]
-    public void CaptureModeNote_NamesTheRung_AndWhatANullMeans()
+    public void CaptureModeNote_NamesNoTrackerNumber_AndSaysWhatANullMeans()
     {
-        Assert.Contains("#3796", DarlingMcpQueryStoreClutterTools.CaptureModeNote, StringComparison.Ordinal);
-        Assert.Contains("V137", DarlingMcpQueryStoreClutterTools.CaptureModeNote, StringComparison.Ordinal);
+        /* #8572: reader text carries no tracker number or rung number. */
+        Assert.Empty(ReplyTextScan.Hits(DarlingMcpQueryStoreClutterTools.CaptureModeNote));
+        Assert.DoesNotContain("rung", DarlingMcpQueryStoreClutterTools.CaptureModeNote, StringComparison.Ordinal);
         /* The whole job of this sentence: a null is an unasked question, and a reader who takes it for the
            engine's NONE has read a real mode out of an absence. */
-        Assert.Contains("never asked, never NONE", DarlingMcpQueryStoreClutterTools.CaptureModeNote, StringComparison.Ordinal);
+        Assert.Contains("was never asked for, and it is not NONE", DarlingMcpQueryStoreClutterTools.CaptureModeNote, StringComparison.Ordinal);
     }
 
     /* ─────────────────────────── the statements ─────────────────────────── */

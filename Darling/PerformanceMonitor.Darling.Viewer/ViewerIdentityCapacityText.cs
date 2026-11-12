@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Numerics;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
@@ -95,16 +96,18 @@ public static class ViewerIdentityCapacityText
             .Select(d => new ViewerIdentityScanRow(
                 d.DatabaseName,
                 ScanState(read.Read.Columns.Count(c => string.Equals(c.DatabaseName, d.DatabaseName, StringComparison.Ordinal))),
-                LocalTime(d.ScannedAt)));
+                DisplayTime(d.ScannedAt)));
         var waiting = read.Read.Unscanned
-            .Select(u => new ViewerIdentityScanRow(u.DatabaseName, NotYetScanned, u.LastScannedAt is { } last ? LocalTime(last) : Dash));
+            .Select(u => new ViewerIdentityScanRow(u.DatabaseName, NotYetScanned, u.LastScannedAt is { } last ? DisplayTime(last) : Dash));
         var skipped = read.Read.Skipped
-            .Select(u => new ViewerIdentityScanRow(u.DatabaseName, char.ToUpperInvariant(u.Text[0]) + u.Text[1..], u.LastScannedAt is { } last ? LocalTime(last) : Dash));
+            .Select(u => new ViewerIdentityScanRow(u.DatabaseName, char.ToUpperInvariant(u.Text[0]) + u.Text[1..], u.LastScannedAt is { } last ? DisplayTime(last) : Dash));
         return scanned.Concat(waiting).Concat(skipped).ToList();
     }
 
-    private static string LocalTime(DateTime utc) =>
-        DateTime.SpecifyKind(utc, DateTimeKind.Utc).ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+    /// <summary>#8576: a scan time (stored naive UTC), stamped to the second with its zone's label on the same clock as the tab's "Last refreshed"
+    /// stamp: this machine's zone in Local mode, UTC in every other mode. It used to read the picked server's offset beside a refresh stamp in UTC.</summary>
+    private static string DisplayTime(DateTime utc) =>
+        ViewerTimeHelper.FormatFleetWide(utc, "yyyy-MM-dd HH:mm:ss", ViewerTimeHelper.CurrentDisplayMode);
 
     /// <summary>
     /// The sentence under the scan list when it has no row. The list has a row for every scanned, unscanned and skipped database, so
@@ -132,7 +135,11 @@ public static class ViewerIdentityCapacityText
         Digits(c.ValuesRemaining),
         c.Exhaustion is { } e ? e.StepsPerDay.ToString("N1", CultureInfo.InvariantCulture) : Dash,
         c.Exhaustion is { } x ? x.DaysLeft.ToString("N1", CultureInfo.InvariantCulture) : Dash,
-        c.Band ?? Dash);
+        BandWord(c.Band));
+
+    /// <summary>#7679: the band as a word, as the web grid and Fleet Overview print it: <c>Critical</c>, <c>Warning</c>, <c>OK</c>. The read's own band stays lower case.</summary>
+    private static string BandWord(string? band) =>
+        string.IsNullOrEmpty(band) ? Dash : band == IdentityCapacityMath.BandOk ? "OK" : char.ToUpperInvariant(band[0]) + band[1..];
 
     private static string TypeText(IdentityColumnFact c) =>
         c.DataType is "decimal" or "numeric" && c.TypePrecision is > 0

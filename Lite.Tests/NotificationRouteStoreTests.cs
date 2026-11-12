@@ -351,10 +351,6 @@ public sealed class NotificationRouteStoreTests : IDisposable
         await tags.UnassignServerTagAsync(new[] { 7101 }, root);
         Assert.Equal(new[] { 7102 }, NotificationRouteCache.Current.Single().ExpandedServerIds!.ToArray());
 
-        var second = await tags.CreateServerTagAsync("Dev", null);
-        await tags.ReparentServerTagAsync(root, second);
-        Assert.Equal(1, NotificationRouteCache.Current.Single().ScopeTagDepth);
-
         await tags.DeleteServerTagAsync(root);
         Assert.True(NotificationRouteCache.Current.Single().Orphaned);
 

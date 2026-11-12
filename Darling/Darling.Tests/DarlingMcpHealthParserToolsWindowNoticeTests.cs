@@ -76,17 +76,22 @@ public sealed class DarlingMcpHealthParserToolsWindowNoticeLiveTests
         tool is HealthTool.SignificantWaits or HealthTool.MemoryNodeOom ? HealthTool.SevereErrors : HealthTool.MemoryNodeOom;
 
     /// <summary>A gate-passing event of <paramref name="tool"/>'s type at <paramref name="eventTime"/>, stored by a collection at <paramref name="collectedAt"/>.</summary>
-    private static Task SeedHealthEventAsync(NpgsqlConnection c, string scenario, HealthTool tool, DateTime eventTime, DateTime? collectedAt = null)
+    private static Task SeedHealthEventAsync(NpgsqlConnection c, string scenario, HealthTool tool, DateTime eventTime, DateTime? collectedAt = null, string? brokerNotification = null)
     {
         var (eventType, fixture, low) = SourceOf(tool);
         var xml = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "SystemHealth", fixture));
         if (low)
         {
-            xml = xml.Replace("RESOURCE_MEMPHYSICAL_HIGH", "RESOURCE_MEMPHYSICAL_LOW", StringComparison.Ordinal);
+            /* The memory-conditions fixture carries HIGH and the broker fixture STABLE; the gates keep LOW and SHRINK (#7466). */
+            xml = tool == HealthTool.MemoryBroker
+                ? xml.Replace(">STABLE<", ">" + (brokerNotification ?? "SHRINK") + "<", StringComparison.Ordinal)
+                : xml.Replace("RESOURCE_MEMPHYSICAL_HIGH", "RESOURCE_MEMPHYSICAL_LOW", StringComparison.Ordinal);
         }
 
         /* The row's event time is the event's own timestamp, as a real capture has it; the read windows on the column. */
         xml = Regex.Replace(xml, "timestamp=\"[^\"]*\"", $"timestamp=\"{eventTime:yyyy-MM-dd'T'HH:mm:ss.fff}Z\"");
+        if (brokerNotification == "unparseable")
+            xml = "this is not xml";
         var name = HealthName(scenario);
         return DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
             @"INSERT INTO system_health_events (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
@@ -139,6 +144,34 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "inside-" + tool, 168, end));
 
             AssertTruncatedAt(root, floor, end.AddHours(-168));
+        });
+
+    /* #7466: the broker tool shows what the SHRINK gate filtered out. The counts come from the tool's own JSON on its real path,
+       on the data reply and on the empty reply, and events_in_window is the raw number of stored broker events (a row that fails
+       to shred still counts) on both. */
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task MemoryBroker_Reply_CarriesNotificationCounts_AndTheRawEventCount_7466_AgainstDevPostgres(bool withShrink) =>
+        await RunHealthAsync("brokercounts-" + withShrink, async (c, ds, end) =>
+        {
+            var scenario = "brokercounts-" + withShrink;
+            await SeedHealthServerAsync(c, scenario, end.AddDays(-30), end.AddDays(-8), end);
+            var minutes = 10;
+            foreach (var n in withShrink ? new[] { "STABLE", "GROW", "GROW", "SHRINK", "unparseable" } : new[] { "STABLE", "GROW", "GROW", "unparseable" })
+                await SeedHealthEventAsync(c, scenario, HealthTool.MemoryBroker, end.AddMinutes(-(minutes += 10)), brokerNotification: n);
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(HealthTool.MemoryBroker, ds, scenario, 168, end));
+
+            if (!withShrink)
+                Assert.Equal("empty", root.GetProperty("status").GetString());
+            Assert.Equal(withShrink ? 5 : 4, root.GetProperty("events_in_window").GetInt32());
+            var counts = root.GetProperty("notification_counts");
+            Assert.Equal(2, counts.GetProperty("GROW").GetInt32());
+            Assert.Equal(1, counts.GetProperty("STABLE").GetInt32());
+            Assert.Equal(withShrink, counts.TryGetProperty("SHRINK", out var shrink) && shrink.GetInt32() == 1);
+            if (withShrink)
+                Assert.Equal(1, root.GetProperty("event_count").GetInt32());
         });
 
     [Theory]
@@ -263,9 +296,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             Assert.True(cut.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
             Assert.Equal(McpHelpers.FormatEffectiveStart(added), cut.GetProperty("hints").GetProperty("effective_start").GetString());
             var message = cut.GetProperty("message").GetString()!;
-            Assert.StartsWith($"No {eventType} events were captured for {HealthName("rung2-" + tool)} in the last 168 hour(s). This server HAS captured them before", message, StringComparison.Ordinal);
+            Assert.StartsWith($"No {eventType} events were captured for {HealthName("rung2-" + tool)} in the 168 hours ending at {end:yyyy-MM-dd HH:mm} UTC. This server has captured them before", message, StringComparison.Ordinal);
             Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
-            Assert.DoesNotContain("genuinely quiet", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("nothing happened in this window", message, StringComparison.Ordinal);
         });
 
     [Theory]
@@ -306,9 +339,9 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, 'ring_buffer_truncated=1 ring_buff
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
             var message = root.GetProperty("message").GetString()!;
             Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
-            Assert.Contains("773 event(s) are hidden", message, StringComparison.Ordinal);
+            Assert.Contains("773 events are hidden", message, StringComparison.Ordinal);
             Assert.Contains("5 h 23 min old", message, StringComparison.Ordinal);
-            Assert.DoesNotContain("quiet", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("nothing happened in this window", message, StringComparison.Ordinal);
         });
 
     /// <summary>The note the collector itself writes for a truncated read: its own measurement labels through the same render the run's note takes.</summary>
@@ -363,7 +396,7 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, $6)",
             Assert.Contains("2 system_health collection runs that read events of this window", message, StringComparison.Ordinal);
             Assert.Contains("the first at " + Minute(pastEnd.AddHours(-5)), message, StringComparison.Ordinal);
             Assert.Contains("the last at " + Minute(pastEnd.AddHours(-2)), message, StringComparison.Ordinal);
-            Assert.Contains("240 event(s) are hidden", message, StringComparison.Ordinal);
+            Assert.Contains("240 events are hidden", message, StringComparison.Ordinal);
         });
 
     [Theory]
@@ -438,7 +471,7 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, $6)",
             var message = root.GetProperty("message").GetString()!;
             Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
             Assert.Contains("the system_health collection run at " + Minute(after) + ", which read events of this window, reported that", message, StringComparison.Ordinal);
-            Assert.Contains("321 event(s) are hidden", message, StringComparison.Ordinal);
+            Assert.Contains("321 events are hidden", message, StringComparison.Ordinal);
         });
 
     [Theory]
@@ -473,7 +506,7 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, $6)",
             var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rblabel-" + tool, 24, end));
 
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
-            Assert.Contains("555 event(s) are hidden", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.Contains("555 events are hidden", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
         });
 
     /* #6827: a note can match the SQL's pre-filter and still not be a truncated note by TryParse (a value of 1x). The newest
@@ -495,7 +528,7 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, $6)",
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
             var message = root.GetProperty("message").GetString()!;
             Assert.Contains("the system_health collection run at " + Minute(older) + ", which read events of this window, reported that", message, StringComparison.Ordinal);
-            Assert.Contains("240 event(s) are hidden", message, StringComparison.Ordinal);
+            Assert.Contains("240 events are hidden", message, StringComparison.Ordinal);
         });
 
     [Theory]
@@ -526,6 +559,10 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, $6)",
             await SeedHealthServerAsync(c, "rbstale-" + tool, end.AddDays(-30), end.AddDays(-8), end.AddHours(-4));
             await SeedHealthEventAsync(c, "rbstale-" + tool, tool, end.AddDays(-20));
             await SeedTruncatedRunAsync(c, "rbstale-" + tool, end.AddHours(-3));
+            /* #7167: the health-parser collector is the stale one here, not the server: another collector ran minutes ago, so the server is
+               collecting and the empty read stays a window with a cut claim. With no run in the last 30 minutes the read would answer
+               unavailable (offline) before the cut-window rule is reached. */
+            await WindowFloorLiveHarness.SeedRunAsync(c, HealthName("rbstale-" + tool), "wait_stats", "SUCCESS", end.AddMinutes(-2), TestContext.Current.CancellationToken);
 
             var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbstale-" + tool, 1, end));
 
@@ -562,10 +599,10 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, 'ring_buffer_truncated=1 ring_buff
 
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
             var message = root.GetProperty("message").GetString()!;
-            Assert.StartsWith($"1 {eventType} event(s) were read for {name}", message, StringComparison.Ordinal);
+            Assert.StartsWith($"1 {eventType} event was read for {name}", message, StringComparison.Ordinal);
             Assert.DoesNotContain("events were found", message, StringComparison.Ordinal);
             Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
-            Assert.Contains("773 event(s) are hidden", message, StringComparison.Ordinal);
+            Assert.Contains("773 events are hidden", message, StringComparison.Ordinal);
         });
 
     /* #6453: nothing of any type ever stored. The newest run read the live session through its event_file target and found
@@ -619,7 +656,7 @@ VALUES ($1, $2, $3, $4, $5, 12, $6, 0, $7)",
             var covered = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rung2cov-" + tool, 168, end));
 
             Assert.False(covered.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
-            Assert.EndsWith(", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.", covered.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.EndsWith(", so nothing happened in this window: widen hours_back to reach the most recent events.", covered.GetProperty("message").GetString()!, StringComparison.Ordinal);
         });
 
     [Theory]

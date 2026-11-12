@@ -70,8 +70,9 @@ namespace Darling.Tests;
 [Trait("Stage", "Guard")]
 public sealed class ViewerFleetTimerGuardTests
 {
-    /// <summary>The two <c>DispatcherTimer</c> ticks that run at <c>NocRefreshIntervalSeconds</c>.</summary>
-    private static readonly string[] s_fleetTimerTicks = ["OnRefreshTimerTick", "OnOverviewTimerTick"];
+    /// <summary>The <c>DispatcherTimer</c> tick handlers that run at <c>NocRefreshIntervalSeconds</c>: the two fleet
+    /// timers' own, and the store-retry handler that shares the refresh timer (#7774).</summary>
+    private static readonly string[] s_fleetTimerTicks = ["OnRefreshTimerTick", "OnOverviewTimerTick", "OnStoreRetryTick"];
 
     /// <summary>A fire-and-forget call — <c>_ = SomethingAsync(...)</c>, the shape with no caller to await it
     /// and so the shape that can overlap itself.</summary>

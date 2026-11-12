@@ -12,6 +12,7 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -58,7 +59,9 @@ public sealed class UiSmokeSeedAppliesLiveTests
         await using (var command = source.CreateCommand(@"
 INSERT INTO config.config_monitored_servers (server_id, name, host, auth, is_enabled, created_at, engine)
 VALUES (101, 'ui-sql', '127.0.0.1,1', 'integrated', TRUE, now() AT TIME ZONE 'UTC', 'sqlserver'),
-       (102, 'ui-pg',  '127.0.0.1',   'sql',        TRUE, now() AT TIME ZONE 'UTC', 'postgres')"))
+       (102, 'ui-pg',  '127.0.0.1',   'sql',        TRUE, now() AT TIME ZONE 'UTC', 'postgres'),
+       (103, 'ui-long-name-sql-server-production-east-region-cluster-demo-01-primary', '127.0.0.2,1', 'integrated', TRUE, now() AT TIME ZONE 'UTC', 'sqlserver'),
+       (104, 'ui-down-sql', '127.0.0.3,1', 'integrated', TRUE, now() AT TIME ZONE 'UTC', 'sqlserver')"))
         {
             await command.ExecuteNonQueryAsync(ct);
         }
@@ -104,9 +107,10 @@ VALUES (101, 'ui-sql', '127.0.0.1,1', 'integrated', TRUE, now() AT TIME ZONE 'UT
         Assert.Equal(360, await CountAsync("collect.memory_stats", sql));
         Assert.Equal(4 * 360, await CountAsync("collect.wait_stats", sql));
         Assert.Equal(2 * 360, await CountAsync("collect.file_io_stats", sql));
-        Assert.Equal(12 * 36, await CountAsync("collect.query_stats", sql));
+        /* 14 queries (the last two in a 77-character database name) x 36, plus the 300 one-collection queries of BulkDb (#7479). */
+        Assert.Equal((14 * 36) + 300, await CountAsync("collect.query_stats", sql));
         Assert.Equal(1, await CountAsync("collect.server_properties", sql));
-        Assert.Equal(6, await CountAsync("collect.database_size_stats", sql));
+        Assert.Equal(8, await CountAsync("collect.database_size_stats", sql));
         Assert.Equal(5 * 72, await CountAsync("collect.collection_log", sql));
         Assert.Equal(2, await CountAsync("collect.blocked_process_reports", sql));
         Assert.Equal(1, await CountAsync("collect.deadlocks", sql));
@@ -131,7 +135,14 @@ VALUES (101, 'ui-sql', '127.0.0.1,1', 'integrated', TRUE, now() AT TIME ZONE 'UT
         Assert.Equal(6 * 36, await CountAsync("collect.pg_statement_stats", pg));
         Assert.Equal(6, await CountAsync("collect.pg_statement_text", pg));
         Assert.Equal(3 * 72, await CountAsync("collect.collection_log", pg));
-        Assert.Equal(2, await CountAsync("collect.servers", "engine_kind IN ('sqlserver', 'postgres')"));
+        Assert.Equal(4, await CountAsync("collect.servers", "engine_kind IN ('sqlserver', 'postgres')"));
+
+        /* #7590: the service writes every failed connect onto the registry row. The seed's trigger keeps the three columns as seeded, so the
+           three servers it seeded as reachable stay not-down and ui-down-sql keeps the error and the retry time pages.json is written against. */
+        await DarlingObservability.MarkConnectFailedAsync(source, new PerformanceMonitor.Darling.Service.MonitoredServer { Name = "ui-sql", Host = "127.0.0.1,1", StoredServerId = 101 }, "service wrote this", null, ct, DateTime.UtcNow.AddMinutes(1));
+        await DarlingObservability.MarkConnectFailedAsync(source, new PerformanceMonitor.Darling.Service.MonitoredServer { Name = "ui-down-sql", Host = "127.0.0.3,1", StoredServerId = 104 }, "service wrote this too", null, ct, DateTime.UtcNow.AddMinutes(1));
+        Assert.Equal(0, await CountAsync("collect.servers", "server_id = 101 AND (connect_down_since IS NOT NULL OR last_connect_error IS NOT NULL OR next_connect_attempt IS NOT NULL)"));
+        Assert.Equal(1, await CountAsync("collect.servers", "server_id = 104 AND last_connect_error LIKE 'Login failed%' AND connect_down_since IS NOT NULL AND next_connect_attempt IS NOT NULL"));
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

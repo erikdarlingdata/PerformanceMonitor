@@ -678,6 +678,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
            FormatLastCollect hands it to the UTC renderer with the display zone, only choosing the format (time alone
            for today, date and time otherwise), so the frame is the renderer's own and the wrapper adds no conversion. */
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Overview.cs", "FormatLastCollect", "FormatForDisplay"),
+        /* #7662: the Config Changes First Seen text. A change time and the capture before it are both naive UTC (snapshot capture_time or a
+           database_states collection_time) and FirstSeen hands each to the UTC renderer with the display zone, only joining them as
+           "between A and B", so the frame is the renderer's own and the wrapper adds no conversion. */
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.ConfigChanges.cs", "FirstSeen", "FormatForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.PlanCorrection.cs", "Local", "FormatForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "Local", "FormatForDisplay"),
         /* #4766: the Default Trace row's bare renderer. A time read from the stored server wall clock cannot say which
@@ -1407,8 +1411,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     [
         ("if", "a null test - if (row.EventTime.HasValue) and if (summary.OldestPlanCreateTime is not "
             + "{ } oldest). The matcher reads the identifier before the parenthesis and a keyword is one"),
-        ("DateTime", "new DateTime(d.SampleTime.Year, ..., d.SampleTime.Hour, 0, 0) - an hour-truncating "
-            + "bucket key built FROM a timestamp, not a rendering of one"),
         ("Compare", "Nullable.Compare(a.EventTime, b.EventTime) - a sort comparison"),
         ("ToUtc", "serverClock.ToUtc(r.StartTime) in Lite get_running_jobs (#4793) - the server-clock conversion of a "
             + "stored server-local stamp to naive UTC, which is the de-skew itself rather than a rendering of it"),

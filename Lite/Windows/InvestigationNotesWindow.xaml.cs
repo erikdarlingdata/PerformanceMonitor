@@ -45,11 +45,20 @@ public partial class InvestigationNotesWindow : Window
     /// <summary>Who a decision is stamped as: <c>person:</c> plus the Windows user, the prefix Darling's viewer stamps too.</summary>
     internal static string Decider() => "person:" + (string.IsNullOrWhiteSpace(Environment.UserName) ? "viewer" : Environment.UserName);
 
+    /// <summary>
+    /// The read takes the store read lock with no token, which waits without limit while an archival, compaction or archive
+    /// reset holds the write lock (#7217). Off the dispatcher, a long wait leaves the window drawn instead of frozen, and the
+    /// rows are bound here on the dispatcher once the lock frees. Internal so a test can drive it from a thread that has no
+    /// dispatcher.
+    /// </summary>
+    internal static Task<PendingNotesPage> ReadPageOffDispatcherAsync(IInvestigationNoteStore store) =>
+        Task.Run(() => PendingNotesPage.ReadAsync(store));
+
     private async Task LoadNotesAsync()
     {
         try
         {
-            var page = await PendingNotesPage.ReadAsync(_store);
+            var page = await ReadPageOffDispatcherAsync(_store);
             _rows.Clear();
             foreach (var note in page.Notes)
             {

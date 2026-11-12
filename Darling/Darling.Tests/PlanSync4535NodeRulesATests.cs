@@ -354,6 +354,8 @@ public sealed class PlanSync4535NodeRulesATests
         ObjectName = "dbo.t",
         HasActualStats = true,
         ActualExecutions = 1,
+        ActualRows = 10,
+        ActualRowsRead = 1_000_000,
         Predicate = "CONVERT_IMPLICIT(int,[dbo].[t].[col],0)=(1)"
     };
 
@@ -388,6 +390,8 @@ public sealed class PlanSync4535NodeRulesATests
             ObjectName = "dbo.t",
             HasActualStats = true,
             ActualExecutions = 1,
+            ActualRows = 10,
+            ActualRowsRead = 1_000_000,
             Predicate = "[dbo].[t].[col]=(1)"
         };
 
@@ -403,6 +407,8 @@ public sealed class PlanSync4535NodeRulesATests
             ObjectName = "dbo.t",
             HasActualStats = true,
             ActualExecutions = 1,
+            ActualRows = 10,
+            ActualRowsRead = 1_000_000,
             Predicate = "[dbo].[t].[col]=(1)"
         };
         var disabledPlan = RunWithConfig(disabledNode, Disable(11));

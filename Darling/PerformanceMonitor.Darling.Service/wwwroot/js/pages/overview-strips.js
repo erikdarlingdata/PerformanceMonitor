@@ -21,7 +21,7 @@
  */
 import { el, mount, parseUtc, axisTime, windowFromHours, readTool, readToolWithinKeptHistory, getActiveDatabaseFilter, keptWindowStrip, emptyStrip, readErrorStrip } from "../util.js";
 import { chartZoomScope } from "../charts.js";
-import { gapThresholdMs, splitAtGaps } from "../chart-gaps.js";
+import { gapThresholdMs, splitAtGaps, bucketMsOf } from "../chart-gaps.js";
 
 /* The held zoom, one entry per server, valid for one scope (page address + preset range): the same rule charts.js keeps for its own
    charts, held here because the strips are one chart of five lines and the zoom is a span of time, not of a chart's points. */
@@ -63,7 +63,8 @@ const svg = (tag, attrs) => {
 const M_LEFT = 54;
 const M_RIGHT = 12;
 const HEADER_H = 30;
-const PLOT_H = 54;
+/* #7644: each strip's plot is 96 px high (it was 54), so five strips with their headers and the axis take about 690 px, not 480: the CPU and waits lines read clearly at 1920x1080. */
+const PLOT_H = 96;
 const STRIP_GAP = 8;
 const STRIP_H = HEADER_H + PLOT_H;
 const AXIS_H = 22;
@@ -115,20 +116,30 @@ export function valueAt(points, tMs, spanMs, isEvent = false) {
 
 /**
  * The strips' series from the six reads' replies (each `{ kind, data, message }` as readTool returns). A strip whose read failed
- * or answered nothing keeps its reason in `note` and has no series, so the page says why rather than drawing an empty axis.
+ * or answered nothing keeps its reason in `note` and has no series, so the page says why rather than drawing an empty axis. A read that
+ * failed is also named in `errorNote` (#7921), which the strip's header shows when another of its series has points and the page shows when
+ * no strip has any.
  */
 export function buildStrips(reads) {
   const note = (res, fallback) => (!res ? fallback : res.kind === "error" ? res.message : res.kind === "empty" ? res.message || fallback : null);
+  const failedNote = (res, label) => (res && res.kind === "error" ? label + ": " + res.message : null);
   const rowsOf = (res, key) => (res && res.kind === "data" && res.data && Array.isArray(res.data[key]) ? res.data[key] : []);
 
   const cpuRows = rowsOf(reads.cpu, "samples");
+  /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so other_process_cpu is null on every point. The strip then draws the SQL line
+     alone and says so: a Total line built from a null Other would sit on the SQL line and claim the host was measured. */
+  const hostKnown = cpuRows.some((r) => r && r.other_process_cpu != null);
   const cpu = {
     key: "cpu", title: "CPU", unit: "%", min: 0, max: 100,
     series: [
       { label: "SQL", color: "#2eaef1", points: toTimed(cpuRows, "sample_time", (r) => r.sql_server_cpu) },
-      { label: "Total", color: "#9aa5b1", points: toTimed(cpuRows, "sample_time", (r) => (r.sql_server_cpu ?? 0) + (r.other_process_cpu ?? 0)) },
+      ...(hostKnown
+        ? [{ label: "Total", color: "#9aa5b1", points: toTimed(cpuRows, "sample_time", (r) => (r.other_process_cpu == null ? null : (r.sql_server_cpu ?? 0) + r.other_process_cpu)) }]
+        : []),
     ],
+    hostNote: cpuRows.length && !hostKnown ? "This server cannot report host CPU" : null,
     note: note(reads.cpu, "No CPU samples in this window."),
+    errorNote: failedNote(reads.cpu, "CPU"),
   };
 
   const waits = {
@@ -136,12 +147,16 @@ export function buildStrips(reads) {
     key: "waits", title: "Waits", unit: "ms/sec", min: 0,
     series: [{ label: "Wait time", color: "#ffb74d", points: toTimed(rowsOf(reads.waits, "trend"), "time", (r) => r.wait_time_ms_per_second) }],
     note: note(reads.waits, "No wait samples in this window."),
+    errorNote: failedNote(reads.waits, "Waits"),
   };
 
+  /* #7219: get_blocking_trend counts blocked-process reports, or DMV snapshot rows when the window holds no reports (the AWS RDS case
+     and the database-filter case), and its `source` key says which; a snapshot row is not a report, so the series is named for the arm that answered. */
+  const blockingBySnapshot = !!(reads.blocking && reads.blocking.kind === "data" && reads.blocking.data && reads.blocking.data.source === "DMV snapshot");
   const blocking = {
-    key: "blocking", title: "Blocking", unit: "events", event: true, min: 0,
+    key: "blocking", title: "Blocking", unit: "per min", event: true, min: 0,
     series: [
-      { label: "Blocking", color: "#ef5350", points: toTimed(rowsOf(reads.blocking, "trend"), "time", (r) => r.count) },
+      { label: blockingBySnapshot ? "Blocking snapshot rows" : "Blocked-process reports", color: "#ef5350", points: toTimed(rowsOf(reads.blocking, "trend"), "time", (r) => r.count) },
       { label: "Deadlocks", color: "#ab47bc", points: toTimed(rowsOf(reads.deadlocks, "trend"), "time", (r) => r.count) },
     ],
     note: null,
@@ -149,17 +164,32 @@ export function buildStrips(reads) {
   /* Blocking and deadlocks are events: a window with none is a true "nothing happened", said on the strip, but a read that FAILED is an error. */
   const blockNote = [reads.blocking, reads.deadlocks].find((r) => r && r.kind === "error");
   blocking.note = blockNote ? blockNote.message : "No blocking or deadlocks in this window.";
+  /* #7921: the strip has two reads. A failed one is named for its series, so when the other read answers points the header says which line is
+     missing instead of the strip reading as "no blocking". */
+  blocking.errorNote = [failedNote(reads.blocking, blocking.series[0].label), failedNote(reads.deadlocks, "Deadlocks")].filter(Boolean).join(" ") || null;
 
   const memory = {
     key: "memory", title: "Buffer pool", unit: "MB", min: 0,
     series: [{ label: "Buffer pool", color: "#ce93d8", points: toTimed(rowsOf(reads.memory, "trend"), "time", (r) => r.buffer_pool_mb) }],
     note: note(reads.memory, "No memory samples in this window."),
+    errorNote: failedNote(reads.memory, "Buffer pool"),
   };
 
+  const ioBucketMs = (res, withCadence) => {
+    const minutes = res && res.kind === "data" && res.data ? res.data.bucket_minutes : null;
+    return bucketMsOf(minutes, withCadence ? rowsOf(res, "trend").map((r) => { const d = parseUtc(r.time); return d ? d.getTime() : NaN; }) : null);
+  };
+  const ioStepMs = ioBucketMs(reads.io, true);
+  const ioWidthMs = ioBucketMs(reads.io, false);
   const io = {
     key: "io", title: "I/O latency", unit: "ms", min: 0,
-    series: [{ label: "Read latency", color: "#81c784", points: weightedReadLatency(rowsOf(reads.io, "trend")) }],
+    /* #7572: `bucketMs` is the step a gap is judged by: the reply's bucket width, or the rows' own cadence when a collector scheduled slower than the bucket
+       keeps fewer rows than buckets (every row counts, the ones with no reads too, since each marks a collection). A step longer than that breaks the line.
+       `readSpanMs` is the span one row's reads were counted over, which the read floor scales by: the bucket width, or the collection step when the
+       collector is slower than the bucket (`bucketMsOf` returned 1.5 times that step), since such a row holds the reads of the whole step. */
+    series: [{ label: "Read latency", color: "#81c784", points: weightedReadLatency(rowsOf(reads.io, "trend")), bucketMs: ioStepMs, readSpanMs: ioStepMs > ioWidthMs ? ioStepMs / 1.5 : ioWidthMs }],
     note: note(reads.io, "No file I/O samples in this window."),
+    errorNote: failedNote(reads.io, "I/O latency"),
   };
 
   return [cpu, waits, blocking, memory, io];
@@ -167,16 +197,30 @@ export function buildStrips(reads) {
 
 /** Below this a point above the band is not called anomalous (the Viewer's floors: "1% CPU above 0.5% baseline" is not news on an idle server). */
 const ANOMALY_FLOOR = { cpu: 10, waits: 100, io: 2 };
+/** #7572: the reads a bucket needs behind its latency before it may carry the red dot, per FIFTEEN MINUTES of bucket. An average over a handful of reads
+ *  is noise (one read at 80 ms is a dot for the whole bucket). 250 per 15 minutes is the bar the PostgreSQL I/O baseline puts on a bucket
+ *  (PgTargetScorer.IoBaselineBucketMinimumReads). It is not Analysis's IoVolumeFloor.MinimumReads, which counts 250 reads over a window of an hour or more
+ *  (a looser bar per minute). The bucket varies with the window (1 to 30 minutes), so the floor is scaled to the span a row's reads were counted over: the
+ *  bucket width, or the collection step when the collector is slower than the bucket. The desktop lanes apply the same rule (OverviewIoReadFloor, #7624). */
+const ANOMALY_MIN_READS_PER_15_MIN = { io: 250 };
+/** The reads a row counted over `widthMs` needs (a span the reply did not state counts as 15 minutes). */
+export function minReadsFor(key, widthMs) {
+  const per15 = ANOMALY_MIN_READS_PER_15_MIN[key] || 0;
+  return per15 === 0 ? 0 : Math.max(1, Math.ceil((per15 * (widthMs > 0 ? widthMs : 15 * 60000)) / (15 * 60000)));
+}
 /** The strips whose baseline is server-wide while the strip's own read can follow the page's database filter. */
 const DATABASE_SCOPED = new Set(["io", "blocking"]);
 
 /**
  * The Viewer's baseline band and anomaly markers (CorrelatedTimelineLanesControl), from get_overview_baselines. `res` is the read's
- * reply as readTool returns it (`{ kind, data, message }`); its `data.baselines` holds `{ mean, effective_std_dev, sample_count }` per
- * lane or null where the store has too little history. A strip gets a flat band, mean +- 2 effective sigma (lower clamped at 0), over
- * the whole window, and a marker on every point above the band at or above the lane's floor (CPU 10, waits 100, I/O 2) or below it.
+ * reply as readTool returns it (`{ kind, data, message }`); its `data.baselines` holds `{ steps: [{ from, to, mean, effective_std_dev,
+ * sample_count }] }` per lane (ISO UTC times, one step per hour of the week the window crosses) or null where the store has too little
+ * history. #7644: a strip gets one band step per hour, mean +- 2 effective sigma (lower clamped at 0), each from its own hour's bucket (an
+ * hour with no usable bucket has no band), and a marker on every point above its own hour's band at or above the lane's floor (CPU 10,
+ * waits 100, I/O 2) or below it.
  * Markers sit on the SQL CPU line only; blocking gets a band and no markers. A lane with no usable baseline gets NO band and NO
- * markers and a `baselineNote` that says why, never a band at 0. `opts.databaseFiltered` is true when the page's database filter
+ * markers and a `baselineNote` that says why (#7663: "not enough history" for a null lane, or "sat at 0" when the lane's steps are marked
+ * zero_activity), never a band at 0. `opts.databaseFiltered` is true when the page's database filter
  * narrows the I/O and blocking reads: their baseline is server-wide, so it is not drawn against a filtered line.
  */
 export function applyBaselines(strips, res, window, opts) {
@@ -189,18 +233,44 @@ export function applyBaselines(strips, res, window, opts) {
     if (!s.series.some((ser) => ser.points.length)) continue; /* nothing drawn: the strip's own note says so */
     if (opts && opts.databaseFiltered && DATABASE_SCOPED.has(s.key)) { s.baselineNote = "Baseline is server-wide: not drawn for a database filter."; continue; }
     if (!(s.key in ANOMALY_FLOOR) && s.key !== "blocking") continue; /* the buffer pool has no baseline */
-    const b = baselines ? baselines[s.key] : null;
-    if (!b || !(b.sample_count > 0) || !(b.effective_std_dev > 0)) { if (reason) s.baselineNote = reason; continue; }
-    const upper = b.mean + 2 * b.effective_std_dev;
-    const lower = Math.max(0, b.mean - 2 * b.effective_std_dev);
-    s.band = [{ from: window ? window.windowStart : 0, to: window ? window.windowEnd : Number.MAX_SAFE_INTEGER, lower, upper, mean: b.mean }];
+    const lane = baselines ? baselines[s.key] : null;
+    const band = usableSteps(lane);
+    /* #7663: a metric that sat at exactly 0 (the reply marks its step zero_activity) is measured quiet, not missing history. */
+    if (!band.length) { if (reason) s.baselineNote = res.kind === "data" && sawZeroActivity(lane) ? ZERO_ACTIVITY_NOTE : reason; continue; }
+    s.band = band;
     if (s.key in ANOMALY_FLOOR) {
       const floor = ANOMALY_FLOOR[s.key];
       const line = s.series[0]; /* SQL CPU, the lane's wait time, the weighted read latency */
-      s.markers = line.points.filter((p) => (p.v > upper && p.v >= floor) || p.v < lower).map((p) => ({ t: p.t, v: p.v }));
+      const minReads = minReadsFor(s.key, line.readSpanMs);
+      s.markers = line.points.filter((p) => {
+        if (minReads !== 0 && !(p.reads >= minReads)) return false;
+        const step = band.find((x) => p.t >= x.from && p.t < x.to); /* #7644: judged against its own hour's band only */
+        return !!step && ((p.v > step.upper && p.v >= floor) || p.v < step.lower);
+      }).map((p) => ({ t: p.t, v: p.v }));
     }
   }
   return strips;
+}
+
+/** #7663: the sentence for a lane whose every hour with samples read 0. */
+const ZERO_ACTIVITY_NOTE = "No band: this metric sat at 0 in this hour's history.";
+
+/** #7663: true when the reply marks a step of the lane as zero activity (samples held, none above 0). */
+function sawZeroActivity(lane) {
+  return !!lane && Array.isArray(lane.steps) && lane.steps.some((st) => st && st.zero_activity === true && st.sample_count > 0);
+}
+
+/** #7644: a lane's reply as band steps in epoch ms (mean +- 2 effective sigma, lower clamped at 0), in time order. A step without samples or a spread above zero is dropped, so that hour has no band. */
+function usableSteps(lane) {
+  const out = [];
+  for (const st of lane && Array.isArray(lane.steps) ? lane.steps : []) {
+    if (!st || !(st.sample_count > 0) || !(st.effective_std_dev > 0)) continue;
+    const from = parseUtc(st.from);
+    const to = parseUtc(st.to);
+    if (!from || !to || !(to.getTime() > from.getTime())) continue;
+    out.push({ from: from.getTime(), to: to.getTime(), lower: Math.max(0, st.mean - 2 * st.effective_std_dev), upper: st.mean + 2 * st.effective_std_dev, mean: st.mean });
+  }
+  return out.sort((a, c) => a.from - c.from);
 }
 
 /**
@@ -220,7 +290,7 @@ export function weightedReadLatency(rows) {
     acc.reads += r.reads;
     byTime.set(t, acc);
   }
-  return [...byTime.entries()].sort((a, b) => a[0] - b[0]).map(([t, a]) => ({ t, v: a.ms / a.reads }));
+  return [...byTime.entries()].sort((a, b) => a[0] - b[0]).map(([t, a]) => ({ t, v: a.ms / a.reads, reads: a.reads }));
 }
 
 /** The time axis the strips share: the zoom when one is held, else the read window; widened to the data when no window is known. */
@@ -319,11 +389,24 @@ export function drawStrips(strips, domain, width, onZoom) {
         if (b.mean != null && b.mean >= yMin && b.mean <= yMax) g.appendChild(svg("line", { class: "strip-band-mean", x1, x2, y1: y(b.mean), y2: y(b.mean) }));
       }
     }
-    /* A strip with data but no band says why, in its header: never a band at 0. */
-    if (s.baselineNote && hasData) {
+    /* A strip with data but no band says why, in its header: never a band at 0. When a read failed, the header names the failure instead (#7921), because the error matters more than the missing band. */
+    if (s.baselineNote && hasData && !s.errorNote) {
       const bn = svg("text", { class: "strip-baseline-note", x: plotR, y: top + 12, "text-anchor": "end" });
       bn.textContent = s.baselineNote;
       g.appendChild(bn);
+    }
+
+    if (s.hostNote && hasData) {
+      /* A span inside the title, so it follows the title's own width. A text of its own at the title's x and y drew the two on top of each other. */
+      const hn = svg("tspan", { class: "strip-baseline-note", dx: 8 });
+      hn.textContent = s.hostNote;
+      title.appendChild(hn);
+    }
+    /* #7921: a read that failed beside a series with points is named in the header, as the host note is, so the missing series is not read as nothing happened. */
+    if (s.errorNote && hasData) {
+      const en = svg("tspan", { class: "strip-baseline-note strip-error-note", dx: 8 });
+      en.textContent = s.errorNote;
+      title.appendChild(en);
     }
 
     if (!hasData) {
@@ -344,7 +427,7 @@ export function drawStrips(strips, domain, width, onZoom) {
         } else {
           /* A stretch with no samples (the service was off) is a break in the line, not a diagonal across it: charts.js's gap rule, judged over the whole series so a zoom cannot invent a gap. */
           const times = c.shown.map((p) => p.t);
-          const runs = splitAtGaps(times.map((_, i) => i), times, gapThresholdMs(c.points.map((p) => p.t)));
+          const runs = splitAtGaps(times.map((_, i) => i), times, gapThresholdMs(c.points.map((p) => p.t), null, c.bucketMs));
           for (const run of runs) {
             if (run.length === 1) {
               g.appendChild(svg("circle", { cx: x(c.shown[run[0]].t), cy: y(c.shown[run[0]].v), r: 2.5, fill: c.color }));
@@ -356,9 +439,29 @@ export function drawStrips(strips, domain, width, onZoom) {
         }
       }
     }
-    for (const m of s.markers || []) {
-      if (m.t < domain.from || m.t > domain.to) continue;
-      g.appendChild(svg("circle", { class: "strip-anomaly", cx: x(m.t), cy: y(Math.min(Math.max(m.v, yMin), yMax)), r: 3 }));
+    /* #7678: a run of neighbouring points above the band is ONE mark, the line's own segment over the run in the marker colour (a little thicker);
+       a point alone is one small dot. A circle per point hid the line on a quiet server (a third of the points marked) and grew with the point count,
+       whatever the plot's width. Neighbours are the strip's own points in order, with no gap between them (the line's gap rule). */
+    if (s.markers && s.markers.length && clipped.length && clipped[0].shown.length) {
+      const c = clipped[0];
+      const marked = new Set(s.markers.map((m) => m.t));
+      const gap = gapThresholdMs(c.points.map((p) => p.t), null, c.bucketMs);
+      let run = [];
+      const flush = () => {
+        if (run.length === 1) {
+          g.appendChild(svg("circle", { class: "strip-anomaly", cx: x(run[0].t), cy: y(Math.min(Math.max(run[0].v, yMin), yMax)), r: 2.5 }));
+        } else if (run.length > 1) {
+          const pts = run.map((p) => Math.max(plotL, Math.min(plotR, x(p.t))).toFixed(1) + "," + y(p.v).toFixed(1)).join(" ");
+          g.appendChild(svg("polyline", { class: "strip-anomaly-run", points: pts }));
+        }
+        run = [];
+      };
+      for (const p of c.shown) {
+        if (!marked.has(p.t) || p.t < domain.from || p.t > domain.to) { flush(); continue; }
+        if (run.length && p.t - run[run.length - 1].t > gap) flush();
+        run.push(p);
+      }
+      flush();
     }
     root.appendChild(g);
   });
@@ -451,6 +554,9 @@ export function drawStrips(strips, domain, width, onZoom) {
   return { node: root, crosshairAt, clearCrosshair };
 }
 
+/* #8554: the strips' trend reads that go through the heavy-read gate; the CPU, blocking and deadlock reads are small and go at once. */
+const GATED_STRIP_READS = new Set(["get_server_trend", "get_memory_trend", "get_file_io_trend"]);
+
 const READS = [
   ["cpu", "get_cpu_utilization", {}],
   ["waits", "get_server_trend", { metric: "total_waits" }],
@@ -468,26 +574,48 @@ export function fillOverviewStrips(body, server, ctx) {
   (async () => {
     const asked = windowFromHours(ctx.hours);
     const baselineStart = new Date(asked ? asked.windowStart : Date.now() - ctx.hours * 3600000).toISOString();
-    const [results, baselineRes] = await Promise.all([
-      Promise.all(READS.map(([, tool, extra]) =>
-        readToolWithinKeptHistory(tool, { server, hours: ctx.hours, ...extra }, ctx && ctx.signal).catch((e) => ({ kind: "error", message: String((e && e.message) || e) })))),
-      /* The Viewer's four baselines at the window start, from the one web-only read; a failure costs the bands, never the lines. */
-      readTool("get_overview_baselines", { server, window_start: baselineStart }, ctx && ctx.signal).catch((e) => ({ kind: "error", message: String((e && e.message) || e) })),
-    ]);
+    /* The Viewer's four baselines at the window start, from the one web-only read; a failure costs the bands, never the lines. #7644: it can
+       take many seconds on a busy server (the I/O baseline reads a month of per-file rows), so the strips are drawn when their own reads
+       return and the band and markers are added when this one does. */
+    let baselineRes = null;
+    let onBaseline = null;
+    /* #8554: the three trends and the baseline are the reads that took 4 to 10 s each on a server's first visit, all ending together.
+       They go through the page's heavy-read gate (two at a time, in the order asked), so the strips' own reads are asked for first and
+       the baseline after them: the strips draw from the trends, the baseline only adds the band. */
+    const stripReads = Promise.all(READS.map(([, tool, extra]) =>
+      readToolWithinKeptHistory(tool, { server, hours: ctx.hours, ...extra }, ctx && ctx.signal, GATED_STRIP_READS.has(tool) ? { heavy: true } : undefined)
+        .catch((e) => ({ kind: "error", message: String((e && e.message) || e) }))));
+    readTool("get_overview_baselines", { server, window_start: baselineStart }, ctx && ctx.signal, { heavy: true })
+      .catch((e) => ({ kind: "error", message: String((e && e.message) || e) }))
+      .then((res) => {
+        baselineRes = res;
+        if (onBaseline) onBaseline();
+      });
+    const results = await stripReads;
     /* #6793: the batch was cancelled (a redraw, or the user left the page). Nothing is drawn into a body nobody is looking at. */
-    if (baselineRes.kind === "aborted" || results.some((r) => r.kind === "aborted")) return;
+    if (results.some((r) => r.kind === "aborted")) return;
     const reads = {};
     READS.forEach(([key], i) => { reads[key] = results[i]; });
     const strips = buildStrips(reads);
     const anyData = strips.some((s) => s.series.some((ser) => ser.points.length));
     const allFailed = results.every((r) => r.kind === "error");
     if (allFailed) return mount(body, readErrorStrip(results[0].message));
-    if (!anyData) return mount(body, [results.map((r) => keptWindowStrip(r)).find(Boolean) || null, emptyStrip("No overview samples in this window.")]);
+    if (!anyData) {
+      /* #7921: a page with no points and a failed read names the failure. The no-samples sentence alone is what a server with nothing collected says. */
+      const failed = strips.map((s) => s.errorNote).filter(Boolean);
+      return mount(body, [
+        results.map((r) => keptWindowStrip(r)).find(Boolean) || null,
+        ...failed.map((text) => readErrorStrip(text)),
+        emptyStrip(failed.length ? "No overview samples in this window from the reads that answered." : "No overview samples in this window."),
+      ]);
+    }
 
     const kept = results.map((r) => r.keptHours).filter(Boolean);
     const window = windowFromHours(kept.length ? Math.min(...kept) : ctx.hours);
     const dbFilter = getActiveDatabaseFilter();
-    applyBaselines(strips, baselineRes, window, { databaseFiltered: !!(dbFilter && dbFilter.server === server) });
+    const applyOpts = { databaseFiltered: !!(dbFilter && dbFilter.server === server) };
+    /* The baseline may already be back (a cached one is); an aborted one adds nothing. */
+    if (baselineRes && baselineRes.kind !== "aborted") applyBaselines(strips, baselineRes, window, applyOpts);
     const id = "overview-strips|" + server;
     const scope = chartZoomScope(ctx.hours);
     const host = el("div", { class: "chart overview-strips-host" });
@@ -513,6 +641,15 @@ export function fillOverviewStrips(body, server, ctx) {
     };
     draw();
     mount(body, [keptWindowStrip(results.find((r) => r.keptHours || r.presetHours) || null), host]);
+    /* The baseline arrives after the strips: add the band and markers and draw again, with the held zoom. A read that failed adds its note and no band. */
+    if (!baselineRes) {
+      onBaseline = () => {
+        onBaseline = null;
+        if (baselineRes.kind === "aborted" || host.isConnected === false) return;
+        applyBaselines(strips, baselineRes, window, applyOpts);
+        draw();
+      };
+    }
     /* The first draw ran before the host was in the page, so it measured 0 and drew at the default width, which the browser then scaled
        down to the real one (#6360). A resize (a phone turned, a panel widened) redraws at the new width, as the line charts do, and so
        does the observer's first report, which is the host's laid-out width: it is compared with the width the strips were drawn at, not

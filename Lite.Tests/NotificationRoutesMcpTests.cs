@@ -151,6 +151,23 @@ public sealed class NotificationRoutesMcpTests : IDisposable
     }
 
     [Fact]
+    public async Task AnAnalysisAllRoute_ReportsMatchKindAnalysisAll_InThePerformanceFamily_AtAnyScope()
+    {
+        /* #7999 */
+        var fleet = await _store.InsertAsync(Route("Analysis: *", slack: SlackUrl));
+        var scoped = await _store.InsertAsync(Route("Analysis: *", server: _serverA, slack: SlackUrl));
+        var category = await _store.InsertAsync(Route("Analysis: queries", slack: SlackUrl));
+
+        using var doc = JsonDocument.Parse(await ReadAsync());
+        var routes = doc.RootElement.GetProperty("routes").EnumerateArray().ToDictionary(r => r.GetProperty("route_id").GetInt32());
+
+        Assert.Equal("analysis_all", routes[fleet].GetProperty("match_kind").GetString());
+        Assert.Equal("performance", routes[fleet].GetProperty("family").GetString());
+        Assert.Equal("analysis_all", routes[scoped].GetProperty("match_kind").GetString());
+        Assert.Equal("analysis_category", routes[category].GetProperty("match_kind").GetString());
+    }
+
+    [Fact]
     public async Task AnUnreadableScope_IsReportedAsScopeUnreadable_NotShownAsAnOrdinaryActiveRoute()
     {
         var ids = await SeedAsync();
@@ -455,6 +472,13 @@ public sealed class NotificationRoutesMcpTests : IDisposable
             "fallback_route_name",
             /* #6928: route severity is Darling-only. */
             "severities",
+            /* #6979: the report notice (Slack and Teams) is Darling-only; Lite has no investigation requests. */
+            "report_notice",
+            /* #7109: approval of a Level 3 agent action is Darling-only; Lite has no agent actions to approve. */
+            "action_approval",
+            "approval_single_person",
+            /* #7656: the Slack bot channel a route's investigation request threads post into is Darling-only; Lite has no investigation requests. */
+            "slack_bot_channel",
         };
         Assert.All(darlingOnly, f => Assert.Contains(f, darling));
         Assert.Equal(darling.Except(darlingOnly).OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));

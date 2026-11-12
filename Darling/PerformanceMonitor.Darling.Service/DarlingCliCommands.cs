@@ -123,6 +123,30 @@ public static partial class DarlingCliCommands
     public static bool IsHardenFilesVerb(string arg) =>
         string.Equals(arg, "--harden-files", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="GrantCertKeyAccess"/> handles: give the service account Read on the private key
+    /// of a certificate in a Windows certificate store, from an elevated prompt (#7718).</summary>
+    public static bool IsGrantCertKeyAccessVerb(string arg) =>
+        string.Equals(arg, DarlingTlsKeyAccess.VerbName, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// <c>--grant-cert-key-access &lt;thumbprint&gt; [--account &lt;name&gt;] [--store-location &lt;LocalMachine|CurrentUser&gt;]
+    /// [--store-name &lt;name&gt;]</c> (#7718): adds one Read entry for one account (the service's registered account unless
+    /// <c>--account</c> names another) to the private key of the certificate the thumbprint names, keeping every existing
+    /// entry, and changes nothing without elevation (LocalMachine) or when the account already has Read. The rules and
+    /// the seams are <see cref="DarlingTlsKeyAccess"/>. Returns the process exit code.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static int GrantCertKeyAccess(string[] rest, TextWriter output, TextWriter error)
+    {
+        if (!DarlingTlsKeyAccess.TryParseArgs(rest, out var parsed, out var problem))
+        {
+            error.WriteLine(problem);
+            return 1;
+        }
+
+        return DarlingTlsKeyAccess.RunForReal(parsed!, output, error);
+    }
+
     /// <summary>The flag that makes <see cref="IsHardenFilesVerb"/>'s verb run only <see cref="HardenTlsKeyFilesOnly(string?, TextWriter, TextWriter)"/>
     /// (#5700); the scripts pass it, and it is not in the help text.</summary>
     public static bool IsTlsKeyFilesOnlyFlag(string arg) =>
@@ -266,8 +290,9 @@ public static partial class DarlingCliCommands
     public static bool IsDisableCollectorVerb(string arg) =>
         string.Equals(arg, "--disable-collector", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The verb <see cref="ResetPasswordKeyAsync"/> handles: mark the service's current password key replaced, so
-    /// the next start makes a new one (#5366). It changes the store only (as the store owner) and never touches a key file.</summary>
+    /// <summary>The verb <see cref="ResetPasswordKeyAsync"/> handles: mark the service's current password key replaced. Without
+    /// <c>passwordKey</c> the next start makes a new key (#5366); with it set, the next start waits for a new key in that
+    /// source (#8006). It changes the store only (as the store owner) and never touches a key file.</summary>
     public static bool IsResetPasswordKeyVerb(string arg) =>
         string.Equals(arg, "--reset-password-key", StringComparison.OrdinalIgnoreCase);
 
@@ -277,17 +302,206 @@ public static partial class DarlingCliCommands
     public static bool IsSelfCheckPasswordKeyVerb(string arg) =>
         string.Equals(arg, "--self-check-password-key", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The hidden verb <see cref="DarlingLaunchMemorySelfCheck"/> handles: <c>--self-check-launch-memory [&lt;expected-limit-mib&gt;]</c>
+    /// samples the Linux launch guard's reader once and fails unless it reads resident memory against the cgroup limit (#6995).
+    /// It is not in <see cref="UsageText"/>: the container smoke runs it, an operator has no use for it.</summary>
+    public static bool IsSelfCheckLaunchMemoryVerb(string arg) =>
+        string.Equals(arg, "--self-check-launch-memory", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Which account <c>--validate-config</c> judges a <c>file:</c> <c>passwordKey</c> as, on Windows: the account the service is
+    /// registered under, the one that reads the key at start, and only when the service is not registered the account running this
+    /// process (a console run, or a check before install). The owner and folder checks trust that account along with SYSTEM and
+    /// Administrators, so judging as the caller let an administrator's own folder pass a check the service then refused. Reuses the
+    /// process-wide setting <c>--harden-files</c> uses (#2371), set only when the service is registered; the verb is a one-shot process.
+    /// Returns the line that names the account, or null when no <c>file:</c> key is configured.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string? ApplyValidateConfigAccount(DarlingConfig config, Func<string, SecurityIdentifier?> registeredServiceAccount)
+    {
+        if (config.PasswordKey is null || !config.PasswordKey.StartsWith("file:", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var registered = registeredServiceAccount(ServiceName);
+        if (registered is null)
+        {
+            return $"The password key file is judged as the account you are running as ({DarlingFileSecurity.ServiceAccountDisplayName}), because the '{ServiceName}' service is not registered on this machine.";
+        }
+
+        DarlingFileSecurity.HardenForAccount(registered);
+        return $"The password key file is judged as the service account {DarlingFileSecurity.ServiceAccountDisplayName}.";
+    }
+
+    /// <summary>The verb <see cref="NewPasswordKey"/> handles: <c>--new-password-key &lt;path&gt;</c> writes a new password key
+    /// to a path for a <c>passwordKey</c> secret and prints only its fingerprint (#8006).</summary>
+    public static bool IsNewPasswordKeyVerb(string arg) =>
+        string.Equals(arg, "--new-password-key", StringComparison.OrdinalIgnoreCase);
+
+    private const string NewPasswordKeyUsage = "Usage: PerformanceMonitor.Darling.Service.exe --new-password-key <path>";
+
+    /// <summary>
+    /// <c>--new-password-key &lt;path&gt;</c> (#8006): generates a password key and writes it to <paramref name="rest"/>'s one
+    /// path as one line of base64 PKCS#8, the form <c>passwordKey</c> reads, then prints the path and the key's fingerprint,
+    /// never the key. It reads no configuration and opens no store. It never writes over anything: a path that holds
+    /// anything at all is refused, and the file is created with create-new semantics, so one that appears in between makes
+    /// the write fail. On Windows the file is created with the hardened ACL already applied; elsewhere it is mode 0600.
+    /// Returns 0 when written; 1 for a usage error, a path that holds something, or a write that failed.
+    /// </summary>
+    public static int NewPasswordKey(string[] rest, TextWriter output, TextWriter error)
+    {
+        ArgumentNullException.ThrowIfNull(rest);
+        ArgumentNullException.ThrowIfNull(output);
+        ArgumentNullException.ThrowIfNull(error);
+
+        if (rest.Length != 1 || string.IsNullOrWhiteSpace(rest[0]) || rest[0].StartsWith('-'))
+        {
+            error.WriteLine(NewPasswordKeyUsage);
+            return 1;
+        }
+
+        var path = rest[0];
+        try
+        {
+            if (DarlingServiceKeyFile.AnythingAt(path))
+            {
+                error.WriteLine($"Something is already at {path}. --new-password-key never writes over anything: give it a path that does not exist.");
+                return 1;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            error.WriteLine($"Could not check {path}: {ex.Message}");
+            return 1;
+        }
+
+        string keyId;
+        byte[]? pkcs8 = null;
+        char[]? chars = null;
+        byte[]? bytes = null;
+        var created = false;
+        try
+        {
+            using (var key = PasswordPrivateKey.Generate())
+            {
+                keyId = key.PublicKey.KeyId;
+                pkcs8 = key.ExportPkcs8();
+            }
+
+            /* No immutable string of the key ever exists: base64 goes into a char array and then ASCII bytes, all zeroed below. */
+            chars = new char[((pkcs8.Length + 2) / 3) * 4];
+            if (!Convert.TryToBase64Chars(pkcs8, chars, out var charCount))
+            {
+                throw new InvalidOperationException("The key could not be encoded as base64.");
+            }
+
+            bytes = new byte[charCount + 1];
+            for (var i = 0; i < charCount; i++)
+            {
+                bytes[i] = (byte)chars[i];
+            }
+
+            bytes[charCount] = (byte)'\n';
+
+            using (var stream = CreateNewKeyFile(path))
+            {
+                created = true;
+
+                /* Straight to the handle: a write through the stream would copy the key into its internal buffer, which
+                   nothing zeroes. */
+                RandomAccess.Write(stream.SafeFileHandle, bytes, fileOffset: 0);
+                stream.Flush(flushToDisk: true);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException
+            or InvalidOperationException or CryptographicException)
+        {
+            /* A file this call created and could not finish is removed, so no partial key is left behind; one it never
+               created (another process got there first) is not this call's to touch. */
+            var leftover = "";
+            if (created)
+            {
+                try
+                {
+                    File.Delete(path);
+                }
+                catch (Exception deleteEx) when (deleteEx is IOException or UnauthorizedAccessException)
+                {
+                    leftover = $" The partly written file could not be removed ({deleteEx.Message}); delete it.";
+                }
+            }
+
+            error.WriteLine($"Could not write a new password key to {path}: {ex.Message}{leftover}");
+            return 1;
+        }
+        finally
+        {
+            if (pkcs8 is not null)
+            {
+                CryptographicOperations.ZeroMemory(pkcs8);
+            }
+
+            if (chars is not null)
+            {
+                Array.Clear(chars);
+            }
+
+            if (bytes is not null)
+            {
+                CryptographicOperations.ZeroMemory(bytes);
+            }
+        }
+
+        output.WriteLine(
+            $"Wrote a new password key to {path} (fingerprint {PasswordSeal.DisplayKeyId(keyId)}). Put it in your secret store, point {DarlingPasswordKeySource.SettingName} at it, then delete this file.");
+        return 0;
+    }
+
+    /// <summary>Creates the key file, failing if anything is at the path: with the hardened ACL applied at creation on
+    /// Windows (only SYSTEM, Administrators and the account running the verb), and readable and writable by its owner only
+    /// elsewhere.</summary>
+    private static FileStream CreateNewKeyFile(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return DarlingFileSecurity.CreateHardenedFile(path, allowInteractiveRead: false);
+        }
+
+        return new FileStream(path, new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.Write,
+            Share = FileShare.None,
+            UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite,
+        });
+    }
+
     /// <summary>The text <c>--reset-password-key</c> prints when the key was marked replaced. <paramref name="sealedPasswords"/>
-    /// is how many saved passwords are sealed to the old key and must be entered again.</summary>
-    public static string ResetPasswordKeyRestartSentence(int sealedPasswords) =>
-        sealedPasswords == 1
+    /// is how many saved passwords are sealed to the old key and must be entered again. With <paramref name="fromSetting"/>
+    /// (darling.json sets <c>passwordKey</c>, #8006) the service never makes a key, so the sentence says to put a new one in
+    /// that source instead.</summary>
+    public static string ResetPasswordKeyRestartSentence(int sealedPasswords, bool fromSetting = false)
+    {
+        var count = sealedPasswords.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (fromSetting)
+        {
+            return "Put a new password key in the passwordKey source (make one with --new-password-key), then restart the service. "
+                + (sealedPasswords == 1
+                    ? "This 1 saved password must be entered again."
+                    : $"These {count} saved passwords must be entered again.");
+        }
+
+        return sealedPasswords == 1
             ? "Restart the service. It will make a new password key, and this 1 saved password must be entered again."
-            : $"Restart the service. It will make a new password key, and these {sealedPasswords.ToString(System.Globalization.CultureInfo.InvariantCulture)} saved passwords must be entered again.";
+            : $"Restart the service. It will make a new password key, and these {count} saved passwords must be entered again.";
+    }
 
     /// <summary>
     /// <c>--reset-password-key [--config &lt;path&gt;]</c>: on the owner connection, in one transaction, counts the saved
-    /// passwords sealed to the current key and marks that key <c>replaced</c> with the reason <c>reset</c>. The next service
-    /// start retires the key file and makes a new key. Key files are never touched here.
+    /// passwords sealed to the current key and marks that key <c>replaced</c> with the reason <c>reset</c>. Without
+    /// <c>passwordKey</c>, the next service start retires the key file and makes a new key; with it, the start reports
+    /// <c>reset_pending</c> until a new key is put in that source (#8006). Key files are never touched here.
     /// </summary>
     public static async Task<int> ResetPasswordKeyAsync(
         string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken)
@@ -313,6 +527,18 @@ public static partial class DarlingCliCommands
             return CollectorToggleExitCode.UsageOrConfig;
         }
 
+        /* #8006: with passwordKey set the service never makes a key, so the closing sentence says where the new one goes. */
+        bool fromSetting;
+        try
+        {
+            fromSetting = !string.IsNullOrWhiteSpace(DarlingConfig.Load(configPath).PasswordKey);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The data source above already loaded this config; a second load that fails only costs the setting-aware wording. */
+            fromSetting = false;
+        }
+
         await using var dataSource = created;
         try
         {
@@ -324,7 +550,7 @@ public static partial class DarlingCliCommands
             output.WriteLine();
             output.WriteLine(replaced is null
                 ? "The store publishes no password key, so there is nothing to reset."
-                : ResetPasswordKeyRestartSentence(sealedPasswords));
+                : ResetPasswordKeyRestartSentence(sealedPasswords, fromSetting));
             output.WriteLine();
             return CollectorToggleExitCode.Success;
         }
@@ -388,6 +614,7 @@ public static partial class DarlingCliCommands
         || IsConfigureNetworkVerb(arg)
         || IsConfigureFirewallVerb(arg)
         || IsHardenFilesVerb(arg)
+        || IsGrantCertKeyAccessVerb(arg)
         || IsEnableMcpVerb(arg)
         || IsDisableMcpVerb(arg)
         || IsEnableWebVerb(arg)
@@ -409,7 +636,9 @@ public static partial class DarlingCliCommands
         || IsDropXeSessionsVerb(arg)
         || IsGrantScriptVerb(arg)
         || IsResetPasswordKeyVerb(arg)
-        || IsSelfCheckPasswordKeyVerb(arg);
+        || IsNewPasswordKeyVerb(arg)
+        || IsSelfCheckPasswordKeyVerb(arg)
+        || IsSelfCheckLaunchMemoryVerb(arg);
 
     /// <summary>
     /// Classifies the exe's command line from its FIRST argument (#1581): no args → run the host; a recognized
@@ -475,6 +704,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --check-settings [--json]   Print the store host profile and a verdict per sizing-relevant setting; exits non-zero if any is stale-after-hardware-change." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --diagnostics-bundle <path> [--hours N] [--server <name>] [--log-dir <dir>] [--config <path>] [--alias-map <path>] [--include-log-text] [--force]   Write one aliased diagnostics file to attach to a bug report (run elevated on the store host; --diag-bundle is the short form)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --encrypt-password  Encrypt a SQL-auth password for darling.json (reads stdin)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --new-password-key <path>   Write a new password key to <path> for a passwordKey secret; prints its fingerprint, never the key." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-viewer-connection   Print a remote-viewer connection string (managed store)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-mcp-token   Reprint the MCP bearer token from darling.json (run elevated; writes a LIVE token to stdout)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-web-token   Reprint the web dashboard access token from darling.json (run elevated; writes a LIVE token to stdout)." + Environment.NewLine +
@@ -482,6 +712,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --harden-files      Re-apply the ACLs on darling.json, the store credentials, the log-hash key and the TLS key files darling.json names (run elevated)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --grant-cert-key-access <thumbprint> [--account <name>] [--store-location LocalMachine|CurrentUser] [--store-name <name>]   Give the service account (or --account) Read on the private key of a certificate in a Windows certificate store, for web.network.tls.store and mcp.network.tls.store. Adds one Read entry and keeps the rest (run elevated for LocalMachine; restart the service after). CurrentUser grants on the key in the store of the account running this command, so it helps only when the service runs as that same account; a service under its own account never reads it, so leave the default LocalMachine." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-mcp        Enable the MCP endpoint in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
@@ -500,7 +731,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --set-collector-run-at <collector> <HH:MM|none|default> [--server <server>] [--config <path>]   Set the time of day (the monitored server's own clock) a collector that runs once a day or less often starts; none stops a fixed time, default clears the row's time so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the run time changes. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --set-collector-frequency <collector> <minutes|default> [--server <server>] [--config <path>]   Set how often a collector runs, in minutes (0 = once when the server loads, at most " + CollectorScheduleDefaults.MaxFrequencyMinutes + "); default clears the row's value so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the frequency is written: the enabled flag, retention and database scope on the row are kept, and a new row stores no enabled flag of its own." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --set-collector-retention <collector> <days|default> [--server <server>] [--config <path>]   Set how many days a collector's data is kept (1 to " + CollectorScheduleDefaults.MaxRetentionDays + "); default clears the row's value so the next level applies. Retention is fleet-wide: --server is accepted only with default, to remove a value an older build stored. Only the retention is written." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling created on a server this service still monitors (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", and this install's own, whichever exist). Removing a server drops only this install's own sessions, so run this just before you remove the server to drop the shared ones too. It also lists the sessions of other installs and never drops them. --dry-run lists them and drops nothing." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling created on a server this service still monitors (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", and this install's own, the schema-changes session included, whichever exist). Removing a server drops only this install's own sessions, so run this just before you remove the server to drop the shared ones too. It also lists the sessions of other installs and never drops them. --dry-run lists them and drops nothing." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for the shared sessions, and a query that lists every install's sessions with their DROP statements, in both scopes. It connects to nothing, so use it for a server that is no longer configured or that a removal could not reach." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --grant-script <server-name> [--finops] [--azure] [--config <path>]   Print the T-SQL that creates the monitoring login and grants what Darling needs on a monitored server (the SQL login the entry uses, or the service account for Windows authentication). Safe to run twice. Connects to no monitored server." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure]   The same for a host not yet added." + Environment.NewLine +
@@ -521,8 +752,17 @@ public static partial class DarlingCliCommands
     /// When the store itself cannot be reached, this falls back to the file's list and says so plainly, which
     /// is the one case where the file genuinely is the best available answer.</para>
     /// </summary>
-    public static async Task<int> ValidateConfigAsync(
-        string? configPath, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    public static Task<int> ValidateConfigAsync(
+        string? configPath, TextWriter output, TextWriter error, CancellationToken cancellationToken) =>
+        ValidateConfigAsync(
+            configPath, output, error,
+            name => OperatingSystem.IsWindows() ? DarlingFileSecurity.RegisteredServiceAccount(name) : null,
+            cancellationToken);
+
+    /// <summary>The verb's body, with how the service's registered account is found passed in so a test names one without registering a service (#8006).</summary>
+    internal static async Task<int> ValidateConfigAsync(
+        string? configPath, TextWriter output, TextWriter error,
+        Func<string, SecurityIdentifier?> registeredServiceAccount, CancellationToken cancellationToken)
     {
         DarlingConfig config;
         try
@@ -553,6 +793,21 @@ public static partial class DarlingCliCommands
             output.WriteLine("WARNING: " + warning);
         }
 
+        /* The service, not this process, reads the key at start, so on Windows the key file is judged as the account the service is registered under. */
+        if (OperatingSystem.IsWindows() && ApplyValidateConfigAccount(config, registeredServiceAccount) is { } judgedAs)
+        {
+            output.WriteLine(judgedAs);
+        }
+
+        /* #8006: a WARNING line for each check a passwordKey file failed that only warns, then the key's fingerprint, or a warning, not a
+           failure: the start refuses such a key without stopping collection.
+           The path is resolved as Load resolved it (DARLING_CONFIG, then beside the binary): configPath is null in the usual run, and
+           with no path the credentials-directory check the start makes would be skipped. */
+        foreach (var line in DarlingPasswordKeySource.DescribeForValidation(config, DarlingConfig.ResolveConfigPath(configPath)))
+        {
+            output.WriteLine(line);
+        }
+
         var targets = await ResolveValidationTargetsAsync(config, output, error, cancellationToken);
         if (targets is null)
         {
@@ -580,7 +835,7 @@ public static partial class DarlingCliCommands
             return 0;
         }
 
-        output.WriteLine($"Validating connectivity to {targets.Count} server(s)...");
+        output.WriteLine($"Validating connectivity to {CountText.Plural(targets.Count, "server")}...");
 
         /* #6476: a Windows-authentication server is tested BY THE RUNNING SERVICE when it can be asked, because this process runs as the
            person at the console and the service runs as another account. The store is opened only when such a server is first tested. */
@@ -676,6 +931,15 @@ public static partial class DarlingCliCommands
     internal static async Task ReportAgentDispatchAsync(
         DarlingConfig config, TextWriter output, CancellationToken cancellationToken)
     {
+        /* #7735: the named web tokens' findings print whenever web.network.tokens is set, the way the mcp.tokens findings print below.
+           Nothing is read from the store for them. Never a token value. */
+        foreach (var finding in DarlingWebTokenSet.Check(
+            config.Web.Network, DarlingAgentDispatchChecks.ResolveWebToken(config.Web), DarlingAgentDispatchChecks.ResolveAllTokens(config.Mcp),
+            DarlingWebTokenSet.ResolveEntry, out _))
+        {
+            output.WriteLine("WARNING: " + finding);
+        }
+
         if (!config.Mcp.AllowInvestigations && !config.Mcp.HasNamedTokens)
         {
             return;
@@ -789,7 +1053,7 @@ public static partial class DarlingCliCommands
         if (fileOnly.Count > 0)
         {
             output.WriteLine(
-                $"WARNING: darling.json lists {fileOnly.Count} server(s) not in the store's registry (never registered, or since removed): {string.Join(", ", fileOnly)}. "
+                $"WARNING: darling.json lists {CountText.Plural(fileOnly.Count, "server")} not in the store's registry (never registered, or since removed): {string.Join(", ", fileOnly)}. "
                 + wording.WhenServersAreFileOnly);
         }
 
@@ -799,8 +1063,8 @@ public static partial class DarlingCliCommands
     /// <summary>The note <c>--validate-config</c> prints when its store connection is not the store owner, so the saved
     /// passwords in the old format of <paramref name="count"/> server(s) were not checked (#5366).</summary>
     internal static string OldFormatPasswordsNotCheckedText(int count) =>
-        $"NOTE: this connection is not the store owner, so the saved passwords of {count.ToString(System.Globalization.CultureInfo.InvariantCulture)} "
-        + "server(s) in the old format could not be checked and those server(s) were not tested. Run the verb with the service's own store connection to check them.";
+        $"NOTE: this connection is not the store owner, so the saved passwords of {CountText.Plural(count, "server")} "
+        + $"in the old format could not be checked and {(count == 1 ? "that server was" : "those servers were")} not tested. Run the verb with the service's own store connection to check {(count == 1 ? "it" : "them")}.";
 
     /// <summary>True when this session may read the pins that old-format saved passwords are matched to: it is the owner of the
     /// pin table, or the store has no such table yet. Never throws for a store answer.</summary>
@@ -3517,9 +3781,31 @@ public static partial class DarlingCliCommands
             DarlingWebTls.TlsShape.Pem =>
                 $"         TLS: on (PEM pair, {tls!.CertPath})."
                 + (plan.Warning is null ? string.Empty : $" NOTE: {plan.Warning}"),
+            DarlingWebTls.TlsShape.Store =>
+                $"         TLS: on (certificate store, {DescribeStoreCertificate(tls!.Store!)})."
+                + (plan.Warning is null ? string.Empty : $" NOTE: {plan.Warning}"),
             _ => $"         TLS: on (PKCS#12, {tls!.PfxPath})."
                  + (plan.Warning is null ? string.Empty : $" NOTE: {plan.Warning}"),
         };
+    }
+
+    /// <summary>
+    /// Where the <c>store</c> form's certificate lives and how it is picked, for the status line (#7718):
+    /// <c>LocalMachine\My, 0123...</c> for a thumbprint, <c>LocalMachine\My, newest valid for name</c> for a subject.
+    /// A location that does not parse is shown as written, since <see cref="DarlingWebTls.Describe"/> already refuses
+    /// it before this line is chosen. Pure.
+    /// </summary>
+    internal static string DescribeStoreCertificate(WebTlsStoreConfig store)
+    {
+        var location = DarlingWebTls.TryParseStoreLocation(store.Location, out var parsed)
+            ? parsed.ToString()
+            : (string.IsNullOrWhiteSpace(store.Location) ? "LocalMachine" : store.Location.Trim());
+        var name = string.IsNullOrWhiteSpace(store.Name) ? "My" : store.Name.Trim();
+        var pick = !string.IsNullOrWhiteSpace(store.Thumbprint)
+            ? DarlingTlsStore.NormalizeThumbprint(store.Thumbprint)
+            : $"newest valid for {store.Subject?.Trim()}";
+
+        return $"{location}\\{name}, {pick}";
     }
 
     /// <summary>
@@ -3528,7 +3814,7 @@ public static partial class DarlingCliCommands
     ///
     /// <list type="bullet">
     /// <item><b>The scheme follows the certificate (#5288).</b> It is <c>https</c> when <c>web.network.tls</c> names a
-    /// PKCS#12 bundle or a PEM pair, because the network listener then speaks TLS only and an <c>http://</c> URL
+    /// PKCS#12 bundle, a PEM pair or a store entry, because the network listener then speaks TLS only and an <c>http://</c> URL
     /// fails the handshake. Anything else, a MISCONFIGURED block included, keeps <c>http</c>: a refused block
     /// leaves the dashboard loopback-only, so there is no remote URL to get right.</item>
     /// <item><b>A wildcard listen has no single address to print.</b> <c>0.0.0.0</c> and <c>::</c> both print the
@@ -3539,7 +3825,7 @@ public static partial class DarlingCliCommands
     /// </summary>
     internal static IReadOnlyList<string> BuildWebLoginHint(string? listen, int port, WebTlsConfig? tls)
     {
-        var scheme = DarlingWebTls.Describe(tls).Shape is DarlingWebTls.TlsShape.Pfx or DarlingWebTls.TlsShape.Pem
+        var scheme = DarlingWebTls.Describe(tls).Shape is DarlingWebTls.TlsShape.Pfx or DarlingWebTls.TlsShape.Pem or DarlingWebTls.TlsShape.Store
             ? "https"
             : "http";
 
@@ -3669,7 +3955,7 @@ public static partial class DarlingCliCommands
 
     /// <summary>True when the current process is running elevated (Administrators role) — required to control the service.</summary>
     [SupportedOSPlatform("windows")]
-    private static bool IsElevated()
+    internal static bool IsElevated()
     {
         using var identity = WindowsIdentity.GetCurrent();
         return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
@@ -3806,7 +4092,7 @@ public static partial class DarlingCliCommands
             ? null
             : $"NOTE: darling.json gives {section} no token, so the service will not start it. Set {section}.network.encryptedToken " +
               $"(from --encrypt-password) or {section}.network.token and restart the service, or set {section}.allowTokenlessLoopback " +
-              (mcp ? "to true to serve loopback with no token (the write tools stay off)." : "to true to serve loopback with no token, for reads only.");
+              (mcp ? $"to true to serve loopback with no token (the write and investigation tools stay off; they need a token of at least {DarlingHostBinding.MinimumTokenLength} characters with at least {DarlingHostBinding.MinimumDistinctTokenCharacters} different ones)." : "to true to serve loopback with no token, for reads only.");
     }
 
     /// <summary>Whether darling.json gives the endpoint a token value (presence only; the value is never read here).</summary>
@@ -3828,7 +4114,10 @@ public static partial class DarlingCliCommands
             : DarlingWebHostService.ResolveWebBind(config.Web, managed).Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
         var listen = mcp ? config.Mcp.Network?.Listen : config.Web.Network?.Listen;
         var tls = mcp ? config.Mcp.Network?.Tls : config.Web.Network?.Tls;
-        return exposed && tls is not null
+        /* A block Describe refuses (a store name that is a path, say) is not served: the listener stays on loopback http. */
+        var tlsServed = DarlingWebTls.Describe(tls, mcp ? "mcp" : "web").Shape
+            is DarlingWebTls.TlsShape.Pfx or DarlingWebTls.TlsShape.Pem or DarlingWebTls.TlsShape.Store;
+        return exposed && tlsServed
             && IPAddress.TryParse(listen?.Trim(), out var listenIp)
             && !DarlingHostBinding.ShouldAddLoopbackListeners(listenIp)
             ? "https"
@@ -4540,7 +4829,7 @@ public static partial class DarlingCliCommands
     /// the list is readable as a policy rather than as control flow — which file gets INTERACTIVE read is the
     /// only judgement in this verb, and it should be visible at a glance.
     /// </summary>
-    private readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What);
+    internal readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What);
 
     /// <summary>One file <see cref="TlsKeyFilesNamed"/> lists: the path as written, the setting that names it, and what
     /// its content has to be.</summary>
@@ -4639,12 +4928,12 @@ public static partial class DarlingCliCommands
     {
         if (tls.OtherAccess > 0)
         {
-            yield return $"{tls.OtherAccess} of {tls.Examined} TLS key file(s) are open to accounts other than SYSTEM, Administrators and the service account (see the lines above for who).";
+            yield return $"{tls.OtherAccess} of {CountText.Plural(tls.Examined, "TLS key file")} {(tls.OtherAccess == 1 ? "is" : "are")} open to accounts other than SYSTEM, Administrators and the service account (see the lines above for who).";
         }
 
         if (tls.UntrustedOwner > 0)
         {
-            yield return $"{tls.UntrustedOwner} of {tls.Examined} TLS key file(s) have an owner who is not SYSTEM, Administrators or the service account, so the owner can change who may read them.";
+            yield return $"{tls.UntrustedOwner} of {CountText.Plural(tls.Examined, "TLS key file")} {(tls.UntrustedOwner == 1 ? "has" : "have")} an owner who is not SYSTEM, Administrators or the service account, so the owner can change who may read them.";
         }
     }
 
@@ -4934,7 +5223,7 @@ public static partial class DarlingCliCommands
            need an administrator are in the closing lines. */
         if (tls.Exposed > 0)
         {
-            output.WriteLine($"{tls.Exposed} of {tls.Examined} TLS key file(s) are STILL readable by ordinary users or could not be secured.");
+            output.WriteLine($"{tls.Exposed} of {CountText.Plural(tls.Examined, "TLS key file")} {(tls.Exposed == 1 ? "is" : "are")} STILL readable by ordinary users or could not be secured.");
         }
 
         foreach (var line in TlsKeyFileAccessCountLines(tls))
@@ -4952,7 +5241,7 @@ public static partial class DarlingCliCommands
     /// location when the config did not load.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private static List<HardenTarget> HardenTargets(string resolvedConfig, string dataDirectory, string? keyDirectory)
+    internal static List<HardenTarget> HardenTargets(string resolvedConfig, string dataDirectory, string? keyDirectory)
     {
         var storeRoot = Path.GetDirectoryName(Path.GetFullPath(dataDirectory));
         var targets = new List<HardenTarget>
@@ -4971,14 +5260,20 @@ public static partial class DarlingCliCommands
         if (!string.IsNullOrEmpty(storeRoot))
         {
             /* Operator-group traverse, never list: the operator walks through it to the admin and viewer credentials,
-               never to the rest. Mirrors DarlingManagedPostgres' own call. */
-            targets.Add(new(storeRoot, AllowInteractive: true, IsDirectory: true, "the store directory"));
+               never to the rest. Mirrors DarlingManagedPostgres' own call, which leaves a drive root alone (#7363): its
+               permissions are the whole drive's, and the files beside the data directory are hardened one by one below. */
+            if (!DarlingManagedPostgres.IsDriveRoot(storeRoot))
+            {
+                targets.Add(new(storeRoot, AllowInteractive: true, IsDirectory: true, "the store directory"));
+            }
+
             targets.Add(new(Path.Combine(storeRoot, "pg-credential.dpapi"), false, false, "the store credential"));
             /* The same posture the service applies on every start (DarlingManagedRoles.EnsureProvisionedAsync): the
                admin and viewer credentials are read by the operator's Viewer, the mcp credential only by the service. */
             targets.Add(new(Path.Combine(storeRoot, "pg-admin-credential.dpapi"), AllowInteractive: true, IsDirectory: false, "the admin credential"));
             targets.Add(new(Path.Combine(storeRoot, "pg-viewer-credential.dpapi"), AllowInteractive: true, IsDirectory: false, "the viewer credential"));
             targets.Add(new(Path.Combine(storeRoot, "pg-mcp-credential.dpapi"), AllowInteractive: false, IsDirectory: false, "the mcp credential"));
+            targets.Add(new(Path.Combine(storeRoot, "pg-web-credential.dpapi"), AllowInteractive: false, IsDirectory: false, "the web credential"));
             targets.Add(new(Path.Combine(storeRoot, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
             /* #5700: the store's own TLS key, read only by the service like the mcp credential. Absent until the store
                has TLS on, and then skipped like every other store file that is not there. */
@@ -5061,6 +5356,15 @@ public static partial class DarlingCliCommands
 
         var targets = HardenTargets(resolvedConfig, dataDirectory, keyDirectory);
         var configDirectory = Path.GetDirectoryName(Path.GetFullPath(resolvedConfig)) ?? AppContext.BaseDirectory;
+        if (Path.GetDirectoryName(Path.GetFullPath(dataDirectory)) is { Length: > 0 } driveRootCandidate
+            && DarlingManagedPostgres.IsDriveRoot(driveRootCandidate))
+        {
+            output.WriteLine(
+                $"NOTE: the store directory {driveRootCandidate} is a drive root, so its permissions were not changed: they are the whole drive's. " +
+                "The credential files beside the data directory are hardened one by one below. " +
+                DarlingManagedPostgres.DriveRootMoveText(driveRootCandidate, dataDirectory));
+            output.WriteLine();
+        }
 
         /* #2371: harden for the account the SERVICE runs as, not for whoever is running THIS. The verb is
            documented to be run elevated and exists because the service cannot re-ACL a file it does not own,
@@ -5180,7 +5484,7 @@ public static partial class DarlingCliCommands
             refused += tls.Refused;
             if (tls.Missing > 0)
             {
-                error.WriteLine($"{tls.Missing} TLS key file(s) named in darling.json were not found.");
+                error.WriteLine($"{CountText.Plural(tls.Missing, "TLS key file")} named in darling.json {(tls.Missing == 1 ? "was" : "were")} not found.");
             }
         }
 
@@ -5195,12 +5499,12 @@ public static partial class DarlingCliCommands
 
         if (refused > 0)
         {
-            error.WriteLine($"{refused} of {touched} item(s) were REFUSED: a junction or symbolic link is on the path, or the file has another name (a hard link), and nothing is changed through one.");
+            error.WriteLine($"{refused} of {CountText.Plural(touched, "item")} {(refused == 1 ? "was" : "were")} REFUSED: a junction or symbolic link is on the path, or the file has another name (a hard link), and nothing is changed through one.");
         }
 
         if (exposed > 0)
         {
-            error.WriteLine($"{exposed} of {touched} item(s) are STILL readable by ordinary users.");
+            error.WriteLine($"{exposed} of {CountText.Plural(touched, "item")} {(exposed == 1 ? "is" : "are")} STILL readable by ordinary users.");
             error.WriteLine("Run this from an ELEVATED prompt. If it was already elevated, the owner is the");
             error.WriteLine("problem: ownership carries WRITE_DAC, so take ownership first, then re-run.");
         }
@@ -5219,10 +5523,10 @@ public static partial class DarlingCliCommands
         /* The service re-asserts the store and config ACLs at every start; it only warns about a TLS key file, and a
            renewed certificate arrives with the folder's ACL. */
         output.WriteLine(tlsExamined == 0
-            ? $"All {touched} item(s) secured. The service re-asserts these ACLs at every start."
+            ? $"All {CountText.Plural(touched, "item")} secured. The service re-asserts these ACLs at every start."
             : touched == tlsExamined
-                ? $"All {touched} item(s) secured. Re-run --harden-files after replacing a TLS key file."
-                : $"All {touched} item(s) secured. The service re-asserts the ACLs of the {touched - tlsExamined} item(s) that are not TLS key files at every start. Re-run --harden-files after replacing a TLS key file.");
+                ? $"All {CountText.Plural(touched, "item")} secured. Re-run --harden-files after replacing a TLS key file."
+                : $"All {CountText.Plural(touched, "item")} secured. The service re-asserts the ACLs of the {CountText.Plural(touched - tlsExamined, "item")} that {(touched - tlsExamined == 1 ? "is not a TLS key file" : "are not TLS key files")} at every start. Re-run --harden-files after replacing a TLS key file.");
         return 0;
     }
 
@@ -5638,7 +5942,7 @@ public static partial class DarlingCliCommands
         output.WriteLine();
         if (failures > 0)
         {
-            error.WriteLine($"{failures} firewall rule(s) could not be reconciled — see the commands above.");
+            error.WriteLine($"{CountText.Plural(failures, "firewall rule")} could not be reconciled — see the commands above.");
             return 1;
         }
 
@@ -5647,7 +5951,7 @@ public static partial class DarlingCliCommands
            #2442 fixed one branch up, and the per-surface lines above already carry the real reason. */
         output.WriteLine(toOpen == 0
             ? "Done. No endpoint wants an open port, so no port was opened."
-            : $"Done. {toOpen} endpoint(s) exposed on the LAN; their scoped rules are in place.");
+            : $"Done. {CountText.Plural(toOpen, "endpoint")} exposed on the LAN; {(toOpen == 1 ? "its scoped rule is" : "their scoped rules are")} in place.");
         return 0;
     }
 
@@ -5992,7 +6296,7 @@ public static partial class DarlingCliCommands
                     }
                     catch (Exception reopenEx) when (reopenEx is not OperationCanceledException)
                     {
-                        error.WriteLine($"  The collapse failed after {removed:N0} row(s); the slice at {sliceStart:yyyy-MM-dd HH:mm} failed ({FirstLineOf(ex.Message)}) and the store connection could not be reopened: {FirstLineOf(reopenEx.Message)}");
+                        error.WriteLine(Inv($"  The collapse failed after {CountText.Plural(removed, "row")}; the slice at {sliceStart:yyyy-MM-dd HH:mm} failed ({FirstLineOf(ex.Message)}) and the store connection could not be reopened: {FirstLineOf(reopenEx.Message)}"));
                         error.WriteLine("  Slices already committed are safe. Re-run to continue — the repair is idempotent.");
                         return 1;
                     }
@@ -6017,7 +6321,7 @@ public static partial class DarlingCliCommands
                    unattended. Each slice is its own transaction, so earlier slices are already committed
                    and are not lost — and the collapse is idempotent, so re-running picks up where this
                    stopped. */
-                error.WriteLine($"  The collapse failed after {removed:N0} row(s); the failing {actualWidth.TotalMinutes:F0}m slice at {sliceStart:yyyy-MM-dd HH:mm} was rolled back: {ex.Message}");
+                error.WriteLine(Inv($"  The collapse failed after {CountText.Plural(removed, "row")}; the failing {actualWidth.TotalMinutes:F0}m slice at {sliceStart:yyyy-MM-dd HH:mm} was rolled back: {ex.Message}"));
                 error.WriteLine("  Slices already committed are safe. Re-run to continue — the repair is idempotent.");
                 return 1;
             }
@@ -6058,8 +6362,8 @@ public static partial class DarlingCliCommands
 
         output.WriteLine();
         output.WriteLine(refreshed == affected.Count
-            ? $"  DONE — {removed:N0} row(s) collapsed, {refreshed} rollup(s) re-materialized."
-            : $"  PARTIAL — {removed:N0} row(s) collapsed, {refreshed} of {affected.Count} rollup(s) re-materialized. The collapse itself is committed; re-run to retry the rollups.");
+            ? $"  DONE — {CountText.Plural(removed, "row")} collapsed, {CountText.Plural(refreshed, "rollup")} re-materialized."
+            : $"  PARTIAL — {CountText.Plural(removed, "row")} collapsed, {refreshed} of {CountText.Plural(affected.Count, "rollup")} re-materialized. The collapse itself is committed; re-run to retry the rollups.");
 
         return 0;
     }
@@ -6442,7 +6746,7 @@ public static partial class DarlingCliCommands
             return 1;
         }
 
-        output.WriteLine(Inv($"  {survey.Pending:N0} text row(s) to convert; {survey.Converted:N0} already gzip; {survey.Total:N0} total."));
+        output.WriteLine(Inv($"  {CountText.Plural(survey.Pending, "text row")} to convert; {survey.Converted:N0} already gzip; {survey.Total:N0} total."));
         output.WriteLine(Inv($"  Relation size (table + TOAST + indexes): {survey.RelationBytes / (1024.0 * 1024 * 1024):N1} GB."));
         output.WriteLine();
 
@@ -6488,7 +6792,7 @@ public static partial class DarlingCliCommands
             var ratio = sample.GzipBytes == 0 ? 0 : (double)sample.TextBytes / sample.GzipBytes;
             var avgGzip = sample.GzipBytes / (double)sample.Rows;
             var projected = survey.Pending * avgGzip;
-            output.WriteLine(Inv($"  DRY RUN — sampled {sample.Rows:N0} pending row(s), compressed in memory, wrote nothing:"));
+            output.WriteLine(Inv($"  DRY RUN — sampled {CountText.Plural(sample.Rows, "pending row")}, compressed in memory, wrote nothing:"));
             output.WriteLine(Inv($"    measured ratio: {ratio:N1}x (raw text -> gzip), average {avgGzip / 1024.0:N1} KB per plan"));
             output.WriteLine(Inv($"    projected gzip content for all {survey.Pending:N0} pending rows: ~{projected / (1024.0 * 1024 * 1024):N1} GB"));
             output.WriteLine();
@@ -6576,7 +6880,7 @@ public static partial class DarlingCliCommands
 
         var finalRatio = result.GzipBytes == 0 ? 0 : (double)result.TextBytes / result.GzipBytes;
         output.WriteLine();
-        output.WriteLine(Inv($"  DONE in {stopwatch.Elapsed:hh\\:mm\\:ss} — {result.Rows:N0} row(s) converted, ") +
+        output.WriteLine(Inv($"  DONE in {stopwatch.Elapsed:hh\\:mm\\:ss} — {CountText.Plural(result.Rows, "row")} converted, ") +
             Inv($"{result.TextBytes / (1024.0 * 1024 * 1024):N1} GB text -> {result.GzipBytes / (1024.0 * 1024 * 1024):N1} GB gzip ({finalRatio:N1}x)."));
         if (after.Total > 0)
         {
@@ -6585,7 +6889,7 @@ public static partial class DarlingCliCommands
 
         if (result.VerifyFailures > 0)
         {
-            error.WriteLine(Inv($"  [WARN] {result.VerifyFailures:N0} row(s) FAILED round-trip verification and kept their text unchanged."));
+            error.WriteLine(Inv($"  [WARN] {CountText.Plural(result.VerifyFailures, "row")} FAILED round-trip verification and kept {(result.VerifyFailures == 1 ? "its" : "their")} text unchanged."));
             error.WriteLine("  Investigate before re-running; those rows are readable exactly as before.");
             error.WriteLine("  VACUUM FULL was skipped — compaction can wait until the conversion is clean.");
             return 1;
@@ -6600,7 +6904,7 @@ public static partial class DarlingCliCommands
 
         if (after.Total > 0 && after.Pending > 0)
         {
-            output.WriteLine(Inv($"  {after.Pending:N0} row(s) arrived mid-run and are still text — re-run to convert them;"));
+            output.WriteLine(Inv($"  {CountText.Plural(after.Pending, "row")} arrived mid-run and {(after.Pending == 1 ? "is" : "are")} still text — re-run to convert {(after.Pending == 1 ? "it" : "them")};"));
             output.WriteLine("  compaction will run when the conversion converges.");
             return 0;
         }
@@ -7482,7 +7786,7 @@ public static partial class DarlingCliCommands
             output.WriteLine(result.LoginDropped
                 ? $"  Login '{result.RoleName}' dropped."
                 : $"  Login '{result.RoleName}' was not dropped: it is missing, or it was not made by --add-alert-source, or the statements below drop it.");
-            output.WriteLine($"  Removed with it: {result.RemovedRows} queued alert row(s), {result.RemovedUndelivered} of them not yet delivered. Alerts it already sent stay in the alert history.");
+            output.WriteLine($"  Removed with it: {CountText.Plural(result.RemovedRows, "queued alert row")}, {result.RemovedUndelivered} of them not yet delivered. Alerts it already sent stay in the alert history.");
             WriteEndedSessions(result, output);
         }
         else
@@ -7573,7 +7877,7 @@ public static partial class DarlingCliCommands
     {
         if (result.SessionsEnded is { } ended)
         {
-            output.WriteLine($"  Ended {ended} open session(s) of login '{result.RoleName}'.");
+            output.WriteLine($"  Ended {CountText.Plural(ended, "open session")} of login '{result.RoleName}'.");
         }
         else if (result.EndSessionsSqlForDba is { } sql)
         {
@@ -9632,18 +9936,62 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
                 continue;
             }
 
+            /* #7981: which slices the engine already counts as built. Every planned slice sits below the
+               coverage floor, so the rollup holds nothing in it; when the invalidation log has no entry over it
+               either, a plain refresh does nothing there. That is the shape after a rollup's own retention has
+               dropped buckets it had built (dropping writes no invalidation), as on a store whose raw data has
+               an outage gap: every plain slice ran for nothing, and the forced fallback below did all the work
+               over the whole range. Such a slice runs forced from the start instead. Without the log, every
+               slice runs plain and the fallback still repairs a shortfall. */
+            IReadOnlyList<(long Lowest, long Greatest)>? invalidations = null;
+            try
+            {
+                invalidations = await RollupBackfill.ReadInvalidationLogAsync(connection, plan.View, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                error.WriteLine($"    NOTE: the invalidation log for {plan.View} could not be read ({FirstLineOf(ex.Message)}); every slice runs plain.");
+            }
+
+            var slices = RollupBackfill.Slices(plan.FromUtc, plan.ToUtc)
+                .Select(s => (s.FromUtc, s.ToUtc, Forced: invalidations is { Count: > 0 } && RollupBackfill.CountedAsBuilt(invalidations, s.FromUtc, s.ToUtc)))
+                .ToList();
+            var forcedSlices = slices.Count(s => s.Forced);
+            if (forcedSlices > 0)
+            {
+                output.WriteLine(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"    {forcedSlices:N0} of {plan.Slices:N0} slices run forced: the rollup counts them as built but holds nothing in them, so a plain refresh over them would do nothing. Its own retention dropping buckets it had built leaves this shape."));
+            }
+
             var completed = 0L;
             var sliceFailed = false;
-            foreach (var (from, to) in RollupBackfill.Slices(plan.FromUtc, plan.ToUtc))
+            var forceUnavailable = false;
+            foreach (var (from, to, forced) in slices)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                var force = forced && !forceUnavailable;
                 try
                 {
-                    var floor = await RollupBackfill.RunSliceAsync(connection, plan.View, from, to, disclosure, cancellationToken);
+                    DateTime? floor;
+                    try
+                    {
+                        floor = await RollupBackfill.RunSliceAsync(connection, plan.View, from, to, disclosure, cancellationToken, force: force);
+                    }
+                    catch (PostgresException ex) when (force && ex.SqlState == RollupBackfill.UndefinedFunctionSqlState)
+                    {
+                        /* force arrived in TimescaleDB 2.18. On an older bring-your-own store the slices run
+                           plain, said once, and a shortfall is reported below as on any such store. */
+                        forceUnavailable = true;
+                        force = false;
+                        error.WriteLine($"    forced refresh unavailable on this store ({FirstLineOf(ex.Message)}); the slices run plain.");
+                        floor = await RollupBackfill.RunSliceAsync(connection, plan.View, from, to, disclosure, cancellationToken);
+                    }
+
                     completed++;
                     output.WriteLine(string.Create(
                         CultureInfo.InvariantCulture,
-                        $"    [{completed:N0}/{plan.Slices:N0}] {from:yyyy-MM-dd} -> {to:yyyy-MM-dd}; coverage now starts {floor:yyyy-MM-dd HH:mm}"));
+                        $"    [{completed:N0}/{plan.Slices:N0}] {from:yyyy-MM-dd} -> {to:yyyy-MM-dd}{(force ? ", forced" : "")}; coverage now starts {floor:yyyy-MM-dd HH:mm}"));
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -9663,8 +10011,9 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
 
             /* Short WITHOUT a slice having failed means the refreshes reported success over a range they did
                not materialize — the signature of an earlier pass cut short, whose invalidation records a plain
-               refresh will now skip straight over. That is the one case the forced form repairs, and the only
-               case it is worth paying for. */
+               refresh will now skip straight over. A slice the log showed as built already ran forced above;
+               this catches what the log did not show, and it is the only case the forced form is worth paying
+               for over the whole range. */
             if (!reached && !sliceFailed && after.SourceOldestUtc is not null)
             {
                 output.WriteLine($"    {plan.View} is still short after every slice; escalating to a forced refresh over the range.");
@@ -9724,11 +10073,11 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
         output.WriteLine("the Retention Held alert resolves on the hour after that. To arm immediately instead, restart the");
         output.WriteLine("PerformanceMonitor Darling service: the same gate runs on the start path.");
         output.WriteLine();
-        output.WriteLine($"Do not let it wait a day. The hourly rollups carry their OWN retention policy ({TimescaleSupport.HourlyRetentionInterval}), already");
-        output.WriteLine("armed on these stores, which will trim the coverage this run just built when it next fires");
-        output.WriteLine("(roughly daily). The hourly re-evaluation, or a restart now, is what lets the raw policies arm off");
-        output.WriteLine("that coverage first. If the trim wins the race nothing is lost — raw is still held — and re-running");
-        output.WriteLine("this verb rebuilds it.");
+        /* #7114: this used to warn that a rollup's own retention could trim the coverage this run built before
+           the hourly re-evaluation armed off it, putting the hold back. The gate now checks a rollup whose own
+           retention is armed only as far back as that retention keeps, so that trim cannot re-hold anything. */
+        output.WriteLine("A rollup's own retention may trim the older days this run built before then. That does not undo it:");
+        output.WriteLine("the gate checks a rollup whose own retention is armed only as far back as that retention keeps.");
         return 0;
     }
 

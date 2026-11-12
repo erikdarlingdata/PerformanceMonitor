@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.PlanAnalysis;
@@ -33,7 +34,7 @@ public sealed partial class PgFactCollector
        so it provably predates whatever change set that configuration and must not be counted. A
        current_maxdop of 0 (unlimited) or unknown (no server_config row yet) makes no configuration
        impossible, so the count is unchanged in both of those cases. */
-    public const string QueryStatsSql = @"
+    public static string QueryStatsSql => @"
 WITH current_maxdop AS
 (
     SELECT value_in_use
@@ -48,9 +49,7 @@ SELECT
     /* #5633: DISTINCT (database, query_hash), like spilling_queries below. This count drives the QUERY_HIGH_DOP threshold (5/20) and
        its N-queries text, and v_query_stats holds one row per query per snapshot, so one high-DOP query seen in 20 collections
        scored at full severity as 20 queries. A NULL hash collapses to one per database, as for spilling_queries. */
-    COUNT(DISTINCT CASE WHEN v.max_dop > 8
-                         AND (m.value_in_use IS NULL OR m.value_in_use = 0 OR v.max_dop <= m.value_in_use)
-                        THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS high_dop_queries,
+" + QueryHighDopSignature.HighDopQueriesCountSql + @"
     COUNT(DISTINCT CASE WHEN v.delta_spills > 0
                         THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS spilling_queries,
     SUM(v.delta_execution_count) AS total_executions,
@@ -135,6 +134,18 @@ LIMIT " + FactRanked.MaxObjects + ";";
 
             if (totalSpills > 0)
             {
+                /* #7884: the period and coverage stamps the wait facts carry, so the scorer grades pages per OBSERVED hour
+                   (FactScorer.ObservedHours) and the same spill rate reads the same at every hours_back. */
+                var spillMetadata = new Dictionary<string, double>
+                {
+                    ["total_spills"] = totalSpills,
+                    /* #5633: DISTINCT queries (database + query_hash) with a spill, not snapshot rows. */
+                    ["spilling_query_count"] = spillingQueries,
+                    ["total_executions"] = totalExecutions,
+                    ["period_duration_ms"] = context.PeriodDurationMs
+                };
+                FactCollectorHelpers.AddCoverageFraction(spillMetadata, context);
+
                 facts.Add(new Fact
                 {
                     Source = "queries",
@@ -143,13 +154,7 @@ LIMIT " + FactRanked.MaxObjects + ";";
                     ServerId = context.ServerId,
                     ObjectName = spillRanked.Count > 0 ? spillRanked[0].ObjectName : null,
                     Ranked = spillRanked,
-                    Metadata = new Dictionary<string, double>
-                    {
-                        ["total_spills"] = totalSpills,
-                        /* #5633: DISTINCT queries (database + query_hash) with a spill, not snapshot rows. */
-                        ["spilling_query_count"] = spillingQueries,
-                        ["total_executions"] = totalExecutions
-                    }
+                    Metadata = spillMetadata
                 });
             }
 
@@ -179,14 +184,7 @@ LIMIT " + FactRanked.MaxObjects + ";";
         }
     }
 
-    /// <summary>
-    /// How many parameter-sensitive plans the fact counts and how many the read reports: the <c>LIMIT</c> this
-    /// statement carried until the compiled-before-the-window test moved to the reader (#4821), which has to run
-    /// BEFORE the cap for the cap to keep the same plans.
-    /// </summary>
-    internal const int ParameterSensitivityMaxOffenders = 20;
-
-    public const string ParameterSensitivitySql = @"
+    public static string ParameterSensitivitySql => @"
 WITH newest AS
 (
     -- creation_time is the MONITORED SERVER's local wall clock -- QueryStatsCollector ships the
@@ -254,11 +252,7 @@ SELECT
     query_plan_hash
 FROM latest, svr
 WHERE rn = 1
-AND   min_worker_time >= 10000
-AND   max_worker_time >= 250000
-AND   execution_count >= 20
-AND   creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'
-AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
+" + ParameterSensitivitySignature.PredicateSql("creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'") + @"
 ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
     /// <summary>
@@ -332,7 +326,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                         }));
                 }
                 offenderCount++;
-                if (offenderCount >= ParameterSensitivityMaxOffenders)
+                if (offenderCount >= FactThresholds.ParameterSensitivity.OffenderCap)
                     break;
             }
 
@@ -353,7 +347,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                     ["worst_min_worker_us"] = worstMinWorker,
                     ["worst_max_worker_us"] = worstMaxWorker,
                     ["worst_grant_ratio"] = worstGrantRatio,
-                    ["grant_divergence"] = worstGrantRatio >= 5 ? 1 : 0,
+                    ["grant_divergence"] = worstGrantRatio >= FactThresholds.ParameterSensitivity.GrantDivergenceRatio ? 1 : 0,
                     ["spill_divergence"] = worstSpillDivergence
                 }
             });
@@ -718,12 +712,7 @@ WITH plan_agg AS
         END AS rows_per_exec,
         MAX(last_exec) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
-        MAX(force_failure_count) AS force_failure_count,
-        -- #5630: one plan_id per hash group, so the caller can read the two plans' compiled parameter values. The
-        -- group's newest-run plan stands for the latest group, its most-executed plan for the best group; ties
-        -- break on plan_id so the pick is the same on every read.
-        (array_agg(plan_id ORDER BY last_exec DESC, plan_id DESC))[1] AS newest_plan_id,
-        (array_agg(plan_id ORDER BY execs DESC, plan_id DESC))[1] AS busiest_plan_id
+        MAX(force_failure_count) AS force_failure_count
     FROM plan_agg
     /*SEC*/
     GROUP BY database_name, query_id, replica_role, query_plan_hash
@@ -773,13 +762,19 @@ compared AS
         -- The resource-expenditure half of the importance gate (#2138): total CPU the LATEST plan burned
         -- over the window. The exec-count floor above only counts; this weighs.
         l.execs * l.cpu_per_exec AS latest_total_cpu_us,
+        -- #7417: the CPU the regression lost in the window, the ranking key and a floor (PlanRegressionRanking): the
+        -- per-execution difference times the latest plan's executions. A factor alone ranked a 455 us statement over a
+        -- 1.2 s one. NULL cpu figures give NULL, which the floor drops.
+        " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuExpressionSql + @" AS lost_cpu_us,
         l.database_name,
         -- #3953: when the best plan last ran, so the advice can state its age. The window reaches a full 14 days
         -- on both SKUs, so a best plan can be two weeks old.
         b.last_exec AS best_last_exec,
-        -- #5630: the plans to compare, and the key for the statement text.
-        l.newest_plan_id AS latest_plan_id,
-        b.busiest_plan_id AS best_plan_id
+        -- #5630: the two plans to compare are picked below, for the surviving candidates only (#8570). The two hash
+        -- groups and the replica carry the key for that pick.
+        l.replica_role,
+        l.query_plan_hash AS latest_hash,
+        b.query_plan_hash AS best_hash
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -795,9 +790,11 @@ candidates AS
     FROM compared
     WHERE regression_factor >= 2
     -- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
-    -- near-zero-cost queries whose ratios are all sampling jitter; magnitude ranking stays with
-    -- regression_factor and the scorer.
+    -- near-zero-cost queries whose ratios are all sampling jitter. Magnitude ranking is the ORDER BY below (#7417).
     AND   latest_total_cpu_us >= 10000000
+    -- #7417: and a CPU-path regression must have LOST that much of it (PlanRegressionRanking). A duration-path row keeps the
+    -- bar above: it got slower through waits more than CPU, so its CPU loss is small by construction.
+    AND   " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuFloorSql + @"
     -- #6548: SQL Server own housekeeping statements (change tracking cleanup and the like) are not application code and
     -- cannot be fixed by anyone monitoring. Left out BEFORE the LIMIT below, so they cannot use up its rows or lead the fact.
     AND   NOT EXISTS (SELECT 1 FROM query_store_text AS x
@@ -809,8 +806,39 @@ candidates AS
                           OR " + PerformanceMonitor.Darling.Storage.QueryStoreSelfStatement.SelfOfStoredText + @"))
     -- #5630: 100, not 20. The caller drops the queries whose two plans were compiled for different inputs
     -- (PlanInputComparison) and keeps the worst 20 of what is left, so the cut moved after that check.
-    ORDER BY regression_factor DESC
+    -- #7417: by the CPU the regression lost, the factor second. The first row leads the card and its force statement.
+    ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
     LIMIT 100
+),
+latest_plan AS
+(
+    -- #5630: one plan_id per hash group, so the caller can read the two plans' compiled parameter values. The group's
+    -- newest-run plan stands for the latest group, its most-executed plan for the best group; ties break on plan_id so
+    -- the pick is the same on every read. #8570: picked here, from plan_agg, for the 100 candidates at most. It was an
+    -- ordered array_agg inside plan_dedup, which sorted and ran a per-group tuplesort for every hash group of the window
+    -- (113,000 on a busy primary) to keep 100. A candidate is one row per (database, query, replica), so DISTINCT ON
+    -- with the same ORDER BY returns the plan_id the aggregate returned, NULLs first on a DESC sort in both.
+    SELECT DISTINCT ON (c.database_name, c.query_id, c.replica_role)
+        c.database_name, c.query_id, c.replica_role, a.plan_id
+    FROM candidates AS c
+    JOIN plan_agg AS a
+      ON  a.database_name = c.database_name
+      AND a.query_id = c.query_id
+      AND a.replica_role IS NOT DISTINCT FROM c.replica_role
+      AND a.query_plan_hash = c.latest_hash
+    ORDER BY c.database_name, c.query_id, c.replica_role, a.last_exec DESC, a.plan_id DESC
+),
+best_plan AS
+(
+    SELECT DISTINCT ON (c.database_name, c.query_id, c.replica_role)
+        c.database_name, c.query_id, c.replica_role, a.plan_id
+    FROM candidates AS c
+    JOIN plan_agg AS a
+      ON  a.database_name = c.database_name
+      AND a.query_id = c.query_id
+      AND a.replica_role IS NOT DISTINCT FROM c.replica_role
+      AND a.query_plan_hash = c.best_hash
+    ORDER BY c.database_name, c.query_id, c.replica_role, a.execs DESC, a.plan_id DESC
 )
 SELECT
     c.query_id,
@@ -828,18 +856,26 @@ SELECT
     c.best_last_exec,
     -- #5630: appended for the same reason. The two plans to compare, then the statement text (the table is keyed
     -- on (server, database, query_id), so it cannot fan a row out).
-    c.latest_plan_id,
-    c.best_plan_id,
+    lp.plan_id AS latest_plan_id,
+    bp.plan_id AS best_plan_id,
     x.query_sql_text,
     -- #5631: appended for the same reason. Rows per call of the newer and the cheaper plan; NULL when unknown.
     c.latest_rows,
     c.best_rows
 FROM candidates AS c
+LEFT JOIN latest_plan AS lp
+  ON  lp.database_name = c.database_name
+  AND lp.query_id = c.query_id
+  AND lp.replica_role IS NOT DISTINCT FROM c.replica_role
+LEFT JOIN best_plan AS bp
+  ON  bp.database_name = c.database_name
+  AND bp.query_id = c.query_id
+  AND bp.replica_role IS NOT DISTINCT FROM c.replica_role
 LEFT JOIN query_store_text AS x
   ON  x.server_id = $1
   AND x.database_name = c.database_name
   AND x.query_id = c.query_id
-ORDER BY c.regression_factor DESC";
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
 
     /// <summary>
     /// Detects plan regressions: a query whose currently-active plan has per-execution
@@ -940,8 +976,12 @@ ORDER BY c.regression_factor DESC";
                 await BoundTheReadAsync();
             }
 
-            using var cmd = new NpgsqlCommand(
-                readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection, snapshot)
+            /* #7730: the key table's test in place of the marker-only text test once its backfill has run, so the old statements the
+               monitor sent before #7463 are left out here too. Asked in the read's own transaction, before the read. */
+            var regressionSql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(
+                connection, snapshot, FactCommandTimeoutSeconds,
+                readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, context.CancellationToken);
+            using var cmd = new NpgsqlCommand(regressionSql, connection, snapshot)
             { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             if (readsDays)
@@ -979,8 +1019,8 @@ ORDER BY c.regression_factor DESC";
 
             /* #5630: read the candidates first (the worst 100 by factor), then judge them, because judging reads plans
                and a second command cannot run while this reader is open. */
-            /* #5812: a current MCP or viewer call reuses the candidates of a read of the same shape younger than one analysis
-               cadence (PlanRegressionCandidateCache.RefreshAfter). The scheduled pass always reads and refills the entry, so it
+            /* #5812: a current MCP or viewer call reuses the candidates of a read of the same shape younger than the reuse
+               window (PlanRegressionCandidateCache.RefreshAfter). The scheduled pass always reads and refills the entry, so it
                stays as fresh as before. Everything below the read (the input check, the cut, the fact) still runs every time. */
             var readStartedUtc = DateTime.UtcNow;
             /* The daily read's leading five parameters stand for the window and the built days; $6, the watermarks, goes in
@@ -1117,7 +1157,7 @@ ORDER BY c.regression_factor DESC";
             for (var i = 0; i < kept.Count; i++)
             {
                 var row = kept[i];
-                // Rows arrive ordered by regression_factor DESC — the first row is the worst offender.
+                // Rows arrive ordered by the CPU the regression lost (#7417), the factor second — the first row is the worst offender.
                 if (i == 0)
                 {
                     worstQueryId = row.QueryId;
@@ -1197,7 +1237,9 @@ ORDER BY c.regression_factor DESC";
                advice reads their absence as "no cost regression" and not as a zero factor (#6267). */
             if (offenderCount > 0)
             {
-                fact.Metadata["worst_regression_factor"] = worstFactor;
+                /* #7417: the LEAD offender's factor (the one that lost the most CPU), the figure the advice pairs with the
+                   lead's own per-execution costs below. Another kept row can have a larger factor. */
+                fact.Metadata["lead_regression_factor"] = worstFactor;
                 fact.Metadata["worst_query_id"] = worstQueryId;
                 fact.Metadata["latest_cpu_per_exec_us"] = worstLatestCpu;
                 fact.Metadata["best_cpu_per_exec_us"] = worstBestCpu;
@@ -1435,19 +1477,78 @@ AND   delta_execution_count > 0";
     }
 
     public const string PlanAdvisorySql = @"
-SELECT query_plan_xml, query_plan_gz
-FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-/* #2069: plan content written since V54 lives as gzip bytes (query_plan_gz) with the text
-   column NULL, so the presence guard and the projection both carry BOTH forms and the read
-   loop resolves text-else-gz (PayloadDimensions.ResolveContent). A guard on query_plan_xml
-   alone matches nothing on a store using the default plan_xml_compression = 'gzip', which
-   costs this collector every MISSING_INDEX and PLAN_WARNING it exists to emit. */
-AND   (query_plan_xml IS NOT NULL OR query_plan_gz IS NOT NULL)
-ORDER BY delta_worker_time DESC
-LIMIT 10";
+/* #8570: the presence guard is answered once per distinct digest, not once per snapshot row. query_stats holds one
+   row per query per snapshot, so a window of 85,000 rows carries a few hundred distinct digests, and a correlated
+   EXISTS in the rank's WHERE probed query_plan_dim's primary key once per row (85,451 index probes, 375,000 buffer
+   hits and 0.3 to 1.4 s on a 52-million-row dimension) before the rank kept ten. The digests of rows with no plan
+   of their own are probed here, one primary-key lookup each. The LIMIT 1 in the lateral lookup is what keeps it
+   a lookup: without it the planner may turn the EXISTS into a hash of the whole dimension or a join that reads
+   it. The rank below joins the answer back by digest. The guard's meaning is unchanged: a row has a plan when
+   its own column or its dimension row carries one (the dimension's text column or, since #2069, its gzip bytes),
+   and a digest whose dimension row is gone has none. The rank still picks each plan's costliest row among the
+   rows that have a plan. */
+WITH probed AS
+(
+    SELECT w.digest
+    FROM
+    (
+        SELECT DISTINCT f.query_plan_digest AS digest
+        FROM query_stats AS f
+        WHERE f.server_id = $1
+        AND   f.collection_time >= $2
+        AND   f.collection_time <= $3
+        AND   f.query_plan_xml IS NULL
+        AND   f.query_plan_digest IS NOT NULL
+    ) AS w,
+    LATERAL
+    (
+        SELECT 1
+        FROM query_plan_dim AS p
+        WHERE p.digest = w.digest
+        AND   (p.query_plan_xml IS NOT NULL OR p.query_plan_gz IS NOT NULL)
+        LIMIT 1
+    ) AS has_plan
+)
+SELECT COALESCE(r.query_plan_xml, d.query_plan_xml) AS query_plan_xml, d.query_plan_gz
+FROM
+(
+    SELECT query_plan_xml, query_plan_digest, delta_worker_time
+    FROM
+    (
+        SELECT
+            f.query_plan_xml,
+            f.query_plan_digest,
+            f.delta_worker_time,
+            /* #7886: one row per plan. query_stats holds one row per query per snapshot, and every snapshot
+               row of a cached plan resolves to the same plan XML. Without this rank the hottest plan fills all
+               ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
+               multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
+               plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A plan is
+               a statement's plan in one database: query_plan_hash is a shape hash that two statements with one
+               shape share, as does one statement in two databases, and a hashless row's plan_handle is shared by
+               every statement in its batch, so database_name and query_hash stay in the key. */
+            ROW_NUMBER() OVER (PARTITION BY f.database_name, f.query_hash, COALESCE(f.query_plan_hash, f.plan_handle) ORDER BY f.delta_worker_time DESC) AS plan_rank
+        FROM query_stats AS f
+        /* #8570: the window ranks every in-window row, so it ranks the table's own thin columns and carries
+           the plan's digest, not the plan. This read went through v_query_stats, which looked up query_plan_dim and
+           put each row's plan content into the rank's sort: a plan under the 2 KB TOAST limit sits inline in the
+           dimension row, so every snapshot row of every plan was sorted with its whole plan (on 67,200 rows of
+           1.4 KB plans the sort wrote 26 MB and 21 MB to disk, against 4.5 MB). The ten winners' content is read
+           by their digest after the limit. */
+        LEFT JOIN probed AS pr ON pr.digest = f.query_plan_digest
+        WHERE f.server_id = $1
+        AND   f.collection_time >= $2
+        AND   f.collection_time <= $3
+        AND   (f.query_plan_xml IS NOT NULL OR pr.digest IS NOT NULL)
+    ) AS ranked
+    WHERE plan_rank = 1
+    ORDER BY delta_worker_time DESC
+    LIMIT 10
+) AS r
+/* #2069: a plan written since V54 lives as gzip bytes (query_plan_gz) with the text column NULL, so the
+   projection carries BOTH forms and the C# side resolves text-else-gz (PayloadDimensions.ResolveContent). */
+LEFT JOIN query_plan_dim AS d ON d.digest = r.query_plan_digest
+ORDER BY r.delta_worker_time DESC";
 
     /// <summary>
     /// WS4: plan-XML advisories. Parses the already-collected query plans of the top queries by

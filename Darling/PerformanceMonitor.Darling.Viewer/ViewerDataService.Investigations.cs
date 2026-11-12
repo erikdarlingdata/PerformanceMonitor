@@ -54,14 +54,16 @@ public sealed partial class ViewerDataService
     /// <summary>The first store version whose requests table has <c>practice_of</c> (V191, #5918).</summary>
     public const int PracticeStoreSchemaVersion = 191;
 
-    /// <summary>The requests, newest first, with the state computed as the store's list computes it. $1 is the state
+    /// <summary>The requests, newest first, with the state computed as the store's list computes it. #8578: <c>server_name</c> here is the registry's
+    /// display name (the name the web list shows), falling back to the name the request was opened with for a server the registry no longer holds. $1 is the state
     /// filter (NULL for every state). <paramref name="withPractice"/> adds the <c>practice_of</c> column, which only a store at
     /// <see cref="PracticeStoreSchemaVersion"/> or later has: the Requests tab keeps its V184 floor and asks for it only then.</summary>
     public static string InvestigationRequestsSelectSql(bool withPractice) => @"
-SELECT request_id, server_id, server_name, family, first_metric, opened_at, alert_count, effective_state,
-       claimed_by, lease_until, claim_count, expires_at, reported_at, closed_at, closed_by, closed_reason,
+SELECT s.request_id, s.server_id, COALESCE(sv.display_name, sv.server_name, s.server_name) AS server_name, s.family, s.first_metric,
+       s.opened_at, s.alert_count, s.effective_state,
+       s.claimed_by, s.lease_until, s.claim_count, s.expires_at, s.reported_at, s.closed_at, s.closed_by, s.closed_reason,
        (SELECT p.verdict FROM config.investigation_reports AS p WHERE p.request_id = s.request_id) AS verdict" +
-        (withPractice ? ", practice_of" : "") + @"
+        (withPractice ? ", s.practice_of" : "") + @"
 FROM (
     SELECT r.*,
            CASE
@@ -73,6 +75,7 @@ FROM (
            END AS effective_state
     FROM config.investigation_requests AS r
 ) AS s
+LEFT JOIN servers AS sv ON sv.server_id = s.server_id
 WHERE ($1::text IS NULL OR s.effective_state = $1)
 ORDER BY s.opened_at DESC, s.request_id
 LIMIT 500";
@@ -526,6 +529,22 @@ VALUES ($1, $2, $3, $4, $5)";
         }
     }
 
+    /// <summary>
+    /// The text a window shows for an exception from an investigation write (#7077). An <see cref="ArgumentException"/>
+    /// carrying a refusal sentence ends its <see cref="Exception.Message"/> with " (Parameter 'login')", a code name the
+    /// person cannot act on, so that suffix is removed. Any other exception's message comes back unchanged.
+    /// </summary>
+    internal static string InputErrorText(Exception ex)
+    {
+        var message = ex.Message;
+        if (ex is ArgumentException { ParamName: { Length: > 0 } name })
+        {
+            message = message.Replace($" (Parameter '{name}')", "", StringComparison.Ordinal);
+        }
+
+        return message;
+    }
+
     /// <summary>The login the actor names: not blank, and the undo path's person shape (1 to 256 characters: letters, digits, single spaces, a few punctuation marks).</summary>
     public static string? ValidateInvestigationLogin(string? login) => InvestigationPersonWrites.ValidateLogin(login);
 
@@ -615,9 +634,9 @@ public sealed class InvestigationRequestViewRow
     /// <summary>True when a person may still close it: open, claimed or reported.</summary>
     public bool IsClosable => State is "open" or "claimed" or "reported";
 
-    public string OpenedDisplay => OpenedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
-    public string ExpiresDisplay => ExpiresAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
-    public string LeaseDisplay => LeaseUntilUtc is { } lease ? lease.ToLocalTime().ToString("HH:mm", CultureInfo.CurrentCulture) : "";
+    public string OpenedDisplay => ViewerTimeHelper.FormatFleetWide(OpenedAtUtc, "yyyy-MM-dd HH:mm");
+    public string ExpiresDisplay => ViewerTimeHelper.FormatFleetWide(ExpiresAtUtc, "yyyy-MM-dd HH:mm");
+    public string LeaseDisplay => LeaseUntilUtc is { } lease ? ViewerTimeHelper.FormatFleetWide(lease, "HH:mm") : "";
     public string ClaimsDisplay => ClaimCount.ToString(CultureInfo.InvariantCulture) + " of 3";
 }
 
@@ -635,13 +654,13 @@ public sealed class InvestigationRequestDetail
 /// <summary>An alert that opened or joined a request.</summary>
 public sealed record InvestigationAlertViewRow(DateTime AlertTimeUtc, string MetricName, string? DedupKey)
 {
-    public string TimeDisplay => AlertTimeUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture);
+    public string TimeDisplay => ViewerTimeHelper.FormatFleetWide(AlertTimeUtc, "yyyy-MM-dd HH:mm:ss");
 }
 
 /// <summary>A journal row of a request.</summary>
 public sealed record InvestigationJournalViewRow(DateTime EventTimeUtc, string Event, string Actor, string? Reason)
 {
-    public string TimeDisplay => EventTimeUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture);
+    public string TimeDisplay => ViewerTimeHelper.FormatFleetWide(EventTimeUtc, "yyyy-MM-dd HH:mm:ss");
 }
 
 /// <summary>The report an agent returned.</summary>
@@ -680,8 +699,8 @@ public sealed class InvestigationNoteViewRow
 
     public bool IsPending => State == "pending";
     public string ScopeDisplay => ServerName ?? (ServerId is { } id ? "server " + id.ToString(CultureInfo.InvariantCulture) : "Fleet");
-    public string CreatedDisplay => CreatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
-    public string ExpiresDisplay => ExpiresAtUtc.ToLocalTime().ToString("yyyy-MM-dd", CultureInfo.CurrentCulture);
+    public string CreatedDisplay => ViewerTimeHelper.FormatFleetWide(CreatedAtUtc, "yyyy-MM-dd HH:mm");
+    public string ExpiresDisplay => ViewerTimeHelper.FormatFleetWide(ExpiresAtUtc, "yyyy-MM-dd");
 }
 
 /// <summary>An environment profile as the Profiles tab lists it.</summary>

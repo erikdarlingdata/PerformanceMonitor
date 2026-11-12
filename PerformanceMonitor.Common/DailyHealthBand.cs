@@ -105,7 +105,8 @@ namespace PerformanceMonitor.Common
 
         /// <summary>Blocking events in the window, counted as WAITS (#5644): one per blocked session, blocker and wait
         /// start, from blocked-process reports and falling back to DMV blocking snapshots. The figure every surface
-        /// DISPLAYS. The band does not read it when <see cref="BlockingReports"/> is set.</summary>
+        /// DISPLAYS. Darling bands on it (#7028): its producers leave <see cref="BlockingReports"/> unset. The band
+        /// does not read it when <see cref="BlockingReports"/> is set (Lite).</summary>
         public long BlockingEvents { get; init; }
 
         /// <summary>The blocked-process REPORT rows (DMV snapshot rows on the fallback) behind
@@ -123,6 +124,12 @@ namespace PerformanceMonitor.Common
         /// whatever the window. Zero when no blocking, or when the blocking source carries no wait time,
         /// which leaves the count arm alone to decide.</summary>
         public long PeakBlockWaitMs { get; init; }
+
+        /// <summary>#7028: the blocking band's snapshot arm value, in milliseconds, or <c>null</c> when the producer
+        /// carries none (Lite never does). The largest total blocked wait of one DMV snapshot in the window, after
+        /// the Blocking Wait Time alert's persistence gate (<see cref="BlockingWaits.GatedSnapshotWaitSql"/>), the
+        /// alert's own measure. The arm reads it only when a snapshot tier is above 0.</summary>
+        public long? PeakSnapshotWaitMs { get; init; }
 
         /// <summary>Memory-pressure events (a process or system indicator ≥ 2) that were not severe. Any is Warning.</summary>
         public long MemoryPressureEvents { get; init; }
@@ -282,7 +289,8 @@ namespace PerformanceMonitor.Common
                undeclared span) is the fallback this classifier wants: a non-zero count reads Warning, a zero
                count (Unknown) stays out of the blocking trigger. */
             var blockingSeverity = ServerHealthClassifier.BlockingSeverity(
-                signals.BlockingReports ?? signals.BlockingEvents, signals.PeakBlockWaitMs / 1000.0, signals.Window, t.BlockingBands);
+                signals.BlockingReports ?? signals.BlockingEvents, signals.PeakBlockWaitMs / 1000.0, signals.Window, t.BlockingBands,
+                signals.PeakSnapshotWaitMs.HasValue ? signals.PeakSnapshotWaitMs.Value / 1000.0 : null);
 
             var cpuSeverity = HighCpuSeverity(signals.HighCpuEvents, signals.Window, t);
             var collectionSeverity = CollectionErrorSeverity(signals.CollectionErrors, signals.CollectionRuns);
@@ -546,7 +554,7 @@ namespace PerformanceMonitor.Common
 
         /// <summary>
         /// The day-detail key-metrics one-liner from a day's roll-up: top wait type, high-CPU sample count,
-        /// total wait time, and unique query count. Formatting lives here (shared by both apps, unit-testable)
+        /// total wait time, and stored query count. Formatting lives here (shared by both apps, unit-testable)
         /// so the two hosts render the line identically.
         ///
         /// <para>#3653 A6: <paramref name="uniqueQueries"/> is <c>null</c> when the store's rollup tier never
@@ -565,7 +573,7 @@ namespace PerformanceMonitor.Common
                 : UniqueQueriesNotMaterialized;
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "Top wait: {0}     High-CPU samples: {1:N0}     Total wait: {2}     Unique queries: {3}",
+                "Top wait: {0}     High-CPU samples: {1:N0}     Total wait: {2}     Queries stored: {3}",
                 wait, highCpuEvents, totalWait, queries);
         }
 
@@ -607,8 +615,9 @@ namespace PerformanceMonitor.Common
         /// <summary>The deadlock line — like <see cref="AppendCount"/> but appends the per-hour rate the
         /// band evaluated when the window is rateable, e.g. "120 deadlocks (5.0/hr)" — the card reason's own
         /// format (#3368/#3525): the count is the countable fact, the rate is the banded one, and a line
-        /// that shows only the count cannot say which tier was crossed. An unrateable window prints the
-        /// count alone, which is exactly what the band had to go on.</summary>
+        /// that shows only the count cannot say which tier was crossed. The rate is written by
+        /// <see cref="RatePerHourText"/>, so one deadlock in a day reads "1 deadlock (&lt;0.1/hr)". An
+        /// unrateable window prints the count alone, which is exactly what the band had to go on.</summary>
         private static void AppendDeadlocks(List<string> lines, in DailyHealthSignals signals)
         {
             if (signals.Deadlocks <= 0)
@@ -618,7 +627,7 @@ namespace PerformanceMonitor.Common
             var line = signals.Deadlocks.ToString("N0", CultureInfo.InvariantCulture) + " " + noun;
             var rate = ServerHealthClassifier.DeadlockRatePerHour(signals.Deadlocks, signals.Window);
             if (rate.HasValue)
-                line += " (" + rate.Value.ToString("0.0", CultureInfo.InvariantCulture) + "/hr)";
+                line += " (" + RatePerHourText(rate.Value) + "/hr)";
             lines.Add(line);
         }
 
@@ -644,10 +653,11 @@ namespace PerformanceMonitor.Common
 
         /// <summary>The blocking line — the count (of WAITS, #5644), then the per-hour rate the band evaluated when the
         /// window is rateable (#3539 A3, the deadlock line's rule), then the peak block duration when one is known,
-        /// e.g. "42 blocking events (1.8/hr, peak block 12.5 s)". The band's tiers are measured in blocked-process
-        /// reports per hour, so when <see cref="DailyHealthSignals.BlockingReports"/> is carried the rate is that
-        /// count's and says so ("19.8 reports/hr"), instead of a wait count's rate the band never read. An unrateable
-        /// window prints no rate.</summary>
+        /// e.g. "42 blocking events (1.8/hr, peak block 12.5 s)". Darling bands on the waits per hour (#7028), so the
+        /// rate is the wait count's. Lite still bands on report rows and carries
+        /// <see cref="DailyHealthSignals.BlockingReports"/>, so for Lite the rate is that count's and says so
+        /// ("19.8 reports/hr"), instead of a wait count's rate the band never read. An unrateable window prints no
+        /// rate.</summary>
         private static void AppendBlocking(List<string> lines, in DailyHealthSignals signals, long peakBlockMs)
         {
             var count = signals.BlockingEvents;
@@ -660,14 +670,28 @@ namespace PerformanceMonitor.Common
             var qualifiers = new List<string>(2);
             var rate = ServerHealthClassifier.BlockingRatePerHour(signals.BlockingReports ?? count, signals.Window);
             if (rate.HasValue)
-                qualifiers.Add(rate.Value.ToString("0.0", CultureInfo.InvariantCulture)
-                    + (signals.BlockingReports.HasValue ? " reports/hr" : "/hr"));
+                qualifiers.Add(RatePerHourText(rate.Value)
+                    + (signals.BlockingReports.HasValue ? " reports/hr" : " waits/hr"));
             if (peakBlockMs > 0)
                 qualifiers.Add("peak block " + FormatDurationMs(peakBlockMs));
+            /* #7028: the snapshot arm's value, when the producer carries one. */
+            if (signals.PeakSnapshotWaitMs is > 0)
+                qualifiers.Add("peak snapshot " + FormatDurationMs(signals.PeakSnapshotWaitMs.Value));
             if (qualifiers.Count > 0)
                 line += " (" + string.Join(", ", qualifiers) + ")";
 
             lines.Add(line);
+        }
+
+        /// <summary>A per-hour rate to one decimal place, in the invariant convention. The count each caller prints
+        /// beside it reads the same on every desktop: an invariant "N0", or a whole number with no grouping. A positive
+        /// rate too small for one decimal place to show prints "&lt;0.1" (#8532): the count beside it says something
+        /// happened, and "0.0" would say nothing did. A sentence that drops a whole rate's ".0" passes its own
+        /// <paramref name="format"/> ("0.#") and gets the same rule.</summary>
+        public static string RatePerHourText(double ratePerHour, string format = "0.0")
+        {
+            var text = ratePerHour.ToString(format, CultureInfo.InvariantCulture);
+            return ratePerHour > 0 && text == 0d.ToString(format, CultureInfo.InvariantCulture) ? "<0.1" : text;
         }
 
         /// <summary>Formats a millisecond duration compactly ("800 ms" / "12.5 s" / "3.2 min").</summary>

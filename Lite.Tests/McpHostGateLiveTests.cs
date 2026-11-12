@@ -168,7 +168,7 @@ public sealed class McpHostGateLiveTests : IDisposable
     }
 
     [Fact]
-    public async Task WithTheOptOutOn_WritesAndInvestigationsAsked_NoWriteOrInvestigationToolIsListed()
+    public async Task WithTheOptOutOn_WritesAndInvestigationsAsked_NoWriteOrStateChangingInvestigationToolIsListed_AndTheReadsAre()
     {
         var host = await StartAsync(token: null, allowTokenless: true, allowWrites: true, allowInvestigations: true);
 
@@ -176,17 +176,27 @@ public sealed class McpHostGateLiveTests : IDisposable
 
         Assert.Contains("analyze_server", tools);
         Assert.DoesNotContain(tools, McpWritePolicy.IsWrite);
-        Assert.DoesNotContain(tools, McpInvestigationPolicy.IsInvestigationTool);
+        Assert.DoesNotContain(tools, McpInvestigationPolicy.IsStateChanging);
+        AssertTheInvestigationReadsAreListed(tools);
     }
 
+    /// <summary>#8461: the two investigation reads are ordinary reads, served in every configuration as Darling serves them; only
+    /// the tools that claim and report follow the investigations setting.</summary>
     [Fact]
-    public async Task WithTheOptOutOn_InvestigationsAsked_NoInvestigationToolIsListed()
+    public async Task WithTheOptOutOn_InvestigationsAsked_NoStateChangingInvestigationToolIsListed_AndTheReadsAre()
     {
         var host = await StartAsync(token: null, allowTokenless: true, allowInvestigations: true);
 
         var tools = await ListedAsync(host, token: null);
 
-        Assert.DoesNotContain(tools, McpInvestigationPolicy.IsInvestigationTool);
+        Assert.DoesNotContain(tools, McpInvestigationPolicy.IsStateChanging);
+        AssertTheInvestigationReadsAreListed(tools);
+    }
+
+    private static void AssertTheInvestigationReadsAreListed(string[] tools)
+    {
+        Assert.Contains("list_investigation_requests", tools);
+        Assert.Contains("get_investigation_reports", tools);
     }
 
     [Fact]
@@ -201,7 +211,8 @@ public sealed class McpHostGateLiveTests : IDisposable
 
         Assert.Equal(401, noToken);
         Assert.DoesNotContain(writes, McpWritePolicy.IsWrite);
-        Assert.DoesNotContain(investigations, McpInvestigationPolicy.IsInvestigationTool);
+        Assert.DoesNotContain(investigations, McpInvestigationPolicy.IsStateChanging);
+        AssertTheInvestigationReadsAreListed(investigations);
     }
 
     [Fact]
@@ -213,7 +224,8 @@ public sealed class McpHostGateLiveTests : IDisposable
 
         Assert.Contains("mute_analysis_finding", tools);
         Assert.Equal(McpWritePolicy.WriteTools.Order(), tools.Where(McpWritePolicy.IsWrite).Order());
-        Assert.DoesNotContain(tools, McpInvestigationPolicy.IsInvestigationTool);
+        Assert.DoesNotContain(tools, McpInvestigationPolicy.IsStateChanging);
+        AssertTheInvestigationReadsAreListed(tools);
     }
 
     [Theory]
@@ -230,7 +242,8 @@ public sealed class McpHostGateLiveTests : IDisposable
 
         Assert.Equal(401, noToken);
         Assert.DoesNotContain(writes, McpWritePolicy.IsWrite);
-        Assert.DoesNotContain(investigations, McpInvestigationPolicy.IsInvestigationTool);
+        Assert.DoesNotContain(investigations, McpInvestigationPolicy.IsStateChanging);
+        AssertTheInvestigationReadsAreListed(investigations);
     }
 
     [Fact]
@@ -320,7 +333,8 @@ public sealed class McpHostGateLiveTests : IDisposable
         Assert.Equal(McpInvestigationPolicy.InvestigationTools.Order(), investigationTools.Where(McpInvestigationPolicy.IsInvestigationTool).Order());
         Assert.DoesNotContain(investigationTools, McpWritePolicy.IsWrite);
         Assert.Contains(bothTools, McpWritePolicy.IsWrite);
-        Assert.DoesNotContain(bothTools, McpInvestigationPolicy.IsInvestigationTool);
+        Assert.DoesNotContain(bothTools, McpInvestigationPolicy.IsStateChanging);
+        AssertTheInvestigationReadsAreListed(bothTools);
     }
 
     [Fact]
@@ -343,6 +357,24 @@ public sealed class McpHostGateLiveTests : IDisposable
 
         Assert.False(host.Service.ReplaceToken(McpTokenStore.Generate()));
         Assert.Equal(200, (await ToolsListAsync(host, authorization: null)).Status);
+    }
+
+    /// <summary>#8462: a replacement that fails the usability check (<see cref="McpTokenStore.IsUsableToken"/>) is refused,
+    /// so the writes decided at start never sit behind a token the start would have refused. The old token keeps working
+    /// and the refused one is never accepted.</summary>
+    [Theory]
+    [InlineData("short-token-12")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaa")]
+    [InlineData("                ")]
+    public async Task NewToken_UnderTheFloor_IsRefused_AndTheOldTokenKeepsWorking(string unusable)
+    {
+        var host = await StartAsync(Token, allowTokenless: false, allowWrites: true);
+        Assert.False(McpTokenStore.IsUsableToken(unusable));
+
+        Assert.False(host.Service.ReplaceToken(unusable));
+
+        Assert.Equal(200, (await ToolsListAsync(host, "Bearer " + Token)).Status);
+        Assert.Equal(401, (await ToolsListAsync(host, "Bearer " + unusable)).Status);
     }
 
     [Theory]

@@ -194,7 +194,7 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
             var whole = m.GetCustomAttribute<DescriptionAttribute>()!.Description;
             var head = McpToolGuide.Split(whole).Head;
             Assert.Contains("labelled impact_basis", head, StringComparison.Ordinal);
-            Assert.Contains("create_statement — the optimizer's suggested CREATE INDEX for this statement", head, StringComparison.Ordinal);
+            Assert.Contains("create_statement, the optimizer's suggested CREATE INDEX for this statement", head, StringComparison.Ordinal);
             Assert.Contains("corroboration for a statement already measured slow, never a diagnosis", head, StringComparison.Ordinal);
             Assert.Contains("every row carries the fixed caveat", head, StringComparison.Ordinal);
             Assert.Contains("regression risk for other plans", head, StringComparison.Ordinal);

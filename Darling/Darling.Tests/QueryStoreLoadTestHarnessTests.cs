@@ -121,8 +121,9 @@ public sealed partial class QueryStoreLoadTestHarnessTests
                 var logger = provider.CreateLogger("PerformanceMonitor.Darling.Test");
                 foreach (var (file, job) in sources)
                 {
-                    var source = File.ReadAllText(Path.Combine(RepoRoot(), file));
-                    var templates = Regex.Matches(source, @"LogInformation\(\s*""(?<t>" + Regex.Escape(job) + @": [^""]*\{ElapsedMs\} ms)""");
+                    var source = RepoFile.ReadRepoFile(Path.Combine(RepoRoot(), file));
+                    /* LogInformation("template") or Log(level expression, "template") (the compose build picks Debug for a tick with nothing to do, #7762). */
+                    var templates = Regex.Matches(source, @"(?:LogInformation|\.Log)\(\s*(?:[^""]*?,\s*)?""(?<t>" + Regex.Escape(job) + @": [^""]*\{ElapsedMs\} ms)""");
                     Assert.True(templates.Count == 1, $"{file}: expected one LogInformation(\"{job}: ... {{ElapsedMs}} ms\"), found {templates.Count}.");
                     logger.Log(LogLevel.Information, "{Line}", Regex.Replace(templates[0].Groups["t"].Value, @"\{\w+\}", "1"));
                 }

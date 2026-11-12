@@ -50,11 +50,11 @@ public sealed class ViewerHourlyWindowEdgesTests
     public void HourlySql_BindsTheCeilingOnlyWhenOneIsKnown_OnBothGrids()
     {
         const string From = "collect.query_stats_io_hourly AS f";
-        /* The procedures grid binds the dropped-database exclusion at $6 (#6651), so its ceiling is the seventh parameter. */
+        /* Both grids bind the dropped-database exclusion at $6 (#6651, #7725), so the ceiling is the seventh parameter. */
         foreach (var (build, slot) in new (Func<DateTime?, string>, int)[]
         {
-            (ceiling => ViewerDataService.BuildTopQueriesHourlySql(From, withIo: true, ceiling: ceiling), 6),
-            (ceiling => ViewerDataService.BuildTopQueriesHourlySql(From, withIo: false, ceiling: ceiling), 6),
+            (ceiling => ViewerDataService.BuildTopQueriesHourlySql(From, withIo: true, ceiling: ceiling), 7),
+            (ceiling => ViewerDataService.BuildTopQueriesHourlySql(From, withIo: false, ceiling: ceiling), 7),
             (ceiling => ViewerDataService.BuildTopProceduresHourlySql(From, withIo: true, ceiling: ceiling), 7),
             (ceiling => ViewerDataService.BuildTopProceduresHourlySql(From, withIo: false, ceiling: ceiling), 7),
         })
@@ -168,7 +168,7 @@ public sealed class ViewerHourlyWindowEdgesTests
         Assert.Null(ViewerServerTab.HourlyBannerSuffix("raw", true, "a note a raw read never has"));
 
         var bare = ViewerServerTab.HourlyBannerSuffix("hourly", false, null);
-        Assert.Contains("aggregated hourly", bare, StringComparison.Ordinal);
+        Assert.Contains("Aggregated hourly", bare, StringComparison.Ordinal);
         Assert.DoesNotContain("Window edges", bare, StringComparison.Ordinal);
         Assert.Equal(bare, ViewerServerTab.HourlyBannerSuffix("hourly", false, ""));
 

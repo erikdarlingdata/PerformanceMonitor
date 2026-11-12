@@ -19,7 +19,7 @@ namespace Darling.Tests;
 /// <summary>
 /// #6807: the composed Query Store gate reads each server's interval-table floor (<c>MIN(first_execution_time)</c>) in ONE statement for the
 /// whole fleet, not one statement per server, and each server's floor is what the one-server statement answers: a server with rows, a
-/// server with none (NULL), and a repeated id.
+/// server with none (NULL), and a repeated id. The table's floor over every server (#7746) is one more statement per check, not per server.
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. It reaches DARLING_TEST_PG only to CREATE and DROP its own database. */
 public sealed class ComposeQueryStoreGateFloorsLiveTests
@@ -41,7 +41,11 @@ public sealed class ComposeQueryStoreGateFloorsLiveTests
             await using var count = new NpgsqlCommandScope(scratch.DatabaseName);
             var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct);
             Assert.True(resolution.Eligible, "the seeded store must route the panel to the wide table, or this test proves nothing");
-            Assert.Equal(1, count.FloorReads);
+            /* One fleet statement for the per-server floors, plus one read of the table's floor over every server (#7746): servers 1 to 3 hold
+               30 hours of intervals, so their own floors sit inside the window start minus the purge-edge margin and the gate asks clause 3
+               once more with the whole-table floor, which server 6's row puts 12 days back. That read carries the same fragment this scope
+               counts, and runs once per check, never once per server. */
+            Assert.Equal(2, count.FloorReads);
 
             /* The fleet statement's floors, each equal to the one-server answer. An id with no coverage row never reaches the floor step,
                so the statement leaves it out, and the gate would read its floor alone if it ever got there. */
@@ -107,7 +111,8 @@ public sealed class ComposeQueryStoreGateFloorsLiveTests
                 Assert.True(resolution.Eligible, "a failed fleet floor statement must leave each server to its own floor read, not refuse the panel");
                 Assert.Equal(withStatement.WideStart, resolution.WideStart);
                 Assert.Equal(withStatement.RawServerIds ?? [], resolution.RawServerIds ?? []);
-                Assert.Equal(6, count.FloorReads);
+                /* Six one-server floor reads, plus the one whole-table floor read (#7746) the first refused server's second ask makes. */
+                Assert.Equal(7, count.FloorReads);
             }
             finally
             {

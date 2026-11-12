@@ -212,9 +212,11 @@ public partial class ManageTagsWindow : Window
         }
 
         TagTree.ItemsSource = nodes;
+        NoTagsMessage.Visibility = nodes.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
         _selectedNode = reselect;
         UpdateButtons();
+        RefreshMembers(); /* #8645: the server list's message follows a rebuilt tree, even when no tag is picked */
     }
 
     private static TagNode? FindNode(IEnumerable<TagNode> nodes, int tagId)
@@ -320,6 +322,10 @@ public partial class ManageTagsWindow : Window
         if (_selectedNode is null)
         {
             MembersHeader.Text = "Select a tag to assign servers";
+            NoServersMessage.Text = _tags.Count == 0
+                ? "No tags yet, so there is nothing to assign servers to."
+                : "Select a tag on the left to see its servers.";
+            NoServersMessage.Visibility = Visibility.Visible;
             return;
         }
 
@@ -341,6 +347,12 @@ public partial class ManageTagsWindow : Window
             var serverId = RemoteCollectorService.GetServerId(server);
             _serverItems.Add(new ServerCheckItem(serverId, server.DisplayName, assigned.Contains(serverId)));
         }
+
+        /* #8645: an empty server list says why: no servers are registered, or the filter hides them all. */
+        NoServersMessage.Text = _servers.Count == 0
+            ? "No servers yet. Add a server first, then assign it to a tag here."
+            : "No servers match the filter.";
+        NoServersMessage.Visibility = _serverItems.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private async void ServerCheck_Click(object sender, RoutedEventArgs e)
@@ -638,8 +650,8 @@ public partial class ManageTagsWindow : Window
 
         var descendants = CountDescendants(_selectedNode);
         var assignments = CountAssignedServers(_selectedNode);
-        var childNote = descendants > 0 ? $" and its {descendants} child tag(s)" : string.Empty;
-        var assignNote = assignments > 0 ? $" This removes {assignments} server assignment(s)." : string.Empty;
+        var childNote = descendants > 0 ? $" and its {PerformanceMonitor.Common.CountText.Plural(descendants, "child tag")}" : string.Empty;
+        var assignNote = assignments > 0 ? $" This removes {PerformanceMonitor.Common.CountText.Plural(assignments, "server assignment")}." : string.Empty;
 
         var confirm = MessageBox.Show(this,
             $"Delete ‘{_selectedNode.Tag.Name}’{childNote}?{assignNote} Collected data is not affected.",

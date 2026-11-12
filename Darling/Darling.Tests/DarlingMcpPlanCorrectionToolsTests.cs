@@ -154,7 +154,7 @@ public sealed class DarlingMcpPlanCorrectionToolsTests
             "the snapshot is a window scan rather than the newest capture");
         Assert.Contains("force_last_good_plan_desired_state", sql, StringComparison.Ordinal);
         Assert.Contains("force_last_good_plan_actual_state", sql, StringComparison.Ordinal);
-        SqlTextPin.AssertExpresses("ORDER BY database_name", sql, "the one row per database no longer arrives ordered");
+        SqlTextPin.AssertExpresses("ORDER BY lower(database_name), database_name", sql, "the one row per database no longer arrives ordered");
     }
 
     [Theory]

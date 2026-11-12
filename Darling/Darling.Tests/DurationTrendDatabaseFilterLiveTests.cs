@@ -105,12 +105,12 @@ public sealed class DurationTrendDatabaseFilterLiveTests
 
                 var all = await Read(DatabaseFilter.All);
                 Assert.Equal("raw", JsonDocument.Parse(all).RootElement.GetProperty("source").GetString());
-                Assert.Equal(14_000 * perSecond, LastRate(all)!.Value, 9);
-                Assert.Equal(5_000 * perSecond, LastRate(await Read(Of(A, B)))!.Value, 9);
-                Assert.Equal(5_000 * perSecond, LastRate(await Read(Of(B, A)))!.Value, 9);
-                Assert.Equal(2_000 * perSecond, LastRate(await Read(DatabaseFilter.One(B)))!.Value, 9);
+                Assert.Equal(14_000 * perSecond, LastRate(all)!.Value, 6);
+                Assert.Equal(5_000 * perSecond, LastRate(await Read(Of(A, B)))!.Value, 6);
+                Assert.Equal(5_000 * perSecond, LastRate(await Read(Of(B, A)))!.Value, 6);
+                Assert.Equal(2_000 * perSecond, LastRate(await Read(DatabaseFilter.One(B)))!.Value, 6);
                 /* A repeated name and a blank one are one name, and the public method's answer is the All one. */
-                Assert.Equal(2_000 * perSecond, LastRate(await Read(Of(B, B, " ")))!.Value, 9);
+                Assert.Equal(2_000 * perSecond, LastRate(await Read(Of(B, B, " ")))!.Value, 6);
                 Assert.Equal(LastRate(all), LastRate(procedures
                     ? await DarlingMcpTrendTools.GetProcedureDurationTrend(postgres, serverName, 24, null, null, null, null, ct)
                     : await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, serverName, 24, null, null, null, ct)));
@@ -124,8 +124,8 @@ public sealed class DurationTrendDatabaseFilterLiveTests
             Assert.Equal(RetentionTier.Raw, route.Tier);
             var twoDatabases = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, serverId, start, end, route, 60, Of(A, B), ct);
             var everyDatabase = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, serverId, start, end, route, 60, DatabaseFilter.All, ct);
-            Assert.Equal(5_000 * perSecond, twoDatabases.Points.Last().Value!.Value, 9);
-            Assert.Equal(14_000 * perSecond, everyDatabase.Points.Last().Value!.Value, 9);
+            Assert.Equal(5_000 * perSecond, twoDatabases.Points.Last().Value!.Value, 6);
+            Assert.Equal(14_000 * perSecond, everyDatabase.Points.Last().Value!.Value, 6);
         }, Cleanup);
 
     /// <summary>
@@ -165,11 +165,11 @@ public sealed class DurationTrendDatabaseFilterLiveTests
             var a = await Mcp(DatabaseFilter.One(A));
             var b = await Mcp(DatabaseFilter.One(B));
             var both = await Mcp(Of(A, B));
-            Assert.Equal(6_000 / bucketSeconds, a, 9);
-            Assert.Equal(3_000 / bucketSeconds, b, 9);
-            Assert.Equal(a + b, both, 9);
-            Assert.Equal((9_000 + 4) / bucketSeconds, await Mcp(DatabaseFilter.All), 9);
-            Assert.Equal(4 / bucketSeconds, await Mcp(DatabaseFilter.One(C)), 9);
+            Assert.Equal(6_000 / bucketSeconds, a, 6);
+            Assert.Equal(3_000 / bucketSeconds, b, 6);
+            Assert.Equal(a + b, both, 6);
+            Assert.Equal((9_000 + 4) / bucketSeconds, await Mcp(DatabaseFilter.All), 6);
+            Assert.Equal(4 / bucketSeconds, await Mcp(DatabaseFilter.One(C)), 6);
 
             /* The Darling viewer's chart reads the same builder. Its bucket width is the window's own, so the window is
                sized wide enough for a whole number of hours (the age rule is told it is an hour past the window's start, so
@@ -183,19 +183,19 @@ public sealed class DurationTrendDatabaseFilterLiveTests
 
             var viewerA = await Viewer(A);
             var viewerB = await Viewer(B);
-            Assert.Equal(6_000 / bucketSeconds, viewerA, 9);
-            Assert.Equal(3_000 / bucketSeconds, viewerB, 9);
-            Assert.Equal(viewerA + viewerB, await Viewer(A, B), 9);
-            Assert.Equal((9_000 + 4) / bucketSeconds, await Viewer(), 9);
+            Assert.Equal(6_000 / bucketSeconds, viewerA, 6);
+            Assert.Equal(3_000 / bucketSeconds, viewerB, 6);
+            Assert.Equal(viewerA + viewerB, await Viewer(A, B), 6);
+            Assert.Equal((9_000 + 4) / bucketSeconds, await Viewer(), 6);
 
             /* The viewer's execution-count chart has its own statement, with the same rule: ten executions per row. */
             async Task<double> ViewerExecutions(params string[] names) =>
                 (await viewer.GetExecutionCountTrendAsync(serverId, viewerStart, end, names.Length == 0 ? null : names, nowUtc: viewerStart.AddHours(1), cancellationToken: ct)).Points.Single().Value;
 
             var executionsA = await ViewerExecutions(A);
-            Assert.Equal(10 / bucketSeconds, executionsA, 9);
-            Assert.Equal(executionsA + await ViewerExecutions(B), await ViewerExecutions(A, B), 9);
-            Assert.Equal(60 / bucketSeconds, await ViewerExecutions(), 9);
+            Assert.Equal(10 / bucketSeconds, executionsA, 6);
+            Assert.Equal(executionsA + await ViewerExecutions(B), await ViewerExecutions(A, B), 6);
+            Assert.Equal(60 / bucketSeconds, await ViewerExecutions(), 6);
         }, Cleanup);
 
     /// <summary>
@@ -228,7 +228,7 @@ public sealed class DurationTrendDatabaseFilterLiveTests
             var a = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, serverId, first, end, route, 60, DatabaseFilter.One(A), ct);
             Assert.Equal(4, a.Points.Count);
             var expected = new[] { 0.0, 0.0, 6_000 / bucketSeconds, 0.0 };
-            for (var i = 0; i < expected.Length; i++) { Assert.Equal(expected[i], a.Points[i].Value!.Value, 9); }
+            for (var i = 0; i < expected.Length; i++) { Assert.Equal(expected[i], a.Points[i].Value!.Value, 6); }
             Assert.False(a.Truncated);
             Assert.Equal(first, a.EffectiveStartUtc);
 
@@ -290,14 +290,14 @@ public sealed class DurationTrendDatabaseFilterLiveTests
             var rawOnly = QueryStoreTrendRouting.QueryStoreTrendRoute.RawOnly;
 
             var all = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(postgres, serverId, start, end, rawOnly, DatabaseFilter.All, ct);
-            Assert.Equal(14_000 * perSecond, all.Last().Value!.Value, 9);
-            Assert.Equal(5_000 * perSecond, (await DarlingTrendReader.GetQueryStoreDurationTrendAsync(postgres, serverId, start, end, rawOnly, Of(A, B), ct)).Last().Value!.Value, 9);
-            Assert.Equal(2_000 * perSecond, (await DarlingTrendReader.GetQueryStoreDurationTrendAsync(postgres, serverId, start, end, rawOnly, DatabaseFilter.One(B), ct)).Last().Value!.Value, 9);
+            Assert.Equal(14_000 * perSecond, all.Last().Value!.Value, 6);
+            Assert.Equal(5_000 * perSecond, (await DarlingTrendReader.GetQueryStoreDurationTrendAsync(postgres, serverId, start, end, rawOnly, Of(A, B), ct)).Last().Value!.Value, 6);
+            Assert.Equal(2_000 * perSecond, (await DarlingTrendReader.GetQueryStoreDurationTrendAsync(postgres, serverId, start, end, rawOnly, DatabaseFilter.One(B), ct)).Last().Value!.Value, 6);
             Assert.Equal(all.Select(p => p.Value), (await DarlingTrendReader.GetQueryStoreDurationTrendAsync(postgres, serverId, start, end, rawOnly, ct)).Select(p => p.Value));
 
             /* The tool, end to end (whichever route the store resolves, the filter is on every arm of it). */
-            Assert.Equal(5_000 * perSecond, LastRate(await DarlingMcpTrendTools.GetQueryStoreDurationTrend(postgres, serverName, 24, null, Of(A, B), ct))!.Value, 9);
-            Assert.Equal(14_000 * perSecond, LastRate(await DarlingMcpTrendTools.GetQueryStoreDurationTrend(postgres, serverName, 24, null, DatabaseFilter.All, ct))!.Value, 9);
+            Assert.Equal(5_000 * perSecond, LastRate(await DarlingMcpTrendTools.GetQueryStoreDurationTrend(postgres, serverName, 24, null, Of(A, B), ct))!.Value, 6);
+            Assert.Equal(14_000 * perSecond, LastRate(await DarlingMcpTrendTools.GetQueryStoreDurationTrend(postgres, serverName, 24, null, DatabaseFilter.All, ct))!.Value, 6);
         }, Cleanup);
 
     /// <summary>
@@ -534,6 +534,15 @@ public sealed class DurationTrendDatabaseFilterHourlyLiveTests
                     CollectionIdGenerator.Next(), ServerId, ServerName, runAt.AddSeconds(3), rows);
             }
 
+            /* #7167: the reads below are anchored at the day's end (as_of), and the stats collectors above stop at hour 5, so the server
+               would read as silent for the last 19 hours of the window and a list that matches nothing would answer unavailable (offline)
+               instead of the true negative this test asserts. The server is collecting: a run of an unrelated collector lands just before
+               the anchor and leaves both rollups untouched. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+                  VALUES ($1, $2, $3, 'wait_stats', $4, 3000, 'SUCCESS', 0)",
+                CollectionIdGenerator.Next(), ServerId, ServerName, windowEnd.AddMinutes(-5));
+
             foreach (var view in new[] { TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.ProcedureStatsIntervalHourlyView })
             {
                 await using var refresh = new NpgsqlCommand($"CALL refresh_continuous_aggregate('collect.{view}'::regclass, $1::timestamp, $2::timestamp)", connection);
@@ -568,23 +577,23 @@ public sealed class DurationTrendDatabaseFilterHourlyLiveTests
                 var all = await Read(DatabaseFilter.All);
                 Assert.True(JsonDocument.Parse(all).RootElement.GetProperty("source").GetString() == "hourly", label + ": expected the hourly tier");
                 var allSeries = Series(all);
-                Assert.Equal(14_000 * perSecond, allSeries[hourOne], 9);
-                Assert.Equal(1_000 * perSecond, allSeries[hourFive], 9);
+                Assert.Equal(14_000 * perSecond, allSeries[hourOne], 6);
+                Assert.Equal(1_000 * perSecond, allSeries[hourFive], 6);
 
                 var two = Series(await Read(Of(A, B)));
-                Assert.Equal(5_000 * perSecond, two[hourOne], 9);
-                Assert.Equal(1_000 * perSecond, two[hourFive], 9);
+                Assert.Equal(5_000 * perSecond, two[hourOne], 6);
+                Assert.Equal(1_000 * perSecond, two[hourFive], 6);
 
                 /* C alone: it has no row in hour 5, but the rollup holds that hour (A's survivor), so it is a measured zero
                    of C's and not a missing point (#5414 round 2: the filter is inside the sums, not a per-bucket HAVING). A's
                    survivor's work is not in it. */
                 var onlyC = Series(await Read(DatabaseFilter.One(C)));
-                Assert.Equal(9_000 * perSecond, onlyC[hourOne], 9);
-                Assert.Equal(0.0, onlyC[hourFive], 9);
+                Assert.Equal(9_000 * perSecond, onlyC[hourOne], 6);
+                Assert.Equal(0.0, onlyC[hourFive], 6);
 
                 var oneByName = Series(await Read(DatabaseFilter.One(B)));
-                Assert.Equal(2_000 * perSecond, oneByName[hourOne], 9);
-                Assert.Equal(0.0, oneByName[hourFive], 9);
+                Assert.Equal(2_000 * perSecond, oneByName[hourOne], 6);
+                Assert.Equal(0.0, oneByName[hourFive], 6);
 
                 /* [#5414 M1] A 240-minute bucket is its hours' work over the hours the rollup HOLDS in it (hours 1 and 2,
                    so 2 * 3600 s), whichever databases were asked about: A, active in hour 1 only, is half its hour-1
@@ -602,10 +611,12 @@ public sealed class DurationTrendDatabaseFilterHourlyLiveTests
                 var twoHours = perSecond / (procedures ? 3 : 2);
                 var wideA = await Wide(DatabaseFilter.One(A));
                 var wideB = await Wide(DatabaseFilter.One(B));
-                Assert.Equal(3_000 * twoHours, wideA, 9);
-                Assert.Equal(6_000 * twoHours, wideB, 9);
-                Assert.Equal(wideA + wideB, await Wide(Of(A, B)), 9);
-                Assert.Equal(18_000 * twoHours, await Wide(DatabaseFilter.All), 9);
+                Assert.Equal(3_000 * twoHours, wideA, 6);
+                Assert.Equal(6_000 * twoHours, wideB, 6);
+                /* #8572: each figure is rounded to six places, so a sum of two rounded figures and the rounded sum may differ
+                   by a millionth or two. A list that dropped a database would be off by hundreds of times that. */
+                Assert.Equal(wideA + wideB, await Wide(Of(A, B)), 2e-6);
+                Assert.Equal(18_000 * twoHours, await Wide(DatabaseFilter.All), 6);
 
                 /* [M4] A list that matches nothing in the rollup is "empty", and the message names the chosen databases. */
                 var emptyJson = await Read(Of("NoSuchDatabase", "NoSuchEither"));

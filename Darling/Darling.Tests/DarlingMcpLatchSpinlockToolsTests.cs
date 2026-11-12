@@ -473,7 +473,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::integer)",
             }
 
             await DeleteRowsAsync(connection, ct, keepServer: true);
-            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(await DarlingMcpLatchSpinlockTools.GetLatchStats(postgres, ServerName)));
+            var noRows = await DarlingMcpLatchSpinlockTools.GetLatchStats(postgres, ServerName);
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(noRows));
+            /* #7010: the no-rows answer carries the window keys under hints. */
+            Assert.True(System.Text.Json.JsonDocument.Parse(noRows).RootElement.GetProperty("hints").TryGetProperty("window_truncated", out _));
 
             bodySucceeded = true;
         }

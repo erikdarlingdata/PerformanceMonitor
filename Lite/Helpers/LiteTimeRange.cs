@@ -170,11 +170,12 @@ internal static class LiteTimeRange
     }
 
     /// <summary>
-    /// Where the picker's 'Data starts' note takes its start from: the coverage probe's floor the tab already awaited, else
-    /// the oldest instant the archive keeps (<see cref="RetentionService.OldestRetainedInstant"/>). No new query.
+    /// Where the picker's 'Data starts' note takes its start from: the oldest instant the store holds data from for the server
+    /// (<see cref="LocalDataService.GetOldestRetainedAsync"/>) when that is known, else the oldest instant the archive keeps
+    /// (<see cref="RetentionService.OldestRetainedInstant"/>).
     /// </summary>
-    internal static DateTime DataStartFor(DateTime? probedFloorUtc, DateTime utcNow) =>
-        probedFloorUtc ?? RetentionService.OldestRetainedInstant(utcNow);
+    internal static DateTime DataStartFor(DateTime? oldestRetainedUtc, DateTime utcNow) =>
+        oldestRetainedUtc ?? RetentionService.OldestRetainedInstant(utcNow);
 
     /// <summary>
     /// The collector behind the data a server-tab page shows (#5562 R3): the page's MAIN collector, by the header of the top
@@ -195,13 +196,14 @@ internal static class LiteTimeRange
             "Query Heatmap" => "query_stats",
             _ => null
         },
-        "CPU" => "cpu_utilization",
+        "CPU" => subTab == "CPU Scheduler" ? "cpu_scheduler_stats" : "cpu_utilization",
         "Memory" => subTab switch
         {
             "Overview" => "memory_stats",
             "Memory Clerks" => "memory_clerks",
             "Memory Grants" => "memory_grant_stats",
             "Memory Pressure Events" => "memory_pressure_events",
+            "Plan Cache" => "plan_cache_stats",
             _ => null
         },
         "File I/O" => "file_io_stats",
@@ -218,8 +220,6 @@ internal static class LiteTimeRange
         "Perfmon" => "perfmon_stats",
         "Running Jobs" => "running_jobs",
         "Latches & Spinlocks" => "latch_stats",
-        "CPU Scheduler" => "cpu_scheduler_stats",
-        "Plan Cache" => "plan_cache_stats",
         "Session Stats" => "session_stats",
         "System Events" => subTab == "Default Trace" ? "default_trace_events" : "system_health_events",
         _ => null

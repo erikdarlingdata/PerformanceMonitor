@@ -332,7 +332,7 @@ public sealed class QueryStoreBackfillDroppedDatabaseTests
             var ct = TestContext.Current.CancellationToken;
             var fixture = new DroppedBackfillStore
             {
-                _scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct),
+                _scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true),
             };
             await using (var connection = new NpgsqlConnection(fixture._scratch.ConnectionString))
             {

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Helpers;
 
@@ -45,6 +46,11 @@ namespace PerformanceMonitorLite.Services;
 internal static class ConfigChangeRowFormat
 {
     public static string Local(DateTime utc) => ServerTimeHelper.FormatServerTime(utc, "yyyy-MM-dd HH:mm:ss");
+
+    /// <summary>#7662: a server or database config change's time is the first capture that held the new value (Lite captures on connect only,
+    /// so that can be days after the change). With the capture before it, the cell says the change happened between the two.</summary>
+    public static string FirstSeen(DateTime changeTime, DateTime? previousCaptureTime) =>
+        previousCaptureTime is null ? Local(changeTime) : "between " + Local(previousCaptureTime.Value) + " and " + Local(changeTime);
 }
 
 /// <summary>One server-configuration change (Server Config Changes sub-tab). Thin display wrapper over the
@@ -53,7 +59,9 @@ internal static class ConfigChangeRowFormat
 /// shared record).</summary>
 public sealed class ServerConfigChangeRow(ConfigChangeDiff.ServerConfigChange change)
 {
-    public string ChangeTimeLocal => ConfigChangeRowFormat.Local(change.ChangeTime);
+    public string ChangeTimeLocal => ConfigChangeRowFormat.FirstSeen(change.ChangeTime, change.PreviousCaptureTime);
+    /// <summary>#7662: the capture before the first one that held the new value; null for the first capture of a setting.</summary>
+    public DateTime? PreviousCaptureTime => change.PreviousCaptureTime;
     /// <summary>Raw naive-UTC change time (capture_time) for the MCP layer's ISO output.</summary>
     public DateTime ChangeTime => change.ChangeTime;
     public string ConfigurationName => change.ConfigurationName;
@@ -72,13 +80,16 @@ public sealed class ServerConfigChangeRow(ConfigChangeDiff.ServerConfigChange ch
 /// WIDE store has no setting_type).</summary>
 public sealed class DatabaseConfigChangeRow(ConfigChangeDiff.DatabaseConfigChange change)
 {
-    public string ChangeTimeLocal => ConfigChangeRowFormat.Local(change.ChangeTime);
+    public string ChangeTimeLocal => ConfigChangeRowFormat.FirstSeen(change.ChangeTime, change.PreviousCaptureTime);
+    /// <summary>#7662: the capture before the first one that held the new value; null for the first capture of a setting.</summary>
+    public DateTime? PreviousCaptureTime => change.PreviousCaptureTime;
     /// <summary>Raw naive-UTC change time (capture_time) for the MCP layer's ISO output.</summary>
     public DateTime ChangeTime => change.ChangeTime;
     public string DatabaseName => change.DatabaseName;
     public string SettingName => change.SettingName;
-    public string? OldValue => change.OldValue;
-    public string? NewValue => change.NewValue;
+    /* #7416 item 3: a pair that differs only in whitespace shows it, so the two cells never read the same. */
+    public string? OldValue => ConfigValueText.Shown(change.OldValue, change.NewValue);
+    public string? NewValue => ConfigValueText.Shown(change.NewValue, change.OldValue);
     public string ChangeDescription => change.ChangeDescription;
 }
 
@@ -116,14 +127,19 @@ public partial class LocalDataService
 
     /// <summary>Database-configuration changes over the tab window, newest first. Reads every sys.databases
     /// snapshot up to the window end then UNPIVOTs the wide row per (database, setting) whose value moved via
-    /// the shared <see cref="ConfigChangeDiff"/>. #1319: the global database filter is pushed into SQL.</summary>
+    /// the shared <see cref="ConfigChangeDiff"/>. #1319: the global database filter is pushed into SQL.
+    /// #7416 item 2: the rows are settings only. <c>log_reuse_wait_desc</c> is the engine's live reason the log cannot truncate, not
+    /// a setting an operator changed, so the grid leaves it out (Change Watch and the analysis engine already do). The MCP tool passes
+    /// <paramref name="includeStatusColumns"/> to report those rows apart, so the history is not lost.</summary>
     public async Task<List<DatabaseConfigChangeRow>> GetDatabaseConfigChangesAsync(
-        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null,
+        bool includeStatusColumns = false)
     {
         using var _q = TimeQuery("GetDatabaseConfigChangesAsync", "v_database_config snapshot diff");
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var snapshots = await ReadDatabaseConfigSnapshotsAsync(serverId, endTime, databaseNames);
         return ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, startTime, endTime)
+            .Where(c => includeStatusColumns || ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName))
             .Select(c => new DatabaseConfigChangeRow(c))
             .ToList();
     }
@@ -231,7 +247,7 @@ SELECT capture_time, database_name,
 FROM v_database_config
 WHERE server_id = $1
 AND   capture_time <= $2" + dbClause + @"
-ORDER BY database_name, capture_time";
+ORDER BY lower(database_name), database_name, capture_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });

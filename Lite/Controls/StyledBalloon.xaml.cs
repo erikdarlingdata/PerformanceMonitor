@@ -9,6 +9,7 @@
 using System.Windows.Controls;
 using System.Windows.Media;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Controls;
 
@@ -22,6 +23,8 @@ public partial class StyledBalloon : UserControl
     public StyledBalloon(string title, string message, ToastSeverity severity)
     {
         InitializeComponent();
+        /* #8475: the card sits in a popup with no window above it, so a theme change has to be brought to it. */
+        WindowlessThemeFollower.Attach(this);
 
         TitleText.Text = title;
         MessageText.Text = message;

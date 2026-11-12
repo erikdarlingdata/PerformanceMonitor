@@ -180,6 +180,8 @@ finds, in one PR. A flake that stalls every lane outranks the rest of the queue.
    `postmaster.pid`, only once that PID proves to be `postgres.exe` started on that data directory. It never stops
    by image name. Then it deletes the rig folder and drops the registry line. A rig you leave running is stopped by
    the coordinator's `rig-sweep.ps1` at the wave boundary once your worktree is gone or its postmaster has died.
+   A rig you restarted with pg_ctl runs under a new PID: the sweep sees that through `postmaster.pid`, keeps the rig while your
+   worktree exists, and rewrites the registry line's PID.
 
 ## Build and test
 
@@ -229,6 +231,9 @@ finds, in one PR. A flake that stalls every lane outranks the rest of the queue.
   - Clean up through `LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, ...)`, with `bodySucceeded` set
     as the body's last statement.
   - A class that uses `ScratchPostgres` carries the `#1776 own-store` comment.
+  - `ScratchPostgres.CreateAsync` returns a clone of a migrated template, so a test's `MigrateAsync` is a no-op (#7097).
+    A test that applies part of the ladder, stages a store shape first, asserts what `MigrateAsync` applied, or never
+    migrates passes `emptyStore: true`.
   - A fixture on its own database that must not race TimescaleDB's scheduler calls
     `_timescaledb_functions.stop_background_workers()`.
 

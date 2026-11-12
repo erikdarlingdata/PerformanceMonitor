@@ -45,6 +45,16 @@ FROM config_monitored_servers
 WHERE aws_role_arn IS NOT NULL OR aws_external_id IS NOT NULL";
 
     /// <summary>
+    /// The registry's list of databases that get Extended Events sessions (#7639, store version 247), for the name set: a list set
+    /// through the Viewer or MCP lives only in the store, like <c>excluded_databases</c>. A store older than 247 has no such column;
+    /// that read adds nothing instead of refusing the bundle.
+    /// </summary>
+    internal const string RegistryXeSessionDatabasesSql = @"
+SELECT xe_session_databases
+FROM config_monitored_servers
+WHERE cardinality(xe_session_databases) > 0";
+
+    /// <summary>
     /// The registry's Query Store replica (#6254, store version 213), for the name set: a host (or listener name) set through the
     /// Viewer, the web dashboard or MCP lives only in the store, so a bundle that seeded darling.json alone would show it in clear.
     /// A store older than 211 has no such column; that read adds nothing instead of refusing the bundle.
@@ -108,13 +118,19 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
 
     /// <summary>
     /// The fleet roll-up with its tag forest reduced to a count. A tag name is text the operator chose (often a client's
-    /// name), and the bundle has no use for it.
+    /// name), and the bundle has no use for it. The pause note's <c>paused_by</c> is dropped too: the bundle keeps <c>paused</c>.
     /// </summary>
     internal static JsonNode? ShapeFleetOverview(JsonNode? fleet)
     {
         if (fleet is JsonObject obj && obj["tags"] is JsonArray tags)
         {
             obj["tags"] = new JsonObject { ["count"] = tags.Count };
+        }
+
+        // The bundle only needs to say collection is paused; who paused it is text a person typed.
+        if (fleet is JsonObject root && root["collection"] is JsonObject collection)
+        {
+            collection.Remove("paused_by");
         }
 
         return fleet;
@@ -323,7 +339,7 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
             sections.Add((await DiagnosticsBundle.RunSectionAsync("store_statements",
                 c => StoreStatementsSectionAsync(postgres, hours, c), ct)) with { AfterAlias = CompactStatementTexts });
             sections.Add(await DiagnosticsBundle.RunSectionAsync("store_log",
-                async c => DiagnosticsBundle.ParseReader(await DarlingMcpStoreLogTools.GetStoreLog(postgres, hours, 50, null, c)), ct));
+                async c => DiagnosticsBundle.ParseReader(await DarlingMcpStoreLogTools.GetStoreLog(postgres, hours, 50, null, full_text: true, offset: 0, responseByteBudget: null, c)), ct));
         }
 
         var logDirectory = options.LogDirectory ?? DarlingFileLoggerProvider.DefaultLogDirectory();
@@ -341,6 +357,11 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
         var logSection = await DiagnosticsBundle.RunSectionAsync("service_log",
             _ => Task.FromResult<JsonNode?>(DiagnosticsBundleServiceLog.Read(logDirectory, searched, DateTime.Now.AddHours(-options.Hours), includeText)), cancellationToken);
         sections.Add(logSection with { AfterAlias = CapServiceLogMessages });
+
+        /* #7657: the Slack Socket Mode listener's counters, as the service last wrote them beside its log: connections open, the last
+           disconnect reason and time, the drops by filter, the queue depth and the last event time. Counts and reasons only. */
+        sections.Add(await DiagnosticsBundle.RunSectionAsync(PerformanceMonitor.Darling.Service.Chat.SlackListenerStatusFile.SectionName,
+            _ => Task.FromResult<JsonNode?>(PerformanceMonitor.Darling.Service.Chat.SlackListenerStatusFile.ReadSection(logDirectory)), cancellationToken));
 
         var failedSections = sections.Count(s => s.Failed && s.Name != "store_unreachable");
         var exit = postgres is null ? DiagnosticsBundleExitCode.StoreUnreachable
@@ -374,6 +395,7 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
         string Registry = RegistryNamesSql,
         string RegistryAws = RegistryAwsSql,
         string RegistryReplica = RegistryReplicaSql,
+        string RegistryXeSessionDatabases = RegistryXeSessionDatabasesSql,
         string Servers = CollectServersSql,
         string Roles = StoreRolesSql,
         string Databases = StoreDatabasesSql,
@@ -428,6 +450,17 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
         }, ct, missingColumnIsEmpty: true))
         {
             failedNameSource ??= "config_monitored_servers (query store replica)";
+        }
+
+        if (!await TryReadAsync(postgres, sql.RegistryXeSessionDatabases, reader =>
+        {
+            foreach (var listed in reader.GetFieldValue<string[]>(0))
+            {
+                aliaser.AddName(AliasKind.Database, listed);
+            }
+        }, ct, missingColumnIsEmpty: true))
+        {
+            failedNameSource ??= "config_monitored_servers (xe session databases)";
         }
 
         /* Servers by id first so the alias order follows server_id; display names share their server's alias. */

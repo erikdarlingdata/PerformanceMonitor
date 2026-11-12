@@ -62,7 +62,8 @@ public sealed class OverviewBaselinesLiveTests
                 await DarlingWebOverviewBaselines.GetOverviewBaselines(postgres, null, "overview-baselines-history", windowStart, ct));
             Assert.Equal("ok", withHistory.RootElement.GetProperty("status").GetString());
             var baselines = withHistory.RootElement.GetProperty("baselines");
-            var cpu = baselines.GetProperty("cpu");
+            /* #7644: each lane is a list of hourly steps; the window's first hour is the one whose bucket is read here. */
+            var cpu = baselines.GetProperty("cpu").GetProperty("steps")[0];
             Assert.InRange(cpu.GetProperty("mean").GetDouble(), 19, 21);
             Assert.InRange(cpu.GetProperty("effective_std_dev").GetDouble(), 9, 11);
             Assert.True(cpu.GetProperty("sample_count").GetInt64() > 5);

@@ -35,14 +35,14 @@
                     <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="_Mute This Alert..." Click="MuteThisAlert_Click">
+                <MenuItem Header="_Mute This Alert..." Tag="AlertWriteItem" Click="MuteThisAlert_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F515;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Mute _Similar Alerts..." Click="MuteSimilarAlerts_Click">
+                <MenuItem Header="Mute _Similar Alerts..." Tag="AlertWriteItem" Click="MuteSimilarAlerts_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F507;"/></MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="Dismiss Se_lected" Click="DismissSelected_Click">
+                <MenuItem Header="Dismiss Se_lected" Tag="AlertWriteItem" Click="DismissSelected_Click">
                     <MenuItem.Icon><TextBlock Text="&#x2717;"/></MenuItem.Icon>
                 </MenuItem>
             </ContextMenu>
@@ -77,25 +77,34 @@
         </Grid.RowDefinitions>
 
         <!-- Header Controls -->
-        <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" MinHeight="36">
+        <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8,10,4" MinHeight="36">
             <TextBlock Text="Alert History" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14"
                        Foreground="{DynamicResource ForegroundBrush}"/>
-            <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="5,0,4,0"
-                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
-            <!-- #5562: the shared time range picker. The old "All" (8760 hours) is the picker's longest choice again, the span the alert table keeps (DarlingRetentionHorizons.AlertHistoryRetentionDays, 90 days); the code sets it. -->
-            <ui:TimeRangePicker x:Name="TimeRangePickerControl" Compact="True" VerticalAlignment="Center"
-                                RangeChanged="TimeRangePicker_RangeChanged"/>
-            <TextBlock Text="Server:" VerticalAlignment="Center" Margin="12,0,4,0"
-                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
-            <ComboBox x:Name="ServerFilterComboBox" Width="160" VerticalAlignment="Center"
-                      SelectionChanged="ServerFilterComboBox_SelectionChanged">
-                <ComboBoxItem Content="All Servers" Tag="" IsSelected="True"/>
-            </ComboBox>
+            <!-- #8266: the label and its control wrap together. -->
+            <StackPanel Orientation="Horizontal" Margin="5,0,0,4">
+                <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="0,0,4,0"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <!-- #5562: the shared time range picker. The old "All" (8760 hours) is the picker's longest choice again, the span the alert table keeps (DarlingRetentionHorizons.AlertHistoryRetentionDays, 90 days); the code sets it. -->
+                <ui:TimeRangePicker x:Name="TimeRangePickerControl" Compact="True" VerticalAlignment="Center"
+                                    RangeChanged="TimeRangePicker_RangeChanged"/>
+            </StackPanel>
+            <!-- #8266: the label and its control wrap together. -->
+            <StackPanel Orientation="Horizontal" Margin="12,0,0,4">
+                <TextBlock Text="Server:" VerticalAlignment="Center" Margin="0,0,4,0"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <ComboBox x:Name="ServerFilterComboBox" Width="160" VerticalAlignment="Center"
+                          SelectionChanged="ServerFilterComboBox_SelectionChanged">
+                    <ComboBoxItem Content="All Servers" Tag="" IsSelected="True"/>
+                </ComboBox>
+            </StackPanel>
+            <!-- One panel, so Refresh and the Dismiss buttons wrap as a group instead of one at a time as the range label changes. -->
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
             <Button Content="Refresh" Click="RefreshButton_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
             <Button x:Name="DismissSelectedButton" Content="Dismiss Selected" Click="DismissSelected_Click"
                     Margin="8,0,0,0" Padding="10,4" MinWidth="90" IsEnabled="False"/>
             <Button x:Name="DismissAllButton" Content="Dismiss All" Click="DismissAll_Click"
                     Margin="4,0,0,0" Padding="10,4" MinWidth="70"/>
+            </StackPanel>
             <Button Content="Manage Mute Rules…" Click="ManageMuteRules_Click"
                     Margin="8,0,0,0" Padding="10,4" MinWidth="90"/>
             <Button Content="Alert Rules…" Click="AlertRules_Click"
@@ -108,7 +117,7 @@
                     Margin="8,0,0,0" Padding="10,4" MinWidth="90"
                     ToolTip="Manage the dashboards and notebooks the web dashboard shows: folders, edit, import and export."/>
             <TextBlock x:Name="AlertCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
-                       FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                       Style="{DynamicResource PanelSubtitleText}"/>
             <TextBlock x:Name="LastRefreshedIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
                        FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
         </WrapPanel>
@@ -135,7 +144,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding ServerName}" Width="140">
+                    <DataGridTextColumn Binding="{Binding ServerName}" Width="Auto" MinWidth="140">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ServerName" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -143,7 +152,8 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding MetricName}" Width="160">
+                    <!-- #8392: the column grows to the longest alert type on screen, so a long name reads whole instead of being cut at a fixed width. -->
+                    <DataGridTextColumn Binding="{Binding MetricName}" Width="Auto" MinWidth="160">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MetricName" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -191,6 +201,12 @@
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding StatusDisplay}" Width="100">
+                        <!-- #7124: the routing reason as a hover on the status text, on the text element's own style so the cell and theme styles stay; a row with none shows no tooltip. -->
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock" BasedOn="{x:Static DataGridTextColumn.DefaultElementStyle}">
+                                <Setter Property="ToolTip" Value="{Binding RoutingReason}"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StatusDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>

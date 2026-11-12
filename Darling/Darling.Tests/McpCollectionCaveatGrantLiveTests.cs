@@ -274,7 +274,7 @@ VALUES ({ServerId}, 'zz_stale_family', 'timeout', '2026-10-01 10:00', '2026-10-0
     private static async Task CleanupAsync(ScratchPostgres scratch, bool bodySucceeded) =>
         await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
             await ExecAsync(cleanup,
-                "DROP OWNED BY admin, viewer, mcp; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS mcp", cleanupCt));
+                $"{LiveCleanupBatch.DropOwnedByExistingProductRolesSql} DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS web; DROP ROLE IF EXISTS mcp", cleanupCt));
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {

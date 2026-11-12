@@ -173,9 +173,8 @@ public sealed class DarlingQueryHeatmapSurfaceAndSqlTests
         Assert.DoesNotContain("LEFT(query_text, 120)", sql, StringComparison.Ordinal);
 
         /* DuckDB's ARG_MAX has no Postgres equivalent; the viewer's replacement is a top-1 window over the
-           cell, with the cell's count carried alongside so one pass yields both. */
+           cell. */
         Assert.Contains("ROW_NUMBER() OVER (PARTITION BY time_bin, bucket_index ORDER BY delta_execution_count DESC)", sql, StringComparison.Ordinal);
-        Assert.Contains("COUNT(*) OVER (PARTITION BY time_bin, bucket_index)", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);
     }
 
@@ -420,7 +419,7 @@ public sealed class DarlingQueryHeatmapLiveTests
             await SeedAsync(connection, ct, baseNow.AddHours(-40), "0xOLD", deltaExec: 4, deltaElapsed: 200_000);
 
             var noWindow = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 2));
-            Assert.Equal("empty", noWindow.GetProperty("status").GetString());
+            Assert.Equal("unavailable", noWindow.GetProperty("status").GetString());
             var noWindowText = noWindow.GetProperty("message").GetString()!;
             Assert.Contains("Widen hours_back", noWindowText, StringComparison.Ordinal);
             Assert.DoesNotContain("EVER", noWindowText, StringComparison.Ordinal);
@@ -586,6 +585,49 @@ public sealed class DarlingQueryHeatmapLiveTests
         }
     }
 
+    /// <summary>#7459: "nothing collected in this window" says unavailable by itself, and on a server that has stopped being collected it still says why.</summary>
+    [Fact]
+    public async Task NothingCollectedInTheWindow_OnAnOfflineServer_SaysItIsOffline_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live heatmap test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var lastCollection = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddDays(-10);
+            await SeedAsync(connection, ct, lastCollection, "0xOLD", deltaExec: 4, deltaElapsed: 200_000);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT COALESCE(MAX(log_id), 0) + 1, $1, $2, 'query_stats', $3, 12, 'SUCCESS', 0 FROM collection_log",
+                ServerId, ServerName, DarlingMcpTestData.Naive(lastCollection));
+
+            var root = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 2));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.StartsWith(ServerName + " is offline: ", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("Widen hours_back", message, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
 
     private static DateTime ParseUtc(string value) => DateTime.Parse(
@@ -612,6 +654,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM query_stats WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", ServerId);
     }
@@ -679,6 +722,35 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         });
     }
 
+    /// <summary>#7881: <c>query_count</c> is the number of distinct queries in the cell, not the sample rows. One hash
+    /// collected five times in one 5-minute bin is ONE query (the old per-row count read 5), and the same count reaches the
+    /// tool's reply whatever the bin width, so a wider bin does not report more queries for the same ones.</summary>
+    [Fact]
+    public async Task OneQueryCollectedFiveTimesInACell_CountsAsOneQuery_AgainstDevPostgres()
+    {
+        await WithServerAsync(async (connection, postgres, baseNow, ct) =>
+        {
+            var bin = FloorToHour(baseNow.AddHours(-3)); /* on a 5-minute boundary, so +0..+4 minutes stay in one bin */
+            /* ~50ms per execution -> one magnitude bucket for every row. */
+            for (var minute = 0; minute < 5; minute++)
+                await SeedAsync(connection, ct, bin.AddMinutes(minute), "0xSTEADY", deltaExec: 5, deltaElapsed: 250_000);
+            await SeedAsync(connection, ct, bin, "0xTWICE", deltaExec: 1, deltaElapsed: 50_000);
+            await SeedAsync(connection, ct, bin.AddMinutes(1), "0xTWICE", deltaExec: 1, deltaElapsed: 50_000);
+
+            var rows = await DarlingQueryHeatmapReader.GetQueryHeatmapAsync(
+                postgres, ServerId, HeatmapMetric.Duration, bin.AddMinutes(-1), bin.AddMinutes(4), DatabaseFilter.All, 5, 100, 200, ct);
+            var cell = Assert.Single(rows);
+            Assert.Equal(2, cell.QueryCount); /* two queries, seven sample rows */
+
+            var steadyOnly = await DarlingQueryHeatmapReader.GetQueryHeatmapAsync(
+                postgres, ServerId, HeatmapMetric.Duration, bin.AddMinutes(2), bin.AddMinutes(4), DatabaseFilter.All, 5, 100, 200, ct);
+            Assert.Equal(1, Assert.Single(steadyOnly).QueryCount); /* one query, three sample rows */
+
+            var wide = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 24, bucket_minutes: 60));
+            Assert.Equal(2, wide.GetProperty("cells").EnumerateArray().Max(c => c.GetProperty("query_count").GetInt64()));
+        });
+    }
+
     /// <summary>
     /// #4966: a quiet start. The table holds a row from before the window, so the window is covered whenever its own rows
     /// begin: false, no note, and <c>effective_start</c> is the window's start (the one the payload names, not a row's time).
@@ -725,7 +797,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
                 Assert.False(grid.TryGetProperty("truncation_note", out _));
 
                 var empty = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 1));
-                Assert.Equal("empty", empty.GetProperty("status").GetString());
+                Assert.Equal("unavailable", empty.GetProperty("status").GetString());
                 Assert.False(empty.TryGetProperty("hints", out _));
                 bodySucceeded = true;
             }
@@ -757,7 +829,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             await SeedAsync(connection, ct, baseNow.AddHours(-40), "0xOLD", deltaExec: 4, deltaElapsed: 200_000);
 
             var outside = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 2));
-            Assert.Equal("empty", outside.GetProperty("status").GetString());
+            /* #7459: rows only outside the window mean nobody collected IN it, so the word is unavailable, with the not-covered hints. */
+            Assert.Equal("unavailable", outside.GetProperty("status").GetString());
             var outsideHints = outside.GetProperty("hints");
             Assert.True(outsideHints.GetProperty("window_truncated").GetBoolean());
             Assert.Equal(JsonValueKind.Null, outsideHints.GetProperty("effective_start").ValueKind);
@@ -793,7 +866,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             Assert.True(cut.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
             Assert.NotEqual(JsonValueKind.Null, cut.GetProperty("hints").GetProperty("effective_start").ValueKind);
             var cutText = cut.GetProperty("message").GetString()!;
-            Assert.StartsWith($"Query stats WERE collected for {ServerName} in the last 24 hour(s), but no capture recorded an execution", cutText, StringComparison.Ordinal);
+            Assert.StartsWith($"Query stats WERE collected for {ServerName} in the last 24 hours, but no capture recorded an execution", cutText, StringComparison.Ordinal);
             Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage + " Delta-based collection also needs a SECOND cycle before the first non-zero row exists.", cutText, StringComparison.Ordinal);
             Assert.DoesNotContain("up and idle", cutText, StringComparison.Ordinal);
 

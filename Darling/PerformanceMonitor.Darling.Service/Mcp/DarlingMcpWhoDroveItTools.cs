@@ -44,7 +44,7 @@ public sealed class DarlingMcpWhoDroveItTools
         "procedure_cpu_ms is the procedure stats' CPU, shown beside cpu_ms and NEVER added to it: a procedure's statements are already in cpu_ms. cpu_source and procedure_cpu_source name where each figure came from. <<GUIDE>> " +
         "statements_window and procedures_window say how far each source reached. " +
         "Rows: database_name, cpu_ms, share, elapsed_ms, executions, statements, top_statement (query_hash, cpu_ms, share_of_database, executions, query_text preview masked by mcp.dataDetail; the text is raw-tier only, so a window older than raw retention has query_hash and no text), procedure_cpu_ms, top_procedure. " +
-        "An empty answer says why: the plan cache was not collected, or the window held no statement CPU. databases_returned/truncated: top caps at 100 and truncated says more databases matched. Deltas only, so a plan evicted between samples loses its CPU, the same limit get_top_queries_by_cpu has.")]
+        "An empty answer says why: the plan cache was not collected, or the window held no statement CPU. databases_returned/truncated: top caps at 100 and truncated says more databases matched. Deltas only, so a plan evicted between samples loses its CPU, the same limit get_top_queries_by_cpu has." + McpHelpers.UtcStampsDescription)]
     public static Task<string> GetCpuByDatabase(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -53,6 +53,15 @@ public sealed class DarlingMcpWhoDroveItTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default) =>
         GetCpuByDatabaseCore(postgres, server_name, hours_back, top, as_of, cancellationToken);
+
+    /// <summary>#7010: the window-floor notice of the raw query_stats table for get_cpu_by_database; the hourly tier answers <see cref="McpWindowNotice.Unavailable"/> (no raw verdict, see the call).</summary>
+    private static Task<McpWindowNotice> CpuNoticeAsync(
+        NpgsqlDataSource postgres, string serverName, bool hourly, DateTime start, DateTime end, bool emptyAnswer, CancellationToken cancellationToken) =>
+        hourly
+            ? Task.FromResult(McpWindowNotice.Unavailable)
+            : DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "query_stats", serverName, start, end, cancellationToken),
+                start, end, "query_stats", emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
 
     internal static async Task<string> GetCpuByDatabaseCore(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? as_of, CancellationToken cancellationToken)
@@ -76,14 +85,32 @@ public sealed class DarlingMcpWhoDroveItTools
                 postgres, resolved.ServerId, start, windowEnd, top + 1, planRoute.Hourly, planRoute.Ceiling, cancellationToken);
             var (page, cut) = McpHelpers.BoundPage(fetched, top);
 
+            /* #7010: the window-floor notice of the raw query_stats table, the three keys every window-floor tool writes. The hourly rollup
+               tier reads a table that keeps far more than raw does, and its own edges are already in statements_window (served_start,
+               start_dropped_from, materialized_to), so that tier carries no raw-floor verdict (Unavailable writes no key). A never-collected
+               server answers bare, before the notice is read. */
             if (page.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_stats", cancellationToken)
-                    ?? McpHelpers.Status("empty",
-                        $"No statement CPU for {resolved.DisplayName} in the last {hours_back} hour(s): the plan cache collector wrote no interval with executions in the window. "
-                        + "Procedure stats are not a substitute, because they count the same work.",
-                        new { statements_window = planRoute.Disclosure });
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_stats", cancellationToken);
+                if (notCollected is not null) return notCollected;
+
+                var emptyNotice = await CpuNoticeAsync(postgres, resolved.ServerName, planRoute.Hourly, start, windowEnd, emptyAnswer: true, cancellationToken);
+                /* #7167: an offline server's empty window answers unavailable, as the get_pg_* reads do. */
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
+                    $"No statement CPU for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}: the plan cache collector wrote no interval with executions in the window. "
+                    + "Procedure stats are not a substitute, because they count the same work.",
+                    emptyNotice.IsUnavailable
+                        ? new Dictionary<string, object?> { ["statements_window"] = planRoute.Disclosure }
+                        : new Dictionary<string, object?>
+                        {
+                            ["statements_window"] = planRoute.Disclosure,
+                            ["effective_start"] = emptyNotice.EffectiveStart,
+                            ["window_truncated"] = emptyNotice.WindowTruncated,
+                            ["truncation_note"] = emptyNotice.TruncationNote,
+                        }), cancellationToken, start);
             }
+
+            var notice = await CpuNoticeAsync(postgres, resolved.ServerName, planRoute.Hourly, start, windowEnd, emptyAnswer: false, cancellationToken);
 
             var serverCpuUs = page[0].ServerCpuUs;
             var procedures = await DarlingWhoDroveItReader.ReadProcedureCpuAsync(
@@ -123,21 +150,25 @@ public sealed class DarlingMcpWhoDroveItTools
                 };
             }).ToList();
 
-            return JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 server_cpu_ms = Math.Round(serverCpuUs / 1000.0, 1),
                 cpu_source = planRoute.Hourly ? "collect.query_stats_io_hourly (hourly rollup)" : "collect.query_stats",
                 procedure_cpu_source = procRoute.Hourly ? "collect.procedure_stats_io_hourly (hourly rollup)" : "collect.procedure_stats",
                 statements_window = planRoute.Disclosure,
                 procedures_window = procRoute.Disclosure,
                 overlap_note = "cpu_ms counts every statement the plan cache sampled, including the statements inside procedures. procedure_cpu_ms is the procedures' own total for the same work: read it beside cpu_ms, never added to it.",
+                coverage_note = QueryStatsCoverage.StoredRowsNote,
                 share_note = "share is a database's cpu_ms over server_cpu_ms, the CPU of every database in the window, so it does not change with top.",
                 databases_returned = databases.Count,
                 truncated = cut,
                 databases,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -153,10 +184,10 @@ public sealed class DarlingMcpWhoDroveItTools
     [McpServerTool(Name = "get_load_by_caller"), Description(
         "Groups the active-query snapshots of a window ending at as_of by caller (host_name, program_name, login_name), ranked by CPU, with requests, CPU, elapsed time, shares of the window and top statements. " +
         "Each request counts once, at the largest CPU any capture saw. Shares are of the window, not of the page. login_name and host_name are masked by mcp.dataDetail. <<GUIDE>> " +
-        "A request is a session and its start (capture time minus its elapsed time, to the second). Its cpu_ms and elapsed_ms are the largest cumulative figures any capture saw, so a request seen in ten captures is one request. A request that started before the window or ran on after it counts only what the captures saw, and one shorter than the capture interval may not be seen at all. " +
+        "A request is a session and its start (capture time minus its elapsed time, to the second). Its cpu_ms is the largest cumulative figure any capture saw, so a request seen in ten captures is one request; its elapsed_ms is that figure cut to the window, so a request that started before the window counts only the elapsed inside it (the capture time less the window start), never its whole lifetime. A request that ran on after the window counts only what the captures saw, and one shorter than the capture interval may not be seen at all. " +
         "requests counts the distinct requests, samples the snapshots (one per running request per capture), captures the distinct capture times. " +
-        "Rows: host_name, program_name, login_name (null = the snapshot carried none), requests, samples, captures, cpu_ms, cpu_share, elapsed_ms, elapsed_share, sample_share, first_seen, last_seen, top_statements (query_hash, requests, samples, cpu_ms, query_text preview masked by mcp.dataDetail). WAITFOR shells are dropped, as get_active_queries drops them. " +
-        "An empty answer says why: query_snapshots was not collected, or the window held no active request. top caps at 100 groups and truncated says more matched; statements per group default 3, at most 10. Reads the snapshots the collector wrote; it does not see a request that finished between two captures.")]
+        "Rows: host_name, program_name, login_name (null = the snapshot carried none), requests, samples, captures, cpu_ms, cpu_share, elapsed_ms, elapsed_share, sample_share, first_seen, last_seen, top_statements (query_hash, requests, samples, cpu_ms, query_text preview masked by mcp.dataDetail). WAITFOR shells are dropped, as get_active_queries drops them, and so is the sp_server_diagnostics session (the health-check request that runs for the life of the instance), as the long-running-query alert drops it. " +
+        "An empty answer says why: query_snapshots was not collected, or the window held no active request. top caps at 100 groups and truncated says more matched; statements per group default 3, at most 10. Reads the snapshots the collector wrote; it does not see a request that finished between two captures." + McpHelpers.UtcStampsDescription)]
     public static Task<string> GetLoadByCaller(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -195,9 +226,9 @@ public sealed class DarlingMcpWhoDroveItTools
             if (page.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
-                    ?? McpHelpers.Status("empty",
-                        $"No active-query snapshots for {resolved.DisplayName} in the last {hours_back} hour(s): nothing was running at a capture, or the collector did not run in the window.",
-                        notice.AsHints());
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
+                        $"No active-query snapshots for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}: nothing was running at a capture, or the collector did not run in the window.",
+                        notice.AsHints()), cancellationToken, start);
             }
 
             static double? Share(double part, double whole) => whole > 0 ? Math.Round(part / whole, 4) : null;
@@ -241,7 +272,7 @@ public sealed class DarlingMcpWhoDroveItTools
                 total_samples = first.TotalSamples,
                 total_cpu_ms = Math.Round(first.TotalCpuMs, 1),
                 total_elapsed_ms = Math.Round(first.TotalElapsedMs, 1),
-                sampling_note = "Each request counts once, by its largest cumulative cpu_ms and elapsed_ms over the captures that saw it (a request is a session and its start, to the second). A request that started before the window or ran on after it counts only what the captures saw, and one shorter than the capture interval may not be seen at all. Shares are of the window's total over every caller, not of the page.",
+                sampling_note = "Each request counts once, by its largest cumulative cpu_ms over the captures that saw it and by its elapsed_ms cut to the window (a request is a session and its start, to the second). A request that started before the window counts only the elapsed inside it; one that ran on after the window counts only what the captures saw, and one shorter than the capture interval may not be seen at all. WAITFOR shells and the sp_server_diagnostics session are not counted. Shares are of the window's total over every caller, not of the page.",
                 callers_returned = callers.Count,
                 truncated = cut,
                 callers,
@@ -276,7 +307,7 @@ public sealed class DarlingMcpWhoDroveItTools
         "A session counts once per capture. <<GUIDE>> " +
         "Waits are session counts per wait_type at the capture itself (none = running, no wait). That collector writes rows only while something is blocked. " +
         "Rows: collection_time, query_hash, sessions, blocked_sessions (sessions with blocking_session_id set at the capture), max_wait_ms, waits [{wait_type, sessions}], query_text preview masked by mcp.dataDetail, head_blocker {spid, blocked_sessions (everything behind it, directly or not), wait_time_ms, login_name, host_name, program_name, database_name, query_text} and blocking_snapshot_time. " +
-        "min_sessions default 5, at least 2; top caps at 100. An empty answer says why: no capture in the window had that many sessions on one statement, or query_snapshots was not collected. WAITFOR shells are dropped, as get_active_queries drops them. The pile-up is seen only at captures, so a pile-up that came and went between two captures is not listed.")]
+        "min_sessions default 5, at least 2; top caps at 100. An empty answer says why: no capture in the window had that many sessions on one statement, or query_snapshots was not collected. WAITFOR shells are dropped, as get_active_queries drops them. The pile-up is seen only at captures, so a pile-up that came and went between two captures is not listed." + McpHelpers.UtcStampsDescription)]
     public static Task<string> GetQueryPileups(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -314,10 +345,10 @@ public sealed class DarlingMcpWhoDroveItTools
             {
                 var anySnapshots = notice.EffectiveStart is not null || notice.WindowTruncated;
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
-                    ?? McpHelpers.Status("empty",
-                        $"No capture in the last {hours_back} hour(s) on {resolved.DisplayName} had {min_sessions} or more sessions running the same query_hash. "
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
+                        $"No capture {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))} on {resolved.DisplayName} had {min_sessions} or more sessions running the same query_hash. "
                         + "A pile-up between two captures is not seen; a lower min_sessions or a longer window may find one.",
-                        notice.AsHints());
+                        notice.AsHints()), cancellationToken, start);
             }
 
             /* The head blocker of each pile-up, from the DMV blocking snapshot nearest its time. */

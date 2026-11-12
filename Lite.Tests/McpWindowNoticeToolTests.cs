@@ -630,6 +630,9 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedLogRunsAsync("query_snapshots", now.AddMinutes(-35), now.AddMinutes(-35), everyMinutes: 30);
+        /* #7167: the server is being collected now (another collector ran a minute ago), so the empty window is this collector's
+           alone and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedLogRunsAsync("wait_stats", now.AddMinutes(-1), now.AddMinutes(-1), everyMinutes: 1);
 
         var root = Root(await McpSessionTools.GetActiveQueries(Service(), _serverManager, ServerName, hours_back: 1));
 
@@ -668,6 +671,9 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedLogRunsAsync("waiting_tasks", now.AddDays(-10), now.AddDays(-9), everyMinutes: 60);
+        /* #7167: the server is being collected now (another collector ran a minute ago), so the empty window is waiting_tasks' alone
+           and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedLogRunsAsync("wait_stats", now.AddMinutes(-1), now.AddMinutes(-1), everyMinutes: 1);
 
         var root = Root(await McpWaitTools.GetWaitingTasks(Service(), _serverManager, ServerName, hours_back: 168));
 
@@ -738,6 +744,9 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedLogRunsAsync("waiting_tasks", now.AddMinutes(-35), now.AddMinutes(-35), everyMinutes: 30);
+        /* #7167: the server is being collected now (another collector ran a minute ago), so the empty window is this collector's
+           alone and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedLogRunsAsync("wait_stats", now.AddMinutes(-1), now.AddMinutes(-1), everyMinutes: 1);
 
         var root = Root(await McpWaitTools.GetWaitingTasks(Service(), _serverManager, ServerName, hours_back: 1));
 
@@ -761,7 +770,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("more than 25% worse than its baseline", message, StringComparison.Ordinal);
         Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
-        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this is the all-clear", message, StringComparison.Ordinal);
         AssertTruncatedAt(EmptyHints(root), floor, "query_store_stats");
         Assert.Contains("baseline_start", EmptyHints(root).GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
     }
@@ -778,7 +787,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
         var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24));
 
-        Assert.Contains("this IS the all-clear", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Contains("this is the all-clear", root.GetProperty("message").GetString(), StringComparison.Ordinal);
         Assert.False(EmptyHints(root).GetProperty("window_truncated").GetBoolean());
     }
 
@@ -798,7 +807,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("database_name 'NoSuchDb'", message, StringComparison.Ordinal);
         Assert.Contains("the filter matched nothing and this is NOT the all-clear", message, StringComparison.Ordinal);
-        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this is the all-clear", message, StringComparison.Ordinal);
     }
 
     /// <summary>#5015: a filter that matches, and finds nothing wrong, is still the all-clear.</summary>
@@ -813,7 +822,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
         var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24, database_name: "Db"));
 
-        Assert.Contains("this IS the all-clear", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Contains("this is the all-clear", root.GetProperty("message").GetString(), StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -836,9 +845,9 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         AssertTruncatedAt(EmptyHints(root), floor, "query_store_stats");
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("database_name 'Db'", message, StringComparison.Ordinal);
-        Assert.Contains("nothing of it collected IN the last 24 hour(s)", message, StringComparison.Ordinal);
+        Assert.Contains("nothing of it collected IN the last 24 hours", message, StringComparison.Ordinal);
         Assert.Contains("NOT the all-clear", message, StringComparison.Ordinal);
-        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this is the all-clear", message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -861,7 +870,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         Assert.Contains("database_name 'Db'", message, StringComparison.Ordinal);
         Assert.Contains("no baseline", message, StringComparison.Ordinal);
         Assert.Contains("NOT a clean bill of health", message, StringComparison.Ordinal);
-        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this is the all-clear", message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -913,7 +922,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
         var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24));
 
-        Assert.Contains("nothing collected IN the last 24 hour(s)", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Contains("nothing collected IN the last 24 hours", root.GetProperty("message").GetString(), StringComparison.Ordinal);
         AssertTruncatedAt(EmptyHints(root), floor, "query_store_stats");
     }
 
@@ -985,8 +994,10 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
         var root = Root(await McpQueryTools.GetQueryHeatmap(Service(), _serverManager, ServerName, hours_back: 168));
 
-        Assert.Contains("nothing collected IN the last 168 hour(s)", root.GetProperty("message").GetString(), StringComparison.Ordinal);
-        AssertNothingHeld(EmptyHints(root), "query_stats");
+        Assert.Contains("nothing collected IN the last 168 hours", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        /* #7459: nothing in the window while older rows exist is a collector that may have stopped, which is unavailable and not a true negative. */
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        AssertNothingHeld(root.GetProperty("hints"), "query_stats");
     }
 
     /* ───────────────────────── assertions ───────────────────────── */

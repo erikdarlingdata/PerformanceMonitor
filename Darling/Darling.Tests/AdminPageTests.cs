@@ -43,7 +43,7 @@ public sealed class AdminPageTests
 
     [Theory]
     [InlineData("SERVER_COLUMNS", new[] { "display_name", "server_name", "auth", "engine", "version", "status", "freshness", "monthly_cost", "read_only", "added", "last_collected", "same_machine_as" })]
-    [InlineData("ROUTE_COLUMNS", new[] { "route_id", "enabled", "metric_match", "match_kind", "family", "applies_to", "severities", "status", "channels", "agent", "resolutions", "smtp_recipients", "modified_at_utc" })]
+    [InlineData("ROUTE_COLUMNS", new[] { "route_id", "enabled", "metric_match", "match_kind", "family", "applies_to", "severities", "report_notice", "slack_bot_channel", "status", "channels", "agent", "resolutions", "smtp_recipients", "modified_at_utc" })]
     [InlineData("SETTING_COLUMNS", new[] { "setting", "value" })]
     public void EachTab_DeclaresItsColumnKeys(string name, string[] keys)
     {
@@ -81,7 +81,7 @@ public sealed class AdminPageTests
         Assert.Contains("{ key: \"status\", label: \"Status\" }", page);
         Assert.Contains("{ key: \"freshness\", label: \"Freshness\"", page);
         Assert.Contains("{ key: \"auth\", label: \"Auth\" }", page);
-        Assert.Contains("label: \"Monthly Cost ($)\"", page);
+        Assert.Contains("label: \"Monthly Cost\"", page);
         Assert.Contains("{ key: \"added\", label: \"Added\", format: \"time\" }", page);
         Assert.DoesNotContain("Not shown here", page);
         Assert.Contains("label: \"Email to\"", page);
@@ -92,9 +92,9 @@ public sealed class AdminPageTests
     public void TheSettingsTab_SplitsTheLongRunningQueryFilters_IntoTheirOwnSectionAfterAlertThresholds()
     {
         var page = Page();
-        var thresholds = page.IndexOf("title: \"Alert thresholds\"", StringComparison.Ordinal);
+        var thresholds = page.IndexOf("title: \"Alert Thresholds\"", StringComparison.Ordinal);
         var filters = page.IndexOf("title: \"Long Running Query Filters\"", StringComparison.Ordinal);
-        var bands = page.IndexOf("title: \"Health bands\"", StringComparison.Ordinal);
+        var bands = page.IndexOf("title: \"Health Bands\"", StringComparison.Ordinal);
         Assert.True(thresholds >= 0 && filters > thresholds && bands > filters);
     }
 
@@ -179,6 +179,6 @@ public sealed class AdminPageTests
         var admin = app.IndexOf("if (h === \"#/admin\" || h.startsWith(\"#/admin/\")) return { name: \"admin\"", StringComparison.Ordinal);
         Assert.True(editor >= 0 && admin > editor);
         Assert.DoesNotContain("\n  if (h.startsWith", app.Substring(editor + 10, admin - editor - 10));
-        Assert.Contains("else if (r.name === \"admin\") renderAdmin(main, r.tab);", app);
+        Assert.Contains("admin: (m, r, o) => renderAdmin(m, r.tab, o),", app);
     }
 }

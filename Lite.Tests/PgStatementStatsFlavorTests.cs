@@ -116,10 +116,12 @@ public class PgStatementStatsFlavorTests
            stored: the statements epoch stats_reset (#3653 A5), and — since #4428 — stats_since and
            target_now and — since #4677 — the pg_stat_statements eviction counter stats_dealloc, last, so every stored ordinal is where it was. */
         Assert.Equal(PgStatementStatsCollector.Instance.PayloadColumns.Count - 4 + 4, aurora.Count);
-        Assert.Equal("statements_stats_reset", aurora[^4]);
-        Assert.Equal("stats_since", aurora[^3]);
-        Assert.Equal("target_now", aurora[^2]);
-        Assert.Equal("stats_dealloc", aurora[^1]);
+        Assert.Equal("statements_stats_reset", aurora[^5]);
+        Assert.Equal("stats_since", aurora[^4]);
+        Assert.Equal("target_now", aurora[^3]);
+        Assert.Equal("stats_dealloc", aurora[^2]);
+        /* #7731: the database name, a STORED column appended last, so every ordinal before it is where it was. */
+        Assert.Equal("database_name", aurora[^1]);
     }
 
     /// <summary>

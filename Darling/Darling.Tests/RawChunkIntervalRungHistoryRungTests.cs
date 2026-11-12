@@ -19,8 +19,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins Darling rung V144 (#4211): two new tables, <c>collect.raw_chunk_interval_rung_history</c> and
-/// <c>collect.raw_chunk_interval_reconcile_runs</c> — the store <see cref="RawChunkIntervalReconciler"/> reads
-/// and writes.
+/// <c>collect.raw_chunk_interval_reconcile_runs</c> — the store <see cref="RawChunkIntervalReconciler"/> writes
+/// (it reads back only the rung history).
 ///
 /// <para>This file took over the "I am the top rung" claim that moved off
 /// <see cref="QueryStoreIntervalLatestRungTests"/> (V143) when this rung landed, and hands it on to

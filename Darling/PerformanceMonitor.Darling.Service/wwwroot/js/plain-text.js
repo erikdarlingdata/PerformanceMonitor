@@ -24,7 +24,7 @@ export const MCP_TOOL_NAMES = [
   "get_analysis_facts", "get_analysis_findings", "get_blocked_process_xml", "get_blocking", "get_blocking_plan_xml",
   "get_blocking_stats", "get_blocking_trend", "get_change_watches", "get_known_patterns", "get_client_timeouts", "get_collection_health", "get_collection_log", "get_collection_state", "get_collector_cost", "get_collector_schedules",
   "get_collector_stall_probes", "get_agent_changes", "get_command_result", "get_compiles_after_evict", "get_cpu_by_database", "get_cpu_scheduler_pressure", "get_cpu_utilization", "get_current_waits_trend",
-  "get_custom_alert_rule", "get_custom_view", "get_daily_summary", "get_daily_summary_range", "get_database_config",
+  "get_custom_alert_rule", "get_custom_view", "get_daily_health_report", "get_daily_summary", "get_daily_summary_range", "get_database_config",
   "get_database_config_changes", "get_database_protection", "get_database_scoped_config", "get_database_state_expectations", "get_database_sizes", "get_deadlock_detail",
   "get_deadlock_plan_xml", "get_deadlock_trend", "get_deadlocks", "get_default_trace_events", "get_file_io_stats",
   "get_file_io_trend", "get_finops", "get_finops_inventory", "get_finops_recommendations", "get_fleet_overview", "get_forced_plans", "get_query_store_hints",
@@ -33,7 +33,7 @@ export const MCP_TOOL_NAMES = [
   "get_health_parser_severe_errors", "get_health_parser_significant_waits", "get_health_parser_system_health",
   "get_identity_capacity", "get_index_usage", "get_investigation_evidence", "get_investigation_reports", "get_job_history", "get_latch_stats", "get_load_by_caller", "get_lock_wait_trend", "get_long_query_completions",
   "get_memory_clerks", "get_memory_grants", "get_memory_pressure_events", "get_memory_stats", "get_memory_trend",
-  "get_mute_rules", "get_notification_routes", "get_object_locking", "get_oversized_plan_backlog",
+  "get_mute_rules", "get_notification_routes", "get_object_definition", "get_object_locking", "get_oversized_plan_backlog", "get_people",
   "get_perfmon_stats", "get_perfmon_trend", "get_pg_autovacuum_health", "get_pg_blocking", "get_pg_buffer_usage",
   "get_pg_column_stats", "get_pg_cpu_utilization", "get_pg_database_stats", "get_pg_database_trend",
   "get_pg_deadlock_detail", "get_pg_deadlocks", "get_pg_extensions", "get_pg_index_bloat", "get_pg_index_usage",
@@ -44,10 +44,10 @@ export const MCP_TOOL_NAMES = [
   "get_pg_wait_sampling", "get_pg_wait_stats", "get_pg_wait_trend", "get_pg_wraparound_risk", "get_pg_write_stats",
   "get_pg_xmin_horizon", "get_plan_cache_bloat", "get_plan_corrections", "get_plan_force_precheck", "get_plan_xml",
   "get_procedure_duration_trend", "get_procedure_plan_xml", "get_pvs_stats", "get_query_duration_trend",
-  "get_query_heatmap", "get_query_pileups", "get_query_repro_script", "get_query_store_aborts", "get_query_store_clutter", "get_query_store_duration_trend",
+  "get_query_fleet_summary", "get_query_heatmap", "get_query_pileups", "get_query_repro_script", "get_query_store_aborts", "get_query_store_clutter", "get_query_store_duration_trend",
   "get_query_store_health", "get_query_store_plan_xml", "get_query_store_query_history",
   "get_query_store_regressions", "get_query_store_top", "get_query_trend", "get_read_latency",
-  "get_resource_semaphore", "get_resource_use_by_tag", "get_running_jobs", "get_server_actions", "get_server_config", "get_server_config_changes", "get_server_settings",
+  "get_resource_semaphore", "get_schema_changes", "get_resource_use_by_tag", "get_running_jobs", "get_server_actions", "get_server_config", "get_server_config_changes", "get_server_settings",
   "get_server_properties", "get_server_summary", "get_server_trend", "get_session_stats", "get_slow_reads",
   "get_spinlock_stats", "get_store_host", "get_store_log", "get_store_metrics", "get_store_query_history",
   "get_store_query_stats", "get_sweep_reports", "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide",
@@ -66,14 +66,14 @@ export const MCP_ACTION_TOOL_NAMES = [
   "create_notification_route", "create_query_tag", "create_query_tag_rule", "create_server_tag", "delete_custom_alert_rule",
   "delete_custom_view", "delete_known_pattern", "delete_mute_rule", "delete_notification_route", "delete_query_tag", "delete_query_tag_rule",
   "delete_server_tag", "describe_custom_view_catalog", "disable_collector", "disable_server", "dismiss_alert_history", "edit_server",
-  "enable_collector", "enable_server", "evict_cached_plan", "find_database", "force_query_store_plan", "generate_webhook_signing_key", "kill_session",
+  "enable_collector", "enable_server", "evict_cached_plan", "find_database", "find_queries_by_text", "find_schema_objects", "force_query_store_plan", "generate_webhook_signing_key", "kill_session",
   "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "list_investigation_requests", "list_query_tag_rules",
   "list_query_tags", "list_servers", "merge_deadlock_signatures", "mute_analysis_finding", "pause_collection", "purge_expired_mute_rules", "purge_now",
   "create_plan_guide", "drop_plan_guide", "recompile_module",
   "record_investigation_feedback", "reject_investigation_note", "reload_config", "remove_server", "remove_webhook_signing_key", "reset_collector_schedules", "restore_alert_history", "resume_collection", "run_collectors_now", "run_custom_view_panel",
-  "save_environment_profile", "set_agent_actions_enabled", "set_alert_threshold_override", "set_collector_databases", "set_collector_frequency", "set_collector_retention", "set_collector_run_at", "set_database_state_expected", "set_mute_rule_enabled",
-  "set_notification_route_enabled", "set_notification_route_fallback", "set_quiet_window", "set_server_action", "set_server_excluded_databases",
-  "submit_investigation_report", "test_connection", "test_custom_alert_rule", "test_query_tag_rule", "start_practice_request", "unassign_query_tag",
+  "save_environment_profile", "send_daily_health_report_now", "set_agent_actions_enabled", "set_alert_threshold_override", "set_collector_databases", "set_collector_frequency", "set_collector_retention", "set_collector_run_at", "set_database_state_expected", "set_mute_rule_enabled",
+  "set_notification_route_enabled", "set_notification_route_fallback", "set_quiet_window", "set_server_action", "set_server_excluded_databases", "set_server_xe_session_databases",
+  "submit_investigation_report", "post_investigation_message", "test_connection", "test_custom_alert_rule", "test_query_tag_rule", "start_practice_request", "unassign_query_tag",
   "unassign_server_tag", "undo_agent_change", "undo_plan_change", "unforce_query_store_plan", "unmute_analysis_finding", "update_alert_settings", "update_custom_alert_rule",
   "update_custom_view", "update_known_pattern", "update_mute_rule", "update_notification_channels", "update_notification_route", "update_query_tag", "update_query_tag_rule",
   "update_server_tag", "update_service_flags", "validate_custom_alert_rule", "validate_custom_view", "wait_for_investigation_requests", "write_investigation_note",
@@ -93,11 +93,18 @@ const PAGE_FOR_TOOLS = [
   ["the Query Store Health panel", ["get_query_store_health"]],
   ["the Memory tab", ["get_memory_grants", "get_memory_trend", "get_resource_semaphore"]],
   ["the System Events tab", ["get_default_trace_events"]],
-  ["the Replication tab", ["get_pg_replication_slots", "get_pg_replication_stats"]],
+  /* #7402: the slots read is the Slots section, so a message on the Replication tab's own Connected Replicas panel points at that section, not at the page the reader is already on. */
+  ["the Slots section of the Replication tab", ["get_pg_replication_slots"]],
+  ["the Replication tab", ["get_pg_replication_stats"]],
   ["the Vacuum tab", ["get_pg_autovacuum_health", "get_pg_session_states", "get_pg_wraparound_risk", "get_pg_xmin_horizon"]],
   ["the Waits tab", ["get_pg_wait_sampling", "get_pg_wait_stats", "get_pg_wait_trend", "get_pg_kernel_stats"]],
   ["the I/O tab", ["get_pg_io_stats", "get_pg_io_trend", "get_pg_buffer_usage", "get_pg_write_stats"]],
-  ["the Activity tab", ["get_pg_blocking", "get_pg_deadlocks", "get_pg_database_stats", "get_pg_database_trend", "get_pg_top_queries", "get_pg_plans", "get_pg_plan_capture_readiness", "get_pg_log_events", "get_pg_lock_stats"]],
+  ["the Activity tab", ["get_pg_blocking", "get_pg_deadlocks", "get_pg_database_stats", "get_pg_database_trend", "get_pg_top_queries", "get_pg_plans", "get_pg_plan_capture_readiness", "get_pg_log_events", "get_pg_lock_stats",
+    /* #7557: the Configuration Audit's advice points at these reads, and the Activity tab shows each (server-tab-reach.js). */
+    "get_pg_column_stats", "get_pg_predicate_stats", "get_pg_query_duration_trend",
+    /* The Logging Settings Audit and Deadlock Graphs panels are on the Activity tab too; a Vacuum tab message names the audit read. */
+    "get_pg_logging_audit", "get_pg_deadlock_detail"]],
+  ["the Overview tab", ["get_pg_cpu_utilization", "get_pg_extensions"]],
   ["the Storage tab", ["get_pg_table_bloat", "get_pg_index_bloat", "get_pg_index_usage"]],
   ["the Configuration tab", ["get_pg_server_config", "get_pg_server_config_changes"]],
 ];
@@ -112,9 +119,11 @@ export const MEASUREMENT_LABELS = [
   "job_history_identity_target_row", "json_records_discarded", "log_bytes_skipped", "log_files_skipped_by_rotation",
   "log_matches_limited", "log_resume_file_missing", "log_resume_file_recycled", "newest_visible_event_age_s",
   "postmaster_epoch_changes", "raise_shaped_deadlocks_skipped", "report_xml_empty", "report_xml_unparsed",
-  "ring_buffer_events_hidden", "ring_buffer_truncated", "shred_gated", "statement_scrub_ms",
+  "ring_buffer_events_hidden", "ring_buffer_events_limit", "ring_buffer_evicted", "ring_buffer_limit_below_setting",
+  "ring_buffer_loss_at_least", "ring_buffer_loss_unknown", "ring_buffer_loss_window_s", "ring_buffer_memory_capped",
+  "ring_buffer_truncated", "shred_gated", "statement_scrub_ms",
   "statement_scrub_named", "statement_scrub_timeouts", "statement_scrub_unjudged", "statements_dealloc",
-  "statements_epoch_changes",
+  "statements_epoch_changes", "xe_session_dropped",
 ];
 const LABEL_SET = new Set(MEASUREMENT_LABELS);
 
@@ -126,13 +135,22 @@ function toolWords(name) {
     .join(" ");
 }
 
+/* #7670: what a count means, for the few a reader cannot work out from the label. The gate skips the XML read when the extended-events counter has not moved since the last run. */
+const COUNT_MEANINGS = { shred_gated: { 1: "no new events since the last run, so the XML was not read", 0: "the XML was read" } };
+
+/** One count in words: "events read: 0", and for a count in COUNT_MEANINGS its meaning after it ("shred gated: 1 (no new events ...)"). */
+function countText(label, value) {
+  const meaning = COUNT_MEANINGS[label] && COUNT_MEANINGS[label][value];
+  return label.replace(/_/g, " ") + ": " + value + (meaning ? " (" + meaning + ")" : "");
+}
+
 /** The shown form of `label=value` counts: a run of pairs becomes "label words: value, label words: value". */
 function pairsToText(run) {
   return run
     .split(" ")
     .map((pair) => {
       const eq = pair.indexOf("=");
-      return pair.slice(0, eq).replace(/_/g, " ") + ": " + pair.slice(eq + 1);
+      return countText(pair.slice(0, eq), pair.slice(eq + 1));
     })
     .join(", ");
 }
@@ -143,7 +161,7 @@ function underscoreCountsToText(run) {
     .split(" ")
     .map((tok) => {
       const at = tok.lastIndexOf("_");
-      return tok.slice(0, at).replace(/_/g, " ") + ": " + tok.slice(at + 1);
+      return countText(tok.slice(0, at), tok.slice(at + 1));
     })
     .join(", ");
 }
@@ -155,6 +173,11 @@ const FIELD_WORDS = [
   [/\bnote_count\b/g, "the note count"],
   [/\btotal_runs\b/g, "Runs"],
   [/\bsession_missing\b/g, "session missing"],
+  /* #7402: the Index Bloat note is written for an MCP client and names the read's fields. The page names the columns it shows. */
+  [/\bexact_measurement_command\b/g, "the Measure It Exactly column"],
+  [/\bestimated_reclaimable_bytes\b/g, "the Reclaimable column"],
+  [/\bskipped_reason\b/g, "Not Measured reason"],
+  [/\bavg_leaf_density\b/g, "Leaf Density %"],
 ];
 
 /* The rewrites that name one known internal token each (a hints pointer, a window parameter, a denial flag). They are the
@@ -178,7 +201,7 @@ function namedTokenText(text) {
   let t = text;
 
   /* A pointer into the MCP answer's own `hints`, which the page never shows. */
-  t = t.replace(/\s*[—–-]+\s*see hints\.captures for which collectors ran and when/g, "");
+  t = t.replace(/\s*[:—–-]+\s*see hints\.captures for which collectors ran and when/g, "");
 
   /* The health sentence's denial flag, said in words. The "true" form carries its own explanation after the dash. */
   t = t.replace(/, and denied_since_last_success is true - the newest denial postdates the newest success,/g, ", and the newest denial is newer than the newest success,");
@@ -230,6 +253,16 @@ function measurementCountsText(text) {
  * `text` with the named internal tokens and the measurement counts put into words, nothing else (#6649). For a collection
  * log's message cell: a successful run leaves its counts there, and a failed run leaves a real error message.
  */
+/** The plural the "(s)" rewrite below gives a word: "hours", "alerts", "queries". */
+function wordsOf(word) {
+  return /[^aeiou]y$/.test(word) ? word.slice(0, -1) + "ies" : word + "s";
+}
+
+/** A count and its word agreeing ("1 alert", "3 alerts", "2 queries"), for text a page builds from a number it knows. */
+export function countWord(n, word) {
+  return n + " " + (String(n) === "1" ? word : wordsOf(word));
+}
+
 export function plainTextCounts(text) {
   if (typeof text !== "string" || text === "") return text;
   return measurementCountsText(namedTokenText(text));
@@ -266,11 +299,16 @@ function withoutToolNames(text) {
   t = t.replace(/(?<![\w.])((?:[Tt]he )?)([a-z][a-z0-9]*(?:_[a-z0-9]+)+) collector(?![\w])/g, (m, the, name) => the + toolWords(name) + " collector");
   t = t.replace(/\bcollector '([a-z][a-z0-9]*(?:_[a-z0-9]+)+)'/g, (m, name) => "collector '" + toolWords(name) + "'");
 
-  /* A read a tab shows. Any other tool name stays here and is dropped below. */
-  t = t.replace(/(?<![\w.])get_[a-z0-9]+(?:_[a-z0-9]+)*(?![\w])/g, (m) => PAGE_FOR_TOOL.get(m) ?? m);
+  /* A read a tab shows. Any other tool name stays here and is dropped below. #7557: a name that opens the text or a sentence ("get_pg_top_queries has the
+     statement's text.") becomes "The Activity tab ...", not "the Activity tab ...". */
+  t = t.replace(/(?<![\w.])get_[a-z0-9]+(?:_[a-z0-9]+)*(?![\w])/g, (m, at, whole) => {
+    const page = PAGE_FOR_TOOL.get(m);
+    if (page === undefined) return m;
+    return /^[a-z]/.test(page) && (at === 0 || /[.!?]\s+$/.test(whole.slice(0, at))) ? page[0].toUpperCase() + page.slice(1) : page;
+  });
 
   /* Two reads on one tab, named one after the other, are that tab once: "try the Queries tab or the Queries tab". */
-  t = t.replace(/\b(the (?:[A-Z][\w/]*\s)+\btab)(?:, | or | and )\1/g, "$1");
+  t = t.replace(/\b([Tt]he) ((?:[A-Z][\w/]*\s)+\btab)(?:, then | then |, | or | and )the \2/g, "$1 $2");
 
   if (firstToolAt(t) < 0) return t;
 
@@ -331,7 +369,11 @@ function lowerEmphasisWords(text) {
  */
 export function plainText(text) {
   if (typeof text !== "string" || text === "") return text;
-  if (text.includes(ENGINE_GATE_MARK)) return AZURE_SQL_DATABASE_MARK.test(text) ? AZURE_SQL_DATABASE_NOT_COLLECTED_LINE : NOT_COLLECTED_LINE;
+  if (text.includes(ENGINE_GATE_MARK)) {
+    if (AZURE_SQL_DATABASE_MARK.test(text)) return AZURE_SQL_DATABASE_NOT_COLLECTED_LINE;
+    if (AWS_RDS_MARK.test(text)) return awsRdsNotCollectedLine(text);
+    return NOT_COLLECTED_LINE;
+  }
   let t = text;
   if (text.includes(RUNTIME_PRECONDITION_MARK)) t = runtimePreconditionText(text);
   t = namedTokenText(t);
@@ -342,6 +384,11 @@ export function plainText(text) {
   for (const [re, words] of FIELD_WORDS) t = t.replace(re, words);
 
   t = measurementCountsText(t);
+
+  /* #7548: a service sentence that ends a clause with the issue that explained it, "(#3061)" or "(#4046, #6866)", is written for a reader of
+     the code. The page has no use for the number, so the parenthesis goes with it, and so does a closing ", #4735" inside a longer one. */
+  t = t.replace(/\s*\(#\d+(?:\s*[,;/]\s*#\d+)*\)/g, "");
+  t = t.replace(/,\s*#\d+(?:\s*[,;/]\s*#\d+)*\)/g, ")");
 
   /* The index-bloat "answered only" read says it in the read's own parameter name. The page shows the sentence under the
      answered-ranking panel, so it says why that ranking is empty, in words, and points at the table above that lists each
@@ -360,6 +407,8 @@ export function plainText(text) {
   /* A trend's width note: "...near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer
      points." The page picks the width, so only the narrower range is left to say. */
   t = t.replace(/pass bucket_minutes \(1-\d+\) for another width, or /g, "");
+  /* #7684 item 2: the Monitor statements switch sits right above this sentence on the Queries, Waits and Active Queries panels, so it names the switch, not the argument the MCP reply names. */
+  t = t.replace(/Pass include_monitor=true to include them\./g, "Turn on Monitor statements to include them.");
   /* #5644 W8: a trend note's closing advice, and the field names it explains. The CPU and Memory pages have no bucket control (the
      page picks the width), so "narrow the bucket" is said as the control that exists, the time range; the Waits, Latch/Spinlock
      and Activity notes name their fields by the column or tile the page shows. */
@@ -369,6 +418,12 @@ export function plainText(text) {
   t = t.replace(
     /\btop_application_name, top_application_connections, top_host_name and top_host_connections are\b/g,
     "the top application, its connection count, the top host and its connection count are",
+  );
+  /* #7682: get_cpu_utilization's host_cpu_note names its fields for an MCP client. The CPU tab says what is not reported and what is drawn;
+     the engine and version words in the parenthesis stay as the reply wrote them. */
+  t = t.replace(
+    /other_process_cpu, total_cpu, idle_cpu and peak_total_cpu are null for buckets where the server cannot report host CPU( \([^)]*\))?\. Only sql_server_cpu is measured there; null is not 0\./g,
+    (_m, why) => "This server cannot report host CPU" + (why || "") + ", so only SQL Server's own CPU is drawn.",
   );
   /* #6831: the system_health event names ("1431 scheduler_monitor_system_health_ring_buffer_recorded event(s) were captured") in words, with
      the count's own plural. The same words say the name inside "No ... events were captured". */
@@ -380,11 +435,11 @@ export function plainText(text) {
   /* #6831: the empty cut-window sentence's pointer at hints.effective_start, when the page has no instant to put there (util.js names it when it has one). */
   t = t.replace(/\bstarts at effective_start \(see hints\)/g, "starts partway into the window");
   /* "24 hour(s)", "288 collector run(s)": the count is known, so the word agrees with it ("1 hour", "24 hours", "2 queries"). */
-  t = t.replace(/(?<![\w.])(\d[\d,]*) ((?:[a-z]+ )?[a-z]+)\(s\)/g, (m, n, word) => n + " " + (n === "1" ? word : /[^aeiou]y$/.test(word) ? word.slice(0, -1) + "ies" : word + "s"));
+  t = t.replace(/(?<![\w.])(\d[\d,]*) ((?:[a-z]+ )?[a-z]+)\(s\)/g, (m, n, word) => n + " " + (n === "1" ? word : wordsOf(word)));
 
   /* "raise limit": the pages have no row-limit control. "...filter - raise limit to see more." and "...returned; raise limit
      (now 50) for more." lose the clause; ", or raise limit," and ", and raise limit if none ... shows one" lose theirs. */
-  t = t.replace(/\s*[;—–-]+\s*raise (?:the )?limit(?: \(now [\d,]+\))?(?: (?:to see|for) (?:more|the rest(?: of the rows)?))?(?=\.)/g, "");
+  t = t.replace(/\s*[;:—–-]+\s*raise (?:the )?limit(?: \(now [\d,]+\))?(?: (?:to see|for) (?:more|the rest(?: of the rows)?))?(?=\.)/g, "");
   t = t.replace(/Scope by server_name(?:, or raise limit,)? (to see the rest|to see them)\./g, "Select a single server $1.");
   t = t.replace(/, or raise (?:the )?limit(?=[.,])/g, "");
   t = t.replace(/, and raise limit if none of the databases returned shows one/g, "");
@@ -398,7 +453,8 @@ export function plainText(text) {
   t = t.replace(/\bmin_duration_ms (?=\d)/g, "minimum duration (ms) ");
   t = t.replace(/\bblocking_only\b/g, "blocking queries only");
   /* #6649: field names inside the service's own sentences. The left-out databases' names live in the MCP answer's
-     `databases_left_out` list, which the page never shows, so the pointer goes and the count before it stays. */
+     `databases_left_out` list; the panels draw them in their own strip (util.js leftOutNoteText, #7538), so in the sentence the pointer goes and the
+     count before it stays. */
   t = t.replace(/ \(see databases_left_out\)/g, "");
   t = t.replace(
     /Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end\./g,
@@ -418,6 +474,19 @@ export function plainText(text) {
   t = t.replace(/\blatest_memory_mb\b/g, "Latest MB");
   t = t.replace(/\bmemory_clerks capture\b/g, "memory clerk capture");
   t = t.replace(/\bmemory_clerks stores\b/g, "The memory clerks collector stores");
+  /* #7410: the Query Store Overhead note names the collector's constant for the sleep waits it drops. */
+  t = t.replace(/dropped at collection by IgnoredWaitDefaults on both SKUs, and dropped again here by name if a row ever carried one/g, "dropped when they are collected, and dropped again here if one ever slipped through");
+  /* #7690: the Extensions note and the Wait Trend empty text name a field and a tier of the read. The page names the panel and the sampler. */
+  t = t.replace(/Per DATABASE, not per cluster: installed_version describes the database the row names\./g, "Each row describes one database, not the whole server: the installed version is the one in that database.");
+  t = t.replace(/(?:\s[—–-]\s+|:\s+)read install_census for what is installed where, because it is aggregated per extension and no limit touches it/g, ". The Extension Install Census shows what is installed where, because it counts every extension and no limit touches it");
+  t = t.replace(/\binstall_census\b/g, "the Extension Install Census");
+  t = t.replace(/\bthe service_sampled tier\b/g, "the service sampler");
+  t = t.replace(/\bservice_sampled\b/g, "service sampler");
+  /* #7690: the Index Bloat note sets its pointer to the exact-measurement command off with a dash; the page says it as its own sentence. */
+  t = t.replace(/(?:\s[—–-]\s+|:\s+)use (?:exact_measurement_command|the Measure It Exactly column) for that/g, ". Use the Measure It Exactly column for that");
+  /* #7410: the Query Heatmap's empty text. */
+  t = t.replace(/\bdatabase_name filter\b/g, "database filter");
+  t = t.replace(/\ba SECOND cycle\b/g, "a second collection");
   /* The system-health "events were captured, none qualified" closing. */
   t = t.replace(/so this is the healthy answer for this read rather than missing data/g, "so this is a normal result, not missing data");
 
@@ -449,7 +518,7 @@ const RECONNECT_STEP = " After you fix the cause, the service must reconnect to 
 
 /** The sentence the DEGRADED answer (a collector that cannot read its source) closes on for an MCP client (#6869): it says what to do with the
     stored sentence, which a reader of the page cannot use. CollectorRuntimePrecondition.DegradedClientSentence, with the space before it. */
-const DEGRADED_CLIENT_SENTENCE = " Act on that sentence — it is what the monitored server itself answered, and it distinguishes the states this one status carries: a grant the login was refused, a source object that does not exist on this target, and a feature the platform does not implement or has switched off.";
+const DEGRADED_CLIENT_SENTENCE = " Act on that sentence: it is what the monitored server itself answered, and it distinguishes the states this one status carries: a grant the login was refused, a source object that does not exist on this target, and a feature the platform does not implement or has switched off.";
 
 /**
  * A runtime-precondition answer (CollectorRuntimePrecondition.cs) the way the page shows it. The server's text is written for
@@ -478,9 +547,83 @@ export const AZURE_SQL_DATABASE_NOT_COLLECTED_LINE = "Azure SQL Database does no
 /** How the server's engine-gate sentence names an Azure SQL Database ("<server> runs on Azure SQL Database (EngineEdition 5)."). */
 const AZURE_SQL_DATABASE_MARK = /runs on Azure SQL Database \(EngineEdition 5\)/;
 
+/** #8095: how the engine-gate sentence names an Amazon RDS for SQL Server instance whose gap is the platform's (CollectorEngineCapability.AwsRdsDescription),
+    and the clause of that sentence that names what is not collected ("so this server does not collect the SQL Agent running-job snapshot, and never will"). */
+const AWS_RDS_MARK = /runs on Amazon RDS for SQL Server \(an AWS RDS instance\)/;
+const NOT_COLLECTED_CLAUSE = /does not collect (.+?), and never will/;
+
+/** #8095: the line for an Amazon RDS for SQL Server engine gate. It names the engine and the data it does not expose, the way the Azure line
+    names its engine, because the generic line sits above panels RDS does fill: "does not apply to this kind of server" over a Job History grid
+    full of Agent runs reads as a contradiction, while "does not expose the SQL Agent running-job snapshot" does not. */
+export function awsRdsNotCollectedLine(text) {
+  const clause = NOT_COLLECTED_CLAUSE.exec(text);
+  return "Amazon RDS for SQL Server does not expose " + (clause ? clause[1] : "this data") + ".";
+}
+
 /** The words every engine-gate sentence ends on (CollectorEngineCapability's permanent-gap epilogue). A "not collected"
     answer that is something else, such as a plan that was never stored, does not carry them and keeps its own sentence.
     The mark opens with "This is a" because a runtime-precondition sentence (an extension that is not installed, a skipped
     source) says "not a permanent engine capability gap": matching the bare phrase turned that fixable state into "does not
     apply to this kind of server" (release walk, PG18 OS CPU by Query). */
 const ENGINE_GATE_MARK = "This is a permanent engine capability gap";
+
+/** #7548: the grant that lets the monitoring login read pg_stats, said once for the panels that need it. */
+const PG_STATS_GRANT = "Run GRANT pg_read_all_data TO <login> on PostgreSQL 14 and above, or GRANT SELECT on the tables on 13.";
+
+/**
+ * #7410: the one plain sentence a panel shows for an empty reply that names a setup step, built from the reply's structured
+ * `hints` (`reason`, and for a missing extension its `extensions` and `restart_required`) and never from the message text, which
+ * is written for an MCP client and stays one click away. `extensionLine` is a panel's own sentence for a missing extension,
+ * for the panel that can say what is not collected. Null when the reply carries no reason this knows, so the caller keeps the
+ * message it was given.
+ */
+export function shortEmptyLine(res, extensionLine) {
+  const h = res && res.hints && typeof res.hints === "object" ? res.hints : null;
+  if (!h) return null;
+  /* #7410: Top Queries on a window that stored snapshots but no measured delta. The hints carry the counts and the hours that would answer, so the sentence is built
+     from them and the tool's paragraph (which names as_of and hours_back for an MCP client) sits behind "More detail". */
+  if (typeof h.reason !== "string" && h.snapshots_with_measured_delta === 0 && Number(h.snapshots_in_window) > 0) {
+    const hours = Number(h.suggested_hours_back);
+    return "No query in this range changed enough between snapshots to attribute CPU to it." +
+      (hours > 0 ? " A range of the last " + hours + (hours === 1 ? " hour" : " hours") + " or more reaches one that did." : " A longer range may.");
+  }
+  /* #7548: the answered-only Index Bloat ranking when no index has an answer. The list is sorted by bytes and then count, so its first entry
+     is not the commonest cause. The grant is named as THE cause only when it is the one reason there is. When it is one of several, it is one
+     fix among others and the table above says why for the rest. */
+  if (res.status === "no_answers" && Array.isArray(h.suppressed_by_reason)) {
+    const buckets = h.suppressed_by_reason;
+    const grantBucket = buckets.some((b) => b && b.reason === "ColumnWidthsNotVisible");
+    if (grantBucket && buckets.length === 1) {
+      return "No index has a bloat estimate because the monitoring login cannot read pg_stats. " + PG_STATS_GRANT;
+    }
+    if (grantBucket) {
+      return "Some indexes have no bloat estimate because the monitoring login cannot read pg_stats. " + PG_STATS_GRANT +
+        " The Not Measured column of the Index Bloat (estimated) table above says why for the rest.";
+    }
+    return "No index has a bloat estimate. The Not Measured column of the Index Bloat (estimated) table above says why.";
+  }
+  if (typeof h.reason !== "string") return null;
+  if (h.reason === "pg_stats_unreadable") {
+    return "No column statistics are collected because the monitoring login cannot read pg_stats. " + PG_STATS_GRANT;
+  }
+  if (h.reason === "extension_missing") {
+    if (extensionLine) return extensionLine;
+    const names = Array.isArray(h.extensions) ? h.extensions.filter((n) => typeof n === "string" && n) : [];
+    if (!names.length) return null;
+    const many = names.length > 1;
+    return names.join(" and ") + (many ? " are" : " is") + " not installed on this server, so this panel has nothing to show. Install " +
+      (many ? "them" : "the extension") + (h.restart_required === true ? " (it needs shared_preload_libraries and a restart)" : "") + " to fill this panel.";
+  }
+  if (h.reason === "source_unreadable") {
+    return "The monitoring login could not read the source for this panel on this server. It needs a grant, or this server does not have that feature.";
+  }
+  if (h.reason === "capture_session_missing") {
+    return "The Extended Events session this panel reads is not running on this server. It is created again within the hour, and the monitoring login needs ALTER ANY EVENT SESSION for that.";
+  }
+  if (h.reason === "plan_capture_not_ready") {
+    const n = typeof h.unsatisfied_count === "number" && h.unsatisfied_count > 0 ? h.unsatisfied_count : 0;
+    return (n === 1 ? "One setting that plan capture needs is" : n > 1 ? n + " settings that plan capture needs are" : "Plan capture is") +
+      " not ready on this server, so no plans are captured. The Plan Capture Readiness panel lists each one with its fix.";
+  }
+  return null;
+}

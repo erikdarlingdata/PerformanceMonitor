@@ -122,6 +122,30 @@ public sealed class DarlingMcpInvestigationToolsTests
         Assert.Empty(off.Lines);
     }
 
+    /// <summary>#8611: the start line typed two tool names by hand and left out the rest of what the arm serves. It is built from the policy's own
+    /// sets now: every state-changing investigation tool by name, and the Level 2 action tools the arm offers by their count, so a tool added
+    /// to either set is in the line with no second edit.</summary>
+    [Fact]
+    public void Start_Served_NamesEveryToolTheArmServes_FromThePolicySet()
+    {
+        var on = new McpConfig { AllowInvestigations = true };
+        var served = DarlingMcpWritePolicy.ResolveForStart(on, Token, out var problem);
+        var logger = new CapturingTestLogger();
+
+        DarlingMcpHostService.LogInvestigationsGate(logger, on, served, problem);
+
+        var line = logger.Joined;
+        foreach (var tool in DarlingMcpWritePolicy.InvestigationTools)
+            Assert.Contains(tool, line, StringComparison.Ordinal);
+
+        var armActionTools = DarlingMcpWritePolicy.AgentActionTools.Where(t => served.Offers(t)).ToArray();
+        Assert.NotEmpty(armActionTools);
+        Assert.True(
+            armActionTools.All(t => line.Contains(t, StringComparison.Ordinal))
+            || line.Contains(armActionTools.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) + " agent action tools", StringComparison.Ordinal),
+            "the line names every action tool the arm serves, or all " + armActionTools.Length + " as a counted family: " + line);
+    }
+
     [Fact]
     public void Annotations_ClaimAndSubmit_AreNeitherReadOnlyNorDestructive_TheReadsAreReadOnly()
     {
@@ -176,7 +200,7 @@ public sealed class DarlingMcpInvestigationToolsTests
         Assert.Contains("list_investigation_requests", DarlingMcpToolClassification.ReadOnlyTools);
         Assert.Contains("get_investigation_reports", DarlingMcpToolClassification.ReadOnlyTools);
         Assert.Equal(
-            new[] { "claim_investigation_request", "submit_investigation_report" },
+            new[] { "claim_investigation_request", "post_investigation_message", "submit_investigation_report" },
             DarlingMcpWritePolicy.InvestigationTools.OrderBy(n => n, StringComparer.Ordinal));
         Assert.Empty(DarlingMcpWritePolicy.InvestigationTools.Intersect(DarlingMcpWritePolicy.WriteTools));
         Assert.Empty(DarlingMcpWritePolicy.InvestigationTools.Intersect(DarlingMcpToolClassification.ReadOnlyTools));
@@ -185,8 +209,11 @@ public sealed class DarlingMcpInvestigationToolsTests
     [Fact]
     public void Instructions_NameTheInvestigationSwitch_AndTheWritesOffCondition()
     {
+        /* #8463: the parenthetical lists every tool in InvestigationTools, in ordinal order, so a tool added to the set
+           appears here without an edit to the text. */
+        var names = string.Join(", ", DarlingMcpWritePolicy.InvestigationTools.OrderBy(n => n, StringComparer.Ordinal));
         Assert.Contains(
-            "Investigation tools (claim_investigation_request, submit_investigation_report) write only investigation state and are " +
+            "Investigation tools (" + names + ") write only investigation state and are " +
             "served when darling.json sets mcp.allowInvestigations with a token and mcp.allowWrites is off.",
             DarlingMcpInstructions.Text, StringComparison.Ordinal);
     }
@@ -236,6 +263,29 @@ public sealed class DarlingMcpInvestigationToolsTests
 
         var only = Assert.Single(problems);
         Assert.StartsWith("action_proposals:", only, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7109: Darling's submit passes <c>serverActionTools</c>. An <c>action_proposals</c> report stays refused, and the message names the seven
+    /// action tools to call with <c>dry_run</c> false, where the proposal is stored.</summary>
+    [Theory]
+    [InlineData("[{\"kind\":\"kill_session\"}]")]
+    [InlineData("anything at all")]
+    public void ValidateReport_OnDarling_RefusesActionProposals_AndNamesTheActionTools(string proposals)
+    {
+        var problems = InvestigationToolCore.ValidateReport(
+            Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), "real", "cause",
+            "[{\"tool\":\"get_wait_stats\",\"arguments\":{},\"key_numbers\":\"LCK_M_X 82%\",\"basis\":\"verified\"}]", "summary", null, proposals,
+            out _, out _, out _, requireBasis: true, serverActionTools: true);
+
+        var only = Assert.Single(problems);
+        Assert.StartsWith("action_proposals: refused", only, StringComparison.Ordinal);
+        foreach (var tool in new[]
+        {
+            "force_query_store_plan", "unforce_query_store_plan", "evict_cached_plan", "kill_session", "recompile_module", "create_plan_guide", "drop_plan_guide",
+        })
+            Assert.Contains(tool, only, StringComparison.Ordinal);
+        Assert.Contains("dry_run false", only, StringComparison.Ordinal);
+        Assert.Contains("action_proposals", InvestigationToolCore.InvalidReportMessage(problems), StringComparison.Ordinal);
     }
 
     [Fact]

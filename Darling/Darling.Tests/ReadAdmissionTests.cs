@@ -85,6 +85,28 @@ public sealed class ReadAdmissionTests
         Assert.Equal(0, admission.Stats().Running);
     }
 
+    /* #7357: a config that never sets reads.maxHeavyReads runs 4 long reads at once. The fifth cannot wait out the cap
+       (the table says a heavy read takes 3 s, the cap is 100 ms), so it is refused at once with 4 running. At the old
+       default of 2 the third read would be the one refused, and the Assert on the fourth ticket fails. */
+    [Fact]
+    public async Task ADefaultConfig_AdmitsFourHeavyReadsAtOnce_AndRefusesTheFifth()
+    {
+        var admission = Build(new DarlingConfig().Reads.MaxHeavyReads, TimeSpan.FromMilliseconds(100), new TimerTimeProvider());
+        var held = new List<ReadAdmissionTicket>();
+        for (var i = 0; i < 4; i++)
+        {
+            var ticket = await AdmitApart(admission, HeavyRoute);
+            Assert.True(ticket.MayRun);
+            held.Add(ticket);
+        }
+
+        Assert.Equal(4, admission.Stats().Running);
+        var fifth = await AdmitApart(admission, HeavyRoute);
+        Assert.False(fifth.MayRun);
+        Assert.Equal(4, Assert.IsType<ReadAdmissionRefusal>(fifth.Refusal).Running);
+        held.ForEach(t => t.Dispose());
+    }
+
     [Fact]
     public async Task AFullQueue_RefusesWithTheSentenceAndTheCounts()
     {
@@ -218,7 +240,7 @@ public sealed class ReadAdmissionTests
         Assert.Equal(3, admission.Limit);
         admission.Configure(-1);
         Assert.Equal(0, admission.Limit);
-        Assert.Equal(2, new DarlingConfig().Reads.MaxHeavyReads);
+        Assert.Equal(4, new DarlingConfig().Reads.MaxHeavyReads);
     }
 
     [Theory]
@@ -353,9 +375,9 @@ public sealed class ReadAdmissionTests
     [Fact]
     public void TheHourlySweep_RebuildsUnderItsOwnSlice_AndReopensTheConnectionBeforeTheFlush()
     {
-        var source = File.ReadAllText(Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var source = RepoFile.ReadRepoFile(Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
         var rebuild = source.IndexOf("ReadAdmission.RunRebuildSliceAsync(", StringComparison.Ordinal);
-        var flush = source.IndexOf("await _readLatency.FlushAsync(", StringComparison.Ordinal);
+        var flush = source.IndexOf("await FlushReadLatencyAsync(_readLatency,", StringComparison.Ordinal);
         Assert.True(rebuild > 0 && flush > rebuild, "The rebuild runs in its own slice, before the read-latency flush.");
         Assert.Contains("connection.State != ConnectionState.Open", source.Substring(rebuild, flush - rebuild));
         Assert.DoesNotContain("_readAdmission.RefreshAsync(connection", source);

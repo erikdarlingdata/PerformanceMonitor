@@ -10,6 +10,8 @@ using System.Windows;
 using System.Windows.Input;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Windows;
 
@@ -40,7 +42,8 @@ public partial class ManageCredentialProfilesDialog : Window
         ProfilesGrid.ItemsSource = null;
         var profiles = _profileManager.GetAll();
         ProfilesGrid.ItemsSource = profiles;
-        StatusText.Text = $"{profiles.Count} profile(s).";
+        StatusText.Text = $"{CountText.Plural(profiles.Count, "profile")}.";
+        NoProfilesMessage.Visibility = profiles.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void AddButton_Click(object sender, RoutedEventArgs e)
@@ -55,7 +58,14 @@ public partial class ManageCredentialProfilesDialog : Window
 
     private void EditButton_Click(object sender, RoutedEventArgs e) => EditSelected();
 
-    private void ProfilesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e) => EditSelected();
+    private void ProfilesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        // A double-click on a column header, the scrollbar or the empty area is not a row (#7210).
+        if (DataGridRowHit.IsOnRow(e.OriginalSource))
+        {
+            EditSelected();
+        }
+    }
 
     private void EditSelected()
     {

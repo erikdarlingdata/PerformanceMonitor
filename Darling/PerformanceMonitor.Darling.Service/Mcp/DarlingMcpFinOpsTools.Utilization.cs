@@ -26,10 +26,11 @@ public sealed partial class DarlingMcpFinOpsTools
         "utilization: fixed 24h verdict, health score, cost, 7-day trend.";
 
     internal const string UtilizationViewGuide =
-        "utilization reads a fixed 24-hour window and a fixed 7-day trend; hours_back other than 24 and limit other than 10 are refused. verdict is RIGHT_SIZED, OVER_PROVISIONED, UNDER_PROVISIONED, NOT_ENOUGH_DATA (fewer than 12 CPU samples in the window) or NOT_APPLICABLE, and null when the window holds no CPU sample. Stolen memory at or above 60% is UNDER_PROVISIONED (memory pressure), never OVER_PROVISIONED, and stolen_memory_note says why a high stolen_memory_pct is flagged. health_score is 0-100: CPU 40%, memory 30%, storage 30% (health_score is null when there is no CPU sample, with health_score_note saying so; cpu.avg_cpu_pct, p95_cpu_pct and max_cpu_pct are null then too, never 0); health_band is good at 80 and above, fair at 60 and above, else poor. stolen_memory_pct is (total server memory - buffer pool) / total server memory; buffer_pool_pct is buffer pool / physical memory. free_space_pct is the latest database-size snapshot's free share, 100 when none exists. monthly_cost_usd comes from the server's registered monthly cost and annual_cost_usd is 12 times it; both are null when no cost is set or it is 0 or less. Percentages are rounded to 0.1. A server with no memory sample answers status empty (or not_collected when its engine cannot supply one) instead of this payload. On engine edition 5 memory_basis is memory_limit and cpu_count is the vCore count (null when the service objective names none). Text numbers use the invariant culture. Times are UTC.";
+        "utilization reads a fixed 24-hour window and a fixed 7-day trend; hours_back other than 24 and limit other than 10 are refused. verdict is RIGHT_SIZED, OVER_PROVISIONED, UNDER_PROVISIONED, NOT_ENOUGH_DATA (fewer than 12 CPU samples in the window) or NOT_APPLICABLE, and null when the window holds no CPU sample. Stolen memory at or above 60% is UNDER_PROVISIONED (memory pressure), never OVER_PROVISIONED, and stolen_memory_note says why a high stolen_memory_pct is flagged. health_score is 0-100: CPU 40%, memory 30%, storage 30% (health_score is null when there is no CPU sample, with health_score_note saying so; cpu.avg_cpu_pct, p95_cpu_pct and max_cpu_pct are null then too, never 0); health_band is good at 80 and above, fair at 60 and above, else poor. stolen_memory_pct is (total server memory - buffer pool) / total server memory; buffer_pool_pct is buffer pool / physical memory. free_space_pct is the latest database-size snapshot's free share, 100 when none exists. monthly_cost_usd comes from the server's registered monthly cost and annual_cost_usd is 12 times it; both are null when no cost is set or it is 0 or less. In every view, percentages are rounded to 0.1, ratios (memory_ratio) to 3 places and megabyte figures to 2 places (a nonzero value under 0.01 MB keeps two significant digits), unless a view's own guide gives another precision; no figure carries trailing zeros, so a zero is 0. provisioning_trend holds at most trend_days rows, one per UTC calendar day that has a CPU sample: the six whole days before today, then today so far. part_day is true on today's row only: its UTC day has not ended, so its figures and verdict cover only the hours collected so far. A server with no memory sample answers status empty (or not_collected when its engine cannot supply one) instead of this payload. On engine edition 5 memory_basis is memory_limit and cpu_count is the vCore count (null when the service objective names none). Text numbers use the invariant culture. Times are UTC.";
 
-    /// <summary>The days the utilization trend spans; the payload's <c>trend_days</c>.</summary>
-    internal const int UtilizationTrendDays = 7;
+    /// <summary>The calendar days the utilization trend lists, today included; the payload's <c>trend_days</c> and the most rows
+    /// <c>provisioning_trend</c> holds (<see cref="ProvisioningTrendWindow"/>).</summary>
+    internal const int UtilizationTrendDays = ProvisioningTrendWindow.Days;
 
     /// <summary>
     /// The utilization view: a fixed 24-hour verdict window and a fixed <see cref="UtilizationTrendDays"/>-day trend. Its
@@ -71,6 +72,8 @@ public sealed partial class DarlingMcpFinOpsTools
         var vcoreEdition = ServerHardwareScope.HardwareIsTheHosts(dto.EngineEdition);
         var noVcores = vcoreEdition && dto.CpuCount <= 0;
         var hasCost = monthly > 0m;
+        /* #7906: the read leaves all four grant figures null when the window holds no memory grant sample. */
+        var hasGrants = dto.MaxGrantWaiters is not null || dto.GrantTimeouts is not null || dto.ForcedGrants is not null || dto.GrantUtilizationPct is not null;
 
         return JsonSerializer.Serialize(new
         {
@@ -86,13 +89,13 @@ public sealed partial class DarlingMcpFinOpsTools
             health_score = score,
             health_band = score is int scoreValue ? FinOpsUtilizationFigures.HealthBand(scoreValue) : null,
             health_score_note = hasCpu ? null : FinOpsHealthCalculator.NoScoreNote,
-            free_space_pct = Math.Round(freePct, 1, MidpointRounding.AwayFromZero),
+            free_space_pct = FinOpsWireFigures.Pct(freePct),
             free_space_pct_reason = totals is null ? "no database size snapshot" : null,
             cpu = new
             {
                 /* With no CPU sample in the window the three figures are null, never the 0 the read returns for nothing. */
-                avg_cpu_pct = hasCpu ? Math.Round(dto.AvgCpuPct, 1, MidpointRounding.AwayFromZero) : (decimal?)null,
-                p95_cpu_pct = hasCpu ? Math.Round(dto.P95CpuPct, 1, MidpointRounding.AwayFromZero) : (decimal?)null,
+                avg_cpu_pct = hasCpu ? FinOpsWireFigures.Pct(dto.AvgCpuPct) : (decimal?)null,
+                p95_cpu_pct = hasCpu ? FinOpsWireFigures.Pct(dto.P95CpuPct) : (decimal?)null,
                 max_cpu_pct = hasCpu ? dto.MaxCpuPct : (int?)null,
                 cpu_samples = dto.CpuSamples,
                 cpu_count = noVcores ? (int?)null : dto.CpuCount,
@@ -108,15 +111,18 @@ public sealed partial class DarlingMcpFinOpsTools
                 target_memory_mb = dto.TargetMemoryMb,
                 total_memory_mb = dto.TotalMemoryMb,
                 buffer_pool_mb = dto.BufferPoolMb,
-                memory_ratio = dto.MemoryRatio,
-                buffer_pool_pct = Math.Round(FinOpsUtilizationFigures.BufferPoolPct(dto.BufferPoolMb, dto.PhysicalMemoryMb), 1, MidpointRounding.AwayFromZero),
-                stolen_memory_pct = Math.Round(FinOpsUtilizationFigures.StolenMemoryPct(dto.TotalMemoryMb, dto.BufferPoolMb), 1, MidpointRounding.AwayFromZero),
+                memory_ratio = FinOpsWireFigures.Ratio(dto.MemoryRatio),
+                buffer_pool_pct = FinOpsWireFigures.Pct(FinOpsUtilizationFigures.BufferPoolPct(dto.BufferPoolMb, dto.PhysicalMemoryMb)),
+                stolen_memory_pct = FinOpsWireFigures.Pct(FinOpsUtilizationFigures.StolenMemoryPct(dto.TotalMemoryMb, dto.BufferPoolMb)),
                 /* The Viewer's tooltip text for an amber or red figure (#6139); null while the figure is below amber. */
                 stolen_memory_note = StolenMemoryNoteOrNull(FinOpsUtilizationFigures.StolenMemoryPct(dto.TotalMemoryMb, dto.BufferPoolMb)),
+                /* #7906: null, with grant_reason saying why, when no memory grant sample was collected in the window (the collector off,
+                   gated by the engine edition or not yet run); never the 0 waiters and 0% utilization an idle server reads. */
                 max_grant_waiters = dto.MaxGrantWaiters,
                 grant_timeouts = dto.GrantTimeouts,
                 forced_grants = dto.ForcedGrants,
-                grant_utilization_pct = dto.GrantUtilizationPct,
+                grant_utilization_pct = FinOpsWireFigures.Pct(dto.GrantUtilizationPct),
+                grant_reason = hasGrants ? null : "no memory grant sample in the last 24 hours",
             },
             monthly_cost_usd = hasCost ? monthly : (decimal?)null,
             annual_cost_usd = hasCost ? FinOpsCost.Annual(monthly) : (decimal?)null,
@@ -124,11 +130,14 @@ public sealed partial class DarlingMcpFinOpsTools
             provisioning_trend = trend.Select(d => new
             {
                 day = d.Day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-                avg_cpu_pct = Math.Round(d.AvgCpuPct, 1, MidpointRounding.AwayFromZero),
-                p95_cpu_pct = Math.Round(d.P95CpuPct, 1, MidpointRounding.AwayFromZero),
+                avg_cpu_pct = FinOpsWireFigures.Pct(d.AvgCpuPct),
+                p95_cpu_pct = FinOpsWireFigures.Pct(d.P95CpuPct),
                 max_cpu_pct = d.MaxCpuPct,
-                memory_ratio = d.MemoryRatio,
+                memory_ratio = FinOpsWireFigures.Ratio(d.MemoryRatio),
                 verdict = d.Status,
+                /* True on today's row: the UTC day has not ended, so it is judged on the hours collected so far. The key says
+                   which day the row is, since a bare "partial" reads to an MCP client as a payload that was cut. */
+                part_day = d.IsPartial,
             }).ToList(),
         }, McpHelpers.JsonOptions);
     }
@@ -136,7 +145,7 @@ public sealed partial class DarlingMcpFinOpsTools
     /// <summary>The Stolen Mem % note (<see cref="ProvisioningVerdict.StolenMemoryNote"/>), or null while the figure is below amber, so the field is absent rather than empty.</summary>
     internal static string? StolenMemoryNoteOrNull(double stolenPercent)
     {
-        var note = ProvisioningVerdict.StolenMemoryNote(stolenPercent);
+        var note = ProvisioningVerdict.StolenMemoryNote(stolenPercent, System.Globalization.CultureInfo.InvariantCulture);
         return note.Length == 0 ? null : note;
     }
 }

@@ -23,30 +23,58 @@ public static class FileSaveHelper
 {
     /// <summary>
     /// Prompts for a <c>.sqlplan</c> path and writes <paramref name="planXml"/> there; the pre-filled name is
-    /// <paramref name="defaultName"/> plus a <c>yyyyMMdd_HHmmss</c> timestamp. A plan the statement filter withheld whole
+    /// <paramref name="defaultName"/> plus <paramref name="timestamp"/> (default: the local time as <c>yyyyMMdd_HHmmss</c>; a window that saves an older stored snapshot passes that snapshot's time), with any character a file name cannot hold
+    /// (a collected object name can carry one) replaced by an underscore (#7228). A plan the statement filter withheld whole
     /// is refused with <see cref="PerformanceMonitor.Common.SensitiveStatements.WithheldPlanSentence"/> and nothing is written.
+    /// Returns true only when the file was written: a refusal, a cancelled dialog and a failed write (which shows its own
+    /// error) all return false, so a caller can show "Saved" on true alone.
     /// </summary>
-    public static void SavePlanFile(string planXml, string defaultName)
+    public static bool SavePlanFile(string planXml, string defaultName, string? timestamp = null)
     {
         /* #5320: the whole-plan marker is not a plan; say it is withheld instead of writing it into a .sqlplan. */
-        if (WithheldPlanGuard.RefuseSave(planXml)) return;
+        if (WithheldPlanGuard.RefuseSave(planXml)) return false;
 
         var dialog = new SaveFileDialog
         {
             Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|All files (*.*)|*.*",
             DefaultExt = ".sqlplan",
-            FileName = $"{defaultName}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
+            FileName = $"{SanitizeFileName(defaultName)}_{timestamp ?? DateTime.Now.ToString("yyyyMMdd_HHmmss")}.sqlplan"
         };
 
-        if (dialog.ShowDialog() != true) return;
+        if (dialog.ShowDialog() != true) return false;
 
+        if (TryWriteText(dialog.FileName, planXml, out var error)) return true;
+
+        MessageBox.Show($"Failed to save plan: {error}", "Save Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        return false;
+    }
+
+    /// <summary>Replaces every <see cref="Path.GetInvalidFileNameChars"/> character in <paramref name="name"/> with an underscore.</summary>
+    public static string SanitizeFileName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var chars = name.ToCharArray();
+        for (var i = 0; i < chars.Length; i++)
+        {
+            if (Array.IndexOf(invalid, chars[i]) >= 0) chars[i] = '_';
+        }
+
+        return new string(chars);
+    }
+
+    /// <summary>Writes <paramref name="text"/> as UTF-8; returns false with the failure text instead of throwing.</summary>
+    public static bool TryWriteText(string path, string text, out string? error)
+    {
         try
         {
-            File.WriteAllText(dialog.FileName, planXml, Encoding.UTF8);
+            File.WriteAllText(path, text, Encoding.UTF8);
+            error = null;
+            return true;
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to save plan: {ex.Message}", "Save Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            error = ex.Message;
+            return false;
         }
     }
 

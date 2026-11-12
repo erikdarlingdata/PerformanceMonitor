@@ -52,8 +52,26 @@ public partial class FleetSweepsTab : UserControl
     {
         await LoadTimelineAsync();
         await Task.WhenAll(LoadDetailAsync(), LoadWatchItemsAsync());
+        StampIfLoaded();
     }
 
+    /// <summary>Each load's last outcome: true once its read put its content on screen, false once a read failed. A load that a newer one
+    /// superseded leaves its outcome to that newer load.</summary>
+    private bool _timelineLoaded;
+    private bool _detailLoaded;
+    private bool _watchItemsLoaded;
+
+    /// <summary>Raises "fleet sweeps: refreshed …" when all three loads last finished. Each load reports its own failure, so the stamp
+    /// never writes over one, and a load that finishes after a failure replaces the failure line it answers.</summary>
+    private void StampIfLoaded()
+    {
+        if (_timelineLoaded && _detailLoaded && _watchItemsLoaded)
+        {
+            StatusChanged?.Invoke($"fleet sweeps: refreshed {ViewerTimeHelper.RefreshedStamp()}");
+        }
+    }
+
+    /// <summary>Reads the timeline into the runs grid and records whether it is on screen.</summary>
     private async Task LoadTimelineAsync()
     {
         if (_dataService == null)
@@ -95,15 +113,17 @@ public partial class FleetSweepsTab : UserControl
                 _binding = false;
             }
 
-            NoRunsMessage.Text = "No sweeps in this span. Widen the span, or check that fleet_sweep.enabled is on — a gap in this timeline is a missed sweep, with its cause on the service log.";
+            NoRunsMessage.Text = "No sweeps in this span. Widen the span, or check that fleet_sweep.enabled is on: a gap in this timeline is a missed sweep, with its cause on the service log.";
             NoRunsMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.FormatFleetWide(DateTime.UtcNow, "HH:mm:ss");
+            LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.RefreshedStamp();
+            _timelineLoaded = true;
         }
         catch (Exception ex)
         {
             /* A load the operator has moved past does not report its failure over the newer load's status. */
             if (_loads.Superseded(nameof(LoadTimelineAsync), gen)) return;
 
+            _timelineLoaded = false;
             StatusChanged?.Invoke($"failed to load the fleet sweep timeline: {ex.Message}");
         }
         finally
@@ -115,6 +135,7 @@ public partial class FleetSweepsTab : UserControl
         }
     }
 
+    /// <summary>Reads the selected sweep into the detail panes and records whether it, or the note that there is none, is on screen.</summary>
     private async Task LoadDetailAsync()
     {
         if (_dataService == null)
@@ -137,16 +158,19 @@ public partial class FleetSweepsTab : UserControl
                 NoDetailMessage.Text = (id is null ? "No sweep has been recorded yet." : "Sweep not found.")
                     + " Sweeps appear here once fleet_sweep.enabled is on and the cadence elapses.";
                 NoDetailMessage.Visibility = Visibility.Visible;
+                _detailLoaded = true;
                 return;
             }
 
             ShowDetail(detail);
+            _detailLoaded = true;
         }
         catch (Exception ex)
         {
             /* A load the operator has moved past does not report its failure over the newer load's status. */
             if (_loads.Superseded(nameof(LoadDetailAsync), gen)) return;
 
+            _detailLoaded = false;
             StatusChanged?.Invoke($"failed to load the fleet sweep: {ex.Message}");
         }
     }
@@ -185,6 +209,7 @@ public partial class FleetSweepsTab : UserControl
         }
     }
 
+    /// <summary>Reads the watch items into their grid and records whether they are on screen.</summary>
     private async Task LoadWatchItemsAsync()
     {
         if (_dataService == null)
@@ -204,14 +229,16 @@ public partial class FleetSweepsTab : UserControl
             WatchLabel.Text = closed ? "Closed watch items" : "Open right now (open + carried)";
             NoWatchMessage.Text = closed
                 ? "No closed watch items."
-                : "Nothing is open right now — no watch item is open or carried.";
+                : "No watch items are open or carried.";
             NoWatchMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            _watchItemsLoaded = true;
         }
         catch (Exception ex)
         {
             /* A load the operator has moved past does not report its failure over the newer load's status. */
             if (_loads.Superseded(nameof(LoadWatchItemsAsync), gen)) return;
 
+            _watchItemsLoaded = false;
             StatusChanged?.Invoke($"failed to load the fleet sweep watch items: {ex.Message}");
         }
     }
@@ -221,6 +248,7 @@ public partial class FleetSweepsTab : UserControl
         if (IsLoaded)
         {
             await LoadTimelineAsync();
+            StampIfLoaded();
         }
     }
 
@@ -236,6 +264,7 @@ public partial class FleetSweepsTab : UserControl
         {
             _selectedSweepId = row.SweepId;
             await LoadDetailAsync();
+            StampIfLoaded();
         }
     }
 
@@ -244,6 +273,7 @@ public partial class FleetSweepsTab : UserControl
         if (IsLoaded)
         {
             await LoadWatchItemsAsync();
+            StampIfLoaded();
         }
     }
 

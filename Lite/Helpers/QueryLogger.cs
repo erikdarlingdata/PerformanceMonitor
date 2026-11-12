@@ -9,6 +9,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Threading;
 
 namespace PerformanceMonitorLite.Helpers;
 
@@ -135,7 +136,20 @@ public sealed class QueryExecutionContext : IDisposable
     private readonly string _queryText;
     private readonly string? _source;
     private readonly string? _serverName;
+    private readonly QueryExecutionContext? _outer;
     private bool _disposed;
+
+    /* #7256: the timing context the code running now belongs to. A LocalDataService read opens its connection from inside
+       the context its TimeQuery started, and the open reports the lock wait and the connection open here, so the slow-read
+       line can say where the time went without every one of the ~60 reads passing a timer down. AsyncLocal flows into the
+       read's own awaits, and an async method's change to it does not reach its caller. */
+    private static readonly AsyncLocal<QueryExecutionContext?> s_current = new();
+
+    /// <summary>The phases the connection open measured for the read that is running now, or null outside a timed read.</summary>
+    internal static PerformanceMonitorLite.Services.ReadPhaseTimer? CurrentPhases => s_current.Value?.Phases;
+
+    /// <summary>Where this read spent its time before the statement ran: the lock wait, the open, an archive slot wait.</summary>
+    internal PerformanceMonitorLite.Services.ReadPhaseTimer Phases { get; } = new();
 
     internal QueryExecutionContext(string context, string queryText, string? source, string? serverName)
     {
@@ -145,6 +159,8 @@ public sealed class QueryExecutionContext : IDisposable
         _queryText = queryText;
         _source = source;
         _serverName = serverName;
+        _outer = s_current.Value;
+        s_current.Value = this;
     }
 
     public double ElapsedMs => _stopwatch.Elapsed.TotalMilliseconds;
@@ -154,10 +170,13 @@ public sealed class QueryExecutionContext : IDisposable
         if (_disposed) return;
         _disposed = true;
         _stopwatch.Stop();
+        s_current.Value = _outer;
 
+        var elapsedMs = _stopwatch.Elapsed.TotalMilliseconds;
         QueryLogger.LogSlowQuery(
-            _startTime, DateTime.Now, _stopwatch.Elapsed.TotalMilliseconds,
-            _context, _queryText, _source, _serverName);
+            _startTime, DateTime.Now, elapsedMs,
+            Phases.HasPhases ? $"{_context} ({Phases.DescribeAgainstElapsed(elapsedMs)})" : _context,
+            _queryText, _source, _serverName);
 
         GC.SuppressFinalize(this);
     }

@@ -43,12 +43,13 @@ public sealed class AnalysisFindingsTabTests
         Assert.Equal(1, tabs.Split("analysisFindingsTab,", StringSplitOptions.None).Length - 1);
     }
 
-    private static JsonElement Run(string scenario)
+    private static JsonElement Run(string scenario, string? session = null)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "analysis-findings-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
         psi.ArgumentList.Add(scenario);
+        if (session is not null) psi.Environment["HARNESS_SESSION"] = session;
         Process proc;
         try { proc = Process.Start(psi)!; }
         catch (Win32Exception) { Assert.Skip("Node is not installed, so the shipped page script cannot be run."); return default; }
@@ -127,12 +128,99 @@ public sealed class AnalysisFindingsTabTests
         Assert.Equal(4, r.GetProperty("buttons").GetInt32());
     }
 
+    /// <summary>#7988: a scoped session's cards carry no Ask AI button, because the prompt read behind it is not one a scoped token
+    /// is served, so the button could only reach the refusal. The cards, the fix copy and the tab links are the same as any other
+    /// reader's, and a reader whose session is not scoped keeps the button on every card.</summary>
+    [Theory]
+    [InlineData("""{"can_edit":false,"scoped":true}""", true, 0)]
+    [InlineData("""{"can_edit":false,"scoped":false}""", false, 4)]
+    public void AScopedSessionsCards_HaveNoAskAiButton_AndEveryOtherReadersDo(string session, bool scoped, int askAiButtons)
+    {
+        var r = Run("sessionButtons", session);
+
+        Assert.Equal(scoped, r.GetProperty("scoped").GetBoolean());
+        Assert.Equal(4, r.GetProperty("cards").GetInt32());
+        var buttons = Strings(r.GetProperty("buttons"));
+        Assert.Equal(askAiButtons, buttons.Count(b => b == "Ask AI"));
+        Assert.Equal(1, buttons.Count(b => b == "Copy fix"));
+        Assert.Equal(3, r.GetProperty("links").GetInt32());
+        Assert.Equal(["/api/read/get_analysis_findings"], Strings(r.GetProperty("reads")));
+    }
+
     [Fact]
-    public void OnlyIncidentFindings_LinkToTheServersQueriesTab_NotConfigFixes()
+    public void OnlyIncidentFindings_LinkToTheirFamilysTab_NotConfigFixes()
     {
         var links = Strings(Run("link"));
         Assert.Equal(3, links.Length);
-        Assert.All(links, l => Assert.Equal("#/server/srv-a/queries", l));
+        // The sample cards are CPU cards (#7677): the link goes to the CPU tab, not Queries.
+        Assert.All(links, l => Assert.Equal("#/server/srv-a/cpu", l));
+    }
+
+    /// <summary>#7677: every card used to carry "Open Queries tab" whatever its text said. Each card now opens the tab that holds its evidence,
+    /// the button names that tab, and a card with no tab of its own (or a standing setting, or no window) has no button.</summary>
+    [Fact]
+    public void EachCard_OpensTheTabThatHoldsItsEvidence_AndTheButtonNamesIt()
+    {
+        var r = Run("tabLinks");
+        void Opens(string card, string tab, string label)
+        {
+            var a = Assert.Single(r.GetProperty(card).EnumerateArray());
+            Assert.Equal("#/server/srv-a/" + tab, a.GetProperty("href").GetString());
+            Assert.Equal("Open " + label + " tab", a.GetProperty("text").GetString());
+        }
+        void NoButton(string card) => Assert.Empty(r.GetProperty(card).EnumerateArray());
+
+        Opens("waits", "waits", "Wait Stats");
+        Opens("blocking", "blocking", "Blocking");
+        Opens("deadlock", "blocking", "Blocking");
+        Opens("memory", "memory", "Memory");
+        Opens("io", "io", "File I/O");
+        Opens("queries", "queries", "Queries");
+        Opens("anomalyWait", "waits", "Wait Stats");
+        Opens("anomalyDeadlock", "blocking", "Blocking");
+        Opens("anomalyByRootFact", "blocking", "Blocking");
+        Opens("pgWaits", "waits", "Waits");
+        Opens("pgBlocking", "activity", "Activity");
+        Opens("pgAnomalyDeadlock", "activity", "Activity");
+        Opens("tempdb", "io", "File I/O");
+        Opens("badActor", "queries", "Queries");
+        Opens("config", "config", "Configuration");
+        Opens("databaseConfig", "config", "Configuration");
+        Opens("jobs", "activity", "Activity");
+        Opens("sessions", "activity", "Activity");
+        Opens("pgVacuum", "vacuum", "Vacuum");
+        Opens("pgSessions", "vacuum", "Vacuum");
+        Opens("pgBuffer", "io", "I/O");
+        Opens("pgWrite", "io", "I/O");
+        Opens("pgCpu", "overview", "Overview");
+        Opens("pgDatabase", "activity", "Activity");
+        Opens("pgPlans", "activity", "Activity");
+        Opens("pgTemp", "activity", "Activity");
+        Opens("pgKernel", "waits", "Waits");
+        Opens("pgPosture", "config", "Configuration");
+        NoButton("anomalyUnmapped");
+        NoButton("pgMemory");
+        NoButton("disk");
+        NoButton("coverage");
+        NoButton("absolution");
+        NoButton("configFix");
+        NoButton("standingState");
+        NoButton("noWindow");
+    }
+
+    /// <summary>#7677: the card map copies the tab ids and labels from the registries in server-tabs.js (a lookup back would be a circular
+    /// import). A relabelled or removed tab there must fail here instead of leaving a button that names the old tab.</summary>
+    [Fact]
+    public void EveryMappedTab_ExistsInItsEnginesRegistry_UnderTheSameLabel()
+    {
+        var r = Run("tabLabels");
+        Assert.True(r.GetArrayLength() > 20);
+        foreach (var e in r.EnumerateArray())
+        {
+            Assert.True(e.GetProperty("registryLabel").ValueKind == JsonValueKind.String,
+                e.GetProperty("family").GetString() + " maps to tab '" + e.GetProperty("id").GetString() + "', which its engine's registry does not have");
+            Assert.Equal(e.GetProperty("registryLabel").GetString(), e.GetProperty("label").GetString());
+        }
     }
 
     [Fact]
@@ -141,6 +229,140 @@ public sealed class AnalysisFindingsTabTests
         var groups = Run("linkKinds").EnumerateArray().ToDictionary(g => g.GetProperty("head").GetString()!, g => g.GetProperty("links").GetInt32());
         Assert.Equal(1, groups.Single(g => g.Key.StartsWith("ForcePlan", StringComparison.Ordinal)).Value);
         Assert.Equal(0, groups.Single(g => g.Key.StartsWith("ConfigFix", StringComparison.Ordinal)).Value);
+    }
+
+    [Fact]
+    public void AStandingStateCard_GetsNoQueriesLink_AndAnIncidentCardGetsOneThatNamesTheTab()
+    {
+        var groups = Run("standingLink").EnumerateArray().ToDictionary(g => g.GetProperty("head").GetString()!, g => Strings(g.GetProperty("links")));
+        Assert.Empty(groups.Single(g => g.Key.StartsWith("VolumeLow", StringComparison.Ordinal)).Value);
+        // The WaitSpike sample card is a CPU card (#7677): its button names the CPU tab, not Queries.
+        Assert.Equal(new[] { "Open CPU tab" }, groups.Single(g => g.Key.StartsWith("WaitSpike", StringComparison.Ordinal)).Value);
+    }
+
+    [Fact]
+    public void TwoChainsOnOneRootWithTwoSentences_AreOneCard_WithTheNewestChainsFigures_AndTheOtherChainNamedUnderIt()
+    {
+        var r = Run("sameRootOtherSentence");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(1, r.GetProperty("cards").GetInt32());
+        /* #7696: one root fact is one row whatever its headlines say, so the two chains' occurrences add up and both chains are named in words. */
+        Assert.Contains("Seen 7×", text, StringComparison.Ordinal);
+        Assert.Contains("Seen as 2 chains: Latch ex, then Cxpacket · Warning · 5 occurrences; Latch ex, then Tempdb usage · Info · 2 occurrences", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("→", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("TEMPDB_USAGE", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TwoChainsOnOneRootWithOneSentence_AreOneCard_WithTheOccurrencesAddedUp_AndEachChainNamedInWords()
+    {
+        var r = Run("sameRoot");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(2, Strings(r.GetProperty("cards")).Length);
+        Assert.Contains("Seen 7×", text, StringComparison.Ordinal);
+        Assert.Contains("Seen as 2 chains: Latch ex, then Cxpacket · Warning · 5 occurrences; Latch ex, then Tempdb usage · Info · 2 occurrences", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("→", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OneSentenceOnTwoIncidents_IsOneCard_AtTheWorstSeverity_WithTheOccurrencesAddedUp()
+    {
+        var r = Run("sameSentence");
+        var headers = Strings(r.GetProperty("headers"));
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(new[] { "Read latency spiked to 155 ms · CRITICAL", "Something else · INFO" }, headers);
+        Assert.Contains("Seen 21×", text, StringComparison.Ordinal);
+        Assert.Contains("Seen as 2 chains: Anomaly read latency, then Lck m s · Critical · 4 occurrences; Anomaly read latency · Warning · 17 occurrences", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OneRootFactOnTwoIncidents_WithADifferentFigureInTheHeadline_IsOneCard_AtTheNewestFigure()
+    {
+        var r = Run("sameRootOtherFigure");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(1, r.GetProperty("rows").GetInt32());
+        Assert.Equal(new[] { "Write latency spiked to 4935.5 ms · CRITICAL" }, Strings(r.GetProperty("headers")));
+        Assert.Equal("Write latency spiked to 4935.5 ms", r.GetProperty("title").GetString());
+        Assert.Equal("Critical", r.GetProperty("label").GetString());
+        Assert.Equal("2026-01-01T00:11:00Z", r.GetProperty("start").GetString());
+        Assert.Equal("2026-01-01T09:20:00Z", r.GetProperty("end").GetString());
+        Assert.Contains("Seen 30×", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("2300", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARowWithNoRootFact_StillMergesByItsHeadline()
+    {
+        var r = Run("noRootStillMergesByTitle");
+        Assert.Equal(2, r.GetProperty("rows").GetInt32());
+        Assert.Equal(new[] { 6, 3 }, r.GetProperty("occurrences").EnumerateArray().Select(x => x.GetInt32()).ToArray());
+    }
+
+    [Fact]
+    public void TwoTablesGrowing_UnderOneRootFact_StayTwoRows_BecauseOnlyTheHeadlineNamesTheTable()
+    {
+        var r = Run("objectAnomalyTwoTables");
+        Assert.Equal(new[] { "dbo.Orders grew 900 MB day-over-day", "dbo.Events grew 700 MB day-over-day" }, Strings(r.GetProperty("titles")));
+    }
+
+    [Fact]
+    public void TwoPileupsOnDifferentStatements_InOneIncident_AreTwoCards_EachWithItsOwnRemediation()
+    {
+        var r = Run("pileupTwoStatementsOneIncident");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(2, r.GetProperty("cards").GetInt32());
+        Assert.Contains("Fix statement A", text, StringComparison.Ordinal);
+        Assert.Contains("Fix statement B", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0x", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void TwoTablesAndTwoContendedObjects_InOneIncident_AreFourCards_EachNamingItsSubject()
+    {
+        var r = Run("objectAnomalyOneIncident");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(4, r.GetProperty("cards").GetInt32());
+        Assert.Equal(4, r.GetProperty("titles").GetArrayLength());
+        foreach (var subject in new[] { "dbo.Orders", "dbo.Events", "dbo.Queue", "dbo.Jobs" })
+            Assert.Contains(subject, text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TwoPileupsOnDifferentStatements_WithOneHeadline_AreTwoCards_EachWithItsOwnRemediation_AndNoHash()
+    {
+        var r = Run("pileupTwoStatements");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(2, r.GetProperty("cards").GetInt32());
+        Assert.Contains("Fix statement A", text, StringComparison.Ordinal);
+        Assert.Contains("Fix statement B", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0x", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ThePileupOfOneStatement_OnTwoIncidents_IsOneCard()
+    {
+        var r = Run("pileupSameStatement");
+        Assert.Equal(1, r.GetProperty("cards").GetInt32());
+        Assert.DoesNotContain("0x", r.GetProperty("text").GetString()!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ThePileupReadBackUnderTwoHeadlines_IsOneCardAtTheNewestHeadline_WithNoHash()
+    {
+        var r = Run("pileupAlsoSeen");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(1, r.GetProperty("cards").GetInt32());
+        /* #7696: the two headlines differ only in the figures, so they are one row at the newest headline and the older one is not printed. */
+        Assert.Contains("4 sessions ran one statement for 30 s", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("3 sessions ran one statement for 20 s", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0x", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("→", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARowWhosePeakWasWarning_ButWhoseNewestOccurrenceWasInfo_ReadsWarning()
+    {
+        Assert.Equal(new[] { "Wait profile shifted · WARNING" }, Strings(Run("peakSeverity").GetProperty("headers")));
     }
 
     [Fact]
@@ -158,7 +380,16 @@ public sealed class AnalysisFindingsTabTests
         var text = Run("scoreWording").GetProperty("text").GetString()!;
         Assert.Contains("(score 0.80)", text, StringComparison.Ordinal);
         Assert.DoesNotContain("0.80 waits", text, StringComparison.Ordinal);
-        Assert.Contains("waits", text, StringComparison.Ordinal);
+        Assert.Contains("Waits", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheCard_ShowsThePlainCategoryName_AndAnUnknownCategoryAsItIs()
+    {
+        var text = Run("categoryNames").GetProperty("text").GetString()!;
+        Assert.Contains("Expensive query", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("bad_actor", text, StringComparison.Ordinal);
+        Assert.Contains("weird_new_source", text, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -48,14 +48,14 @@ public sealed class ViewerFinOpsUtilizationNoCpuTests
         row.P95CpuPct = 40m;
         row.MaxCpuPct = 77;
 
-        Assert.Equal($"{12.5m:N2}%", row.AvgCpuText);
-        Assert.Equal($"{40m:N2}%", row.P95CpuText);
-        Assert.Equal("77%", row.MaxCpuText);
+        Assert.Equal($"{12.5m:N1}%", row.AvgCpuText);
+        Assert.Equal($"{40m:N1}%", row.P95CpuText);
+        Assert.Equal("77.0%", row.MaxCpuText);
 
         // A measured idle server is a real 0, not a dash.
         var idle = Row("OVER_PROVISIONED");
-        Assert.Equal($"{0m:N2}%", idle.AvgCpuText);
-        Assert.Equal("0%", idle.MaxCpuText);
+        Assert.Equal($"{0m:N1}%", idle.AvgCpuText);
+        Assert.Equal("0.0%", idle.MaxCpuText);
     }
 
     [Theory]

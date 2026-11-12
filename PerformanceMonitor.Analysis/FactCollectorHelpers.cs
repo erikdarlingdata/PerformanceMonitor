@@ -144,7 +144,9 @@ public static class FactCollectorHelpers
     /// Keeps individual facts for:
     ///   - LCK_M_S, LCK_M_IS (reader/writer blocking — RCSI signal)
     ///   - LCK_M_RS_*, LCK_M_RIn_*, LCK_M_RX_* (serializable/repeatable read signal)
-    ///   - SCH_M, SCH_S (schema locks — DDL/index operations)
+    ///   - LCK_M_SCH_M (schema-modification lock — DDL/index operations), keyed SCH_M by
+    ///     <see cref="WaitFactKey"/> before this runs (#7178). LCK_M_SCH_S (readers queued behind a
+    ///     schema change) is a general lock wait here and folds into LCK, as before.
     /// Individual constituent wait times are preserved in metadata as "{type}_ms" keys.
     ///
     /// <para>The grouped Value is the SUM of the constituents' Values, not a fresh division (#3538 A2).
@@ -256,11 +258,48 @@ public static class FactCollectorHelpers
             metadata["coverage_fraction"] = coverage.Fraction;
     }
 
+    /// <summary>The width of the blocking peak bucket in hours, the grain the BLOCKING_EVENTS (10, 50) pair was
+    /// measured on (#3871). Both collectors bucket with the same literal interval in their SQL.</summary>
+    public const double PeakBucketHours = 4.0;
+
+    /// <summary>
+    /// #7895: the hours a bucket divides its events by: its own span, clipped to the window end, never more than the
+    /// hours the collector observed in the window (<see cref="AnalysisContext.ObservedDurationMs"/>, the divisor
+    /// every per-hour fact shares), and never under one hour, so a sliver of a tail bucket cannot turn one event
+    /// into a storm. The coverage witness carries one observed figure for the whole window, so a collector gap caps
+    /// a bucket's hours at what the window observed but never shrinks a bucket the collector saw end to end. A gap
+    /// inside the peak bucket itself needs observed time per bucket, which the witness does not carry (#8001).
+    /// </summary>
+    public static double CoveredHours(double spanHours, AnalysisContext context) =>
+        Math.Max(1.0, Math.Min(spanHours, context.ObservedDurationMs / 3_600_000.0));
+
+    /// <summary>
+    /// #7895: the busiest blocking bucket by RATE, from the two bucket shapes a window-start origin produces: full
+    /// buckets of <see cref="PeakBucketHours"/>, of which only the biggest count can win, and the one clipped tail
+    /// bucket, whose own span is <paramref name="tailBucketHours"/>. Each count divides by the
+    /// <see cref="CoveredHours"/> of its span; the higher rate wins and the bigger count breaks a tie. A window
+    /// that is a multiple of the bucket width has no tail (count 0), and a window shorter than one bucket has no
+    /// full bucket (count 0). Returns the rate, the winning bucket's count and the hours it divided by, so the
+    /// fact publishes all three.
+    /// </summary>
+    public static (double EventsPerHour, long EventCount, double CoveredHours) PeakBucketRate(
+        long peakFullBucketCount, long tailBucketCount, double tailBucketHours, AnalysisContext context)
+    {
+        var fullHours = CoveredHours(PeakBucketHours, context);
+        var tailHours = CoveredHours(tailBucketHours, context);
+        var fullRate = peakFullBucketCount / fullHours;
+        var tailRate = tailBucketCount > 0 ? tailBucketCount / tailHours : 0.0;
+        return tailRate > fullRate || (tailRate == fullRate && tailBucketCount > peakFullBucketCount)
+            ? (tailRate, tailBucketCount, tailHours)
+            : (fullRate, peakFullBucketCount, fullHours);
+    }
+
     /// <summary>
     /// Maps a raw wait type to the FAMILY key its regular fact is grouped under, mirroring
     /// <see cref="GroupParallelismWaits"/> (all CX* → CXPACKET) and <see cref="GroupGeneralLockWaits"/> /
-    /// <see cref="IsGeneralLockWait"/> (general lock modes → LCK; LCK_M_S / LCK_M_IS, range locks, and
-    /// schema locks keep their own key). Every other wait type maps to itself. This is the single
+    /// <see cref="IsGeneralLockWait"/> (general lock modes → LCK; LCK_M_S / LCK_M_IS and range locks keep
+    /// their own key) and <see cref="WaitFactKey"/> (LCK_M_SCH_M → SCH_M, #7178). Every other wait type
+    /// maps to itself. This is the single
     /// source of truth <see cref="AnomalyIncidentReconciler"/> uses to fold an ANOMALY_WAIT_PROFILE
     /// into the regular wait finding that shares its dominant driver's family, so the family decision
     /// can never drift from how the collector actually grouped the waits.
@@ -271,14 +310,27 @@ public static class FactCollectorHelpers
             return waitType ?? string.Empty;
         if (waitType.StartsWith("CX", StringComparison.Ordinal))
             return "CXPACKET";
-        if (IsGeneralLockWait(waitType))
+        var factKey = WaitFactKey(waitType);
+        if (IsGeneralLockWait(factKey))
             return "LCK";
-        return waitType;
+        return factKey;
     }
 
     /// <summary>
+    /// The key a raw <c>wait_type</c> is stored under on its wait fact (#7178). The engine names the
+    /// schema-modification lock <c>LCK_M_SCH_M</c> but every consumer (scorer ramp, the SCH_M advice
+    /// card, the SCH_M → RUNNING_JOBS edge, the reconciler's maintenance family) keys on <c>SCH_M</c>, and
+    /// before this the raw name reached <see cref="GroupGeneralLockWaits"/> and folded into LCK, so none
+    /// of those arms could fire. Both collectors call this where they build the fact. Every other wait
+    /// type keeps its own name.
+    /// </summary>
+    public static string WaitFactKey(string waitType) =>
+        string.Equals(waitType, "LCK_M_SCH_M", StringComparison.OrdinalIgnoreCase) ? "SCH_M" : waitType;
+
+    /// <summary>
     /// Returns true for general lock waits that should be grouped into "LCK".
-    /// Excludes reader locks (S, IS), range locks (RS_*, RIn_*, RX_*), and schema locks.
+    /// Excludes reader locks (S, IS) and range locks (RS_*, RIn_*, RX_*). Schema-modification waits
+    /// reach here already keyed SCH_M (<see cref="WaitFactKey"/>), which is not a LCK_M_ name.
     /// </summary>
     public static bool IsGeneralLockWait(string waitType)
     {

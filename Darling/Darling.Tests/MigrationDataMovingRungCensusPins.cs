@@ -377,6 +377,98 @@ public sealed class MigrationDataMovingRungCensusPins
             + "reads the table once to validate it, and the table is a hand-edited registry of at most a few hundred rows (one per route "
             + "an operator made), so the scan takes milliseconds. It reads no collected data and spends none of the lock-wait budget, so "
             + "the multiple stays 5."),
+        new(
+            231,
+            SetsTheFloor: false,
+            "Four nullable ADD COLUMNs plus one ADD CONSTRAINT ... CHECK on config.config_mute_rules (created V3, #7040). The columns carry "
+            + "no default, so they are catalog-only. The CHECK reads the table once to validate it, and the table is a hand-edited registry "
+            + "of mute rules (a store holds a handful, a very large one a few hundred), so the scan takes milliseconds. It reads no collected "
+            + "data and spends none of the lock-wait budget, so the multiple stays 5."),
+        new(
+            233,
+            SetsTheFloor: false,
+            "ADD COLUMN IF NOT EXISTS report_notice text NOT NULL DEFAULT 'off' plus ADD CONSTRAINT ... CHECK on config.config_notification_routes "
+            + "(created V131), the notification routes registry (#6979). The ADD COLUMN with a constant default is catalog-only. The CHECK "
+            + "reads the table once to validate it, and the table is a hand-edited registry of at most a few hundred rows (one per route "
+            + "an operator made), so the scan takes milliseconds. It reads no collected data and spends none of the lock-wait budget, so "
+            + "the multiple stays 5."),
+        new(
+            235,
+            SetsTheFloor: false,
+            "Three SET DEFAULT statements plus one UPDATE on config.config_alert_settings (created V17), the one-row alert settings "
+            + "singleton (#7083). The SET DEFAULT is catalog-only. The UPDATE touches at most that one row. It reads no collected data and "
+            + "spends none of the lock-wait budget, so the multiple stays 5."),
+        new(
+            236,
+            SetsTheFloor: false,
+            "ADD COLUMN IF NOT EXISTS action text NOT NULL DEFAULT 'mute' plus ADD CONSTRAINT ... CHECK on config.config_mute_rules (created V3, "
+            + "#7083). The ADD COLUMN with a constant default is catalog-only. The CHECK reads the table once to validate it, and the table is a "
+            + "hand-edited registry of mute rules (a store holds a handful, a very large one a few hundred), so the scan takes milliseconds. It reads "
+            + "no collected data and spends none of the lock-wait budget, so the multiple stays 5."),
+        new(
+            238,
+            SetsTheFloor: false,
+            "ADD COLUMN action_approval text NOT NULL DEFAULT 'required' with its CHECK, then one UPDATE of the rows at agent_level 3, plus ADD "
+            + "COLUMN IF NOT EXISTS approval_single_person on config.config_notification_routes (created V131, #7109). The ADD COLUMNs with a "
+            + "constant default are catalog-only. The CHECK and the UPDATE each read the table once, and the table is a hand-edited registry of at "
+            + "most a few hundred routes, so both take milliseconds. The new proposals table starts empty. It reads no collected data and spends "
+            + "none of the lock-wait budget, so the multiple stays 5."),
+        new(
+            248,
+            SetsTheFloor: false,
+            "Replaces the key trigger function and creates both triggers again, then one DELETE FROM collect.query_store_self_keys_state "
+            + "(created V219, #7730): the state row the background backfill reads, a single row. The trigger function body names a DELETE on "
+            + "collect.query_store_self_keys, which is the function text and not a statement the rung runs. The rung scans no table and "
+            + "rewrites no collected row (the backfill runs in the background after start), so it spends none of the lock-wait budget "
+            + "and the multiple stays 5."),
+        new(
+            251,
+            SetsTheFloor: false,
+            "Replaces the compose-stamp trigger function and creates both row triggers again (#7762), with the threshold moved to the hour of the "
+            + "writer's clock. The function body names an INSERT ... SELECT into collect.query_store_compose_stamp_built (created V173), which is the "
+            + "function text and not a statement the rung runs. The rung is a function replace and two trigger creates: catalog work on the partitioned "
+            + "parent, cloned onto each leaf without a scan, and it reads and rewrites no row. It spends none of the lock-wait budget, so the multiple stays 5."),
+        new(
+            254,
+            SetsTheFloor: false,
+            "Two CREATE INDEX statements over tables earlier rungs created (#7659): a partial index on config.investigation_requests (created V184) over "
+            + "chat_thread_of, a column the same rung adds, so every existing row is NULL and the partial index holds no entry; and an index on "
+            + "config.investigation_request_threads (created V252) over its two text columns, a table of one row per request thread that the Slack bot "
+            + "posted, at most the request count (tens of thousands on the largest store) and empty on a store that never posted. Both scans are "
+            + "sub-second, so the rung spends none of the lock-wait budget and the multiple stays 5."),
+        new(
+            257,
+            SetsTheFloor: false,
+            "#8464: one CREATE INDEX IF NOT EXISTS over the populated collect.collection_log hypertable (created V2), V150's shape: "
+            + "idx_collection_log_status_time (server_id, status, collection_time DESC), the index every last-collected read's newest-SUCCESS "
+            + "descent takes. Measured on a 900,000-row store with 61 one-day chunks, 59 of them compressed: under a second, 1,160 kB in all, "
+            + "because a compressed chunk's B-tree holds only its uncompressed rows and the cost is the day or two of rows not yet compressed. "
+            + "Not CONCURRENTLY (TimescaleDB refuses it on a hypertable), inside the ladder's transaction like V150. Does not move the "
+            + "MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            258,
+            SetsTheFloor: false,
+            "#8567: one CREATE INDEX IF NOT EXISTS over the populated collect.oversized_plan_backlog (created V121), a plain table: "
+            + "idx_oversized_plan_backlog_dropped (server_id, expired_at), partial to the rows dropped unfetched, the rows the sweep's purge "
+            + "deletes. The build reads the heap once and keeps the rows its predicate admits, which is none on a store whose sweep has not "
+            + "dropped a row yet. Measured on a 2,000,000-row, 401 MB table holding 100,000 dropped rows: 58 ms, 704 kB. Not CONCURRENTLY, "
+            + "inside the ladder's transaction. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            260,
+            SetsTheFloor: false,
+            "#8570: two CREATE INDEX IF NOT EXISTS over the populated collect.oversized_plan_backlog (created V121), a plain table: "
+            + "idx_oversized_plan_backlog_server_bytes (server_id, observed_bytes) and idx_oversized_plan_backlog_collector_bytes "
+            + "(collector_name, observed_bytes), the two narrow columns the median reads walk. Each build reads the heap once. Measured on a 3,000,000-row, 827 MB table: 7.2 s and 10.8 s on a busy laptop, 90 MB and 115 MB of index, one rung well inside one command timeout. "
+            + "Not CONCURRENTLY, inside the ladder's transaction. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            261,
+            SetsTheFloor: false,
+            "#7988: the Viewer-managed web access groups. The three UPDATE statements the scan sees are all on the control-plane singleton "
+            + "config.config_service (id = 1, created V17), V62's and V137's shape, and each sits inside a function body (manage_web_access_group, "
+            + "activate_web_access_group and the web_access_tag_deleted trigger) that runs only when an administrator changes a group later; the "
+            + "rung itself executes none of them, so it reads and rewrites no row at migration time. What it does run is catalog work: three empty "
+            + "tables, their owner-guard triggers and functions, one trigger on config.server_tags, and the hardening function's grant and revoke "
+            + "statements, all under the lock_timeout the rung opens with. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
     ];
 
     /// <summary>
@@ -661,13 +753,36 @@ public sealed class MigrationDataMovingRungCensusPins
     /// tracks (which are all index BUILDS or DML over pre-existing rows), so it gets no
     /// <see cref="s_declared"/> entry at all: there is no data-moving cost to declare, only a scan blind
     /// spot to name.
+    ///
+    /// <para>V246 (#7609) is the exception that does build an index, so it is named here by hand too. Its <c>DO $$ ... $$</c> reads the
+    /// corrected hourly rollup's materialization name from <c>timescaledb_information</c> (that name is different on every store, so the DDL
+    /// cannot be written literally) and runs one non-concurrent <c>CREATE INDEX IF NOT EXISTS</c> on <c>(query_hash, bucket DESC)</c> over that
+    /// one hourly rollup. That is rollup rows at hourly grain, not the raw collector hypertables V22 and V39 build over, and the build is bounded
+    /// by the same <c>lock_timeout</c> V152 sets. It is not in <see cref="s_declared"/> because that register is derived from the scan, which cannot
+    /// see a dynamic statement, so a declaration here would fail the census equality check.</para>
+    ///
+    /// <para>V255 (#8106) builds the cadence wait baseline supply inside a <c>DO $$ ... $$</c> because the statement differs by store: on a store
+    /// with the extension whose <c>wait_stats</c> is already a hypertable it creates the continuous aggregate <c>WITH NO DATA</c> (the ensure sweep
+    /// that follows on the same start materializes it), everywhere else the plain fallback view, and the hypertable read goes
+    /// through <c>EXECUTE</c> because <c>timescaledb_information</c> parses only where the extension exists. Both shapes are catalog-only: no
+    /// row is read or rewritten, so there is no data-moving cost to declare, only the scan blind spot to name.</para>
+    ///
+    /// <para>V261 and V262 (#7988) define the web access groups' and the advanced web access switch's hardening functions, whose bodies revoke
+    /// from and grant to roles named at call time (PUBLIC, the four product logins and any grantee the catalog shows on the rung's own objects)
+    /// through <c>EXECUTE format()</c>, and each rung calls its function once. Both are catalog-only: grants on the tables and functions the
+    /// rung itself created, no row read or rewritten. V261's own data-moving cost, the control-plane version bumps inside its function bodies,
+    /// is declared in <see cref="s_declared"/> because the scan sees those statements literally.</para>
     /// </summary>
-    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204];
+    /* V259 (#8549) is V255's shape for the daily wait totals: a DO block that reads the catalog for the hypertable and creates the empty
+       aggregate or the plain view through EXECUTE. Catalog-only, no row of wait_stats is read or written. */
+    /* V263 (#8549) is V259's shape for the oldest-run rollup under the Job History note: a DO block that reads the catalog for the hypertable and creates the empty aggregate or the plain view through EXECUTE. Catalog-only, no row of job_history is read or written. */
+    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204, 246, 255, 259, 261, 262, 263];
 
     /// <summary>
     /// The scan is textual, so dynamic SQL would hide a data-moving statement from it completely. The
-    /// ladder has two exempted rungs today (V152 and V204, named in <see cref="s_dynamicSqlExemptedRungs"/> because
-    /// each <c>DO $$ ... EXECUTE format(...)</c> drops a catalog index or constraint rather than moving data) and
+    /// ladder has eight exempted rungs today (V152, V204, V246, V255, V259, V261, V262 and V263, named in <see cref="s_dynamicSqlExemptedRungs"/> because
+    /// each <c>DO $$ ... EXECUTE</c> or <c>EXECUTE format()</c> drops a catalog index or constraint, creates an empty aggregate or a view, or grants
+    /// and revokes on the rung's own objects, rather than moving data) and
     /// otherwise none — the only other <c>EXECUTE</c> is <c>EXECUTE FUNCTION</c> in V17's trigger
     /// definitions. Pinned so the blind spot stays theoretical for every other rung: one that builds DDL
     /// with <c>format()</c> needs to be costed by hand, added either to this exemption list (if it moves

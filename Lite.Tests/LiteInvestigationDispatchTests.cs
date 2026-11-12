@@ -457,10 +457,14 @@ FROM investigation_requests AS r"));
         bool recurring = false) =>
         new(metric, "srv", "0.9", "0.5", serverId, new AlertContext(), 0.9, 0.5, "finding detail", false, route, hash, recurring);
 
-    /// <summary>A throwaway DuckDB with the real alert history store and the real investigation store, on a clock the test
-    /// can move forward.</summary>
+    /// <summary>A throwaway DuckDB with the real alert history store and the real investigation store, on one clock the test
+    /// can move forward. The alert sender stamps its rows from the same clock as the store, anchored five minutes into an
+    /// hour: the recurring-skip journal writes one row per alert hour, so a sender on the wall clock wrote two rows for one
+    /// page whenever its two sends straddled the hour (#8142).</summary>
     private sealed class ThrowawayDuckDb : IDisposable
     {
+        private static readonly DateTime T0 = new(2026, 10, 14, 12, 5, 0, DateTimeKind.Utc);
+
         private readonly string _dir;
         private readonly DuckDbInitializer _db;
 
@@ -470,12 +474,14 @@ FROM investigation_requests AS r"));
             Directory.CreateDirectory(_dir);
             _db = new DuckDbInitializer(Path.Combine(_dir, "lite.duckdb"));
             _db.InitializeAsync().GetAwaiter().GetResult();
-            Store = new DuckDbInvestigationStore(_db, () => DateTime.UtcNow + Shift, DuckDbInvestigationStoreTests.TestLockBudget);
+            Store = new DuckDbInvestigationStore(_db, () => Now, DuckDbInvestigationStoreTests.TestLockBudget);
         }
 
         public DuckDbInvestigationStore Store { get; }
 
         public TimeSpan Shift { get; set; }
+
+        public DateTime Now => T0 + Shift;
 
         public EmailAlertService EmailService(RouteSettings settings)
         {
@@ -484,7 +490,10 @@ FROM investigation_requests AS r"));
             var core = new InvestigationDispatchCore(Store.OpenOrJoinAsync, settings, NullLogger.Instance,
                 recurringSkipped: Store.RecordRecurringSkipAsync);
             return new EmailAlertService(settings, history, webhooks, NullLogger<EmailAlertService>.Instance, core,
-                (requestId, token) => Store.ReadRequestAsync(requestId, token));
+                (requestId, token) => Store.ReadRequestAsync(requestId, token))
+            {
+                ClockForTests = () => Now,
+            };
         }
 
         public string? Scalar(string sql)

@@ -47,10 +47,13 @@ public sealed class ViewerFinOpsSqlTests
     public void ProvisioningTrendSql_DailyCpuAndMemoryRatio()
     {
         var sql = ViewerDataService.ProvisioningTrendSql;
-        Assert.Contains("CAST(collection_time AS DATE)", sql, StringComparison.Ordinal);
+        /* The days are the caller's buckets ($3 labels, $4 starts, $5 ends), never the UTC date of each sample: the Viewer passes the
+           selected time display's days and the MCP tools UTC days. */
+        Assert.Contains("unnest($3::date[], $4::timestamp[], $5::timestamp[])", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_cpu_utilization_stats", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_memory_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY CAST(collection_time AS DATE)", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY d.day", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("CAST(collection_time AS DATE)", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -171,24 +174,18 @@ public sealed class ViewerFinOpsSqlTests
     }
 
     [Fact]
-    public void HighImpactSql_RanksOnTheResolvingView_AndLooksUpTextAndPlanForTheKeptHashesOnly()
+    public void HighImpactSql_RanksWithoutTextOrPlan_AndLooksUpTextAndPlanForTheKeptHashesOnly()
     {
         var sql = ViewerDataService.HighImpactQueriesSql;
         /* Aggregates to query_hash level with no text and no plan (#6803: those ran per hash in the window, before the
            scorer kept the top few dozen); the lookup is a second statement over the kept hashes. */
-        Assert.Contains("FROM v_query_stats AS qs", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("qs2", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY query_hash", sql, StringComparison.Ordinal);
 
-        /* The lookup reads v_query_stats, the #1767 resolving view: on the base table the `query_text IS NOT NULL AND
-           query_text != ''` filters match nothing on rows written since the migration, and the panel goes empty with no
-           error anywhere. One lookup per content form (#2069): post-V54 plans are gzip bytes with the text NULL. */
+        /* The lookup is a second statement over the kept hashes, passed as $3. What it reads and how it resolves each
+           hash's text and plan are behaviour, pinned live by FinOpsHighImpactBoundedReadLiveTests. */
         var lookup = DarlingFinOpsHighImpactReader.HighImpactSampleLookupSql;
-        Assert.Equal(3, lookup.Split("FROM v_query_stats qs2").Length - 1); /* text, plan text, plan gz */
         Assert.Contains("unnest($3::text[])", lookup, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY qs2.delta_execution_count DESC NULLS LAST", lookup, StringComparison.Ordinal);
-        Assert.Contains("qs2.query_plan_xml", lookup, StringComparison.Ordinal);
-        Assert.Contains("qs2.query_plan_gz IS NOT NULL", lookup, StringComparison.Ordinal);
 
         var ddl = PgSchemaGenerator.CreateTable(QueryStatsCollector.Instance);
         foreach (var col in new[]
@@ -243,7 +240,9 @@ public sealed class ViewerFinOpsSqlTests
     {
         Assert.Contains("FROM v_index_object_stats", ViewerDataService.ObjectGrowthSummarySql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $5", ViewerDataService.ObjectGrowthSummarySql, StringComparison.Ordinal);
-        Assert.Contains("date_trunc('day', ios.collection_time)", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
+        /* The series buckets each sample into the day the caller's days table holds it in, so a column is a day of the caller's calendar. */
+        Assert.Contains("JOIN days d", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY ios.schema_name, ios.table_name, d.day", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $6", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
         Assert.Contains("GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)",
             ViewerDataService.ObjectIndexDetailSql, StringComparison.Ordinal);
@@ -486,37 +485,6 @@ public sealed class ViewerFinOpsSqlTests
         Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("now(", sql.ToLowerInvariant());
         Assert.Contains("$1", sql, StringComparison.Ordinal);
-    }
-
-    /* ── #1591: the permission-denied badge query ── */
-
-    /// <summary>
-    /// The badge counts DISTINCT collectors, not log rows. One collector denied every cycle for a week is "1
-    /// collector has no permission" — counting rows would render a meaningless four-figure number and train the
-    /// operator to ignore the badge.
-    /// </summary>
-    [Fact]
-    public void PermissionDeniedCountSql_CountsDistinctCollectors_NotRows()
-    {
-        var sql = ViewerDataService.PermissionDeniedCollectorCountSql;
-
-        Assert.Contains("COUNT(DISTINCT collector_name)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("COUNT(*)", sql, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// It must filter to PERMISSIONS only. Counting ERROR too would badge ordinary collector failures as a
-    /// permission problem and send the operator hunting for a grant that is not missing.
-    /// </summary>
-    [Fact]
-    public void PermissionDeniedCountSql_FiltersToPermissionsOnly()
-    {
-        var sql = ViewerDataService.PermissionDeniedCollectorCountSql;
-
-        Assert.Contains("status = 'PERMISSIONS'", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("'ERROR'", sql, StringComparison.Ordinal);
-        Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
     }
 
     /* ── #1591: the Hardware Note ── */

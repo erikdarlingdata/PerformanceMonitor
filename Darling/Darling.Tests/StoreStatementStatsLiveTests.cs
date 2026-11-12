@@ -309,7 +309,7 @@ public sealed class StoreStatementStatsLiveTests
             "Set DARLING_TEST_PG to a superuser connection string to run the #3899 setup proof in a scratch database.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var c = await OpenAsync(scratch.ConnectionString, ct);
 
         var preloaded = await IsPreloadedAsync(c, ct);
@@ -361,7 +361,7 @@ public sealed class StoreStatementStatsLiveTests
             "Set DARLING_TEST_PG to a superuser connection string to run the #3899 version proof in a scratch database.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var c = await OpenAsync(scratch.ConnectionString, ct);
         var preloaded = await IsPreloadedAsync(c, ct);
         await ExecAsync(c, "CREATE SCHEMA IF NOT EXISTS config", ct);
@@ -407,7 +407,7 @@ public sealed class StoreStatementStatsLiveTests
             "Set DARLING_TEST_PG to a connection string to judge the #3915 patterns in PostgreSQL's regex engine.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var c = await OpenAsync(scratch.ConnectionString, ct);
 
         var cases = new (string Text, bool Readable, bool Sensitive)[]
@@ -416,11 +416,11 @@ public sealed class StoreStatementStatsLiveTests
             ("  select $1 AS x", true, false),
             ("/* leading */ SELECT $1", false, false),
             ("-- line comment\nSELECT $1", false, false),
-            ("-- nightly: update settings\nALTER SYSTEM SET ssl_passphrase_command = 'echo s3cr3t'", false, false),
-            ("--with\nSET app.api_key = 'sk_live_123'", false, false),
+            ("-- nightly: update settings\nALTER SYSTEM SET ssl_passphrase_command = 'echo s3cr3t'", false, true),
+            ("--with\nSET app.api_key = 'sk_live_123'", false, true),
             ("-- note\tupdate x\nALTER SYSTEM SET a = 'x'", false, false),
             ("-- table maintenance\nCOPY t FROM PROGRAM 'curl -H x-api-key:abc123'", false, false),
-            ("/* a /* b */ select */ SET app.api_key = 'x'", false, false),
+            ("/* a /* b */ select */ SET app.api_key = 'x'", false, true),
             ("ALTER /* a /* b */ c */ ROLE app PASSWORD 'x'", false, true),
             ("CREATE TABLE t (owner_role text, user_id int)", false, false),
             ("(SELECT $1) UNION (SELECT $2)", true, false),

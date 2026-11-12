@@ -244,13 +244,13 @@ public sealed class PgTargetBetweenWavesTests
         /* Without the setting (every pre-16 target, and the 16+ default): the sentence is byte-identical to lane 3's. */
         var without = Saturation(peak: 90, maxConnections: 100, superuserReserved: 3, reservedConnections: 0);
         var block = FactAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(without))!;
-        Assert.Contains("90 sessions were connected against 97 usable connections — max_connections 100 minus superuser_reserved_connections 3 — that is 90 / (100 − 3) = 93%.", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("90 sessions were connected against 97 usable connections: max_connections 100 minus superuser_reserved_connections 3, that is 90 / (100 − 3) = 93%.", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("reserved_connections 0", block.Investigation, StringComparison.Ordinal);
 
         /* With it: the arithmetic the advice shows is the arithmetic the ceiling did. */
         var with = Saturation(peak: 90, maxConnections: 100, superuserReserved: 3, reservedConnections: 2);
         block = FactAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(with))!;
-        Assert.Contains("90 sessions were connected against 95 usable connections — max_connections 100 minus superuser_reserved_connections 3 minus reserved_connections 2 — that is 90 / (100 − 3 − 2) = 95%.", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("90 sessions were connected against 95 usable connections: max_connections 100 minus superuser_reserved_connections 3 minus reserved_connections 2, that is 90 / (100 − 3 − 2) = 95%.", block.Investigation, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── item 8: the bad actor's first next-read ───────────────────────── */

@@ -150,7 +150,7 @@ export function ownerLine(view) {
 }
 
 /**
- * The state of the editor's "Personal (listed only for you)" checkbox: { disabled, reason }. `view` is the stored view being
+ * The state of the editor's "Personal (listed only for you)" checkbox: { disabled, reason, signOut }. `view` is the stored view being
  * edited, or null for a new one. It is disabled, with the reason as short text, when the session can't own a view (`can_own` is
  * false: the shared token, no sign-in, or a sign-in made before owner keys existed), and for a shared view that is not `mine` (the
  * store lets only the person who made it, signed in, make it personal; a view the shared token or MCP made, or one from before
@@ -158,7 +158,8 @@ export function ownerLine(view) {
  */
 export function personalChoice(view, session) {
   if (!canOwn(session)) {
-    return { disabled: true, reason: "Personal views need a sign-in that can own them, and this session has none. If you are signed in, open /auth/logout, then sign in again." };
+    /* #7684 item 13: the closing step is a link to the sign-out path (as on the People strip), so `signOut` tells the editor to draw it after `reason`. */
+    return { disabled: true, signOut: true, reason: "Personal views need a sign-in that can own them, and this session has none. If you are signed in, " };
   }
   if (view && view.personal !== true && view.id != null && view.mine !== true) {
     return {

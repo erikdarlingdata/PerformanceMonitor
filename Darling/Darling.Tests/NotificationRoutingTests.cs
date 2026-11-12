@@ -516,12 +516,16 @@ public sealed class NotificationRoutingTests
             AgAlertPolicy.SyncFellBehindMetric, AgAlertPolicy.DatabaseSuspendedMetric,
             DarlingSelfAlertEvaluator.CollectorCostDigestMetric, DarlingSelfAlertEvaluator.FleetSweepRollupMetric,
             DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric,
+            /* #7041: the scheduled Daily Health Report, fired through the constant. */
+            DarlingSelfAlertEvaluator.DailyHealthReportMetric,
             DarlingSelfAlertEvaluator.DiskPressureMetric, DarlingSelfAlertEvaluator.CustomRuleHealthMetric,
             DarlingSelfAlertEvaluator.StaleMuteMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric,
             /* #5288: the MCP endpoint's twin of the web certificate alert, fired through the descriptor's
                ExpiryMetric (tls.ExpiryMetric), which the FireAsync literal scan below cannot see. */
             DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric,
             DarlingSelfAlertEvaluator.StoreSettingsMetric,
+            /* #7368: fired through the constant, so the FireAsync literal scan below cannot see it. */
+            DarlingSelfAlertEvaluator.AutovacuumBehindMetric,
             DarlingSelfAlertEvaluator.CompressionJobMetric, DarlingSelfAlertEvaluator.JobCadenceMetric,
             DarlingSelfAlertEvaluator.RetentionHoldMetric, DarlingSelfAlertEvaluator.StoreUpgradeMetric,
             /* #5450: fired through the constant, so the FireAsync literal scan below cannot see it. */
@@ -548,6 +552,8 @@ public sealed class NotificationRoutingTests
                cannot see a variable, so the census's forcing function is this line. */
             DarlingSelfAlertEvaluator.RefreshJobStuckMetric, DarlingSelfAlertEvaluator.RetentionJobStuckMetric,
             DarlingSelfAlertEvaluator.PolicyJobFailingMetric,
+            /* #8302: a daily rollup behind its source, fired through the constant on its own path. */
+            DarlingSelfAlertEvaluator.DailyRollupStaleMetric,
             /* #3783: the store's TOAST slack and checkpointer pressure, both fired through the constant. */
             DarlingSelfAlertEvaluator.ToastSlackMetric, DarlingSelfAlertEvaluator.CheckpointerPressureMetric,
             /* #5654: the external-alert delivery health check's alert. */
@@ -566,6 +572,10 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.CheckDbOverdueMetric,
             /* #6875: the Identity Capacity alert fires through DarlingSelfAlertEvaluator.IdentityCapacityMetric, a constant the FireAsync literal scan cannot see. */
             DarlingSelfAlertEvaluator.IdentityCapacityMetric,
+            /* #7084: the engine's High CPU, Blocking and Deadlocks alerts fire through the OpenEngineAlerts constants,
+               which the AlertOutcome literal scan below cannot see. */
+            OpenEngineAlerts.HighCpuMetric, OpenEngineAlerts.BlockingDetectedMetric,
+            OpenEngineAlerts.BlockingWaitTimeMetric, OpenEngineAlerts.DeadlocksDetectedMetric,
         };
 
         /* The literals: the third argument of every `new AlertOutcome(` in the shared engine and the worker
@@ -587,8 +597,8 @@ public sealed class NotificationRoutingTests
             names.Add(m.Groups[1].Value);
         }
 
-        /* Two literals the scans above cannot see: "Blocking Wait Time" and "Blocking Detected" are fired via
-           a `metricName` local in the worker, which the const scan catches through the engine constants;
+        /* Two literals the scans above cannot see: "Blocking Wait Time" and "Blocking Detected" come from the
+           OpenEngineAlerts constants listed above;
            "Capture Down" / "Agent Not Running" / "Collection Stopped" / "Server Unreachable" / "Server
            Restored" / "Collector Cost Regression" are FireAsync literals the regex above reads. Assert the
            scan really found the self-alert literals so a regex drift fails here, not in the census. */
@@ -652,5 +662,15 @@ public sealed class NotificationRoutingTests
         public int AnalysisNotifyCooldownMinutes => 360;
         public int AnalysisPageCap => 5;
         public string TriageBaseUrl => "";
+    }
+    /// <summary>#8302: the stale daily rollup's own name routes with the store's other self-monitor names, pairs with its
+    /// recovered name, and replays at the Warning it fires at rather than falling through to the performance family.</summary>
+    [Fact]
+    public void DailyRollupStale_IsASelfMonitorName_WithItsRecoveredPair_AndReplaysAsWarning()
+    {
+        Assert.Equal(AlertFamily.SelfMonitor, AlertFamily.Of(DarlingSelfAlertEvaluator.DailyRollupStaleMetric));
+        Assert.Equal(AlertSeverityLevel.Warning, AlertSeverity.RouteLevelOf(DarlingSelfAlertEvaluator.DailyRollupStaleMetric, null));
+        Assert.Equal("WARNING", AlertSeverity.ForMetric(DarlingSelfAlertEvaluator.DailyRollupStaleMetric).BadgeText);
+        Assert.True(AlertMetricClassifier.IsResolution(DarlingSelfAlertEvaluator.DailyRollupRecoveredMetric));
     }
 }

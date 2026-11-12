@@ -67,8 +67,9 @@
                           PreviewMouseLeftButtonDown="GraphScrollViewer_PreviewMouseLeftButtonDown"
                           PreviewMouseMove="GraphScrollViewer_PreviewMouseMove"
                           PreviewMouseLeftButtonUp="GraphScrollViewer_PreviewMouseLeftButtonUp">
+                <!-- #8534: a graph smaller than the viewer sits in the middle of it, and LoadModel opens every graph zoomed to fit. One zoomed in past the viewer fills the scroll extent, so it starts at the top-left and scrolls. -->
                 <Canvas x:Name="GraphCanvas" ClipToBounds="False"
-                        HorizontalAlignment="Left" VerticalAlignment="Top">
+                        HorizontalAlignment="Center" VerticalAlignment="Center">
                     <Canvas.LayoutTransform>
                         <ScaleTransform x:Name="ZoomTransform" ScaleX="1" ScaleY="1"/>
                     </Canvas.LayoutTransform>

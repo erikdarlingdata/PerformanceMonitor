@@ -195,7 +195,7 @@ public partial class AddServerDialog : Window
         {
             SaveButton.IsEnabled = false;
             TestConnectionButton.IsEnabled = false;
-            StatusText.Text = "Not connected to a Darling store — server changes are unavailable.";
+            StatusText.Text = "Not connected to a Darling store: server changes are unavailable.";
         }
         else if (_dataService.IsReadOnly)
         {
@@ -203,7 +203,7 @@ public partial class AddServerDialog : Window
             /* Test Connection enqueues a command (a config write), so a read-only seat can't run it either. */
             TestConnectionButton.IsEnabled = false;
             StatusText.Text = "This viewer is connected read-only, so servers can't be added or changed. " +
-                "Set postgres.connectAs to \"admin\" in darling.json and restart.";
+                ViewerReadOnlyException.HowToConnectAsAdmin;
         }
     }
 
@@ -237,7 +237,6 @@ public partial class AddServerDialog : Window
         if (useProfile)
         {
             if (SqlCredentialsPanel is not null) SqlCredentialsPanel.Visibility = Visibility.Collapsed;
-            if (EntraMfaPanel is not null) EntraMfaPanel.Visibility = Visibility.Collapsed;
             if (ServicePrincipalPanel is not null) ServicePrincipalPanel.Visibility = Visibility.Collapsed;
             if (ManagedIdentityPanel is not null) ManagedIdentityPanel.Visibility = Visibility.Collapsed;
         }
@@ -249,14 +248,12 @@ public partial class AddServerDialog : Window
 
     private void AuthMode_Changed(object sender, RoutedEventArgs e)
     {
-        if (SqlCredentialsPanel is null || EntraMfaPanel is null ||
-            ServicePrincipalPanel is null || ManagedIdentityPanel is null)
+        if (SqlCredentialsPanel is null || ServicePrincipalPanel is null || ManagedIdentityPanel is null)
         {
             return;
         }
 
         SqlCredentialsPanel.Visibility = SqlAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
-        EntraMfaPanel.Visibility = EntraMfaAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         ServicePrincipalPanel.Visibility = ServicePrincipalAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         ManagedIdentityPanel.Visibility = ManagedIdentityAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
 
@@ -342,7 +339,7 @@ public partial class AddServerDialog : Window
     /// <summary>The engine radios are disabled on edit; the tooltip says why, so the lock reads as a rule
     /// rather than a bug (#3499).</summary>
     private const string EngineLockedOnEditTooltip =
-        "The engine is part of what this server IS — its collected history is keyed to it — so an edit can't " +
+        "The engine is part of what this server IS (its collected history is keyed to it), so an edit can't " +
         "change it. To move a host between engines, add it as a new server and remove this one.";
 
     /// <summary>
@@ -354,7 +351,7 @@ public partial class AddServerDialog : Window
     /// supported and how to proceed, not just what is not.
     /// </summary>
     internal const string PostgresRequiresSqlAuthMessage =
-        "A PostgreSQL target requires username/password (SQL) authentication — integrated/Kerberos and the " +
+        "A PostgreSQL target requires username/password (SQL) authentication: integrated/Kerberos and the " +
         "Microsoft Entra modes are not supported for PostgreSQL targets, matching what the service accepts. " +
         "Enter a username and password, or pick a credential profile that carries one.";
 
@@ -374,7 +371,7 @@ public partial class AddServerDialog : Window
 
         if (!int.TryParse(text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var port))
         {
-            return (0, "Port must be a number — leave it blank for the default (5432).");
+            return (0, "Port must be a number: leave it blank for the default (5432).");
         }
 
         if (port is not 0 && port is < 1 or > 65535)
@@ -383,6 +380,33 @@ public partial class AddServerDialog : Window
         }
 
         return (port, null);
+    }
+
+    /// <summary>
+    /// Parses the monthly cost box (#7197): blank is 0, the unset value every FinOps read treats as "no cost".
+    /// Otherwise a plain decimal number, zero or more, in invariant form (the box is filled that way on an edit).
+    /// No thousands separator is accepted, so "120,50" is refused instead of stored as 12050, and "abc", "-5"
+    /// and "$120" give a message instead of silently erasing a stored cost to 0 — the same refusal edit_server
+    /// makes. Pure — pinned by Darling.Tests.
+    /// </summary>
+    internal static (decimal Cost, string? Error) ParseMonthlyCostText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return (0m, null);
+        }
+
+        if (!decimal.TryParse(
+                text,
+                NumberStyles.AllowDecimalPoint | NumberStyles.AllowLeadingSign | NumberStyles.AllowLeadingWhite | NumberStyles.AllowTrailingWhite,
+                CultureInfo.InvariantCulture,
+                out var cost)
+            || cost < 0)
+        {
+            return (0m, "Monthly cost must be a number, zero or more, written like 120 or 120.50. Leave it blank for no cost.");
+        }
+
+        return (cost, null);
     }
 
     private string GetSelectedEncryptMode() => EncryptModeComboBox.SelectedIndex switch
@@ -736,10 +760,11 @@ public partial class AddServerDialog : Window
         var database = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim();
         var readOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true;
 
-        decimal monthlyCost = 0m;
-        if (decimal.TryParse(MonthlyCostBox.Text, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsedCost) && parsedCost >= 0)
+        var (monthlyCost, costError) = ParseMonthlyCostText(MonthlyCostBox.Text);
+        if (costError is not null)
         {
-            monthlyCost = parsedCost;
+            error = costError;
+            return null;
         }
 
         return new MonitoredServerRow
@@ -1061,7 +1086,7 @@ public partial class AddServerDialog : Window
     {
         if (result is null)
         {
-            return "The connection test is still running on the service — try again in a moment.";
+            return "The connection test is still running on the service. Try again in a moment.";
         }
 
         if (result.Status == ViewerDataService.StatusSucceeded)
@@ -1110,7 +1135,7 @@ public partial class AddServerDialog : Window
             }
 
             /* #6254: the Query Store replica's own result, after the primary's. */
-            return string.Join(" — ", parts) + "." + (ViewerDataService.ProbeReplicaNote(root) is { } replicaNote ? " " + replicaNote : "") + (ViewerDataService.ProbeMissingGrantsNote(root) is { } grantsNote ? " " + grantsNote : "");
+            return string.Join(", ", parts) + "." + (ViewerDataService.ProbeReplicaNote(root) is { } replicaNote ? " " + replicaNote : "") + (ViewerDataService.ProbeMissingGrantsNote(root) is { } grantsNote ? " " + grantsNote : "");
         }
         catch (JsonException)
         {

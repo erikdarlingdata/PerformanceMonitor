@@ -50,7 +50,7 @@ public sealed class DarlingMcpIncidentActionTools
     internal const int MaxPurgeRetentionDays = 3650;
 
     [McpServerTool(Name = "test_connection"), Description(
-        "Tests the connection to ONE registered server now: the service connects with the server's stored settings and password and reports the engine, version and what it can see. Read only on the monitored server; it changes nothing. It is queued as a command and runs on the service's next command poll (a few seconds); the answer gives the command_id, and get_command_result shows connected or the connection error. A second test of the same server within 15 seconds is refused. Takes only a server name: it cannot test an address or a password you give it. Needs mcp.allowWrites; never offered to an investigation agent.")]
+        "Tests the connection to ONE registered server now: the service connects with the server's stored settings and password and reports the engine, version and what it can see. Read only on the monitored server; it changes nothing. It is queued as a command and runs on the service's next command poll (a few seconds); the answer gives the command_id, and get_command_result shows connected or the connection error. A second test of the same server within 15 seconds is refused. Takes only a server name: it cannot test an address or a password you give it. Needs mcp.allowWrites or a named operator token; never offered to an investigation agent.")]
     public static Task<string> TestConnection(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string server_name,
@@ -59,7 +59,7 @@ public sealed class DarlingMcpIncidentActionTools
             "A connection test is queued. The service runs it on its next command poll.", cancellationToken);
 
     [McpServerTool(Name = "analyze_now"), Description(
-        "Runs one analysis pass for ONE registered server now, instead of waiting for the analysis schedule. The service derives findings from data already collected and stores them; it does not query the monitored server. It is queued as a command and runs on the service's next command poll; the answer gives the command_id, and get_command_result shows the outcome. A second request for the same server within 15 seconds is refused. Needs mcp.allowWrites; never offered to an investigation agent.")]
+        "Runs one analysis pass for ONE registered server now, instead of waiting for the analysis schedule. The service derives findings from data already collected and stores them; it does not query the monitored server. It is queued as a command and runs on the service's next command poll; the answer gives the command_id, and get_command_result shows the outcome. A second request for the same server within 15 seconds is refused. Needs mcp.allowWrites or a named operator token; never offered to an investigation agent.")]
     public static Task<string> AnalyzeNow(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string server_name,
@@ -68,7 +68,7 @@ public sealed class DarlingMcpIncidentActionTools
             "An analysis pass is queued. The service runs it on its next command poll.", cancellationToken);
 
     [McpServerTool(Name = "purge_now"), Description(
-        "Starts the retention purge across the WHOLE store now, for example when the store disk fills. With no retention_days it purges to each collector's configured retention; with retention_days it purges every collector to that many days. PURGED DATA CANNOT COME BACK: there is no undo, and a short retention_days deletes every row older than it. Two steps: the first call queues nothing and answers what would be deleted (each collector's retention and the oldest time kept) with a confirm value that works once and expires after 5 minutes; only a second call that passes it back queues the purge. Fleet-wide, not per server. It is queued as a command and the service starts it on its next command poll; the answer gives the command_id, and get_command_result shows that it started or that an earlier purge still holds the slot. Needs mcp.allowWrites; never offered to an investigation agent.")]
+        "Starts the retention purge across the WHOLE store now, for example when the store disk fills. With no retention_days it purges to each collector's configured retention; with retention_days it purges every collector to that many days. PURGED DATA CANNOT COME BACK: there is no undo, and a short retention_days deletes every row older than it. Two steps: the first call queues nothing and answers what would be deleted (each collector's retention and the oldest time kept) with a confirm value that works once and expires after 5 minutes; only a second call that passes it back queues the purge. Fleet-wide, not per server. It is queued as a command and the service starts it on its next command poll; the answer gives the command_id, and get_command_result shows that it started or that an earlier purge still holds the slot. Needs mcp.allowWrites or a named operator token; never offered to an investigation agent.")]
     public static Task<string> PurgeNow(
         NpgsqlDataSource postgres,
         [Description("Leave empty on the first call: it shows what the purge would delete and answers a confirm value. To queue the purge, call again with the same retention_days and that confirm value; it works once and expires after 5 minutes.")] string? confirm = null,
@@ -288,7 +288,7 @@ public sealed class DarlingMcpIncidentActionTools
             }
 
             var changes = new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds);
-            var read = await changes.ReadAsync(DarlingWebEndpoints.AgentChangesLimit, cancellationToken);
+            var read = await changes.ReadAsync(DarlingWebEndpoints.AgentChangesLimit, cancellationToken: cancellationToken);
             var body = DarlingWebEndpoints.AgentChangesBody(read, canDecide: false, DateTime.UtcNow);
             var all = body["changes"]!.AsArray().Select(c => c!.AsObject()).ToList();
             var shown = all.Where(c => !undoable_only || c["can_undo"]?.GetValue<bool>() == true).Take(limit).ToList();
@@ -298,7 +298,7 @@ public sealed class DarlingMcpIncidentActionTools
                 ["agent_changes_enabled"] = read.Enabled,
                 ["count"] = shown.Count,
                 ["changes"] = new JsonArray(shown.Select(c => (JsonNode?)c.DeepClone()).ToArray()),
-                ["note"] = "A plan force, unforce, plan guide create or plan guide drop with can_undo true is undone with undo_plan_change(called_id), which shows the statement first and writes only after a confirm. Any other change with can_undo true (a mute, custom rule, threshold override or signature merge) is undone with undo_agent_change(called_id) when mcp.allowWrites is on.",
+                ["note"] = "A plan force, unforce, plan guide create or plan guide drop with can_undo true is undone with undo_plan_change(called_id), which shows the statement first and writes only after a confirm. Any other change with can_undo true (a mute, custom rule, threshold override or signature merge) is undone with undo_agent_change(called_id) when mcp.allowWrites is on or the token is a named operator.",
             };
             if (shown.Count == 0)
             {

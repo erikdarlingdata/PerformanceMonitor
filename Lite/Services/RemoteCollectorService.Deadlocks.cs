@@ -58,6 +58,22 @@ public partial class RemoteCollectorService
             (connection, token) => EnsureDeadlockXeSessionOnPremAsync(connection, server, token), cancellationToken);
     }
 
+    /// <summary>The deadlock session's create and start (#8146): the ring_buffer clause carries <c>max_events_limit</c> through <see cref="RingBufferTarget.Sql"/>.</summary>
+    internal static string BuildDeadlockCreateSql(int ringBufferMaxEvents) => $@"
+CREATE EVENT SESSION [{DeadlockXeSessionName}]
+ON SERVER
+ADD EVENT sqlserver.xml_deadlock_report
+{RingBufferTarget.Sql(ringBufferMaxEvents)}
+WITH
+(
+    MAX_DISPATCH_LATENCY = 5 SECONDS,
+    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+    MEMORY_PARTITION_MODE = NONE,
+    STARTUP_STATE = ON
+);
+
+ALTER EVENT SESSION [{DeadlockXeSessionName}] ON SERVER STATE = START;";
+
     /// <summary>
     /// On-prem / Azure MI / AWS RDS: creates or ensures server-scoped XE session with ring_buffer target.
     /// </summary>
@@ -101,23 +117,7 @@ WHERE ses.name = @session_name;", connection))
         /* Create and start server-scoped session with ring_buffer
            Using MEMORY_PARTITION_MODE = NONE for AWS RDS compatibility */
         /* No catch here: a failure propagates to the ensure's catch, which logs it once at Warn or Error and then at Debug (#4964). */
-        using var createCmd = new SqlCommand($@"
-CREATE EVENT SESSION [{DeadlockXeSessionName}]
-ON SERVER
-ADD EVENT sqlserver.xml_deadlock_report
-ADD TARGET package0.ring_buffer
-(
-    SET max_memory = 4096
-)
-WITH
-(
-    MAX_DISPATCH_LATENCY = 5 SECONDS,
-    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
-    MEMORY_PARTITION_MODE = NONE,
-    STARTUP_STATE = ON
-);
-
-ALTER EVENT SESSION [{DeadlockXeSessionName}] ON SERVER STATE = START;", connection);
+        using var createCmd = new SqlCommand(BuildDeadlockCreateSql(App.XeRingBufferMaxEvents), connection);
         createCmd.CommandTimeout = CommandTimeoutSeconds;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         AppLogger.Info("XeSession", $"[{server.DisplayName}] Created and started deadlock XE session");
@@ -132,8 +132,38 @@ ALTER EVENT SESSION [{DeadlockXeSessionName}] ON SERVER STATE = START;", connect
     /// <see cref="ReadXeSessionAsync"/>), so the run records PERMISSIONS or ERROR with the XE session
     /// flagged unavailable, and never a SUCCESS over a source it could not read.
     /// </summary>
-    private Task<int> CollectDeadlocksAsync(ServerConnection server, CancellationToken cancellationToken)
-        => ReadXeSessionAsync(
-            "deadlock",
-            () => RunCollectorDefinitionAsync(DeadlocksCollector.Instance, server, cancellationToken));
+    private async Task<int> CollectDeadlocksAsync(ServerConnection server, Exception? ensureFailure, CancellationToken cancellationToken)
+    {
+        if (ensureFailure is null)
+        {
+            var rows = await ReadXeSessionAsync(
+                "deadlock",
+                () => RunCollectorDefinitionAsync(DeadlocksCollector.Instance, server, cancellationToken));
+
+            /* #7639: some databases were refused their session while others were ensured. The run still succeeded, and its note says
+               which databases are not in it and why, so a short or empty grid is not read as a quiet server. */
+            ApplyXeEnsurePartialNote(server, XeSessionEnsureWarnedKey(server, DeadlockXeSessionName));
+            return rows;
+        }
+
+        /* #7639: the Azure SQL Database ensure failed in every database, so no database-scoped session was made. The read goes
+           ahead anyway: the master item's durable telemetry arm needs no session (#2641), and a database that already holds the
+           shared session is still read. The Azure loop skips each database it cannot read on its own, and whatever the read
+           stored stays stored. The run then records the ensure's failure, the same PERMISSIONS or ERROR with the same message
+           as before, so the grant that fixes it reaches the collection log. A read failure of its own is dropped: the ensure's
+           is the cause, and the one a person can act on. */
+        try
+        {
+            await ReadXeSessionAsync(
+                "deadlock",
+                () => RunCollectorDefinitionAsync(DeadlocksCollector.Instance, server, cancellationToken));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            AppLogger.Debug("XeSession", $"[{server.DisplayName}] Deadlock read after a failed ensure: {ex.Message}");
+        }
+
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ensureFailure).Throw();
+        return 0;
+    }
 }

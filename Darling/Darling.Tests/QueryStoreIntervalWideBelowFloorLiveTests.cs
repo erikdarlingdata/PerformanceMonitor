@@ -120,7 +120,12 @@ WHERE @hole_from IS NULL OR t < @hole_from OR t >= @hole_to",
             IsForcedPlan = false,
             ForceFailureCount = 0,
             RuntimeStatsIntervalId = 600,
-            IntervalStartTimeUtc = first,
+            /* #7814: the MCP reads place an interval by its start, so an interval that started at S + 1 h 25 m is outside every window
+               from S + 26 h on, however late it was collected. The row stands for one whose start falls between the one-day margin's read
+               start (S + 26 h) and the purge-edge margin's (S + 28 h) while its first execution is before the purge. That shape is
+               synthetic (Query Store never emits a first execution before the interval start), and it is the only way to keep the
+               purge-edge margin under test now that the window is placed by the start. */
+            IntervalStartTimeUtc = S.AddHours(26).AddMinutes(10),
         };
         await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, new List<QueryStoreCollector.Row> { row }, server, first.AddDays(1).AddMinutes(55), context, ct);
     }
@@ -259,7 +264,7 @@ AND   hypertable_name = 'query_store_stats';";
         await using var rig = await StartAsync(timescale: true, ct);
 
         var edge = (DateTime)(await ScalarAsync(rig.Connection,
-            "SELECT MIN(collection_time) FROM collect.query_store_interval_wide WHERE server_id = @server_id AND query_id = 3", ct))!;
+            "SELECT MIN(interval_start_time_utc) FROM collect.query_store_interval_wide WHERE server_id = @server_id AND query_id = 3", ct))!;
         await ForceFilledSinceAsync(rig.Connection, edge, ct);
         await SnapshotAsync(rig, "snap_raw", DarlingDataReader.QueryStoreTopSql, edge, ct);
         await DropRawChunksOlderThanAsync(rig, S.AddDays(2), ct);
@@ -272,7 +277,7 @@ AND   hypertable_name = 'query_store_stats';";
         await SnapshotAsync(rig, "snap_table", DarlingDataReader.QueryStoreTopTableSql, plan.ReadStart, ct);
         var d = await DiffAsync(rig.Connection, "snap_raw", "snap_table", ct);
         Assert.True(await ScalarAsync(rig.Connection, "SELECT COUNT(*) FROM snap_table WHERE query_id = 3", ct) is long n && n > 0,
-            "the row collected exactly at the read start must be returned");
+            "the row whose interval starts exactly at the read start must be returned");
         Assert.Equal(0, d.AOnly);
         Assert.Equal(0, d.BOnly);
     }

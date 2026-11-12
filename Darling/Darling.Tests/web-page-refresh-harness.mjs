@@ -44,12 +44,14 @@ const brand = new FakeNode("div");
 byId["auto-refresh-toggle"] = new FakeNode("button");
 brand.appendChild(byId["auto-refresh-toggle"]);
 
+/* Every boot's start() adds its own visibilitychange listener; a scenario fires only the newest, the live module copy's. */
+const docListeners = {};
 globalThis.document = {
   createElement: (t) => new FakeNode(t), createElementNS: (_n, t) => new FakeNode(t),
   createTextNode: (t) => { const n = new FakeNode("#text"); n.textContent = String(t); return n; },
   createDocumentFragment: () => new FakeNode("#frag"),
   getElementById: (id) => byId[id] || null, querySelector: () => null, querySelectorAll: () => [],
-  addEventListener() {}, removeEventListener() {}, body: new FakeNode("body"), documentElement: new FakeNode("html"),
+  addEventListener(t, f) { (docListeners[t] ||= []).push(f); }, removeEventListener() {}, body: new FakeNode("body"), documentElement: new FakeNode("html"),
   cookie: "", hidden: false,
 };
 globalThis.Node = FakeNode;
@@ -77,10 +79,16 @@ Date.now = () => now;
 let tick = null;
 globalThis.setInterval = (fn) => { tick = fn; return 1; };
 globalThis.clearInterval = () => {};
-globalThis.setTimeout = () => 0;
-globalThis.clearTimeout = () => {};
+/* The page's timers are tracked against the same clock and fired when it passes their due time (releaseDue), never by wall-clock
+   time, so a scenario's counts do not depend on how long its flushes take. */
+const timerDelay = (ms) => ms;
+let timers = new Map(); let timerSeq = 0;
+globalThis.setTimeout = (fn, ms = 0, ...args) => { const handle = ++timerSeq; timers.set(handle, { at: now + timerDelay(ms), run: () => fn(...args) }); return handle; };
+globalThis.clearTimeout = (handle) => { timers.delete(handle); };
+const fireDueTimers = () => { for (const [handle, t] of [...timers]) if (t.at <= now) { timers.delete(handle); t.run(); } };
 
 let fetches = 0; let renders = 0; const fetchLog = [];
+let fleetAnswers = false; // #8633: when set, /api/fleet answers with one card (every other read keeps failing)
 let fetchDelayMs = 0; // simulated time a read takes: each fetch holds open until the clock passes this
 let pending = [];
 globalThis.fetch = (url) => {
@@ -89,12 +97,21 @@ globalThis.fetch = (url) => {
   if (String(url).split("?")[0] === "/api/session") {
     return Promise.resolve({ ok: true, status: 200, json: async () => ({ can_edit: false }), text: async () => JSON.stringify({ can_edit: false }) });
   }
+  if (fleetAnswers && String(url).split("?")[0] === "/api/fleet") {
+    fetches++; fetchLog.push(Math.round((now - 1000000) / 1000) + ' ' + url);
+    const body = JSON.stringify({ total_servers: 1, critical_count: 0, warning_count: 0, offline_count: 0, offline_servers: 0, tags: [], worst_servers: [],
+      additional_problem_count: 0, generated_at: "2026-11-11T12:00:00Z", cards: [{ server_id: 1, display_name: "alpha", server_name: "alpha", band: "Healthy",
+      band_label: "Healthy", is_online: true, status: "ok", last_collection: null, tags: [], is_silenced: false, metric_count: 0, measured_metric_count: 0 }] });
+    return new Promise((resolve) => {
+      pending.push({ at: now + fetchDelayMs, done: () => resolve({ ok: true, status: 200, json: async () => JSON.parse(body), text: async () => body }) });
+    });
+  }
   fetches++; if (String(url).includes('get_server_summary')) renders++; fetchLog.push(Math.round((now - 1000000) / 1000) + ' ' + url);
   return new Promise((resolve) => {
     pending.push({ at: now + fetchDelayMs, done: () => resolve({ ok: false, status: 500, json: async () => ({}), text: async () => "" }) });
   });
 };
-const releaseDue = () => { const due = pending.filter((p) => p.at <= now); pending = pending.filter((p) => p.at > now); due.forEach((p) => p.done()); };
+const releaseDue = () => { fireDueTimers(); const due = pending.filter((p) => p.at <= now); pending = pending.filter((p) => p.at > now); due.forEach((p) => p.done()); };
 const drain = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
 
 // Advances the clock one second at a time, running the scheduler tick, and returns the fetches that started.
@@ -108,7 +125,7 @@ let n = 0; let bootDelay = 0;
 async function boot(stored, hash = "#/server/alpha") {
   storage = new Map();
   if (stored) storage.set("darling.pageRefresh", stored);
-  pending.forEach((p) => p.done()); pending = []; fetchDelayMs = bootDelay; tick = null;
+  pending.forEach((p) => p.done()); pending = []; timers = new Map(); fetchDelayMs = bootDelay; tick = null;
   await drain();
   location.hash = hash;
   await import(pathToFileURL(path.join(jsDir, "app.js")).href + "?run=" + (++n));
@@ -185,6 +202,7 @@ out.next5m = await secondsToNextRead("5m");
 {
   await fresh("off");
   await advance(2);
+  await settle(); // the first load's Overview reads go two at a time (#8554), so it takes a few rounds to end: the button is idle only then
   fetchDelayMs = 5000;
   const log0 = fetchLog.length; const r0 = renders;
   const btn = brand.find((x) => x.attrs.id === "page-refresh-now");
@@ -193,7 +211,7 @@ out.next5m = await secondsToNextRead("5m");
   out.doubleClickViews = views();
   out.doubleClickRenders = renders - r0;
   out.busyWhileReading = btn.disabled === true && btn.attrs["aria-busy"] === "true" && btn.attrs.title === "Refreshing…";
-  await advance(10);
+  await advance(25); // the render's reads take the fleet read's 5 s, then three gated rounds of 5 s
   out.doubleClickRenders = renders - r0;
   out.idleAfterSettle = btn.disabled === false && btn.getAttribute("aria-busy") === null;
   fetchDelayMs = 0;
@@ -224,13 +242,14 @@ out.next5m = await secondsToNextRead("5m");
 }
 
 // 30 s under backoff: reads that take 20 s (> half the interval) push the next page render out to 4x the render
-// time (rather than 30 s), and a render never starts while the previous one's reads are outstanding.
+// time (rather than 30 s), and a render never starts while the previous one's reads are outstanding. The Overview's heavy reads
+// go two at a time (#8554), so a render lasts a few read times longer and the window is 900 s, enough for three renders.
 {
   bootDelay = 20000;
   await fresh("30s");
   const starts = [];
   let hintSlow = false;
-  for (let s = 0; s < 300; s++) {
+  for (let s = 0; s < 900; s++) {
     const r = renders;
     await advance(1);
     if (renders > r) starts.push(s + 1);
@@ -240,8 +259,10 @@ out.next5m = await secondsToNextRead("5m");
   out.backoffGaps = starts.slice(1).map((v, i) => v - starts[i]);
   out.backoffHintSaysSlow = hintSlow;
   bootDelay = 100000; // reads outlast many 30 s intervals
-  await fresh("30s");
+  /* Counted from before the boot: the page's first render starts its reads with the page (#8554), not after the fleet card, so it is
+     one of the renders this counts, and a second one inside the window would be a stacked render. */
   const b = renders;
+  await fresh("30s");
   await advance(150);
   out.stackedRenders = renders - b;
   bootDelay = 0;
@@ -258,9 +279,91 @@ out.next5m = await secondsToNextRead("5m");
   await fresh("30s", "#/fleet");
   await advance(2);
   out.controlHiddenOnFleet = brand.find((x) => x.attrs.id === "page-refresh-control").hidden;
+  out.intervalVisibilityOnFleet = brand.find((x) => x.attrs.id === "page-refresh-select").style.visibility;
   await fresh("30s", "#/finops/alpha/utilization");
   await advance(2);
   out.controlHiddenOnFinops = brand.find((x) => x.attrs.id === "page-refresh-control").hidden;
+  out.intervalVisibilityOnFinops = brand.find((x) => x.attrs.id === "page-refresh-select").style.visibility;
+}
+
+// #7935: a refresh that is due for the page and the shell together (Resume, and a tab return while the page was due) re-renders the page
+// in the same pass as the shell's reads start, so the page's /api/fleet joins the sidebar's and the store is asked for one fleet roll-up.
+// The shell's reads count as page reads, so a page decided after they start waits a tick or more and then sends its own fleet read.
+{
+  const fleetReads = (from) => fetchLog.slice(from).filter((l) => l.includes("/api/fleet")).length;
+  // Resume: the toggle is a fresh node, so only this boot's click listener is on it.
+  byId["auto-refresh-toggle"] = new FakeNode("button");
+  await fresh("1m", "#/server/alpha");
+  await advance(2);
+  const toggle = byId["auto-refresh-toggle"];
+  toggle.dispatch("click"); await drain(); // paused
+  await advance(2);
+  const log0 = fetchLog.length; const r0 = renders;
+  toggle.dispatch("click"); await drain(); // resumed: one refresh now
+  out.resumeFleetReads = fleetReads(log0);
+  // The page's first read on this route is the fleet read, and its panel reads follow that answer: let the pass's fetches answer
+  // with no tick in between, so a render that started in the pass shows now and one that waited for a tick does not.
+  now += 1000; releaseDue(); await drain();
+  out.resumeRendersBeforeTick = renders - r0;
+  await advance(3);
+  out.resumeRendersAfter = renders - r0;
+  out.resumeFleetReadsAfter = fleetReads(log0);
+  // Tab return with the page due: hidden through a whole interval, then visible again.
+  await fresh("1m", "#/server/alpha");
+  await advance(2);
+  document.hidden = true;
+  await advance(70);
+  const log1 = fetchLog.length; const r1 = renders;
+  document.hidden = false;
+  docListeners.visibilitychange.at(-1)(); await drain();
+  out.returnFleetReads = fleetReads(log1);
+  now += 1000; releaseDue(); await drain();
+  out.returnRendersBeforeTick = renders - r1;
+  await advance(3);
+  out.returnRendersAfter = renders - r1;
+  out.returnFleetReadsAfter = fleetReads(log1);
+}
+
+// #7935: a scheduler tick where the page and the shell are both due re-renders the page in the same pass as the shell's reads
+// start, so one /api/fleet serves the sidebar and the page. The ticks that follow while that render's reads are still in flight
+// do not start it again (#4191): every read of the render is sent once.
+{
+  const fleetReads = (from) => fetchLog.slice(from).filter((l) => l.includes("/api/fleet")).length;
+  const repeated = (from) => { const seen = new Map(); for (const l of fetchLog.slice(from)) { const u = l.slice(l.indexOf(" ") + 1); seen.set(u, (seen.get(u) || 0) + 1); } return [...seen].filter(([, n]) => n > 1).map(([u]) => u); };
+  await fresh("1m", "#/server/alpha");
+  // The boot render's fleet read answers at the first tick and its panel reads end after the gate's rounds (#8554: two at a time, so
+  // about four ticks), so the page is due about 64 s after boot and the shell 60 s after. Ticks run to 59 s with nothing due; the
+  // next one lands seven seconds late and finds both due.
+  await advance(59);
+  fetchDelayMs = 5000; // this pass's reads take 5 s, so the ticks that follow land while the render's reads are in flight
+  const log0 = fetchLog.length; const r0 = renders;
+  now += 7000; releaseDue(); await drain(); tick(); await drain();
+  out.tickShellReads = fetchLog.slice(log0).filter((l) => l.includes("/api/views")).length;
+  out.tickFleetReads = fleetReads(log0);
+  // The page's panel reads follow the fleet answer: let the pass's reads answer with no tick in between, so a render that started
+  // in the pass shows now and one that waited for a later tick does not.
+  now += 5000; releaseDue(); await drain();
+  out.tickRendersBeforeTick = renders - r0;
+  await advance(30);
+  out.tickRendersAfter = renders - r0;
+  out.tickFleetReadsAfter = fleetReads(log0);
+  out.tickRepeatedReads = repeated(log0);
+  fetchDelayMs = 0;
+}
+
+// #8633: an idle Fleet Overview. The page's poll re-render trails the shell's refresh by the length of its last render (its next poll is
+// counted from where that render settled, the shell's from where its refresh began), so the sidebar's /api/fleet had landed before the
+// page's poll asked again: two roll-ups per tick. The page's poll now takes the sidebar's, so each tick reads it once.
+{
+  fleetAnswers = true;
+  fetchDelayMs = 1000; // the roll-up takes 1 s to come back
+  await fresh("1m", "#/fleet");
+  await advance(10); // the first render settles
+  const log0 = fetchLog.length;
+  await advance(130); // two idle ticks
+  out.idleFleetTickReads = fetchLog.slice(log0).filter((l) => l.includes("/api/fleet")).length;
+  fleetAnswers = false;
+  fetchDelayMs = 0;
 }
 
 console.log(JSON.stringify(out));

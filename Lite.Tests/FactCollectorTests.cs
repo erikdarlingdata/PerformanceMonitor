@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -327,6 +328,14 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
         Assert.InRange(facts["IO_READ_LATENCY_MS"].Value, 45, 55);
         // 15,000,000 stall / 500,000 writes = 30ms avg
         Assert.InRange(facts["IO_WRITE_LATENCY_MS"].Value, 25, 35);
+
+        // #6959: the user data file wrote 400,000 times at 250ms. An unfiltered sum would score
+        // 115,000,000 / 900,000 = ~128ms, so the scored value above proves the fact filter. The data-file
+        // figure rides along as metadata.
+        Assert.Equal(30, facts["IO_WRITE_LATENCY_MS"].Metadata["avg_write_latency_ms"], precision: 0);
+        Assert.Equal(500_000, facts["IO_WRITE_LATENCY_MS"].Metadata["total_writes"]);
+        Assert.Equal(250, facts["IO_WRITE_LATENCY_MS"].Metadata["data_file_write_latency_ms"], precision: 0);
+        Assert.Equal(400_000, facts["IO_WRITE_LATENCY_MS"].Metadata["data_file_writes"]);
     }
 
     [Fact]
@@ -531,6 +540,72 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
 
         /* The name is a string in the string slot; Metadata stays doubles-only (the lane-7 #3542 lesson). */
         Assert.DoesNotContain(jobs.Metadata.Keys, k => k.Contains("name", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// #7883: running_jobs holds one row per running job per collection tick, so one Agent job that stays
+    /// past its limit across five ticks wrote five rows. The counts are jobs, not rows (the advice reads
+    /// "N Agent jobs" and the severity ramp saturates at three), so that one run must read as 1 in the
+    /// fact's value, running_long_count and running_count.
+    /// </summary>
+    [Fact]
+    public async Task CollectFacts_RunningJobs_OneLongJobAcrossManyTicks_CountsOnce()
+    {
+        var facts = await SeedAndCollectAsync(async s =>
+        {
+            await s.SeedTestServerAsync();
+            await s.SeedRunningJobTicksAsync("Nightly Index Maintenance", "job-a", ticks: 5, isRunningLong: true);
+        });
+
+        var jobs = facts["RUNNING_JOBS"];
+        Assert.Equal(1, jobs.Value);
+        Assert.Equal(1, jobs.Metadata["running_long_count"]);
+        Assert.Equal(1, jobs.Metadata["running_count"]);
+        Assert.Equal("Nightly Index Maintenance", jobs.ObjectName);
+    }
+
+    /// <summary>
+    /// #7883: two long jobs and one not-long job, each seen on several ticks, read as 2 long of 3 running.
+    /// </summary>
+    [Fact]
+    public async Task CollectFacts_RunningJobs_TwoLongJobsAcrossManyTicks_CountTwo()
+    {
+        var facts = await SeedAndCollectAsync(async s =>
+        {
+            await s.SeedTestServerAsync();
+            await s.SeedRunningJobTicksAsync("Nightly Index Maintenance", "job-a", ticks: 5, isRunningLong: true);
+            await s.SeedRunningJobTicksAsync("Weekly CHECKDB", "job-b", ticks: 3, isRunningLong: true, percentOfAverage: 250);
+            await s.SeedRunningJobTicksAsync("Log Backup", "job-c", ticks: 4, isRunningLong: false, percentOfAverage: 100);
+        });
+
+        var jobs = facts["RUNNING_JOBS"];
+        Assert.Equal(2, jobs.Value);
+        Assert.Equal(2, jobs.Metadata["running_long_count"]);
+        Assert.Equal(3, jobs.Metadata["running_count"]);
+    }
+
+    /// <summary>
+    /// #7883: the run key is the job id PLUS the run's start_time. The same job that finished and then ran
+    /// again (same job_id, a later start_time) is two runs, each seen on several ticks, so running_count is 2
+    /// and, with both runs long, so is running_long_count. Counting by job alone reads 1 and hides the second run.
+    /// </summary>
+    [Fact]
+    public async Task CollectFacts_RunningJobs_SameJobRunsTwiceAcrossManyTicks_CountsTwoRuns()
+    {
+        var facts = await SeedAndCollectAsync(async s =>
+        {
+            await s.SeedTestServerAsync();
+            // First run: three ticks that ended well before the second run began.
+            await s.SeedRunningJobTicksAsync("Nightly Index Maintenance", "job-a", ticks: 3, isRunningLong: true,
+                newestMinutesBeforePeriodEnd: 160);
+            // Second run of the same job: a later start_time, five ticks up to the usual newest tick.
+            await s.SeedRunningJobTicksAsync("Nightly Index Maintenance", "job-a", ticks: 5, isRunningLong: true);
+        });
+
+        var jobs = facts["RUNNING_JOBS"];
+        Assert.Equal(2, jobs.Value);
+        Assert.Equal(2, jobs.Metadata["running_long_count"]);
+        Assert.Equal(2, jobs.Metadata["running_count"]);
     }
 
     [Fact]
@@ -743,6 +818,34 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(10_000, bloat.Metadata["total_plans"]);
         Assert.Equal(800, bloat.Metadata["single_use_size_mb"]);
         Assert.Equal(1_300, bloat.Metadata["total_size_mb"]);
+    }
+
+    // #7445: 1,000 compiled plans (100 single use, 150 MB) beside 4,000 single-use parse trees (40 MB). The card
+    // used to sum every cache type: 4,100 of 5,000 = 82% on 190 MB scored a full-severity PLAN_CACHE_BLOAT card
+    // while the badge, which leaves parse trees out, read NORMAL. Both now read the compiled plans only.
+    [Fact]
+    public async Task CollectFacts_PlanCacheBloat_ParseTreesDoNotMakeTheCardDisagreeWithTheBadge()
+    {
+        var facts = await SeedAndCollectAsync(async s =>
+        {
+            await s.SeedPlanCacheStatsAsync(totalPlans: 1_000, singleUsePlans: 100, totalSizeMb: 500, singleUseSizeMb: 150,
+                cacheObjType: "Compiled Plan", objType: "Adhoc");
+            await s.SeedPlanCacheStatsAsync(totalPlans: 4_000, singleUsePlans: 4_000, totalSizeMb: 40, singleUseSizeMb: 40,
+                cacheObjType: "Parse Tree", objType: "View");
+        });
+
+        var bloat = facts["PLAN_CACHE_BLOAT"];
+        Assert.Equal(10, bloat.Value, precision: 6);               // 100 * 100 / 1000, not 4100 * 100 / 5000
+        Assert.Equal(1_000, bloat.Metadata["total_plans"]);
+        Assert.Equal(100, bloat.Metadata["single_use_plans"]);
+        Assert.Equal(150, bloat.Metadata["single_use_size_mb"]);
+        Assert.Equal(540, bloat.Metadata["total_size_mb"]);        // the whole cache's size is unchanged
+
+        new FactScorer().ScoreAll(facts.Values.ToList());
+        Assert.Equal(0.0, bloat.Severity, precision: 4);           // the card stays quiet
+
+        var summary = await new LocalDataService(_duckDb).GetPlanCacheSummaryAsync(TestDataSeeder.TestServerId, hoursBack: 72);
+        Assert.Equal("NORMAL", LocalDataService.ClassifyPlanCacheBloat(summary).Level);   // and the badge agrees
     }
 
     // No plan_cache_stats snapshot -> the fact is not emitted (collector returns before Add).

@@ -59,7 +59,7 @@ public sealed class InvestigationNamedTokenHostLiveTests
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, "HostLiveSrv", ct);
         await DarlingMcpTestData.RegisterServerAsync(connection, PgServerId, "HostLivePg", ct);
         await ExecAsync(connection, $"UPDATE collect.servers SET engine_kind = 'postgres' WHERE server_id = {PgServerId}", ct);
-        await ExecAsync(connection, "INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Blocking', 3)", ct);
+        await ExecAsync(connection, "INSERT INTO config.config_notification_routes (metric_match, agent_level, action_approval) VALUES ('Blocking', 3, 'off')", ct);
 
         await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
         var store = new InvestigationRequestStore(source, 30, () => DateTime.UtcNow);
@@ -143,7 +143,7 @@ public sealed class InvestigationNamedTokenHostLiveTests
     }
 
     [Fact]
-    public async Task TheSecondToken_ReadingEvidenceOnTheFirstTokensClaim_IsRefusedAndJournaledAsTheSecond()
+    public async Task TheSecondToken_ReadingEvidenceOnTheFirstTokensClaim_IsRefused_AndJournalsNothing()
     {
         await RunAsync(async c =>
         {
@@ -151,7 +151,8 @@ public sealed class InvestigationNamedTokenHostLiveTests
                 new JsonObject { ["request_id"] = c.RequestId, ["claim_id"] = c.ClaimId }, SecondBearer);
 
             Assert.Equal(DarlingMcpInvestigationTools.ClaimNotToken, answer.GetProperty("status").GetString());
-            Assert.Equal("1", await RefusedAsync(c, Second, "evidence:" + DarlingMcpInvestigationTools.ClaimNotToken));
+            /* The evidence read is a read: a refused one journals nothing (#6997). */
+            Assert.Equal("0", await RefusedAsync(c, Second, "evidence:" + DarlingMcpInvestigationTools.ClaimNotToken));
         });
     }
 
@@ -170,7 +171,7 @@ public sealed class InvestigationNamedTokenHostLiveTests
     }
 
     [Fact]
-    public async Task TheLegacyToken_UsingAServedTokensClaim_IsRefused_ForSubmitAndEvidence()
+    public async Task TheLegacyToken_UsingAServedTokensClaim_IsRefused_ForSubmitAndEvidence_AndOnlySubmitIsJournaled()
     {
         await RunAsync(async c =>
         {
@@ -183,7 +184,7 @@ public sealed class InvestigationNamedTokenHostLiveTests
             Assert.Equal(DarlingMcpInvestigationTools.AgentIdIsNamedToken, evidence.GetProperty("status").GetString());
 
             Assert.Equal("1", await RefusedAsync(c, "invalid", "submit:" + DarlingMcpInvestigationTools.AgentIdIsNamedToken));
-            Assert.Equal("1", await RefusedAsync(c, "invalid", "evidence:" + DarlingMcpInvestigationTools.AgentIdIsNamedToken));
+            Assert.Equal("0", await RefusedAsync(c, "invalid", "evidence:" + DarlingMcpInvestigationTools.AgentIdIsNamedToken));
         });
     }
 
@@ -296,6 +297,8 @@ public sealed class InvestigationNamedTokenHostLiveTests
     [InlineData("invalid", false)]
     [InlineData("unclaimed", true)]
     [InlineData("unclaimed", false)]
+    [InlineData("legacy-token", true)]
+    [InlineData("Legacy-Token", false)]
     public async Task TheLegacyToken_UsingAReservedPlaceholderAsItsAgentId_IsRefused_AndJournaledAsInvalid(string reserved, bool serveNamed)
     {
         await RunAsync(async c =>
@@ -321,6 +324,8 @@ public sealed class InvestigationNamedTokenHostLiveTests
             Assert.Equal("9", await JournalRowsAsync(c, InvestigationRules.InvalidAgentId));
             Assert.Equal("0", await ScalarAsync(c.Connection,
                 $"SELECT count(*) FROM config.investigation_journal WHERE actor = 'agent:unclaimed' AND event IN ('refused', 'claimed')", c.Ct));
+            Assert.Equal("0", await ScalarAsync(c.Connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE lower(actor) = 'agent:legacy-token'", c.Ct));
         }, serveNamed);
     }
 }

@@ -27,13 +27,21 @@ import {
   el,
   mount,
   loadingStrip,
+  waitingStrip,
+  retryButton,
+  isWindowTooWide,
+  retryOnceWhenBusy,
+  busyRetryStrip,
   errorStrip,
   readErrorStrip,
   emptyStrip,
   noticeStrip,
+  captionStrip,
   keptWindowStrip,
   windowFloorStrip,
   leftOutStrip,
+  leftOutNoteText,
+  LEFT_OUT_NOTE_KEY,
   readTool,
   readWithinKeptHistory,
   apiGet,
@@ -41,21 +49,33 @@ import {
   getPath,
   parseUtc,
   applyFormat,
-  tickDecimals,
   bandClass,
   sevClass,
   windowFromHours,
+  readPinWindow,
+  pinnedWindowText,
+  pinRangeLabel,
   dbScopeChip,
   dbFilteredEmptyText,
-  sourceStrip,
+  sourceSpan,
+  applySourceSubtitle,
   clampText,
+  plainEmptyStrip,
+  noteStrip,
   disclosure,
   markPartialSubtitle,
+  applyDataSubtitle,
   localizeIsoText,
   localizeAlertDetail,
+  noValuesText,
+  SAMPLED_BLOCKING_SOURCE,
+  isStateZero,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
-import { plainText, plainTextNamed, plainTextCounts } from "./plain-text.js";
+import { bucketMsOf } from "./chart-gaps.js";
+import { plainText, plainTextNamed, plainTextCounts, shortEmptyLine } from "./plain-text.js";
+import { panelPlotPx } from "./trend-points.js";
+import { withheldDisplayText } from "./mute-context.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
 import {
   VALUE_LIST_MAX_LEN,
@@ -107,6 +127,44 @@ export function emptyHeadline(desc, res) {
 }
 
 /**
+ * #7410: the strip an empty reply draws in a panel. A panel's agreed sentence (emptyWins) or a reply with no structured reason shows
+ * the message as before. A reply that names a missing extension, a source the login cannot read, or plan capture that is not ready
+ * shows one plain sentence built from its `hints`, and the tool's full text is behind "More detail". A panel whose
+ * `extensionMissingLine` says what is not collected uses that sentence for a missing extension.
+ */
+export function panelEmptyStrip(desc, res) {
+  /* #8577: a read pinned with `as_of` words its window in the message ("in the last 4 hours"), which says "ending now"; name the pinned one. */
+  const pin = desc.asOfIgnored ? null : readPinWindow(desc.params, res.keptHours != null ? res.keptHours : desc.windowHours);
+  if (pin && typeof res.message === "string") res = { ...res, message: pinnedWindowText(res.message, pin) };
+  if (emptyHeadline(desc, res) !== res.message) return emptyStrip(emptyHeadline(desc, res));
+  /* A panel with `emptyLine` says that plain sentence for a true negative and keeps the tool's own text behind "More detail" (#7410). */
+  if (desc.emptyLine && res.status === "empty") return plainEmptyStrip(res, desc.emptyLine === true ? desc.emptyText : desc.emptyLine);
+  const extension = res.hints && res.hints.reason === "extension_missing" ? desc.extensionMissingLine : undefined;
+  return plainEmptyStrip(res, shortEmptyLine(res, extension));
+}
+
+/**
+ * #8577: the "Pinned: start → end" pill a read cell shows when its `as_of` puts its window in the past, the same pill and label a composed
+ * cell with a `range` shows (pinRangeLabel). The window is the one the read answered for: the cell's hours, or the kept hours a retry narrowed it to.
+ * Null for a read that ends now.
+ */
+export function readPinStrip(desc, res) {
+  const win = readPinWindow(desc.params, res && res.keptHours != null ? res.keptHours : desc.windowHours);
+  if (!win) return null;
+  /* #8630: a read whose tool takes no `as_of` (`desc.asOfIgnored`, set where the catalog is at hand) answers for the present whatever
+     the cell names, so it says that instead of claiming the pinned window. */
+  if (desc.asOfIgnored) {
+    return el("div", { class: "cell-pin-strip" }, [
+      el("span", { class: "pin-badge pin-badge-current", title: "This read has no end time to pin. It shows the state now, not the state at the time of the alert.", text: "Current state, not pinned" }),
+    ]);
+  }
+  const label = pinRangeLabel({ windowStart: new Date(win.windowStart).toISOString(), windowEnd: new Date(win.windowEnd).toISOString() });
+  return el("div", { class: "cell-pin-strip" }, [
+    el("span", { class: "pin-badge", title: "This cell reads the window that ends at its pinned time, not the last hours before now. Open live shows the window that ends now.", text: "Pinned: " + label }),
+  ]);
+}
+
+/**
  * A panel whose wording depends on which collector answered (#5644 W16, the blocking trend: blocked process reports, or the DMV
  * snapshot rows it falls back to). `desc.bySource` maps the answer's `desc.sourceKey` value to `{ title, label, unit }`; the
  * returned descriptor carries the series label and axis unit, and the heading's title text is replaced in place. A descriptor
@@ -130,14 +188,14 @@ export function applySourceWording(desc, data, panel) {
  * Build a panel node. It returns immediately with a loading strip and fills itself once the fetch resolves,
  * mapping the API response kinds (data / empty envelope / error / aborted / auth) to the right UI.
  */
-export function renderPanel(desc, onSettled) {
+export function renderPanel(desc, onSettled, gate = null) {
   const signal = panelSignal;
-  const body = el("div", { class: "panel-body" }, [loadingStrip()]);
+  const body = el("div", { class: "panel-body" }, [gate ? waitingStrip() : loadingStrip()]);
   /* #5701: `data-panel` (the read) and `data-title` are the hooks the web UI smoke check finds a panel by. */
   const panel = el("div", { class: "panel card" + (desc.span === 2 ? " span-2" : ""), "data-panel": desc.read || desc.title, "data-title": desc.title }, [
     /* The database-scope chip (#5245): while the page's database filter is active it says whether this panel's read took it
        (dbScopeChip in util.js; `desc.dbScope` overrides the read's own class for a panel fed by a shared read). */
-    el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null, dbScopeChip(desc.read, desc.dbScope)]),
+    el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null, sourceSpan(desc), dbScopeChip(desc.read, desc.dbScope)]),
     /* #5226: an optional control node under the title (the Top Queries / Top Procedures ranking selector), drawn before the body so a
        load that replaces the body never replaces it. Absent on every other panel. */
     desc.control || null,
@@ -145,7 +203,17 @@ export function renderPanel(desc, onSettled) {
   ]);
   /* #6933: the key a poll matches this panel by, so it keeps the panel on screen while the same read runs again. */
   notePanelKey(panel, JSON.stringify([desc.read || desc.path || null, desc.params || null]));
-  loadPanel(desc, body, signal, onSettled);
+  /* #7257: a saved view's `gate` starts the read when the page's long-read slots allow it. */
+  if (gate) {
+    /* A failed read gets a Retry button that runs this one panel again through the same gate, and a busy refusal is sent once more. */
+    const retry = () => {
+      mount(body, waitingStrip());
+      gate(() => loadPanel(desc, body, signal, null, retry), true);
+    };
+    gate(() => loadPanel(desc, body, signal, onSettled, retry));
+  } else {
+    loadPanel(desc, body, signal, onSettled);
+  }
   return panel;
 }
 
@@ -153,19 +221,28 @@ export function renderPanel(desc, onSettled) {
    terminal state (data, empty, error, aborted, or auth) — every renderPanel caller today omits it (a no-op), but
    it is what lets a caller with its OWN concurrency budget (the alert-notebook doc's max-3 in-flight cell loader,
    views.js) know when a slot frees, since renderPanel itself returns synchronously with the fetch still in flight. */
-async function loadPanel(desc, body, signal, onSettled) {
+async function loadPanel(desc, body, signal, onSettled, onRetry = null) {
   try {
-    await loadPanelBody(desc, body, signal);
+    await loadPanelBody(desc, body, signal, onRetry);
   } finally {
     if (onSettled) onSettled();
   }
 }
 
-async function loadPanelBody(desc, body, signal) {
+async function loadPanelBody(desc, body, signal, onRetry = null) {
   /* A read that keeps less history than the page's Range is asked again for what it keeps, and the panel says
      so through keptWindowStrip (readWithinKeptHistory in util.js, shared with the server-tab composites). */
+  /* #7257: a panel of a saved view (it has onRetry) sends a read the service refused busy (429) once more after its Retry-After. */
+  /* #7661: a trend chart asks for about one point per 2 px of its plot (trend-points.js), so a day does not come back as 1-minute buckets the
+     plot cannot show. Measured here, when the panel loads: from its body when it is on the page, else estimated from the window. */
+  /* Only a panel that draws a line has a plot: a table, a stat or a band list sends no `plotPx`, so its read keeps the old budget and its rows. */
+  const plotPx = panelPlotPx(desc, body.clientWidth, typeof window !== "undefined" ? window.innerWidth : 0);
+  const readOptions = plotPx > 0 ? { plotPx } : undefined;
+  const readOnce = (tool, params) => onRetry
+    ? retryOnceWhenBusy(() => readTool(tool, params, signal, readOptions), (seconds) => mount(body, busyRetryStrip(seconds)), signal)
+    : readTool(tool, params, signal, readOptions);
   const res = await readWithinKeptHistory(
-    (params) => (desc.read ? readTool(desc.read, params, signal) : apiGet(desc.path + buildQuery(params), signal)),
+    (params) => (desc.read ? readOnce(desc.read, params) : apiGet(desc.path + buildQuery(params), signal)),
     desc.params
   );
 
@@ -180,7 +257,10 @@ async function loadPanelBody(desc, body, signal) {
     /* readErrorStrip degrades the "window too wide" validation error to a notice; every other error stays red
        (#2780). Shared with the server-tab composites so the whole page degrades the same way. A window refusal
        only reaches it now when the one retry above could not settle it. */
-    mount(body, readErrorStrip(res.message));
+    /* #7257: the "pick a shorter range" notice gets no Retry button, since the same range gives the same notice. */
+    /* #8323: the engine's own text, when the answer put a plain sentence in front of it, sits behind "More detail". */
+    const detail = res.detail ? disclosure("More detail", res.detail, { title: "What the store said, in full" }) : null;
+    mount(body, onRetry && !isWindowTooWide(res.message) ? [readErrorStrip(res.message), detail, retryButton(onRetry)] : [readErrorStrip(res.message), detail]);
     return;
   }
   const kept = keptWindowStrip(res);
@@ -196,20 +276,12 @@ async function loadPanelBody(desc, body, signal) {
     mount(body, emptyStrip(desc.notCollectedLine));
     return;
   }
-  /* A panel whose collector reads one optional PostgreSQL extension says plainly that the extension is not installed when the
-     server's precondition answer says that (pg_stat_kcache behind OS CPU by Query), a fixable state. It is not the
-     "does not apply to this kind of server" line, which is for a server that can never have the data. */
-  if (res.kind === "empty" && res.status === "precondition" && desc.extensionMissingLine
-      && typeof res.message === "string" && res.message.includes("extension it reads is not installed")) {
-    mount(body, emptyStrip(desc.extensionMissingLine));
-    return;
-  }
   if (res.kind === "empty") {
     /* #4966: a grid that looked and found nothing still says where its table's data starts when that is after the
        window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a
        new server's empty week does not read as a quiet one. windowFloorStrip is null for a chart and for an envelope
        without the note. */
-    mount(body, [kept, windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), emptyStrip(emptyHeadline(desc, res))]);
+    mount(body, [kept, readPinStrip(desc, res), windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), panelEmptyStrip(desc, res)]);
     return;
   }
 
@@ -232,26 +304,32 @@ async function loadPanelBody(desc, body, signal) {
 
        Read through getPath and rendered as TEXT by noticeStrip, so a note is inert markup like every other
        server value on this page (R4). */
-    const note = desc.noteKey ? getPath(res.data, desc.noteKey) : null;
+    /* #7538, #7651: the left-out note is the one the page words itself and gives the names (leftOutNoteText); any other note is the server's text. */
+    const note = desc.noteKey === LEFT_OUT_NOTE_KEY ? leftOutNoteText(res.data) : desc.noteKey ? getPath(res.data, desc.noteKey) : null;
     /* #4925: a panel may carry further server notes (`moreNoteKeys`), each rendered as its own line when non-null. */
-    const moreNotes = (desc.moreNoteKeys || []).map((k) => getPath(res.data, k));
+    const moreNotes = (desc.moreNoteKeys || []).map((k) => (k === LEFT_OUT_NOTE_KEY ? leftOutNoteText(res.data) : getPath(res.data, k)));
+    /* #7428: a note the page composes from the answer's fields (`noteFrom(data)`), for a sentence the server does not write, such as why a tile is blank. */
+    if (typeof desc.noteFrom === "function") moreNotes.push(desc.noteFrom(res.data));
     /* #4966: a grid says where its table's data starts when that is after the window's start (windowFloorStrip). */
     const floor = windowFloorStrip(res.data, desc);
     /* #5644 W12: a row-capped panel stops claiming the window it was asked for in its heading. */
+    applyDataSubtitle(body.parentNode, res.data, desc);
     markPartialSubtitle(body.parentNode, res.data, desc);
     /* A narrowed read draws its chart over the hours it answered for, not the Range it was asked for (#2802).
        A copy, so the caller's descriptor keeps the window it asked for. */
     if (res.keptHours) desc = { ...desc, windowHours: res.keptHours };
     desc = applySourceWording(desc, res.data, body.parentNode);
+    /* #5244, #7543: which collector answered a blocking read, for a descriptor that names its field (`sourceKey`), goes in the heading
+       beside the window label, so no row above the chart takes height from the plot. Nothing for every other panel. */
+    applySourceSubtitle(body.parentNode, res.data, desc);
     const rendered = render(res.data, desc);
 
     mount(body, [
       kept,
+      readPinStrip(desc, res),
       floor,
-      /* #5244: which collector answered a blocking read, for a descriptor that names its field (`sourceKey`); null for every other panel. */
-      sourceStrip(res.data, desc),
-      typeof note === "string" && note.trim() ? noticeStrip(note) : null,
-      ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noticeStrip(n) : null)),
+      typeof note === "string" && note.trim() ? noteStrip(desc, note, res.data) : null,
+      ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noteStrip(desc.noteQuiet === true ? { noteQuiet: true } : null, n) : null)),
       rendered,
     ]);
   } catch (e) {
@@ -281,7 +359,7 @@ export const VIZ = {
  */
 const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-detect fields.";
 
-/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,clamp,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copy,copyValue}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
+/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,clamp,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copy,copyValue,exportOnly}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
 
    Column-header sort (#4843). A header click cycles ascending -> descending -> the server's own order, with a ▲/▼
    indicator and aria-sort; Enter and Space on the focused header do the same. The comparison reads the RAW row value
@@ -335,7 +413,7 @@ export function gridTable(rows, desc) {
   const grid = desc.sortable === false ? null : makeGridSort(desc, cols, rows);
   const bodyRows = rows.map((row) => {
     const rc = typeof desc.rowClass === "function" ? desc.rowClass(row) : desc.rowClass;
-    const tr = el("tr", { class: typeof rc === "string" && rc ? rc : null }, cols.map((c) => cell(row, c)));
+    const tr = el("tr", { class: typeof rc === "string" && rc ? rc : null }, cols.map((c) => exportOnlyCell(row, c)));
     trRow.set(tr, row);
     if (typeof desc.onRow === "function") desc.onRow(row, tr);
     return tr;
@@ -353,6 +431,7 @@ export function gridTable(rows, desc) {
   const filterBar = desc.filter === false ? null : gridFilter(desc, cols, head, tbody);
   const table = el("table", { class: "data" }, [el("thead", {}, [head]), tbody]);
   const wrap = el("div", { class: "table-wrap" }, filterBar ? [filterBar, table] : [table]);
+  pinIdentityColumn(wrap, table, head, tbody, cols);
   const picker = columnPicker(desc, cols, head, tbody);
   /* #5701: `data-grid` names the grid for the web UI smoke check. A tools-less, picker-less grid is the bare wrapper, which
      carries the hook itself so the check finds every grid the same way. */
@@ -363,6 +442,22 @@ export function gridTable(rows, desc) {
   }
   if (desc.tools === false) return el("div", { class: "grid-box", "data-grid": gridName }, [picker, wrap]);
   return el("div", { class: "grid-box", "data-grid": gridName }, picker ? [picker, gridTools(desc, cols, tbody), wrap] : [gridTools(desc, cols, tbody), wrap]);
+}
+
+/* #7729: a grid wider than its box (Database Configuration 3456 px in 1189, High Impact 2160 in 1204) scrolled sideways to figures with no row name
+   beside them. The first column that names the row (`name: true`, or `pin: true` where the name is drawn by a render) sticks to the left edge
+   while the box scrolls. Only a grid that overflows takes it (the box gets `pin-first` while it does), so a grid that fits is as it was.
+   Where there is no ResizeObserver (a test's fake DOM) nothing is pinned. */
+function pinIdentityColumn(wrap, table, head, tbody, cols) {
+  if (typeof ResizeObserver !== "function") return;
+  const at = cols.findIndex((c) => c.pin === true || c.name === true);
+  if (at < 0) return;
+  head.children[at].classList.add("pin-col");
+  Array.from(tbody.children).forEach((tr) => { if (tr.children[at]) tr.children[at].classList.add("pin-col"); });
+  const sync = () => wrap.classList[wrap.scrollWidth > wrap.clientWidth + 1 ? "add" : "remove"]("pin-first");
+  const watch = new ResizeObserver(sync);
+  watch.observe(wrap);
+  watch.observe(table);
 }
 
 /* Column groups (#4843). A descriptor with `groups: ["Memory detail", ...]` and `defaultGroups: [...]` marks wide
@@ -481,7 +576,9 @@ function gridTools(desc, cols, tbody) {
       .map((c, i) => {
         if (c.csv === false) return null;
         const hasCopy = typeof c.copyValue === "function";
-        const raw = objs.map((r) => (r ? (hasCopy ? c.copyValue(r) : getPath(r, c.key)) : undefined));
+        /* A state-only row's stored zero in a stateZeroDash column exports as the dash its cell shows (util.js's isStateZero), as Alert
+           History's own export does; every other value is the stored one. */
+        const raw = objs.map((r) => (r ? (hasCopy ? c.copyValue(r) : c.stateZeroDash === true && isStateZero(r, c.key) ? "—" : getPath(r, c.key)) : undefined));
         if (raw.some(isListValue)) return null;
         const textOnly = (typeof c.render === "function" || typeof c.display === "function") && raw.every((v) => v === undefined);
         return { i, c, raw, textOnly };
@@ -827,6 +924,8 @@ function gridFilter(desc, cols, head, tbody) {
       b.setAttribute("aria-pressed", on ? "true" : "false");
     }
     if (bar.style) bar.style.display = r.tests || gridFilterOpen.has(key) ? "" : "none";
+    /* A page that acts on the shown rows (Alert History's Dismiss All, #7919) learns here that the set changed. */
+    if (typeof desc.onFilter === "function") desc.onFilter();
   }
 
   function close(refocus) {
@@ -1071,7 +1170,7 @@ function gridFilter(desc, cols, head, tbody) {
 /* An unsortable header cell. The sortable one is built by makeGridSort().headerCell; both are the place a later
    header affordance (a filter, a menu) attaches. */
 function headerCell(c) {
-  return el("th", { text: c.label, class: isNumericCol(c) ? "num" : null, title: c.hint || null });
+  return el("th", { text: c.label, class: (isNumericCol(c) ? "num" : "") + (c.exportOnly ? " export-only" : "") + (c.wrapHead ? " wrap-head" : "") || null, title: c.hint || null });
 }
 
 /* The sort state of every grid, at MODULE scope so the 60 s poll's rebuild of a page re-applies the chosen sort.
@@ -1169,7 +1268,7 @@ function makeGridSort(desc, cols, rows) {
       const th = ths[i];
       if (!th) return;
       const live = sortable[i];
-      th.className = live ? "sortable" + (isNumericCol(c) ? " num" : "") : isNumericCol(c) ? "num" : "";
+      th.className = (live ? "sortable" + (isNumericCol(c) ? " num" : "") : isNumericCol(c) ? "num" : "") + (c.exportOnly ? " export-only" : "") + (c.wrapHead ? " wrap-head" : "");
       th.setAttribute("tabindex", live ? "0" : "-1");
       /* The column's `hint` is its header tooltip; this refresh runs after the header is built, so it must not replace it. */
       th.setAttribute("title", live ? (c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label) : c.hint || "");
@@ -1205,7 +1304,7 @@ function makeGridSort(desc, cols, rows) {
     eligible: cols.map((c) => c.sortable !== false),
     headerCell(c, i) {
       const ind = el("span", { class: "sort-ind", "aria-hidden": "true" });
-      const th = el("th", { class: "sortable" + (isNumericCol(c) ? " num" : ""), tabindex: "0", "aria-sort": "none", title: c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label }, [c.label, ind]);
+      const th = el("th", { class: "sortable" + (isNumericCol(c) ? " num" : "") + (c.exportOnly ? " export-only" : "") + (c.wrapHead ? " wrap-head" : ""), tabindex: "0", "aria-sort": "none", title: c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label }, [c.label, ind]);
       th.sortInd = ind;
       const cycle = () => {
         if (!sortable[i]) return;
@@ -1245,6 +1344,12 @@ function makeGridSort(desc, cols, rows) {
   return grid;
 }
 
+/** Whether a rendered grid row passes the column filters (true when none is on). A page that acts on "the rows shown"
+    reads this, so it never keeps its own copy of the filter rule (#7919). */
+export function gridRowShown(tr) {
+  return !filteredOut.has(tr);
+}
+
 /** The row object a rendered grid row was built from (a sorted grid's DOM order is not the row order). */
 export function gridRowOf(tr) {
   return trRow.get(tr);
@@ -1266,17 +1371,29 @@ export function reapplyGridSort(tbody) {
    the table never renders with no columns. */
 export function visibleColumns(cols, rows) {
   const kept = cols.filter((c) => {
-    if (!c.hideWhenEmpty) return true;
+    /* #7416: `hideWhenAllZero` drops a count column that is zero (or missing) on every row: a column of zeros on a healthy server says nothing, and a
+       column that has a number says why it is there in its header hint. */
+    if (c.hideWhenAllZero && !rows.some((row) => Number(getPath(row, c.key)) > 0)) return false;
+    if (!c.hideWhenEmpty && !c.hideWhenZero) return true;
     return rows.some((row) => {
       const v = getPath(row, c.key);
-      return v != null && v !== "";
+      /* #7410: `hideWhenZero` also drops a column whose every value is 0, the counters only some engines fill (Top Query Shapes' temp blocks, WAL and peak memory). */
+      return v != null && v !== "" && !(c.hideWhenZero && Number(v) === 0);
     });
   });
   return kept.length ? kept : cols;
 }
 
 function isNumericCol(c) {
-  return c.align === "right" || ["int", "num1", "num2", "rate", "ms", "mb", "bytes", "pct"].includes(c.format);
+  return c.align === "right" || ["int", "id", "num1", "num2", "rate", "ms", "mb", "mbfit", "bytes", "pct"].includes(c.format);
+}
+
+/* #7410: a column with `exportOnly: true` is built and not drawn (`.export-only`), so Copy and the CSV carry its value under its label. The Logging
+   Settings Audit folds Unit and Source into the Value cell and the cost into the remedy cell, and the export still keeps each as its own field. */
+function exportOnlyCell(row, c) {
+  const td = cell(row, c);
+  if (c.exportOnly) td.classList.add("export-only");
+  return td;
 }
 
 function cell(row, c) {
@@ -1291,17 +1408,23 @@ function cell(row, c) {
     if (isNumericCol(c)) rcls.push("num");
     if (c.clamp) rcls.push("clamp");
     else if (c.wrap) rcls.push("wrap");
+    /* #7607: `follow: true` on a wrap column makes its width follow the window (`wrap-follow`). A column flag, not a cellClass function, because a stored dashboard template spreads these column lists and reads only literals. */
+    if (c.follow) rcls.push("wrap-follow");
     if (c.mono) rcls.push("mono");
     if (c.pre) rcls.push("pre");
     if (c.sevKey) rcls.push(sevClass(getPath(row, c.sevKey)));
     if (typeof c.cellClass === "function") { const k = c.cellClass(row); if (k) rcls.push(k); }
     return el("td", { class: rcls.join(" ") || null }, [c.render(row)]);
   }
-  const raw = getPath(row, c.key);
+  const found = getPath(row, c.key);
+  /* #7578: `nullAs` is the value a missing figure means (see the stat tile). */
+  const raw = found == null && c.nullAs != null ? c.nullAs : found;
   const cls = [];
   if (isNumericCol(c)) cls.push("num");
-  if (c.clamp) cls.push("clamp");
+  if (c.name) cls.push(c.path ? "name-cell path-cell" : "name-cell");
+  else if (c.clamp) cls.push("clamp");
   else if (c.wrap) cls.push("wrap");
+  if (c.follow) cls.push("wrap-follow");
   if (c.mono) cls.push("mono");
   if (c.pre) cls.push("pre");
   if (c.sevKey) cls.push(sevClass(getPath(row, c.sevKey)));
@@ -1311,9 +1434,13 @@ function cell(row, c) {
      "n/a (log service)" for the log file of a Hyperscale database). The server wrote the sentence; the page only
      shows it in place of the bare em dash. */
   const why = raw == null && c.nullKey ? getPath(row, c.nullKey) : null;
-  const shown =
+  /* stateZeroDash: an alert-history value column whose stored 0 on a state-only row is not a reading (util.js's isStateZero, the
+     rule the Alert History page applies) shows the dash instead of a formatted 0. */
+  const shownPlain =
     why != null && why !== ""
       ? String(why)
+      : c.stateZeroDash === true && isStateZero(row, c.key)
+        ? "—"
       : typeof c.display === "function"
         ? String(c.display(row) ?? "—")
         : c.format
@@ -1327,6 +1454,9 @@ function cell(row, c) {
               : c.plain
                 ? plainText(String(raw))
                 : String(raw);
+  /* #7725: a row the server marked database_dropped (work in a database the server no longer lists) reads "<name> (dropped)" in its Database cell,
+     on every grid that has one (Top Procedures, Top Queries, and the FinOps lists). The name itself is untouched in the row. */
+  const shown = c.key === "database_name" && getPath(row, "database_dropped") === true ? shownPlain + " (dropped)" : shownPlain;
   /* #5644 W20: a column marked `localizeText` (a message or note: collection-health notes, collector errors) shows any ISO
      instant in its sentence in local time, like the grids beside it. Opt-in: query text, statement text, details and
      identifiers are data, and a literal such as '2026-01-01T00:00:00' inside them must show as written. */
@@ -1335,7 +1465,11 @@ function cell(row, c) {
      same body carries query and SQL lines that must print as written. Never use `localizeText` on a column that holds SQL. */
   const text = c.localizeAlertDetail && !c.format
     ? localizeAlertDetail(shown, getPath(row, "newest_sample"))
-    : c.localizeText && !c.format ? localizeIsoText(shown) : shown;
+    : c.localizeText && !c.format ? localizeIsoText(shown) : withheldDisplayText(shown); /* #7548: the stored marker reads as words, nothing else changes */
+  /* #7533: `name: true` is a name column (Database, File, Path, Job, Instance): one line under the stylesheet's window-following cap, an ellipsis, and the whole name in the cell's title.
+     `path: true` (a file path) cuts the START instead, so the file name at the end stays visible (#7533 review): see clampText.
+     It does not open on a click, because a name is read and copied, not expanded. Copy cell and the CSV read the row, so they carry the whole name too. */
+  if (c.name) return el("td", { class: cls.join(" ") || null }, [clampText(text, { expandable: false, path: c.path === true })]);
   if (c.clamp) return el("td", { class: cls.join(" ") || null }, [clampText(text)]);
   /* #6154: `detailKey` names a field of the same row that holds the long explanation. The cell shows only its short value and the
      explanation opens under it on a click (a <details>, so the keyboard works), so a row stays one line tall. Text that is the same
@@ -1344,8 +1478,7 @@ function cell(row, c) {
     const full = getPath(row, c.detailKey);
     if (typeof full === "string" && full !== "") {
       const detail = el("p", { class: "cell-detail-text", text: plainText(full) });
-      const box = disclosure(text, detail, { max: 60 });
-      box.classList.add("cell-detail");
+      const box = disclosure(text, detail, { max: c.detailMax || 60, cell: true });
       return el("td", { class: cls.join(" ") || null }, [box]);
     }
   }
@@ -1363,6 +1496,22 @@ export function visibleStats(stats, data) {
     if (s.showWhen && getPath(data, s.showWhen.key) !== s.showWhen.equals) return false;
     return true;
   });
+}
+
+/* #7729: the stat grid is auto-fit, so each row fills with as many 150 px tiles as fit and the rest wrap: 15 tiles at 1536 px ran 7, 7 and 1, with
+   Buffer pool alone on a third row. Once the grid is laid out, the column count is the fewest columns that keep the same number of rows
+   (15 tiles, at most 7 across: 3 rows, so 5 across). It follows the width, so 1280 and 2560 px each balance on their own. A grid that fits on one
+   row keeps one column a tile. Where there is no ResizeObserver (a test's fake DOM) the CSS auto-fit stays. */
+function balanceTiles(grid, count) {
+  if (count < 3 || typeof ResizeObserver !== "function") return;
+  new ResizeObserver(() => {
+    const width = grid.clientWidth;
+    if (!width) return;
+    const gap = parseFloat(getComputedStyle(grid).columnGap) || 12;
+    const across = Math.max(1, Math.floor((width + gap) / (150 + gap)));
+    const rows = Math.ceil(count / across);
+    grid.style.gridTemplateColumns = "repeat(" + Math.ceil(count / rows) + ", minmax(0, 1fr))";
+  }).observe(grid);
 }
 
 /* stat: desc = { stats:[{key,label,format,small?,sev?,nullKey?}], emptyText? } over the tool's top-level object. A stat
@@ -1384,32 +1533,107 @@ function vizStat(data, desc) {
   if (desc.emptyText && stats.every((s) => getPath(data, s.key) == null)) return emptyStrip(desc.emptyText);
   /* `hideWhenEmpty` drops a tile whose value is missing (and that has no sentence of its own to show instead): a panel
      of fifteen tiles, half of them dashes, said less than the seven that had a value. */
-  const shown = stats.filter((s) => !(s.hideWhenEmpty && getPath(data, s.key) == null && !(s.nullKey && getPath(data, s.nullKey))));
-  return el(
-    "div",
-    { class: "stats" },
-    shown.map((s) => {
-      const sev = s.sev || s.severity;
-      const valueClass = "value" + (s.small ? " small" : "") + (sev ? " " + sevClass(sev) : "");
-      const raw = getPath(data, s.key);
-      const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
-      /* `appendKey` adds a second field of the payload after the value, when it has one: the product level "RTM" and its update level "CU20" read "RTM CU20" (#6159). */
-      const extra = raw != null && s.appendKey ? getPath(data, s.appendKey) : null;
-      const shownValue = applyFormat(s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");
-      return el("div", { class: "stat" }, [
-        el("div", { class: valueClass, text: why != null && why !== "" ? String(why) : shownValue }),
-        el("div", { class: "label", text: s.label }),
-      ]);
-    })
-  );
+  const shown = stats.filter((s) => !s.pageCut && !(s.hideWhenEmpty && getPath(data, s.key) == null && !(s.nullKey && getPath(data, s.nullKey))));
+  /* #7410: a stat with `pageCut` is no tile. The read's "the window held more than this page" flag is about the grid, not the server,
+     so when it is true the panel says so in words (the stat's `pageCut` sentence, or what its `pageCut(data)` returns when the sentence carries a count, #7551) under the tiles. */
+  const cutNotes = stats.filter((s) => s.pageCut && getPath(data, s.key) === true).map((s) => noticeStrip(typeof s.pageCut === "function" ? s.pageCut(data) : s.pageCut));
+  const tile = (s) => {
+    const sev = s.sev || s.severity;
+    /* `display(data)` is a tile whose text is made from more than one field of the answer (the Alert setup tile says how many gaps there are). */
+    const made = typeof s.display === "function" ? s.display(data) : null;
+    const found = made != null ? made : getPath(data, s.key);
+    /* #7578: `nullAs` is the value a missing figure means when the read answered at all (Runnable %: no other request was running, so the share is 0). */
+    const raw = found == null && s.nullAs != null ? s.nullAs : found;
+    const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
+    /* `small` shrinks a long text value (a state name, a database name). A dash is not text, and at 1rem it drew
+       smaller than the dashes of the tiles beside it (#7409), so a missing value keeps the full tile size. */
+    const hasValue = raw != null || (why != null && why !== "");
+    const valueClass = "value" + (s.small && hasValue ? " small" : "") + (sev ? " " + sevClass(sev) : "");
+    /* `appendKey` adds a second field of the payload after the value, when it has one: the product level "RTM" and its update level "CU20" read "RTM CU20" (#6159). */
+    const extra = raw != null && s.appendKey ? getPath(data, s.appendKey) : null;
+    const shownValue = applyFormat(made != null ? "text" : s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");
+    const valueText = why != null && why !== "" ? String(why) : shownValue;
+    /* #7552: a wait name (SOS_SCHEDULER_YIELD) may break after an underscore, so a narrow tile wraps between words and not at its last letter. */
+    const valueKids = s.breakAfterUnderscore ? valueText.split(/(?<=_)/).flatMap((part, i) => (i ? [el("wbr"), part] : [part])) : null;
+    return el("div", { class: "stat", title: s.hint || null }, [
+      valueKids ? el("div", { class: valueClass }, valueKids) : el("div", { class: valueClass, text: valueText }),
+      el("div", { class: "label", text: s.label }),
+    ]);
+  };
+  /* #7416: a `sentence` stat is prose, not a figure. Drawn as a bold tile it filled a tile track and pushed its neighbour wide;
+     it is a line of text across the panel instead, and the tiles that remain keep their natural width. */
+  const sentences = shown.filter((s) => s.sentence && getPath(data, s.key) != null && getPath(data, s.key) !== "");
+  if (!sentences.length) {
+    const tiles = el("div", { class: "stats" }, shown.map(tile));
+    balanceTiles(tiles, shown.length);
+    return cutNotes.length ? el("div", {}, [tiles, ...cutNotes]) : tiles;
+  }
+  const rest = shown.filter((s) => !s.sentence);
+  return el("div", { class: "stat-block" }, [
+    ...sentences.map((s) => el("p", { class: "stat-sentence", text: s.localizeText ? localizeIsoText(String(getPath(data, s.key)), s.localizeMinutes ? { minutes: true, since: s.sinceKey ? getPath(data, s.sinceKey) : null } : undefined) : String(getPath(data, s.key)) })),
+    rest.length ? el("div", { class: "stats natural" }, rest.map(tile)) : null,
+    ...cutNotes,
+  ]);
 }
 
 /* line: desc = { rowsKey, xKey, series:[{key,label,color?}], format?, emptyText? }. `format: "int"` declares the
    series are COUNTS, so the chart also puts its gridlines on whole numbers (see integerTicks in charts.js). */
+/* #7571: a read that answers one row per (time, group) -- a wait type, a database -- is drawn one series per group, not one line
+   through every row. `groupKey` names the row field that holds the group and the descriptor's one `series` entry names the number.
+   Rows at one time fold into one point, a group repeated at one time adds up, and past MAX_GROUP_SERIES groups the smallest by
+   total fold into "(other)" so the stack's height at each time is still the whole figure the grid beside it adds up to. */
+const MAX_GROUP_SERIES = 8;
+const OTHER_GROUP = "(other)";
+const GROUP_KEY_PREFIX = "g:";
+export function groupedPoints(rows, xKey, groupKey, valueField) {
+  const totals = new Map();
+  for (const r of rows) {
+    if (!r || r[xKey] == null) continue;
+    const g = r[groupKey] == null || r[groupKey] === "" ? "(none)" : String(r[groupKey]);
+    totals.set(g, (totals.get(g) || 0) + (Number(r[valueField]) || 0));
+  }
+  const ranked = [...totals.keys()].sort((a, b) => totals.get(b) - totals.get(a) || (a < b ? -1 : a > b ? 1 : 0));
+  const kept = ranked.length > MAX_GROUP_SERIES ? ranked.slice(0, MAX_GROUP_SERIES - 1) : ranked;
+  const folded = ranked.length > kept.length;
+  const byTime = new Map();
+  for (const r of rows) {
+    if (!r || r[xKey] == null) continue;
+    const g0 = r[groupKey] == null || r[groupKey] === "" ? "(none)" : String(r[groupKey]);
+    const g = kept.includes(g0) ? g0 : OTHER_GROUP;
+    const v = Number(r[valueField]);
+    if (!Number.isFinite(v)) continue;
+    /* A group is a database or wait type NAME, so it is data: the point holds no prototype (a database named __proto__ is an ordinary
+       key) and each group's key carries a prefix (a database named like xKey, collection_time, does not overwrite the point's time). */
+    if (!byTime.has(r[xKey])) {
+      const first = Object.create(null);
+      first[xKey] = r[xKey];
+      byTime.set(r[xKey], first);
+    }
+    const pt = byTime.get(r[xKey]);
+    pt[GROUP_KEY_PREFIX + g] = (pt[GROUP_KEY_PREFIX + g] || 0) + v;
+  }
+  const names = folded ? [...kept, OTHER_GROUP] : kept;
+  return {
+    points: [...byTime.values()].sort((a, b) => String(a[xKey]).localeCompare(String(b[xKey]))),
+    series: names.map((n, i) => ({ key: GROUP_KEY_PREFIX + n, label: n, color: SERIES_COLORS[i % SERIES_COLORS.length] })),
+  };
+}
+
 function vizLine(data, desc) {
-  const seriesCfg = Array.isArray(desc.series) ? desc.series : [];
-  if (!seriesCfg.length) return emptyStrip(NO_FIELDS_MSG);
-  const points = getPath(data, desc.rowsKey) || [];
+  const baseSeriesCfg = Array.isArray(desc.series) ? desc.series : [];
+  if (!baseSeriesCfg.length) return emptyStrip(NO_FIELDS_MSG);
+  const rawPoints = getPath(data, desc.rowsKey) || [];
+  const grouped = desc.groupKey && Array.isArray(rawPoints) ? groupedPoints(rawPoints, desc.xKey, desc.groupKey, baseSeriesCfg[0].key) : null;
+  const points = grouped ? grouped.points : rawPoints;
+  const allSeriesCfg = grouped ? grouped.series : baseSeriesCfg;
+  /* #7394: `hideEmptySeries` drops a series with no measured value at any point, as the desktop's PostgreSQL trend charts do: a
+     latency that is null on every point (avg read ms with track_io_timing off, the default) is a fact about the configuration, and
+     a legend entry with no line would read as a flat zero. A chart left with no series says `noSeriesText` (or its emptyText). */
+  const measured = (s) => points.some((p) => p && p[s.key] != null && p[s.key] !== "" && !Number.isNaN(Number(p[s.key])));
+  const seriesCfg = desc.hideEmptySeries && points.length ? allSeriesCfg.filter(measured) : allSeriesCfg;
+  /* `noSeriesText` may be a function of the payload, for a sentence whose cause the payload itself can name. */
+  const noSeries = typeof desc.noSeriesText === "function" ? desc.noSeriesText(data) : desc.noSeriesText;
+  if (!seriesCfg.length) return emptyStrip(noSeries || desc.emptyText || NO_FIELDS_MSG);
   /* ZERO points is a different statement from ONE point, and only the descriptor knows which sentence is true.
      A read whose empty array means the thing simply did not happen must say so, not inherit a warming-up
      message about a condition it never had: get_blocking_trend and get_deadlock_trend used to return
@@ -1420,13 +1644,24 @@ function vizLine(data, desc) {
      now draws that lone bucket as a marker (a single reading IS data) rather than the old "not enough data
      points" strip — so a series that reached one bucket reads consistently beside siblings that reached two. */
   if (!points.length && desc.emptyText) return emptyStrip(desc.emptyText);
+  /* #7402: points came back and none holds a number for any series (an idle server just after a restart: its one point has no rate yet).
+     Say what happened, in the read's own words when it has a message, instead of a chart with nothing on it. */
+  const drawable = (v) => v != null && v !== "" && Number.isFinite(Number(v));
+  if (points.length && !points.some((p) => seriesCfg.some((s) => drawable(p && p[s.key])))) return emptyStrip(noValuesText(data));
+  /* #7549: `allZeroText` is the one line drawn in place of a chart whose every measured value, in every series, is 0: a healthy server's counters are flat
+     lines on a 0 to 1 axis, a full card each, that say less than a sentence. One value above 0, in any series, keeps the chart. */
+  if (desc.allZeroText && !points.some((p) => seriesCfg.some((s) => drawable(p && p[s.key]) && Number(p[s.key]) > 0))) {
+    /* The line keeps the stats-reset fact the chart's marker would have carried: a window that crossed a reset differenced against a fresh baseline. */
+    const crossedReset = desc.resetKey && points.some((p) => p && p[desc.resetKey] === true);
+    return emptyStrip(crossedReset ? desc.allZeroText + " (statistics were reset in this window)" : desc.allZeroText);
+  }
   const series = seriesCfg.map((s, i) => ({
     key: s.key,
     label: s.label,
     color: s.color || SERIES_COLORS[i % SERIES_COLORS.length],
   }));
   /* The second argument is the axis tick step the chart passes (#6158), so a small range prints enough decimals that no two ticks read alike. */
-  const formatValue = desc.format ? (v, o) => applyFormat(desc.format, v, o) : (v, o) => (o && o.step > 0 && tickDecimals(o.step) ? Number(v).toFixed(tickDecimals(o.step)) : String(Math.round(v)));
+  const formatValue = desc.format ? (v, o) => applyFormat(desc.format, v, o) : (v, o) => applyFormat("int", v, o); /* #7679: with the thousands separator (60,000, not 60000), as every other whole-number axis prints it */
   /* Percentage charts cap the y-domain at 100 so a 96% reading never rounds the axis up past 100% (B3). */
   const clampMax = desc.clampMax ?? (desc.format === "pct" ? 100 : null);
   /* #2802: span the x-axis over the REQUESTED window ("last N hours" ending now), not the data's own extent, so a
@@ -1434,30 +1669,164 @@ function vizLine(data, desc) {
      width is the panel's own `hours` param — `windowHours` when a fanout injects it (a fanout spec carries no
      params) or when loadPanelBody narrowed the read to the history it keeps, else desc.params.hours. Absent ⇒
      null ⇒ the chart keeps its data-extent domain, unchanged. */
-  const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours);
+  const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours, desc.asOfIgnored ? null : desc.params && desc.params.as_of);
   /* Drag-to-zoom over the loaded points (zoomableLineChart, charts.js). The zoom is held under this chart's
      identity (title, read and series) and the page's scope (server + tab + preset range), so the poll's rebuild
      draws it again and a different server, tab or range does not. */
   const zoomId = [desc.title || "", desc.read || desc.path || "", desc.xKey, seriesCfg.map((s) => s.key).join(",")].join("|");
-  return zoomableLineChart({
-    points,
+  /* #7394: `resetKey` names a boolean on each point (counter_reset) that marks an interval across a statistics reset. Each one is drawn as
+     a vertical marker with a key entry ("Stats reset 2") under the chart, because the step a reset leaves in a differenced series is the
+     instrument re-baselining, not the workload, and the old table's Stats Reset column was the only place that said one happened. */
+  const resetTimes = desc.resetKey ? points.filter((p) => p && p[desc.resetKey] === true).map((p) => p[desc.xKey]) : [];
+  const annotations = resetTimes.length ? [{ source: "stats_reset", displayName: desc.resetLabel || "Stats reset", events: resetTimes.map((ts) => ({ ts, label: "" })) }] : null;
+  /* #7508: `seamKey` names the field of the reply holding the instant where the series changes grain (routing.raw_from on the Query
+     Store Duration Trend), so the chart's gap rule judges each grain against its own spacing. Absent or unparseable: no seam. */
+  const seam = desc.seamKey ? parseUtc(getPath(data, desc.seamKey)) : null;
+  /* #7692: `bucketKey` names the field of the reply stating its bucket (bucket_minutes). A read that returns rows only where something ran (the Query
+     Duration Trend on a quiet server) has uneven steps, so the chart's own cadence guess reads it as events and never breaks it, and a four hour hole
+     drew one diagonal. The step is the bucket, or the rows' own cadence when a collector runs slower (bucketMsOf), judged from EVERY row's time, a row
+     with no figure included. A panel with a seam (Query Store) names no bucketKey: its two grains are judged by the seam. */
+  const bucketMs = desc.bucketKey
+    ? bucketMsOf(getPath(data, desc.bucketKey), (Array.isArray(rawPoints) ? rawPoints : []).map((p) => { const d = p ? parseUtc(p[desc.xKey]) : null; return d ? d.getTime() : NaN; }))
+    : null;
+  /* #7682: `footNoteKey` names a text field of the reply drawn as a notice under the chart, only when a series was left out for having no measured value
+     (get_cpu_utilization's host_cpu_note: this server cannot report host CPU, so Other and Total are not drawn). */
+  const footNote = desc.footNoteKey && seriesCfg.length < allSeriesCfg.length ? getPath(data, desc.footNoteKey) : null;
+  /* `zeroFill` draws the buckets an event-count read left out at 0 (zeroFilledPoints): the read records every event, so a bucket with no row is a
+     count of 0. Not when the answer's source (`sourceKey`) is the DMV snapshot, a sample taken on a schedule: a bucket it has no row for is time
+     nobody observed, so those points reach the chart as they came. */
+  const fill = desc.zeroFill && !(desc.sourceKey && getPath(data, desc.sourceKey) === SAMPLED_BLOCKING_SOURCE);
+  /* #7850: the reply's `covered` ranges are the time the collector's successful runs read; the fill is 0 only inside them. A reply without the field (an
+     older service) fills the whole window, as #7839 did. */
+  const covered = fill ? coveredRanges(getPath(data, "covered")) : null;
+  /* #7850: with a `covered` list every covered bucket has a point, so two neighbouring points more than one bucket apart have a stretch nobody
+     observed between them, and the line breaks there (a lone point is drawn as a dot). The bucket is the reply's `bucket_minutes`: get_blocking_trend
+     and get_deadlock_trend state 1, as their SQL buckets by minute. Only a reply with no such field falls back to the smallest gap between its events,
+     a guess that joins two events exactly that far apart. The chart's own spacing guess cannot see it: three events
+     hours apart are uneven steps, read as events, and were joined into one slope. Without `covered` the chart keeps its own rule, as before. */
+  const fillBucketMs = covered ? zeroFillStepMs(points, desc.xKey, getPath(data, "bucket_minutes")) : null;
+  const chart = zoomableLineChart({
+    points: fill ? zeroFilledPoints(points, desc.xKey, seriesCfg, getPath(data, "bucket_minutes"), win, covered) : points,
     xKey: desc.xKey,
     series,
+    annotations,
+    gapSeamMs: seam ? seam.getTime() : null,
+    bucketMs: fillBucketMs != null ? fillBucketMs : bucketMs,
     formatValue,
     clampMax,
     /* A count chart's ticks are whole numbers: on a small domain a fractional step (0.2, 0.5) prints through the
        whole-number formatter as the same label several times over ("1 1 1 0 0 0" on a blocking-events axis). */
     integerTicks: desc.format === "int",
-    unit: desc.unit ?? null,
+    /* #7571: "stacked-bar" draws a grouped read as one bar per time, one segment per group. Absent: the chart's default line. */
+    mode: desc.mode || undefined,
+    /* #7488: a size chart picks its ticks in the unit its labels step up to (fmtMb prints GB from 1,024). #7555: a bytes chart likewise. */
+    sizeUnit: desc.format === "mb" ? "mb" : desc.format === "bytes" ? "bytes" : desc.format === "ms" ? "ms" : null,
+    /* #7586: a duration axis carries its unit on every tick (fmtMs), so an "ms" caption above it would name a second unit. */
+    unit: desc.format === "ms" && desc.unit === "ms" ? null : (desc.unit ?? null),
     title: desc.title || null,
     atTime: desc.atTime || null,
     source: desc.read || desc.path ? { read: desc.read || desc.path, params: desc.params || null } : null,
     windowStart: win ? win.windowStart : null,
     windowEnd: win ? win.windowEnd : null,
   }, zoomId, chartZoomScope(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours));
+  /* #7699: `seamCaption` turns the seam instant into the sentence that says why the line changes grain there. A caption, not a warning. */
+  const seamCaption = seam && typeof desc.seamCaption === "function" ? desc.seamCaption(seam) : null;
+  const under = [];
+  if (typeof footNote === "string" && footNote) under.push(noticeStrip(footNote));
+  if (typeof seamCaption === "string" && seamCaption) under.push(captionStrip(seamCaption));
+  return under.length ? el("div", {}, [chart, ...under]) : chart;
 }
 
-/* bandlist: desc = { rowsKey, primaryKey, bandKey, bandLabelKey?, reasonKey?, navKey?, emptyText? } */
+/**
+ * The `covered` field of a trend reply (#7850) as [startMs, endMs] pairs, or null when the reply has none (an older service: the fill keeps #7839's
+ * whole-window behaviour). An empty list is a window no run covered, so nothing is filled. A range with an unreadable time is dropped.
+ */
+export function coveredRanges(raw) {
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  for (const r of raw) {
+    const from = r ? parseUtc(r.start) : null;
+    const to = r ? parseUtc(r.end) : null;
+    if (from instanceof Date && to instanceof Date && Number.isFinite(from.getTime()) && Number.isFinite(to.getTime()) && to > from) out.push([from.getTime(), to.getTime()]);
+  }
+  return out;
+}
+
+/**
+ * The bucket step, in ms, of a zero-filled trend (#7850): the reply's own `bucket_minutes` when it states one, else the smallest step between the
+ * points it returned, and never under a minute. zeroFilledPoints lays its grid at this step and the chart breaks the line at a jump longer than it.
+ */
+export function zeroFillStepMs(points, xKey, bucketMinutes) {
+  let stepMs = Number(bucketMinutes) > 0 ? Number(bucketMinutes) * 60000 : Infinity;
+  if (!Number.isFinite(stepMs)) {
+    const times = [...new Set((Array.isArray(points) ? points : []).map((p) => { const d = p ? parseUtc(p[xKey]) : null; return d instanceof Date ? d.getTime() : NaN; }).filter(Number.isFinite))].sort((a, b) => a - b);
+    for (let i = 1; i < times.length; i++) stepMs = Math.min(stepMs, times[i] - times[i - 1]);
+    if (!Number.isFinite(stepMs)) stepMs = 60000;
+  }
+  return Math.max(60000, stepMs);
+}
+
+/**
+ * The points of an event-count trend with every bucket of the window present (`zeroFill`). get_blocking_trend and get_deadlock_trend
+ * return only the buckets that have events, so a bucket they leave out is a count of 0 and not a gap in collection: two reports a
+ * minute apart must not read as a line floating between 1 and 4. The bucket is the reply's own (`bucket_minutes`) when it states one,
+ * else the smallest step between the points it returned, and never under a minute. The window is the chart's own (windowStart and
+ * windowEnd in epoch ms); without one the fill spans the points. The points the read returned are kept as they are.
+ *
+ * `covered` (#7850) is the reply's `covered` ranges as [startMs, endMs] pairs (coveredRanges), the time the collector's successful runs read. A
+ * bucket is filled only when the whole bucket lies inside one range; a bucket outside them is time nobody observed and is left out, as it was before
+ * the fill. Null (no `covered` field, an older service) fills the whole window.
+ */
+export function zeroFilledPoints(points, xKey, seriesCfg, bucketMinutes, win, covered = null) {
+  const timeOf = (p) => {
+    const d = p ? parseUtc(p[xKey]) : null;
+    return d instanceof Date && Number.isFinite(d.getTime()) ? d.getTime() : null;
+  };
+  const have = new Map();
+  for (const p of points) {
+    const t = timeOf(p);
+    if (t != null && !have.has(t)) have.set(t, p);
+  }
+  const times = [...have.keys()].sort((a, b) => a - b);
+  if (!times.length) return points;
+  const stepMs = zeroFillStepMs(points, xKey, bucketMinutes);
+  const start = win && Number.isFinite(Number(win.windowStart)) ? Number(win.windowStart) : times[0];
+  const end = win && Number.isFinite(Number(win.windowEnd)) ? Number(win.windowEnd) : times[times.length - 1];
+  /* The grid is aligned on the first returned point, so every returned point sits on it. At most 50,000 buckets are drawn (a 30 day window of minute buckets is 43,200). */
+  const first = times[0] - Math.ceil((times[0] - start) / stepMs) * stepMs;
+  const out = [];
+  /* The ranges sorted by start, walked once as t rises: a range whose end the bucket has passed can never hold a later bucket. A scan of every range
+     per bucket was most of the fill's time on a 30 day window of minute buckets. */
+  const ranges = covered ? [...covered].sort((x, y) => x[0] - y[0]) : null;
+  let ri = 0;
+  for (let t = first, n = 0; t <= end && n < 50000; t += stepMs, n++) {
+    const p = have.get(t);
+    if (p) {
+      out.push(p);
+      continue;
+    }
+    if (ranges) {
+      while (ri < ranges.length && ranges[ri][1] < t + stepMs) ri++;
+      if (ri >= ranges.length || ranges[ri][0] > t) continue;
+    }
+    {
+      const zero = { [xKey]: new Date(t).toISOString() };
+      for (const s of seriesCfg) zero[s.key] = 0;
+      out.push(zero);
+    }
+  }
+  /* A returned point off the grid (a second row for one time, or one past the bucket cap) is kept too. A set, not a scan of `out` per point:
+     a week of minute buckets is 10,000 points against as many buckets, redrawn on every poll. */
+  const placed = new Set(out);
+  const gridCount = out.length;
+  for (const p of points) if (!placed.has(p) && timeOf(p) != null) out.push(p);
+  /* The grid is already in time order: sort only when an off-grid point was added. Sorting 43,200 minute buckets parsed their times twice per
+     comparison, over half of the fill's time on a 30 day window. */
+  return out.length === gridCount ? out : out.sort((a, b) => timeOf(a) - timeOf(b));
+}
+
+/* bandlist: desc = { rowsKey, primaryKey, bandKey, bandLabelKey?, reasonKey?, navKey?, navStore?, emptyText? }
+   navStore is the store a row's server opens in (#8095, the front door's store sections); absent, the current store. */
 function vizBandlist(data, desc) {
   const rows = getPath(data, desc.rowsKey) || [];
   if (!rows.length) return emptyStrip(desc.emptyText || "Nothing to show.");
@@ -1465,17 +1834,25 @@ function vizBandlist(data, desc) {
     "div",
     { class: "bandlist" },
     rows.map((r) => {
-      const band = getPath(r, desc.bandKey);
+      let band = getPath(r, desc.bandKey);
+      let bandLabel = getPath(r, desc.bandLabelKey) || band;
+      /* #7729: a row listed only for tiles that no band reads (`advisoryKey`, the fleet's advisory_tiles) is not Healthy: this list's dot and
+         pill say Attention, in the Warning colours. The server's band and the strip counts are the service's and stay as they are. */
+      const advisory = desc.advisoryKey ? getPath(r, desc.advisoryKey) : null;
+      if (band === "Healthy" && Array.isArray(advisory) && advisory.length) {
+        band = "Warning";
+        bandLabel = "Attention";
+      }
       const props = { class: "row " + bandClass(band) };
       if (desc.navKey) {
         const target = getPath(r, desc.navKey);
-        if (target) props.onActivate = () => navigateServer(target);
+        if (target) props.onActivate = () => navigateServer(target, desc.navStore);
       }
       return el("div", props, [
         el("span", { class: "dot " + bandClass(band) }),
         el("span", { class: "primary", text: getPath(r, desc.primaryKey) }),
         desc.reasonKey ? el("span", { class: "reason", text: getPath(r, desc.reasonKey) }) : null,
-        band ? el("span", { class: "badge " + bandClass(band), text: getPath(r, desc.bandLabelKey) || band }) : null,
+        band ? el("span", { class: "badge " + bandClass(band), text: bandLabel }) : null,
       ]);
     })
   );
@@ -1486,6 +1863,27 @@ function vizBandlist(data, desc) {
 /** Set the hash route to a server's detail page. */
 export function navigateServer(serverName, store) {
   location.hash = storeHash("#/server/" + encodeURIComponent(serverName), store);
+}
+
+/**
+ * Open one panel of a server's tab (#7416): a tile that says a column is nearly full goes to the panel that names it, not to the top of a tab
+ * that runs to tens of thousands of pixels. The panel is found by its `data-title` once the tab has drawn it (the tab builds its panels
+ * after the server's card arrives), then scrolled to the top of the view. It is looked for for four seconds and the scroll is repeated once
+ * after the tab's reads settle, because panels above it change height as they fill in.
+ */
+export function navigateServerPanel(serverName, store, tab, panelTitle) {
+  location.hash = storeHash("#/server/" + encodeURIComponent(serverName) + "/" + encodeURIComponent(tab), store);
+  let tries = 0;
+  const look = () => {
+    const panel = typeof document.querySelector === "function" ? document.querySelector('[data-title="' + panelTitle + '"]') : null;
+    if (panel && typeof panel.scrollIntoView === "function") {
+      panel.scrollIntoView({ block: "start" });
+      setTimeout(() => panel.scrollIntoView({ block: "start" }), 1500);
+      return;
+    }
+    if (++tries < 40) setTimeout(look, 100);
+  };
+  setTimeout(look, 100);
 }
 
 /** Collector rows worst first (Failing, then Warning, then the rest, then Healthy, then not applicable), each group in
@@ -1526,15 +1924,19 @@ export function statusToSev(status) {
     case "SUCCESS":
     case "ANALYZED":
     case "ONLINE":
+    case "LOW": /* #7699: the Latch Stats Severity band words */
       return "Healthy";
     case "STALE":
     case "WARNING":
+    case "REVIEW":
     case "PERMISSIONS":
     case "SKIPPED":
+    case "MEDIUM":
       return "Warning";
     case "FAILING":
     case "ERROR":
     case "OFFLINE":
+    case "HIGH":
       return "Critical";
     default:
       return "Unknown";

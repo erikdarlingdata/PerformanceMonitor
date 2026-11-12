@@ -246,8 +246,10 @@ public sealed class QueryStatsPlanFetchTests
 
         QueryStatsCollector.Instance.WritePayload(row, writer, MakeContext(capture: true));
 
-        var call = Assert.Single(writer.PayloadOrDigestCalls);
-        Assert.Equal(("<plan/>", "ABCDEF"), call);
+        /* #7419: the text column goes through PayloadOrDigest too, ahead of the plan; this row has neither text nor digest. */
+        Assert.Equal(2, writer.PayloadOrDigestCalls.Count);
+        Assert.Equal(((string?)null, (string?)null), writer.PayloadOrDigestCalls[0]);
+        Assert.Equal(("<plan/>", "ABCDEF"), writer.PayloadOrDigestCalls[1]);
     }
 
     private sealed class NoDeltas : ICollectorDeltaCalculator

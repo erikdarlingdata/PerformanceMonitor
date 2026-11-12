@@ -8,6 +8,7 @@
 
 using System;
 using System.ComponentModel;
+using System.Linq;
 using System.Text.Json.Serialization;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitorLite.Services;
@@ -161,6 +162,17 @@ public class ServerConnection : INotifyPropertyChanged
     public System.Collections.Generic.List<string> ExcludedDatabases { get; set; } = new();
 
     /// <summary>
+    /// #7639: on Azure SQL Database, the databases that get Extended Events sessions (deadlock, blocked process, client
+    /// timeout, long query completions), each a database-scoped session that Azure caps per pool. Empty = every database,
+    /// which is how it worked before this setting. When set, only these get a session; <see cref="ExcludedDatabases"/> still
+    /// applies and wins. A server-scoped session on a box SQL Server covers every database and ignores this. A session this
+    /// install made in a database left off the list is left in place, never dropped. The ownerless legacy long-query session
+    /// is dropped in every database. Saved in servers.json; an older file
+    /// without the field loads it as empty.
+    /// </summary>
+    public System.Collections.Generic.List<string> XeSessionDatabases { get; set; } = new();
+
+    /// <summary>
     /// #1319: the per-server global database FILTER (display-only). When non-empty, database-scoped
     /// views (query grids, blocking, per-DB config, trends/slicers/heatmap) show only these databases;
     /// empty = "All" (today's behavior). Distinct from <see cref="ExcludedDatabases"/>, which is
@@ -184,6 +196,12 @@ public class ServerConnection : INotifyPropertyChanged
     public string DisplayNameWithIntent => ReadOnlyIntent ? $"{DisplayName} (Read-Only)" : DisplayName;
 
     /// <summary>
+    /// The sidebar's second line: the server name, or nothing when it would only repeat the display name above it.
+    /// </summary>
+    [JsonIgnore]
+    public string SidebarDetail => string.Equals(ServerNameDisplay, DisplayNameWithIntent, StringComparison.OrdinalIgnoreCase) ? string.Empty : ServerNameDisplay;
+
+    /// <summary>
     /// What a screen reader announces for a server in a list or drop-down box (UI Automation names an item by its text):
     /// the name the box shows, not the type name "ServerConnection".
     /// </summary>
@@ -205,19 +223,19 @@ public class ServerConnection : INotifyPropertyChanged
     {
         AuthenticationTypes.EntraMFA => "Microsoft Entra MFA",
         AuthenticationTypes.SqlServer => "SQL Server",
-        AuthenticationTypes.ServicePrincipal => "Azure — Service Principal",
-        AuthenticationTypes.ManagedIdentity => "Azure — Managed Identity",
+        AuthenticationTypes.ServicePrincipal => "Azure: Service Principal",
+        AuthenticationTypes.ManagedIdentity => "Azure: Managed Identity",
         /* The label names its own precondition on purpose. "Azure - Default Credential" would be
            the driver's word for it and would tell a user nothing about what it needs; this mode
            fails outright on a machine with no Azure sign-in on it, so the requirement belongs in
            the name rather than only in a failure message. */
-        AuthenticationTypes.EntraDefaultCredential => "Azure — Existing Sign-In (az login)",
+        AuthenticationTypes.EntraDefaultCredential => "Azure: Existing Sign-In (az login)",
         /* Named for what the user has to do, for the same reason as the label above it. "Device Code
            Flow" is the driver's phrase and describes a grant type; what a user needs to know before
            choosing it is that they will read a code off this screen and type it into a browser, and
            that the browser does not have to be on this machine - which is the whole reason the mode
            survives an elevated process. */
-        AuthenticationTypes.EntraDeviceCode => "Azure — Device Code (browser on any device)",
+        AuthenticationTypes.EntraDeviceCode => "Azure: Device Code (browser on any device)",
         _ => "Windows"
     };
 
@@ -234,6 +252,13 @@ public class ServerConnection : INotifyPropertyChanged
     /// </summary>
     [JsonIgnore]
     public bool? HasCollectorErrors { get; set; }
+
+    /// <summary>
+    /// While the connection check says this server is down, the sentence naming since when and the last connect error (#7590),
+    /// from <see cref="ServerConnectionStatus.UnreachableReason"/>; null otherwise. Never saved.
+    /// </summary>
+    [JsonIgnore]
+    public string? UnreachableReason { get; set; }
 
     /// <summary>
     /// The sentence saying this server's host is not the one the current Windows user confirmed for it (see
@@ -260,7 +285,7 @@ public class ServerConnection : INotifyPropertyChanged
     public ServerCardStatus CardStatus => ServerCardStatusRules.Classify(IsOnline, HasCollectorErrors == true);
 
     /// <summary>
-    /// Computed dot status for the sidebar indicator. One of: "Unknown", "Online", "Warning", "Offline".
+    /// Computed dot status for the sidebar indicator. One of: "Connecting", "Online", "Warning", "Offline".
     /// Drives the Ellipse fill via DataTrigger in MainWindow.xaml.
     /// </summary>
     [JsonIgnore]
@@ -282,15 +307,21 @@ public class ServerConnection : INotifyPropertyChanged
     /// </summary>
     [JsonIgnore]
     public string DotTooltip => string.Join("\n",
-        HostChangeNotice is { Length: > 0 } notice ? notice + "\n" + CardStatus.Headline() : CardStatus.Headline(),
-        "It reports the connection check only, not collection freshness — the Overview card's Last Collect row bands that.",
-        DotTooltipAction);
+        new[]
+        {
+            /* The sidebar's rail shows dots with no names beside them, so the tooltip opens on the server's name. */
+            string.IsNullOrEmpty(DisplayName) ? ServerName : DisplayName,
+            HostChangeNotice is { Length: > 0 } notice ? notice + "\n" + CardStatus.Headline() : CardStatus.Headline(),
+            /* #7590: an unreachable server says since when and why, from the in-process connection check. */
+            CardStatus == ServerCardStatus.Offline ? UnreachableReason : null,
+            "It reports the connection check only, not collection freshness. The Overview card's Last Collect row bands that.",
+            DotTooltipAction,
+        }.Where(line => !string.IsNullOrEmpty(line)));
 
-    /// <summary>The line the sidebar dot's tooltip ends on — the gesture the ROW actually supports.
+    /// <summary>The line the sidebar dot's tooltip ends on — the gesture the sidebar supports in both of its shapes.
     /// <c>ServerListView_MouseDoubleClick</c> connects; a single click only selects, so naming one would be
-    /// naming a no-op. Same sentence as the Overview card's closing line with the noun the reader is
-    /// pointing at, because the point of doing every surface is that they share a vocabulary.</summary>
-    private const string DotTooltipAction = "Double-click the row to open this server's tab";
+    /// naming a no-op. The rail shows the dot with no row beside it, so the sentence names no row.</summary>
+    private const string DotTooltipAction = "Double-click to open this server's tab";
 
     /// <summary>
     /// Display-only property for showing status in UI.
@@ -536,7 +567,7 @@ public class ServerConnection : INotifyPropertyChanged
             /* tcp: so SqlClient never falls back to a named pipe over SMB with this process's Windows credentials (#6352). */
             DataSource = ServerHostSetting.TcpDataSource(ServerName),
             InitialCatalog = string.IsNullOrWhiteSpace(DatabaseName) ? "master" : DatabaseName,
-            ApplicationName = "PerformanceMonitorLite",
+            ApplicationName = PerformanceMonitor.Common.MonitorApplicationNames.Lite,
             ConnectTimeout = 15,
             CommandTimeout = 60,
             TrustServerCertificate = TrustServerCertificate,

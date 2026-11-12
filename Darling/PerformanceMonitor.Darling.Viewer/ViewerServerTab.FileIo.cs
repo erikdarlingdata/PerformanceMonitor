@@ -78,20 +78,23 @@ public partial class ViewerServerTab
     /// sub-tab reads the per-file latency trend, the Throughput sub-tab reads the per-file MB/s trend.
     /// Both window on the toolbar's settable range like every other viewer surface.
     /// </summary>
-    private async Task LoadFileIoAsync()
+    private async Task LoadFileIoAsync(ViewerLoadTimer? timer = null)
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        /* #8549: the read is booked by name and the chart draw is a client step, so a slow File I/O says which of the two it was. */
         switch (FileIoSubTabs.SelectedIndex)
         {
             case 1: // File I/O Throughput
-                var throughput = await _dataService.GetFileIoThroughputTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
-                RenderFileIoThroughputCharts(throughput, startUtc, endUtc);
+                timer?.Surface = "File I/O > Throughput";
+                var throughput = await Timed(timer, "throughput trend read", _dataService.GetFileIoThroughputTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+                ClientStep(timer, "throughput chart draw", () => RenderFileIoThroughputCharts(throughput, startUtc, endUtc));
                 break;
             case 0: // File I/O Latency
             default:
-                var latency = await _dataService.GetFileIoLatencyTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
-                RenderFileIoLatencyCharts(latency, startUtc, endUtc);
+                timer?.Surface = "File I/O > Latency";
+                var latency = await Timed(timer, "latency trend read", _dataService.GetFileIoLatencyTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+                ClientStep(timer, "latency chart draw", () => RenderFileIoLatencyCharts(latency, startUtc, endUtc));
                 break;
         }
     }
@@ -113,7 +116,7 @@ public partial class ViewerServerTab
             foreach (var c in new[] { FileIoReadChart, FileIoWriteChart })
             {
                 c.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-                c.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+                c.Plot.Axes.SetLimitsX(ChartXStart(c.Plot, rangeStart, rangeEnd), rangeEnd);
                 ReapplyAxisColors(c);
                 c.Refresh();
             }
@@ -202,19 +205,19 @@ public partial class ViewerServerTab
         }
 
         FileIoReadChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        FileIoReadChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        FileIoReadChart.Plot.Axes.SetLimitsX(ChartXStart(FileIoReadChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(FileIoReadChart);
-        FileIoReadChart.Plot.YLabel("Read Latency (ms)");
+        FileIoReadChart.Plot.YLabel("ms");
         SetChartYLimitsWithLegendPadding(FileIoReadChart, 0, readMax > 0 ? readMax : 10);
-        ShowChartLegend(FileIoReadChart);
+        ShowChartLegend(FileIoReadChart, oneRow: true);
         FileIoReadChart.Refresh();
 
         FileIoWriteChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        FileIoWriteChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        FileIoWriteChart.Plot.Axes.SetLimitsX(ChartXStart(FileIoWriteChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(FileIoWriteChart);
-        FileIoWriteChart.Plot.YLabel("Write Latency (ms)");
+        FileIoWriteChart.Plot.YLabel("ms");
         SetChartYLimitsWithLegendPadding(FileIoWriteChart, 0, writeMax > 0 ? writeMax : 10);
-        ShowChartLegend(FileIoWriteChart);
+        ShowChartLegend(FileIoWriteChart, oneRow: true);
         FileIoWriteChart.Refresh();
     }
 
@@ -235,7 +238,7 @@ public partial class ViewerServerTab
             foreach (var c in new[] { FileIoReadThroughputChart, FileIoWriteThroughputChart })
             {
                 c.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-                c.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+                c.Plot.Axes.SetLimitsX(ChartXStart(c.Plot, rangeStart, rangeEnd), rangeEnd);
                 ReapplyAxisColors(c);
                 c.Refresh();
             }
@@ -283,19 +286,19 @@ public partial class ViewerServerTab
         }
 
         FileIoReadThroughputChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        FileIoReadThroughputChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        FileIoReadThroughputChart.Plot.Axes.SetLimitsX(ChartXStart(FileIoReadThroughputChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(FileIoReadThroughputChart);
-        FileIoReadThroughputChart.Plot.YLabel("Read Throughput (MB/s)");
+        FileIoReadThroughputChart.Plot.YLabel("MB/s");
         SetChartYLimitsWithLegendPadding(FileIoReadThroughputChart, 0, readMax > 0 ? readMax : 1);
-        ShowChartLegend(FileIoReadThroughputChart);
+        ShowChartLegend(FileIoReadThroughputChart, oneRow: true);
         FileIoReadThroughputChart.Refresh();
 
         FileIoWriteThroughputChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        FileIoWriteThroughputChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        FileIoWriteThroughputChart.Plot.Axes.SetLimitsX(ChartXStart(FileIoWriteThroughputChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(FileIoWriteThroughputChart);
-        FileIoWriteThroughputChart.Plot.YLabel("Write Throughput (MB/s)");
+        FileIoWriteThroughputChart.Plot.YLabel("MB/s");
         SetChartYLimitsWithLegendPadding(FileIoWriteThroughputChart, 0, writeMax > 0 ? writeMax : 1);
-        ShowChartLegend(FileIoWriteThroughputChart);
+        ShowChartLegend(FileIoWriteThroughputChart, oneRow: true);
         FileIoWriteThroughputChart.Refresh();
     }
 

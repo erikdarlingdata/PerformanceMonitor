@@ -27,6 +27,27 @@ namespace PerformanceMonitor.Collectors;
 public readonly record struct RowResetDecision(bool AnyReset = false, bool CreditedInGap = false, int IntervalSeconds = 0);
 
 /// <summary>
+/// #7419: the baselines (and pass windows) of some keys as they stood before a run advanced them, so a run that
+/// computed deltas but never stored them can put them back and leave the next run's delta spanning both intervals.
+/// </summary>
+public interface IDeltaBaselineSnapshot
+{
+    /// <summary>Puts back every captured baseline the run itself wrote. A baseline someone else replaced or cleared since
+    /// (a server cleared on a reconnect) is left alone. Safe to call once; later calls do nothing.</summary>
+    void Restore();
+}
+
+/// <summary>
+/// #7419: implemented by a row list whose read already advanced the delta baselines of rows it may not store. A host that
+/// ends a run before the rows are stored calls <see cref="RollBackBaselines"/>, so the next run's delta covers both intervals.
+/// </summary>
+public interface IBaselineRollback
+{
+    /// <summary>Puts the baselines back as they were before the read. Does nothing the second time.</summary>
+    void RollBackBaselines();
+}
+
+/// <summary>
 /// Delta computation contract for cumulative DMV counters. Definitions own WHICH fields are
 /// delta'd, under WHICH counter-group names and keys, and with WHICH gap policy — that is
 /// parity-critical monitoring brain. Hosts supply the stateful implementation (Lite:
@@ -242,4 +263,23 @@ public interface ICollectorDeltaCalculator
     /// </summary>
     IReadOnlyList<string> DrainWaitStatsClearWarnings(int serverId)
         => Array.Empty<string>();
+
+    /// <summary>
+    /// #7419: captures the cached baseline of every (group, key) pair on <paramref name="serverId"/> and the pass window of
+    /// every group, before a collector's read advances them for <paramref name="collectionTime"/>. Default-implemented to
+    /// return null (nothing captured, nothing to restore) like <see cref="PeekBaselines"/>, so every test double compiles.
+    /// </summary>
+    /// <param name="keepNewKeys">True leaves a key the run saw for the first time in place on restore, so its next delta is one
+    /// interval, as it is when nothing fails. False removes it, so the next run meets the key with no baseline and credits its
+    /// whole count on its own evidence that the counters began since the previous run: query_stats (#7419) for every key, through
+    /// its series age, and pg_statement_stats for an entry whose stats_since places it after the previous run (#7189).</param>
+    IDeltaBaselineSnapshot? CaptureBaselines(int serverId, IReadOnlyList<string> groups, IReadOnlyCollection<string> keys, DateTime collectionTime, bool keepNewKeys = false)
+        => null;
+
+    /// <summary>
+    /// #7782: captures one pass window that moves on a clock other than the collection time, as it stands before the run rolls
+    /// it forward to <paramref name="observedTime"/>. Default-implemented to return null, like <see cref="CaptureBaselines"/>.
+    /// </summary>
+    IDeltaBaselineSnapshot? CapturePass(int serverId, string group, DateTime observedTime)
+        => null;
 }

@@ -45,13 +45,15 @@ namespace Darling.Tests;
 /// text (a baseline interval and a stepped-up recent interval, ~3 KB of parameterized text each -- the #4198
 /// field offender), 30 multi-process deadlock graphs, 30 blocked-process reports with report XML, 20 collectors'
 /// worth of collection-log history, plan-correction recommendations across every tenant database, a page of long
-/// query completions, and 50 sibling servers (one collection each) so <c>get_fleet_overview</c> answers with the
+/// query completions, one daily snapshot of 120 tables' index and object stats (#8655: more tables than
+/// <c>get_table_index_sizes</c>' 100-table page holds, each row carrying the growth note a single snapshot gives it),
+/// and 50 sibling servers (one collection each) so <c>get_fleet_overview</c> answers with the
 /// #4198-measured 43-50-card shape instead of the one server this fixture otherwise seeds.</para>
 ///
 /// <para><b>Known gaps.</b> A tool whose required parameter has no default and is not one of the three DI
 /// services below gets a placeholder (0/false/null) instead -- it likely answers empty/not-found and passes
 /// trivially, because this fixture does not seed its backing rows/state. <c>get_analysis_findings</c>'s
-/// <c>analysis_findings</c> table, <c>get_index_usage</c>/<c>get_object_locking</c>'s object-level stats, and
+/// <c>analysis_findings</c> table and
 /// every single-row drill-down (<c>get_custom_view</c>, <c>get_plan_xml</c>, <c>get_custom_alert_rule</c>, ...)
 /// are in this bucket; each run's GAPS output (and the PR body) names exactly which. <c>describe_custom_view_catalog</c>
 /// takes no parameters at all -- a static catalog description -- so it reproduces its #4198 size with no seeding.</para>
@@ -59,7 +61,7 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class McpReadToolBudgetLiveTests
 {
-    private const string ServerName = "mcp-read-tool-budget";
+    internal const string ServerName = "mcp-read-tool-budget";
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
 
     private const int DbCount = 12;
@@ -71,6 +73,7 @@ public sealed class McpReadToolBudgetLiveTests
     private const int CollectionLogSamplesPerCollector = 10;
     private const int PlanCorrectionRows = 30;
     private const int LongQueryRows = 20;
+    private const int TableRows = 120;
     private const int FleetServerCount = 50;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -209,14 +212,14 @@ public sealed class McpReadToolBudgetLiveTests
         name == "audit_config" ||
         WriteToolRoster.Contains(name);
 
-    private static (string Name, MethodInfo Method)[] ReadToolMethods() =>
+    internal static (string Name, MethodInfo Method)[] ReadToolMethods() =>
         AllToolMethods().Where(x => !IsExcluded(x.Name)).ToArray();
 
     /// <summary>Binds one tool's parameters: its DI services, <c>server_name</c> at the seeded server, every
     /// other optional parameter at its declared default. A required parameter that is none of those gets a
     /// placeholder and a <paramref name="gaps"/> note -- see the class remarks' "Known gaps".</summary>
-    private static object?[] BindArgs(MethodInfo method, NpgsqlDataSource postgres, DarlingAnalysisService analysisService,
-        McpToolGuideCatalog catalog, List<string> gaps, string toolName)
+    internal static object?[] BindArgs(MethodInfo method, NpgsqlDataSource postgres, DarlingAnalysisService analysisService,
+        McpToolGuideCatalog catalog, List<string> gaps, string toolName, IReadOnlyDictionary<string, object?>? overrides = null)
     {
         var parameters = method.GetParameters();
         var args = new object?[parameters.Length];
@@ -226,6 +229,7 @@ public sealed class McpReadToolBudgetLiveTests
             if (p.ParameterType == typeof(NpgsqlDataSource)) { args[i] = postgres; continue; }
             if (p.ParameterType == typeof(DarlingAnalysisService)) { args[i] = analysisService; continue; }
             if (p.ParameterType == typeof(McpToolGuideCatalog)) { args[i] = catalog; continue; }
+            if (overrides is not null && p.Name is { } overridden && overrides.TryGetValue(overridden, out var value)) { args[i] = value; continue; }
             if (p.Name == "server_name") { args[i] = ServerName; continue; }
             if (p.HasDefaultValue) { args[i] = p.DefaultValue; continue; }
 
@@ -237,7 +241,7 @@ public sealed class McpReadToolBudgetLiveTests
 
     /// <summary>Every MCP tool method returns either <c>string</c> (<c>get_tool_guide</c>) or <c>Task&lt;string&gt;</c>
     /// (everything else); this is the reply an MCP client would receive either way.</summary>
-    private static async Task<string> InvokeAsync(MethodInfo method, object?[] args)
+    internal static async Task<string> InvokeAsync(MethodInfo method, object?[] args)
     {
         var result = method.Invoke(null, args);
         return result switch
@@ -365,6 +369,20 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
                 (long)(i + 1) * 500_000, "EXEC dbo.usp_NightlyReconcile_" + i + " " + PadBlock(400));
         }
 
+        /* index_object_stats: one daily snapshot of more tables than get_table_index_sizes' 100-table page holds (#8655),
+           spread over the tenant databases. A store with a single snapshot gives every row its growth note, the widest
+           row the read writes; get_index_usage and get_object_locking read the same rows. */
+        for (var i = 0; i < TableRows; i++)
+        {
+            var db = $"TenantDb{i % DbCount:000}";
+            var table = $"OrderLineHistory_{i:000}";
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, user_seeks, user_scans, user_lookups, user_updates, row_lock_wait_count, row_lock_wait_in_ms, page_lock_wait_count, page_lock_wait_in_ms, index_lock_promotion_count, page_latch_wait_in_ms, page_io_latch_wait_in_ms)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddHours(-2)), ServerId, ServerName, db, "dbo", i + 1, table, 1, "PK_" + table, "CLUSTERED",
+                5000m - i, 4999m - i, 1000L + i, 10L + i, 5L, 2L, 20L + i, 3L, 40L + i, 1L, 15L, 0L, 6L, 9L);
+        }
+
         /* The fleet: FleetServerCount siblings, one SUCCESS collection each, so get_fleet_overview answers with
            #4198's measured 43-50-card shape instead of the one server this fixture otherwise seeds. */
         for (var i = 0; i < FleetServerCount; i++)
@@ -391,7 +409,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
     private static readonly string[] SeededTables =
     {
         "deadlocks", "blocked_process_reports", "dmv_blocking_snapshots", "collection_log",
-        "query_store_stats", "plan_correction", "long_query_completions",
+        "query_store_stats", "plan_correction", "long_query_completions", "index_object_stats",
     };
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)

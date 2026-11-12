@@ -147,6 +147,30 @@ public sealed class CustomViewFoldersWebTests
     }
 
     [Fact]
+    public void TheViewList_KeepsTheLastGoodListWhenAPollReadFails_AndSaysSo()
+    {
+        if (!TryRun("readFailed", out var r)) return;
+
+        var good = Strings(r.GetProperty("good"));
+        Assert.Contains("V:Waits", good);
+        Assert.Contains("V:＋ New view", good);
+        Assert.DoesNotContain(good, line => line.StartsWith("N:", StringComparison.Ordinal));
+
+        /* #7929: a failed poll read (an error, a 429) keeps every row of the last good list, under a note that says why. */
+        var after = Strings(r.GetProperty("afterFailure"));
+        Assert.Equal("N:Views unavailable, showing the last list", after[0]);
+        Assert.Equal(good, after.Skip(1).ToArray());
+        Assert.DoesNotContain("No views yet", r.GetProperty("failureText").GetString());
+
+        /* No earlier list to keep: the note alone. Only an answered empty list says "No views yet". */
+        Assert.Equal(new[] { "Views unavailable" }, Strings(r.GetProperty("noEarlierList")));
+        Assert.Equal(new[] { "No views yet" }, Strings(r.GetProperty("answeredEmpty")));
+
+        /* The next good read clears the note. */
+        Assert.Equal(good, Strings(r.GetProperty("recovered")));
+    }
+
+    [Fact]
     public void TheEditorFields_OfferFolderAndPersonalOnlyWhereTheStoreWouldAllowThem_AndSayWhy()
     {
         if (!TryRun("fields", out var r)) return;
@@ -162,7 +186,11 @@ public sealed class CustomViewFoldersWebTests
         var noIdentity = r.GetProperty("newNoIdentity");
         Assert.True(noIdentity.GetProperty("personalDisabled").GetBoolean());
         Assert.Contains("Personal views need a sign-in that can own them", noIdentity.GetProperty("text").GetString());
-        Assert.Contains("open /auth/logout, then sign in again", noIdentity.GetProperty("text").GetString());
+        /* #7684 item 13: the closing step is a sign-out link (as on the People strip), not a path to type. */
+        Assert.Contains("If you are signed in, sign out and sign in again.", noIdentity.GetProperty("text").GetString());
+        Assert.DoesNotContain("open /auth/logout", noIdentity.GetProperty("text").GetString());
+        Assert.Equal(new[] { "/auth/logout|sign out" }, Strings(noIdentity.GetProperty("links")));
+        Assert.Empty(Strings(r.GetProperty("ownShared").GetProperty("links")));
 
         /* A shared view: only its creator can make it personal; one with no recorded creator can be made personal by nobody. */
         Assert.False(r.GetProperty("ownShared").GetProperty("personalDisabled").GetBoolean());
@@ -238,6 +266,60 @@ public sealed class CustomViewFoldersWebTests
         Assert.False(r.GetProperty("after").GetBoolean());
         Assert.True(r.GetProperty("keyGone").GetBoolean());
         Assert.False(r.GetProperty("afterReload").GetBoolean());
+    }
+
+    /// <summary>#7988: the shell gates routes and hides nav links only for a session that says scoped. With no session yet, or a
+    /// failed probe, what the caller may read is unknown: the page renders as before (#7928), and the server refuses whatever it may
+    /// not read. The shipped <c>route()</c> is run for each session: what it drew, what it mounted in the page's place, and which nav
+    /// links it left hidden (Availability Groups starts hidden and is revealed by its own probe, never by <c>route()</c>).</summary>
+    [Fact]
+    public void TheShell_GatesRoutesAndNavOnlyForAScopedSession_AndRendersWhenTheProbeFailed()
+    {
+        if (!TryRun("scope", out var r)) return;
+
+        static string[] Texts(JsonElement visit, string name) => visit.GetProperty(name).EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+        /* A failed probe, no session yet and an unscoped session: the page is drawn and no link is hidden. */
+        foreach (var (visit, drawn) in new[]
+        {
+            ("routeProbeFailedFleet", "fleet:fleet"),
+            ("routeProbeFailedAdmin", "admin:admin"),
+            ("routeNoSessionAdmin", "admin:admin"),
+            ("routeUnscopedAdmin", "admin:admin"),
+        })
+        {
+            var seen = r.GetProperty(visit);
+            Assert.True(Texts(seen, "rendered").SequenceEqual([drawn]), visit + " drew " + string.Join(",", Texts(seen, "rendered")));
+            Assert.True(Texts(seen, "mounted").Length == 0, visit + " mounted " + string.Join(",", Texts(seen, "mounted")));
+            Assert.True(Texts(seen, "hidden").SequenceEqual(["ag"]), visit + " hid " + string.Join(",", Texts(seen, "hidden")));
+        }
+
+        /* A scoped session on a route outside its set: the refusal card in the page's place, and the page's renderer never runs. */
+        var scopedAdmin = r.GetProperty("routeScopedAdmin");
+        Assert.Empty(Texts(scopedAdmin, "rendered"));
+        Assert.Equal(["This page requires an unrestricted dashboard session."], Texts(scopedAdmin, "mounted"));
+        Assert.Equal(["admin", "ag"], Texts(scopedAdmin, "hidden"));
+
+        /* A scoped session on one of its own routes: the page is drawn, with the links outside its set hidden. */
+        var scopedFleet = r.GetProperty("routeScopedFleet");
+        Assert.Equal(["fleet:fleet"], Texts(scopedFleet, "rendered"));
+        Assert.Empty(Texts(scopedFleet, "mounted"));
+        Assert.Equal(["admin", "ag"], Texts(scopedFleet, "hidden"));
+
+        /* The next visit under an unscoped session shows the links the scoped one hid. */
+        var afterScoped = r.GetProperty("routeAfterScoped");
+        Assert.Equal(["fleet:fleet"], Texts(afterScoped, "rendered"));
+        Assert.Equal(["ag"], Texts(afterScoped, "hidden"));
+
+        Assert.False(r.GetProperty("probeFailedFleet").GetBoolean());
+        Assert.False(r.GetProperty("probeFailedAdmin").GetBoolean());
+        Assert.False(r.GetProperty("probeFailedNavAdmin").GetBoolean());
+        Assert.False(r.GetProperty("noSessionAdmin").GetBoolean());
+        Assert.True(r.GetProperty("scopedAdmin").GetBoolean());
+        Assert.False(r.GetProperty("scopedFleet").GetBoolean());
+        Assert.True(r.GetProperty("scopedNavAdmin").GetBoolean());
+        Assert.False(r.GetProperty("scopedNavFleet").GetBoolean());
+        Assert.False(r.GetProperty("unscopedNavAdmin").GetBoolean());
     }
 
     [Fact]

@@ -39,7 +39,7 @@ namespace Darling.Tests;
 public sealed class XamlStaticResourceHygieneTests
 {
     /* Each app scope: its XAML subtrees. Shared control libraries would join the scope of every
-       app that references them; today neither app consumes XAML from outside its own tree. */
+       app that references them; a dictionary an app merges from PerformanceMonitor.Ui joins that file's scope through TransitiveDefinitions. */
     private static readonly (string App, string[] Roots)[] Scopes =
     {
         ("Lite", new[] { "Lite" }),
@@ -110,8 +110,8 @@ public sealed class XamlStaticResourceHygieneTests
 
     /// <summary>The keys defined in a file plus, transitively, in every dictionary it merges via
     /// <c>Source=</c> (relative paths, and <c>;component/</c> pack paths with the prefix stripped and the
-    /// remainder resolved against the referencing file — correct for same-assembly sources, the only kind
-    /// this repo uses; a cross-assembly pack URI would not resolve here). A Source that cannot be resolved
+    /// remainder resolved against the referencing file — and a pack path into a shared library at the repo root
+    /// (PerformanceMonitor.Ui) resolved from that library's folder). A Source that cannot be resolved
     /// contributes nothing, which only ever makes the scan stricter.</summary>
     private static HashSet<string> TransitiveDefinitions(string file, HashSet<string> seenFiles)
     {
@@ -130,13 +130,24 @@ public sealed class XamlStaticResourceHygieneTests
         foreach (Match m in MergeSource.Matches(text))
         {
             var src = m.Groups["src"].Value;
+            var baseDirectory = Path.GetDirectoryName(file)!;
             var componentIndex = src.IndexOf(";component/", StringComparison.OrdinalIgnoreCase);
             if (componentIndex >= 0)
             {
+                /* "/Assembly;component/path" or "pack://application:,,,/Assembly;component/path". A shared library
+                   that sits at the repo root as <Assembly>/<Assembly>.csproj (PerformanceMonitor.Ui) resolves from its
+                   own folder, so the keys it defines join the scope of the file that merges it. Any other assembly
+                   keeps the same-assembly reading: the path resolved against the referencing file. */
+                var assembly = src[..componentIndex];
+                assembly = assembly[(assembly.LastIndexOf('/') + 1)..];
                 src = src[(componentIndex + ";component/".Length)..];
+                if (FindRepoRoot() is { } repo && File.Exists(Path.Combine(repo, assembly, assembly + ".csproj")))
+                {
+                    baseDirectory = Path.Combine(repo, assembly);
+                }
             }
 
-            var candidate = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(file)!, src.Replace('/', Path.DirectorySeparatorChar)));
+            var candidate = Path.GetFullPath(Path.Combine(baseDirectory, src.Replace('/', Path.DirectorySeparatorChar)));
             keys.UnionWith(TransitiveDefinitions(candidate, seenFiles));
         }
 

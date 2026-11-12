@@ -404,7 +404,8 @@ public sealed class ViewerPostgresTabsTests
         Assert.True(notes.Count >= ViewerPostgresTabs.All.Count,
             $"Only {notes.Count} PostgreSQL note elements found in the XAML; expected at least one per tab.");
 
-        var unfilled = notes.Where(n => !loaders.Contains($"{n}.Text", StringComparison.Ordinal)).ToList();
+        /* #7410: a note filled through ShowNote(Name, ...) is filled the same as one assigned to Name.Text. */
+        var unfilled = notes.Where(n => !loaders.Contains($"{n}.Text", StringComparison.Ordinal) && !loaders.Contains($"ShowNote({n},", StringComparison.Ordinal)).ToList();
         Assert.True(unfilled.Count == 0,
             "PostgreSQL panel note(s) are declared in the XAML and never filled, so those panels can be " +
             "blank with no explanation: " + string.Join(", ", unfilled));
@@ -449,6 +450,24 @@ public sealed class ViewerPostgresTabsTests
         Assert.Equal("0 B", PgDisplay.Bytes(0));
         Assert.Equal("0", PgDisplay.Count(0));
         Assert.Equal("0 ms", PgDisplay.Milliseconds(0));
+    }
+
+    /// <summary>
+    /// #8564: one labelled duration format in a column, from milliseconds to days. The clock-style text it replaced ("02:05", "1.08:23:10")
+    /// sat beside "41 ms" in the Backend Age column and read as hours and minutes as easily as minutes and seconds.
+    /// </summary>
+    [Theory]
+    [InlineData(41L, "41 ms")]
+    [InlineData(999L, "999 ms")]
+    [InlineData(1_000L, "1s")]
+    [InlineData(59_999L, "59s")]
+    [InlineData(125_000L, "2m 5s")]
+    [InlineData(3_600_000L, "1h 0m")]
+    [InlineData(3_900_000L, "1h 5m")]
+    [InlineData(116_590_000L, "1d 8h 23m")]
+    public void Milliseconds_ReadsInOneLabelledFormat(long ms, string expected)
+    {
+        Assert.Equal(expected, PgDisplay.Milliseconds(ms));
     }
 
     /// <summary>
@@ -601,6 +620,92 @@ public sealed class ViewerPostgresTabsTests
         Assert.Contains("transactions", pinned.PeakHorizonAge, StringComparison.Ordinal);
     }
 
+    /// <summary>#8664: a count of one is "1 transaction", not "1 transactions", and zero and many keep the plural.</summary>
+    [Theory]
+    [InlineData(0L, "0 transactions")]
+    [InlineData(1L, "1 transaction")]
+    [InlineData(2L, "2 transactions")]
+    [InlineData(4_200_000L, "4,200,000 transactions")]
+    public void APinnedHorizonAge_AgreesWithItsCountInNumber(long age, string expected)
+    {
+        Assert.Equal(expected, PgDisplay.SessionState(SessionRow(peakHorizonAge: age)).PeakHorizonAge);
+    }
+
+    /// <summary>#8664: the logging audit is shared with the MCP reply, but the Viewer has no tool and no field of those names.</summary>
+    [Fact]
+    public void TheLoggingAuditRows_NameNoMcpToolAndNoMcpField()
+    {
+        var names = new[] { "log_min_duration_statement", "log_lock_waits", "log_temp_files", "log_autovacuum_min_duration", "log_checkpoints", "auto_explain.log_min_duration" };
+        var audits = new List<DarlingPgLoggingAudit.Result>
+        {
+            /* A snapshot that holds none of the six settings: every verdict is unknown, which has its own wording. */
+            DarlingPgLoggingAudit.Audit([new DarlingPgLoggingAuditReader.PgLoggingSettingRow("work_mem", "4096", "kB", "user", "default", "4096", false, DateTime.UtcNow)]),
+        };
+        foreach (var (setting, restart) in new[] { ("off", true), ("on", false), ("-1", false), ("0", false), ("1000", false), ("garbled", false) })
+        {
+            audits.Add(DarlingPgLoggingAudit.Audit(names
+                .Select(name => new DarlingPgLoggingAuditReader.PgLoggingSettingRow(name, setting, null, "superuser", "user", "off", restart, DateTime.UtcNow))
+                .ToList()));
+        }
+
+        foreach (var audit in audits)
+        {
+            foreach (var row in audit.Facets.Select(PgDisplay.LoggingAudit))
+            {
+                foreach (var text in new[] { row.Unlocks, row.Recommended, row.CostNote, row.Remedy, row.PendingRestart })
+                {
+                    Assert.DoesNotMatch("get_pg_|cost_note|pending_restart_settings", text);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// #8014: the xmin grid's Held In column divides over the captures in the window, not over the source's own rows. The collector
+    /// stores nothing on a capture with no holder, so a session seen in 2 captures that won both has 2 rows and 2 wins, and "2 of 2"
+    /// read the same as a slot that held the horizon all window.
+    /// </summary>
+    [Fact]
+    public void XminHeldIn_ASourceSeenTwiceThatWonBoth_DoesNotReadAsTwoOfTwo()
+    {
+        var seenTwice = XminRow(samplesAsWinner: 2, samples: 2);
+
+        var shown = PgDisplay.Xmin(seenTwice, capturesInWindow: 60);
+
+        Assert.Equal("2 of 60 captures", shown.WinnerShare);
+        Assert.DoesNotContain("2 of 2", shown.WinnerShare, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The column sorts by the same share it shows (#8014): over the window's captures, so a source that won twice sorts below
+    /// one that won 58 times even though both won every row of their own.
+    /// </summary>
+    [Fact]
+    public void XminHeldIn_SortsByTheShareOverTheWindow_NotOverTheSourcesOwnRows()
+    {
+        var transient = PgDisplay.Xmin(XminRow(samplesAsWinner: 2, samples: 2), capturesInWindow: 60);
+        var chronic = PgDisplay.Xmin(XminRow(samplesAsWinner: 58, samples: 58), capturesInWindow: 60);
+
+        Assert.Equal("58 of 60 captures", chronic.WinnerShare);
+        Assert.Equal(2 / 60.0, transient.WinnerShareSort);
+        Assert.Equal(58 / 60.0, chronic.WinnerShareSort);
+        Assert.True(transient.WinnerShareSort < chronic.WinnerShareSort);
+    }
+
+    /// <summary>A window with no captures has nothing to divide by: the dash and no sort key, as get_pg_xmin_horizon's null.</summary>
+    [Fact]
+    public void XminHeldIn_AWindowWithNoCaptures_ReadsAsNotApplicable()
+    {
+        var shown = PgDisplay.Xmin(XminRow(samplesAsWinner: 2, samples: 2), capturesInWindow: 0);
+
+        Assert.Equal(PgDisplay.NotApplicableText, shown.WinnerShare);
+        Assert.Null(shown.WinnerShareSort);
+    }
+
+    private static DarlingPgXminReader.PgXminRow XminRow(long samplesAsWinner, long samples) =>
+        new("session", DateTime.UtcNow, XminAge: 10, Holder: "pid 1", Detail: null, IsWinner: false,
+            PeakXminAge: 10, SamplesAsWinner: samplesAsWinner, Samples: samples);
+
     /// <summary>
     /// The viewer's three row flags agree with the MCP surface's severity band on the same row.
     ///
@@ -615,6 +720,13 @@ public sealed class ViewerPostgresTabsTests
     [Theory]
     /* A sustained holder: the critical band, and the only one that gets the red. */
     [InlineData(10, 9, 10, 0L, 5_000_000L, false, "Critical")]
+    /* #7381: the floor is 2 holder samples, so 2 of 2 is still red. */
+    [InlineData(2, 2, 0, 1_000L, 5_000_000L, false, "Critical")]
+    /* #7381: 1 of 1 is a sighting, not a hold, and so is the monitor's own sampler (1 of 1, age 0). */
+    [InlineData(1, 1, 0, 1_000L, 5_000_000L, false, "Healthy")]
+    [InlineData(1, 1, 0, 1_000L, 0L, false, "Healthy")]
+    /* #7381: always the oldest, but at age 0 nothing waited behind it. */
+    [InlineData(5, 5, 0, 1_000L, 0L, false, "Healthy")]
     /* Idle in transaction, long, pinning NOTHING: the warning band and the amber. The correction this
        whole feature exists to make. */
     [InlineData(10, 0, 10, 600_000L, -1L, false, "Warning")]
@@ -665,16 +777,12 @@ public sealed class ViewerPostgresTabsTests
         Assert.True(lit <= 1, $"{lit} row flags fired for band '{expectedBand}'; the bands are exclusive.");
     }
 
-    /// <summary>The two thresholds the viewer copies are the same numbers the MCP surface decides on.
+    /// <summary>The idle threshold the viewer copies is the same number the MCP surface decides on.
     /// Asserted directly as well as behaviourally above, because a drift caught at the constant names the
     /// defect, while a drift caught only through a fixture names a row.</summary>
     [Fact]
-    public void TheCopiedSessionThresholds_AreTheOnesTheReadUses()
+    public void TheCopiedIdleThreshold_IsTheOneTheReadUses()
     {
-        Assert.Equal(
-            DarlingMcpPgSessionStatesTools.SustainedHolderSampleShare,
-            PgDisplay.SustainedHolderSampleShare,
-            precision: 10);
         Assert.Equal(
             DarlingMcpPgSessionStatesTools.IdleWithoutHorizonAttentionMs,
             PgDisplay.IdleWithoutHorizonAttentionMs);
@@ -872,17 +980,24 @@ public sealed class ViewerPostgresTabsTests
     private static readonly IReadOnlyDictionary<string, string> FoldedFields =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
+            ["PgStatementRow.DatabaseName"] = "DatabaseId (shown as Database) — the cell shows the name, or 'database <id>' for a row stored before the name was collected",
             ["PgXminRow.IsWinner"] = "IsWinnerText — rendered as a word rather than True/False",
-            ["PgXminRow.SamplesAsWinner"] = "WinnerShare — '58 of 60 samples' says more than either half alone",
-            ["PgXminRow.Samples"] = "WinnerShare — it is that fraction's denominator",
+            ["PgXminRow.SamplesAsWinner"] = "WinnerShare — '58 of 60 captures' says more than either half alone",
+            ["PgXminRow.Samples"] = "not shown: it is only the captures in which this source recorded a holder, not the window's capture count that WinnerShare divides by (#8014)",
+            ["PgXminRow.IsCurrent"] = "not shown: the Viewer reads with includeCleared true, lists only the IsCurrent rows, and the panel note counts the rest as cleared (ClearedRows)",
+            ["PgXminRow.LatestCaptureAt"] = "not shown: it is the newest run's time for every row, which the toolbar's window already says",
 
             ["PgAutovacuumRow.FirstDeadTuples"] = "DeadTupleTrend — the window's start, as a signed delta",
             ["PgAutovacuumRow.FirstSeenAt"] = "DeadTupleTrend — the delta's other end; the window is the toolbar's",
             ["PgAutovacuumRow.TotalBytes"] = "TotalSize — the same number, formatted",
+            ["PgAutovacuumRow.IsCurrent"] = "not shown: the Viewer reads with includeCleared true, lists only the IsCurrent rows, and the panel note counts the rest as cleared (ClearedRows)",
+            ["PgAutovacuumRow.LatestCaptureAt"] = "not shown: it is the newest run's time for every row, which the toolbar's window already says",
 
             ["PgWraparoundRow.AllowsConnections"] = "ConnectionsAllowed — as words, because NOT ALLOWED is the finding",
             ["PgWraparoundRow.AutovacuumFreezeMaxAge"] = "FreezeMaxAge — the same setting, without the column's prefix",
             ["PgWraparoundRow.AutovacuumMultixactFreezeMaxAge"] = "MultixactFreezeMaxAge — same",
+            ["PgWraparoundRow.IsCurrent"] = "not shown: the Viewer reads with includeCleared true, lists only the IsCurrent rows, and the panel note counts the rest as cleared (ClearedRows)",
+            ["PgWraparoundRow.LatestCaptureAt"] = "not shown: it is the newest run's time for every row, which the toolbar's window already says",
 
             ["PgIoRow.WriteCountersTracked"] = "Writes / WriteTimeMs — they read 'not tracked' rather than 0",
             ["PgIoRow.OpBytes"] = "OpSize — the same number, formatted",
@@ -894,6 +1009,8 @@ public sealed class ViewerPostgresTabsTests
             ["PgSlotRow.FirstRetainedWalBytes"] = "RetainedWalTrend — the window's start, as a signed delta",
             ["PgSlotRow.FirstSeenAt"] = "RetainedWalTrend — the delta's other end; the window is the toolbar's",
             ["PgSlotRow.IsActive"] = "ActiveText, and the inactive row highlight",
+            ["PgSlotRow.IsCurrent"] = "not shown: the Viewer reads with includeCleared true, lists only the IsCurrent rows, and the panel note counts the rest as cleared (ClearedRows)",
+            ["PgSlotRow.LatestCaptureAt"] = "not shown: it is the newest run's time for every row, which the toolbar's window already says",
             ["PgSlotRow.RetainedWalBytes"] = "RetainedWal — the same number, formatted",
             ["PgSlotRow.SafeWalSizeBytes"] = "SafeWalSize — the same number, formatted",
 
@@ -915,6 +1032,7 @@ public sealed class ViewerPostgresTabsTests
             ["PgStatementRow.TempBlocksWritten"] = "TempWritten — labelled in blocks, not converted to bytes",
             ["PgStatementRow.WalBytes"] = "WalWritten — the same number, formatted",
             ["PgStatementRow.MaxPeakMemBytes"] = "PeakMemory — the same number, formatted; null off Aurora, where core PostgreSQL has no per-statement peak-memory figure at all (#2625)",
+            ["PgStatementRow.IsServiceStatement"] = "QueryText — a statement the service itself ran reads as a \"[Performance Monitor's own statement] \" prefix on the text, which says it where the operator is looking (#7567)",
             ["PgStatementRow.TotalExecTimeMs"] = "TotalExecTimeMs is shown; AvgExecTimeMs derives from it and Calls",
 
             ["PgDatabaseRow.BlksHit"] = "CacheHitPct — the hit side of that ratio",

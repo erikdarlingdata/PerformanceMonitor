@@ -83,7 +83,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     [InlineData("get_memory_trend", "server_name,hours_back,as_of,bucket_minutes")]
     [InlineData("get_perfmon_trend", "counter_name,server_name,hours_back,as_of,bucket_minutes")]
     [InlineData("get_file_io_trend", "server_name,hours_back,as_of,bucket_minutes,database_name")]
-    [InlineData("get_query_trend", "query_hash,database_name,server_name,hours_back,as_of")]
+    [InlineData("get_query_trend", "query_hash,database_name,server_name,hours_back,as_of,bucket_minutes")]
     [InlineData("get_query_duration_trend", "server_name,hours_back,as_of,bucket_minutes,database_name")]
     [InlineData("get_procedure_duration_trend", "server_name,hours_back,as_of,bucket_minutes,procedure_name,database_name")]
     [InlineData("get_query_store_duration_trend", "server_name,hours_back,as_of,database_name")]
@@ -148,8 +148,9 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.True(at > 0, "SerializeTrend moved — re-anchor this pin");
         var end = source.IndexOf("\n    }\n", at, StringComparison.Ordinal);
         var body = source[at..end];
-        Assert.Contains("elapsed_ms_per_second = p.Value", body, StringComparison.Ordinal);
-        Assert.Contains("executions_per_second = p.ExecutionsPerSecond", body, StringComparison.Ordinal);
+        /* #8572: each rate is rounded on its way out, so the pin names the members and not the expression. */
+        Assert.Contains("elapsed_ms_per_second = ", body, StringComparison.Ordinal);
+        Assert.Contains("executions_per_second = ", body, StringComparison.Ordinal);
         Assert.DoesNotContain("percentile", body, StringComparison.OrdinalIgnoreCase);
 
         /* And the whole catalogue: "percentile" only ever as a negation. */
@@ -208,14 +209,14 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void PerfmonTrendSql_SingleCounter_SumsInstances_CastsBigint()
+    public void PerfmonTrendSql_SingleCounter_OnePointPerCollection_AndTheBucketsCountTheArtifactsSetAside()
     {
         var sql = DarlingTrendReader.PerfmonTrendSql;
         Assert.Contains("FROM v_perfmon_stats", sql, StringComparison.Ordinal);
         Assert.Contains("counter_name = $2", sql, StringComparison.Ordinal);
-        /* #4476: the SUMs exclude an isolated single-sample Wait Statistics artifact row before casting. */
-        Assert.Contains("CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint)", sql, StringComparison.Ordinal);       /* PG SUM(bigint) is numeric */
-        Assert.Contains("CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint)", sql, StringComparison.Ordinal);
+        /* Which instance rows the value and the delta sum is pinned against a live store in
+           PerfmonTotalInstanceLiveTests, and that the SUMs exclude an isolated single-sample Wait Statistics
+           artifact (#4476) in PerfmonWaitStatisticsArtifactMcpLiveTests, not against the statement text. */
         Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(artifacts) AS artifacts_set_aside", DarlingTrendReader.PerfmonTrendBucketedSql, StringComparison.Ordinal);
 
@@ -578,9 +579,15 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         })
         {
             Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);
-            Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", sql, StringComparison.Ordinal);
-            Assert.Contains("THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))", sql, StringComparison.Ordinal);
-            Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
+            /* #7161: the seconds are the gap to the previous collection (the #5449 rule), three states — every row stored 0
+               is unrated, a previous collection within the collector's 3600 s gives the gap, and only the store's first
+               collection keeps its stored interval — never MAX(sample_interval_seconds) over the collection. */
+            Assert.Contains("MAX(sample_interval_seconds) AS stored_interval", sql, StringComparison.Ordinal);
+            Assert.Contains("extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS gap_seconds", sql, StringComparison.Ordinal);
+            Assert.Contains("WHEN stored_interval = 0 THEN NULL", sql, StringComparison.Ordinal);
+            Assert.Contains($"WHEN gap_seconds IS NOT NULL THEN CASE WHEN gap_seconds <= {CollectorDeltaCalculator.DefaultMaxGapSeconds} THEN gap_seconds END", sql, StringComparison.Ordinal);
+            Assert.Contains("ELSE NULLIF(stored_interval, 0)", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
             /* The wrong spelling is COALESCE over the INTERVAL (a fabricated interval on the restart row); the filtered
                texts COALESCE their SUMs to 0 (#5414 M1: a collection the chosen databases had no rows in is zero work,
                a measurement) and say so, so only the interval spellings are refused. */
@@ -595,13 +602,16 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
            is the ONLY difference between the viewer's call and the MCP reader's. */
         Assert.Equal(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true), ViewerDataService.QueryDurationTrendSql);
         /* #5414 M1: the filtered per-collection CTE carries the filter in its aggregates and a matched-rows count; minus
-           those lines it is the unfiltered text. */
+           those lines it is the unfiltered text. #7161: the outer projection (collection_time, total_elapsed_ms, total_executions
+           and, filtered, matched_rows) is one line, so the filtered side's matched_rows suffix is all that sets it apart; that
+           line is left out of both sides, and the aggregates it projects are compared where they are computed. */
         Assert.Equal(
             Lines(Cte(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true)), "raw AS\n("))
                 .Where(l => !l.Contains("delta_elapsed_time", StringComparison.Ordinal) && !l.Contains("delta_execution_count", StringComparison.Ordinal)
-                            && !l.Contains("matched_rows", StringComparison.Ordinal)).ToArray(),
+                            && !l.Contains("matched_rows", StringComparison.Ordinal) && !l.Contains("total_executions", StringComparison.Ordinal)).ToArray(),
             Lines(Cte(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: false)), "raw AS\n("))
-                .Where(l => !l.Contains("delta_elapsed_time", StringComparison.Ordinal) && !l.Contains("delta_execution_count", StringComparison.Ordinal)).ToArray());
+                .Where(l => !l.Contains("delta_elapsed_time", StringComparison.Ordinal) && !l.Contains("delta_execution_count", StringComparison.Ordinal)
+                            && !l.Contains("total_executions", StringComparison.Ordinal)).ToArray());
 
         /* The alias's ARGUMENT, by value: since #3897 the MCP reader's two raw texts are the BUCKETED builder's
            output, byte for byte (line endings aside) — not line-trimmed, because an alias has no indentation of
@@ -938,7 +948,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)"
     }
 
     /// <summary>
-    /// #3653 (A11, the MCP half): <c>get_query_duration_trend</c>'s raw route rates a planted three-state
+    /// #3653 (A11, the MCP half) and #7161: <c>get_query_duration_trend</c>'s raw route rates a planted three-state
     /// <c>sample_interval_seconds</c> series the way the viewer's chart does, THROUGH THE REAL READER — the
     /// routed <see cref="DarlingTrendReader.GetQueryDurationTrendAsync"/> and the tool's own payload — not
     /// the builder text run by hand (DeltaFamilyIntervalCompletionLivePostgresTests already runs that). The
@@ -946,8 +956,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)"
     /// LAG's 300 s, 600 ms → 2.0 ms/sec. t3 a restart — every row 0 — unrated: THIS is the row the LAG-only
     /// const divided into a confident 0.00 ms/sec and 0.00 executions/sec on dev between #3695 and this alias, after the viewer
     /// stopped (0 delta over a real 300 s). t4 a steady pass with a readmitted plan (0) beside a measured
-    /// 120 s row: MAX 120 wins over the LAG's 300, 1,200 ms → 10.0 ms/sec, 24 → 0.2 executions/sec (the LAG
-    /// would have said 4.0 and 0.08). Two unrated points, both KEPT, both null on the wire — and the payload's
+    /// 120 s row: since #7161 the seconds are the gap to the previous collection (300 s), not the longest stored
+    /// interval, so 1,200 ms → 4.0 ms/sec and 24 → 0.08 executions/sec (the stored 120 s said 10.0 and 0.2). Two
+    /// unrated points, both KEPT, both null on the wire — and the payload's
     /// <c>unrated_points</c> counts both. Reproduced on a PG18 + TimescaleDB 2.28.1 rig before this was
     /// written; the pre-alias const was run against the same rows there and published 0.00 at t3.
     /// </summary>
@@ -999,8 +1010,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)"
             Assert.False(result.Points[2].HasRate);                          /* the restart: NOT 0.00 */
             Assert.Null(result.Points[2].ExecutionCount);
             Assert.Null(result.Points[2].ExecutionsPerSecond);
-            Assert.Equal(10.0, result.Points[3].Value!.Value, precision: 6); /* 1,200 ms / STORED 120 s, not the LAG's 4.0 */
-            Assert.Equal(0.2, result.Points[3].ExecutionsPerSecond!.Value, precision: 6);
+            Assert.Equal(4.0, result.Points[3].Value!.Value, precision: 6);  /* #7161: 1,200 ms / the 300 s gap to t3, not the stored 120 s (10.0) */
+            Assert.Equal(0.08, result.Points[3].ExecutionsPerSecond!.Value, precision: 6);
 
             /* The tool over the same rows at one-minute points (its 24-hour window resolves raw on this store):
                the two unrated points are on the wire as null, counted, and never 0. */
@@ -1017,8 +1028,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)"
             Assert.Equal(JsonValueKind.Null, trend[2].GetProperty("executions_per_second").ValueKind);
             Assert.Equal(JsonValueKind.Null, trend[2].GetProperty("execution_count").ValueKind);
             Assert.Equal(2.0, trend[1].GetProperty("elapsed_ms_per_second").GetDouble(), precision: 6);
-            Assert.Equal(10.0, trend[3].GetProperty("elapsed_ms_per_second").GetDouble(), precision: 6);
-            Assert.Equal(0.2, trend[3].GetProperty("executions_per_second").GetDouble(), precision: 6);
+            Assert.Equal(4.0, trend[3].GetProperty("elapsed_ms_per_second").GetDouble(), precision: 6);
+            Assert.Equal(0.08, trend[3].GetProperty("executions_per_second").GetDouble(), precision: 6);
 
             bodySucceeded = true;
         }

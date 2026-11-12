@@ -189,15 +189,13 @@ public sealed class ReleaseWalkFilterAndCompareTests
     // ---- V12a ---------------------------------------------------------------------------------------------------
 
     [Fact]
-    public void LongQueries_TraceOff_EmptyTextSaysWhyAndWhereToTurnItOn()
+    public void LongQueries_TraceOff_EmptyTextSaysWhy()
     {
-        var off = LongQueriesEmptyText.Text(false, "Settings → Collector Schedules → Edit");
-        var on = LongQueriesEmptyText.Text(true, "Settings → Collector Schedules → Edit");
+        var off = LongQueriesEmptyText.Text(false);
+        var on = LongQueriesEmptyText.Text(true);
 
-        Assert.Contains("trace is OFF", off, StringComparison.Ordinal);
-        Assert.Contains("Settings → Collector Schedules → Edit", off, StringComparison.Ordinal);
-        Assert.Contains("long_query_completions", off, StringComparison.Ordinal);
-        Assert.DoesNotContain("OFF", on, StringComparison.Ordinal);
+        Assert.Contains("trace is off", off, StringComparison.Ordinal);
+        Assert.DoesNotContain("off", on, StringComparison.OrdinalIgnoreCase);
         Assert.NotEqual(EmptyState.DefaultGridText, off);
         Assert.NotEqual(EmptyState.DefaultGridText, on);
     }
@@ -205,11 +203,11 @@ public sealed class ReleaseWalkFilterAndCompareTests
     [Theory]
     [InlineData("Lite/Controls/ServerTab.LongQueries.cs")]
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.LongQueries.cs")]
-    public void LongQueries_TheGridsEmptyTextFollowsTheTraceSetting(string path)
+    public void LongQueries_TheGridsEmptyTextLeavesTheTraceStateToTheBanner(string path)
     {
         var source = RepoFile(path);
 
         Assert.Contains("EmptyState.SetText(LongQueryCompletionsGrid", source, StringComparison.Ordinal);
-        Assert.Contains("LongQueriesEmptyText.Text(traceEnabled, LongQueriesSwitchLocation)", source, StringComparison.Ordinal);
+        Assert.Contains("LongQueriesEmptyText.Text(traceEnabled: true)", source, StringComparison.Ordinal);
     }
 }

@@ -301,11 +301,98 @@ public sealed class AnalysisCoverageTests : IClassFixture<SharedDuckDbFixture>, 
            be read without the sentence above — it is the collector's quarter, not the server's storm. */
         Assert.Equal("worse", cx.Value.GetProperty("status").GetString());
         Assert.True(cx.Value.GetProperty("coverage_caveat").GetBoolean());
+        /* #7458: a PARTLY collected side still compares. Only an unobserved one does not. */
+        Assert.True(root.GetProperty("comparable").GetBoolean());
+        Assert.Equal(0, root.GetProperty("summary").GetProperty("not_compared").GetInt32());
         Assert.True(root.GetProperty("summary").GetProperty("coverage_caveat").GetBoolean());
         Assert.All(root.GetProperty("families").EnumerateArray(), f => Assert.True(f.GetProperty("coverage_caveat").GetBoolean()));
 
         /* The COLLECTION_GAP fact is reported through the coverage blocks, not as a compared key. */
         Assert.DoesNotContain(WindowCoverage.FactKey, result, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #7458: a baseline the collector never observed, but which still carries point-in-time facts (the server
+    /// config is read regardless of window). Nothing is compared: no row has a direction, the counters that
+    /// mean "something got worse or appeared" are 0, and the caveat leads with "not collected at all" and
+    /// names the window, instead of calling it "only partly collected" and then reporting new issues.
+    /// </summary>
+    [Fact]
+    public async Task CompareAnalysis_UnobservedBaseline_ComparesNothing_AndSaysTheWindowWasNotCollected()
+    {
+        var now = DateTime.UtcNow;
+        await PlantServerConfigAsync();
+        await PlantSeriesAsync(Wait, totalDeltaMs: 900_000, coveredMinutes: 240, windowEnd: now);
+
+        var result = await McpAnalysisTools.CompareAnalysis(CreateService(), _serverManager, null, 4, 28);
+
+        using var doc = JsonDocument.Parse(result);
+        var root = doc.RootElement;
+
+        Assert.True(root.GetProperty("baseline").GetProperty("coverage").GetProperty("unobserved").GetBoolean());
+        Assert.False(root.GetProperty("comparable").GetBoolean());
+
+        var caveat = root.GetProperty("caveat").GetString();
+        Assert.NotNull(caveat);
+        Assert.StartsWith("The BASELINE window (", caveat, StringComparison.Ordinal);
+        Assert.Contains("was not collected at all", caveat, StringComparison.Ordinal);
+        Assert.Contains(root.GetProperty("baseline").GetProperty("start").GetString()!, caveat, StringComparison.Ordinal);
+        Assert.DoesNotContain("only partly collected", caveat, StringComparison.Ordinal);
+        Assert.DoesNotContain("counts as a new issue", caveat, StringComparison.Ordinal);
+
+        AssertNothingCompared(root);
+        var cx = Assert.Single(root.GetProperty("facts").EnumerateArray(), f => f.GetProperty("key").GetString() == "CXPACKET");
+        Assert.Equal("comparison_only", cx.GetProperty("presence").GetString());
+        Assert.InRange(cx.GetProperty("comparison_value").GetDouble(), 0.06, 0.065);
+    }
+
+    /// <summary>#7458, the other side: a COMPARISON window nobody collected must not report the baseline's
+    /// facts as resolved issues.</summary>
+    [Fact]
+    public async Task CompareAnalysis_UnobservedComparison_ComparesNothing_AndSaysTheWindowWasNotCollected()
+    {
+        var now = DateTime.UtcNow;
+        await PlantServerConfigAsync();
+        await PlantSeriesAsync(Wait, totalDeltaMs: 900_000, coveredMinutes: 240, windowEnd: now.AddHours(-24));
+
+        var result = await McpAnalysisTools.CompareAnalysis(CreateService(), _serverManager, null, 4, 28);
+
+        using var doc = JsonDocument.Parse(result);
+        var root = doc.RootElement;
+
+        Assert.True(root.GetProperty("comparison").GetProperty("coverage").GetProperty("unobserved").GetBoolean());
+        Assert.False(root.GetProperty("comparable").GetBoolean());
+        var caveat = root.GetProperty("caveat").GetString();
+        Assert.NotNull(caveat);
+        Assert.StartsWith("The COMPARISON window (", caveat, StringComparison.Ordinal);
+        Assert.Contains("was not collected at all", caveat, StringComparison.Ordinal);
+        Assert.DoesNotContain("only partly collected", caveat, StringComparison.Ordinal);
+
+        AssertNothingCompared(root);
+        var cx = Assert.Single(root.GetProperty("facts").EnumerateArray(), f => f.GetProperty("key").GetString() == "CXPACKET");
+        Assert.Equal("baseline_only", cx.GetProperty("presence").GetString());
+        Assert.InRange(cx.GetProperty("baseline_value").GetDouble(), 0.06, 0.065);
+    }
+
+    private static void AssertNothingCompared(JsonElement root)
+    {
+        var summary = root.GetProperty("summary");
+        Assert.Equal(0, summary.GetProperty("worse").GetInt32());
+        Assert.Equal(0, summary.GetProperty("better").GetInt32());
+        Assert.Equal(0, summary.GetProperty("new_issues").GetInt32());
+        Assert.Equal(0, summary.GetProperty("resolved_issues").GetInt32());
+        Assert.Equal(0, summary.GetProperty("families_worse").GetInt32());
+        Assert.Equal(0, summary.GetProperty("families_better").GetInt32());
+        Assert.True(summary.GetProperty("not_compared").GetInt32() > 0);
+        Assert.True(summary.GetProperty("coverage_caveat").GetBoolean());
+
+        Assert.All(root.GetProperty("facts").EnumerateArray(), f => Assert.Equal("not_compared", f.GetProperty("status").GetString()));
+        Assert.All(root.GetProperty("families").EnumerateArray(), f =>
+        {
+            Assert.Equal("not_compared", f.GetProperty("status").GetString());
+            Assert.Equal(0, f.GetProperty("worse").GetInt32());
+        });
+        Assert.Empty(root.GetProperty("plan_cache_churn").GetProperty("appeared").EnumerateArray());
     }
 
     [Fact]

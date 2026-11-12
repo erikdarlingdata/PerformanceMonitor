@@ -23,8 +23,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// event CTEs of <see cref="DailySummarySql.RangeSql"/> the way the alert sweep and the fleet card scope them,
 /// without touching the frozen statement.
 ///
-/// <para>The scope is a pair of <c>FILTER</c> clauses, not <c>WHERE</c> clauses, so the day spine and the
-/// signal-presence count stay exactly as they were: a day whose only events belonged to a sibling still exists
+/// <para>The deadlock scope is a <c>FILTER</c> clause, not a <c>WHERE</c> clause, so the day spine and the
+/// signal-presence count stay as they were for it (#7028: the blocked-process scope is a predicate on the report source, so a
+/// sibling's reports never reach the hourly wait chain; the day still exists through the collection log): a day whose only events belonged to a sibling still exists
 /// and still counts its sources as present. Parameters <c>$1</c>-<c>$4</c> keep their meaning and the list of
 /// database names is <c>$5</c> (a <c>text[]</c>). The DMV blocking CTE is left alone: a master's DMV sees only
 /// its own sessions, so its fallback count is already the master's.</para>
@@ -44,14 +45,14 @@ public static class DailySummaryAzureMasterScope
     private const string DeadlockOutsidePredicate =
         "database_name IS NOT NULL AND lower(database_name) <> 'master' AND NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($5::text[]) x))";
 
-    // The two CTE select lines exactly as they appear in DailySummarySql.RangeSql. One line each, so the
-    // replace does not depend on the source file's line endings.
+    // The deadlock CTE's select line exactly as it appears in DailySummarySql.RangeSql. One line, so the replace does
+    // not depend on the source file's line endings.
     private const string DeadlockSelectLine = "SELECT date_trunc('day', deadlock_time) AS d, COUNT(*) AS c";
-    private const string BprSelectLine = "SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms";
 
-    // #5644: the report count the health band reads, the bpr CTE's next select line. It takes the same scope filter
-    // as the wait count beside it, or a scoped day would band on reports of waits it no longer counts.
-    private const string BprReportsLine = "SUM(wait_reports)::bigint AS reports";
+    // #7028: the blocked-process-report source's window line (DailySummarySql.BprSourceWhere). The keep predicate is
+    // appended to it, so the reports of a separately monitored database never reach the wait chain: they neither count
+    // as waits nor make an hour an XE hour (an hour with only such reports falls back to its DMV waits, as a day did).
+    private const string BprWhereLine = DailySummarySql.BprSourceWhere;
 
     /// <summary>The graphs the every-process rule still has to decide, one row per stored deadlock: the row's
     /// database is unknown, is master, or is a listed one. $1 server_id, $2/$3 the half-open window as
@@ -75,26 +76,8 @@ AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(databas
 
         var scoped = ReplaceOnce(routedSql, DeadlockSelectLine,
             "SELECT date_trunc('day', deadlock_time) AS d, COUNT(*) FILTER (WHERE " + DeadlockOutsidePredicate + ") AS c");
-        scoped = ReplaceOnce(scoped, BprSelectLine,
-            "SELECT date_trunc('day', event_time) AS d, COUNT(*) FILTER (WHERE " + BprKeepPredicate + ") AS c, "
-            + "MAX(wait_time_ms) FILTER (WHERE " + BprKeepPredicate + ") AS max_wait_ms");
-        /* The line after it is the bpr CTE's own (the dmv CTE's reports column is the same text, so the bpr select line
-           comes first): replace the FIRST occurrence only, which is the bpr one. */
-        scoped = ReplaceFirst(scoped, BprReportsLine,
-            "SUM(wait_reports) FILTER (WHERE " + BprKeepPredicate + ")::bigint AS reports");
+        scoped = ReplaceOnce(scoped, BprWhereLine, BprWhereLine + " AND " + BprKeepPredicate);
         return scoped;
-    }
-
-    private static string ReplaceFirst(string sql, string fragment, string replacement)
-    {
-        var at = sql.IndexOf(fragment, StringComparison.Ordinal);
-        if (at < 0)
-        {
-            throw new InvalidOperationException(
-                "Daily-summary master scoping found no '" + fragment + "' to replace: DailySummarySql.RangeSql has drifted from DailySummaryAzureMasterScope (#5644).");
-        }
-
-        return sql.Remove(at, fragment.Length).Insert(at, replacement);
     }
 
     private static string ReplaceOnce(string sql, string fragment, string replacement)

@@ -121,10 +121,9 @@ public sealed class CollectionLogSegmentByLiveTests
     /// <summary>
     /// The other fresh-store order: TimescaleDB is installed before the migrations run (a bring-your-own store whose
     /// administrator created it first), so V23 does the first conversion, with the <c>server_id</c> its text has always
-    /// had (a migration is never edited). V23's policy has no start time, so the scheduler runs it as soon as it is
-    /// added; on a new store that run finds an empty table. The first start's ensure then moves the hypertable to the
-    /// new value before any row is old enough to compress, so every chunk the policy compresses later uses the new
-    /// value and none uses <c>server_id</c> alone.
+    /// had, and adds no compression policy (#8275). The first start's ensure moves the hypertable to the new value and
+    /// then adds the policy, on the hourly cadence and its phase minute, so the policy's first run already sees the
+    /// new value: every chunk it compresses uses the new value and none uses <c>server_id</c> alone.
     /// </summary>
     [Fact]
     public async Task AFreshStore_WhoseExtensionPredatesTheMigrations_HasTheNewSegmentBy_AfterItsFirstStart_AndNoServerIdOnlyChunk()
@@ -142,21 +141,23 @@ public sealed class CollectionLogSegmentByLiveTests
         await RequirePerChunkSettingsAsync(connection, ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
-        /* V23's own work: converted, compression on, with its text's server_id. */
+        /* V23's own work: converted, compression on, with its text's server_id, and no policy yet. */
         var afterMigrations = await ReadHypertableAsync(connection, ct);
         Assert.True(afterMigrations.IsHypertable, "V23 did not convert collection_log although the extension existed when it ran");
         Assert.True(afterMigrations.CompressionEnabled);
         Assert.Equal(OldSegmentBy, afterMigrations.SegmentBy);
+        Assert.Equal(0L, await CompressionPolicyCountAsync(connection, ct));
 
-        /* V23's policy's immediate first run (the background workers are stopped, so it runs here). A new store's
-           table is empty, so it compresses nothing under server_id. */
-        await RunCompressionPolicyAsync(connection, ct);
-        Assert.Empty(await ReadChunkSettingsAsync(connection, ct));
-
-        /* The first start. */
+        /* The first start: the new value, then the policy. */
         Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
         Assert.Equal(WantedSegmentBy, (await ReadHypertableAsync(connection, ct)).SegmentBy);
         Assert.Contains(TimescaleSupport.CollectionLogTable, await ConvergedTablesAsync(connection, ct));
+        Assert.Equal(1L, await CompressionPolicyCountAsync(connection, ct));
+
+        /* The policy's first run (the background workers are stopped, so it runs here). A new store's table is empty,
+           so it compresses nothing. */
+        await RunCompressionPolicyAsync(connection, ct);
+        Assert.Empty(await ReadChunkSettingsAsync(connection, ct));
 
         /* Days of runs later, the policy compresses the older chunks, every one with the new value. */
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);

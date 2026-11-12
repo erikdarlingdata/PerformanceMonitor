@@ -25,7 +25,7 @@ public sealed class PlanRegressionInputsAdviceTests
     {
         var meta = new Dictionary<string, double>
         {
-            ["worst_regression_factor"] = 12,
+            ["lead_regression_factor"] = 12,
             ["offender_count"] = 2,
             ["latest_cpu_per_exec_us"] = 120_000,
             ["best_cpu_per_exec_us"] = 10_000,
@@ -96,10 +96,10 @@ public sealed class PlanRegressionInputsAdviceTests
         {
             ["latest_cpu_per_exec_us"] = 455,
             ["best_cpu_per_exec_us"] = 21,
-            ["worst_regression_factor"] = 21.7,
+            ["lead_regression_factor"] = 21.7,
         }));
 
-        Assert.Contains("(455 us vs 21 us of CPU per execution)", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("(455 µs vs 21 µs of CPU per execution)", advice.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("0 ms", advice.Investigation, StringComparison.Ordinal);
     }
 
@@ -228,11 +228,12 @@ public sealed class PlanRegressionInputsAdviceTests
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(2)]
-    public void PlanRegressionWithParameterSensitivity_SaysNotToForce_WhateverTheBasis(int basis)
+    public void PlanRegressionWithParameterSensitivity_CautionsAgainstForcing_WhateverTheBasis(int basis)
     {
         var advice = Compose("PLAN_REGRESSION", PlanRegressionWithBasis(basis), ParameterSensitivity());
 
-        Assert.Contains("do not force a query that also shows that signature", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("be cautious about forcing a query that also shows that signature", advice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("do not force", advice.Remediation, StringComparison.Ordinal);
         Assert.Contains("OPTION (RECOMPILE)", advice.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("stops the bleeding", advice.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("so this is a plan choice that got worse", advice.Investigation, StringComparison.Ordinal);
@@ -247,7 +248,8 @@ public sealed class PlanRegressionInputsAdviceTests
             PlanRegressionWithBasis(1, new Dictionary<string, double> { ["latest_is_forced"] = 1, ["force_failure_count"] = 3 }),
             ParameterSensitivity());
 
-        Assert.Contains("do not force a query that also shows that signature", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("be cautious about forcing a query that also shows that signature", advice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("do not force", advice.Remediation, StringComparison.Ordinal);
         Assert.Contains("clear the broken force", advice.Remediation, StringComparison.Ordinal);
         Assert.Contains("failing to apply", advice.Investigation, StringComparison.Ordinal);
     }
@@ -268,7 +270,7 @@ public sealed class PlanRegressionInputsAdviceTests
     {
         var advice = Compose("CPU_SPIKE", CpuSpike(), PlanRegressionWithBasis(1), ParameterSensitivity());
 
-        Assert.StartsWith("Parameter sensitivity co-fired — do NOT force a plan", advice.Remediation, StringComparison.Ordinal);
+        Assert.StartsWith("Parameter sensitivity co-fired: do NOT force a plan", advice.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("forcing it is the fast fix", advice.Remediation, StringComparison.Ordinal);
         Assert.Contains("do not force a query that also shows that signature", advice.Remediation, StringComparison.Ordinal);
     }
@@ -286,7 +288,7 @@ public sealed class PlanRegressionInputsAdviceTests
     {
         var advice = Compose("CPU_SPIKE", CpuSpike(), ParameterSensitivity());
 
-        Assert.StartsWith("Parameter sensitivity co-fired — do NOT force a plan", advice.Remediation, StringComparison.Ordinal);
+        Assert.StartsWith("Parameter sensitivity co-fired: do NOT force a plan", advice.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("plan regression", advice.Remediation, StringComparison.Ordinal);
     }
 
@@ -308,8 +310,8 @@ public sealed class PlanRegressionInputsAdviceTests
     {
         var root = rootKey == "CPU_SPIKE" ? CpuSpike() : CpuSqlPercent();
         var text = Compose(rootKey, root, PlanRegressionWithBasis(1), ParameterSensitivity()).Remediation;
-        var sensitivity = text.IndexOf("parameter sensitivity —", StringComparison.Ordinal);
-        var regression = text.IndexOf("a plan regression —", StringComparison.Ordinal);
+        var sensitivity = text.IndexOf("parameter sensitivity:", StringComparison.Ordinal);
+        var regression = text.IndexOf("a plan regression:", StringComparison.Ordinal);
         if (rootKey == "CPU_SQL_PERCENT")
         {
             Assert.True(sensitivity >= 0, "the cause list names parameter sensitivity");

@@ -50,7 +50,7 @@ public sealed partial class ViewerDataService
         ArgumentNullException.ThrowIfNull(server);
         var read = await DarlingIdentityCapacityReader.ReadAsync(
             _dataSource, server.ServerId, DatabaseFilter.All, windowEndUtc.AddHours(-hoursBack), windowEndUtc,
-            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, ViewerStoreLogger.Instance, cancellationToken);
         if (read.HasScan)
         {
             return new ViewerIdentityCapacityRead(read.Columns.Count > 0 || read.Unscanned.Count > 0 || read.Skipped.Count > 0 ? ViewerIdentityCapacityRead.Data : ViewerIdentityCapacityRead.Empty, null, read);

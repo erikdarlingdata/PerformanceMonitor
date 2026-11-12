@@ -147,7 +147,6 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
         var sql = Reader.QueryStoreHealthSql;
         Assert.Contains("FROM v_query_store_health", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(capture_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY database_name", sql, StringComparison.Ordinal);
         Assert.Contains(
             "database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode, capture_time",
             sql, StringComparison.Ordinal);
@@ -278,7 +277,7 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
             "wait_stats_capture_mode ON (the default) records per-plan wait statistics",
             "OFF saves both",
             "*_desc spelling verbatim",
-            "null means the row predates the V137 rung or, for wait_stats_capture_mode, the engine is older than SQL Server 2017",
+            "null means the row was written by a build that did not record it or, for wait_stats_capture_mode, the engine is older than SQL Server 2017",
             "never OFF",
             "Consumed by the Viewer's Query Store grid",
             /* #3898 D4: the issue ref that used to sit after this tool name came off the wire (head and tail

@@ -135,7 +135,7 @@ public sealed class CollectionCycleSkipTests : IDisposable
 
         Assert.NotNull(report);
         Assert.Equal(
-            "Collection cycle took 312s, so 4 collection slot(s) were skipped. Slowest steps: archival 240s, collectors 61s, retention 9s.",
+            "Collection cycle took 312s, so 4 collection slots were skipped. Slowest steps: archival 240s, collectors 61s, retention 9s.",
             report!.Message);
         Assert.Equal(4, report.SlotsSkipped);
         Assert.Equal(312_000, report.CycleMs);
@@ -161,7 +161,7 @@ public sealed class CollectionCycleSkipTests : IDisposable
 
         Assert.NotNull(report);
         Assert.Equal(
-            "Collection wait overran: it lasted 2820s against a 60s interval, so 46 collection slot(s) were skipped. "
+            "Collection wait overran: it lasted 2820s against a 60s interval, so 46 collection slots were skipped. "
             + "The cycle itself took 5s; the computer may have slept or hibernated, or the clock stepped forward.",
             report!.Message);
         Assert.Equal("wait", report.SlowestStep);
@@ -177,7 +177,7 @@ public sealed class CollectionCycleSkipTests : IDisposable
 
         Assert.NotNull(report);
         Assert.Equal(
-            "Collection cycle took 65s and the wait overran, so 124 collection slot(s) were skipped across the two. "
+            "Collection cycle took 65s and the wait overran, so 124 collection slots were skipped across the two. "
             + "Slowest steps: archival 240s, collectors 61s, retention 9s. "
             + "The wait lasted 7200s against a 60s interval; the computer may have slept or hibernated, or the clock stepped forward.",
             report!.Message);
@@ -186,7 +186,7 @@ public sealed class CollectionCycleSkipTests : IDisposable
         /* The row's slowest item is whichever is longer: here the wait. */
         Assert.Equal("wait", report.SlowestStep);
         Assert.Equal(7_200_000, report.SlowestStepMs);
-        Assert.DoesNotContain("so 124 collection slot(s) were skipped. ", report.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("so 124 collection slots were skipped. ", report.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -195,7 +195,7 @@ public sealed class CollectionCycleSkipTests : IDisposable
         /* A 130 s cycle then a wait that only used up its own slack (0 s left after the cycle): no overrun, so one cause. */
         var report = CollectionCycleSkip.Build(2, TimeSpan.FromSeconds(130), TimeSpan.FromSeconds(30), Steps(), Interval);
 
-        Assert.StartsWith("Collection cycle took 130s, so 2 collection slot(s) were skipped.", report!.Message, StringComparison.Ordinal);
+        Assert.StartsWith("Collection cycle took 130s, so 2 collection slots were skipped.", report!.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("overran", report.Message, StringComparison.Ordinal);
     }
 
@@ -360,7 +360,7 @@ public sealed class CollectionCycleSkipTests : IDisposable
 
         Assert.Equal(1, block.GetProperty("count_24h").GetInt64());
         Assert.Equal(1, summary.Count);
-        Assert.StartsWith("Skipped cycles in 24 h: 1 late cycle(s), 1,499 slot(s) skipped.", summary.SummaryLine(), StringComparison.Ordinal);
+        Assert.StartsWith("Skipped cycles in 24 h: 1 late cycle, 1,499 slots skipped.", summary.SummaryLine(), StringComparison.Ordinal);
         Assert.Contains("The gap ran from", summary.LastMessage, StringComparison.Ordinal);
     }
 
@@ -440,7 +440,7 @@ public sealed class CollectionCycleSkipTests : IDisposable
     [Fact]
     public void NoFileUnderLite_CopiesTheCollectorNameAsASingleQuotedSqlLiteral()
     {
-        /* The nine reader predicates interpolate CollectionCycleSkip.CollectorName; a rename must move writer and readers
+        /* The thirteen reader predicates interpolate CollectionCycleSkip.CollectorName; a rename must move writer and readers
            together. The census has no exceptions: doc comments write the name in <c> tags, never in single quotes. */
         var literal = "'" + CollectionCycleSkip.CollectorName + "'";
         var lite = Path.GetFullPath(Path.Combine(RepoRootFromThisFile(), "Lite"));
@@ -458,14 +458,17 @@ public sealed class CollectionCycleSkipTests : IDisposable
     }
 
     [Fact]
-    public void TheNinePredicates_InterpolateTheCollectorName()
+    public void TheFourteenPredicates_InterpolateTheCollectorName()
     {
         var services = Path.Combine(RepoRootFromThisFile(), "Lite", "Services");
+        /* #8464: the Overview card's Last Collect and the server list's last success interpolate the shared
+           CollectionRunSql.SuccessfulCollectorRun, which carries the same name from the same constant; they count here too,
+           as does the any-collector-row probe beside them (HasAnyCollectorRowAsync). */
         var count = Directory.EnumerateFiles(services, "LocalDataService.*.cs")
             .Sum(f => System.Text.RegularExpressions.Regex.Matches(File.ReadAllText(f),
-                @"collector_name <> '\{CollectionCycleSkip\.CollectorName\}'").Count);
+                @"collector_name <> '\{CollectionCycleSkip\.CollectorName\}'|\{CollectionRunSql\.SuccessfulCollectorRun\}").Count);
 
-        Assert.Equal(9, count);
+        Assert.Equal(14, count);
     }
 
     [Fact]
@@ -550,7 +553,7 @@ public sealed class CollectionCycleSkipTests : IDisposable
         }
 
         Assert.Empty(bare);
-        Assert.True(holes >= 8, "expected the nine predicates to sit in at least eight literals, saw " + holes);
+        Assert.True(holes >= 8, "expected the ten predicates to sit in at least eight literals, saw " + holes);
     }
 
     private static string RepoRootFromThisFile([CallerFilePath] string thisFile = "")

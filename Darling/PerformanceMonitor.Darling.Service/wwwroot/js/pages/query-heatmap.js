@@ -75,12 +75,22 @@ export function renderHeatmapBody(data, opts) {
         "Query Heatmap by " + metricWord + ": " + grid.cellCount + " cells across " + grid.columns + " time bins of " + grid.binMinutes +
         " minutes. A picture; use Show as table for the values.",
     });
+    /* #7542: the columns share the panel's width (app.css: width 100%, fixed layout). The table's minimum keeps each time column at exactly
+       6 px, so a narrow window scrolls inside .qh-wrap instead of squeezing the cells away. With border-spacing 1px a row of `columns` time
+       cells plus the row head has columns + 2 gaps: 6 * columns + (columns + 2) = 7 * columns + 2. The row head's width is the one
+       --qh-head custom property that app.css defines on .qh-grid and also uses for the head cells. */
+    table.style.minWidth = "calc(var(--qh-head) + " + (grid.columns * 7 + 2) + "px)";
     /* A label every 12 columns: hourly at the Viewer's 5 minute bins. */
     const tick = grid.columns < 12 ? 1 : 12;
     const head = el("tr", {}, [el("th", { class: "qh-corner" })]);
     for (let c = 0; c < grid.columns; c += tick) {
       const span = Math.min(tick, grid.columns - c);
-      head.appendChild(el("th", { class: "qh-tick", colspan: String(span), text: axisTime(new Date(grid.startMs + c * grid.binMs), spansDays) }));
+      /* #7653: the last label sits over whatever columns are left after the 12-column ticks, 1 to 11 when the window starts or ends mid-bin
+         or a cut read starts at any bin. A label over fewer columns than a tick has no room its text is sure to fit (a day-qualified time
+         needs about a tick's width at 1280 px), and its text ran past the table's edge and gave the panel a sideways scrollbar. It is left
+         blank; its columns still count in the row. app.css clips each tick cell, so no label paints past the table at any width. */
+      const label = span < tick ? "" : axisTime(new Date(grid.startMs + c * grid.binMs), spansDays);
+      head.appendChild(el("th", { class: "qh-tick", colspan: String(span), text: label }));
     }
     table.appendChild(head);
     for (let r = grid.rows.length - 1; r >= 0; r--) {
@@ -151,7 +161,7 @@ function metricPicker(onPick) {
  * The Query Heatmap card of the Queries tab: the metric picker under the title, the grid (or table) under it. A metric pick draws the card
  * again with the new `metric`, aborting the read before it. `columns` are the table view's columns, `hours` and `label` the tab's range.
  */
-export function queryHeatmapCard({ server, hours, label, columns, emptyText }) {
+export function queryHeatmapCard({ server, hours, label, columns, emptyText, emptyLine }) {
   const slot = el("div", {}, []);
   slot.style.display = "contents";
   let drawing = null;
@@ -182,6 +192,7 @@ export function queryHeatmapCard({ server, hours, label, columns, emptyText }) {
       viz: "table",
       render: (data, desc) => renderHeatmapBody(data, { server, columns, desc }),
       emptyText,
+      emptyLine,
       span: 2,
       control,
     });

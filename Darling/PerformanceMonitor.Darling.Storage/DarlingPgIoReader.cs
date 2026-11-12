@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -71,6 +73,12 @@ public static class DarlingPgIoReader
     /// <para>This comment previously claimed NULL survived the arithmetic. It does not, and the claim was
     /// worse than useless: it would have licensed someone to drop the tracked flag believing the NULLs were
     /// carrying the information. The flag is not belt-and-braces — it is the only discriminator.</para>
+    /// <para><b>The engine does not always say NULL</b> (#8092): an Aurora PostgreSQL 16 target reports
+    /// <c>writes = 0</c>, which <c>writes IS NOT NULL</c> reads as tracked. So the flag the SQL derives is
+    /// gated again in <see cref="GetPgIoPageAsync"/> on the registry's engine kind, through
+    /// <see cref="IsAuroraTargetAsync"/>: on an Aurora target <c>WriteCountersTracked</c> is false whatever
+    /// the counter holds, and on any other target the SQL's answer stands, so an idle write side on a stock
+    /// engine is still a measurement.</para>
     /// <para><b><c>window_total_reads</c> / <c>window_total_read_time_ms</c> are the whole window's figures, on
     /// every row</b> (#3541 A7). <c>SUM(SUM(d_reads)) OVER ()</c> is a window aggregate over the GROUPED result,
     /// evaluated after <c>GROUP BY</c> / <c>HAVING</c> and before <c>ORDER BY</c> / <c>LIMIT</c>, so it sums every
@@ -101,7 +109,8 @@ public static class DarlingPgIoReader
                 GREATEST(write_bytes  - LAG(write_bytes)  OVER series, 0) AS d_write_bytes,
                 GREATEST(extend_bytes - LAG(extend_bytes) OVER series, 0) AS d_extend_bytes,
                 /* Whether this combination tracks writes AT ALL, as opposed to having written nothing.
-                   Aurora reports NULL here across the board; a self-managed target reports numbers. */
+                   Aurora reports NULL or 0 here across the board, so the C# gate on the registry's engine
+                   kind settles it there; a self-managed target reports numbers. */
                 (writes IS NOT NULL) AS writes_tracked,
                 /* Whether the server measures bytes at all — PG18 and above. read_bytes is the probe for
                    all three: WAL rows legitimately report no extend_bytes, so extend_bytes IS NOT NULL
@@ -172,29 +181,62 @@ public static class DarlingPgIoReader
         var start = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified);
         var end = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified);
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        PgIoPage? fromRollup = null;
         try
         {
-            if (await TryReadFromRollupAsync(connection, serverId, start, end, limit, cancellationToken) is { } fromRollup)
-            {
-                return fromRollup;
-            }
+            fromRollup = await TryReadFromRollupAsync(connection, serverId, start, end, limit, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* Fall through to the raw statement below; the transaction was disposed (rolled back) with the failed attempt. */
         }
 
-        await using var command = new NpgsqlCommand(PgIoSql, connection) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds };
+        var page = fromRollup ?? await ReadRawAsync();
+
+        /* #8092: on an Aurora target the write side is unmeasured whatever the engine wrote into the counter. */
+        return await IsAuroraTargetAsync(connection, serverId, cancellationToken)
+            ? page with { Rows = page.Rows.Select(r => r with { WriteCountersTracked = false }).ToList() }
+            : page;
+
+        async Task<PgIoPage> ReadRawAsync()
+        {
+            await using var command = new NpgsqlCommand(PgIoSql, connection) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds };
+            command.Parameters.AddWithValue(serverId);
+            /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
+               Npgsql infer timestamptz, and PostgreSQL then resolves the comparison against these naive
+               timestamp columns by converting THEM at the store session's TimeZone - east of UTC every fresh
+               row falls out of the window and the read silently returns nothing. Hidden by UTC-hosted test
+               stores; found by the round-2 review. */
+            command.Parameters.AddWithValue(start);
+            command.Parameters.AddWithValue(end);
+            command.Parameters.AddWithValue(limit);
+            return await ReadPageAsync(command, cancellationToken);
+        }
+    }
+
+    /// <summary>The registry's engine token for one server, the column <c>PostgresTargetFactsSql</c> reads.</summary>
+    public const string TargetEngineKindSql = "SELECT engine_kind FROM servers WHERE server_id = $1";
+
+    /// <summary>
+    /// Whether the registry calls this server Amazon Aurora PostgreSQL (#8092), decoded through
+    /// <see cref="MonitoredEngineKind.IsAurora"/> so an absent or unrecognised token answers false: with no
+    /// claim about the engine, the SQL's own <c>writes IS NOT NULL</c> stands. Aurora backends do not write
+    /// data files, the storage layer does, and the engine reports the write side of <c>pg_stat_io</c> as NULL
+    /// on some majors and as 0 on others; either way it is unmeasured, and this is what the two I/O readers
+    /// gate <c>WriteCountersTracked</c> on beside the column test.
+    /// </summary>
+    public static async Task<bool> IsAuroraTargetAsync(NpgsqlConnection connection, int serverId, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(TargetEngineKindSql, connection) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds };
         command.Parameters.AddWithValue(serverId);
-        /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
-           Npgsql infer timestamptz, and PostgreSQL then resolves the comparison against these naive
-           timestamp columns by converting THEM at the store session's TimeZone - east of UTC every fresh
-           row falls out of the window and the read silently returns nothing. Hidden by UTC-hosted test
-           stores; found by the round-2 review. */
-        command.Parameters.AddWithValue(start);
-        command.Parameters.AddWithValue(end);
-        command.Parameters.AddWithValue(limit);
-        return await ReadPageAsync(command, cancellationToken);
+        return MonitoredEngineKind.IsAurora(await command.ExecuteScalarAsync(cancellationToken) as string);
+    }
+
+    /// <summary><see cref="IsAuroraTargetAsync(NpgsqlConnection, int, CancellationToken)"/> on a session of its own.</summary>
+    public static async Task<bool> IsAuroraTargetAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        return await IsAuroraTargetAsync(connection, serverId, cancellationToken);
     }
 
     /// <summary>

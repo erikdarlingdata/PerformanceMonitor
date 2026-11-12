@@ -165,7 +165,7 @@ public sealed class QueryStoreStatePruneTests
 
         foreach (var host in hosts)
         {
-            var source = File.ReadAllText(host);
+            var source = RepoFile.ReadRepoFile(host);
             var name = Path.GetFileName(host);
 
             var call = source.IndexOf("await PruneOrphanedQueryStoreDatabaseStateIfDueAsync(", StringComparison.Ordinal);

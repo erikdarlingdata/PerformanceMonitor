@@ -12,8 +12,6 @@ body:
       options:
         - Lite
         - Darling
-        - Full Dashboard (deprecated)
-        - Installer (deprecated)
         - SQL collection scripts
     validations:
       required: true
@@ -40,7 +38,7 @@ body:
     id: windows-version
     attributes:
       label: Windows Version
-      description: The OS where the Lite, Darling, or Dashboard app is running.
+      description: The OS where the Lite or Darling app is running.
       placeholder: "e.g., Windows 11 23H2, Windows Server 2022"
     validations:
       required: true
@@ -85,7 +83,7 @@ body:
     id: errors
     attributes:
       label: Error Messages / Log Output
-      description: Paste any error messages or relevant log entries. Dashboard logs are in %LOCALAPPDATA%\PerformanceMonitor\Logs\; Lite logs are in %LOCALAPPDATA%\PerformanceMonitorLite-Data\logs\ (on versions before the data-root move, %LOCALAPPDATA%\PerformanceMonitorLite\logs\); Darling logs are in %ProgramData%\PerformanceMonitorDarling\logs\.
+      description: Paste any error messages or relevant log entries. Lite logs are in %LOCALAPPDATA%\PerformanceMonitorLite-Data\logs\ (on versions before the data-root move, %LOCALAPPDATA%\PerformanceMonitorLite\logs\); Darling logs are in %ProgramData%\PerformanceMonitorDarling\logs\.
       render: text
     validations:
       required: false
@@ -115,7 +113,6 @@ body:
       description: |
         Anything else that might help:
         - Did this work before? If so, what changed?
-        - Is SQL Server Agent running? (deprecated Full Dashboard edition only)
         - Are you monitoring Azure SQL DB, Azure MI, or AWS RDS?
     validations:
       required: false

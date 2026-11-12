@@ -202,12 +202,12 @@ namespace PerformanceMonitor.Common
         /// freshness: there is no live ping to a monitored server.</summary>
         public static string Headline(this ServerCollectionStatus status) => status switch
         {
-            ServerCollectionStatus.Stale => "Warning — collection has lagged on this server",
-            ServerCollectionStatus.Online => "Online — collection is current",
-            ServerCollectionStatus.Offline => "Offline — nothing has been collected for long enough to call the server dark",
+            ServerCollectionStatus.Stale => "Warning: collection has lagged on this server",
+            ServerCollectionStatus.Online => "Online: collection is current",
+            ServerCollectionStatus.Offline => "Offline: nothing has been collected for long enough to call the server dark",
             ServerCollectionStatus.AwaitingFirstCollection =>
-                "Awaiting first collection — registered, but the service has not reached it yet",
-            _ => "Unknown — this server's collection freshness has not been classified",
+                "Awaiting first collection: registered, but the service has not reached it yet",
+            _ => "Unknown: this server's collection freshness has not been classified",
         };
     }
 
@@ -322,8 +322,13 @@ namespace PerformanceMonitor.Common
         public static readonly TimeSpan BlockingRateMinimumWindow = TimeSpan.FromHours(1);
 
         /// <summary>
-        /// WARNING tier of the blocking COUNT arm: blocked-process reports per hour, normalised over the
-        /// window.
+        /// WARNING tier of the blocking COUNT arm, normalised over the window. <b>Unit: Darling reads this as blocked
+        /// WAITS per hour (#7028), the count the blocking alerts use, and Lite reads it as blocked-process REPORTS per
+        /// hour.</b> Lite stays on report rows because #7028 was built for Darling only.
+        /// The tier keeps its stored value, which was measured in reports below. One wait is still one count however
+        /// many reports SQL Server wrote for it. In a window that mixes hours, each hour now takes its own source as the
+        /// alert does, so hours that have only DMV snapshots are no longer dropped and such a window can count more
+        /// waits than the old report count did.
         ///
         /// <para><b>The top of the measured quiet mode.</b> 14 days of <c>blocked_process_reports</c> on
         /// the 43-server dogfood fleet — 2,398 reports over 14,448 server-hours, bucketed one server-hour
@@ -342,7 +347,8 @@ namespace PerformanceMonitor.Common
         public const double BlockingWarnPerHour = 5.0;
 
         /// <summary>
-        /// CRITICAL tier of the blocking COUNT arm: reports per hour.
+        /// CRITICAL tier of the blocking COUNT arm. <b>Unit: blocked WAITS per hour in Darling (#7028), blocked-process
+        /// REPORTS per hour in Lite.</b> The tier keeps its stored value, which was measured in reports, below.
         ///
         /// <para><b>Placed inside the measured trough, the #3368 method.</b> On the same 14-day distribution
         /// the interval [5, 19] holds 14 server-hours (5 at 5–10, 9 at 11–19) against 23 at 20 or more, and
@@ -472,7 +478,7 @@ namespace PerformanceMonitor.Common
     }
 
     /// <summary>
-    /// The four settable tiers of the blocking band (#6927): events per hour and the longest single block in
+    /// The settable tiers of the blocking band (#6927): blocking waits per hour and the longest single block in
     /// seconds, each with a Warning and a Critical bar. The same shape as <see cref="DeadlockRateThresholds"/>:
     /// the store holds what the operator set, these accessors clamp on read, and a <c>default</c> struct
     /// (every field zero) clamps to the floors rather than to zero.
@@ -488,12 +494,14 @@ namespace PerformanceMonitor.Common
         double WarnPerHourRaw,
         double CriticalPerHourRaw,
         double WarnWaitSecondsRaw,
-        double CriticalWaitSecondsRaw)
+        double CriticalWaitSecondsRaw,
+        double WarnSnapshotWaitSecondsRaw = 0,
+        double CriticalSnapshotWaitSecondsRaw = 0)
     {
-        /// <summary>Warning bar, events per hour, clamped.</summary>
+        /// <summary>Warning bar, blocking waits per hour, clamped.</summary>
         public double WarnPerHour => Clamp(WarnPerHourRaw, ServerHealthThresholds.BlockingRatePerHourFloor, ServerHealthThresholds.BlockingRatePerHourCeiling);
 
-        /// <summary>Critical bar, events per hour, clamped independently of the warning bar.</summary>
+        /// <summary>Critical bar, blocking waits per hour, clamped independently of the warning bar.</summary>
         public double CriticalPerHour => Clamp(CriticalPerHourRaw, ServerHealthThresholds.BlockingRatePerHourFloor, ServerHealthThresholds.BlockingRatePerHourCeiling);
 
         /// <summary>Warning bar, longest block in seconds, clamped.</summary>
@@ -502,12 +510,29 @@ namespace PerformanceMonitor.Common
         /// <summary>Critical bar, longest block in seconds, clamped independently of the warning bar.</summary>
         public double CriticalWaitSeconds => Clamp(CriticalWaitSecondsRaw, ServerHealthThresholds.BlockingWaitSecondsFloor, ServerHealthThresholds.BlockingWaitSecondsCeiling);
 
-        /// <summary>Today's constants: what a store at its V228 column defaults hands the band.</summary>
+        /// <summary>#7028: Warning bar, the largest blocked wait summed across one DMV snapshot, seconds (the
+        /// <c>Blocking Wait Time</c> alert's measure). 0 means the tier is off, which is what a bar of 0 means on
+        /// the alert; any other value is clamped to 1 through 86400.</summary>
+        public double WarnSnapshotWaitSeconds => ClampOptional(WarnSnapshotWaitSecondsRaw);
+
+        /// <summary>#7028: Critical bar for the snapshot arm, seconds. 0 means the tier is off. Clamped
+        /// independently of the warning bar.</summary>
+        public double CriticalSnapshotWaitSeconds => ClampOptional(CriticalSnapshotWaitSecondsRaw);
+
+        /// <summary>Today's constants: what a store at its V228 column defaults hands the band. The snapshot arm
+        /// (#7028) is off (0), because the alert's own bar defaults to off.</summary>
         public static BlockingBandThresholds Default => new(
             ServerHealthThresholds.BlockingWarnPerHour,
             ServerHealthThresholds.BlockingCriticalPerHour,
             ServerHealthThresholds.BlockingWarnWaitSeconds,
-            ServerHealthThresholds.BlockingCriticalWaitSeconds);
+            ServerHealthThresholds.BlockingCriticalWaitSeconds,
+            0,
+            0);
+
+        private static double ClampOptional(double value) =>
+            double.IsNaN(value) || value <= 0
+                ? 0
+                : Math.Clamp(value, ServerHealthThresholds.BlockingWaitSecondsFloor, ServerHealthThresholds.BlockingWaitSecondsCeiling);
 
         private static double Clamp(double value, double floor, double ceiling) =>
             double.IsNaN(value) ? floor : Math.Clamp(value, floor, ceiling);
@@ -594,6 +619,12 @@ namespace PerformanceMonitor.Common
         /// measured quiet window.</summary>
         public int? BlockingCount { get; init; }
 
+        /// <summary>#7616: on a PostgreSQL target, how many blocking captures ran in the window (the denominator of
+        /// <see cref="BlockingCount"/>, which is how many of them saw any blocking). <c>null</c> on SQL Server, whose
+        /// count is blocked waits. When it is set, the blocking band is
+        /// <see cref="ServerHealthClassifier.PostgresBlockingSeverity"/>, a share of the captures actually taken.</summary>
+        public long? BlockingCapturesTaken { get; init; }
+
         /// <summary>The worst blocking wait in the window, in seconds.</summary>
         public double MaxBlockedSeconds { get; init; }
 
@@ -610,6 +641,12 @@ namespace PerformanceMonitor.Common
         /// production bundle declares both.</para>
         /// </summary>
         public TimeSpan BlockingWindow { get; init; }
+
+        /// <summary>#7028: the blocking band's snapshot arm value, in seconds, or <c>null</c> when this path carries
+        /// none (Lite, and any bundle built before the arm existed). The largest total blocked wait of one DMV
+        /// snapshot in the window, after the Blocking Wait Time alert's persistence gate, the alert's own measure.
+        /// The arm runs only when this is not null and a snapshot tier is above 0.</summary>
+        public double? PeakSnapshotWaitSeconds { get; init; }
 
         /// <summary>Deadlocks in the window, or <c>null</c> when this target has no deadlock source the
         /// card reads (#3272). Same reasoning as <see cref="HasMemoryPressure"/>.</summary>
@@ -650,6 +687,18 @@ namespace PerformanceMonitor.Common
         /// <c>config_alert_settings</c> values in so the card, the Overview tab, the calendar and the fleet
         /// sweep band on what the operator set. Lite has no such knobs and leaves it null.</summary>
         public BlockingBandThresholds? BlockingBandThresholds { get; init; }
+
+        /// <summary>#7561: true when an identity column on this server is at or past the critical bar (an insert that will fail). It is not a
+        /// seventh metric: <see cref="MetricSeverities"/> and <see cref="ServerHealthClassifier.MeasuredMetricCounts"/> do not see it. It raises
+        /// <see cref="ServerHealthClassifier.OverallMetricSeverity"/> to Critical and counts as one Critical in <see cref="ServerHealthClassifier.FleetHealthScore"/>,
+        /// so the dot, the strip counts, the severity sort and the MCP reply agree with the tile.</summary>
+        public bool IdentityCapacityCritical { get; init; }
+
+        /// <summary>#7647: true when a database on this server is in a state the Database State alert grades Critical (SUSPECT, RECOVERY_PENDING, EMERGENCY) in both of
+        /// the two newest snapshots. Like <see cref="IdentityCapacityCritical"/> it is not one of the six metrics: it raises
+        /// <see cref="ServerHealthClassifier.OverallMetricSeverity"/> to Critical and counts as one Critical in <see cref="ServerHealthClassifier.FleetHealthScore"/>. A server whose
+        /// database state is not collected leaves it false, which is "no reading", not "healthy": the card says not collected for that part.</summary>
+        public bool DatabaseStateCritical { get; init; }
 
         /// <summary>Worker-thread ceiling (max_workers_count), or null with no scheduler snapshot (e.g. Azure SQL DB).</summary>
         public int? TotalThreads { get; init; }
@@ -695,22 +744,12 @@ namespace PerformanceMonitor.Common
     /// the window — because a difference of fewer than two samples is not a zero, where a <c>COUNT(*)</c>
     /// over an event table is; the two fleet readers hold that decision beside the read.</para>
     ///
-    /// <para><b>Blocking stays here on purpose, and the reason is the shape of the evidence, not its
-    /// absence.</b> A PostgreSQL target's blocking IS collected (<c>pg_blocking</c>, <c>pg_lock_stats</c>),
-    /// but as per-minute SAMPLES of <c>pg_stat_activity</c>: a waiter seen in three consecutive captures is
-    /// one wait observed three times, where SQL Server's blocked-process report is one engine-recorded event
-    /// per threshold crossing. <see cref="ServerHealthClassifier.BlockingSeverity"/>'s count tiers were
-    /// measured in reports per server-hour on that engine-recorded shape (#3596), and a sampled sighting
-    /// count fed through them would band on a denominator the tiers were never measured against — three
-    /// sightings of one 3-minute wait is not three reports. An honest PostgreSQL band needs its own
-    /// sampled-shape tiers (share of captures holding a waiter, longest observed wait) measured on that
-    /// fleet, which is a distribution nobody has taken yet; until then Unknown is the reading, and the
-    /// alert (<c>DarlingWorker.EvaluatePgBlockingAsync</c>, root blockers per rolling window) is the
-    /// surface that speaks for PostgreSQL blocking. Tiering pending: #3601's <c>lock_wait</c> log-event
-    /// family (<c>log_lock_waits</c> "still waiting" lines) is the EVENT-grain evidence a report-rate band
-    /// would read — one line per wait past <c>deadlock_timeout</c>, the shape the SQL Server tiers were
-    /// measured on — and is the join point for a future PostgreSQL arm here; nothing reads it yet. The
-    /// Darling README's engine-coverage table states this beside the band.</para>
+    /// <para><b>Blocking left this set in #7616.</b> A PostgreSQL target's blocking IS collected (<c>pg_blocking</c>) as per-minute SAMPLES of
+    /// <c>pg_stat_activity</c>, a different unit from SQL Server's blocked-process report: a waiter seen in three consecutive captures is one
+    /// wait observed three times. So the PostgreSQL card does not borrow SQL Server's wait count. It counts the captures in the window that
+    /// saw any blocking, and <see cref="ServerHealthClassifier.PostgresBlockingSeverity"/> bands that count per hour against the same
+    /// store tiers, with no longest-wait arm. A target with no capture in the window is still not measured: Unknown, never a 0 (#7654).
+    /// The <c>lock_wait</c> log-event family (#3601) remains the event-grain evidence a future report-rate arm could read.</para>
     ///
     /// <para><b>It names the ENGINE, not the collector state.</b> A SQL Server whose deadlock collector is
     /// permission-denied also reads zero, and that stays Healthy here on purpose: #3017 routed that case to
@@ -787,7 +826,9 @@ namespace PerformanceMonitor.Common
         /// successful connect, Lite's server entry when it is added), so a server registered inside what the
         /// read could see could only have collected inside it, and the read found nothing. Registered before
         /// it, the server had time to collect and has sent nothing the read could see: Offline is the word, and
-        /// it is what a read that could see all of history says whenever the server did once collect.</para>
+        /// it is what a read that could see all of history says whenever the server did once collect. A server
+        /// whose collectors all fail (#8464) has no successful collection and reads by this same rule here; the
+        /// overload that takes <c>attempted</c> tells it from one that has not been tried.</para>
         ///
         /// <para><b>No registration keeps the ladder's reading</b>, because nothing then says when collection
         /// could have begun. That is also the reading a caller gets by passing null for a server its read did
@@ -806,6 +847,145 @@ namespace PerformanceMonitor.Common
             !lastCollectionUtc.HasValue && registeredAtUtc.HasValue && registeredAtUtc.Value < searchedFromUtc
                 ? ServerFreshness.Offline
                 : ClassifyFreshness(lastCollectionUtc, nowUtc);
+
+        /// <summary>
+        /// The freshness ladder with the service's own connection answer folded in (#7590). A server whose connect has failed
+        /// (<paramref name="connectDownSinceUtc"/> is the first failure of the current outage, stored on the registry) is
+        /// <see cref="ServerFreshness.Offline"/> at once: the service has no connection to it, so no collector can run, and waiting out
+        /// <see cref="ServerHealthThresholds.OfflineThreshold"/> only shows green tiles for up to 30 minutes. A server with no failed
+        /// connect keeps the age rule untouched, including the 30 minute wait #2794 measured, because a quiet server with nothing failed is
+        /// a different thing from one that cannot be reached. Every surface that bands from the registry calls this one function.
+        /// </summary>
+        public static ServerFreshness ClassifyFreshness(
+            DateTime? lastCollectionUtc,
+            DateTime? registeredAtUtc,
+            DateTime searchedFromUtc,
+            DateTime nowUtc,
+            DateTime? connectDownSinceUtc) =>
+            EffectiveConnectDownSince(lastCollectionUtc, connectDownSinceUtc).HasValue
+                ? ServerFreshness.Offline
+                : ClassifyFreshness(lastCollectionUtc, registeredAtUtc, searchedFromUtc, nowUtc);
+
+        /// <summary>
+        /// The registration rule with the log's failed rows folded in (#8464). A collector writes a row for every attempt, so a server
+        /// with no successful collection falls into two kinds: one whose collectors have run and all failed (a login that connects but
+        /// lacks VIEW SERVER STATE writes a PERMISSIONS row per collector per cycle), and one no collector has reached yet. With
+        /// <paramref name="attempted"/> true and no successful collection the server is <see cref="ServerFreshness.Offline"/> at once:
+        /// it has been tried and nothing arrives, whatever its registration's age, and the fleet card, <c>list_servers</c>, the Overview
+        /// card, the sidebar dot, the Admin grid and every offline note say the same word for it. With no row at all the rule above
+        /// stands, so a server that has not been tried stays awaiting its first collection, and one whose whole history retention
+        /// dropped reads Offline from its registration. A newest collection bands as the ladder bands it, whatever the flag.
+        /// </summary>
+        /// <param name="attempted">Whether the log holds any collector row for the server, a failed one included; the cycle and
+        /// analysis-pass rows are not collector runs and do not count.</param>
+        public static ServerFreshness ClassifyFreshness(
+            DateTime? lastCollectionUtc,
+            DateTime? registeredAtUtc,
+            DateTime searchedFromUtc,
+            DateTime nowUtc,
+            bool attempted) =>
+            !lastCollectionUtc.HasValue && attempted
+                ? ServerFreshness.Offline
+                : ClassifyFreshness(lastCollectionUtc, registeredAtUtc, searchedFromUtc, nowUtc);
+
+        /// <summary>
+        /// <see cref="ClassifyFreshness(DateTime?, DateTime?, DateTime, DateTime, bool)"/> with the service's connection answer folded in
+        /// (#7590), the one function every surface that bands from the registry and the collection log calls.
+        /// </summary>
+        public static ServerFreshness ClassifyFreshness(
+            DateTime? lastCollectionUtc,
+            DateTime? registeredAtUtc,
+            DateTime searchedFromUtc,
+            DateTime nowUtc,
+            DateTime? connectDownSinceUtc,
+            bool attempted) =>
+            EffectiveConnectDownSince(lastCollectionUtc, connectDownSinceUtc).HasValue
+                ? ServerFreshness.Offline
+                : ClassifyFreshness(lastCollectionUtc, registeredAtUtc, searchedFromUtc, nowUtc, attempted);
+
+        /// <summary>
+        /// The stored failed-connect flag, or null once a collection newer than it proves a later connect worked (#7590). The flag is cleared by
+        /// one write per connect that is allowed to fail, and a server that is collecting again must not read Offline for the rest of the session
+        /// because that write was lost: the age rule heals itself, so this does too. Every reader that takes <c>connect_down_since</c> from the
+        /// registry passes it through here with the newest collection it holds, and a surface with no collection time of its own is sent the
+        /// resolved value (the web reads the fleet card).
+        /// </summary>
+        public static DateTime? EffectiveConnectDownSince(DateTime? lastCollectionUtc, DateTime? connectDownSinceUtc) =>
+            connectDownSinceUtc.HasValue && lastCollectionUtc.HasValue && lastCollectionUtc.Value > connectDownSinceUtc.Value
+                ? null
+                : connectDownSinceUtc;
+
+        /// <summary>
+        /// The reason a failed connect puts on a card, in place of "collection stale" or "no recent collection" (#7590):
+        /// <c>Server unreachable since 2026-11-04 14:03 UTC</c>, then the last connect error when one is stored. The time is UTC
+        /// because the store is, and a surface that wants local time formats the stored instant itself.
+        /// </summary>
+        public static string UnreachableReason(DateTime sinceUtc, string? lastError)
+        {
+            var text = "Server unreachable since " + sinceUtc.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture) + " UTC";
+            return string.IsNullOrWhiteSpace(lastError) ? text : text + ": " + lastError.Trim();
+        }
+
+        /// <summary>
+        /// What Collection Health says while a server's connect has failed (#7590): collection is waiting on the connection, since when,
+        /// the last error (<see cref="UnreachableReason"/>), and when the service tries the connect next. A retry time already past reads
+        /// <c>due now</c>: the service has not stored the next attempt yet. No stored time says nothing about the retry.
+        /// </summary>
+        public static string WaitingOnConnectionText(DateTime sinceUtc, string? lastError, DateTime? nextAttemptUtc, DateTime nowUtc)
+        {
+            /* A SQL Server error text usually ends with its own period ("Login failed for user 'x'."): a second one reads as a typo. */
+            var reason = UnreachableReason(sinceUtc, lastError);
+            var text = "Collection is waiting on the connection: the service cannot connect to this server, so no collector is running. " + reason + (reason.EndsWith('.') ? string.Empty : ".");
+            if (!nextAttemptUtc.HasValue)
+            {
+                return text;
+            }
+
+            return text + " Next retry " + (nextAttemptUtc.Value <= nowUtc
+                ? "is due now."
+                : "at " + nextAttemptUtc.Value.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + " UTC.");
+        }
+
+        /// <summary>
+        /// The <c>server_connection</c> block <c>get_collection_health</c> carries while a server is unreachable (#7590), the one shape for both
+        /// SKUs: Darling builds it from the stored failed connect, Lite from its in-process connection check. <paramref name="nextAttemptUtc"/> is
+        /// null where no retry time exists (Lite re-checks on its own interval and stores none). The collector rows beside it are the last runs from
+        /// before the connection failed, and the sentence says so when there are any.
+        /// </summary>
+        public static object ServerConnectionBlock(DateTime sinceUtc, string? lastError, DateTime? nextAttemptUtc, DateTime nowUtc, bool hasCollectorRows) => new
+        {
+            status = "waiting_on_connection",
+            since = sinceUtc.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
+            last_connect_error = lastError,
+            /* The retry decision, UTC; null when none is stored. */
+            next_connect_attempt = nextAttemptUtc?.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
+            message = WaitingOnConnectionText(sinceUtc, lastError, nextAttemptUtc, nowUtc)
+                + (hasCollectorRows ? " The collector rows are the last runs from before the connection failed." : ""),
+        };
+
+        /// <summary>
+        /// How a tile reads while its server is unreachable: the values are the last collected ones, and this says so with their age
+        /// (<c>last known, 12 min ago</c>).
+        /// </summary>
+        public static string LastKnownLabel(DateTime? lastCollectionUtc, DateTime nowUtc)
+        {
+            if (!lastCollectionUtc.HasValue)
+            {
+                return "no last known value";
+            }
+
+            var age = nowUtc - lastCollectionUtc.Value;
+            if (age < TimeSpan.Zero)
+            {
+                age = TimeSpan.Zero;
+            }
+
+            var words = age.TotalMinutes < 1 ? "under a minute"
+                : age.TotalHours < 1 ? ((int)age.TotalMinutes).ToString(System.Globalization.CultureInfo.InvariantCulture) + " min"
+                : age.TotalDays < 1 ? ((int)age.TotalHours).ToString(System.Globalization.CultureInfo.InvariantCulture) + " h"
+                : ((int)age.TotalDays).ToString(System.Globalization.CultureInfo.InvariantCulture) + " d";
+            return "last known, " + words + " ago";
+        }
 
         /// <summary>
         /// CPU band: &gt;= 95% Critical, &gt;= 80% Warning; nothing bandable Unknown. One ladder, applied to
@@ -893,7 +1073,7 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
-        /// Blocked-process reports per hour over <paramref name="window"/>, or <c>null</c> when the window
+        /// Blocking waits per hour over <paramref name="window"/>, or <c>null</c> when the window
         /// is too short to normalise honestly (below <see cref="ServerHealthThresholds.BlockingRateMinimumWindow"/>,
         /// which includes a zero, negative or undeclared one) — <see cref="DeadlockRatePerHour"/>'s arithmetic
         /// over the blocking count (#3539 A3). Public for the same reason: both cards and the day cell REPORT
@@ -905,7 +1085,7 @@ namespace PerformanceMonitor.Common
 
         /// <summary>
         /// Blocking band (#3539 A3): three arms, in this order — the longest single block's magnitude,
-        /// then blocked-process reports per HOUR over the window against
+        /// then blocking waits per HOUR over the window against
         /// <see cref="ServerHealthThresholds.BlockingCriticalPerHour"/> / <see cref="ServerHealthThresholds.BlockingWarnPerHour"/>,
         /// then the wait arm's Warning bar; no source Unknown (#3272).
         ///
@@ -950,6 +1130,9 @@ namespace PerformanceMonitor.Common
         /// <see cref="MemorySeverity"/> for why the arm exists). A <c>long</c> for the daily classifier's
         /// day-scale roll-ups; every <c>int</c> caller widens implicitly.</param>
         /// <param name="maxBlockedSeconds">The longest single block in the window.</param>
+        /// <param name="peakSnapshotWaitSeconds">#7028: the snapshot arm's value, the largest gated snapshot total
+        /// in the window, in seconds, or null when the caller has none (Lite never passes it). The arm runs only
+        /// when this is not null and a snapshot tier is above 0.</param>
         /// <param name="window">How long the count covers. Required rather than defaulted, for the reason
         /// <see cref="DeadlockSeverity"/>'s is: a caller that kept the old two-argument call would compile
         /// and silently band a bare count again, which is the entire defect.</param>
@@ -957,41 +1140,212 @@ namespace PerformanceMonitor.Common
             long? blockingCountOrNullWhenUnmeasured,
             double maxBlockedSeconds,
             TimeSpan window,
-            BlockingBandThresholds? thresholds = null)
+            BlockingBandThresholds? thresholds = null,
+            double? peakSnapshotWaitSeconds = null)
         {
             if (!blockingCountOrNullWhenUnmeasured.HasValue)
             {
                 return HealthSeverity.Unknown;
             }
 
-            var blockingCount = blockingCountOrNullWhenUnmeasured.Value;
-            var tiers = thresholds ?? BlockingBandThresholds.Default;
+            var arms = BlockingArmsFor(
+                blockingCountOrNullWhenUnmeasured.Value,
+                maxBlockedSeconds,
+                window,
+                thresholds ?? BlockingBandThresholds.Default,
+                peakSnapshotWaitSeconds);
 
-            if (maxBlockedSeconds >= tiers.CriticalWaitSeconds)
+            if (arms.Wait == HealthSeverity.Critical
+                || arms.Snapshot == HealthSeverity.Critical
+                || arms.Rate == HealthSeverity.Critical)
             {
                 return HealthSeverity.Critical;
             }
 
-            var ratePerHour = BlockingRatePerHour(blockingCount, window);
-            if (ratePerHour.HasValue && ratePerHour.Value >= tiers.CriticalPerHour)
-            {
-                return HealthSeverity.Critical;
-            }
-
-            if (maxBlockedSeconds >= tiers.WarnWaitSeconds)
+            if (arms.Wait == HealthSeverity.Warning || arms.Snapshot == HealthSeverity.Warning)
             {
                 return HealthSeverity.Warning;
             }
 
-            if (!ratePerHour.HasValue)
+            return arms.Rate;
+        }
+
+        /// <summary>#7616: a PostgreSQL blocking band needs at least this many captures in the window. One blocked capture of one
+        /// taken is 100% of the share and would scale to 60 an hour, Critical, for a target registered a minute ago.</summary>
+        public const int PostgresBlockingMinimumCaptures = 3;
+
+        /// <summary>#7616: the PostgreSQL blocking captures per hour the tiers are written for, one a minute (the default
+        /// <c>pg_blocking</c> cadence). The band scales its share to this, so an operator-tuned cadence does not move it.</summary>
+        public const double PostgresBlockingNominalCapturesPerHour = 60.0;
+
+        /// <summary>#7616: why a PostgreSQL blocking card with some captures but fewer than
+        /// <see cref="PostgresBlockingMinimumCaptures"/> reads Unknown. One string for every surface that shows it.</summary>
+        public const string PostgresBlockingTooFewCapturesDetail = "fewer than 3 captures in this window";
+
+        /// <summary>
+        /// #7616: PostgreSQL blocking captures per hour at the default one-a-minute cadence:
+        /// <c>capturesWithBlocking / capturesTaken * 60</c>. A capture is a snapshot, so the share of the captures that saw
+        /// blocking estimates the share of time blocked, whatever the cadence and however much of the window the collector
+        /// covered (a rate over the NOMINAL hour reads quieter when the collector ran part of it, or ran every five minutes: #3695).
+        /// <c>null</c> below <see cref="PostgresBlockingMinimumCaptures"/> captures, and when there is no count.
+        /// </summary>
+        public static double? PostgresBlockingRatePerHour(long? capturesWithBlocking, long capturesTaken) =>
+            capturesWithBlocking.HasValue && capturesTaken >= PostgresBlockingMinimumCaptures
+                ? (double)capturesWithBlocking.Value / capturesTaken * PostgresBlockingNominalCapturesPerHour
+                : null;
+
+        /// <summary>
+        /// #7616: the PostgreSQL blocking band. The count is how many of the window's per-minute captures saw any blocking
+        /// (the capture <c>get_pg_blocking</c> reads), over <paramref name="capturesTaken"/> captures. It bands
+        /// <see cref="PostgresBlockingRatePerHour"/> against the store's per-hour tiers (<see cref="BlockingBandThresholds"/>,
+        /// the #6927 bars, 5 and 20 by default, each read as at most 60 so a tier above 60 means every capture), so at the default cadence that is 5 and 20 minutes an hour with a blocked session
+        /// in view. No count, no capture, or fewer than <see cref="PostgresBlockingMinimumCaptures"/> captures is Unknown, never a Healthy
+        /// zero. There is no longest-wait arm: a capture records who waits behind whom at one instant, not how long the wait has run.
+        /// </summary>
+        public static HealthSeverity PostgresBlockingSeverity(
+            long? capturesWithBlockingOrNullWhenNoCapture,
+            long capturesTaken,
+            BlockingBandThresholds? thresholds = null)
+        {
+            var rate = PostgresBlockingRatePerHour(capturesWithBlockingOrNullWhenNoCapture, capturesTaken);
+            if (!rate.HasValue)
             {
-                return blockingCount > 0 ? HealthSeverity.Warning : HealthSeverity.Unknown;
+                return HealthSeverity.Unknown;
             }
 
-            return ratePerHour.Value >= tiers.WarnPerHour
-                ? HealthSeverity.Warning
+            /* The rate cannot pass PostgresBlockingNominalCapturesPerHour, but the stored tiers accept 1 to 10000 for the SQL Server
+               count. Clamped to the ceiling, a tier above 60 means every capture, so a target blocked in every capture still reaches
+               Critical instead of reading Healthy under a Critical tier of 80. The SQL Server arm is not clamped. */
+            var tiers = thresholds ?? BlockingBandThresholds.Default;
+            var critical = Math.Min(tiers.CriticalPerHour, PostgresBlockingNominalCapturesPerHour);
+            var warn = Math.Min(tiers.WarnPerHour, PostgresBlockingNominalCapturesPerHour);
+            return rate.Value >= critical ? HealthSeverity.Critical
+                : rate.Value >= warn ? HealthSeverity.Warning
                 : HealthSeverity.Healthy;
         }
+
+        /// <summary>#7616 / #3631: what the fleet's blocking total adds up, for the tile that shows it. SQL Server counts blocked
+        /// waits and PostgreSQL counts the captures that saw blocking, and the total sums whichever the fleet has into one number, so
+        /// the tile names both units when it has both engines. <c>null</c> for a fleet with neither.</summary>
+        public static string? BlockingTotalUnitsDetail(bool hasSqlServer, bool hasPostgres) =>
+            hasSqlServer && hasPostgres ? "SQL Server blocked waits plus PostgreSQL blocking captures, in one number"
+            : hasSqlServer ? "blocked waits"
+            : hasPostgres ? "blocking captures"
+            : null;
+
+        /// <summary>#7616: the reason text for a PostgreSQL blocking band, <c>Blocking 5 captures (25.0/hr)</c>. The rate is left off
+        /// when there are too few captures to rate, and is written by <see cref="DailyHealthBandCalculator.RatePerHourText"/>,
+        /// so a positive rate never reads as "0.0".</summary>
+        public static string PostgresBlockingReason(long capturesWithBlocking, long capturesTaken)
+        {
+            var rate = PostgresBlockingRatePerHour(capturesWithBlocking, capturesTaken);
+            return "Blocking " + capturesWithBlocking.ToString(CultureInfo.InvariantCulture)
+                + (capturesWithBlocking == 1 ? " capture" : " captures")
+                + (rate.HasValue ? " (" + DailyHealthBandCalculator.RatePerHourText(rate.Value) + "/hr)" : "");
+        }
+
+        /// <summary>#7444: what each of the band's three arms read, so the band and the reason text that names
+        /// the arm that fired it come from ONE evaluation and cannot disagree about which arm crossed. Wait and
+        /// Snapshot are Healthy, Warning or Critical (Snapshot is Healthy when its arm is off). Rate is the count
+        /// arm: Healthy, Warning or Critical on a rateable window, and on an unrateable one Warning for a
+        /// non-zero count and Unknown for zero (#3368's rule), in which case <c>RatePerHour</c> is null.</summary>
+        private readonly record struct BlockingArms(
+            HealthSeverity Wait,
+            HealthSeverity Snapshot,
+            HealthSeverity Rate,
+            double? RatePerHour);
+
+        private static BlockingArms BlockingArmsFor(
+            long blockingCount,
+            double maxBlockedSeconds,
+            TimeSpan window,
+            BlockingBandThresholds tiers,
+            double? peakSnapshotWaitSeconds)
+        {
+            /* #7028: the snapshot arm reads the Blocking Wait Time alert's measure (the largest blocked wait summed
+               across one DMV snapshot, after the alert's persistence gate). It runs only when the caller carries a
+               value and a tier is above 0 (0 = off). */
+            var snapshotSeconds = peakSnapshotWaitSeconds ?? 0;
+            var snapshotArm = peakSnapshotWaitSeconds.HasValue;
+            var snapshotCritical = tiers.CriticalSnapshotWaitSeconds;
+            var snapshotWarn = tiers.WarnSnapshotWaitSeconds;
+
+            var wait = maxBlockedSeconds >= tiers.CriticalWaitSeconds ? HealthSeverity.Critical
+                : maxBlockedSeconds >= tiers.WarnWaitSeconds ? HealthSeverity.Warning
+                : HealthSeverity.Healthy;
+
+            var snapshot = snapshotArm && snapshotCritical > 0 && snapshotSeconds >= snapshotCritical ? HealthSeverity.Critical
+                : snapshotArm && snapshotWarn > 0 && snapshotSeconds >= snapshotWarn ? HealthSeverity.Warning
+                : HealthSeverity.Healthy;
+
+            var ratePerHour = BlockingRatePerHour(blockingCount, window);
+            var rate = !ratePerHour.HasValue
+                ? (blockingCount > 0 ? HealthSeverity.Warning : HealthSeverity.Unknown)
+                : ratePerHour.Value >= tiers.CriticalPerHour ? HealthSeverity.Critical
+                : ratePerHour.Value >= tiers.WarnPerHour ? HealthSeverity.Warning
+                : HealthSeverity.Healthy;
+
+            return new BlockingArms(wait, snapshot, rate, ratePerHour);
+        }
+
+        /// <summary>#7444: the blocking reason a fleet card prints, naming the arm of <see cref="BlockingSeverity"/>
+        /// that fired the band: <c>Blocking 1 (longest block 19.4 s)</c>, <c>Blocking 1 (peak snapshot 2.0 min)</c> or
+        /// <c>Blocking 40 (12.5 waits/hr)</c>. Before this the text always named the rate, so a card the longest block
+        /// had put at Warning read <c>Blocking 1 (0.0 waits/hr)</c>. Takes the band's own inputs and reads the same
+        /// arms (<c>BlockingArmsFor</c>) against the same tiers, so the two cannot drift. When more than one arm
+        /// fired it names the one with the higher severity, the longest block before the snapshot before the rate on a
+        /// tie. A window too short to rate, with no wait arm fired, prints the count alone, which is all the band had.
+        /// Durations use <see cref="DailyHealthBandCalculator"/>'s format, so the daily calendar and this line read
+        /// alike.</summary>
+        public static string BlockingReason(
+            long blockingCount,
+            double maxBlockedSeconds,
+            TimeSpan window,
+            BlockingBandThresholds? thresholds = null,
+            double? peakSnapshotWaitSeconds = null)
+        {
+            var arms = BlockingArmsFor(
+                blockingCount,
+                maxBlockedSeconds,
+                window,
+                thresholds ?? BlockingBandThresholds.Default,
+                peakSnapshotWaitSeconds);
+
+            var head = "Blocking " + blockingCount.ToString(CultureInfo.InvariantCulture);
+            var best = HealthSeverity.Warning;
+            string? qualifier = null;
+
+            if (arms.Wait >= best)
+            {
+                best = arms.Wait;
+                qualifier = "longest block " + DailyHealthBandCalculator.FormatDurationMs(SecondsToMs(maxBlockedSeconds));
+            }
+
+            if (arms.Snapshot >= best && (qualifier is null || arms.Snapshot > best))
+            {
+                best = arms.Snapshot;
+                qualifier = "peak snapshot " + DailyHealthBandCalculator.FormatDurationMs(SecondsToMs(peakSnapshotWaitSeconds ?? 0));
+            }
+
+            if (arms.RatePerHour.HasValue && arms.Rate >= best && (qualifier is null || arms.Rate > best))
+            {
+                qualifier = DailyHealthBandCalculator.RatePerHourText(arms.RatePerHour.Value) + " waits/hr";
+            }
+
+            return qualifier is null ? head : head + " (" + qualifier + ")";
+        }
+
+        private static long SecondsToMs(double seconds) => (long)Math.Round(seconds * 1000.0);
+
+        /// <summary>#7444: <see cref="BlockingReason(long, double, TimeSpan, BlockingBandThresholds?, double?)"/> over a
+        /// card's metrics, the same values <see cref="MetricSeverities"/> bands. A count the card did not measure reads
+        /// as a bare "Blocking" because no arm ran.</summary>
+        public static string BlockingReason(ServerHealthMetrics m) =>
+            m.BlockingCapturesTaken.HasValue
+                ? (m.BlockingCount.HasValue ? PostgresBlockingReason(m.BlockingCount.Value, m.BlockingCapturesTaken.Value) : "Blocking")
+                : m.BlockingCount.HasValue
+                ? BlockingReason(m.BlockingCount.Value, m.MaxBlockedSeconds, m.BlockingWindow, m.BlockingBandThresholds, m.PeakSnapshotWaitSeconds)
+                : "Blocking";
 
         /// <summary>The one division behind both rate bands: events per hour, or null below the band's own
         /// minimum window (which a zero, negative or undeclared window is). One function rather than two so
@@ -1211,7 +1565,9 @@ namespace PerformanceMonitor.Common
             yield return CpuSeverity(m.CpuPercentForAlert, m.CapacityUtilizationPercent, m.CpuSource);
             yield return ThreadsSeverity(m.TotalThreads, m.AvailableThreads, m.ThreadsWaitingForCpu, m.RequestsWaitingForThreads);
             yield return MemorySeverity(m.HasMemoryPressure);
-            yield return BlockingSeverity(m.BlockingCount, m.MaxBlockedSeconds, m.BlockingWindow, m.BlockingBandThresholds);
+            yield return m.BlockingCapturesTaken.HasValue
+                ? PostgresBlockingSeverity(m.BlockingCount, m.BlockingCapturesTaken.Value, m.BlockingBandThresholds)
+                : BlockingSeverity(m.BlockingCount, m.MaxBlockedSeconds, m.BlockingWindow, m.BlockingBandThresholds, m.PeakSnapshotWaitSeconds);
             yield return DeadlockSeverity(
                 m.DeadlockCount,
                 m.DeadlockWindow,
@@ -1242,6 +1598,12 @@ namespace PerformanceMonitor.Common
         /// </summary>
         public static HealthSeverity OverallMetricSeverity(in ServerHealthMetrics m)
         {
+            /* #7561: a column at its critical bar is a failing insert, a Critical whatever the six metrics read (even none). */
+            if (m.IdentityCapacityCritical || m.DatabaseStateCritical)
+            {
+                return HealthSeverity.Critical;
+            }
+
             var worst = HealthSeverity.Unknown;
             foreach (var s in MetricSeverities(m))
             {
@@ -1264,6 +1626,59 @@ namespace PerformanceMonitor.Common
 
             return worst;
         }
+
+        /// <summary>#7561: the tiles no band reads and that still want a person, by name: an identity capacity column at the warning bar (a column at the
+        /// critical bar bands the server instead, see <see cref="ServerHealthMetrics.IdentityCapacityCritical"/>), an Agent alerts setup gap, and an overdue
+        /// backup or CHECKDB (Protection). The ONE rule for the web fleet card, <c>get_fleet_overview</c> and the Viewer's Needs attention list, so none keeps its
+        /// own copy. Empty when the server has none.</summary>
+        public static IReadOnlyList<string> AdvisoryTiles(
+            int agentAlertGapCount, int databaseProtectionOverdueCount, int identityColumnsAtBar, bool identityCritical,
+            int databaseStateDeviations = 0, bool databaseStateCritical = false)
+        {
+            var tiles = new List<string>(4);
+            /* #7647: a database whose state deviates (OFFLINE, RESTORING, ...) and that the alert does not grade Critical. A Critical state bands the server instead. */
+            if (databaseStateDeviations > 0 && !databaseStateCritical)
+            {
+                tiles.Add("Database state");
+            }
+
+            if (identityColumnsAtBar > 0 && !identityCritical)
+            {
+                tiles.Add("Identity capacity");
+            }
+
+            if (agentAlertGapCount > 0)
+            {
+                tiles.Add("Agent alerts");
+            }
+
+            if (databaseProtectionOverdueCount > 0)
+            {
+                tiles.Add("Protection");
+            }
+
+            return tiles;
+        }
+
+        /// <summary>#7561: the Needs attention reason clause for the identity tile, said the same on the web, the Viewer, the MCP tool and the email. A column at the
+        /// critical bar is at its limit and a column at the warning bar is near it, and each count is its own, so one critical and four warning columns read
+        /// "1 column at its limit, 4 near it" and not "5 columns at the bar". <paramref name="columnsAtBar"/> counts both kinds.</summary>
+        public static string IdentityCapacityReason(int columnsAtBar, int criticalColumns)
+        {
+            var critical = Math.Clamp(criticalColumns, 0, columnsAtBar);
+            var warning = columnsAtBar - critical;
+            if (critical == 0)
+            {
+                return string.Create(CultureInfo.InvariantCulture, $"Identity capacity {warning} column{(warning == 1 ? "" : "s")} at the warning bar");
+            }
+
+            var text = string.Create(CultureInfo.InvariantCulture, $"Identity capacity critical ({critical} column{(critical == 1 ? " at its" : "s at their")} limit");
+            return warning == 0 ? text + ")" : string.Create(CultureInfo.InvariantCulture, $"{text}, {warning} near it)");
+        }
+
+        /// <summary>#7561: the Needs attention reason clause for overdue backups and CHECKDBs, the service's words on every surface that prints it.</summary>
+        public static string ProtectionReason(int overdueCount) =>
+            string.Create(CultureInfo.InvariantCulture, $"Protection {overdueCount} overdue item{(overdueCount == 1 ? "" : "s")}");
 
         /// <summary>
         /// How many of the six card metrics carry a real reading (#3528): measured = severities that are
@@ -1345,7 +1760,7 @@ namespace PerformanceMonitor.Common
                 _ => 0,
             };
 
-            var criticals = 0;
+            var criticals = (m.IdentityCapacityCritical ? 1 : 0) + (m.DatabaseStateCritical ? 1 : 0);
             var warnings = 0;
             foreach (var sev in MetricSeverities(m))
             {
@@ -1707,6 +2122,16 @@ namespace PerformanceMonitor.Common
         /// fortnight of zero-row successes, is still flagged: from 72 hours after the last productive run
         /// until that run ages out of the read's seven-day window. The comparison is strictly greater, like
         /// the interval arm's, so a target sitting exactly on the bar is still read as quiet.</para>
+        ///
+        /// <para><b>The bar is observed time, not wall time (#7242).</b> The quiet stretch is the sum over the
+        /// trailing zero-row streak of the gap from each run to the next (from the run that broke the streak to
+        /// the newest run), a gap counted at most <see cref="ObservedQuietGaps.GapCapMinutes"/>: three intervals,
+        /// an hour at least. A gap longer than the cap is a stretch the service was not watching (stopped or
+        /// down), so it counts only the cap, while runs spaced out by a saturated sweep add up to the real
+        /// elapsed time. A service stopped over a weekend therefore cannot say the server was quiet through
+        /// those hours, and counting them read 19 observed hours (1,141 runs at one minute) as 75 quiet hours.
+        /// Where a surface cannot read the exact streak, runs times the interval stands in. The wall-clock gap
+        /// since the last productive run must also pass the bar, which an observed stretch of that length implies.</para>
         /// </summary>
         public static readonly TimeSpan ActivitySourcedQuietBar = TimeSpan.FromHours(72);
 
@@ -2092,11 +2517,22 @@ namespace PerformanceMonitor.Common
         /// <see cref="RegressedFromProductive"/> reads. Null means the window holds no productivity to
         /// have regressed from, which is the never-produced-here case that stays benign.
         /// </param>
+        /// <param name="frequencyMinutes">
+        /// The collector's effective interval on this server, in minutes (#7242). Only the activity-sourced
+        /// arm reads it, to turn the trailing run count into observed time. Zero or less means the cadence
+        /// is unknown, and that arm then falls back to the wall clock alone.
+        /// </param>
+        /// <param name="observedQuietMinutes">
+        /// The observed quiet time of the streak in minutes (<see cref="ObservedQuietGaps.Minutes"/>), or null
+        /// where the exact streak was not read, which falls back to runs times the interval.
+        /// </param>
         public static bool ProducedThenStopped(
             string? collectorName,
             long trailingZeroRowSuccessRuns,
-            DateTime? lastProductiveTimeUtc) =>
-            ProducedThenStopped(collectorName, trailingZeroRowSuccessRuns, lastProductiveTimeUtc, DateTime.UtcNow);
+            DateTime? lastProductiveTimeUtc,
+            int frequencyMinutes,
+            double? observedQuietMinutes = null) =>
+            ProducedThenStopped(collectorName, trailingZeroRowSuccessRuns, lastProductiveTimeUtc, DateTime.UtcNow, frequencyMinutes, observedQuietMinutes);
 
         /// <summary>
         /// The clock-aware overload (#4473): for an interval-sourced collector
@@ -2116,11 +2552,24 @@ namespace PerformanceMonitor.Common
         /// — this parameter exists so a pin can hold the clock still rather than to change any caller's
         /// semantics.
         /// </param>
+        /// <param name="frequencyMinutes">
+        /// The collector's effective interval on this server, in minutes (#7242). Zero or less means the
+        /// cadence is unknown, and the activity-sourced arm then falls back to the wall clock alone, as it
+        /// read before #7242.
+        /// </param>
+        /// <param name="observedQuietMinutes">
+        /// The time the service actually observed the server quiet, in minutes: the sum over the zero-row
+        /// streak of each gap between runs, a gap counted at most <see cref="ObservedQuietGaps.GapCapMinutes"/>
+        /// (<see cref="ObservedQuietGaps.Minutes"/>). Null where the surface did not read the exact streak (the
+        /// estimate path), which falls back to <paramref name="trailingZeroRowSuccessRuns"/> times the interval.
+        /// </param>
         public static bool ProducedThenStopped(
             string? collectorName,
             long trailingZeroRowSuccessRuns,
             DateTime? lastProductiveTimeUtc,
-            DateTime nowUtc)
+            DateTime nowUtc,
+            int frequencyMinutes,
+            double? observedQuietMinutes = null)
         {
             if (lastProductiveTimeUtc is null || trailingZeroRowSuccessRuns < ProductiveZeroRunStreak)
             {
@@ -2148,14 +2597,40 @@ namespace PerformanceMonitor.Common
 
             /* An activity-sourced collector on an idle target returns nothing for hours at a time, which
                the streak alone read as a stop every night (#4620). Same shape as the interval arm: the
-               streak AND a quiet longer than anything an idle weekend explains. */
+               streak AND a quiet longer than anything an idle weekend explains. The quiet is OBSERVED time
+               (#7242): the gaps between the zero-row runs the service made, each counted at most
+               ObservedQuietGaps.GapCapMinutes. A stretch longer than the cap is time the service was not
+               watching (stopped or down), so only the cap of it counts, while runs spaced out by a
+               saturated sweep still add up to the real elapsed time. Where the exact streak was not read,
+               runs times the interval stands in. The wall-clock gap stays a second condition: a streak
+               cannot be longer in observed time than the wall time it sits in, so it only guards a run
+               count that is larger than the elapsed time allows. */
             if (IsActivitySourcedCollector(collectorName))
             {
-                return nowUtc - lastProductiveTimeUtc.Value > ActivitySourcedQuietBar;
+                if (nowUtc - lastProductiveTimeUtc.Value <= ActivitySourcedQuietBar)
+                {
+                    return false;
+                }
+
+                return frequencyMinutes <= 0
+                    || (observedQuietMinutes ?? trailingZeroRowSuccessRuns * (double)frequencyMinutes) > ActivitySourcedQuietBar.TotalMinutes;
             }
 
             return true;
         }
+
+        /// <summary>
+        /// Whether the activity-sourced quiet bar (#7242) is the deciding question for this row: an
+        /// activity-sourced collector that produced once and whose last productive run is older than
+        /// <see cref="ActivitySourcedQuietBar"/> on the wall clock. Only such a row needs the EXACT count of
+        /// zero-row runs, because <see cref="EstimateTrailingZeroRowSuccessRuns"/> divides elapsed time by the
+        /// cadence and so hands the wall clock back, hours the service was stopped included. A surface that
+        /// estimates (the fleet card, the Viewer's overview) reads the exact count for just these rows.
+        /// </summary>
+        public static bool NeedsObservedQuietRuns(string? collectorName, DateTime? lastProductiveTimeUtc, DateTime nowUtc) =>
+            lastProductiveTimeUtc is not null
+            && IsActivitySourcedCollector(collectorName)
+            && nowUtc - lastProductiveTimeUtc.Value > ActivitySourcedQuietBar;
 
         /// <summary>
         /// The width of the trailing zero-row-success streak ESTIMATED from two instants and the
@@ -2258,7 +2733,7 @@ namespace PerformanceMonitor.Common
             return string.Format(
                 CultureInfo.InvariantCulture,
                 "produced {0:N0} rows until {1} and has recorded SUCCESS with zero rows on {2:N0} runs "
-                + "since — a collector that stops producing is a different fact from one that never "
+                + "since. A collector that stops producing is a different fact from one that never "
                 + "produced",
                 rowsInPriorWindow,
                 DateTime.SpecifyKind(lastProductiveTimeUtc.Value, DateTimeKind.Utc)
@@ -2300,6 +2775,18 @@ namespace PerformanceMonitor.Common
         public static bool IsAlwaysOnCollector(string? collectorName) =>
             string.Equals(collectorName, "ag_database_replica_states", StringComparison.Ordinal)
             || string.Equals(collectorName, "ag_replica_states", StringComparison.Ordinal);
+
+        /// <summary>The sentence on an Always On collector row that a server without Always On reports as not collected (#6828, #7375). One
+        /// text for <c>get_collection_health</c> in Darling and in Lite.</summary>
+        public const string AlwaysOnOffMessage = "Always On availability groups are not enabled on this server, so there is nothing for this collector to read.";
+
+        /// <summary>
+        /// True when the server's newest <c>server_properties</c> row says Always On (HADR) is off (#6828, #7375). A server with no row yet
+        /// makes no claim, so the log-driven rows stand. A row whose flag is NULL reads as off, the way both stores' property reads map
+        /// it (#6838): Darling's <c>GetLatestServerPropertiesAsync</c> and Lite's both turn a NULL into false, and the fleet read answers
+        /// the same, so every surface agrees on a NULL.
+        /// </summary>
+        public static bool IsAlwaysOnOff(bool hasPropertiesRow, bool isHadrEnabled) => hasPropertiesRow && !isHadrEnabled;
 
         /// <summary>
         /// True for a collector row that a server with Always On OFF reports as not collected rather than healthy (#6828): an Always On
@@ -2382,7 +2869,7 @@ namespace PerformanceMonitor.Common
 
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "produced {0:N0} rows in the seven days before {1}; has reported {2} since — a restart or "
+                "produced {0:N0} rows in the seven days before {1}; has reported {2} since. A restart or "
                 + "upgrade changed what this collector can read",
                 rowsInPriorWindow,
                 DateTime.SpecifyKind(lastNonSkipTimeUtc.Value, DateTimeKind.Utc)
@@ -2533,6 +3020,14 @@ namespace PerformanceMonitor.Common
                the only record that the read is blind. Same rule as the partial-database note: the NEWEST run's
                note, read only where the ladder would otherwise say HEALTHY. */
             if (RingBufferTruncationNote.TryParse(latestRunNote, out _, out _))
+            {
+                return Warning;
+            }
+
+            /* #8146. A ring-buffer collector that lost events (evicted before the read, or dropped by the session)
+               still records SUCCESS, so the counts on the newest run's note are the only record. An unknown-only
+               loss (the session restarted, nothing countable) is explained in the note but does not band. */
+            if (RingBufferLossNote.TryParse(latestRunNote, out var loss) && (loss.Evicted > 0 || loss.Dropped > 0))
             {
                 return Warning;
             }
@@ -2710,6 +3205,55 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
+        /// #7670: <see cref="FormatCollectionNote"/> as the two desktop apps' health grids show it. A measuring collector's counts
+        /// (<c>shred_gated=1 events_read=0</c>) read as words, the way the web page words them (<c>shred gated: 1 (no new events since
+        /// the last run, so the XML was not read), events read: 0</c>). <see cref="FormatCollectionNote"/> itself keeps the raw
+        /// counts, because the MCP <c>note_summary</c> and the health bands are built on that text.
+        /// </summary>
+        public static string FormatCollectionNoteForDisplay(
+            string? lastNote,
+            long noteCount,
+            long totalRuns,
+            string? collectorName = null,
+            bool targetHasUserDatabases = false,
+            string? recoveredNote = null,
+            string? readSource = null)
+        {
+            var text = FormatCollectionNote(lastNote, noteCount, totalRuns, collectorName, targetHasUserDatabases, recoveredNote, readSource);
+            if (!HasMeasurements(lastNote))
+            {
+                return text;
+            }
+
+            var cut = lastNote!.LastIndexOf("; ", StringComparison.Ordinal);
+            var counts = cut >= 0 ? lastNote[(cut + 2)..] : lastNote;
+            return text.Replace(counts, CountsInWords(counts), StringComparison.Ordinal);
+        }
+
+        /// <summary>The meaning of a count a reader cannot work out from its label, worded as the web page words it (plain-text.js COUNT_MEANINGS).</summary>
+        private static string CountMeaning(string label, string value) => (label, value) switch
+        {
+            ("shred_gated", "1") => " (no new events since the last run, so the XML was not read)",
+            ("shred_gated", "0") => " (the XML was read)",
+            _ => string.Empty,
+        };
+
+        /// <summary><c>shred_gated=1 events_read=0</c> as <c>shred gated: 1 (...), events read: 0</c>. The input is a run of counts that passed <see cref="HasMeasurements"/>.</summary>
+        private static string CountsInWords(string counts)
+        {
+            var words = new List<string>();
+            foreach (var token in counts.Split(' '))
+            {
+                var eq = token.IndexOf('=', StringComparison.Ordinal);
+                var label = token[..eq];
+                var value = token[(eq + 1)..];
+                words.Add(label.Replace('_', ' ') + ": " + value + CountMeaning(label, value));
+            }
+
+            return string.Join(", ", words);
+        }
+
+        /// <summary>
         /// #6254: the per-run Collection Log grids' message cell. A run's own message (its error, or the note it left) with the run's
         /// <c>read_source</c> after it, worded as the health views word it (<c>read source: replica 12, primary 2</c>). A run with no
         /// read source (every run of a server with the replica setting off, every collector but Query Store, every run stored before the
@@ -2717,6 +3261,37 @@ namespace PerformanceMonitor.Common
         /// </summary>
         public static string FormatRunMessage(string? message, string? readSource) =>
             AppendReadSource(message ?? string.Empty, readSource);
+
+        /// <summary>
+        /// #7416: the store keeps ONE text column per log row (<c>error_message</c>) and the collectors write their run notes into it on
+        /// SUCCESS rows ("shred gated: 1", "plans rendered: 0, ..."). On a row that did not succeed the same column holds the error. A
+        /// SUCCESS row therefore has no error, only a note, and the Error column of a log grid must not show it.
+        /// #7690: the same holds for an ANALYZED row, the scheduled analysis pass that finished ("Scheduled analysis pass ran in 4.3s, ...").
+        /// ABANDONED, ERROR and the rest keep their text under Error.
+        /// </summary>
+        public static bool IsRunNote(string? status)
+        {
+            var word = status?.Trim();
+            return string.Equals(word, "SUCCESS", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(word, "ANALYZED", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>#7416: the row's error text: its stored message unless the row succeeded (then the message is a note, see <see cref="IsRunNote"/>). Null for none.</summary>
+        public static string? RunError(string? status, string? message) =>
+            IsRunNote(status) || string.IsNullOrEmpty(message) ? null : message;
+
+        /// <summary>#7416: the row's run note: its stored message when the row succeeded, null otherwise.</summary>
+        public static string? RunNote(string? status, string? message) =>
+            IsRunNote(status) && !string.IsNullOrEmpty(message) ? message : null;
+
+        /// <summary>#7416: the grids' Error cell: the error text only, blank for a row that has none.</summary>
+        public static string FormatRunError(string? status, string? message) =>
+            RunError(status, message) ?? string.Empty;
+
+        /// <summary>#7416: the grids' Note cell: the run note with the run's read source after it (<see cref="FormatRunMessage"/>'s wording).
+        /// A failed row's message is its error, so only its read source can appear here.</summary>
+        public static string FormatRunNoteCell(string? status, string? message, string? readSource) =>
+            AppendReadSource(RunNote(status, message) ?? string.Empty, readSource);
 
         private static string AppendReadSource(string note, string? readSource)
         {
@@ -2747,11 +3322,17 @@ namespace PerformanceMonitor.Common
             if (HasMeasurements(lastNote))
             {
                 /* #6441: a truncated ring buffer bands WARNING, and the counts alone do not say why. */
-                if (RingBufferTruncationNote.Describe(lastNote) is { } truncation)
+                /* #8146: the same for ring-buffer loss; when a note carries both, truncation reads first. */
+                var truncationSentence = RingBufferTruncationNote.Describe(lastNote);
+                var lossSentence = RingBufferLossNote.Describe(lastNote);
+                if (truncationSentence is not null || lossSentence is not null)
                 {
+                    var sentence = truncationSentence is not null && lossSentence is not null
+                        ? truncationSentence + "; " + lossSentence
+                        : truncationSentence ?? lossSentence;
                     return noteCount >= totalRuns && totalRuns > 0
-                        ? "latest run: " + truncation + " (" + lastNote + ")"
-                        : string.Format(CultureInfo.InvariantCulture, "latest noted run: {0} ({1}; {2} of {3} runs)", truncation, lastNote, noteCount, totalRuns);
+                        ? "latest run: " + sentence + " (" + lastNote + ")"
+                        : string.Format(CultureInfo.InvariantCulture, "latest noted run: {0} ({1}; {2} of {3} runs)", sentence, lastNote, noteCount, totalRuns);
                 }
 
                 /* The note is the newest run that CARRIED one, and some measurers write counts only when
@@ -3131,6 +3712,39 @@ namespace PerformanceMonitor.Common
     }
 
     /// <summary>
+    /// #7242: the gaps between the runs of one zero-row streak, in the form every store can hand over without knowing the collector's
+    /// interval. The activity quiet bar is OBSERVED time: the sum over the streak of each gap between consecutive runs (starting at the
+    /// run that broke the streak, ending at the newest run), a gap counted at most <see cref="GapCapMinutes"/>. A gap longer than the
+    /// cap is a stretch the service was not watching (stopped or down), so only the cap of it counts, while runs spaced out by a
+    /// saturated sweep still add up to the real elapsed time. Every gap of <see cref="GapFloorMinutes"/> or less is below any cap, so
+    /// the store sums those and lists only the longer ones.
+    /// </summary>
+    /// <param name="Runs">How many runs came after the run that broke the streak.</param>
+    /// <param name="ShortGapMinutes">The sum of the gaps that are <see cref="GapFloorMinutes"/> or shorter.</param>
+    /// <param name="LongGapMinutes">Each gap longer than <see cref="GapFloorMinutes"/>, in minutes.</param>
+    public sealed record ObservedQuietGaps(long Runs, double ShortGapMinutes, IReadOnlyList<double> LongGapMinutes)
+    {
+        /// <summary>No gap is capped below this, so a store sums gaps up to it and lists the longer ones.</summary>
+        public const double GapFloorMinutes = 60;
+
+        /// <summary>The longest a single gap counts for a collector run every <paramref name="frequencyMinutes"/>: three intervals, at least an hour.</summary>
+        public static double GapCapMinutes(int frequencyMinutes) => Math.Max(3.0 * frequencyMinutes, GapFloorMinutes);
+
+        /// <summary>The observed quiet time in minutes for a collector run every <paramref name="frequencyMinutes"/>.</summary>
+        public double Minutes(int frequencyMinutes)
+        {
+            var cap = GapCapMinutes(frequencyMinutes);
+            var total = ShortGapMinutes;
+            foreach (var gap in LongGapMinutes)
+            {
+                total += Math.Min(gap, cap);
+            }
+
+            return total;
+        }
+    }
+
+    /// <summary>
     /// Sweep-pressure verdict for get_collection_health (#2296): does the collection body's own execution
     /// demand fit inside its fastest cadence?
     ///
@@ -3379,14 +3993,14 @@ namespace PerformanceMonitor.Common
                 && pressure.PeakCollectorPeakRunMs >= pressure.PeakCollectorAvgDurationMs * BimodalTailRatio
                 ? string.Format(
                     CultureInfo.InvariantCulture,
-                    " Its MEAN run is only {0:N0} ms, so its cost is bimodal and any figure built from that mean — the sustained verdict, the heaviest_collectors ranking, and this cycle before #2460 — understates one body by {1:N0} ms.",
+                    " Its MEAN run is only {0:N0} ms, so its cost is bimodal and any figure built from that mean (the sustained verdict, the heaviest_collectors ranking, and the cycle's own cost) understates one body by {1:N0} ms.",
                     Math.Round(pressure.PeakCollectorAvgDurationMs),
                     Math.Round(pressure.PeakCollectorPeakRunMs - pressure.PeakCollectorAvgDurationMs))
                 : string.Empty;
 
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "On the cycle where every scheduled cadence comes due together this body costs {0:N0} ms — {1:N1}% of the {2:N0} ms sweep budget — so that body cannot finish inside its cadence and its relaunch is skipped, however much headroom the sustained {3:N1}% reports. Its largest single contributor is {4}, {5:N0} ms on a heavy run and {6:N1}% of the budget on its own, every {7} minutes. Amortized over that cadence it is worth {8:N0} ms per minute, so the sustained figure and the heaviest_collectors ranked by it both understate what this collector does to one body.{9} The lever here is the schedule's shape — moving or splitting that collector so it stops sharing a cycle — not the capacity answer a SATURATED verdict calls for.",
+                "On the cycle where every scheduled cadence comes due together this body costs {0:N0} ms ({1:N1}% of the {2:N0} ms sweep budget), so that body cannot finish inside its cadence and its relaunch is skipped, however much headroom the sustained {3:N1}% reports. Its largest single contributor is {4}, {5:N0} ms on a heavy run and {6:N1}% of the budget on its own, every {7} minutes. Amortized over that cadence it is worth {8:N0} ms per minute, so the sustained figure and the heaviest_collectors ranked by it both understate what this collector does to one body.{9} The lever here is the schedule's shape: moving or splitting that collector so it stops sharing a cycle, not the capacity answer a SATURATED verdict calls for.",
                 Math.Round(pressure.PeakCycleMs),
                 pressure.PeakCyclePercent,
                 SweepBudgetMs,

@@ -64,7 +64,23 @@ internal static class RepoFile
     /// <summary>The absolute path of the repository root.</summary>
     internal static string Root => ResolveRoot();
 
-    /// <summary>Reads a repo file exactly as it sits on disk.</summary>
+    /// <summary>The types split into <c>&lt;Type&gt;.&lt;Area&gt;.cs</c> partial files (#7025). Only these
+    /// read joined; every other file reads exactly as it sits on disk, because a pin that reads one file at a
+    /// time (a per-file scan, a per-file count) must not see the same text twice. A later split adds its type
+    /// name here, and to the matching set in <c>Lite.Tests/SplitRepoFile.cs</c>.</summary>
+    private static readonly string[] SplitTypes = ["DarlingCollectorRunner", "DarlingWebEndpoints", "DarlingWorker"];
+
+    /// <summary>The page modules split into one file per server-page tab (#7027): <c>pages/server-tabs.js</c> keeps the
+    /// registry and the files in <c>pages/server-tabs/</c> hold the rest. A read of the main file comes back with
+    /// every file in that folder joined after it, one newline apart, in ordinal file-name order, so a pin reads the
+    /// renderers and column lists that used to sit in the one file. The folder is the file name without <c>.js</c>.</summary>
+    private static readonly string[] SplitJsModules = ["server-tabs"];
+
+    /// <summary>Reads a repo file exactly as it sits on disk. A <c>.cs</c> file named
+    /// <c>&lt;Type&gt;.cs</c> for a type in <see cref="SplitTypes"/> comes back with its
+    /// <c>&lt;Type&gt;.&lt;Area&gt;.cs</c> partial files joined after it, one newline apart, in ordinal
+    /// file-name order, so a pin written before the split reads the same text. A path that itself names a
+    /// partial reads just that file.</summary>
     internal static string ReadRepoFile(params string[] segments)
     {
         var full = PathTo(segments);
@@ -75,7 +91,60 @@ internal static class RepoFile
                 $"source not found, this pin would read nothing: {full}", full);
         }
 
-        return File.ReadAllText(full);
+        var text = File.ReadAllText(full);
+
+        foreach (var part in PartialsBeside(full))
+        {
+            text += "\n" + File.ReadAllText(part);
+        }
+
+        foreach (var part in JsModulesBeside(full))
+        {
+            text += "\n" + File.ReadAllText(part);
+        }
+
+        return text;
+    }
+
+    /// <summary>The <c>&lt;name&gt;/*.js</c> files of a page module in <see cref="SplitJsModules"/>, ordinal by
+    /// file name. Empty for any other file, and for a file inside the folder, which reads alone.</summary>
+    private static string[] JsModulesBeside(string full)
+    {
+        var stem = Path.GetFileNameWithoutExtension(full);
+
+        if (!full.EndsWith(".js", StringComparison.Ordinal) || Array.IndexOf(SplitJsModules, stem) < 0)
+        {
+            return [];
+        }
+
+        var folder = Path.Combine(Path.GetDirectoryName(full)!, stem);
+        var parts = Directory.Exists(folder) ? Directory.GetFiles(folder, "*.js") : [];
+
+        Array.Sort(parts, (a, b) => string.CompareOrdinal(Path.GetFileName(a), Path.GetFileName(b)));
+
+        return parts;
+    }
+
+    /// <summary>The <c>&lt;Type&gt;.&lt;Area&gt;.cs</c> files beside <paramref name="full"/>, ordinal by file
+    /// name. Empty unless <paramref name="full"/> is a <c>&lt;Type&gt;.cs</c> file of a type in
+    /// <see cref="SplitTypes"/>: a name that already has a dot before <c>.cs</c> is a partial (or a
+    /// code-behind) and reads alone.</summary>
+    private static string[] PartialsBeside(string full)
+    {
+        var stem = Path.GetFileNameWithoutExtension(full);
+
+        if (!full.EndsWith(".cs", StringComparison.Ordinal)
+            || stem.Contains('.', StringComparison.Ordinal)
+            || Array.IndexOf(SplitTypes, stem) < 0)
+        {
+            return [];
+        }
+
+        var parts = Directory.GetFiles(Path.GetDirectoryName(full)!, stem + ".*.cs");
+
+        Array.Sort(parts, (a, b) => string.CompareOrdinal(Path.GetFileName(a), Path.GetFileName(b)));
+
+        return parts;
     }
 
     /// <summary>Reads a repo file with CRLF normalised to LF, for pins whose anchors span a line break.

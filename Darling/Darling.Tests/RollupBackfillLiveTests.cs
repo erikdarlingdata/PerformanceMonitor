@@ -366,7 +366,9 @@ public sealed class RollupBackfillLiveTests
             Assert.Contains("To arm immediately instead, restart the", runText, StringComparison.Ordinal);
             Assert.DoesNotContain("NEXT: restart", runText, StringComparison.Ordinal);
             Assert.DoesNotContain("Do not delay the restart", runText, StringComparison.Ordinal);
-            Assert.Contains("Do not let it wait a day", runText, StringComparison.Ordinal);
+            /* #7114: the race warning is gone, because a rollup trimming itself to its own horizon no longer re-holds. */
+            Assert.DoesNotContain("Do not let it wait a day", runText, StringComparison.Ordinal);
+            Assert.Contains("That does not undo it", runText, StringComparison.Ordinal);
 
             /* ── The verb's success claim is CHECKED against the store, not taken at its word. ── */
             await using (var verify = new NpgsqlConnection(scratch.ConnectionString))

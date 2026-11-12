@@ -185,6 +185,7 @@ LIMIT $3";
     /// selector's source, and the half of #3878 that let a renamed-away database still be PICKED rather than
     /// merely displayed. Same anchor as the grid it drives. $1 server_id, $2 the saved database filter (#5312, a text[], NULL = every database): only databases inside it are listed.</summary>
     public const string IndexLockingDatabasesSql = @"
+SELECT * FROM (
 SELECT DISTINCT ios.database_name
 FROM v_index_object_stats ios
 WHERE ios.server_id = $1
@@ -197,7 +198,8 @@ AND (
     OR COALESCE(ios.page_io_latch_wait_in_ms, 0) > 0
     OR COALESCE(ios.index_lock_promotion_count, 0) > 0
 )
-ORDER BY ios.database_name";
+) AS d
+ORDER BY lower(database_name), database_name";
 
     /// <summary>The newest stored <c>is_optimized_locking_on</c> flag per database on the server. $1 server_id, $2 the saved database filter (#5312, a text[], NULL = every database): only the chosen databases' flags count, as in get_object_locking.</summary>
     public const string OptimizedLockingFlagsSql = @"

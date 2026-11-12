@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Ui;
 
@@ -43,6 +44,21 @@ public static class TimeSeriesGaps
     /// Returns the original arrays when no break is needed, so the common no-gap case allocates nothing.
     /// </summary>
     public static (double[] Xs, double[] Ys) BreakAtGaps(double[] xs, double[] ys)
+        => BreakAtGaps(xs, ys, (double?)null);
+
+    /// <summary>
+    /// <see cref="BreakAtGaps(double[], double[])"/> for a series that joins two grains (#7508): the Query Store
+    /// Duration Trend is one point per hour before the instant the raw intervals start (<c>routing.raw_from</c>,
+    /// <c>QueryStoreTrendRoute.RawStartUtc</c>) and one point per Query Store interval from it. One threshold for
+    /// the whole series cannot judge both: once the interval points outnumber the hourly ones the median falls to
+    /// minutes and every hourly step reads as a gap, so the older part drew as lone dots. With
+    /// <paramref name="seamX"/> (an OADate) that has points on both sides, each side gets its own threshold, so
+    /// the hourly side is judged against an hour and the raw side against its interval, and a real outage on either
+    /// side still breaks. A pair that crosses the seam is judged by the larger threshold. A side too short for a
+    /// spacing of its own borrows the other side's, so an outage next to it still breaks. With neither side able to
+    /// judge, no seam, or every point on one side of it, this is the plain rule.
+    /// </summary>
+    public static (double[] Xs, double[] Ys) BreakAtGaps(double[] xs, double[] ys, double? seamX)
     {
         if (xs is null || ys is null || xs.Length != ys.Length || xs.Length < 3)
         {
@@ -50,7 +66,28 @@ public static class TimeSeriesGaps
         }
 
         var threshold = GapThreshold(xs);
-        if (threshold is null)
+        var beforeSeam = 0.0;
+        var afterSeam = 0.0;
+        var seamAt = 0.0;
+        var seamed = false;
+        if (seamX is double seam && double.IsFinite(seam))
+        {
+            var first = Array.FindIndex(xs, x => x >= seam);
+            if (first > 0)
+            {
+                var before = GapThreshold(xs[..first]);
+                var after = GapThreshold(xs[first..]);
+                if (before is not null || after is not null)
+                {
+                    seamed = true;
+                    seamAt = seam;
+                    beforeSeam = before ?? after!.Value;
+                    afterSeam = after ?? before!.Value;
+                }
+            }
+        }
+
+        if (!seamed && threshold is null)
         {
             return (xs, ys);
         }
@@ -58,7 +95,10 @@ public static class TimeSeriesGaps
         List<int>? breakAfter = null;
         for (var i = 0; i < xs.Length - 1; i++)
         {
-            if (xs[i + 1] - xs[i] > threshold.Value)
+            var limit = !seamed
+                ? threshold!.Value
+                : xs[i] >= seamAt ? afterSeam : xs[i + 1] < seamAt ? beforeSeam : Math.Max(beforeSeam, afterSeam);
+            if (xs[i + 1] - xs[i] > limit)
             {
                 (breakAfter ??= new List<int>()).Add(i);
             }
@@ -92,6 +132,64 @@ public static class TimeSeriesGaps
         Array.Copy(ys, next, outYs, write, ys.Length - next);
 
         return (outXs, outYs);
+    }
+
+    /// <summary>
+    /// The spans in which NO series drew a point, judged over all the series' points together (#8644). A series with few points has no
+    /// cadence of its own to judge a gap by (two points have none, and with three the one long step drags the median up so far that
+    /// three times it passes over the gap), so Duration Trends drew a straight line across twenty hours in which nothing was collected.
+    /// The other collectors' points say what the rhythm is: the spans between neighbouring points of the combined set that are wider
+    /// than <see cref="CadenceMultiplier"/> times its median positive spacing. Empty when the combined set has no measurable cadence.
+    /// </summary>
+    public static IReadOnlyList<(double From, double To)> OutagesAcross(IEnumerable<double[]> seriesXs)
+    {
+        var all = seriesXs.SelectMany(x => x).Where(double.IsFinite).Distinct().OrderBy(x => x).ToArray();
+        var outages = new List<(double From, double To)>();
+        if (all.Length < 3 || GapThreshold(all) is not double threshold)
+        {
+            return outages;
+        }
+
+        for (var i = 0; i < all.Length - 1; i++)
+        {
+            if (all[i + 1] - all[i] > threshold)
+            {
+                outages.Add((all[i], all[i + 1]));
+            }
+        }
+
+        return outages;
+    }
+
+    /// <summary>
+    /// <see cref="BreakAtGaps(double[], double[])"/>, plus a break wherever one of <paramref name="outages"/> (from
+    /// <see cref="OutagesAcross"/>) lies between two neighbouring points of this series, so a series too short to judge a gap by its own
+    /// spacing still stops where every series stopped (#8644).
+    /// </summary>
+    public static (double[] Xs, double[] Ys) BreakAtGaps(double[] xs, double[] ys, IReadOnlyList<(double From, double To)> outages)
+    {
+        var (ownXs, ownYs) = BreakAtGaps(xs, ys, (double?)null);
+        if (outages is null || outages.Count == 0 || ownXs is null || ownXs.Length < 2)
+        {
+            return (ownXs!, ownYs!);
+        }
+
+        var outXs = new List<double>(ownXs.Length + outages.Count);
+        var outYs = new List<double>(ownYs.Length + outages.Count);
+        for (var i = 0; i < ownXs.Length; i++)
+        {
+            outXs.Add(ownXs[i]);
+            outYs.Add(ownYs[i]);
+            if (i + 1 < ownXs.Length
+                && !double.IsNaN(ownYs[i]) && !double.IsNaN(ownYs[i + 1])
+                && outages.Any(o => o.From >= ownXs[i] && o.To <= ownXs[i + 1]))
+            {
+                outXs.Add(ownXs[i] + (ownXs[i + 1] - ownXs[i]) / 2.0);
+                outYs.Add(double.NaN);
+            }
+        }
+
+        return outXs.Count == ownXs.Length ? (ownXs, ownYs) : (outXs.ToArray(), outYs.ToArray());
     }
 
     /// <summary>

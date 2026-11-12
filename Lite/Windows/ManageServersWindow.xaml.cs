@@ -83,7 +83,11 @@ public partial class ManageServersWindow : Window
 
     private void ServersGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        EditSelected();
+        // A double-click on a column header, the scrollbar or the empty area is not a row (#7210).
+        if (DataGridRowHit.IsOnRow(e.OriginalSource))
+        {
+            EditSelected();
+        }
     }
 
     private void EditSelected()
@@ -124,6 +128,21 @@ public partial class ManageServersWindow : Window
         }
 
         var dialog = new ExcludedDatabasesDialog(_serverManager, selected) { Owner = this };
+        if (dialog.ShowDialog() == true && dialog.ExclusionsModified)
+        {
+            ServersChanged = true;
+            RefreshGrid();
+        }
+    }
+
+    private void XeSessionDatabases_Click(object sender, RoutedEventArgs e)
+    {
+        if (ServersGrid.SelectedItem is not ServerConnection selected)
+        {
+            return;
+        }
+
+        var dialog = new ExcludedDatabasesDialog(_serverManager, selected, xeSessionsMode: true) { Owner = this };
         if (dialog.ShowDialog() == true && dialog.ExclusionsModified)
         {
             ServersChanged = true;

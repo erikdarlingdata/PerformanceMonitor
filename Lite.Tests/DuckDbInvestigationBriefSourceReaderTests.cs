@@ -480,6 +480,40 @@ INSERT INTO config_alert_log
 VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
             Micros(at), ServerId, ServerName, metric, !muted, muted);
 
+    /// <summary>The server's clock row: its newest <c>server_properties</c> row with an offset, and the zone id the engine reports.</summary>
+    private Task InsertServerClockAsync(DateTime collectedAt, int utcOffsetMinutes, string? timeZoneId) =>
+        ExecAsync(@"
+INSERT INTO server_properties
+    (collection_id, collection_time, server_id, server_name,
+     edition, product_version, product_level, engine_edition,
+     cpu_count, hyperthread_ratio, physical_memory_mb, utc_offset_minutes, time_zone_id)
+VALUES (-7563201, $1, $2, $3, 'Developer Edition', '16.0.4150.1', 'RTM', 3, 8, 1, 16384, $4, $5)",
+            Micros(collectedAt), ServerId, ServerName, utcOffsetMinutes, (object?)timeZoneId ?? DBNull.Value);
+
+    /// <summary>The reader hands the server's own zone to the streak rule: with a stored Eastern clock, an Agent job at 02:00 local
+    /// that fired at 06:00 UTC after the spring change of 2026 and at 07:00 UTC before it (03:00 EDT on the Sunday, when the clock
+    /// skipped 02:00) is a streak of 7; read in UTC, as a server with no stored clock is, it would be 3.</summary>
+    [Fact]
+    public async Task TheStreak_FollowsTheServersZone_AcrossASpringForwardSunday()
+    {
+        var anchor = new DateTime(2026, 3, 12, 6, 0, 0, DateTimeKind.Utc); // Thursday, 02:00 EDT
+        var requestId = Guid.NewGuid();
+        await InsertServerClockAsync(anchor.AddHours(-1), utcOffsetMinutes: -240, timeZoneId: "Eastern Standard Time");
+        await InsertRequestAsync(requestId, anchor);
+        await InsertLinkAsync(1, requestId, anchor);
+        foreach (var day in new[] { 1, 2, 3 })
+            await InsertFireAsync(anchor.AddDays(-day));                       // 02:00 EDT
+        foreach (var day in new[] { 4, 5, 6, 7 })
+            await InsertFireAsync(anchor.AddDays(-day).AddHours(1));           // 07:00 UTC: 03:00 EDT on the Sunday, 02:00 EST before it
+
+        var reader = new DuckDbInvestigationBriefSourceReader(_initializer, () => Now);
+        var sources = await reader.ReadAsync(requestId, TestContext.Current.CancellationToken);
+        var recurrence = sources!.Recurrence!.Single();
+        Assert.Equal(7, recurrence.StreakDays);
+        Assert.Equal(7, recurrence.Fired);
+        Assert.Equal(7, recurrence.FiredDates.Count);
+    }
+
     /// <summary>
     /// #6261 (Darling's <c>TheStreak_*</c> live facts, same planted shape): days 1, 2 (muted only) and 3 fired, day 4 did not,
     /// day 5 did, so the streak is 3 and the brief says so beside the #6000 counts, with the note that muted fires count; and a

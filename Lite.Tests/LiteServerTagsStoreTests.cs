@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common.Tags;
@@ -26,12 +27,51 @@ namespace Lite.Tests;
 /// </summary>
 public sealed class LiteServerTagsStoreTests : IClassFixture<SharedDuckDbFixture>
 {
+    private readonly SharedDuckDbFixture _fixture;
     private readonly LocalDataService _service;
 
     public LiteServerTagsStoreTests(SharedDuckDbFixture fixture)
     {
         fixture.ResetData();
+        _fixture = fixture;
         _service = new LocalDataService(fixture.DuckDb);
+    }
+
+    /// <summary>
+    /// #7200: server_tags.created_at is UTC whatever zone the DuckDB session runs in. The zone is forced to UTC+14 (a zone no CI
+    /// machine uses), so the old now()::TIMESTAMP write lands fourteen hours ahead of the one-minute window around UtcNow.
+    /// </summary>
+    [Fact]
+    public async Task Create_StampsCreatedAtInUtc_WhateverTheSessionZone()
+    {
+        await RunAsync("SET GLOBAL TimeZone = 'Pacific/Kiritimati'");
+        try
+        {
+            var before = DateTime.UtcNow.AddMinutes(-1);
+            var id = await _service.CreateServerTagAsync("Zoned", parentId: null);
+            var after = DateTime.UtcNow.AddMinutes(1);
+
+            using var connection = _fixture.DuckDb.CreateConnection();
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = $"SELECT created_at FROM server_tags WHERE id = {id}";
+            var stamp = (DateTime)(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken))!;
+
+            Assert.InRange(stamp, before, after);
+        }
+        finally
+        {
+            await RunAsync("RESET GLOBAL TimeZone");
+        }
+    }
+
+    private async Task RunAsync(string sql)
+    {
+        using var connection = _fixture.DuckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -144,8 +184,6 @@ public sealed class LiteServerTagsStoreTests : IClassFixture<SharedDuckDbFixture
         await _service.AssignServerTagAsync(new[] { 1 }, child);
         await _service.AssignServerTagAsync(new[] { 2 }, grandchild);
         await _service.AssignServerTagAsync(new[] { 3 }, unrelated);
-
-        Assert.True(await _service.ServerTagHasChildrenAsync(parent));
 
         await _service.DeleteServerTagAsync(parent);
 

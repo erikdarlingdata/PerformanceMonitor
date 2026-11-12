@@ -51,7 +51,10 @@ public sealed class ViewerQueriesSqlTests
         Assert.True(rankedRead >= 0, "the ranked CTE must aggregate the base query_stats table");
         /* #5309: the text is ONE lookup for every ranked group; it resolves the dimension itself (what
            v_query_stats' COALESCE does) for the newest row of each group only. */
-        Assert.DoesNotContain("LATERAL", sql, StringComparison.Ordinal);
+        var textSql = sql.Replace(ViewerDataService.TopQueriesModuleCte, string.Empty, StringComparison.Ordinal);
+        /* The module CTE (#8549) probes idx_procedure_stats_time with a LATERAL ... LIMIT 1 once per ranked handle, an index probe and
+           never a scan. It is the module lookup, not the text lookup #5309 is about, so it is cut out before the text checks below. */
+        Assert.DoesNotContain("LATERAL", textSql, StringComparison.Ordinal);
         Assert.DoesNotContain("FROM v_query_stats", sql, StringComparison.Ordinal);
         Assert.True(dimRead > lookupAt && lookupAt > rankedRead,
             "the base-table aggregate comes first; the dimension is read by the one latest-text lookup");
@@ -65,7 +68,8 @@ public sealed class ViewerQueriesSqlTests
            another caller's rows (NOT DISTINCT FROM so ad-hoc NULL hosts still match ad-hoc rows). */
         Assert.Contains("GROUP BY database_name, query_hash, host_object_name", sql, StringComparison.Ordinal);
         Assert.Contains("host_object_name IS NOT DISTINCT FROM r.host_object_name", sql, StringComparison.Ordinal);
-        Assert.Contains("q.host_object_name IS NOT DISTINCT FROM rk.host_object_name", sql, StringComparison.Ordinal);
+        /* #8136: the lookup's own host-object match to the window is gone (the text is picked inside the group's aggregate);
+           TopQueriesTextOneScanLiveTests pins that two same-hash groups under different host objects keep their own texts. */
         Assert.Contains("HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0", sql, StringComparison.Ordinal);
     }
 
@@ -86,16 +90,16 @@ public sealed class ViewerQueriesSqlTests
     public void TopQueriesSql_FetchesTheLatestNonNullQueryText_ViaLateralJoin_WithPlanPresenceFlag()
     {
         var sql = ViewerDataService.TopQueriesSql;
-        Assert.DoesNotContain("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);   /* #5309: one lookup, not one per row */
+        /* The module CTE's per-handle LATERAL ... LIMIT 1 index probe (#8549) is cut out: these pins are about the text lookup. */
+        var textSql = sql.Replace(ViewerDataService.TopQueriesModuleCte, string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain("LEFT JOIN LATERAL", textSql, StringComparison.Ordinal);   /* #5309: one lookup, not one per row */
         Assert.Contains("q.query_text IS NOT NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("q.collection_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("DISTINCT ON (q.database_name, q.query_hash, q.host_object_name)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
-        /* The LATERAL still fetches only query_text (never the multi-KB plan), and it reads v_query_stats so
-           the #1767 payload dimension is resolved — the base table's inline query_text is NULL on every row
-           written since. The plan is surfaced by a cheap group-level presence flag that gates the grid's
-           Query Plan column; the plan XML itself is read on demand (GetQueryStatsPlanXmlAsync). */
-        Assert.Contains("JOIN query_text_dim AS d ON d.digest = l.query_text_digest", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 1", textSql, StringComparison.Ordinal);
+        /* #8136: which row's text is picked (the newest that carries one, the row collected last on a tie, inline before
+           digest) and that it resolves through the #1767 dimension are pinned by TopQueriesTextOneScanLiveTests through the
+           rows both readers return. The lookup still fetches only query_text (never the multi-KB plan); the plan is surfaced
+           by a cheap group-level presence flag that gates the grid's Query Plan column, and the plan XML itself is read on
+           demand (GetQueryStatsPlanXmlAsync). */
 
         /* The flag now has a digest arm: since #1767 the plan lives in query_plan_dim and the fact row
            carries only the key, so a bare `query_plan_xml IS NOT NULL` would report "no plan captured" for
@@ -137,20 +141,20 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("database_name = ANY($5)", sql, StringComparison.Ordinal);
         /* #5313: $6 is the candidate limit now (top + 5 first, refilled), still not an offset or staleness parameter. */
         Assert.Contains("LIMIT $6", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$7", sql, StringComparison.Ordinal);
+        /* #7725: $7 is the databases the server dropped (left out of the listed ranking); the live hourly tests cover that slot. */
+        Assert.DoesNotContain("$8", sql, StringComparison.Ordinal);
     }
 
     [Fact]
     public void TopQueriesSql_StitchesModuleByHandle_DedupsToLatest_LeftJoinsForAdHocFallback()
     {
         /* #1568: read-time attribution. A dedicated CTE picks ONE procedure_stats identity per sql_handle
-           (latest collection_time, via ROW_NUMBER + WHERE rn = 1 — Postgres has no QUALIFY), then a LEFT
+           (latest collection_time; #8549 finds it with a hash aggregate and a lateral probe, not a ROW_NUMBER, and
+           TopQueriesModuleLiveTests runs it against the old statement's answers), then a LEFT
            JOIN on the shared normalized handle surfaces db.schema.object; unmatched rows stay ad hoc. */
         var sql = ViewerDataService.TopQueriesSql;
-        Assert.Contains("module AS (", sql, StringComparison.Ordinal);
+        Assert.Contains("module AS", sql, StringComparison.Ordinal);
         Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("ROW_NUMBER() OVER (PARTITION BY sql_handle ORDER BY collection_time DESC) AS rn", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);
         Assert.Contains("LEFT JOIN module AS m ON m.sql_handle = r.sql_handle", sql, StringComparison.Ordinal);
         Assert.Contains("m.object_name AS module_object_name", sql, StringComparison.Ordinal);
         Assert.Contains("m.schema_name AS module_schema_name", sql, StringComparison.Ordinal);
@@ -197,7 +201,7 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("MAX(execution_type_desc)", sql, StringComparison.Ordinal);
         /* Rank by total duration = executions * avg duration, candidate limit (top + 5 on the first round, #5313), cap at top (Lite's shape). */
-        Assert.Contains("ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY " + QueryStoreWeightedAverage.RankByDuration + " DESC", sql, StringComparison.Ordinal);  /* #7169: total duration, not SUM x AVG */
         Assert.Contains("LIMIT $6", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("+ 5", sql, StringComparison.Ordinal);
         /* #5815: the page sorts the candidates before the text lateral, on sort_cost (executions * avg duration),
@@ -215,11 +219,11 @@ public sealed class ViewerQueriesSqlTests
     {
         var sql = ViewerDataService.QueryStoreTopSql;
         Assert.Contains("CAST(SUM(execution_count) AS bigint)", sql, StringComparison.Ordinal);
-        Assert.Contains("AVG(CAST(avg_duration_us AS double precision)) / 1000.0", sql, StringComparison.Ordinal);
+        Assert.Contains(QueryStoreWeightedAverage.DurationUs + " / 1000.0", sql, StringComparison.Ordinal);
         /* Postgres has no MAX(boolean); the forced-plan flag folds through bool_or. */
         Assert.Contains("bool_or(is_forced_plan)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("MAX(CASE WHEN is_forced_plan", sql, StringComparison.Ordinal);
-        Assert.Contains("AVG(CAST(avg_query_max_used_memory AS double precision)) * 8.0 / 1024.0", sql, StringComparison.Ordinal);
+        Assert.Contains(QueryStoreWeightedAverage.QueryMaxUsedMemory + " * 8.0 / 1024.0", sql, StringComparison.Ordinal);
         /* View-Plan deferred: the collected query_plan_text column is not read this wave. */
         Assert.DoesNotContain("query_plan_text", sql, StringComparison.Ordinal);
     }
@@ -242,7 +246,10 @@ public sealed class ViewerQueriesSqlTests
     [Theory]
     [InlineData(nameof(ViewerDataService.QueryStoreTopSql))]
     [InlineData(nameof(ViewerDataService.QueryStoreComparisonSql))]
-    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql))]
+    /* #8549: QueryStoreSlicerSql left this row. Its dedupe is DISTINCT ON now, and this pin's rule for it was the window
+       function's spelling (PARTITION BY ... AS rn ... WHERE rn = 1). What the row stood for, a latest-snapshot-per-interval
+       dedupe whose key holds the interval identity and breaks ties on execution_count, NULL count first, is bounded by
+       QueryStoreSlicerCompressedLiveTests, which runs the statement on rows that tie. */
     [InlineData(nameof(ViewerDataService.QueryStoreRegressionsSql))]
     public void QueryStoreAggregates_DedupToTheLatestSnapshotPerInterval_BeforeAggregating(string sqlName)
     {
@@ -341,10 +348,10 @@ public sealed class ViewerQueriesSqlTests
     /// caller asked for; the delta slicers never had the problem because for them the two are one column.
     /// </param>
     [Theory]
-    [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)", "date_trunc('hour', collection_time)", "collection_time")]
-    [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)", "date_trunc('hour', collection_time)", "collection_time")]
-    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(DISTINCT query_id)", "date_trunc('hour', COALESCE(interval_start_time_utc, collection_time))", "COALESCE(interval_start_time_utc, collection_time)")]
-    public void SlicerSql_BucketsByHour_SevenColumnShape(string sqlName, string table, string distinctCount, string bucketExpression, string windowFilter)
+    [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time")]
+    [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time")]
+    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(query_id) FILTER (WHERE qrn = 1)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), TIMESTAMP '2000-01-01 00:00:00')", "COALESCE(interval_start_time_utc, collection_time)")]
+    public void SlicerSql_BucketsAtTheWindowsWidth_SevenColumnShape(string sqlName, string table, string distinctCount, string bucketExpression, string windowFilter)
     {
         var sql = SqlByName(sqlName);
         Assert.Contains(bucketExpression, sql, StringComparison.Ordinal);
@@ -623,11 +630,13 @@ public sealed class ViewerQueriesLivePostgresTests
     private const int ComparisonServerId = -970804;
     private const int SlicerServerId = -970805;
     private const int ProcedureStatsPlanServerId = -970806;
+    private const int ProcedureStatsRecompiledServerId = -971175;
     private const int RegressionsServerId = -970807;
     private const int ModuleAttributionServerId = -970808;
     private const int DedupServerId = -970809;
     private const int IntervalIdentityServerId = -970810;
     private const int WindowEdgeServerId = -970811;
+    private const int GridWindowEdgeServerId = -977776;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -819,6 +828,61 @@ public sealed class ViewerQueriesLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #7175: a procedure that recompiled has a row per plan_handle. The history window's per-row Download and View
+    /// Stored Plan pass the row's own plan_handle, so an older snapshot reads its own plan, not the newest one.
+    /// </summary>
+    [Fact]
+    public async Task ProcedureStatsPlan_RowPlanHandle_ReturnsThatRowsPlan_NotTheNewest_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live row-plan test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "procedure_stats", ProcedureStatsRecompiledServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(cs!);
+        var t = TruncateToSeconds(DateTime.UtcNow).AddHours(-2);
+
+        var bodySucceeded = false;
+        try
+        {
+            await InsertProcedureStatsAsync(connection, ProcedureStatsRecompiledServerId, t, "StackOverflow", "dbo", "usp_Recompiled", "PROC",
+                deltaExec: 1, deltaWorker: 10_000, deltaElapsed: 20_000, deltaReads: 100, planXml: "<ShowPlanXML>old</ShowPlanXML>", planHandle: "0xOLDHANDLE");
+            await InsertProcedureStatsAsync(connection, ProcedureStatsRecompiledServerId, t.AddMinutes(30), "StackOverflow", "dbo", "usp_Recompiled", "PROC",
+                deltaExec: 1, deltaWorker: 10_000, deltaElapsed: 20_000, deltaReads: 100, planXml: "<ShowPlanXML>new</ShowPlanXML>", planHandle: "0xNEWHANDLE");
+
+            Assert.Equal("<ShowPlanXML>old</ShowPlanXML>",
+                await viewer.GetProcedureStatsPlanXmlAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xOLDHANDLE"));
+            Assert.Equal("<ShowPlanXML>new</ShowPlanXML>",
+                await viewer.GetProcedureStatsPlanXmlAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xNEWHANDLE"));
+            /* The read names the snapshot it picked, and flags a substitution (#7175): the window files the
+               plan under that snapshot's time, not the clicked row's. */
+            var own = await viewer.GetProcedureStatsPlanAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xOLDHANDLE");
+            Assert.NotNull(own);
+            Assert.False(own.IsFallback);
+            Assert.Equal(t, own.CollectionTime);
+            var substituted = await viewer.GetProcedureStatsPlanAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xNEVERSTORED");
+            Assert.NotNull(substituted);
+            Assert.True(substituted.IsFallback);
+            Assert.Equal(t.AddMinutes(30), substituted.CollectionTime); /* the newest plan's snapshot, not the asked-for one */
+            /* No handle (the Top Procedures row) and a handle with no stored plan both read the newest plan. */
+            Assert.Equal("<ShowPlanXML>new</ShowPlanXML>",
+                await viewer.GetProcedureStatsPlanXmlAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled"));
+            Assert.Equal("<ShowPlanXML>new</ShowPlanXML>",
+                await viewer.GetProcedureStatsPlanXmlAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xNEVERSTORED"));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "procedure_stats", ProcedureStatsRecompiledServerId, cleanupCt));
+        }
+    }
+
     [Fact]
     public async Task QueryStore_AveragesIntervals_ForcedPlanBoolean_MemoryToMb_AgainstDevPostgres()
     {
@@ -889,12 +953,13 @@ public sealed class ViewerQueriesLivePostgresTests
 
         await using var viewer = new ViewerDataService(cs!);
 
-        /* One hour bucket, so the slicer assertion is about dedup rather than bucket boundaries. */
+        /* One hour bucket, so the slicer assertion is about dedup rather than bucket boundaries: the window is over two hours
+           long, the length at which the slicer keeps the hour (SlicerBuckets), and every seeded row sits in its last hour. */
         var bucketStart = TruncateToSeconds(DateTime.UtcNow).AddHours(-3);
         bucketStart = bucketStart.AddMinutes(-bucketStart.Minute).AddSeconds(-bucketStart.Second);
         var firstExecA = bucketStart.AddMinutes(1);
         var firstExecB = bucketStart.AddMinutes(2);
-        var start = bucketStart.AddMinutes(-1);
+        var start = bucketStart.AddHours(-2);
         var end = bucketStart.AddMinutes(59);
 
         var bodySucceeded = false;
@@ -1004,6 +1069,76 @@ public sealed class ViewerQueriesLivePostgresTests
         {
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "query_store_stats", DedupServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #7776 against a real store: the grid's rows are the rows the slicer's bars are drawn from. The bars place an interval by the
+    /// hour its work RAN (<c>interval_start_time_utc</c>); the grid used to bound the same window on <c>collection_time</c>, so a
+    /// slice showed an interval that started before it (collected inside it) and lacked one that started inside it (collected after
+    /// its end). Same fixture shape as the window-edge test below, read through <see cref="ViewerDataService.GetQueryStoreTopQueriesAsync"/>.
+    /// </summary>
+    [Fact]
+    public async Task QueryStoreGrid_FiltersOnTheIntervalTheBarsUse_NotTheCollectionClock_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live Query Store grid window test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "query_store_stats", GridWindowEdgeServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(cs!);
+
+        var h0 = TruncateToHour(TruncateToSeconds(DateTime.UtcNow).AddHours(-8));
+        var h1 = h0.AddHours(1);
+        var h3 = h0.AddHours(3);
+        var h4 = h0.AddHours(4);
+        var start = h1;
+        var end = h3.AddMinutes(59);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Ran before the window, collected inside it: its collection time is in the slice, its interval is not. Not shown. */
+            await InsertQueryStoreAsync(connection, GridWindowEdgeServerId, h0.AddHours(2).AddMinutes(5), "GridEdgeDb",
+                queryId: 1, planId: 11, execCount: 3, avgDurationUs: 2_000, avgCpuUs: 1_000, forced: false,
+                maxMemPages: 0, queryText: "SELECT before", firstExecutionTimeUtc: h0.AddMinutes(1),
+                intervalId: 8901, intervalStartUtc: h0);
+
+            /* Ran in the window's last hour, collected after the window ends: its interval is in the slice, its collection time is not. Shown. */
+            await InsertQueryStoreAsync(connection, GridWindowEdgeServerId, h4.AddMinutes(5), "GridEdgeDb",
+                queryId: 2, planId: 22, execCount: 7, avgDurationUs: 3_000, avgCpuUs: 1_000, forced: false,
+                maxMemPages: 0, queryText: "SELECT after", firstExecutionTimeUtc: h3.AddMinutes(1),
+                intervalId: 8902, intervalStartUtc: h3);
+
+            /* Interior: shown. */
+            await InsertQueryStoreAsync(connection, GridWindowEdgeServerId, h1.AddMinutes(50), "GridEdgeDb",
+                queryId: 3, planId: 33, execCount: 5, avgDurationUs: 1_000, avgCpuUs: 1_000, forced: false,
+                maxMemPages: 0, queryText: "SELECT inside", firstExecutionTimeUtc: h1.AddMinutes(1),
+                intervalId: 8903, intervalStartUtc: h1);
+
+            var rows = await viewer.GetQueryStoreTopQueriesAsync(GridWindowEdgeServerId, start, end);
+
+            Assert.Equal(new long[] { 2, 3 }, rows.Select(r => r.QueryId).OrderBy(id => id).ToArray());
+            Assert.Equal(7, Assert.Single(rows, r => r.QueryId == 2).TotalExecutions);
+
+            /* The text of both rows is inline on the fact row only (no query_store_text row, the legacy shape). Query 2 was collected
+               after the window's end, so the inline-text lookup has to reach past it the way the fact rows do. */
+            Assert.Equal("SELECT after", Assert.Single(rows, r => r.QueryId == 2).QueryText);
+            Assert.Equal("SELECT inside", Assert.Single(rows, r => r.QueryId == 3).QueryText);
+
+            /* The bars above the grid are drawn from the same intervals. */
+            var buckets = await viewer.GetQueryStoreSlicerDataAsync(GridWindowEdgeServerId, start, end);
+            Assert.Equal(new[] { h1, h3 }, buckets.Select(b => b.BucketTime).OrderBy(t => t).ToArray());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_store_stats", GridWindowEdgeServerId, cleanupCt));
         }
     }
 
@@ -1272,7 +1407,8 @@ public sealed class ViewerQueriesLivePostgresTests
 
             var r = Assert.Single(rows);                    /* only query 100: 200 below gate, 300 no baseline ever, 400 baseline outside the 7-day bound */
             Assert.Equal(100, r.QueryId);
-            Assert.Equal("CRITICAL", r.Severity);
+            /* +200% is the CRITICAL band by percent, but 2 s added and 4 ms a run is under the #7592 grade floor, so LOW. */
+            Assert.Equal("LOW", r.Severity);
             Assert.Equal(2.0, r.BaselineDurationMs, 3);
             Assert.Equal(6.0, r.RecentDurationMs, 3);
             Assert.Equal(200.0, r.DurationRegressionPercent, 1);
@@ -1436,7 +1572,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     private static async Task InsertProcedureStatsAsync(
         NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc,
         string databaseName, string schemaName, string objectName, string objectType,
-        long deltaExec, long deltaWorker, long deltaElapsed, long deltaReads, string? planXml = null, string sqlHandle = "0xSQLHANDLE")
+        long deltaExec, long deltaWorker, long deltaElapsed, long deltaReads, string? planXml = null, string sqlHandle = "0xSQLHANDLE", string planHandle = "0xPLANHANDLE")
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO procedure_stats
@@ -1457,7 +1593,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc.AddHours(-1), DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(sqlHandle);
-        command.Parameters.AddWithValue("0xPLANHANDLE");
+        command.Parameters.AddWithValue(planHandle);
         command.Parameters.AddWithValue(deltaExec);
         command.Parameters.AddWithValue(deltaWorker);
         command.Parameters.AddWithValue(deltaElapsed);

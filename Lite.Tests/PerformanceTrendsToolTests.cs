@@ -115,6 +115,43 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         Assert.Equal(24.0, neverRoot.GetProperty("effective_hours_back").GetDouble());
     }
 
+    /// <summary>#7498: idle runs with no stored row in the window answer <c>empty</c>, as Darling does. A stored row keeps the
+    /// series, even one of zero work: a store from before #5449 holds those, and Darling serves them as a series too.</summary>
+    [Fact]
+    public async Task IdleRunsWithNoStoredRow_AnswerEmpty_AndAStoredRowKeepsTheSeries()
+    {
+        var service = new LocalDataService(_duckDb);
+        var baseNow = Truncate(DateTime.UtcNow);
+
+        await SeedProcedureAsync(baseNow.AddHours(-48), executions: 5, elapsedUs: 1_000_000);
+        await SeedProcedureRunsAsync(baseNow.AddMinutes(-30), baseNow.AddMinutes(-25), baseNow.AddMinutes(-20));
+
+        var idle = JsonDocument.Parse(await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 4)).RootElement;
+        Assert.Equal("empty", idle.GetProperty("status").GetString());
+
+        await SeedProcedureAsync(baseNow.AddMinutes(-15), executions: 0, elapsedUs: 0);
+        var stored = JsonDocument.Parse(await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 4)).RootElement;
+        Assert.False(stored.TryGetProperty("status", out _));
+        Assert.NotEqual(0, stored.GetProperty("trend").GetArrayLength());
+    }
+
+    private async Task SeedProcedureRunsAsync(params DateTime[] times)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        foreach (var at in times)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+                VALUES ($1, $2, $3, 'procedure_stats', $4, 12, 'SUCCESS', 0)";
+            cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
+            cmd.Parameters.Add(new DuckDBParameter { Value = _serverId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = at });
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
+
     [Fact]
     public async Task QueryStoreEmpty_NamesTheCauseThePlanCacheTrendsDoNotHave()
     {
@@ -176,11 +213,12 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         var second = trend[1];
         Assert.True(second.GetProperty("value").GetDouble() > 0, "elapsed ms/sec must be a real rate");
 
-        /* The shipped integer field rounds this to an idle server. The double is why it is here. */
-        Assert.Equal(0, second.GetProperty("execution_count").GetInt64());
+        /* #8073: execution_count is the executions the point's rate was built from, the 2 seeded here, and the rate
+           below one per second keeps its own key instead of being truncated into the count. */
+        Assert.Equal(2, second.GetProperty("execution_count").GetInt64());
         Assert.True(
             second.GetProperty("executions_per_second").GetDouble() > 0,
-            "executions_per_second must survive a rate below 1/sec that execution_count truncates to zero");
+            "executions_per_second must survive a rate below 1/sec");
 
         /* #3541 A2: the unit is in the field name now — same quantity as `value`, kept beside it on the
            execution_count precedent above. */
@@ -282,7 +320,7 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
     private static void AssertDisclosureBlock(JsonElement envelope)
     {
         var keys = envelope.EnumerateObject().Select(p => p.Name).ToArray();
-        var block = new[] { "source", "effective_start", "effective_hours_back", "window_truncated", "bucket", "bucket_minutes", "aggregate_note" };
+        var block = new[] { "source", "effective_start", "effective_hours_back", "window_truncated", "start_older_than_tier", "tier_keeps_days", "bucket", "bucket_minutes", "aggregate_note" };
         var at = Array.IndexOf(keys, "source");
         Assert.True(at >= 0, "the envelope has no `source`");
         Assert.Equal(block, keys.Skip(at).Take(block.Length).ToArray());

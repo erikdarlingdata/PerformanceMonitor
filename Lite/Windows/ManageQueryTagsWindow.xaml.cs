@@ -93,6 +93,7 @@ public partial class ManageQueryTagsWindow : Window
             var selectedId = _selected?.Tag.Id;
             var roots = ManageQueryTagsModel.BuildTree(_tags).Select(r => new QueryTagNodeView(r)).ToList();
             TagTree.ItemsSource = roots;
+            NoQueryTagsMessage.Visibility = roots.Count == 0 ? Visibility.Visible : Visibility.Collapsed; /* #8645 */
             _selected = selectedId is int id ? Flatten(ManageQueryTagsModel.BuildTree(_tags)).FirstOrDefault(i => i.Tag.Id == id) : null;
             RuleTagBox.ItemsSource = _tags.OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase).ToList();
             RuleTagBox.SelectedIndex = RuleTagBox.Items.Count > 0 ? 0 : -1;
@@ -285,8 +286,8 @@ public partial class ManageQueryTagsWindow : Window
         var id = _selected.Tag.Id;
         var casualties = await Task.Run(() => _model.CountDeleteCasualtiesAsync(id));
         var children = Flatten(new[] { _selected }).Count() - 1;
-        var childNote = children > 0 ? $" and its {children} child tag(s)" : string.Empty;
-        var note = casualties > 0 ? $" This also removes {casualties} hand assignment(s) and rule(s) that use it." : string.Empty;
+        var childNote = children > 0 ? $" and its {PerformanceMonitor.Common.CountText.Plural(children, "child tag")}" : string.Empty;
+        var note = casualties > 0 ? $" This also removes {PerformanceMonitor.Common.CountText.Plural(casualties, "hand assignment or rule", "hand assignments and rules")} that use it." : string.Empty;
         var confirm = MessageBox.Show(this, $"Delete ‘{_selected.Tag.Name}’{childNote}?{note} Collected data is not affected.",
             "Delete Query Tag", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
         if (confirm == MessageBoxResult.OK)

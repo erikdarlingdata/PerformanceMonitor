@@ -82,7 +82,7 @@ public sealed class DarlingMcpPvsToolsTests
         SqlTextPin.AssertExpresses("collection_time = (", sql, "the read is not pinned to one capture");
         SqlTextPin.AssertExpresses("SELECT MAX(collection_time)", sql, "the capture it pins to is not the newest");
         SqlTextPin.AssertExpresses(
-            "ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name",
+            "ORDER BY persistent_version_store_size_mb DESC NULLS LAST, lower(database_name), database_name",
             sql,
             "the biggest version store no longer sorts first");
 
@@ -117,7 +117,7 @@ public sealed class DarlingMcpPvsToolsTests
 
         SqlTextPin.AssertExpresses("p.collection_time >= $2", sql, "the trend is no longer bounded by the requested window");
         SqlTextPin.AssertExpresses(
-            "ORDER BY p.database_name, p.collection_time",
+            "ORDER BY lower(p.database_name), p.database_name, p.collection_time",
             sql,
             "the points no longer arrive grouped per database in time order");
     }

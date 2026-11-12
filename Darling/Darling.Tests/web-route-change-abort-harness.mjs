@@ -108,6 +108,8 @@ const answerFor = (url) => {
   if (rangeBody && url.includes("get_daily_summary_range")) return json(rangeBody);
   if (url.includes("get_resource_use_by_tag") && tagBody) return json(tagBody);
   if (url.includes("/api/read/list_servers")) return json({ servers: [{ server_name: "alpha", display_name: "alpha" }] });
+  /* #8083: the store defines one tag, so Query Tag Usage goes on to the by-tag read these scenarios watch (with none it draws one line and sends no read). */
+  if (url.includes("/api/read/list_query_tags")) return json({ status: "ok", tags: [{ tag_id: 1, name: "Prod", path: "Prod", colour: null }] });
   if (url.includes("/api/session")) return json({ can_edit: false });
   if (url.includes("/api/catalog")) return json({ reads: [{ name: "get_view_panel_read" }, { name: "get_notebook_cell_read" }], viz: [], compose: {} });
   if (url.includes("/api/views/view1")) return json({ id: "view1", name: "A view", definition: { panels: [{ title: "View panel", read: "get_view_panel_read", viz: "table" }] } });
@@ -121,8 +123,10 @@ globalThis.fetch = (url, opts = {}) => {
   const rec = { at: now, url, signal: opts.signal || null, abortedAtStart: !!(opts.signal && opts.signal.aborted), aborted: false };
   fetchLog.push(rec);
   /* app.js asks /api/session before it starts (#6840: is this a front door?). A store answers it at once, and the page must not wait on the
-     scenario's clock to start, so it is answered now. It stays counted in fetchLog like every other read. */
-  if (url.split("?")[0] === "/api/session") {
+     scenario's clock to start, so it is answered now. It stays counted in fetchLog like every other read. #8083: the same for the tag list
+     Query Tag Usage asks for before its by-tag read, a small config read a store answers at once, so the by-tag read these scenarios time
+     still starts with the page. */
+  if (url.split("?")[0] === "/api/session" || url.split("?")[0] === "/api/read/list_query_tags") {
     const a = answerFor(url);
     return Promise.resolve({ ok: true, status: a.status, json: async () => a.body, text: async () => JSON.stringify(a.body) });
   }
@@ -176,7 +180,7 @@ const scenarios = {
     const before = { started: !!slow, aborted: slow.aborted };
     await go("#/server/alpha");
     const afterLeave = { aborted: slow.aborted, serverRenders };
-    await advance(3);
+    await advance(8); // the server page's Overview sends its heavy reads two at a time (#8554), so its first load takes a few more seconds
     const btn = refreshBtn();
     const out = { before, afterLeave, busyAfterSettle: btn.disabled === true };
     const r0 = serverRenders;
@@ -325,20 +329,22 @@ const scenarios = {
   async leaveHealthWithCalendarReadOut() {
     dailyEmpty = true;
     await boot("#/server/alpha");
-    await advance(2);
+    await advance(8); // the range read goes through the heavy gate (#8554), a few rounds behind the strips
     const ranges = () => fetchLog.filter((r) => r.url.includes("get_daily_summary_range"));
     const before = { reads: ranges().length, aborted: ranges().some((r) => r.aborted) };
     await go("#/investigations"); await settle();
     const afterLeave = { reads: ranges().length, monthReadAborted: ranges().length > 1 && ranges()[1].aborted };
-    await go("#/server/alpha"); await advance(2);
+    await go("#/server/alpha"); await advance(8);
     return { before, afterLeave, monthReadsAfterReturn: ranges().length - afterLeave.reads };
   },
   /* The Overview tab draws today's tile and the month calendar from ONE get_daily_summary_range read, and asks no get_daily_summary beside it. */
   async overviewReadsTheRangeOnce() {
     rangeBody = { to_date: "2026-10-03", days: [{ summary_date: "2026-10-01", top_wait_type: "WAIT_OLD" }, { summary_date: "2026-10-03", top_wait_type: "WAIT_TODAY" }] };
     await boot("#/server/alpha/overview");
-    await advance(2);
-    const has = (t) => !!byId.main.find((x) => x.textContent === t);
+    await advance(8); // the first round ends when the range read has landed: the gate (#8554) sends it after the trends and the baseline
+    /* #7552: the Top wait value breaks after an underscore, so it is a few text nodes with <wbr> between them: read a node as the text of its whole subtree, the way a browser's textContent does. */
+    const full = (n) => (n.children.length ? n.children.map((c) => (c && c.children ? full(c) : "")).join("") : n.textContent || "");
+    const has = (t) => !!byId.main.find((x) => full(x) === t);
     const read = (re) => fetchLog.filter((r) => re.test(r.url));
     return {
       rangeReads: read(/get_daily_summary_range/).length,
@@ -347,6 +353,23 @@ const scenarios = {
       calendarDrawn: !!byId.main.find((x) => x.textContent === "Daily Health Calendar"),
       anyAborted: fetchLog.some((r) => r.aborted),
     };
+  },
+  /* #8554: the Overview sends its five heavy reads through the page's heavy-read gate, two in flight. Leaving while some are in flight
+     and the rest are still waiting for a slot aborts the ones out and drops the waiting ones, which are never sent after the leave, and
+     the slots are free for the next visit. */
+  async leaveOverviewWithHeavyReadsQueued() {
+    const heavy = /get_server_trend|get_memory_trend|get_file_io_trend|get_overview_baselines|get_daily_summary_range/;
+    const sent = () => fetchLog.filter((r) => heavy.test(r.url));
+    await boot("#/server/alpha/overview");
+    /* No clock step here: the panels' reads start with the page, before the fleet card answers (#8554), so the two the gate lets through
+       are already out and unanswered and the other three wait. A step would answer the two and let the next two through. */
+    const before = { sent: sent().length, aborted: sent().some((r) => r.aborted) };
+    await go("#/investigations"); await settle();
+    const afterLeave = { sent: sent().length, allAborted: sent().length > 0 && sent().every((r) => r.aborted) };
+    await advance(10);
+    const afterWait = { sent: sent().length };
+    await go("#/server/alpha/overview"); await advance(8);
+    return { before, afterLeave, afterWait, sentOnReturn: sent().length - afterWait.sent, abortedOnReturn: sent().slice(afterWait.sent).some((r) => r.aborted) };
   },
   /* The FinOps Locking tab's Database box reads the server's database names with the tab's own signal. */
   async finopsDatabaseBoxReadOut() {

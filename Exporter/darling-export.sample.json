@@ -1,0 +1,42 @@
+{
+  "config_version": 1,
+  "store": {
+    "name": "store_a",
+    "host": "127.0.0.1",
+    "port": 5641,
+    "database": "darling",
+    "user": "export_reader",
+    "password": { "source": "env", "name": "DARLING_EXPORT_PG_PASSWORD" },
+    "application_name": "darling-export",
+    "statement_timeout_seconds": 120
+  },
+  "paths": {
+    "out": "/var/lib/darling-export/out",
+    "state": "/var/lib/darling-export/state",
+    "logs": "/var/lib/darling-export/logs"
+  },
+  "destination": {
+    "type": "s3",
+    "bucket": "example-bucket",
+    "prefix": "landing",
+    "region": "us-east-1"
+  },
+  "families": {
+    "fresh": { "optional_tables": [] },
+    "query_store": { "enabled": true, "lag_hours": 3, "source": "raw" },
+    "fast": { "window_minutes": 60, "late_row_margin_minutes": 15 }
+  },
+  "schedule": {
+    "max_windows_per_family": 6,
+    "max_window_age_hours": 20,
+    "cutoff_minute": 40,
+    "hourly_start_minute": 20
+  },
+  "export": {
+    "duckdb_memory_limit": "4GB",
+    "procedure_plan_reuse": "shadow"
+  },
+  "memory_guard": { "enabled": true, "min_free_mb": 6144, "start_multiplier": 2 },
+  "restart_delay": { "minutes": 30, "detector": "off" },
+  "retention": { "log_days": 14, "leftover_hours": 24, "out_hours": 48, "temp_hours": 24 }
+}

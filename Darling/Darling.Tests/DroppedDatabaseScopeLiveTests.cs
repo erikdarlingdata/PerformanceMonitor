@@ -159,7 +159,8 @@ public sealed class DroppedDatabaseScopeLiveTests
                                            delta_worker_time, delta_elapsed_time, delta_execution_count, delta_spills, sample_interval_seconds)
               VALUES ($1,$2,$3,$4,'NewDb','dbo','usp_Work','0xHNewDb',950000,1900000,950,0,60)",
             CollectionIdGenerator.Next(), now.AddMinutes(-1), serverId, serverName);
-        Assert.Equal(new[] { "NewDb", "LiveDb" }, Databases(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 168, top: 20)));
+        /* #7725: the databases the server still lists rank first (NewDb, LiveDb), and the dropped GoneDb fills what the limit leaves, after them. */
+        Assert.Equal(new[] { "NewDb", "LiveDb", "GoneDb" }, Databases(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 168, top: 20)));
         Assert.Equal(new[] { "NewDb" }, Databases(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 168, top: 1)));
         Assert.Equal(new[] { "GoneDb" }, (await CurrentDatabaseScope.ReadDroppedAsync(dataSource, serverId, windowStartUtc: now.AddHours(-168), cancellationToken: ct))!.ToArray());
         /* Named, a dropped database is a question about its history and is read as asked. */
@@ -197,13 +198,10 @@ public sealed class DroppedDatabaseScopeLiveTests
         var serverId = ServerIdHelper.GetDeterministicHashCode(serverName);
         await DarlingMcpTestData.RegisterServerAsync(connection, serverId, serverName, ct);
         var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
-        await DarlingMcpTestData.ExecAsync(connection, ct,
-            @"INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
-                                           delta_worker_time, delta_elapsed_time, delta_execution_count, delta_spills, sample_interval_seconds)
-              VALUES ($1,$2,$3,$4,'GoneDb','dbo','usp_Work','0xHGoneDb',900000,1800000,900,0,60)",
-            CollectionIdGenerator.Next(), now.AddHours(-2), serverId, serverName);
-        /* The collector has run twice and looked at the window, so the empty page takes the "ran, found nothing" branch. */
-        foreach (var minutes in new[] { 30, 90 })
+        /* The collector has run twice and looked at the window, so the empty page takes the "ran, found nothing" branch. The newest run is
+           5 minutes old: a run at 30 minutes sits on the 30-minute offline threshold and ages past it before the read (#7167 then answers
+           unavailable), and this server is meant to be collecting. */
+        foreach (var minutes in new[] { 5, 90 })
         {
             await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO collection_log
@@ -228,8 +226,9 @@ VALUES ($1, $2, $3, 'procedure_stats', $4, 100, 'SUCCESS', NULL, 1, 80, 20)",
         Assert.DoesNotContain("recorded nothing for it", message, StringComparison.Ordinal);
         Assert.DoesNotContain("matches this request", message, StringComparison.Ordinal);
         Assert.Contains("a database this server still has", message, StringComparison.Ordinal);
-        Assert.Contains("1 database(s) the server no longer lists", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("left out", message, StringComparison.Ordinal);
         Assert.Equal(new[] { "GoneDb" }, LeftOut(empty.RootElement));
+        Assert.Equal(1, empty.RootElement.GetProperty("databases_left_out_count").GetInt32());
         Assert.Contains("no longer lists them", empty.RootElement.GetProperty("databases_left_out_note").GetString(), StringComparison.Ordinal);
 
         /* The Query Store clutter read leaves GoneDb out the same way, and its empty page must not say Query Store is off everywhere. */
@@ -240,7 +239,24 @@ VALUES ($1, $2, $3, 'procedure_stats', $4, 100, 'SUCCESS', NULL, 1, 80, 20)",
         using var clutter = JsonDocument.Parse(await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(dataSource, serverName, 24, 20, false, null, null, cancellationToken: ct));
         Assert.Equal("empty", clutter.RootElement.GetProperty("status").GetString());
         Assert.DoesNotContain("OFF everywhere", clutter.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        /* #7538: the count is the reply's databases_left_out_count, and the empty sentence does not say it again. */
+        Assert.DoesNotContain("left out", clutter.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.Equal(1, clutter.RootElement.GetProperty("databases_left_out_count").GetInt32());
         Assert.Equal(new[] { "GoneDb" }, LeftOut(clutter.RootElement));
+
+        /* #7725: GoneDb ran a procedure in the window. The page used to be empty (the dropped database was only named); it now carries the row,
+           marked database_dropped, and because the row is there databases_left_out no longer names GoneDb. */
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
+                                           delta_worker_time, delta_elapsed_time, delta_execution_count, delta_spills, sample_interval_seconds)
+              VALUES ($1,$2,$3,$4,'GoneDb','dbo','usp_Work','0xHGoneDb',900000,1800000,900,0,60)",
+            CollectionIdGenerator.Next(), now.AddHours(-2), serverId, serverName);
+        using var filled = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 168, top: 20));
+        var filledRow = Assert.Single(filled.RootElement.GetProperty("procedures").EnumerateArray());
+        Assert.Equal("GoneDb", filledRow.GetProperty("database_name").GetString());
+        Assert.True(filledRow.GetProperty("database_dropped").GetBoolean());
+        Assert.Empty(LeftOut(filled.RootElement));
+        Assert.False(filled.RootElement.TryGetProperty("databases_left_out_note", out var filledNote) && filledNote.ValueKind == JsonValueKind.String);
 
         /* Named, the dropped database is read as asked: rows come back and nothing is disclosed as left out. */
         using var named = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 168, top: 20, database_name: "GoneDb"));
@@ -254,8 +270,17 @@ VALUES ($1, $2, $3, 'procedure_stats', $4, 100, 'SUCCESS', NULL, 1, 80, 20)",
               VALUES ($1,$2,$3,$4,'LiveDb','dbo','usp_Work','0xHLiveDb',100000,200000,100,0,60)",
             CollectionIdGenerator.Next(), now.AddHours(-2), serverId, serverName);
         using var page = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 168, top: 20));
-        Assert.Equal(new[] { "LiveDb" }, page.RootElement.GetProperty("procedures").EnumerateArray().Select(p => p.GetProperty("database_name").GetString()!).ToArray());
-        Assert.Equal(new[] { "GoneDb" }, LeftOut(page.RootElement));
+        /* #7725: listed rows first (LiveDb carries no mark), then the dropped GoneDb's row, marked. Both databases have a row, so nothing is left out. */
+        var pageRows = page.RootElement.GetProperty("procedures").EnumerateArray().ToList();
+        Assert.Equal(new[] { "LiveDb", "GoneDb" }, pageRows.Select(p => p.GetProperty("database_name").GetString()!).ToArray());
+        Assert.False(pageRows[0].TryGetProperty("database_dropped", out _));
+        Assert.True(pageRows[1].GetProperty("database_dropped").GetBoolean());
+        Assert.Empty(LeftOut(page.RootElement));
+
+        /* A limit that the listed row already fills leaves GoneDb out of the rows, and then the page names it again. */
+        using var topOne = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 168, top: 1));
+        Assert.Equal(new[] { "LiveDb" }, topOne.RootElement.GetProperty("procedures").EnumerateArray().Select(p => p.GetProperty("database_name").GetString()!).ToArray());
+        Assert.Equal(new[] { "GoneDb" }, LeftOut(topOne.RootElement));
     }
 
     /// <summary>

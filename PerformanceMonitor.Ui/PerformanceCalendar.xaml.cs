@@ -14,6 +14,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Ui
@@ -22,13 +23,12 @@ namespace PerformanceMonitor.Ui
     /// A navigable month heatmap of composite daily health bands, shared by Lite and the Darling viewer so
     /// the Performance Calendar can't drift between them. The host supplies <see cref="Days"/> (one banded
     /// <see cref="PerformanceCalendarDay"/> per collected day) and the displayed month; the control lays out
-    /// a 6x7 grid, washes each in-month cell with its band color, and raises <see cref="MonthChanged"/> when
+    /// the weeks the month spans, seven days each, washes each in-month cell with its band color, and raises <see cref="MonthChanged"/> when
     /// the user navigates (so the host can fetch that month). Clicking a day opens the built-in day-detail
     /// panel; its drill buttons raise <see cref="DayDrillRequested"/> so the host can scope + navigate.
     /// </summary>
     public partial class PerformanceCalendar : UserControl
     {
-        private const int WeeksShown = 6;
         private const int DaysPerWeek = 7;
 
         public PerformanceCalendar()
@@ -48,6 +48,28 @@ namespace PerformanceMonitor.Ui
             set => SetValue(DaysProperty, value);
         }
 
+        /// <summary>
+        /// #8647: true from the moment the host picks the calendar's tab until its first month read returns. The cells dim and
+        /// <c>Loading...</c> sits over them, so a calendar that has not been read does not pass for a month with no collection.
+        /// The host sets it back to false when the read returns, with rows or without.
+        /// </summary>
+        public static readonly DependencyProperty IsLoadingProperty = DependencyProperty.Register(
+            nameof(IsLoading), typeof(bool), typeof(PerformanceCalendar),
+            new PropertyMetadata(false, OnIsLoadingChanged));
+        public bool IsLoading
+        {
+            get => (bool)GetValue(IsLoadingProperty);
+            set => SetValue(IsLoadingProperty, value);
+        }
+
+        private static void OnIsLoadingChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+        {
+            var calendar = (PerformanceCalendar)d;
+            var loading = (bool)e.NewValue;
+            calendar.DayCells.Opacity = loading ? 0.3 : 1.0;
+            calendar.CalendarLoadingText.Visibility = loading ? Visibility.Visible : Visibility.Collapsed;
+        }
+
         /// <summary>The month to display (any day within it; normalized to the first). Defaults to the current
         /// UTC month — the calendar operates in UTC day-space to match the collected data (naive-UTC collection times).</summary>
         public static readonly DependencyProperty DisplayMonthProperty = DependencyProperty.Register(
@@ -62,7 +84,7 @@ namespace PerformanceMonitor.Ui
         /// <summary>The currently selected/drilled day, framed with an accent ring. Null when none.</summary>
         public static readonly DependencyProperty SelectedDateProperty = DependencyProperty.Register(
             nameof(SelectedDate), typeof(DateTime?), typeof(PerformanceCalendar),
-            new PropertyMetadata(null, OnVisualInputChanged));
+            new PropertyMetadata(null, OnSelectedDateChanged));
         public DateTime? SelectedDate
         {
             get => (DateTime?)GetValue(SelectedDateProperty);
@@ -80,7 +102,7 @@ namespace PerformanceMonitor.Ui
         /// <summary>The weekday column headers in the current culture's week order.</summary>
         public ObservableCollection<string> WeekdayHeaders { get; } = new();
 
-        /// <summary>The 42 rendered day cells (6 weeks x 7 days).</summary>
+        /// <summary>The rendered day cells: the weeks the month spans (four to six), seven cells each.</summary>
         public ObservableCollection<PerformanceCalendarCell> Cells { get; } = new();
 
         /// <summary>The supplied days indexed by date, for O(1) day-detail-panel lookup on click. Rebuilt
@@ -90,11 +112,84 @@ namespace PerformanceMonitor.Ui
         /// <summary>The date the day-detail panel is currently showing (drives the drill buttons). Null when hidden.</summary>
         private DateTime? _detailDate;
 
+        /// <summary>The in-month day the left button went down on, held until the button comes up. A click selects
+        /// a day only when it goes down and comes up on that day. Null between clicks, and for the second press of a
+        /// double-click, whose release therefore selects nothing.</summary>
+        private DateTime? _pressedDate;
+
         private static DateTime FirstOfMonth(DateTime value) => new(value.Year, value.Month, 1);
 
         private static void OnVisualInputChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
         {
-            ((PerformanceCalendar)d).RebuildCells();
+            var calendar = (PerformanceCalendar)d;
+            var wasOpen = calendar.DayDetailPanel?.Visibility == Visibility.Visible;
+            calendar.RebuildCells();
+
+            // A month change that returns to the selected day opens its panel again, so it is brought into view.
+            // A refreshed Days list finds the panel open and leaves the scroll position alone.
+            if (!wasOpen)
+            {
+                calendar.ScrollDayDetailIntoView();
+            }
+        }
+
+        private static void OnSelectedDateChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+        {
+            var calendar = (PerformanceCalendar)d;
+            calendar.RebuildCells();
+            calendar.ScrollDayDetailIntoView();
+        }
+
+        /// <summary>
+        /// Scrolls the calendar so the day-detail panel of the selected day is in view (#8532): the whole panel when
+        /// the view can hold it, otherwise the view starts at the panel's top edge. It runs when a day is clicked,
+        /// when the selected day changes, when a month change opens the panel again, and when the view gets shorter
+        /// with the panel open. It does not run when the host hands over a refreshed <see cref="Days"/>, so a
+        /// refresh leaves the scroll position where the user put it. It does nothing while the panel is closed.
+        /// </summary>
+        private void ScrollDayDetailIntoView()
+        {
+            if (CalendarScroll == null || DayDetailPanel == null || DayDetailPanel.Visibility != Visibility.Visible)
+            {
+                return;
+            }
+
+            // The panel's place is known only once the rows above it are laid out.
+            UpdateLayout();
+            if (!DayDetailPanel.IsDescendantOf(CalendarScroll))
+            {
+                return;
+            }
+
+            // The presenter holds the view's height and offset as the last arrange left them. The scroll viewer
+            // copies them only once layout has finished, which is too late for a caller inside a layout pass.
+            var presenter = CalendarScroll.Template?.FindName("PART_ScrollContentPresenter", CalendarScroll) as ScrollContentPresenter;
+            var measured = presenter is { ViewportHeight: > 0 };
+            var viewHeight = measured ? presenter!.ViewportHeight : CalendarScroll.ViewportHeight;
+            var offset = measured ? presenter!.VerticalOffset : CalendarScroll.VerticalOffset;
+            if (viewHeight <= 0)
+            {
+                return;
+            }
+
+            var view = presenter ?? (Visual)CalendarScroll;
+            var panel = DayDetailPanel.TransformToAncestor(view).TransformBounds(new Rect(DayDetailPanel.RenderSize));
+            double shift;
+            if (panel.Height > viewHeight || panel.Top < 0)
+            {
+                shift = panel.Top;
+            }
+            else if (panel.Bottom > viewHeight)
+            {
+                shift = panel.Bottom - viewHeight;
+            }
+            else
+            {
+                return;
+            }
+
+            CalendarScroll.ScrollToVerticalOffset(offset + shift);
+            UpdateLayout();
         }
 
         private void BuildWeekdayHeaders()
@@ -137,8 +232,11 @@ namespace PerformanceMonitor.Ui
             var offset = ((int)month.DayOfWeek - firstDayOfWeek + DaysPerWeek) % DaysPerWeek;
             var gridStart = month.AddDays(-offset);
 
+            // Only the weeks the month spans: a week row that holds no day of the month is not drawn.
+            var weeks = (offset + DateTime.DaysInMonth(month.Year, month.Month) + DaysPerWeek - 1) / DaysPerWeek;
+
             Cells.Clear();
-            for (var i = 0; i < WeeksShown * DaysPerWeek; i++)
+            for (var i = 0; i < weeks * DaysPerWeek; i++)
             {
                 var date = gridStart.AddDays(i);
                 var inMonth = date.Year == month.Year && date.Month == month.Month;
@@ -182,13 +280,47 @@ namespace PerformanceMonitor.Ui
             MonthChanged?.Invoke(this, new PerformanceCalendarMonthEventArgs(month));
         }
 
+        /// <summary>A press anywhere in the calendar starts a new click, so a day pressed earlier and released
+        /// outside the cells is forgotten before a cell's own handler sees this press.</summary>
+        protected override void OnPreviewMouseLeftButtonDown(MouseButtonEventArgs e)
+        {
+            _pressedDate = null;
+            base.OnPreviewMouseLeftButtonDown(e);
+        }
+
+        private void Cell_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            // Only the first press of a click sequence picks a day. The first click of a double-click can scroll
+            // the rows, which puts another day under the pointer for the second press; that press picks nothing.
+            _pressedDate = e.ClickCount == 1
+                && sender is FrameworkElement { DataContext: PerformanceCalendarCell { IsInDisplayMonth: true } cell }
+                ? cell.Date
+                : null;
+        }
+
         private void Cell_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
         {
-            if (sender is FrameworkElement { DataContext: PerformanceCalendarCell cell } && cell.IsInDisplayMonth)
+            var pressed = _pressedDate;
+            _pressedDate = null;
+
+            if (sender is FrameworkElement { DataContext: PerformanceCalendarCell cell } && cell.IsInDisplayMonth
+                && pressed == cell.Date)
             {
                 // Setting SelectedDate reframes the accent ring and (via the DP callback -> RebuildCells ->
                 // UpdateDayDetailPanel) shows the day-detail panel for this day.
                 SelectedDate = cell.Date;
+
+                // A click on the day that is already selected changes no property, and still asks for its detail.
+                ScrollDayDetailIntoView();
+            }
+        }
+
+        private void CalendarScroll_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            // A shorter view can leave an open panel below its bottom edge.
+            if (e.HeightChanged && e.NewSize.Height < e.PreviousSize.Height)
+            {
+                ScrollDayDetailIntoView();
             }
         }
 

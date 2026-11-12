@@ -208,6 +208,22 @@ RETURNING " + AssignmentColumns;
         tags.Select(t => new TagTreeNode(t.Id, t.Name, t.ParentId)).ToList();
 
     /// <summary>Reads tags, hand assignments, rule counts, server names and the map state.</summary>
+    /// <summary>The query tags used or explicitly assigned on the permitted servers.</summary>
+    public async Task<IReadOnlySet<int>> UsedTagIdsAsync(IReadOnlyList<int> serverIds, CancellationToken ct = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(ct);
+        await using var command = Command("""
+            SELECT tag_id FROM config.query_tag_map WHERE server_id = ANY($1)
+            UNION SELECT tag_id FROM config.query_tag_assignments WHERE server_id = ANY($1)
+            UNION SELECT tag_id FROM config.query_tag_rules WHERE server_id = ANY($1)
+            """, connection, null);
+        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, serverIds.ToArray());
+        var ids = new HashSet<int>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) ids.Add(reader.GetInt32(0));
+        return ids;
+    }
+
     public async Task<QueryTagSnapshot> ReadSnapshotAsync(CancellationToken ct = default)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(ct);

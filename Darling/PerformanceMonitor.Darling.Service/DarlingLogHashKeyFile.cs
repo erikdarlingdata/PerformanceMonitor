@@ -115,7 +115,7 @@ public static class DarlingLogHashKeyFile
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(
+            logger.LogError(ex, 
                 "PostgreSQL log events will not be collected: the directory for the store's log-hash key could not be resolved ({Message}) (#4004).",
                 ex.Message);
             return new DarlingLogHashKeyLoad(null, string.Empty, Generated: false, Refusal: $"the directory for the store's log-hash key could not be resolved ({ex.Message})");
@@ -206,9 +206,13 @@ public static class DarlingLogHashKeyFile
         Key: null,
         Path: path,
         Generated: false,
-        Refusal: $"PostgreSQL log events will not be collected: the store's log-hash key {path} cannot be used because {reason} (#4004). "
+        Refusal: $"PostgreSQL log events will not be collected: the store's log-hash key {path} cannot be used because {reason}. "
             + "The service does not replace this key on its own, because a new key gives every stored log event a new identity. "
-            + "If only this service could have written or read it, restrict it to the service account (on Windows, --harden-files run elevated does that) and restart; otherwise, or to start a new key, delete it and restart, and the service generates a new one.");
+            + (reason.StartsWith(DarlingServiceKeyFile.UnreadableDirectoryLead, StringComparison.Ordinal)
+                /* #8141: the key is likely there, behind a directory the service's user cannot list; the chown in the
+                   reason keeps it, and deleting it would give every stored log event a new identity for nothing. */
+                ? "Run the command above, then restart; the key is kept."
+                : "If only this service could have written or read it, restrict it to the service account (on Windows, --harden-files run elevated does that) and restart; otherwise, or to start a new key, delete it and restart, and the service generates a new one."));
 
     /// <summary>
     /// The refusal when the DIRECTORY is what cannot be trusted (#4004 review, round 3). The key file's own remedies
@@ -220,7 +224,7 @@ public static class DarlingLogHashKeyFile
         Key: null,
         Path: path,
         Generated: false,
-        Refusal: $"PostgreSQL log events will not be collected: the store's log-hash key {path} cannot be used because {reason} (#4004). "
+        Refusal: $"PostgreSQL log events will not be collected: the store's log-hash key {path} cannot be used because {reason}. "
             + "Nothing in that directory is read or written while it is not trusted; fix what the reason names and restart.");
 }
 

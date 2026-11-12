@@ -104,7 +104,7 @@ public static class DarlingPgDatabaseReader
     /// comment on the expression, where that distinction is load-bearing.</item>
     /// <item><c>counter_rewind_count</c> — the IMPLICIT signal, a counter smaller than the previous sample's.
     /// Kept alongside rather than replaced by the explicit one because a crash restart discards the
-    /// statistics, and a target that has never been reset at all reports <c>stats_reset</c> as NULL, so the
+    /// statistics, and a target with no RECORDED reset reports <c>stats_reset</c> as NULL, so the
     /// timestamp can stay unchanged across a genuine rewind.</item>
     /// </list>
     /// <para>Both are counts rather than booleans: three resets in a window is a different conversation from

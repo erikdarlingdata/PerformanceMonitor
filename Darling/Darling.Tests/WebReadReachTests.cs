@@ -104,7 +104,7 @@ public sealed class WebReadReachTests
             {
                 "get_alert_history", "get_blocking_stats", "get_blocking_trend", "get_cpu_utilization", "get_deadlock_trend", "get_file_io_trend",
                 "get_lock_wait_trend", "get_memory_trend", "get_perfmon_trend", "get_pg_cpu_utilization", "get_pg_database_trend", "get_pg_io_trend",
-                "get_procedure_duration_trend", "get_query_duration_trend", "get_query_store_duration_trend", "get_tempdb_trend",
+                "get_procedure_duration_trend", "get_query_duration_trend", "get_query_fleet_summary", "get_query_store_duration_trend", "get_query_trend", "get_tempdb_trend",
                 "get_wait_trend",
             },
             WebReadReach.All.Where(kv => kv.Value.MaxHours > McpHelpers.MaxHoursBack).Select(kv => kv.Key).OrderBy(n => n, StringComparer.Ordinal).ToArray());
@@ -435,5 +435,27 @@ public sealed class WebReadReachTests
     public void ACeilingThatIsNotWholeDays_IsSpelledInHours()
     {
         Assert.Contains("maximum of 100 hours. Use", McpHelpers.ErrorMessageOf(McpHelpers.ValidateHoursBack(101, 100)!));
+    }
+
+    /// <summary>
+    /// #8550: a server's id is a hash of its name, and -1 is one of the ids it can be. A read with no server resolves from the
+    /// fleet-wide schedule row and the shipped default, never from the row of a server whose id is -1, and that server's own
+    /// read takes its own row.
+    /// </summary>
+    [Fact]
+    public void AReadWithNoServer_ResolvesFromTheFleetRow_NotFromTheRowOfAServerWhoseIdIsMinusOne()
+    {
+        const string collector = "running_jobs";
+        var shipped = CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes<ScheduleOverride>(collector, 7, null);
+        Assert.NotNull(shipped);
+        Assert.NotEqual(45, shipped);
+
+        var serverRowOnly = new[] { new ScheduleOverride(-1, collector, 45, null, null) };
+        Assert.Equal(45, WebReadReach.CollectorIntervalMinutes(collector, -1, serverRowOnly));
+        Assert.Equal(shipped, WebReadReach.CollectorIntervalMinutes(collector, null, serverRowOnly));
+
+        var both = new[] { new ScheduleOverride(null, collector, 20, null, null), new ScheduleOverride(-1, collector, 45, null, null) };
+        Assert.Equal(45, WebReadReach.CollectorIntervalMinutes(collector, -1, both));
+        Assert.Equal(20, WebReadReach.CollectorIntervalMinutes(collector, null, both));
     }
 }

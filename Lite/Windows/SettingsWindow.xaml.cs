@@ -190,6 +190,8 @@ public partial class SettingsWindow : Window
 
     private void ServerScheduleGrid_DoubleClick(object sender, MouseButtonEventArgs e)
     {
+        // A double-click on a column header, the scrollbar or the empty area is not a row (#7210).
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource)) return;
         OpenServerScheduleEditor();
     }
 
@@ -227,12 +229,12 @@ public partial class SettingsWindow : Window
 
         if (customCount == 0)
         {
-            MessageBox.Show("All servers are already using the default schedule.", "Apply Default", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(this, "Apply Default", "All servers are already using the default schedule.");
             return;
         }
 
         var result = MessageBox.Show(
-            $"Remove custom schedules from {customCount} server(s) and revert them to the default schedule?\n\nThis cannot be undone.",
+            $"Remove custom schedules from {CountText.Plural(customCount, "server")} and revert {(customCount == 1 ? "it" : "them")} to the default schedule?\n\nThis cannot be undone.",
             "Apply Default to All",
             MessageBoxButton.YesNo,
             MessageBoxImage.Warning);
@@ -348,7 +350,7 @@ public partial class SettingsWindow : Window
         {
             /* Not "Disabled": nobody disabled it. Kept to one short line because this TextBlock does not
                wrap; the part that does not fit is on the tooltip. */
-            McpStatusText.Text = "Status: Off \u2014 settings.json could not be read";
+            McpStatusText.Text = "Status: Off. settings.json could not be read";
             McpStatusText.ToolTip =
                 $"settings.json could not be read ({_mcpSettingsProblem}), so the MCP server did not start and "
                 + "the tickbox and port above are defaults rather than your settings.\n\n"
@@ -447,8 +449,10 @@ public partial class SettingsWindow : Window
             SaveTimeDisplayMode(root);
             SaveCheckForUpdates(root);
             alertsValid = SaveAlertSettings(root);
-            SaveSmtpSettings(root);
-            webhooksValid = SaveWebhookSettings(root);
+            var smtpValid = SaveSmtpSettings(root);
+            /* A refused recipient list is reported by its own dialog; folding it into webhooksValid makes the outcome
+               "written with objections" so no second success box contradicts it. */
+            webhooksValid = SaveWebhookSettings(root) && smtpValid;
         }
         catch (Exception ex)
         {
@@ -461,7 +465,7 @@ public partial class SettingsWindow : Window
 
         bool written = App.WriteSettingsDocument(root, "settings");
 
-        /* _saved is what stops CloseButton_Click / OnClosing reverting the live theme preview, so it has to
+        /* _saved is what stops OnClosing reverting the live theme preview, so it has to
            mean "the theme reached settings.json" and not "Save was clicked". Set unconditionally it makes
            the window contradict itself: the dialog below says nothing was saved while the unpersisted theme
            stays applied for the rest of the run and comes back to its old value on the next launch. */
@@ -514,14 +518,13 @@ public partial class SettingsWindow : Window
                 return;
 
             case SettingsSaveOutcome.SavedAndMcpNeedsRestart:
-                MessageBox.Show(
+                InAppMessage.Show(this, "Settings",
                     "Settings saved. MCP changes take effect after restarting the application."
-                    + MemoryLimitRestartNote(),
-                    "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+                    + MemoryLimitRestartNote());
                 return;
 
             default:
-                MessageBox.Show("Settings saved." + MemoryLimitRestartNote(), "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Settings", "Settings saved." + MemoryLimitRestartNote());
                 return;
         }
     }
@@ -653,7 +656,7 @@ public partial class SettingsWindow : Window
                the caller is told the page did not validate. Reporting Valid = true here was the #2433
                instance the review bot found, and it is not survivable now that this method writes nothing
                it could be wrong about. */
-            AppLogger.Error("Settings", $"Failed to save MCP settings: {ex.Message}");
+            AppLogger.Error("Settings", $"Failed to save MCP settings: {ex.Message}", ex);
             MessageBox.Show(
                 $"The MCP port could not be checked, so the MCP settings were left unchanged:\n\n{ex.Message}",
                 "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -810,7 +813,7 @@ public partial class SettingsWindow : Window
     private bool _isLoadingTheme;
     private readonly string _originalTheme = ThemeManager.CurrentTheme;
     /// <summary>
-    /// Whether this window's Save actually reached settings.json. Read by <c>CloseButton_Click</c> and
+    /// Whether this window's Save actually reached settings.json. Read by
     /// <c>OnClosing</c> to decide whether to revert the live theme preview, so it tracks the write rather
     /// than the click (#2433) — a theme that was previewed but never persisted must not survive the window
     /// that failed to save it.
@@ -1204,6 +1207,7 @@ public partial class SettingsWindow : Window
         root["alert_blocking_enabled"] = App.AlertBlockingEnabled;
         root["alert_blocking_threshold"] = App.AlertBlockingThreshold;
         root["alert_blocking_wait_seconds_threshold"] = App.AlertBlockingWaitSecondsThreshold;
+        root["alert_blocking_defaults_applied"] = true;  /* #7083: the marker that makes a saved 1 / 0 count as a choice, see the loader in App.xaml.cs */
         root["alert_deadlock_enabled"] = App.AlertDeadlockEnabled;
         root["alert_deadlock_threshold"] = App.AlertDeadlockThreshold;
         root["alert_database_state_enabled"] = App.AlertDatabaseStateEnabled;
@@ -1280,8 +1284,8 @@ public partial class SettingsWindow : Window
     {
         AlertCpuThresholdBox.Text = "80";
         AlertCpuModeBox.SelectedIndex = 0; // Total
-        AlertBlockingThresholdBox.Text = "1";
-        AlertBlockingWaitSecondsBox.Text = "0";
+        AlertBlockingThresholdBox.Text = BlockingPageRule.CountThresholdDefault.ToString(CultureInfo.InvariantCulture);
+        AlertBlockingWaitSecondsBox.Text = BlockingPageRule.WaitSecondsThresholdDefault.ToString(CultureInfo.InvariantCulture);
         AlertDeadlockThresholdBox.Text = "1";
         AlertRunnableQueueWarningBox.Text = RunnableQueueEvaluator.DefaultWarningPerScheduler.ToString(CultureInfo.InvariantCulture);
         AlertRunnableQueueCriticalBox.Text = RunnableQueueEvaluator.DefaultCriticalPerScheduler.ToString(CultureInfo.InvariantCulture);
@@ -1304,7 +1308,7 @@ public partial class SettingsWindow : Window
         AlertCooldownBox.Text = "5";
         EmailCooldownBox.Text = "15";
         AlertDeliveryModeBox.SelectedIndex = 0;
-        AlertPerEventMaxBox.Text = "10";
+        AlertPerEventMaxBox.Text = AlertDefaults.PerEventMax.ToString(CultureInfo.InvariantCulture);
         AnalysisIntervalBox.Text = "30";
         AnalysisNotifySeverityBox.Text = "1.5";
         AnalysisNotifyCooldownBox.Text = "360";
@@ -1465,7 +1469,7 @@ public partial class SettingsWindow : Window
     /// no longer performs a write, so there is no longer a failure for it to be unable to report. That is
     /// the difference between removing the partial-save state and describing it.
     /// </summary>
-    private void SaveSmtpSettings(JsonNode root)
+    private bool SaveSmtpSettings(JsonNode root)
     {
         App.SmtpEnabled = SmtpEnabledCheckBox.IsChecked == true;
         App.SmtpServer = SmtpServerBox.Text?.Trim() ?? "";
@@ -1474,7 +1478,23 @@ public partial class SettingsWindow : Window
         App.SmtpUseSsl = SmtpSslCheckBox.IsChecked == true;
         App.SmtpUsername = SmtpUsernameBox.Text?.Trim() ?? "";
         App.SmtpFromAddress = SmtpFromBox.Text?.Trim() ?? "";
-        App.SmtpRecipients = SmtpRecipientsBox.Text?.Trim() ?? "";
+
+        /* #7184: one recipient the send cannot parse (an Outlook-style "a@x.com;b@x.com") fails every alert email, valid
+           addresses included, and "a@x.com; b@x.com" silently drops the first. An enabled channel keeps its stored recipients and says so, like the other writers do. */
+        var recipientsValid = true;
+        var typedRecipients = SmtpRecipientsBox.Text?.Trim() ?? "";
+        if (App.SmtpEnabled && EmailSendCore.RecipientsRefusal(typedRecipients) is { } recipientsRefusal)
+        {
+            recipientsValid = false;
+            NoteInvalid("Default recipients: " + recipientsRefusal, SmtpRecipientsBox);
+            MessageBox.Show(
+                "The default email recipients were not changed:\n\n" + recipientsRefusal,
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        else
+        {
+            App.SmtpRecipients = typedRecipients;
+        }
 
         /* Save password securely */
         if (!string.IsNullOrEmpty(SmtpPasswordBox.Password))
@@ -1492,6 +1512,7 @@ public partial class SettingsWindow : Window
         root["smtp_username"] = App.SmtpUsername;
         root["smtp_from_address"] = App.SmtpFromAddress;
         root["smtp_recipients"] = App.SmtpRecipients;
+        return recipientsValid;
     }
 
     private void SmtpEnabledCheckBox_Changed(object sender, RoutedEventArgs e)
@@ -1527,6 +1548,8 @@ public partial class SettingsWindow : Window
             errors.Add("From address must be a valid email");
         if (string.IsNullOrWhiteSpace(SmtpRecipientsBox.Text))
             errors.Add("At least one recipient is required");
+        else if (EmailSendCore.RecipientsRefusal(SmtpRecipientsBox.Text) is { } recipientsRefusal)
+            errors.Add("Default recipients: " + recipientsRefusal);
 
         if (errors.Count == 0)
         {
@@ -1613,11 +1636,11 @@ public partial class SettingsWindow : Window
             var error = await EmailSendCore.SendTestEmailAsync(new AppAlertSettings(), Services.EmailAlertService.Branding);
             if (error == null)
             {
-                MessageBox.Show("Test email sent successfully!", "Test Email", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Email", "Test email sent successfully!");
             }
             else
             {
-                MessageBox.Show($"Failed to send test email:\n\n{error}", "Test Email Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Failed to send test email:\n\n{error}\n\nCheck the SMTP server, port and login on the Delivery tab in Settings.", "Test Email Failed", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
         finally
@@ -1937,16 +1960,16 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("PagerDuty test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "PagerDuty test notification sent successfully!");
             }
             else
             {
-                MessageBox.Show($"Failed to send PagerDuty test notification:\n\n{error}", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Failed to send PagerDuty test notification:\n\n{error}\n\nCheck the PagerDuty routing key on the Delivery tab in Settings.", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to send PagerDuty test notification:\n\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to send PagerDuty test notification:\n\n{ex.Message}\n\nCheck the PagerDuty routing key on the Delivery tab in Settings.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -1968,16 +1991,16 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("Teams test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "Teams test notification sent successfully!");
             }
             else
             {
-                MessageBox.Show($"Failed to send Teams test notification:\n\n{error}", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Failed to send Teams test notification:\n\n{error}\n\nCheck the Teams webhook URL on the Delivery tab in Settings.", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to send Teams test notification:\n\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to send Teams test notification:\n\n{ex.Message}\n\nCheck the Teams webhook URL on the Delivery tab in Settings.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -1999,16 +2022,16 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("Slack test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "Slack test notification sent successfully!");
             }
             else
             {
-                MessageBox.Show($"Failed to send Slack test notification:\n\n{error}", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Failed to send Slack test notification:\n\n{error}\n\nCheck the Slack webhook URL on the Delivery tab in Settings.", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to send Slack test notification:\n\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to send Slack test notification:\n\n{ex.Message}\n\nCheck the Slack webhook URL on the Delivery tab in Settings.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -2066,16 +2089,16 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("Generic webhook test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "Generic webhook test notification sent successfully!");
             }
             else
             {
-                MessageBox.Show($"Failed to send generic webhook test notification:\n\n{error}", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Failed to send generic webhook test notification:\n\n{error}\n\nCheck the generic webhook URL on the Delivery tab in Settings.", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to send generic webhook test notification:\n\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to send generic webhook test notification:\n\n{ex.Message}\n\nCheck the generic webhook URL on the Delivery tab in Settings.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -2099,12 +2122,8 @@ public partial class SettingsWindow : Window
     private void CopyAllRows_Click(object sender, RoutedEventArgs e) => DataGridExport.CopyAllRows(sender);
     private void ExportToCsv_Click(object sender, RoutedEventArgs e) => DataGridExport.ExportToCsv(sender, "schedules", App.CsvSeparator);
 
-    private void CloseButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (!_saved)
-            ThemeManager.Apply(_originalTheme);
-        Close();
-    }
+    /* OnClosing reverts the unsaved theme preview, and Close() always reaches it (#7228). */
+    private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
 
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {

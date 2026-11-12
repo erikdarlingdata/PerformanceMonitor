@@ -69,6 +69,8 @@ public partial class NotificationRouteEditDialog : Window
             MatchCombo.Items.Add(new ComboBoxItem { Content = name, Tag = name });
         }
 
+        /* #7999: every analysis finding, at every scope. After the families so a family's index is still its position. */
+        MatchCombo.Items.Add(new ComboBoxItem { Content = NotificationRouteKinds.AnalysisAllChoiceLabel, Tag = NotificationRoute.AnalysisAllMatch });
         MatchCombo.Items.Add(new ComboBoxItem { Content = ExactMetricChoice, Tag = null });
 
         AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentInheritChoice, Tag = null });
@@ -98,6 +100,10 @@ public partial class NotificationRouteEditDialog : Window
         if (existing.IsWildcard)
         {
             SelectWildcard();
+        }
+        else if (existing.IsAnalysisAll)
+        {
+            MatchCombo.SelectedItem = MatchCombo.Items.OfType<ComboBoxItem>().First(i => Equals(i.Tag, NotificationRoute.AnalysisAllMatch));
         }
         else if (existing.Family is { } family)
         {
@@ -378,6 +384,7 @@ public partial class NotificationRouteEditDialog : Window
             AlertFamily.AgentJobs => "SQL Server Agent: failed or long-running jobs.",
             AlertFamily.Performance => "A monitored server's health: blocking, deadlocks, CPU, long-running queries, space, connection loss, and any alert no other family names.",
             AlertFamily.External => "Alerts sent in from outside the collectors.",
+            NotificationRoute.AnalysisAllMatch => NotificationRouteKinds.AnalysisAllChoiceDescription,
             NotificationRoute.WildcardMatch => "Every alert for the chosen server or tag. The lowest-priority match: an exact metric or a family route for the same scope wins over it.",
             _ => "One alert by its exact metric name. Wins over a family or 'Every metric'; a recovery (Server Restored) routes as the alert it clears."
         };
@@ -386,13 +393,9 @@ public partial class NotificationRouteEditDialog : Window
     private NotificationRoute BuildRoute()
     {
         var (serverId, tagId) = NotificationRouteUi.ScopeIds(SelectedScope());
-        var match = SelectedMatchTag() ?? ExactMetricBox.Text.Trim();
-
-        /* An exact name that is really a family spelled by hand becomes the family, so the list and the router agree. */
-        if (SelectedMatchTag() is null && AlertFamily.NormalizeFamily(match) is { } family)
-        {
-            match = family;
-        }
+        /* An exact name that is really a family spelled by hand becomes the family, and any spelling of "Analysis: *" its canonical
+           text (#7999), so the list and the router agree. */
+        var match = NotificationRouteKinds.MatchToSave(SelectedMatchTag(), ExactMetricBox.Text);
 
         /* An unreadable saved destination left alone keeps its flag (the channel stays off, #5366); clearing its box removes it. */
         var keepOff = new List<string>();

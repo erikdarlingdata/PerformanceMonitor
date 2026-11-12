@@ -102,9 +102,11 @@ public class BaselineProvider
         [MetricNames.SessionCount] = "session_stats",
         [MetricNames.QueryDuration] = "query_stats",
         [MetricNames.IoLatency] = "file_io_stats",
+        [MetricNames.IoLatencyChart] = "file_io_stats",
         [MetricNames.IoWriteLatency] = "file_io_stats",
         [MetricNames.Blocking] = "blocked_process_report",
         [MetricNames.BlockingPerMinute] = "blocked_process_report",
+        [MetricNames.BlockingSnapshot] = "dmv_blocking_snapshot",
         [MetricNames.Deadlock] = "deadlocks",
         [MetricNames.Memory] = "memory_stats",
     };
@@ -144,7 +146,7 @@ public class BaselineProvider
         AppLogger.Warn(
             "Baselines",
             $"{collector} is retained for {days} days but the {metricName} baseline window is " +
-            $"{BaselineMath.BaselineWindowDays} days — baselines for {metricName} are computed from " +
+            $"{BaselineMath.BaselineWindowDays} days: baselines for {metricName} are computed from " +
             $"{days} days of history, so anomaly thresholds are degraded. Raise {collector}'s retention to " +
             $"at least {BaselineMath.BaselineWindowDays} days, or expect less reliable detection.");
     }
@@ -169,6 +171,54 @@ public class BaselineProvider
         var (hourOfDay, dayOfWeek) = cached.Clock.LocalKey(analysisTime);
 
         return BaselineMath.SelectBucket(baselines, hourOfDay, dayOfWeek);
+    }
+
+    /// <summary>#7644: one local hour of a window and the bucket that hour's local hour-of-week key picks. <c>FromUtc</c> is the start of
+    /// the local hour (before the window start for the first step), <c>ToUtc</c> its end. Darling's PgBaselineProvider.BaselineStep, twinned.</summary>
+    public sealed record BaselineStep(DateTime FromUtc, DateTime ToUtc, BaselineBucket Bucket);
+
+    /// <summary>
+    /// #7644: the band the Overview lanes draw, one step per local hour the window crosses, from the same cached entry
+    /// <see cref="GetBaselineAsync"/> reads at <paramref name="computeTime"/>. Steps include hours whose bucket is empty: the caller
+    /// decides which are usable. Darling's PgBaselineProvider.GetBaselineStepsSharedAsync, twinned.
+    /// </summary>
+    public async Task<IReadOnlyList<BaselineStep>> GetBaselineStepsAsync(
+        int serverId, string metricName, DateTime windowStartUtc, DateTime windowEndUtc, DateTime computeTime, CancellationToken cancellationToken = default)
+    {
+        WarnIfRetentionUndercutsBaselineWindow(metricName);
+        var entry = await GetOrComputeBaselinesAsync(serverId, metricName, computeTime, cancellationToken);
+        return StepsFor(entry, windowStartUtc, windowEndUtc, _localClock);
+    }
+
+    /// <summary>The local-hour walk of <see cref="GetBaselineStepsAsync"/>. Hours are the zone's: the walk goes through
+    /// <see cref="LocalClockWindow.ToLocal"/>, so a +5:30 zone steps at :30 UTC, and a step ends where the clock's offset changes.
+    /// The clock is re-resolved over the window being drawn from the entry's own zone id and offset, as <see cref="GetBucketMapAsync"/>
+    /// does (#7644), never the entry's <see cref="CachedBaseline.Clock"/>: that one covers the compute window, the 30 days before
+    /// the compute time, so a custom range older than that would walk on a fixed offset and cut every step after a daylight-saving
+    /// change an hour off.</summary>
+    internal static List<BaselineStep> StepsFor(CachedBaseline entry, DateTime windowStartUtc, DateTime windowEndUtc, BaselineLocalClock localClock)
+    {
+        var steps = new List<BaselineStep>();
+        if (entry.Buckets is null || entry.Buckets.Count == 0 || windowEndUtc <= windowStartUtc)
+            return steps;
+
+        var clock = localClock.Resolve(entry.TimeZoneId, entry.UtcOffsetMinutes, windowStartUtc, windowEndUtc);
+        var t = windowStartUtc;
+        while (t < windowEndUtc)
+        {
+            var local = clock.ToLocal(t);
+            var intoHour = TimeSpan.FromTicks(local.Ticks % TimeSpan.TicksPerHour);
+            var next = t + (TimeSpan.FromHours(1) - intoHour);
+            var transition = DateTime.SpecifyKind(clock.TransitionAtUtc, t.Kind);
+            if (clock.HasTransition && t < transition && transition < next)
+                next = transition;
+            var from = steps.Count == 0 ? t - intoHour : t;
+            var (hourOfDay, dayOfWeek) = clock.LocalKey(t);
+            steps.Add(new BaselineStep(from, next, BaselineMath.SelectBucket(entry.Buckets, hourOfDay, dayOfWeek)));
+            t = next;
+        }
+
+        return steps;
     }
 
     /// <summary>
@@ -228,14 +278,14 @@ public class BaselineProvider
     internal static DateTime RoundedDay(DateTime analysisTime)
         => new(analysisTime.Year, analysisTime.Month, analysisTime.Day, 0, 0, 0);
 
-    /// <summary>#4248, widened by #4731: the five arms that read a RAW table at full grain over the 30-day window —
-    /// the <c>clean</c> CTE of Cpu, IoLatency and IoWriteLatency (<c>v_cpu_utilization_stats</c>, <c>v_file_io_stats</c> twice, #6696) and the
+    /// <summary>#4248, widened by #4731: the six arms that read a RAW table at full grain over the 30-day window —
+    /// the <c>clean</c> CTE of Cpu, IoLatency, IoLatencyChart and IoWriteLatency (<c>v_cpu_utilization_stats</c>, <c>v_file_io_stats</c> three times, #6696, #7644) and the
     /// <c>logged</c> CTE of Blocking and Deadlock (<see cref="EventBaselineSql"/>, over <c>v_collection_log</c>) —
     /// rather than an already-aggregated one. Darling's PgBaselineProvider.IsDailyCacheMetric, twinned, so the two
     /// products flag the same anomalies off the same cache grain. See that method's remarks for why these four and
     /// not the other seven RobustTierScaffold arms.</summary>
     internal static bool IsDailyCacheMetric(string metricName)
-        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoWriteLatency or MetricNames.Blocking or MetricNames.Deadlock;
+        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoLatencyChart or MetricNames.IoWriteLatency or MetricNames.Blocking or MetricNames.BlockingSnapshot or MetricNames.Deadlock;
 
     /// <summary>The cache key's time AND the compute's window end (#3941, restated for #4248): the day for a
     /// raw-table arm (<see cref="IsDailyCacheMetric"/>), the hour for every other one — the one seam both read so
@@ -305,7 +355,7 @@ public class BaselineProvider
 
     /// <summary>
     /// The newest <c>server_properties</c> row that carries an offset, for the clock the buckets key on (#3653 Q6) —
-    /// <c>LocalDataService.GetServerUtcOffsetMinutesAsync</c>'s read with <c>time_zone_id</c> (v42) riding along, and
+    /// <c>LocalDataService.GetServerClockAsync</c>'s read (<c>time_zone_id</c>, v42, rides along), and
     /// its reason for skipping NULL offsets: the column is nullable and a store migrated from earlier holds snapshots
     /// that predate it. One row, on the compute's own connection, once per metric per cache period. A server with no
     /// row reads (NULL, NULL), which <see cref="BaselineLocalClock.Resolve"/> turns into UTC keying — exactly what
@@ -712,15 +762,29 @@ WITH clean AS (
     AND   (delta_reads > 0 OR delta_writes > 0)
 )," + RobustTierScaffold,
 
+            /* #7644: the Overview strip's unit, Darling's PgBaselineProvider IoLatencyChart arm twinned. The arm above judges each FILE ROW, so a
+               file with ten slow reads weighs as much as the busy file with ten thousand fast ones, and the band sat far from the line the
+               lane draws (reads-weighted per collection: the files' stall summed over their reads summed). Same source, and rows with reads
+               only, so v is never null and sample_count is the number of collections that read. */
+            MetricNames.IoLatencyChart => @"
+WITH clean AS (
+    SELECT collection_time, SUM(delta_stall_read_ms) * 1.0 / SUM(delta_reads) AS v
+    FROM v_file_io_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   delta_reads > 0
+    GROUP BY collection_time
+)," + RobustTierScaffold,
+
             /* #6696: the write-latency twin of the arm above (Darling's PgBaselineProvider has the long note), for the
                ANOMALY_WRITE_LATENCY gate, which used to be scored against the read series. WHERE delta_writes > 0
-               keeps v non-null, so sample_count counts write-bearing file rows. */
+               keeps v non-null, so sample_count counts write-bearing file rows. #6959: the write side reads log files and tempdb data files only. User data files take background checkpoint and lazy-writer writes that no session waits on, so a multi-file database's data rows (a small high group) were the window peak against a baseline median they sat far above. */
             MetricNames.IoWriteLatency => @"
 WITH clean AS (
     SELECT collection_time, delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0) AS v
     FROM v_file_io_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_writes > 0
+    AND   (file_type = 'LOG' OR lower(database_name) = 'tempdb')
 )," + RobustTierScaffold,
 
             // #6645: the baseline counts the same reports the current window does (BlockingWaits.NotSelfWaitSql), so the 3x ratio
@@ -729,6 +793,12 @@ WITH clean AS (
             // No restart exclusion needed (event counts, not cumulative). See EventBaselineSql (#4731).
             MetricNames.Blocking => OnEventTime(EventBaselineSql("blocked_process_report", "v_collection_log",
                 StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql) + " AS ev", "COUNT(*)"), "event_time"),
+
+            /* #7588: the DMV snapshot arm of the blocking spike. Its window counts v_dmv_blocking_snapshots rows (same self-wait
+               filter), so its history is those rows, covered by the snapshot collector's own runs. A snapshot's event_time IS its
+               collection_time, so the events keep the helper's collection_time key and need no OnEventTime. */
+            MetricNames.BlockingSnapshot => EventBaselineSql("dmv_blocking_snapshot", "v_collection_log",
+                "(SELECT * FROM v_dmv_blocking_snapshots WHERE " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + ") AS snap", "COUNT(*)"),
 
             // Event-based — same approach as blocking
             MetricNames.Deadlock => OnEventTime(EventBaselineSql("deadlocks", "v_collection_log",
@@ -747,21 +817,26 @@ WITH clean AS (
             // ── Chart-unit baselines (for UI bands — units match what the chart displays) ──
 
             // Wait ms per second (chart shows this, not total ms per collection)
-            /* #3540: the collection's STORED interval (MAX over its rows) where it has one, the LAG only for
-               pre-v60 collections; a restart collection's 0 becomes NULL and the with_rate WHERE drops it
-               exactly as it always dropped the window's first row.
+            /* #3540: the collection's STORED interval where it has one, the LAG only for pre-v60 collections;
+               a restart collection has no rate and the with_rate WHERE drops it exactly as it always dropped
+               the window's first row. #8106: the rate is the collection's positive-interval deltas over its cadence.
                #3653 (A10): the QUALIFY restart heuristic is gated on the collection having NO stored
                interval — the WaitStats arm's reasoning: a measured zero rate is idle, and the restart the
                heuristic hunts for was already dropped as an interval-0 collection one CTE up. */
             MetricNames.WaitMsPerSec => @"
 WITH per_collection AS (
     SELECT collection_time,
-           SUM(delta_wait_time_ms)::DOUBLE PRECISION AS total_wait_ms,
            MAX(sample_interval_seconds) AS stored_interval_seconds,
+           /* #8106: the collection's positive-interval deltas over its cadence, the shortest stored interval any of
+              its rows measured, so the total equals the sum of its parts (the anomaly's window read takes the same
+              shape, so the window and the baseline it is scored against agree); a restart collection (every row 0)
+              has no cadence and is dropped by with_rate's WHERE, a pre-v60 collection rates its summed delta over
+              the LAG. */
            CASE WHEN MAX(sample_interval_seconds) IS NULL
-                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                ELSE NULLIF(MAX(sample_interval_seconds), 0)
-           END AS interval_sec
+                THEN SUM(delta_wait_time_ms)::DOUBLE PRECISION / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
+                ELSE SUM(delta_wait_time_ms) FILTER (WHERE sample_interval_seconds > 0)::DOUBLE PRECISION
+                     / MIN(NULLIF(sample_interval_seconds, 0))
+           END AS ms_per_sec
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_wait_time_ms >= 0
@@ -770,9 +845,9 @@ WITH per_collection AS (
 with_rate AS (
     SELECT collection_time,
            stored_interval_seconds,
-           total_wait_ms / interval_sec AS ms_per_sec
+           ms_per_sec
     FROM per_collection
-    WHERE interval_sec IS NOT NULL AND interval_sec > 0
+    WHERE ms_per_sec IS NOT NULL
     QUALIFY NOT (ms_per_sec = 0
         AND COALESCE(LAG(ms_per_sec) OVER (ORDER BY collection_time), 0) > 100
         AND stored_interval_seconds IS NULL)
@@ -782,7 +857,7 @@ clean AS (
     FROM with_rate
 )," + RobustTierScaffold,
 
-            // Blocking events per minute (chart shows event bars bucketed by minute)
+            // Blocked-process reports per minute (the chart shows report bars bucketed by minute)
             MetricNames.BlockingPerMinute => @"
 WITH per_minute AS (
     SELECT DATE_TRUNC('minute', event_time) AS minute_bucket,

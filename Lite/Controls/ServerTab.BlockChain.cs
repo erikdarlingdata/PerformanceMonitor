@@ -33,7 +33,7 @@ public partial class ServerTab : UserControl
     // Double-click a blocked-process-report row.
     private async void BlockedProcessReportGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (BlockedProcessReportGrid.SelectedItem is BlockedProcessReportRow row)
+        if (DataGridRowHit.IsOnRow(e.OriginalSource) && BlockedProcessReportGrid.SelectedItem is BlockedProcessReportRow row)
             await OpenBlockChainForRowAsync(row);
     }
 
@@ -114,7 +114,7 @@ public partial class ServerTab : UserControl
             GraphViewerWindow.ShowGraph(
                 Window.GetWindow(this),
                 control,
-                $"Block Chain — SPID {spid} on {_server.DisplayName}");
+                $"Block Chain: SPID {spid} on {_server.DisplayName}");
         }
         catch (Exception ex)
         {

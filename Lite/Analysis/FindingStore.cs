@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -128,6 +129,15 @@ public class FindingStore
     }
 
     /// <summary>
+    /// The read-time forcing and automatic-plan-correction state of the findings' force-plan targets
+    /// (#8542), over this store's database, for a reader that renders a finding's copy-paste command.
+    /// Returns the dictionary and a null reason on success, and null with the reason when the read fails.
+    /// </summary>
+    public Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> TryGetForcePlanTargetStatesAsync(
+        int serverId, IEnumerable<AnalysisFinding> findings, CancellationToken cancellationToken = default) =>
+        AnalysisService.ReadForcePlanTargetStatesAsync(_duckDb, serverId, findings, cancellationToken);
+
+    /// <summary>
     /// #2455: finding and mute ids come from the shared process-wide
     /// <see cref="CollectionIdGenerator"/> rather than a per-instance counter.
     ///
@@ -214,6 +224,7 @@ public class FindingStore
                    six-site corruption surface the issue names. StoryPath below is unchanged. */
                 PathKeys = story.Path,
                 RootFactMetadata = story.RootFactMetadata,
+                PageEvidence = story.PageEvidence,
                 /* #3691 lane 43: the root fact's ranked objects, in memory only like the metadata above —
                    analyze_server's root_fact renders them; a read-back finding has none. */
                 RootFactRanked = story.RootFactRanked
@@ -311,8 +322,8 @@ public class FindingStore
                announcing a completed analysis for a set the store does not have, and it is the
                behaviour this store has always had. Only the diagnostic is new. */
             AppLogger.Error("AnalysisService", everyRowAccepted
-                ? $"Finding batch for {context.ServerName} had all {findings.Count} row(s) accepted and then failed to COMMIT them, so the batch was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {ex.Message}"
-                : $"Finding batch for {context.ServerName} failed at row {row} of {findings.Count} and was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {ex.Message}");
+                ? $"Finding batch for {context.ServerName} had all {CountText.Plural(findings.Count, "row")} accepted and then failed to COMMIT them, so the batch was rolled back, this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {ex.Message}"
+                : $"Finding batch for {context.ServerName} failed at row {row} of {findings.Count} and was rolled back, this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {ex.Message}");
             throw;
         }
 
@@ -417,6 +428,43 @@ LIMIT $4";
         }
 
         return findings;
+    }
+
+    /// <summary>
+    /// The distinct story paths this server has stored under one root fact key, across the findings retention
+    /// (#8012): what the analysis page hold reads, when a story's path has got shorter, to find the wider path of
+    /// the same story that was already paged. Rare by construction (a page-band member with no bucket and no page
+    /// row of its own) and small in answer (the distinct paths of one root), so it reads only the four columns the
+    /// seed needs and no row's drill-down. The server_id predicate is the one the time index leads with; the root
+    /// is a filter on the rows it admits. Matches the Darling twin's PgFindingStore.
+    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the notifier's restart seed, a lifetime with
+    /// no per-pass budget and no wedged analysis to abandon, so its store calls take no pass token.</para>
+    /// </summary>
+    public async Task<IReadOnlyList<StoredStoryPath>> GetStoryPathsAsync(int serverId, string rootFactKey)
+    {
+        var paths = new List<StoredStoryPath>();
+
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+SELECT DISTINCT story_path_hash, story_path, category, fact_count
+FROM analysis_findings
+WHERE server_id = $1
+AND   root_fact_key = $2";
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = rootFactKey });
+
+        using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            paths.Add(new StoredStoryPath(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3)));
+        }
+
+        return paths;
     }
 
     /// <summary>
@@ -735,6 +783,16 @@ RETURNING mute_id, story_path, muted_date, reason";
        hour named different jobs, and the labeler compares the name it recovers against this pass's, so a
        wrong pick labels nothing rather than the wrong job.
 
+       #7450: two more columns ride the same rows. chain_fired_hours is the number of distinct local hours of the
+       whole window the chain has a saved row in, and chain_span_hours the number of hours from the chain's first
+       saved row in the window to its last, both ends counted. A chain that fires in more than half of its own span
+       fires nearly all the time, however often a pass finds it, and its same-slot weeks say nothing about a
+       schedule; a weekly job fires in a handful of hours across a span of hundreds. The span is the chain's own,
+       so no record of "the server was analysed in that hour" is needed (the store keeps none: a pass that saved
+       nothing leaves no row, and the finding writers skip a story with no severity). Both come off local_rows,
+       the one scan of the window, which feeds the chain_hours CTE and the final select; no second read of the
+       range is made. Buckets are local hours, so a clock change moves the counts by at most one hour.
+
        Byte-identical to Darling's PgFindingStore.GetPriorOccurrencesSql: the server's clock is a separate
        one-row read (BaselineProvider.ServerClockSql here, PgBaselineProvider.ServerClockSql there), so nothing
        in this statement names a table the two products spell differently. A source pin in Darling.Tests holds
@@ -751,13 +809,25 @@ WITH local_rows AS
     WHERE f.server_id = $1
     AND   f.analysis_time >= $2
     AND   f.analysis_time <  $3
+),
+chain_hours AS
+(
+    SELECT
+        story_path_hash AS chain_hash,
+        COUNT(DISTINCT local_bucket) AS chain_fired_hours,
+        CAST(EXTRACT(EPOCH FROM (MAX(local_bucket) - MIN(local_bucket))) / 3600 AS INTEGER) + 1 AS chain_span_hours
+    FROM local_rows
+    GROUP BY story_path_hash
 )
 SELECT
     story_path_hash,
     root_fact_key,
     local_bucket,
-    MAX(CASE WHEN root_fact_key = 'RUNNING_JOBS' THEN story_text END) AS job_story_text
+    MAX(CASE WHEN root_fact_key = 'RUNNING_JOBS' THEN story_text END) AS job_story_text,
+    MAX(chain_fired_hours) AS chain_fired_hours,
+    MAX(chain_span_hours) AS chain_span_hours
 FROM local_rows
+JOIN chain_hours ON chain_hash = story_path_hash
 WHERE (EXTRACT(HOUR FROM local_bucket) = $7 AND EXTRACT(DOW FROM local_bucket) = $8)
 OR    root_fact_key = 'RUNNING_JOBS'
 GROUP BY story_path_hash, root_fact_key, local_bucket
@@ -825,7 +895,9 @@ ORDER BY local_bucket, story_path_hash";
                     reader.GetString(0),
                     reader.GetString(1),
                     reader.GetDateTime(2),
-                    reader.IsDBNull(3) ? null : reader.GetString(3)));
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    Convert.ToInt32(reader.GetValue(4), CultureInfo.InvariantCulture),
+                    Convert.ToInt32(reader.GetValue(5), CultureInfo.InvariantCulture)));
             }
 
             return new PriorOccurrenceRead(utcOffsetMinutes, referenceLocal, occurrences);
@@ -833,7 +905,7 @@ ORDER BY local_bucket, story_path_hash";
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
             AppLogger.Warn("FindingStore",
-                $"GetPriorOccurrencesAsync failed — this pass's findings are persisted unlabelled and the next pass reads the same history: {ex.Message}");
+                $"GetPriorOccurrencesAsync failed, this pass's findings are persisted unlabelled and the next pass reads the same history: {ex.Message}");
             return PriorOccurrenceRead.Empty;
         }
     }

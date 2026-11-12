@@ -18,7 +18,11 @@ public sealed partial class PgFactCollector
 {
     /* #5320: no statement text. The fact is keyed on the query hash and carries only numbers, so the read used to
        fetch a 200-character cut of the text for nothing, and a cut text read here would have been judged as a prefix.
-       The text is read, judged whole and then cut where an answer prints it (the BAD_ACTOR drill-down). */
+       The text is read, judged whole and then cut where an answer prints it (the BAD_ACTOR drill-down).
+       #8403: every row of the window counts, including a row whose execution delta is 0 while its CPU and reads
+       deltas are not. The store holds such rows, and the BAD_ACTOR drill-down and the totals already sum them, so
+       the fact sums the same rows and the finding's headline average and the drill-down beside it describe the
+       same work. The execution bar in HAVING still gates on the execution sum, and the ordering guards its divisor. */
     public const string BadActorSql = @"
 SELECT
     database_name,
@@ -41,7 +45,6 @@ FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-AND   delta_execution_count > 0
 GROUP BY database_name, query_hash
 HAVING SUM(delta_execution_count) >= 100
 ORDER BY SUM(delta_worker_time)::DOUBLE PRECISION / GREATEST(SUM(delta_execution_count), 1) *
@@ -65,6 +68,10 @@ LIMIT 5";
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
+            /* #8317: the read ranks (database, hash) pairs, so one hash running in several databases can take
+               more than one of the five rows, and the key carries the hash alone. One fact per hash, for the
+               first row the ranking returns that is worth a fact: the highest-scoring database. */
+            var seenHashes = new HashSet<string>(StringComparer.Ordinal);
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
             {
@@ -81,6 +88,7 @@ LIMIT 5";
 
                 // Skip low-impact queries — need meaningful per-execution cost
                 if (avgCpuMs < 10 && avgReads < 1000) continue;
+                if (!seenHashes.Add(queryHash)) continue;
 
                 facts.Add(new Fact
                 {
@@ -112,7 +120,7 @@ LIMIT 5";
         }
     }
 
-    public const string ActiveQuerySql = @"
+    public const string ActiveQuerySql = $@"
 SELECT
     COUNT(*) AS total_snapshots,
     COUNT(CASE WHEN total_elapsed_time_ms > 30000 THEN 1 END) AS long_running_count,
@@ -124,7 +132,8 @@ SELECT
 FROM query_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
-AND   collection_time <= $3";
+AND   collection_time <= $3
+AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}";
 
     /// <summary>
     /// Collects active query snapshot facts: long-running queries, blocked sessions, high DOP.
@@ -190,16 +199,18 @@ AND   collection_time <= $3";
        so two rows equal on both still yield the same answer on every pass — the composed advice is
        frozen into the finding's StoryText, and a pick that flipped between passes would rewrite the
        finding's text over an unchanged window. A job running long across several collection ticks
-       appears in several rows; that is harmless here (the same name sorts first each time) and is
-       deliberately not de-duplicated for the counts, which keep their existing per-row semantics.
+       appears in several rows; that is harmless for the name (the same name sorts first each time).
+       The counts are #7883: distinct job RUNS (job id plus the run's start time), not rows, because one
+       row lands per job per collection tick and the advice and the severity ramp both read the count as
+       a number of jobs.
        ARRAY_AGG … FILTER … [1] rather than a second scan or a subquery: one round trip, one row, and
        the same clause runs unchanged on DuckDB (1-based lists, FILTER, ordered aggregates), so the Lite
        twin carries it verbatim over v_running_jobs. NULL when nothing ran long — the fact still emits (running_count > 0)
        and the advice keeps its unnamed sentence. */
     public const string RunningJobsSql = @"
 SELECT
-    COUNT(*) AS running_count,
-    COUNT(CASE WHEN is_running_long THEN 1 END) AS running_long_count,
+    COUNT(DISTINCT COALESCE(job_id, job_name, '') || '|' || COALESCE(start_time::text, '')) AS running_count,
+    COUNT(DISTINCT COALESCE(job_id, job_name, '') || '|' || COALESCE(start_time::text, '')) FILTER (WHERE is_running_long) AS running_long_count,
     MAX(percent_of_average) AS max_percent_of_avg,
     MAX(current_duration_seconds) AS max_duration_seconds,
     (ARRAY_AGG(job_name ORDER BY percent_of_average DESC NULLS LAST, current_duration_seconds DESC, job_name)
@@ -247,8 +258,8 @@ AND   collection_time <= $3";
                    use for what their source query selected — and never in Metadata, which is
                    Dictionary<string, double> by contract: every reader (scorer, advice, MCP, the finding
                    stores' JSON) treats a metadata value as a number, so an identifier there is either a
-                   compile error or a NaN. The counts and maxima below keep their existing meaning over
-                   ALL rows in the window; the name alone is scoped to the running-long rows. */
+                   compile error or a NaN. The counts are of distinct job runs (#7883), the maxima are
+                   over ALL rows in the window, and the name alone is scoped to the running-long rows. */
                 ObjectName = worstLongJobName,
                 Metadata = new Dictionary<string, double>
                 {

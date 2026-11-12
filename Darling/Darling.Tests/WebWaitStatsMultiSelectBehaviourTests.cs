@@ -114,6 +114,8 @@ public sealed class WebWaitStatsMultiSelectBehaviourTests
         Assert.Equal(10, r.GetProperty("checked").GetArrayLength());
         Assert.Equal(4, r.GetProperty("disabled").GetInt32());
         Assert.Contains("Limit reached", Strings(r.GetProperty("hint")).Single());
+        // #7578: reaching the cap is not a warning, so the text carries the muted marker (the stylesheet colors it).
+        Assert.True(r.GetProperty("hintIsLimit")[0].GetBoolean());
         Assert.True(r.GetProperty("emptyChart").GetInt32() >= 1);
         Assert.Equal(FirstTen, Strings(r.GetProperty("top")));
     }
@@ -257,10 +259,10 @@ public sealed class WebWaitStatsMultiSelectBehaviourTests
     public void TheWaitsPanel_ReadsGetWaitTrend_OncePerWait_WithTheWaitTypeAndHours_AndImportsThePickerOnlyHere()
     {
         var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
-        Assert.Contains("readToolWithinKeptHistory(\"get_wait_trend\", { server, wait_type: waitType, hours: ctx.hours }, mine.signal)", tabs);
+        Assert.Contains("readToolWithinKeptHistory(\"get_wait_trend\", { server, wait_type: waitType, hours: ctx.hours }, mine.signal, { plotPx: estimatedPlotPx() })", tabs);
         Assert.Contains("waitTypes.map(", tabs);
         Assert.Contains("const MAX_WAITS_CHARTED = 10;", tabs);
-        Assert.Contains("from \"../multi-picker.js\"", tabs);
+        Assert.Contains("from \"../../multi-picker.js\"", tabs); /* #7027: the import sits in the tab module, two folders down. */
         var panels = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js");
         Assert.DoesNotContain("multi-picker", panels);
     }

@@ -23,15 +23,17 @@
  * every 60s. Sort order, filters and every rendered field are unchanged.
  */
 
-import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, disclosure,
-         ALERT_STATE_LABELS, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder, storeHash } from "../util.js";
-import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
+import { countWord } from "../plain-text.js";
+import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, noticeStrip, disclosure,
+         ALERT_STATE_LABELS, applyFormat, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder, storeHash, NO_MESSAGE_TEXT_PREFIX, isStateZero } from "../util.js";
+import { VIZ, reapplyGridSort, gridRowOf, gridRowShown } from "../panels.js";
 import { copyText } from "../grid-tools.js";
 import { pageRangePicker, windowResultOfSpec } from "../page-range.js";
 import { relativeSpec, specName } from "../time-range.js";
 import { mutePrefillParams } from "../mute-context.js";
 import { orderServers } from "../server-order.js";
-import { getSession } from "../views-api.js";
+import { getSession, peekSession } from "../views-api.js";
+import { noteRefreshError } from "../refresh-in-place.js";
 
 /* #3169: the state-carrying notification_type values, derived from the one shared map rather than listed a
    second time. The status label already carries each of them, so the channel chip beside it must not repeat
@@ -41,13 +43,24 @@ const STATE_ONLY_CHANNELS = new Set(Object.keys(ALERT_STATE_LABELS));
 /* Most urgent first when ascending, the order the fleet bands use (Critical, Warning, then the calm states). */
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2, resolution: 3 };
 
+/* #7646: a state-only alert (get_alert_history's state_only, the server's AlertMetricClassifier.IsStateOnly) never had a number, so
+   its stored 0 shows as a dash, as the Viewer's grid does, not as "0.0". A nonzero value on such a row is a real measurement and
+   stays a number. The rule is util.js's isStateZero, shared with the triage card and the notebook. The CSV export and the copy
+   commands carry the same dash (copyValue), and the raw number on every other row. */
+function stateOrNumber(a, key) {
+  return isStateZero(a, key) ? "—" : applyFormat("num1", a[key]);
+}
+function stateOrRaw(a, key) {
+  return isStateZero(a, key) ? "—" : a[key];
+}
+
 const ALERT_COLUMNS = [
   { key: "alert_time", label: "Time", format: "time" },
   { key: "server_name", label: "Server" },
   { key: "metric_name", label: "Metric" },
   { key: "severity", label: "Severity", sortValue: (a) => (a.severity == null ? null : (SEVERITY_RANK[a.severity] ?? 9)), render: (a) => severityCell(a) },
-  { key: "current_value", label: "Value", format: "num1" },
-  { key: "threshold_value", label: "Threshold", format: "num1" },
+  { key: "current_value", label: "Value", format: "num1", display: (a) => stateOrNumber(a, "current_value"), copyValue: (a) => stateOrRaw(a, "current_value") },
+  { key: "threshold_value", label: "Threshold", format: "num1", display: (a) => stateOrNumber(a, "threshold_value"), copyValue: (a) => stateOrRaw(a, "threshold_value") },
   { key: "status", label: "Status", render: (a) => statusCell(a) },
   { key: "detail_text", label: "Detail", render: (a) => detailCell(a), copyValue: (a) => detailFullText(a) },
 ];
@@ -73,6 +86,8 @@ function alertColumns() {
   const base = showExternal
     ? ALERT_COLUMNS.slice(0, 3).concat([EXTERNAL_COLUMN], ALERT_COLUMNS.slice(3))
     : ALERT_COLUMNS;
+  /* The triage page is outside a scoped seat's routes, so its column is left out rather than linked to a refusal. */
+  if (peekSession()?.scoped) return base;
   return canMute ? [SELECT_COLUMN, TRIAGE_COLUMN, MUTE_COLUMN].concat(base) : [TRIAGE_COLUMN].concat(base);
 }
 
@@ -247,7 +262,12 @@ function detailCell(a) {
       mount(placeholder, detailBody(a, items));
       return;
     }
-    mount(placeholder, detailBody(a));
+    /* #7084 part 4: any other alert asks get_alert_details too, once, on its first open. The server decides which alerts
+     * findings attach to, so the page keeps no list of its own: it shows the findings the reply carries in attached_findings
+     * (empty for an alert nothing attaches to). A failed or empty read leaves the list off. */
+    mount(placeholder, [loadingStrip()]);
+    const read = await alertDetailRead(a);
+    mount(placeholder, detailBody(a, null, read?.attached_findings));
   });
   return node;
 }
@@ -261,12 +281,13 @@ function isAnalysisAlert(a) {
   return typeof a.metric_name === "string" && a.metric_name.startsWith("Analysis:");
 }
 
-function alertAdvice(a) {
+/* get_alert_details for one row: { details, attached_findings }, or null when it could not be read. Cached like the advice. */
+function alertDetailRead(a) {
   const key = alertKey(a);
   if (!adviceCache.has(key)) {
     const pending = readTool("get_alert_details", { server_id: a.server_id, metric_name: a.metric_name, alert_time: a.alert_time })
       .then((res) => {
-        if (res.kind === "data") return Array.isArray(res.data?.details) && res.data.details.length > 0 ? res.data.details : null;
+        if (res.kind === "data") return res.data ?? null;
         if (res.kind === "empty") return null;
         adviceCache.delete(key);
         return null;
@@ -274,6 +295,11 @@ function alertAdvice(a) {
     adviceCache.set(key, pending);
   }
   return adviceCache.get(key);
+}
+
+async function alertAdvice(a) {
+  const read = await alertDetailRead(a);
+  return Array.isArray(read?.details) && read.details.length > 0 ? read.details : null;
 }
 
 /* #5642: "Newest Query Store sample: 15:43:29 UTC, 5m 20s old", or "CPU reading: 15:43:29 UTC, 5m 20s old" for a source that
@@ -297,7 +323,7 @@ function sampleAgeLine(sample) {
 }
 
 /* The expansion body: unchanged shape from the pre-#4194 eager version (see detailCell above), just built lazily. */
-function detailBody(a, details) {
+function detailBody(a, details, attached) {
   const hasDetail = a.detail_text != null && String(a.detail_text).trim().length > 0;
   /* #5241: an Analysis row's stored context holds advice; opening the row fetches it (detailCell) as `details`: the
    * structured items the desktop's Alert Detail window shows - heading, labelled fields, the advice prose and
@@ -321,6 +347,13 @@ function detailBody(a, details) {
     body.push(el("div", { class: "detail-fields" }, fields.map(fieldRow)));
   } else if (hasDetail) {
     body.push(el("div", { class: "detail-raw", text: shownDetail }));
+  }
+  /* #7084 part 4: the analysis findings held back from paging because this engine alert was open (get_alert_details'
+   * attached_findings, read when the row opened): each finding's time and story. */
+  if (Array.isArray(attached) && attached.length > 0) {
+    const rows = [["", "Attached findings"]];
+    for (const f of attached) rows.push([parseUtc(f.alert_time)?.toLocaleString() ?? String(f.alert_time), f.metric_name]);
+    body.push(el("div", { class: "detail-fields" }, rows.map(fieldRow)));
   }
   /* #5825: what a resolution row's send did. get_alert_history sets the three fields on such a row only. */
   if (a.resolution_outcome) {
@@ -568,13 +601,13 @@ function buildDismissBar(state) {
   const status = el("span", { class: "dismiss-status", text: "" });
   const bar = el("div", { class: "dismiss-bar" }, [selBtn, allBtn, status]);
   state.dismiss = { bar, selBtn, allBtn, status, busy: false };
-  selBtn.addEventListener("click", () => dismissRows(state, [...selected.values()]));
+  selBtn.addEventListener("click", () => dismissRows(state, selectedShown(state)));
   allBtn.addEventListener("click", () => {
     const rows = visibleRows(state).filter(dismissable);
     if (!rows.length) return;
     /* The prompt the Viewer asks before Dismiss All. Unlike the Viewer, which dismisses every live alert in the
        window, this page dismisses only the rows it lists, so a truncated page says the rest stay live. */
-    let ask = "Dismiss " + rows.length + " alert(s)?\n\nDismissed alerts are hidden from this view but remain in the store.";
+    let ask = "Dismiss " + countWord(rows.length, "alert") + "?\n\nDismissed alerts are hidden from this view but remain in the store.";
     if (state.truncated) ask += "\n\nMore alerts exist than the " + state.alerts.length + " listed; only the listed ones are dismissed and the rest stay live.";
     if (typeof globalThis.confirm === "function" && !globalThis.confirm(ask)) return;
     dismissRows(state, rows);
@@ -586,15 +619,40 @@ function buildDismissBar(state) {
 function updateDismissBar(state) {
   const d = state.dismiss;
   if (!d) return;
-  d.selBtn.textContent = selected.size ? "Dismiss Selected (" + selected.size + ")" : "Dismiss Selected";
-  d.selBtn.disabled = d.busy || selected.size === 0;
+  const picked = selectedShown(state).length;
+  d.selBtn.textContent = picked ? "Dismiss Selected (" + picked + ")" : "Dismiss Selected";
+  d.selBtn.disabled = d.busy || picked === 0;
   d.allBtn.disabled = d.busy || !visibleRows(state).some(dismissable);
 }
 
-/* The rows the current filter box lets through - what the table shows and what Dismiss All acts on. */
+/* The rows the table shows, which Dismiss All acts on: the server filter box, then every column filter. A column
+ * filter hides a line with display:none and the grid records it (panels.js gridRowShown), so this asks the grid
+ * instead of keeping a second copy of the filter rule (#7919). */
 function visibleRows(state) {
   const q = state.filter.value.trim().toLowerCase();
-  return q ? state.alerts.filter((a) => String(a.server_name || "").toLowerCase().includes(q)) : state.alerts;
+  const rows = q ? state.alerts.filter((a) => String(a.server_name || "").toLowerCase().includes(q)) : state.alerts;
+  if (!state.tbody) return rows;
+  const shown = new Set();
+  for (const tr of state.tbody.children) {
+    const row = gridRowOf(tr);
+    if (row && gridRowShown(tr)) shown.add(alertKey(row));
+  }
+  return rows.filter((a) => shown.has(alertKey(a)));
+}
+
+/* The checked rows Dismiss Selected acts on: only those the column filters leave showing, the same test Dismiss All uses.
+ * A checked row a filter hides stays checked (it is back, checked, when the filter is cleared) but is neither counted
+ * nor sent while hidden, so a click never dismisses a row the grid is not showing (#7919). The button text and its
+ * enabled state read this same list. */
+function selectedShown(state) {
+  const picked = [...selected.values()];
+  if (!picked.length || !state.tbody) return picked;
+  const hidden = new Set();
+  for (const tr of state.tbody.children) {
+    const row = gridRowOf(tr);
+    if (row && !gridRowShown(tr)) hidden.add(alertKey(row));
+  }
+  return picked.filter((a) => !hidden.has(alertKey(a)));
 }
 
 function dismissOutcomeText(t) {
@@ -617,7 +675,7 @@ async function dismissRows(state, rows) {
     if (res.kind === "data" && res.data && typeof res.data === "object") {
       for (const k of Object.keys(totals)) totals[k] += Number(res.data[k]) || 0;
     } else if (res.status === 403) {
-      failure = res.message && !/^Request failed/.test(res.message) ? res.message : "This session is read-only, so nothing was dismissed.";
+      failure = res.message && !res.message.startsWith(NO_MESSAGE_TEXT_PREFIX) ? res.message : "This session is read-only, so nothing was dismissed.";
     } else if (res.kind === "auth") {
       failure = res.message || "Your session has expired. Sign in again.";
     } else {
@@ -630,7 +688,7 @@ async function dismissRows(state, rows) {
     d.status.textContent = totals.requested ? failure + " (" + dismissOutcomeText(totals) + " before it failed)" : failure;
     d.status.setAttribute("class", "dismiss-status dismiss-error");
     updateDismissBar(state);
-    if (totals.requested) await refreshAlerts(state);
+    if (totals.requested) await rereadAfterDismiss(state);
     return;
   }
   /* Unselect only what was sent; a box ticked while the request was in flight stays checked. */
@@ -638,7 +696,15 @@ async function dismissRows(state, rows) {
   uncheckBoxes(state);
   d.status.setAttribute("class", "dismiss-status");
   d.status.textContent = dismissOutcomeText(totals);
-  await refreshAlerts(state);
+  await rereadAfterDismiss(state);
+}
+
+/* The re-read after a dismiss the store accepted. The table no longer shows what its request returns, so a re-read that fails replaces it with
+ * the error (refreshAlerts keeps a table through a failed read only when the table was drawn from that same request) rather than listing the
+ * dismissed rows as if nothing had changed. */
+function rereadAfterDismiss(state) {
+  state.drawnParams = null;
+  return refreshAlerts(state);
 }
 
 export async function renderAlerts(main) {
@@ -686,7 +752,7 @@ export async function renderAlerts(main) {
     filter,
   ]);
   const investigations = buildInvestigationsPanel();
-  live = { main, headEl, meta, noticeBox, tableBox, filter, alerts: [], tbody: null, rowMap: null, seq: 0, dismiss: null, investigations };
+  live = { main, headEl, meta, noticeBox, tableBox, filter, alerts: [], tbody: null, rowMap: null, drawnParams: null, seq: 0, dismiss: null, investigations };
   mount(main, canMute
     ? [headEl, buildDismissBar(live), noticeBox, tableBox, investigations.panel]
     : [headEl, noticeBox, tableBox, investigations.panel]);
@@ -862,6 +928,14 @@ async function refreshInvestigations(state) {
  * the new page is ready, so a healthy 60s tick with no new alert produces no visible change and no DOM churn at
  * all. A changed window or server reconciles the same way: rows that left the window are removed, new ones land
  * in order. A reply that arrives after a newer request was made is dropped. */
+/* #7410: an empty alert list. When the default filter hid dismissed alerts, the reply carries their count in `hints`, and the page says
+   that in its own words (the tick box it names is on this page) with the tool's sentence behind "More detail". */
+export function emptyAlertsStrip(res) {
+  const n = res.hints && Number(res.hints.dismissed_excluded_count);
+  if (n > 0) return plainEmptyStrip(res, n + (n === 1 ? " alert in this range was dismissed, so it is hidden." : " alerts in this range were dismissed, so they are hidden.") + " Tick Show dismissed to see them.");
+  return emptyStrip(res.message);
+}
+
 async function refreshAlerts(state) {
   /* #5632 Phase A: an open Investigations panel is re-read with the alerts; a closed one is not read at all. */
   if (state.investigations && state.investigations.panel.open) await refreshInvestigations(state.investigations);
@@ -869,19 +943,32 @@ async function refreshAlerts(state) {
   const req = readRequest();
   const res = req.error ? { kind: "error", message: "This range cannot be read yet: " + req.error } : await readTool("get_alert_history", req.params);
   if (seq !== state.seq) return;
-  state.meta.textContent = (choices.server ? choices.server : "fleet-wide") + " · " + windowLabel();
+  /* #7943: a read that failed keeps the table on screen, its rows and their opened Detail lines, and says so above it (noteRefreshError, as a
+     panel does) only when it asked for exactly what that table was drawn from (state.drawnParams): the poll of an unchanged page. The next
+     poll that answers reconciles the same rows and clears the notice. A read after a changed choice, a range that cannot be read (#5562: the
+     page shows that reason, never a different window) or the re-read after a dismiss shows the error strip in the table's place, as a first
+     load does, so the previous choice's rows are never listed under the new one's label. An empty answer is a real answer and replaces the table. */
+  if (res.kind === "error" && state.tbody && !req.error && JSON.stringify(req.params) === state.drawnParams) {
+    noteRefreshError(state.noticeBox, res.message);
+    return;
+  }
+  /* #7945: the picked server is named as the Server picker names it (its display name), not by the raw value. */
+  const pickedServer = choices.server ? (serverNames.find((r) => r.name === choices.server) || { label: choices.server }).label : "fleet-wide";
+  state.meta.textContent = pickedServer + " · " + windowLabel();
   mount(state.noticeBox, []);
   if (res.kind === "error" || res.kind === "empty") {
     state.alerts = [];
     state.tbody = null;
     state.rowMap = null;
+    state.drawnParams = null;
     state.truncated = false;
     /* The checked set survives a failed read; it is pruned only against a successful one. */
     updateDismissBar(state);
-    mount(state.tableBox, res.kind === "error" ? errorStrip(res.message) : emptyStrip(res.message));
+    mount(state.tableBox, res.kind === "error" ? errorStrip(res.message) : emptyAlertsStrip(res));
     return;
   }
   state.alerts = trimAlertsToStart(res.data.alerts || [], req.startMs);
+  state.drawnParams = JSON.stringify(req.params);
   state.truncated = res.data.truncated === true;
   /* A checked row that is no longer listed (dismissed elsewhere, aged out) is no longer selected. */
   const listed = new Set(state.alerts.filter(dismissable).map(alertKey));
@@ -922,7 +1009,7 @@ function drawAlerts(state) {
     return;
   }
 
-  const table = VIZ.table({ alerts: rows }, { rowsKey: "alerts", columns: alertColumns() });
+  const table = VIZ.table({ alerts: rows }, { rowsKey: "alerts", columns: alertColumns(), onFilter: () => updateDismissBar(state) });
   mount(state.tableBox, table);
   const tbody = table.querySelector("tbody");
   const rowMap = new Map();

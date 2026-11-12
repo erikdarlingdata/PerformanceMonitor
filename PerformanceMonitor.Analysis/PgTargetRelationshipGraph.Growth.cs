@@ -48,14 +48,14 @@ public sealed partial class PgTargetRelationshipGraph
 
         /* growth → bloat trend, same database: is the growth dead space? */
         AddEdge(PgTargetFactKeys.DatabaseGrowth, PgTargetFactKeys.BloatTrend, GrowthCategory,
-            "PG_BLOAT_TREND fired on a table in a database this trend names — part of the growth is dead space autovacuum has not reclaimed, so the bloat card's levers come before any storage decision",
+            "PG_BLOAT_TREND fired on a table in a database this trend names: part of the growth is dead space autovacuum has not reclaimed, so the bloat card's levers come before any storage decision",
             facts => Fired(facts, PgTargetFactKeys.DatabaseGrowth)
                 && Fired(facts, PgTargetFactKeys.BloatTrend)
                 && PgTargetScorer.GrowthAndBloatShareADatabase(facts[PgTargetFactKeys.DatabaseGrowth], facts[PgTargetFactKeys.BloatTrend]));
 
         /* the deviation → the trend that names the database. */
         AddEdge(PgTargetFactKeys.AnomalyDatabaseGrowth, PgTargetFactKeys.DatabaseGrowth, GrowthCategory,
-            "PG_DATABASE_GROWTH fired — the unusual growth rate this window sits on a fortnight's trend that names the database",
+            "PG_DATABASE_GROWTH fired: the unusual growth rate this window sits on a fortnight's trend that names the database",
             facts => Fired(facts, PgTargetFactKeys.DatabaseGrowth));
     }
 }

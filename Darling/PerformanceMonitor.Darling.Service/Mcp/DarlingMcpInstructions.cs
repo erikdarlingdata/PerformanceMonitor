@@ -51,8 +51,8 @@ internal static class DarlingMcpInstructions
     /// right after <see cref="DarlingMcpWritePolicy.Apply"/> narrows the collection, so the two cannot disagree.
     /// </summary>
     internal static string Build(
-        DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served)
-        => Compose(peers, ToolCensus(catalog, served), served.Contains(MuteTool));
+        DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served, bool agentMuteRules = true)
+        => Compose(peers, ToolCensus(catalog, served, null, agentMuteRules), served.Contains(MuteTool));
 
     /// <summary>
     /// #6542: the instructions for a request that presented a NAMED token, rendered over the tools that token's role is served
@@ -62,8 +62,13 @@ internal static class DarlingMcpInstructions
     /// </summary>
     internal static string BuildForNamedToken(
         DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served,
-        DarlingMcpWritePolicy.Effective policy)
-        => Compose(peers, ToolCensus(catalog, served, policy), served.Contains(MuteTool), policy);
+        DarlingMcpWritePolicy.Effective policy, bool agentMuteRules = true)
+        => Compose(peers, ToolCensus(catalog, served, policy, agentMuteRules), served.Contains(MuteTool), policy);
+
+    /// <summary>What a claim-free mute may do, from the limits the path enforces (<see cref="DarlingMcpAgentMuteDirect"/>), so a change to one moves the text (#8610).</summary>
+    internal static readonly string DirectMuteLimits =
+        $"a mute on one server and a metric that is not a service alert, expiring within {DarlingMcpAgentMuteDirect.MaxExpiryDays} days " +
+        $"({DarlingMcpAgentMuteDirect.MaxWritesPerHour} writes an hour, no repeat within {DarlingMcpAgentMuteDirect.RepeatLookbackDays} days)";
 
     private static string Compose(
         DarlingPeerDirectory.Snapshot peers, string census, bool muteServed = true, DarlingMcpWritePolicy.Effective? named = null)
@@ -111,9 +116,10 @@ internal static class DarlingMcpInstructions
 
     /// <summary><see cref="ToolCensus(IReadOnlyCollection{string}, IReadOnlyCollection{string})"/> for a named token's role (#6542) when
     /// <paramref name="named"/> is set: the sentence that says what is not served names the role, not the settings that govern
-    /// the legacy token. Null leaves the legacy census byte-identical.</summary>
+    /// the legacy token. Null leaves the legacy census byte-identical. <paramref name="agentMuteRules"/> is <c>mcp.allowAgentMuteRules</c> (#7414): when it is
+    /// off, the census does not say an agent may call the four mute rule tools without an <c>agent_action</c>, since every such call is refused.</summary>
     internal static string ToolCensus(
-        IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served, DarlingMcpWritePolicy.Effective? named)
+        IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served, DarlingMcpWritePolicy.Effective? named, bool agentMuteRules = true)
     {
         var count = served.Count;
         var total = catalog.Count;
@@ -136,8 +142,13 @@ internal static class DarlingMcpInstructions
         if (named is { } role)
         {
             if (role.Investigations)
-                off.Add("this token has the agent role: the write tools beyond the actions an agent may take with an `agent_action` are " +
-                    "served only to an operator token");
+                off.Add(agentMuteRules
+                    ? "this token has the agent role: the write tools beyond the actions an agent may take with an `agent_action`, and beyond " +
+                      $"the four mute rule tools it may call without one for {DirectMuteLimits}, are served only to an operator token"
+                    : "this token has the agent role: the write tools beyond the actions an agent may take with an `agent_action` are served only to an operator token");
+            else if (!role.Writes)
+                off.Add("this token has the reader role: the write tools, the server registry tools and the investigation tools are never " +
+                    "served to it, whatever the settings say");
             else
             {
                 off.Add("this token has the operator role: the investigation tools are served only to an agent token");
@@ -150,7 +161,7 @@ internal static class DarlingMcpInstructions
             off.Add($"the write tools are off, so the {writeCount + adminCount - agentActionServed} that change monitoring configuration are not served " +
                     $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount - agentActionServed}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
                     $"{adminCount} more)" + (agentActionServed > 0
-                        ? $"; the {agentActionServed} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch)"
+                        ? $"; the {agentActionServed} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch)" + (agentMuteRules ? $", except the four mute rule tools, which an agent token (named, or the unnamed one under `mcp.allowInvestigations`) may also call without one for {DirectMuteLimits} (reason and expires_at required)" : string.Empty)
                         : string.Empty));
         else if (!adminServed)
             off.Add($"`{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so the {adminCount} tools that add, edit and remove " +
@@ -177,7 +188,7 @@ internal static class DarlingMcpInstructions
 
         return opening + $" {shared} are the same names Lite exposes. The remaining {count - shared} are unique to Darling: " +
                $"thirty-five are the PostgreSQL reads (`get_pg_*`), plus {families}, and central-store-only reads " +
-               "(`get_fleet_overview`, `get_ag_health` — Availability Groups — `get_sweep_reports`, `get_store_metrics`, " +
+               "(`get_fleet_overview`, `get_ag_health` (Availability Groups), `get_sweep_reports`, `get_store_metrics`, " +
                "`get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
     }
 
@@ -187,9 +198,9 @@ internal static class DarlingMcpInstructions
     /// are identical, so a new tool moves this or fails there.
     /// </summary>
     private const string CatalogCensus =
-        "This server exposes 276 tools. 112 are the same names Lite exposes. The remaining 164 are unique to Darling: " +
+        "This server exposes 286 tools. 112 are the same names Lite exposes. The remaining 174 are unique to Darling: " +
         "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server/query-tag, " +
-        "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
+        "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` (Availability Groups), " +
         "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
 
     /// <summary>
@@ -231,7 +242,9 @@ internal static class DarlingMcpInstructions
         "list_query_tag_rules", "list_query_tags", "test_query_tag_rule", "unassign_query_tag", "update_query_tag", "update_query_tag_rule",
     };
 
-    private const string Preamble = """
+    /* A property, not a field: Text above is initialized first in textual order, and the settings paragraph it carries
+       is built from DarlingMcpWritePolicy.InvestigationTools at run time. */
+    private static string Preamble => """
         You are connected to a SQL Server performance monitoring tool via PerformanceMonitor Darling, the headless collector service.
 
         ## What this server can and cannot do
@@ -243,7 +256,7 @@ internal static class DarlingMcpInstructions
     private const string BodyHead = """
         ## How Data Is Collected
 
-        The Darling service collects 24/7, every 1-15 minutes by collector. `server_name` resolves against the registry (exact, then partial). `analyze_server` needs 24+ hours of history (`wait_stats` for a SQL Server target, `pg_database_stats` for a PostgreSQL target) or returns `insufficient_data`.
+        The Darling service collects 24/7; most collectors every 1 to 15 minutes, some hourly or daily (`get_collector_schedules` gives each interval). `server_name` resolves against the registry (exact, then partial). `analyze_server` needs 24+ hours of history (`wait_stats` for a SQL Server target, `pg_database_stats` for a PostgreSQL target) or returns `insufficient_data`.
 
         ## Tools
         """;
@@ -251,25 +264,26 @@ internal static class DarlingMcpInstructions
     private const string BodyTail = """
         ### Reading an empty result
 
-        When a read comes back with no data, the `status` word says which kind of nothing it is, and the four are not interchangeable. `empty` is a true negative: we looked and there was nothing to find. `unavailable` means this server could have that data and does not have it right now, so collection health is worth a look. `not_collected` means this server does not collect that at all — and when the reason is the engine, the gap is permanent: the collector serving that read does not run on this server's engine (an Azure SQL Database has no system_health session, no default trace and no SQL Agent; a PostgreSQL target collects none of the SQL Server signals at all, and the `get_pg_*` reads are the ones that answer there), so there is no session to start, no collector to enable, and nothing to check. The message names the engine and the collector. Do not send anyone to go and fix it. `precondition` is the one that is worth acting on: this server could have that data, the collector is running, and a setup step on the monitored server is in the way — a Query Store that is off or has gone READ_ONLY, an Extended Events capture session that is not running, an extension that was never created, a grant the monitoring login was refused. The message names the precondition, quotes what the monitored server itself said, and gives the statement or grant that satisfies it. It is re-derived on every read rather than decided when the connection was made, so once somebody does the thing it asked for the next call answers with data — usually with nothing to restart on the monitoring side. A few preconditions are the exception and say so in their own message: the fact that gates them is read once when the service connects to that server and cached for the connection's life, so satisfying them also needs the service to reconnect before collection resumes. Read the message rather than assuming the general case — it tells you which kind you have, and telling somebody to retry a connect-scoped one without reconnecting sends them round a loop that never terminates.
+        When a read comes back with no data, the `status` word says which kind of nothing it is, and the four are not interchangeable. `empty` is a true negative: we looked and there was nothing to find. `unavailable` means this server could have that data and does not have it right now, so collection health is worth a look. `not_collected` means this server does not collect that at all, and when the reason is the engine, the gap is permanent: the collector for that read does not run on this server's engine (an Azure SQL Database has no system_health session, default trace or SQL Agent; a PostgreSQL target collects none of the SQL Server signals, and the `get_pg_*` reads answer there), so there is nothing to start, enable or check. The message names the engine and the collector. Do not send anyone to go and fix it. `precondition` is the one worth acting on: the collector is running and a setup step on the monitored server is in the way, such as a Query Store that is off or READ_ONLY, an Extended Events session that is not running, an extension never created, or a grant the monitoring login was refused. The message names the precondition, quotes what the monitored server said, and gives the statement or grant that satisfies it. It is re-derived on every read, so once somebody does it the next call answers with data. A few preconditions are the exception and say so in their own message: the gating fact is read once when the service connects and cached for the connection's life, so they also need the service to reconnect. Read the message: telling somebody to retry a connect-scoped one without reconnecting sends them round a loop that never terminates.
 
-        Every tool failure — an exception the tool caught while reading — is the same envelope with `status` = `error`: `{"status":"error","message":"Error during <tool_name>: <what went wrong>","hints":{"operation":"<tool_name>"}}`. It is the fifth `status` word: the four above say what kind of nothing the store holds, `error` says the read did not complete, so retry it or report it rather than reading it as an all-clear. Branch on `status`, not on the message text. Data results keep their own shape and never carry a top-level `message`, which is how the envelope is told apart from data without a schema. A refusal — a `server_name` that does not resolve, an `hours_back` outside its range, a `limit` past its ceiling, a required parameter that was not sent — is neither a failure nor a miss and has its own word: the same envelope with `status` = `invalid`: `{"status":"invalid","message":"<what was refused, and what is accepted>","hints":{"parameter":"<parameter_name>"}}`. The read did not run because the request as given cannot be served; `hints.parameter` names the knob to change and the message says what it accepts, so fix that and call again — retrying it unchanged answers the same way. It is the word the write tools already use for a body that will not parse, and it means the same thing there. The service runs only a few long reads at once: one that would wait too long for a slot gets `busy`, `{"status":"busy","message":"<why>","hints":{"retry_after_seconds":<n>,"running":<n>,"queued":<n>}}`. The call was correct but did not run (`running`, `queued`: long reads running and waiting then); call again after `retry_after_seconds`.
+        Every tool failure (an exception the tool caught while reading) is the same envelope with `status` = `error`: `{"status":"error","message":"Error during <tool_name>: <what went wrong>","hints":{"operation":"<tool_name>"}}`. It is the fifth `status` word: the four above say what kind of nothing the store holds, `error` says the read did not complete, so retry or report it, never read it as an all-clear. Branch on `status`, not on the message text. Data results never carry a top-level `message`, which is how the envelope is told apart from data. A refusal (a `server_name` that does not resolve, an `hours_back` outside its range, a `limit` past its ceiling, a missing required parameter) is neither a failure nor a miss and has its own word: the same envelope with `status` = `invalid`: `{"status":"invalid","message":"<what was refused, and what is accepted>","hints":{"parameter":"<parameter_name>"}}`. The request as given cannot be served. `hints.parameter` names the knob to change and the message says what it accepts, so fix that: retrying unchanged answers the same way. The write tools use it for a body that will not parse. The service runs only a few long reads at once: one that would wait too long for a slot gets `busy`, `{"status":"busy","message":"<why>","hints":{"retry_after_seconds":<n>,"running":<n>,"queued":<n>}}`. The call was correct but did not run (`running`, `queued`: long reads running and waiting then); call again after `retry_after_seconds`.
 
         `window_truncated` true: the window starts before the store's data, not a cut page (`effective_start`, `truncation_note`).
 
         ### PostgreSQL wait instruments
 
-        Waits come from one instrument: Aurora native > the `pg_wait_sampling` extension > the service-side sampler. Aurora gets `engine_cumulative`; others read `get_pg_wait_sampling`'s `instrument`: `extension_sampled` or `service_sampled` — a floor, not parity.
+        Waits come from one instrument: Aurora native > the `pg_wait_sampling` extension > the service-side sampler. Aurora gets `engine_cumulative`; others read `get_pg_wait_sampling`'s `instrument`: `extension_sampled` or `service_sampled`, a floor, not parity.
 
         ### Asking about a past window
 
-        Every tool below that takes `hours_back` also takes `as_of`: an ISO-8601 UTC instant that moves the window's end off "now"; `hours_back` stays the length. Use it for past-time questions, not a wider `hours_back` (a different aggregate).
+        Every tool below that takes `hours_back` also takes `as_of`, an ISO-8601 UTC instant that moves the window's end off "now" (`hours_back` stays the length). Use it for past-time questions, not a wider `hours_back` (a different aggregate).
 
         - Accepted: full ISO-8601 with an offset, or a bare `2026-08-19` (midnight UTC). An unparseable or future `as_of` is refused, not read as "now"; an older one returns the normal `empty` / `unavailable`.
-        - Latest-snapshot reads take no `as_of` — read `captured_at` / `age_seconds`. `get_pvs_stats`, `get_fleet_overview`, `get_store_metrics` never take it.
-        - The analysis family does take it: `get_analysis_facts`/`analyze_server` re-run fact collection, anomaly detection and scoring over the anchored window (`analyze_server` with `as_of` is exploratory, does not persist).
+        - A stamp with no offset is UTC unless the tool's note puts it on the server's clock.
+        - Latest-snapshot reads take no `as_of`, read `captured_at` / `age_seconds`. `get_pvs_stats`, `get_fleet_overview`, `get_store_metrics` never take it.
+        - The analysis family takes it: `get_analysis_facts`/`analyze_server` re-run fact collection, anomaly detection and scoring over the anchored window (`analyze_server` with `as_of` is exploratory, does not persist).
 
-        Each finding's `confidence` is an evidence score (0.20 for the symptom alone, more as the root fact's amplifier checks match and the chain deepens — a lone uncorroborated symptom is 0.20, never 1.0) and `confidence_basis` says in words what it rests on (an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not a finding's `confidence`).
+        Each finding's `confidence` is an evidence score (0.20 for a lone uncorroborated symptom, never 1.0, rising as the root fact's amplifier checks match and the chain deepens) and `confidence_basis` says in words what it rests on (an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not a finding's `confidence`).
 
         ## Workflow
 

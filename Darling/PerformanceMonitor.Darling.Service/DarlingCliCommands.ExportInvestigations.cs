@@ -268,7 +268,7 @@ public static partial class DarlingCliCommands
 
             /* No overwrite unless --force: a file that appeared at the target while the store was read makes this fail. */
             File.Move(temp, path, overwrite: args.Force);
-            output.WriteLine($"Wrote {outcome.Cases} investigation case(s) with feedback to {path} (one JSON object per line, masked at {McpDataDetailModes.Word(mode)}, readable by {InvestigationExportFile.ReadableBy}).");
+            output.WriteLine($"Wrote {CountText.Plural(outcome.Cases, "investigation case")} with feedback to {path} (one JSON object per line, masked at {McpDataDetailModes.Word(mode)}, readable by {InvestigationExportFile.ReadableBy}).");
             if (serverLabel is not null)
             {
                 output.WriteLine($"Server: {serverLabel}.");
@@ -276,7 +276,7 @@ public static partial class DarlingCliCommands
 
             if (outcome.HeldBack > 0)
             {
-                output.WriteLine($"{outcome.HeldBack} case(s) a live practice request replays were held back.");
+                output.WriteLine($"{CountText.Plural(outcome.HeldBack, "case")} a live practice request replays {(outcome.HeldBack == 1 ? "was" : "were")} held back.");
             }
 
             if (outcome.Truncated)

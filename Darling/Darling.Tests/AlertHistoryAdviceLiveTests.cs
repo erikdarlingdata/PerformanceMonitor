@@ -138,7 +138,7 @@ VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $5, $6)",
 
             var json = await WebReadAsync(postgres, "get_alert_details", DetailsQuery(AdviceMetric, now.AddMinutes(-2)));
             using var doc = JsonDocument.Parse(json);
-            Assert.Equal(new[] { "details" }, doc.RootElement.EnumerateObject().Select(p => p.Name).ToArray());
+            Assert.Equal(new[] { "details", "attached_findings" }, doc.RootElement.EnumerateObject().Select(p => p.Name).ToArray());
             var details = doc.RootElement.GetProperty("details").EnumerateArray().ToList();
             Assert.Equal(new[] { "Diagnosis", "Plan regression", "Remediation T-SQL" },
                 details.Select(d => d.GetProperty("heading").GetString()).ToArray());
@@ -188,7 +188,7 @@ VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $5, $6)",
             await SeedAsync(connection, now, ct);
             await using var postgres = OpenDataSource(cs);
 
-            const string empty = "{\"details\":[]}";
+            const string empty = "{\"details\":[],\"attached_findings\":[]}";
             /* An engine alert's context holds no prose: its detail_text already says everything, so it gets none. */
             Assert.Equal(empty, await WebReadAsync(postgres, "get_alert_details", DetailsQuery(EngineMetric, now.AddMinutes(-1))));
             /* Unknown metric, unknown time, unknown server: no match is an empty answer, not an error. */
@@ -240,13 +240,17 @@ VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $5, $6)",
         var bodySucceeded = false;
         try
         {
-            await SeedAsync(connection, DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow), ct);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await SeedAsync(connection, now, ct);
             await using var postgres = OpenDataSource(cs);
 
-            var tool = await DarlingMcpAlertTools.GetAlertHistory(postgres, null, 1, 50, cancellationToken: ct);
-            var web = await WebReadAsync(postgres, "get_alert_history", "?hours_back=1&limit=50");
+            /* #7010: a relative window carries its own request time as effective_start (a covered window starts where it was asked to), so two calls
+               a few hundred milliseconds apart differ there by design. Every call here ends the window at the same instant, and the bytes still must match. */
+            var asOf = now.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+            var tool = await DarlingMcpAlertTools.GetAlertHistory(postgres, null, 1, 50, as_of: asOf, cancellationToken: ct);
+            var web = await WebReadAsync(postgres, "get_alert_history", $"?hours_back=1&limit=50&as_of={Uri.EscapeDataString(asOf)}");
             /* The old flag is gone: sending it changes nothing. */
-            var withOldFlag = await WebReadAsync(postgres, "get_alert_history", "?hours_back=1&limit=50&include_details=true");
+            var withOldFlag = await WebReadAsync(postgres, "get_alert_history", $"?hours_back=1&limit=50&include_details=true&as_of={Uri.EscapeDataString(asOf)}");
 
             Assert.Equal(tool, web);
             Assert.Equal(tool, withOldFlag);

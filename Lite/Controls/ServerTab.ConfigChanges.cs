@@ -10,6 +10,7 @@ using System;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 
@@ -66,7 +67,7 @@ public partial class ServerTab : UserControl
         var data = await Task.Run(() => _dataService.GetServerConfigChangesAsync(_serverId, hoursBack, fromDate, toDate));
         _serverConfigChangesFilterMgr!.UpdateData(data);
         ShowEngineGap(ServerConfigChangesNoDataMessage, "server_config", data.Count, keepsOwnEmptyText: true);
-        ServerConfigChangesCountIndicator.Text = data.Count > 0 ? $"{data.Count} change(s)" : "";
+        ServerConfigChangesCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "change") : "";
         await RefreshStoredWindowBannerAsync(QueryWindowRelation.ServerConfig, ServerConfigChangesWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
@@ -75,7 +76,7 @@ public partial class ServerTab : UserControl
         var data = await Task.Run(() => _dataService.GetDatabaseConfigChangesAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
         _databaseConfigChangesFilterMgr!.UpdateData(data);
         DatabaseConfigChangesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        DatabaseConfigChangesCountIndicator.Text = data.Count > 0 ? $"{data.Count} change(s)" : "";
+        DatabaseConfigChangesCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "change") : "";
         await RefreshStoredWindowBannerAsync(QueryWindowRelation.DatabaseConfig, DatabaseConfigChangesWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
@@ -84,7 +85,7 @@ public partial class ServerTab : UserControl
         var data = await Task.Run(() => _dataService.GetTraceFlagChangesAsync(_serverId, hoursBack, fromDate, toDate));
         _traceFlagChangesFilterMgr!.UpdateData(data);
         ShowEngineGap(TraceFlagChangesNoDataMessage, "trace_flags", data.Count, keepsOwnEmptyText: true);
-        TraceFlagChangesCountIndicator.Text = data.Count > 0 ? $"{data.Count} change(s)" : "";
+        TraceFlagChangesCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "change") : "";
         await RefreshStoredWindowBannerAsync(QueryWindowRelation.TraceFlags, TraceFlagChangesWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 

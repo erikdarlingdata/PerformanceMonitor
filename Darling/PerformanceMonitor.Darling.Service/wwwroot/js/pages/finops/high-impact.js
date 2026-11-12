@@ -12,7 +12,7 @@
 
 import { VIZ } from "../../panels.js";
 import { planColumn } from "../plan-viewer.js";
-import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { el, mount, loadingStrip, captionStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
 import { gatedEmptyStrip } from "./gate.js";
 import { finopsWindowControl } from "./window.js";
 
@@ -24,12 +24,33 @@ const chosenHours = new Map();
 
 const LIMIT = 10;
 
+/* #7562: the band words take the colors the same words have on Recommendations. */
+const BAND_SEV = { high: "Critical", medium: "Warning", low: "Healthy" };
+function withBandSev(data) {
+  return { ...data, rows: (data.rows || []).map((r) => ({ ...r, impact_band_sev: BAND_SEV[String(r.impact_band || "").toLowerCase()] ?? null })) };
+}
+
+/* #7695: a query hash's figures are summed across every database that ran it, and database_name is the one with the
+   most CPU. When more than one is in the total the cell says so, and the tooltip says what the figures cover. */
+function databaseCell(row) {
+  /* #7725: "(dropped)" after a database the server no longer lists, as the shared table cell does for every other grid. */
+  const name = (row.database_name == null ? "" : String(row.database_name)) + (row.database_dropped === true ? " (dropped)" : "");
+  const n = Number(row.database_count);
+  if (!(n > 1)) return el("span", { text: name });
+  return el("span", {
+    text: name + " + " + (n - 1) + " more",
+    title: "The figures are summed across " + n + " databases. The name is the database with the most CPU.",
+  });
+}
+
 const COLUMNS = [
   { key: "impact_score", label: "Score", format: "int" },
-  { key: "impact_band", label: "Band" },
-  { key: "database_name", label: "Database" },
+  /* #7699: the band prints as a word with a capital (High, Medium, Low), as the other verdict columns do. */
+  { key: "impact_band", label: "Band", format: "status", sevKey: "impact_band_sev" },
+  /* #7729: the column that stays at the left edge when the grid scrolls sideways. */
+  { key: "database_name", label: "Database", render: databaseCell, cellClass: () => "name-cell", pin: true },
   { key: "query_hash", label: "Query hash", mono: true },
-  { key: "sample_query_text", label: "Query preview", wrap: true, valueList: false },
+  { key: "sample_query_text", label: "Query preview", clamp: true, valueList: false },
   { key: "total_executions", label: "Executions", format: "int" },
   { key: "total_cpu_ms", label: "CPU", format: "ms" },
   { key: "cpu_share_pct", label: "CPU %", format: "num1" },
@@ -39,10 +60,10 @@ const COLUMNS = [
   { key: "reads_share_pct", label: "Reads %", format: "num1" },
   { key: "total_writes", label: "Writes", format: "int" },
   { key: "writes_share_pct", label: "Writes %", format: "num1" },
-  { key: "total_memory_mb", label: "Memory MB", format: "num1" },
+  { key: "peak_memory_mb", label: "Peak grant MB", format: "num1" },
   { key: "memory_share_pct", label: "Memory %", format: "num1" },
   { key: "executions_share_pct", label: "Executions %", format: "num1" },
-  { key: "has_plan", label: "Plan", format: "bool" },
+  { key: "has_plan", label: "Has plan", format: "bool" },
 ];
 
 // The read returns the union of the top LIMIT hashes on each of six measures, so the count and the window come from the answer.
@@ -70,8 +91,8 @@ export const tab = {
         if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
         const data = res.data || {};
         mount(body, [
-          noticeStrip(noticeText(data)),
-          VIZ.table(data, { rowsKey: "rows", columns: [...COLUMNS, planColumn(server)], emptyText: "No queries were ranked for this server." }),
+          captionStrip(noticeText(data)),
+          VIZ.table(withBandSev(data), { rowsKey: "rows", columns: [...COLUMNS, planColumn(server)], emptyText: "No queries were ranked for this server." }),
         ]);
       } catch (e) {
         if (mine === seq && e?.name !== "AbortError") mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));

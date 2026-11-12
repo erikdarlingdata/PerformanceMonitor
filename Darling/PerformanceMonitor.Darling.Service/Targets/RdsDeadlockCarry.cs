@@ -53,6 +53,15 @@ internal static class RdsDeadlockCarry
     /// <param name="moreCanArrive">False when this chunk is the last of its file, so a report it ends inside can
     /// never be finished.</param>
     internal static Portion Step(string held, string? chunkText, bool moreCanArrive)
+        => Step(held, chunkText, moreCanArrive, PgDeadlockLogParser.UnfinishedTailStart);
+
+    /// <summary>
+    /// The same step for any kind of block the text can end inside (#7186): the stderr plan and log-event routes hold
+    /// their own unfinished tail the same way, and differ only in where <paramref name="unfinishedTailStart"/> says it
+    /// begins (-1 for none).
+    /// </summary>
+    internal static Portion Step(
+        string held, string? chunkText, bool moreCanArrive, Func<string?, int> unfinishedTailStart)
     {
         var fresh = chunkText ?? string.Empty;
 
@@ -67,7 +76,7 @@ internal static class RdsDeadlockCarry
         }
 
         var text = held + fresh;
-        var start = PgDeadlockLogParser.UnfinishedTailStart(text);
+        var start = unfinishedTailStart(text);
 
         if (start < 0)
         {
@@ -86,12 +95,14 @@ internal static class RdsDeadlockCarry
 }
 
 /// <summary>
-/// The per-instance bookkeeping for <see cref="RdsDeadlockCarry"/>, modelled on <see cref="RdsCsvlogCarryBook"/>: keyed
+/// The per-instance bookkeeping for <see cref="RdsDeadlockCarry"/> (and, from #7186, for the stderr plan and log-event
+/// carries, which hold their own unfinished tail through the same step), modelled on <see cref="RdsCsvlogCarryBook"/>: keyed
 /// by the instance half of <see cref="RdsLogSource.ResumeMarker.Key"/> with the file name carried inside, so a
 /// rotation to a new file starts fresh instead of gluing the new file's first bytes onto the old file's tail. The held
-/// head stays in memory, and the saved resume marker (#4708) is not moved past a chunk while a report is held, so a
-/// restart reads that chunk again rather than starting in the middle of the report. The carry only moves alongside the
-/// marker's own commit. One book per ingestor, never shared.
+/// head stays in memory. On the deadlock route the saved resume marker (#4708) is not moved past a chunk while a report
+/// is held, so a restart reads that chunk again rather than starting in the middle of the report. The plan and
+/// log-event routes save the position on every pass instead, and a restart loses the one plan or entry held. The carry
+/// only moves alongside the marker's own commit. One book per ingestor, never shared.
 /// </summary>
 internal sealed class RdsDeadlockCarryBook
 {

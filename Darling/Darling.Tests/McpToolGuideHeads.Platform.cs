@@ -34,7 +34,7 @@ public sealed class McpToolGuideHeadsPlatformTests
         ("get_store_metrics", "no server_name"),
         ("get_store_metrics", "Daily points are each day's LAST snapshot"),
         ("get_store_metrics", "job_history is ownership-filtered"),
-        ("get_store_metrics", "arming by hand drops history's only copy"),
+        ("get_store_metrics", "arming by hand drops history a short consumer lacks"),
         ("get_store_metrics", "inventory.reconciled=false flags bytes no row explains"),
         ("get_store_log", "no server_name"),
         ("get_store_log", "not_collected (captures=0) means nobody read the log"),
@@ -96,9 +96,9 @@ public sealed class McpToolGuideHeadsPlatformTests
     {
         var served = McpToolGuideTests.Served("get_store_metrics");
         Assert.DoesNotContain("TOAST UTILISATION", served.Served, StringComparison.Ordinal);
-        Assert.DoesNotContain("CHECKPOINTER (V137)", served.Served, StringComparison.Ordinal);
-        Assert.Contains("TOAST UTILISATION (V137)", served.Tail!, StringComparison.Ordinal);
-        Assert.Contains("CHECKPOINTER (V137)", served.Tail!, StringComparison.Ordinal);
+        Assert.DoesNotContain("CHECKPOINTER:", served.Served, StringComparison.Ordinal);
+        Assert.Contains("TOAST UTILISATION:", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("CHECKPOINTER:", served.Tail!, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -198,7 +198,9 @@ public sealed class McpToolGuideHeadsPlatformTests
         Assert.DoesNotContain("PerformanceInsights (an Aurora PostgreSQL", served.Served, StringComparison.Ordinal);
         Assert.Contains("RingBuffer (SQL Server", served.Tail!, StringComparison.Ordinal);
         Assert.Contains("PerformanceInsights (an Aurora PostgreSQL", served.Tail!, StringComparison.Ordinal);
-        Assert.Contains("blocking_severity stays", served.Tail!, StringComparison.Ordinal);
+        /* #7616: the PostgreSQL blocking sentence the tail carried ("stays Unknown on purpose") now says how the card bands. */
+        Assert.Contains("blocking_rate_per_hour", served.Tail!, StringComparison.Ordinal);
+        Assert.DoesNotContain("blocking_rate_per_hour", served.Served, StringComparison.Ordinal);
     }
 
     /// <summary>

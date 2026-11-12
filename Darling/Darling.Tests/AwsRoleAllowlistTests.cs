@@ -274,7 +274,7 @@ public sealed class AwsRoleAllowlistTests
             return;
         }
 
-        var text = File.ReadAllText(worker);
+        var text = RepoFile.ReadRepoFile(worker);
         var sets = Regex.Matches(text, @"AwsRoleAllowlist\.Current\s*=").Count;
         Assert.Equal(1, sets);
         Assert.True(
@@ -309,7 +309,9 @@ public sealed class AwsRoleAllowlistTests
             .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
                      && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
             .Where(f => Regex.IsMatch(File.ReadAllText(f), @"AwsRoleAllowlist\.Current\s*="))
-            .Select(Path.GetFileName)
+            /* #7024: DarlingWorker is split into DarlingWorker.<Area>.cs files; they count as the one worker. */
+            .Select(f => Path.GetFileName(f).StartsWith("DarlingWorker.", StringComparison.Ordinal) ? "DarlingWorker.cs" : Path.GetFileName(f))
+            .Distinct()
             .ToArray();
 
         Assert.Equal(new[] { "DarlingWorker.cs" }, setters);

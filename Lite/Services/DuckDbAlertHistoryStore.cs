@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
@@ -43,6 +44,13 @@ public sealed class DuckDbAlertHistoryStore : IAlertHistoryStore
 
     /* Failure tracking for louder logging — moved with LogAlertAsync. */
     private int _consecutiveLogFailures;
+
+    /// <summary>
+    /// Per-(server, operation) failure streaks of the catch arms below, so a store fault that persists writes its stack once
+    /// per streak rather than on every sweep's read or write for every server (<see cref="FailureStreakLog{TKey}"/>). The two
+    /// bulk watermark loads run once at startup and <see cref="RecordAlertAsync"/> keeps its own counter, so they are not here.
+    /// </summary>
+    private readonly FailureStreakLog<(int ServerId, string Operation)> _failures = new();
 
     public DuckDbAlertHistoryStore(DuckDbInitializer? duckDb = null)
     {
@@ -122,11 +130,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
             _consecutiveLogFailures++;
             if (_consecutiveLogFailures <= 3)
             {
-                AppLogger.Error("EmailAlert", $"Failed to log alert ({_consecutiveLogFailures}x): {ex.Message}");
+                AppLogger.Error("EmailAlert", $"Failed to log alert ({_consecutiveLogFailures}x): {ex.Message}", ex);
             }
             else if (_consecutiveLogFailures % 50 == 0)
             {
-                AppLogger.Error("EmailAlert", $"Alert logging STILL broken: {_consecutiveLogFailures} failures. Last: {ex.Message}");
+                AppLogger.Error("EmailAlert", $"Alert logging STILL broken: {_consecutiveLogFailures} failures. Last: {ex.Message}", ex);
             }
         }
     }
@@ -187,6 +195,7 @@ AND   send_error IS NULL"
                 command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertContextSerializer.BuildDedupKeyLikePattern(dedupKey) });
 
             var result = await command.ExecuteScalarAsync();
+            _failures.Succeeded((sid.Value, nameof(GetLastEmailSentUtcAsync)));
             if (result == null || result == DBNull.Value) return null;
 
             /* alert_time is written as DateTime.UtcNow; tag it UTC so the kind
@@ -195,7 +204,7 @@ AND   send_error IS NULL"
         }
         catch (Exception ex)
         {
-            AppLogger.Error("EmailAlert", $"Could not read persisted alert cooldown: {ex.Message}");
+            _failures.Failed("EmailAlert", (sid.Value, nameof(GetLastEmailSentUtcAsync)), $"Could not read persisted alert cooldown: {ex.Message}", ex);
             return null;
         }
     }
@@ -256,6 +265,7 @@ AND   notification_type IN ('webhook', 'email+webhook')"
                 command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertContextSerializer.BuildDedupKeyLikePattern(dedupKey) });
 
             var result = await command.ExecuteScalarAsync();
+            _failures.Succeeded((sid.Value, nameof(GetLastWebhookSentUtcAsync)));
             if (result == null || result == DBNull.Value) return null;
 
             /* alert_time is written as DateTime.UtcNow; tag it UTC so the kind
@@ -264,7 +274,7 @@ AND   notification_type IN ('webhook', 'email+webhook')"
         }
         catch (Exception ex)
         {
-            AppLogger.Error("WebhookAlert", $"Could not read persisted webhook cooldown: {ex.Message}");
+            _failures.Failed("WebhookAlert", (sid.Value, nameof(GetLastWebhookSentUtcAsync)), $"Could not read persisted webhook cooldown: {ex.Message}", ex);
             return null;
         }
     }
@@ -330,13 +340,14 @@ AND   metric_name = $2"
                 command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertContextSerializer.BuildDedupKeyLikePattern(dedupKey) });
 
             var result = await command.ExecuteScalarAsync();
+            _failures.Succeeded((sid.Value, nameof(GetLastAlertTimeAsync)));
             if (result == null || result == DBNull.Value) return null;
 
             return DateTime.SpecifyKind(Convert.ToDateTime(result), DateTimeKind.Utc);
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AnalysisNotify", $"Could not read persisted analysis cooldown: {ex.Message}");
+            _failures.Failed("AnalysisNotify", (sid.Value, nameof(GetLastAlertTimeAsync)), $"Could not read persisted analysis cooldown: {ex.Message}", ex);
             return null;
         }
     }
@@ -350,15 +361,41 @@ AND   metric_name = $2"
         string serverId, string metricName, string resolutionMetricName, DateTime sinceUtc, bool countMuted = true,
         AlertSeverityLevel? tierWhenRowCarriesNone = null, DateTime? untilUtc = null)
     {
+        /* #7068: the one read of "the newest fire that no resolution closed" now serves the tier seed and the standing-incident seed. */
+        var fire = await GetOpenFireAsync(serverId, metricName, new[] { resolutionMetricName }, sinceUtc, untilUtc, countMuted);
+        return fire is null ? null : AlertContextSerializer.TryReadSeverity(fire.ContextJson) ?? tierWhenRowCarriesNone;
+    }
+
+    /// <summary>
+    /// #7068: the newest fire row (inside the optional window, before the exclusive <paramref name="untilUtc"/>) that no
+    /// resolution row closed. See <see cref="IAlertHistoryStore.GetOpenFireAsync"/>. A failed read THROWS (no catch here).
+    /// Answers from <see cref="GetStandingAsync"/>, the one read behind it and the per-grain seed.
+    /// </summary>
+    public async Task<AlertHistoryFire?> GetOpenFireAsync(
+        string serverId, string metricName, System.Collections.Generic.IReadOnlyList<string> resolutionMetricNames,
+        DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true) =>
+        (await GetStandingAsync(serverId, metricName, resolutionMetricNames, sinceUtc, untilUtc, countMuted)).NewestOpen();
+
+    /// <summary>The most fire rows, and the most resolution rows per title, <see cref="GetStandingAsync"/> reads.</summary>
+    public const int StandingRowCap = 1000;
+
+    /// <summary>
+    /// #7068: every fire row (newest first, at most <see cref="StandingRowCap"/>) and the resolution rows as new as the oldest of
+    /// them. See <see cref="IAlertHistoryStore.GetStandingAsync"/>. A failed read THROWS (no catch here).
+    /// </summary>
+    public async Task<AlertHistoryStanding> GetStandingAsync(
+        string serverId, string metricName, System.Collections.Generic.IReadOnlyList<string> resolutionMetricNames,
+        DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true)
+    {
         /* Same identity scope as GetLastEmailSentUtcAsync (#3456). */
-        var sid = AlertHistoryServerIdentity.SeedScope(serverId);
-        if (sid is null) return null;
+        var sid = AlertHistoryServerIdentity.OpenFireScope(serverId, metricName);
+        if (sid is null) return AlertHistoryStanding.Empty;
 
         var duckDb = _duckDb;
         if (duckDb == null)
         {
             var dbPath = App.DatabasePath;
-            if (string.IsNullOrEmpty(dbPath)) return null;
+            if (string.IsNullOrEmpty(dbPath)) return AlertHistoryStanding.Empty;
             duckDb = new DuckDbInitializer(dbPath);
         }
 
@@ -366,54 +403,80 @@ AND   metric_name = $2"
         using var connection = duckDb.CreateConnection();
         await connection.OpenAsync();
 
-        /* v_config_alert_log = live UNION ALL archive (#4887), so a reset cannot hide a fire or a resolution. */
+        /* v_config_alert_log = live UNION ALL archive (#4887), so a reset cannot hide a fire or a resolution. "No bound" is
+           a far-past or far-future instant, so the statement keeps one shape. */
         using var fireCommand = connection.CreateCommand();
         fireCommand.CommandText = @"
-SELECT alert_time, context_json
+SELECT alert_time, current_value, context_json
 FROM v_config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2
-AND   alert_time >= $3"
-            + (untilUtc is null ? "" : "\nAND   alert_time < $4")
+AND   alert_time >= $3
+AND   alert_time < $4"
             + AlertHistoryEscalationSeed.KeepUnlessEveryChannelFailedFilter
+            + AlertHistoryEscalationSeed.ExcludeDigestFilter
             + (countMuted ? "" : AlertHistoryEscalationSeed.ExcludeMutedFilter)
-            + "\nORDER BY alert_time DESC\nLIMIT 1";
+            + "\nORDER BY alert_time DESC\nLIMIT " + StandingRowCap.ToString(System.Globalization.CultureInfo.InvariantCulture);
         fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
         fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
-        fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertHistoryEscalationSeed.TruncateToMicroseconds(sinceUtc) });
-        if (untilUtc is { } until)
-        {
-            /* #5715 round 1: exclusive, microsecond like the column; a row at or after the engine start is this process's own. */
-            fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertHistoryEscalationSeed.TruncateToMicroseconds(until) });
-        }
+        fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter
+            { Value = sinceUtc is { } since ? AlertHistoryEscalationSeed.TruncateToMicroseconds(since) : new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified) });
+        /* #5715 round 1: exclusive, microsecond like the column; a row at or after the engine start is this process's own. */
+        fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter
+            { Value = untilUtc is { } until ? AlertHistoryEscalationSeed.TruncateToMicroseconds(until) : new DateTime(9000, 1, 1, 0, 0, 0, DateTimeKind.Unspecified) });
 
-        DateTime? fireAt = null;
-        string? contextJson = null;
+        var fires = new List<AlertHistoryFire>();
         using (var reader = await fireCommand.ExecuteReaderAsync())
         {
-            if (await reader.ReadAsync())
+            while (await reader.ReadAsync())
             {
-                fireAt = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
-                contextJson = reader.IsDBNull(1) ? null : reader.GetString(1);
+                fires.Add(new AlertHistoryFire(
+                    DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+                    reader.IsDBNull(1) ? 0 : reader.GetDouble(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2)));
             }
         }
 
-        if (fireAt is null) return null;
+        if (fires.Count == 0) return AlertHistoryStanding.Empty;
 
-        using var resolutionCommand = connection.CreateCommand();
-        resolutionCommand.CommandText = @"
-SELECT MAX(alert_time)
+        var clears = new List<AlertHistoryClear>();
+        DateTime? cappedAtUtc = null;
+        foreach (var resolutionName in resolutionMetricNames)
+        {
+            var titleRows = 0;
+            DateTime titleOldest = default;
+            using var clearCommand = connection.CreateCommand();
+            clearCommand.CommandText = @"
+SELECT alert_time, context_json, detail_text
 FROM v_config_alert_log
 WHERE server_id = $1
-AND   metric_name = $2";
-        resolutionCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
-        resolutionCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = resolutionMetricName });
-        var resolved = await resolutionCommand.ExecuteScalarAsync();
-        DateTime? resolvedAt = resolved == null || resolved == DBNull.Value
-            ? null
-            : DateTime.SpecifyKind(Convert.ToDateTime(resolved), DateTimeKind.Utc);
+AND   metric_name = $2
+AND   alert_time >= $3
+ORDER BY alert_time DESC
+LIMIT " + StandingRowCap.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            clearCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
+            clearCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = resolutionName });
+            clearCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.SpecifyKind(fires[^1].FireAtUtc, DateTimeKind.Unspecified) });
+            using var clearReader = await clearCommand.ExecuteReaderAsync();
+            while (await clearReader.ReadAsync())
+            {
+                titleOldest = DateTime.SpecifyKind(clearReader.GetDateTime(0), DateTimeKind.Utc);
+                titleRows++;
+                clears.Add(new AlertHistoryClear(
+                    titleOldest,
+                    clearReader.IsDBNull(1) ? null : clearReader.GetString(1),
+                    clearReader.IsDBNull(2) ? null : clearReader.GetString(2)));
+            }
 
-        return AlertHistoryEscalationSeed.Resolve(fireAt, contextJson, resolvedAt, tierWhenRowCarriesNone);
+            /* A title that stopped at the cap holds only its newest clears; the newest such boundary is the instant before which
+               no title is fully read (see FromCappedRead). */
+            if (titleRows >= StandingRowCap && (cappedAtUtc is not { } seen || titleOldest > seen))
+            {
+                cappedAtUtc = titleOldest;
+            }
+        }
+
+        return AlertHistoryStanding.FromCappedRead(fires, clears, cappedAtUtc);
     }
 
     /// <summary>
@@ -456,15 +519,76 @@ AND   alert_sent"
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
 
             var result = await command.ExecuteScalarAsync();
+            _failures.Succeeded((sid.Value, nameof(GetLastDeliveredPageUtcAsync)));
             if (result == null || result == DBNull.Value) return null;
 
             return DateTime.SpecifyKind(Convert.ToDateTime(result), DateTimeKind.Utc);
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AnalysisNotify", $"Could not read persisted delivered-page seed: {ex.Message}");
+            _failures.Failed("AnalysisNotify", (sid.Value, nameof(GetLastDeliveredPageUtcAsync)), $"Could not read persisted delivered-page seed: {ex.Message}", ex);
             return null;
         }
+    }
+
+    /// <summary>
+    /// #7084 part 4: the newest engine alert still open on a server, for an analysis finding that would page. One of the
+    /// <see cref="OpenEngineAlerts.Families"/>' metrics with a DELIVERED fire (<c>alert_sent</c>, not muted, not a digest) in the
+    /// <see cref="OpenEngineAlerts.Window"/> before <paramref name="nowUtc"/> and no resolution row after it. Null for none, and
+    /// for a key that is not a server id. A failed read THROWS: the caller pages, because "could not read" must not look like
+    /// "an alert is open". Reads <c>v_config_alert_log</c> (live plus archive, #4887) so a reset cannot hide the fire.
+    /// </summary>
+    public async Task<AlertAttachedToDto?> FindOpenEngineAlertAsync(string serverId, DateTime nowUtc)
+    {
+        var sid = AlertHistoryServerIdentity.SeedScope(serverId);
+        if (sid is null) return null;
+
+        var duckDb = _duckDb;
+        if (duckDb == null)
+        {
+            var dbPath = App.DatabasePath;
+            if (string.IsNullOrEmpty(dbPath)) return null;
+            duckDb = new DuckDbInitializer(dbPath);
+        }
+
+        var since = DateTime.SpecifyKind(AlertHistoryEscalationSeed.TruncateToMicroseconds(nowUtc - OpenEngineAlerts.Window), DateTimeKind.Unspecified);
+        var until = DateTime.SpecifyKind(AlertHistoryEscalationSeed.TruncateToMicroseconds(nowUtc), DateTimeKind.Unspecified);
+        AlertAttachedToDto? newest = null;
+        using var readLock = duckDb.AcquireReadLock();
+        using var connection = duckDb.CreateConnection();
+        await connection.OpenAsync();
+        foreach (var (metric, resolutionTitle) in OpenEngineAlerts.Families)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+SELECT MAX(f.alert_time)
+FROM v_config_alert_log AS f
+WHERE f.server_id = $1
+AND   f.metric_name = $2
+AND   f.alert_sent
+AND   NOT f.muted
+AND   f.notification_type <> '" + AlertDelivery.ChannelDigest + @"'
+AND   f.alert_time > $3
+AND   f.alert_time <= $4
+AND   NOT EXISTS (SELECT 1 FROM v_config_alert_log AS r
+                  WHERE r.server_id = f.server_id AND r.metric_name = $5 AND r.alert_time > f.alert_time)";
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metric });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = since });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = until });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = resolutionTitle });
+            var result = await command.ExecuteScalarAsync();
+            if (result != null && result != DBNull.Value)
+            {
+                var utc = DateTime.SpecifyKind(Convert.ToDateTime(result), DateTimeKind.Utc);
+                if (newest is null || utc > newest.AlertTimeUtc)
+                {
+                    newest = new AlertAttachedToDto(metric, utc);
+                }
+            }
+        }
+
+        return newest;
     }
 
     /// <summary>
@@ -473,6 +597,8 @@ AND   alert_sent"
     /// from these at startup, before the first alert sweep, so a restart does not
     /// reset the watermark to 0 and re-fire (and re-post a webhook for) events
     /// still lingering in the rolling lookback window.
+    /// <para>#7295: a read that fails is logged and then thrown. An empty list means the table was read and holds no row. It used
+    /// to answer an empty list for a failure too, so a seed that could not read looked like a store with nothing saved.</para>
     /// </summary>
     public async Task<List<(int ServerId, string MetricName, int Watermark)>> LoadEdgeTriggerWatermarksAsync()
     {
@@ -508,7 +634,8 @@ WHERE watermark_time IS NULL";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not load edge-trigger watermarks: {ex.Message}");
+            AppLogger.Error("Alerts", $"Could not load edge-trigger watermarks: {ex.Message}", ex);
+            throw;
         }
         return result;
     }
@@ -546,10 +673,11 @@ VALUES ($1, $2, $3, $4)";
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
 
             await command.ExecuteNonQueryAsync();
+            _failures.Succeeded((serverId, nameof(SaveEdgeTriggerWatermarkAsync)));
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not persist edge-trigger watermark ({metricName}): {ex.Message}");
+            _failures.Failed("Alerts", (serverId, nameof(SaveEdgeTriggerWatermarkAsync)), $"Could not persist edge-trigger watermark ({metricName}): {ex.Message}", ex);
         }
     }
 
@@ -600,10 +728,11 @@ AND   metric_name = $2";
                     Convert.ToDateTime(reader.GetValue(3)),
                     Convert.ToDateTime(reader.GetValue(4))));
             }
+            _failures.Succeeded((serverId, nameof(LoadIncidentOccurrencesAsync)));
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not load incident occurrences ({metricName}): {ex.Message}");
+            _failures.Failed("Alerts", (serverId, nameof(LoadIncidentOccurrencesAsync)), $"Could not load incident occurrences ({metricName}): {ex.Message}", ex);
             return new List<(string, long, int, DateTime, DateTime)>();
         }
         return result;
@@ -695,13 +824,14 @@ AND   metric_name = $2"
             }
 
             transaction.Commit();
+            _failures.Succeeded((serverId, nameof(SaveIncidentOccurrencesAsync)));
         }
         catch (Exception ex)
         {
             /* A dropped write costs accuracy on the NEXT delivery's total — the fingerprint reads as new and
                restarts, with a fresh start time saying so — never a missed or duplicated alert, which the
                gate has already decided by this point. */
-            AppLogger.Error("Alerts", $"Could not persist incident occurrences ({metricName}): {ex.Message}");
+            _failures.Failed("Alerts", (serverId, nameof(SaveIncidentOccurrencesAsync)), $"Could not persist incident occurrences ({metricName}): {ex.Message}", ex);
         }
     }
 
@@ -710,9 +840,8 @@ AND   metric_name = $2"
     /// — the Lite twin of Darling's V118 table. Returns null when there is no row, which the engine reads as
     /// "no memory" and arms the gate from zero.
     ///
-    /// <para>Null on failure too, deliberately. A load failure cannot resurrect a <c>firing</c> bit it did
-    /// not read, so the worst outcome is the streak rebuilding over the next few samples — a delay, never a
-    /// re-announcement of an incident the user already has open.</para>
+    /// <para>#7295: a read that fails is logged and then thrown, so a caller can tell it from a table with no row. It used to answer
+    /// null for both, and a seed that could not read lost an open incident's <c>firing</c> bit and its streak.</para>
     /// </summary>
     public async Task<(int Breaches, int Clears, bool Firing, DateTime? LastObservedSampleUtc)?>
         LoadAlertPersistenceAsync(int serverId, string metricName)
@@ -741,7 +870,9 @@ AND   metric_name = $2";
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
 
             using var reader = await command.ExecuteReaderAsync();
-            if (!await reader.ReadAsync())
+            var hasRow = await reader.ReadAsync();
+            _failures.Succeeded((serverId, nameof(LoadAlertPersistenceAsync)));
+            if (!hasRow)
             {
                 return null;
             }
@@ -754,8 +885,8 @@ AND   metric_name = $2";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not load the alert persistence gate ({metricName}): {ex.Message}");
-            return null;
+            _failures.Failed("Alerts", (serverId, nameof(LoadAlertPersistenceAsync)), $"Could not load the alert persistence gate ({metricName}): {ex.Message}", ex);
+            throw;
         }
     }
 
@@ -810,10 +941,11 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
             });
             upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
             await upsert.ExecuteNonQueryAsync();
+            _failures.Succeeded((serverId, nameof(SaveAlertPersistenceAsync)));
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not persist the alert persistence gate ({metricName}): {ex.Message}");
+            _failures.Failed("Alerts", (serverId, nameof(SaveAlertPersistenceAsync)), $"Could not persist the alert persistence gate ({metricName}): {ex.Message}", ex);
         }
     }
 
@@ -828,6 +960,7 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
     /// toasts for failures still inside the lookback window that the user already saw and dismissed.
     /// The value is the server-local run time of the newest already-alerted failure, returned in its
     /// native basis (NOT coerced to UTC) so it compares directly against <c>FailedJobInfo.RunDateTime</c>.
+    /// <para>#7295: a read that fails is logged and then thrown. An empty list means the table was read and holds no row.</para>
     /// </summary>
     public async Task<List<(int ServerId, DateTime Watermark)>> LoadFailedJobWatermarksAsync()
     {
@@ -862,7 +995,8 @@ AND   watermark_time IS NOT NULL";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not load failed-job watermarks: {ex.Message}");
+            AppLogger.Error("Alerts", $"Could not load failed-job watermarks: {ex.Message}", ex);
+            throw;
         }
         return result;
     }
@@ -900,10 +1034,11 @@ VALUES ($1, $2, 0, $3, $4)";
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
 
             await command.ExecuteNonQueryAsync();
+            _failures.Succeeded((serverId, nameof(SaveFailedJobWatermarkAsync)));
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not persist failed-job watermark: {ex.Message}");
+            _failures.Failed("Alerts", (serverId, nameof(SaveFailedJobWatermarkAsync)), $"Could not persist failed-job watermark: {ex.Message}", ex);
         }
     }
 
@@ -946,10 +1081,11 @@ AND   database_name = $2";
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
 
             await command.ExecuteNonQueryAsync();
+            _failures.Succeeded((serverId, nameof(SaveDatabaseStateAlertedAsync)));
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not record the alerted database state for {databaseName}: {ex.Message}");
+            _failures.Failed("Alerts", (serverId, nameof(SaveDatabaseStateAlertedAsync)), $"Could not record the alerted database state for {databaseName}: {ex.Message}", ex);
         }
     }
 
@@ -990,10 +1126,11 @@ AND   database_name = $2";
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
 
             await command.ExecuteNonQueryAsync();
+            _failures.Succeeded((serverId, nameof(ClearDatabaseStateAlertedAsync)));
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not clear the alerted database state for {databaseName}: {ex.Message}");
+            _failures.Failed("Alerts", (serverId, nameof(ClearDatabaseStateAlertedAsync)), $"Could not clear the alerted database state for {databaseName}: {ex.Message}", ex);
         }
     }
 }

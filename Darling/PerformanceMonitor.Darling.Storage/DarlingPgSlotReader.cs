@@ -36,7 +36,9 @@ public static class DarlingPgSlotReader
         string? InvalidationReason,
         bool Conflicting,
         long FirstRetainedWalBytes,
-        DateTime FirstSeenAt);
+        DateTime FirstSeenAt,
+        bool IsCurrent = true,
+        DateTime? LatestCaptureAt = null);
 
     /// <summary>
     /// Latest state per slot, joined to that slot's earliest reading in the window.
@@ -44,10 +46,14 @@ public static class DarlingPgSlotReader
     /// held 45 GB all window is a consumer that is behind but keeping pace; a slot that held 2 GB an hour
     /// ago and holds 45 GB now is a volume filling in front of you, and only the second one is an
     /// emergency. A single current figure cannot distinguish them.</para>
+    /// <para>#7910: a row that is not from the collector's newest run belongs to something that is no longer reported, so
+    /// <c>is_current</c> is false and <c>latest_capture_at</c> is when the collector last looked. <see cref="PgCurrentCapture"/>
+    /// states the rule.</para>
     /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
-    public const string PgSlotsSql = """
-        WITH latest AS (
+    public const string PgSlotsSql = $"""
+        WITH {PgCurrentCapture.SlotsCte},
+        latest AS (
             SELECT DISTINCT ON (slot_name)
                 slot_name, collection_time, slot_type, plugin, database_name, is_active,
                 wal_status, retained_wal_bytes, safe_wal_size_bytes, xmin_age, catalog_xmin_age,
@@ -85,15 +91,20 @@ public static class DarlingPgSlotReader
             l.invalidation_reason,
             l.conflicting,
             e.first_retained_wal_bytes,
-            e.first_seen_at
+            e.first_seen_at,
+            {PgCurrentCapture.IsCurrentSql} AS is_current,
+            cw.newest_at AS latest_capture_at
         FROM latest AS l
         JOIN earliest AS e ON e.slot_name = l.slot_name
+        CROSS JOIN capture_window AS cw
         ORDER BY l.retained_wal_bytes DESC
         """;
 
+    /// <param name="includeCleared">False (the default) drops the slots absent from the collector's newest run, which were
+    /// dropped. The MCP tool passes true so it can name them.</param>
     public static async Task<List<PgSlotRow>> GetPgSlotsAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        CancellationToken cancellationToken = default)
+        bool includeCleared = false, CancellationToken cancellationToken = default)
     {
         var rows = new List<PgSlotRow>();
         await using var command = postgres.CreateCommand(PgSlotsSql);
@@ -109,6 +120,12 @@ public static class DarlingPgSlotReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var isCurrent = reader.IsDBNull(16) || reader.GetBoolean(16);
+            if (!isCurrent && !includeCleared)
+            {
+                continue;
+            }
+
             rows.Add(new PgSlotRow(
                 reader.GetString(0),
                 reader.GetDateTime(1),
@@ -125,7 +142,9 @@ public static class DarlingPgSlotReader
                 reader.IsDBNull(12) ? null : reader.GetString(12),
                 !reader.IsDBNull(13) && reader.GetBoolean(13),
                 reader.IsDBNull(14) ? -1 : reader.GetInt64(14),
-                reader.GetDateTime(15)));
+                reader.GetDateTime(15),
+                isCurrent,
+                reader.IsDBNull(17) ? null : reader.GetDateTime(17)));
         }
 
         return rows;

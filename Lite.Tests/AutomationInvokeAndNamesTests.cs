@@ -66,7 +66,7 @@ public class AutomationInvokeAndNamesTests
             list.ItemInvoked += (_, e) => ServerListKeyboard.HandleInvoke(list, e.Item, OpenSelected);
 
             var window = new Window { Content = list, Width = 300, Height = 300 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             Pump(window.Dispatcher);
             var rows = InvokableItems(UIElementAutomationPeer.CreatePeerForElement(list));
             Assert.Equal(2, rows.Count);
@@ -99,7 +99,7 @@ public class AutomationInvokeAndNamesTests
             list.ItemInvoked += (_, e) => ServerListKeyboard.HandleInvoke(list, e.Item, () => opened++);
 
             var window = new Window { Content = list, Width = 300, Height = 300 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             Pump(window.Dispatcher);
             var rows = InvokableItems(UIElementAutomationPeer.CreatePeerForElement(list));
             ((IInvokeProvider)rows[0].GetPattern(PatternInterface.Invoke)!).Invoke();
@@ -128,7 +128,7 @@ public class AutomationInvokeAndNamesTests
             cards.ItemInvoked += (_, e) => invoked.Add(((ServerSummaryItem)e.Item).ServerId);
 
             var window = new Window { Content = cards, Width = 300, Height = 300 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             Pump(window.Dispatcher);
             var rows = InvokableItems(UIElementAutomationPeer.CreatePeerForElement(cards));
             ((IInvokeProvider)rows[1].GetPattern(PatternInterface.Invoke)!).Invoke();
@@ -158,7 +158,7 @@ public class AutomationInvokeAndNamesTests
             var problems = StaTestThread.Run(() =>
             {
                 var window = new SettingsWindow(new ScheduleManager(dir), new ServerManager(dir));
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 var found = InputNamesProbe.Unnamed(window, (TabControl)window.FindName("SettingsTabs"));
 
                 /* Closing an unsaved settings window re-applies the original theme, which needs the running app's pack resources; this window changed none. */

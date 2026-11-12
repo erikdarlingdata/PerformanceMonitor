@@ -97,4 +97,32 @@ public sealed class ReadOutcomeClassifierTests
         var sentence = "Error during get_wait_stats: 42P01: relation \"x\" does not exist";
         Assert.Equal(ReadOutcome.Error, ReadOutcomeClassifier.ClassifySentence(sentence, CancellationToken.None));
     }
+
+    /// <summary>#7938: a web read the store refuses for the viewer role's <c>temp_file_limit</c> reaches the endpoint as a tool-caught
+    /// sentence, <c>"Error during {tool}: " + PostgresException.Message</c>, and Npgsql's <c>Message</c> opens with the SQLSTATE. The
+    /// sentence is a limit, the same answer <see cref="ReadOutcomeClassifier.Classify(Exception, CancellationToken)"/> gives the live exception.</summary>
+    [Fact]
+    public void ClassifySentence_53400ConfigurationLimitSentence_IsLimit()
+    {
+        var ex = new PostgresException("temporary file size exceeds temp_file_limit (64kB)", "ERROR", "ERROR", "53400");
+        var sentence = "Error during get_query_heatmap: " + ex.Message;
+        Assert.Equal(ReadOutcome.Limit, ReadOutcomeClassifier.ClassifySentence(sentence, CancellationToken.None));
+    }
+
+    [Fact]
+    public void ClassifySentence_53400DigitsInsideAName_IsError()
+    {
+        // The token counts only where the SQLSTATE sits, right after the sentence's prefix, not inside a database or table name later on.
+        var sentence = "Error during get_wait_stats: 42P01: relation \"tenant_53400: \" does not exist";
+        Assert.Equal(ReadOutcome.Error, ReadOutcomeClassifier.ClassifySentence(sentence, CancellationToken.None));
+    }
+
+    [Fact]
+    public void ClassifySentence_RequestTokenCancelled_IsCancelled_EvenWithA53400Sentence()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var sentence = "Error during get_query_heatmap: 53400: temporary file size exceeds temp_file_limit (64kB)";
+        Assert.Equal(ReadOutcome.Cancelled, ReadOutcomeClassifier.ClassifySentence(sentence, cts.Token));
+    }
 }

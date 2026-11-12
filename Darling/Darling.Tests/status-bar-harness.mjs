@@ -14,7 +14,7 @@ if (start < 0 || end < start) throw new Error("app.js layout changed: status-bar
 const source = full.slice(start, end);
 
 const flat = (x) => (Array.isArray(x) ? x.flatMap(flat) : x == null ? [] : [x]);
-const el = (tag, attrs, kids) => ({ tag, cls: (attrs && attrs.class) || "", text: attrs && attrs.text, kids: flat(kids) });
+const el = (tag, attrs, kids) => ({ tag, cls: (attrs && attrs.class) || "", text: attrs && attrs.text, title: attrs && attrs.title, kids: flat(kids) });
 const sc = {
   session: { can_edit: true },
   ping: { status: "ok" },
@@ -52,11 +52,12 @@ vm.runInContext(source + "\nthis.updateStatusBar = updateStatusBar; this.notePag
 const fleet = { cards: [{ healthy_collector_count: 3, failed_collector_count: 1 }], total_servers: 1, generated_at: "T" };
 const settle = () => new Promise((r) => setTimeout(r, 20));
 const texts = () => (bar || []).filter((n) => n.cls.includes("sb-item")).map((n) => n.text);
+const accessTitle = () => ((bar || []).find((n) => n.cls.includes("sb-seat")) || {}).title || null;
 const poll = async (roll = fleet) => { context.updateStatusBar(roll); await settle(); return texts(); };
 
 const run = {
-  async seatWrite() { sc.session = { can_edit: true }; return { items: await poll() }; },
-  async seatRead() { sc.session = { can_edit: false }; return { items: await poll() }; },
+  async seatWrite() { sc.session = { can_edit: true }; return { items: await poll(), accessTitle: accessTitle() }; },
+  async seatRead() { sc.session = { can_edit: false }; return { items: await poll(), accessTitle: accessTitle() }; },
   async seatProbeFailed() { sc.session = { can_edit: false, probe_failed: true }; return { items: await poll() }; },
   async storeSize() { return { items: await poll() }; },
   async storeSizeMb() { sc.storeHost = { kind: "data", data: { store: { size_bytes: 300 * 1024 ** 2 } } }; return { items: await poll() }; },

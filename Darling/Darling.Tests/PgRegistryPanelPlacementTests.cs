@@ -99,11 +99,11 @@ public sealed class PgRegistryPanelPlacementTests
     /// walk blanks literal text.
     /// </summary>
     private static readonly Regex CollectorNamingCall = new(
-        @"\b(?:PgCollectorIsGatedOff|PanelNote)\(", RegexOptions.Compiled);
+        @"\b(?:PgCollectorIsGatedOff|PanelNote|PanelNoteParts)\(", RegexOptions.Compiled);
 
     /// <summary>A control this method assigns. Same shape as <c>PgPanelTabOwnershipTests</c>' detector.</summary>
     private static readonly Regex ControlAssignment = new(
-        @"\b(?<name>Pg[A-Za-z]+(?:Grid|Note|Expander))\s*(?:\.\w+)?\s*=(?!=)", RegexOptions.Compiled);
+        @"\b(?<name>Pg[A-Za-z]+(?:Grid|Note|Expander))\s*(?:\.\w+)?\s*=(?!=)|\bShowNote\((?<name>Pg[A-Za-z]+Note)\b", RegexOptions.Compiled);
 
     private static readonly Regex LoaderCall = new(
         @"\b(?<name>LoadPg[A-Za-z]+Async)\b", RegexOptions.Compiled);

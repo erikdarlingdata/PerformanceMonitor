@@ -118,4 +118,72 @@ public sealed class FinOpsIndexAnalysisLimitBehaviourTests
         Assert.Equal(new[] { "Gamma" }, step.GetProperty("typedUnknown").EnumerateArray().Select(e => e.GetString()!).ToArray());
         Assert.Equal("Gamma", step.GetProperty("shown").GetString());
     }
+
+    /* #7702 item 1: a 0.002 GB figure printed 0.00. It now prints in the unit that fits (2.0 MB), and an index of 0.4 MB, which the read
+       sends as 0.000391 GB, prints 0.4 MB, not 0.400384 MB. #7701: a left-over database says since when, Collected sits right after
+       Database in the roll-up, and a live database that shares its name with a left-over one keeps its Collected time on its
+       recommendations (the left-over twin does not make the name ambiguous). */
+    [Fact]
+    public void ASmallSizePrintsNonZero_ALeftOverDatabaseCarriesItsMark_AndCollectedFollowsDatabase()
+    {
+        var step = Run().GetProperty("sizes");
+        var text = step.GetProperty("text").GetString()!;
+        Assert.Contains("2.0 MB", text, StringComparison.Ordinal);
+        Assert.Contains("0.41 MB", text, StringComparison.Ordinal);
+        Assert.Contains("0.4 MB", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0.400384", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0.4096", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0.00", text, StringComparison.Ordinal);
+        Assert.Contains("Not collected since", text, StringComparison.Ordinal);
+        var header = step.GetProperty("header").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal("Collected", header[header.ToList().IndexOf("Database") + 1]);
+    }
+
+    /* #7702 item 1, the size helper at its edges. The read sends GB; 0.005 MB is the point where two-decimal rounding turns 0.00 into
+       0.01. A positive size below it reads "<0.01 MB" (never 0.00), exactly 0 reads 0 MB (never "<0.01 MB"), a negative size does not
+       throw and a tiny negative one reads 0 MB (not "<0.01 MB", which is a positive size), under 1 MB prints two decimals, and from
+       1 MB up the normal path prints one. */
+    [Fact]
+    public void ASizeAtTheRoundingEdges_PrintsASensibleValue_NeverZeroForAPositiveOneOrSmallForAZero()
+    {
+        var edges = Run().GetProperty("edges");
+        string At(string name) => edges.GetProperty(name).GetString()!;
+        Assert.Equal("0.01 MB", At("Exact"));
+        Assert.Equal("<0.01 MB", At("Below"));
+        Assert.Equal("0 MB", At("Zero"));
+        Assert.Equal("-0.4 MB", At("Negative"));
+        Assert.Equal("0 MB", At("NegTiny"));
+        Assert.Equal("0.99 MB", At("Under1"));
+        Assert.Equal("1.0 MB", At("RoundsTo1"));
+        Assert.Equal("1.0 MB", At("Over1"));
+        Assert.Equal("1.5 MB", At("Over1Half"));
+    }
+
+    /* #7538, #7651: the empty sentence no longer carries the count, so the page names the left-out databases itself, above the empty
+       sentence and above the count line of a page with rows. A read that left none out draws no such sentence. */
+    [Fact]
+    public void AReadThatLeftDatabasesOut_NamesThemOnTheEmptyPage_AndOnThePageWithRows()
+    {
+        const string Sentence = "2 databases were left out because the server no longer lists them. They were dropped or detached: a_old, b_old.";
+        var run = Run();
+        string[] At(string step) => run.GetProperty(step).EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal(new[] { Sentence, "No index statistics for a database this server still has in the latest snapshots." }, At("leftOutEmpty"));
+        var data = At("leftOutData");
+        Assert.Equal(Sentence, data[0]);
+        Assert.Equal("3 recommendations." + Tail, data[1]);
+        Assert.DoesNotContain(At("leftOutNone"), s => s.Contains("left out", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ALiveDatabaseSharingANameWithALeftOverOne_KeepsItsCollectedTimeOnItsRecommendations()
+    {
+        var tables = Run().GetProperty("sizes").GetProperty("tables").EnumerateArray().ToList();
+        var grid = tables.Single(t => t.GetProperty("rows").EnumerateArray().Any(r => r.EnumerateArray().Any(c => c.GetString() == "IX1")));
+        var header = grid.GetProperty("header").EnumerateArray().Select(e => e.GetString()!).ToList();
+        var row = grid.GetProperty("rows").EnumerateArray().Single(r => r.EnumerateArray().Any(c => c.GetString() == "IX1"))
+            .EnumerateArray().Select(c => c.GetString()!).ToList();
+        var collected = row[header.IndexOf("Collected")];
+        Assert.NotEqual("—", collected);
+        Assert.NotEmpty(collected);
+    }
 }

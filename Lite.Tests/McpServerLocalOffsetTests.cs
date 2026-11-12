@@ -191,7 +191,7 @@ public sealed class McpServerLocalOffsetTests : IClassFixture<SharedDuckDbFixtur
             await SeedCpuAsync(_noOffsetId, "UncollectedSrv", eventUtc, IndiaCpu);
             await SeedDefaultTraceAsync(_noOffsetId, "UncollectedSrv", eventUtc, IndiaEventText);
 
-            Assert.Null(await _dataService.GetServerUtcOffsetMinutesAsync(_noOffsetId));
+            Assert.Null(await _dataService.GetServerClockAsync(_noOffsetId));
 
             var cpu = await McpCpuTools.GetCpuUtilization(_dataService, _serverManager, "UncollectedSrv");
             Assert.Equal(new[] { IndiaCpu }, SqlCpuIn(cpu));
@@ -240,7 +240,9 @@ public sealed class McpServerLocalOffsetTests : IClassFixture<SharedDuckDbFixtur
         await SeedServerOffsetAsync(_pacificId, "PacificSrv", PacificOffset, DateTime.UtcNow.AddDays(-2));
         await SeedServerOffsetAsync(_pacificId, "PacificSrv", null, DateTime.UtcNow);
 
-        Assert.Equal(PacificOffset, await _dataService.GetServerUtcOffsetMinutesAsync(_pacificId));
+        var clock = await _dataService.GetServerClockAsync(_pacificId);
+        Assert.NotNull(clock);
+        Assert.Equal(PacificOffset, clock.OffsetMinutesAt(DateTime.UtcNow));
     }
 
     // ── helpers ──

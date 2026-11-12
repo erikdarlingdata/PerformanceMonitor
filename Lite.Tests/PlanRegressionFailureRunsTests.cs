@@ -76,7 +76,7 @@ public sealed class PlanRegressionFailureRunsTests : IClassFixture<SharedDuckDbF
 
         /* No plan's cost regressed, so the fact carries no cost figure and names no cost offender. */
         Assert.Equal(0, fact.Metadata["offender_count"]);
-        Assert.False(fact.Metadata.ContainsKey("worst_regression_factor"));
+        Assert.False(fact.Metadata.ContainsKey("lead_regression_factor"));
         Assert.Empty(pass.PlanRegressionOffenders ?? []);
     }
 
@@ -191,7 +191,7 @@ public sealed class PlanRegressionFailureRunsTests : IClassFixture<SharedDuckDbF
         /* The fact keeps the larger of the cost factor and the failures' value (6), and carries both sets of figures. */
         Assert.Equal(expectedValue, fact.Value);
         Assert.Equal(1, fact.Metadata["offender_count"]);
-        Assert.Equal(costFactor, fact.Metadata["worst_regression_factor"], 3);
+        Assert.Equal(costFactor, fact.Metadata["lead_regression_factor"], 3);
         Assert.Equal(20, fact.Metadata["worst_query_id"]);
         Assert.Equal(2, fact.Metadata["failure_offender_count"]);
         Assert.Equal(10, fact.Metadata["worst_timeout_query_id"]);

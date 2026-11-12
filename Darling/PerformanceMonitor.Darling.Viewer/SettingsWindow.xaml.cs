@@ -48,6 +48,10 @@ public partial class SettingsWindow : Window
     /// <summary>#6875: the Identity Capacity bars as loaded. The window shows only the switch, and a Save writes these back.</summary>
     private int _identityCapacityWarningPercent = 70;
     private int _identityCapacityCriticalPercent = 90;
+    /* #7611 (V245): the Database Protection ages. Held from the loaded row as the fallback for a save; the three boxes beside the overdue alerts edit them. */
+    private int _backupOverdueThresholdHours = 168;
+    private int _logBackupOverdueThresholdMinutes = 60;
+    private int _checkDbOverdueThresholdHours = 336;
 
     /// <summary>Branding the shared email/webhook renderers stamp on test messages (mirrors the service's).</summary>
     private static readonly AlertBranding s_branding = new("Performance Monitor Darling", null);
@@ -354,8 +358,23 @@ public partial class SettingsWindow : Window
         if (readOnly)
         {
             PauseResumeButton.IsEnabled = false;
+
+            /* #8115: the banner says the monitoring settings are shown for reference, so the fields on the fleet tabs refuse edits and
+               Restore Defaults, which only resets fields this seat can never save, is disabled. The Viewer tab is this person's own. */
+            RestoreAlertDefaultsButton.IsEnabled = false;
+            RestoreAlertDefaultsButton.ToolTip = ReadOnlyFieldTooltip;
+            foreach (var tab in SettingsTabs.Items.OfType<TabItem>())
+            {
+                if (!ReferenceEquals(tab, ViewerTab) && tab.Content is DependencyObject content)
+                {
+                    /* The "This viewer only" triage defaults are saved to this person's own settings file, so they stay editable. */
+                    ReadOnlySettingsGate.Apply(content, ReadOnlyFieldTooltip, "ViewerOnlyTriageDefaults");
+                }
+            }
         }
     }
+
+    internal const string ReadOnlyFieldTooltip = "This viewer is connected with a read-only role, so this setting is shown for reference and cannot be changed from here.";
 
     // ── Viewer preferences (folded in from #1401: default time range + auto-refresh) ──
 
@@ -426,8 +445,8 @@ public partial class SettingsWindow : Window
         }
 
         CollectionStatusText.Text = _paused
-            ? "Status: Paused — the Darling service is not collecting"
-            : "Status: Collecting — managed by the Darling service";
+            ? "Status: Paused (the Darling service is not collecting)"
+            : "Status: Collecting (managed by the Darling service)";
         /* The "_" keeps Alt+L alive across the state swap — see the XAML for why the key is on
            "Collection" (the word both states share) rather than on the verb. */
         PauseResumeButton.Content = _paused ? "Resume Co_llection" : "Pause Co_llection";
@@ -456,7 +475,7 @@ public partial class SettingsWindow : Window
 
             if (result is null)
             {
-                CollectionStatusText.Text = "Status: the service is running the command — check again later";
+                CollectionStatusText.Text = "Status: the service is running the command. Check again later";
             }
             else if (result.Status == ViewerDataService.StatusSucceeded)
             {
@@ -927,6 +946,8 @@ public partial class SettingsWindow : Window
         BandBlockingCriticalPerHourBox.Text = r.BlockingCriticalPerHour.ToString("0.0", CultureInfo.InvariantCulture);
         BandBlockingWarnWaitSecondsBox.Text = r.BlockingWarnWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
         BandBlockingCriticalWaitSecondsBox.Text = r.BlockingCriticalWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingWarnSnapshotWaitSecondsBox.Text = r.BlockingWarnSnapshotWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingCriticalSnapshotWaitSecondsBox.Text = r.BlockingCriticalSnapshotWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
         AlertPvsCheckBox.IsChecked = r.PvsEnabled;
         AlertPvsThresholdPercentBox.Text = r.PvsThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertPvsFloorGbBox.Text = r.PvsFloorGb.ToString(CultureInfo.InvariantCulture);
@@ -947,6 +968,12 @@ public partial class SettingsWindow : Window
         /* #6875: the two bars have no box here (update_alert_settings and the threshold overrides set them), so a Save carries the loaded values back unchanged. */
         _identityCapacityWarningPercent = r.IdentityCapacityWarningPercent;
         _identityCapacityCriticalPercent = r.IdentityCapacityCriticalPercent;
+        _backupOverdueThresholdHours = r.BackupOverdueThresholdHours;
+        _logBackupOverdueThresholdMinutes = r.LogBackupOverdueThresholdMinutes;
+        _checkDbOverdueThresholdHours = r.CheckDbOverdueThresholdHours;
+        AlertBackupOverdueHoursBox.Text = r.BackupOverdueThresholdHours.ToString(CultureInfo.InvariantCulture);
+        AlertLogBackupOverdueMinutesBox.Text = r.LogBackupOverdueThresholdMinutes.ToString(CultureInfo.InvariantCulture);
+        AlertCheckDbOverdueHoursBox.Text = r.CheckDbOverdueThresholdHours.ToString(CultureInfo.InvariantCulture);
         AlertCooldownBox.Text = r.CooldownMinutes.ToString(CultureInfo.InvariantCulture);
         AnalysisEnabledCheckBox.IsChecked = r.AnalysisEnabled;
         AnalysisIntervalBox.Text = r.AnalysisIntervalMinutes.ToString(CultureInfo.InvariantCulture);
@@ -964,6 +991,13 @@ public partial class SettingsWindow : Window
            enable/disable group: sweeps keep running under a fleet-wide mute by contract. */
         FleetSweepEnabledCheckBox.IsChecked = r.FleetSweepEnabled;
         FleetSweepIntervalBox.Text = r.FleetSweepIntervalMinutes.ToString(CultureInfo.InvariantCulture);
+        /* #7041 (V232): the Daily Health Report, outside the master-toggle group like the fleet sweep. A report that is off with no zone yet
+           starts at this machine's zone, the way the web editor starts at the browser's: the person setting it up is most likely in the
+           zone they want. A saved zone, or a blank on a report that is already on, is left as it is. */
+        DailyReportEnabledCheckBox.IsChecked = r.DailyReportEnabled;
+        DailyReportSendAtBox.Text = r.DailyReportSendAt;
+        DailyReportTimeZoneBox.Text = r.DailyReportTimeZone ?? (r.DailyReportEnabled ? "" : ViewerDataService.DefaultKnownPatternTimeZone());
+        DailyReportTitleBox.Text = r.DailyReportTitle ?? "";
         /* #1141/#1236: the delivery mode + per-event cap are now STORE-backed (the service honors them),
            seeded from the row like every other alert-engine control. */
         AlertDeliveryModeBox.SelectedIndex = r.DeliveryMode == "PerEvent" ? 1 : 0;
@@ -985,6 +1019,23 @@ public partial class SettingsWindow : Window
         value = null;
         errors.Add(
             $"{label} must be a number between {min.ToString("0.0", CultureInfo.InvariantCulture)} and {max.ToString("0.0", CultureInfo.InvariantCulture)}.",
+            box);
+    }
+
+    /// <summary>Parses one optional blocking band box (#7028): 0 turns the tier off, otherwise the named bounds the classifier clamps to.
+    /// A value between 0 and the floor is refused, because the clamp would rewrite it to the floor and the setting would not stick.</summary>
+    private static void BlockingBandOptionalBox(
+        System.Windows.Controls.TextBox box, double min, double max, string label, SettingsValidationErrors errors, out double? value)
+    {
+        if (double.TryParse(box.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) && (parsed == 0 || (parsed >= min && parsed <= max)))
+        {
+            value = parsed;
+            return;
+        }
+
+        value = null;
+        errors.Add(
+            $"{label} must be 0 (that tier is off) or a number between {min.ToString("0.0", CultureInfo.InvariantCulture)} and {max.ToString("0.0", CultureInfo.InvariantCulture)}.",
             box);
     }
 
@@ -1040,6 +1091,9 @@ public partial class SettingsWindow : Window
             IdentityCapacityEnabled = AlertIdentityCapacityCheckBox.IsChecked == true,
             IdentityCapacityWarningPercent = _identityCapacityWarningPercent,
             IdentityCapacityCriticalPercent = _identityCapacityCriticalPercent,
+            BackupOverdueThresholdHours = _backupOverdueThresholdHours,
+            LogBackupOverdueThresholdMinutes = _logBackupOverdueThresholdMinutes,
+            CheckDbOverdueThresholdHours = _checkDbOverdueThresholdHours,
             AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true,
             AnalysisNotificationsEnabled = AnalysisNotificationsCheckBox.IsChecked == true,
             /* #3712 (V137): the combo's Tag IS the stored value -- 'digest' / 'page', or empty for NULL ("the file
@@ -1047,6 +1101,7 @@ public partial class SettingsWindow : Window
                the bind normalises the spelling. */
             AnalysisUncorroboratedRoute = SelectedAnalysisUncorroboratedRoute(),
             FleetSweepEnabled = FleetSweepEnabledCheckBox.IsChecked == true,
+            DailyReportEnabled = DailyReportEnabledCheckBox.IsChecked == true,
             ExcludedDatabases = SettingsListText.SplitLines(AlertExcludedDatabasesBox.Text),
             ExcludedVolumes = VolumeExclusions.Normalize(SettingsListText.SplitLinesAndCommas(AlertExcludedVolumesBox.Text)).ToList(),
         };
@@ -1214,6 +1269,21 @@ public partial class SettingsWindow : Window
                 row.BlockingCriticalWaitSeconds = blCriticalWait.Value;
             }
         }
+        /* #7028: the snapshot arm. 0 turns a tier off, so the order only binds when both are above 0. */
+        BlockingBandOptionalBox(BandBlockingWarnSnapshotWaitSecondsBox, ServerHealthThresholds.BlockingWaitSecondsFloor, ServerHealthThresholds.BlockingWaitSecondsCeiling,
+            "Blocking snapshot warn seconds", errors, out var blWarnSnapshot);
+        BlockingBandOptionalBox(BandBlockingCriticalSnapshotWaitSecondsBox, ServerHealthThresholds.BlockingWaitSecondsFloor, ServerHealthThresholds.BlockingWaitSecondsCeiling,
+            "Blocking snapshot critical seconds", errors, out var blCriticalSnapshot);
+        if (blWarnSnapshot.HasValue && blCriticalSnapshot.HasValue)
+        {
+            if (blWarnSnapshot.Value > 0 && blCriticalSnapshot.Value > 0 && blCriticalSnapshot.Value < blWarnSnapshot.Value)
+                errors.Add("Blocking snapshot critical seconds must not be lower than blocking snapshot warn seconds.", BandBlockingCriticalSnapshotWaitSecondsBox);
+            else
+            {
+                row.BlockingWarnSnapshotWaitSeconds = blWarnSnapshot.Value;
+                row.BlockingCriticalSnapshotWaitSeconds = blCriticalSnapshot.Value;
+            }
+        }
         if (int.TryParse(AlertPvsThresholdPercentBox.Text, out var pvsPct) && pvsPct is >= 0 and <= 100)
             row.PvsThresholdPercent = pvsPct;
         if (int.TryParse(AlertPvsFloorGbBox.Text, out var pvsFloor) && pvsFloor >= 0)
@@ -1229,6 +1299,20 @@ public partial class SettingsWindow : Window
             row.LongRunningJobMultiplier = jobMult;
         if (int.TryParse(AlertFailedJobLookbackBox.Text, out var failedJobLookback) && failedJobLookback is >= 1 and <= 1440)
             row.FailedJobLookbackMinutes = failedJobLookback;
+        /* #7611: the three overdue ages, refused outside the registry's bounds (ViewerDatabaseProtectionRules). A refused box leaves the
+           loaded value in the row and the save stops on the error list. */
+        if (ViewerDatabaseProtectionRules.TryParse(AlertBackupOverdueHoursBox.Text, ViewerDatabaseProtectionRules.BackupHoursKey, out var backupHours))
+            row.BackupOverdueThresholdHours = backupHours;
+        else
+            errors.Add(ViewerDatabaseProtectionRules.Refusal("Full backup overdue age", ViewerDatabaseProtectionRules.BackupHoursKey, "hours"), AlertBackupOverdueHoursBox);
+        if (ViewerDatabaseProtectionRules.TryParse(AlertLogBackupOverdueMinutesBox.Text, ViewerDatabaseProtectionRules.LogBackupMinutesKey, out var logBackupMinutes))
+            row.LogBackupOverdueThresholdMinutes = logBackupMinutes;
+        else
+            errors.Add(ViewerDatabaseProtectionRules.Refusal("Log backup overdue age", ViewerDatabaseProtectionRules.LogBackupMinutesKey, "minutes"), AlertLogBackupOverdueMinutesBox);
+        if (ViewerDatabaseProtectionRules.TryParse(AlertCheckDbOverdueHoursBox.Text, ViewerDatabaseProtectionRules.CheckDbHoursKey, out var checkDbHours))
+            row.CheckDbOverdueThresholdHours = checkDbHours;
+        else
+            errors.Add(ViewerDatabaseProtectionRules.Refusal("CHECKDB overdue age", ViewerDatabaseProtectionRules.CheckDbHoursKey, "hours"), AlertCheckDbOverdueHoursBox);
 
         if (int.TryParse(AlertCooldownBox.Text, out var alertCooldown) && alertCooldown is >= 1 and <= 120)
             row.CooldownMinutes = alertCooldown;
@@ -1261,6 +1345,27 @@ public partial class SettingsWindow : Window
         else
             errors.Add($"Fleet sweep interval must be between {FleetSweepCadence.IntervalMinutesFloor} and {FleetSweepCadence.IntervalMinutesCeiling} minutes.", FleetSweepIntervalBox);
 
+        /* #7041 (V232): the same rules update_alert_settings enforces (ViewerDailyReportRules mirrors the service's), so the two writers
+           cannot disagree. A blank zone or title is stored as NULL: the host's zone, the default title. */
+        if (ViewerDailyReportRules.TryParseSendAt(DailyReportSendAtBox.Text, out var dailyReportSendAt))
+            row.DailyReportSendAt = ViewerDailyReportRules.FormatSendAt(dailyReportSendAt);
+        else
+            errors.Add("Daily health report send time must be a time of day written HH:mm, for example 07:00.", DailyReportSendAtBox);
+
+        var dailyReportZone = DailyReportTimeZoneBox.Text.Trim();
+        if (ViewerDailyReportRules.IsKnownZone(dailyReportZone))
+            row.DailyReportTimeZone = dailyReportZone.Length == 0 ? null : dailyReportZone;
+        else
+            errors.Add($"Daily health report time zone \"{dailyReportZone}\" is not a time zone this machine knows. Use an IANA id such as America/New_York, or leave it blank for the service host's zone.", DailyReportTimeZoneBox);
+
+        var dailyReportTitle = DailyReportTitleBox.Text.Trim();
+        if (dailyReportTitle.Length == 0)
+            row.DailyReportTitle = null;
+        else if (ViewerDailyReportRules.TryValidateTitle(dailyReportTitle, out var dailyReportTitleError))
+            row.DailyReportTitle = dailyReportTitle;
+        else
+            errors.Add($"Daily health report title {dailyReportTitleError}", DailyReportTitleBox);
+
         /* #1141/#1236: delivery mode + per-event cap (store-backed). */
         row.DeliveryMode = AlertDeliveryModeBox.SelectedIndex == 1 ? "PerEvent" : "Summary";
         if (int.TryParse(AlertPerEventMaxBox.Text, out var perEventMax) && perEventMax is >= 1 and <= 100)
@@ -1287,8 +1392,8 @@ public partial class SettingsWindow : Window
     {
         AlertCpuThresholdBox.Text = "80";
         AlertCpuModeBox.SelectedIndex = 0; // Total
-        AlertBlockingThresholdBox.Text = "1";
-        AlertBlockingWaitSecondsBox.Text = "0";
+        AlertBlockingThresholdBox.Text = BlockingPageRule.CountThresholdDefault.ToString(CultureInfo.InvariantCulture);
+        AlertBlockingWaitSecondsBox.Text = BlockingPageRule.WaitSecondsThresholdDefault.ToString(CultureInfo.InvariantCulture);
         AlertDeadlockThresholdBox.Text = "1";
         /* #3444 (V122): from the shared constants rather than a literal "1", so a moved default cannot
            leave this button writing a threshold nobody chose. */
@@ -1352,6 +1457,9 @@ public partial class SettingsWindow : Window
             ServerHealthThresholds.BlockingWarnWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
         BandBlockingCriticalWaitSecondsBox.Text =
             ServerHealthThresholds.BlockingCriticalWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+        /* #7028: both snapshot tiers default to 0, which is off. */
+        BandBlockingWarnSnapshotWaitSecondsBox.Text = "0.0";
+        BandBlockingCriticalSnapshotWaitSecondsBox.Text = "0.0";
         AnalysisNotifyCooldownBox.Text = "360";
         AlertPvsThresholdPercentBox.Text = "40";
         AlertPvsFloorGbBox.Text = "1";
@@ -1360,10 +1468,13 @@ public partial class SettingsWindow : Window
         AlertFileGrowthLookbackMinutesBox.Text = "60";
         AlertLongRunningJobMultiplierBox.Text = "3";
         AlertFailedJobLookbackBox.Text = "60";
+        AlertBackupOverdueHoursBox.Text = "168";
+        AlertLogBackupOverdueMinutesBox.Text = "60";
+        AlertCheckDbOverdueHoursBox.Text = "336";
         AlertCooldownBox.Text = "5";
         EmailCooldownBox.Text = "15";
         AlertDeliveryModeBox.SelectedIndex = 0;
-        AlertPerEventMaxBox.Text = "5";
+        AlertPerEventMaxBox.Text = AlertDefaults.PerEventMax.ToString(CultureInfo.InvariantCulture);
         AnalysisIntervalBox.Text = "30";
         AnalysisNotifySeverityBox.Text = "1.5";
         /* #3712 (V137): "defaults" for the route knob is the NULL item -- the store column cleared, the service's
@@ -1376,6 +1487,11 @@ public partial class SettingsWindow : Window
            leave this button writing a cadence nobody chose. The checkbox resets to the shipped ON. */
         FleetSweepEnabledCheckBox.IsChecked = true;
         FleetSweepIntervalBox.Text = FleetSweepCadence.DefaultIntervalMinutes.ToString(CultureInfo.InvariantCulture);
+        /* #7041 (V232): the report ships off, at 07:00, in the host's zone, with the default title. */
+        DailyReportEnabledCheckBox.IsChecked = false;
+        DailyReportSendAtBox.Text = ViewerDailyReportRules.DefaultSendAt;
+        DailyReportTimeZoneBox.Text = "";
+        DailyReportTitleBox.Text = "";
         AlertExcludedDatabasesBox.Text = "";
         AlertExcludedVolumesBox.Text = "";
         MuteRuleDefaultExpirationCombo.SelectedIndex = 1; // 24 hours
@@ -1413,6 +1529,18 @@ public partial class SettingsWindow : Window
         }
 
         var window = new ThresholdOverridesWindow(_dataService) { Owner = this };
+        window.ShowDialog();
+    }
+
+    /// <summary>#7107: the people, their identities and grants, beside the investigations they will ask for and approve.</summary>
+    private void ManagePeopleButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService is null)
+        {
+            return;
+        }
+
+        var window = new PeopleWindow(_dataService) { Owner = this };
         window.ShowDialog();
     }
 
@@ -1580,6 +1708,9 @@ public partial class SettingsWindow : Window
         AlertBackupOverdueCheckBox.IsEnabled = enabled;
         AlertLogBackupOverdueCheckBox.IsEnabled = enabled;
         AlertCheckDbOverdueCheckBox.IsEnabled = enabled;
+        AlertBackupOverdueHoursBox.IsEnabled = enabled;
+        AlertLogBackupOverdueMinutesBox.IsEnabled = enabled;
+        AlertCheckDbOverdueHoursBox.IsEnabled = enabled;
         AlertPvsThresholdPercentBox.IsEnabled = enabled;
         AlertPvsFloorGbBox.IsEnabled = enabled;
         AlertLowDiskThresholdGbBox.IsEnabled = enabled;
@@ -1647,6 +1778,12 @@ public partial class SettingsWindow : Window
         SlackStatusText.Text = ViewerWebhookSealing.IsSaved(r.SlackUrl) ? ViewerWebhookSealing.KeepHint : "";
         SlackProxyAddressBox.Text = r.SlackProxy;
         SlackSendResolutionsCheckBox.IsChecked = r.SlackSendResolutions;
+        /* #7656: a saved token is shown blank with the keep hint, as a saved webhook URL is. */
+        SlackBotTokenBox.Text = ViewerWebhookSealing.ShownText(r.SlackBotToken);
+        SlackAppTokenBox.Text = ViewerWebhookSealing.ShownText(r.SlackAppToken);
+        SlackBotTokenStatusText.Text = ViewerWebhookSealing.IsSaved(r.SlackBotToken) || ViewerWebhookSealing.IsSaved(r.SlackAppToken)
+            ? ViewerWebhookSealing.KeepHint
+            : "";
 
         GenericWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.GenericUrl);
         GenericWebhookUrlBox.Text = ViewerWebhookSealing.ShownText(r.GenericUrl);
@@ -1699,6 +1836,9 @@ public partial class SettingsWindow : Window
             row.SmtpUsername = string.IsNullOrWhiteSpace(username) ? null : username;
             row.SmtpFromAddress = SmtpFromBox.Text?.Trim() ?? "";
             row.SmtpRecipients = SmtpRecipientsBox.Text?.Trim() ?? "";
+            /* #7184: one entry the send cannot parse (an Outlook-style "a@x.com;b@x.com") fails every default-route email, and "a@x.com; b@x.com" silently drops the first. */
+            if (NotificationRouteWriter.RecipientsRefusal(row.SmtpRecipients) is { } recipientsRefusal)
+                errors.Add("Default recipients: " + recipientsRefusal, SmtpRecipientsBox);
             row.EmailSendResolutions = EmailSendResolutionsCheckBox.IsChecked == true;
             ResolveSmtpPassword(row, errors);
         }
@@ -1716,6 +1856,10 @@ public partial class SettingsWindow : Window
             row.SlackProxy = SlackProxyAddressBox.Text?.Trim() ?? "";
             row.SlackSendResolutions = SlackSendResolutionsCheckBox.IsChecked == true;
         }
+
+        /* #7656: the Slack bot's tokens ride the row whether or not the Slack webhook is on. */
+        row.SlackBotToken = ViewerWebhookSealing.CarryKept(SlackBotTokenBox.Text, _loadedNotification?.SlackBotToken);
+        row.SlackAppToken = ViewerWebhookSealing.CarryKept(SlackAppTokenBox.Text, _loadedNotification?.SlackAppToken);
 
         if (GenericWebhookEnabledCheckBox.IsChecked == true)
         {
@@ -1817,7 +1961,7 @@ public partial class SettingsWindow : Window
                 GenericWebhookUrlBox.Text?.Trim() ?? "",
                 ViewerWebhookSealing.ShownText(_loadedNotification.GenericUrl).Trim(), StringComparison.Ordinal))
         {
-            MessageBox.Show(ViewerWebhookSigningKeys.SaveUrlFirstText, "Signing key", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(this, "Signing key", ViewerWebhookSigningKeys.SaveUrlFirstText);
             return;
         }
 
@@ -1835,7 +1979,7 @@ public partial class SettingsWindow : Window
             var key = await ViewerPasswordKey.GetSealKeyAsync(_dataService, this);
             if (key.Notice is { } notice)
             {
-                MessageBox.Show(notice, "Signing key", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Signing key", notice);
             }
 
             if (key.Sealer is null)
@@ -1922,7 +2066,7 @@ public partial class SettingsWindow : Window
             refusal = key.Refusal;
             if (key.Notice is { } notice)
             {
-                MessageBox.Show(notice, "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Settings", notice);
             }
         }
 
@@ -1998,7 +2142,7 @@ public partial class SettingsWindow : Window
         {
             /* The window closes when the save succeeds, so the status line alone would never be seen. */
             SmtpStatusText.Text = key.Notice;
-            MessageBox.Show(key.Notice, "SMTP password", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(this, "SMTP password", key.Notice);
         }
 
         if (key.Sealer is null)
@@ -2050,6 +2194,8 @@ public partial class SettingsWindow : Window
             errors.Add("From address must be a valid email");
         if (string.IsNullOrWhiteSpace(SmtpRecipientsBox.Text))
             errors.Add("Default recipients are needed for alerts that no notification route covers.");
+        else if (NotificationRouteWriter.RecipientsRefusal(SmtpRecipientsBox.Text) is { } recipientsRefusal)
+            errors.Add("Default recipients: " + recipientsRefusal);
 
         if (errors.Count == 0)
         {
@@ -2120,14 +2266,14 @@ public partial class SettingsWindow : Window
             if (SmtpPasswordBox.Password.Length == 0 && !string.IsNullOrEmpty(_loadedNotification.SmtpEncryptedPassword))
             {
                 /* The saved password is never read back into this window: nothing here can send with it. */
-                MessageBox.Show(ViewerSmtpSeal.SavedCannotTestText, "Test Email", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Email", ViewerSmtpSeal.SavedCannotTestText);
                 return;
             }
 
             var error = await EmailSendCore.SendTestEmailAsync(settings, s_branding);
             if (error == null)
             {
-                MessageBox.Show("Test email sent successfully!", "Test Email", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Email", "Test email sent successfully!");
             }
             else
             {
@@ -2188,8 +2334,9 @@ public partial class SettingsWindow : Window
         TestPagerDutyButton.IsEnabled = enabled;
     }
 
-    /// <summary>Shows why a Send Test cannot run when its box is blank because the value is saved (#5366). True when it was shown.</summary>
-    private static bool RefuseTestOfSavedValue(string? typed, string? stored, string label)
+    /// <summary>Shows why a Send Test cannot run when its box is blank because the value is saved (#5366). True when it was shown. An instance
+    /// method, so the notice is owned by this window.</summary>
+    private bool RefuseTestOfSavedValue(string? typed, string? stored, string label)
     {
         var text = ViewerWebhookSealing.CannotTestSavedValueText(typed, stored, label);
         if (text is null)
@@ -2197,7 +2344,7 @@ public partial class SettingsWindow : Window
             return false;
         }
 
-        MessageBox.Show(text, "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+        InAppMessage.Show(this, "Test Webhook", text);
         return true;
     }
 
@@ -2219,7 +2366,7 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("PagerDuty test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "PagerDuty test notification sent successfully!");
             }
             else
             {
@@ -2255,7 +2402,7 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("Teams test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "Teams test notification sent successfully!");
             }
             else
             {
@@ -2291,7 +2438,7 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("Slack test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "Slack test notification sent successfully!");
             }
             else
             {
@@ -2358,7 +2505,7 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("Generic webhook test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "Generic webhook test notification sent successfully!");
             }
             else
             {
@@ -2470,8 +2617,15 @@ public partial class SettingsWindow : Window
             return;
         }
 
-        /* Write the operator config to the control-plane store (the service reloads on the config_version bump).
-           A read-only seat surfaces the friendly message and the window stays open. */
+        /* #8115: a read-only seat is told up front that only its own preferences were saved, instead of the store refusing a write
+           the dialog's banner already said could not happen. */
+        if (_dataService is not null && _dataService.IsReadOnly)
+        {
+            InAppMessage.Show(this, "Settings", "Your viewer preferences were saved. The monitoring settings are read-only on this seat, so they were left as they are.");
+            return;
+        }
+
+        /* Write the operator config to the control-plane store (the service reloads on the config_version bump). */
         if (_dataService is not null)
         {
             try

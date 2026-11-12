@@ -18,8 +18,10 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -28,8 +30,55 @@ namespace Darling.Tests;
 /// #6874 part 3: the Viewer's Agent Alerts words as functions of the read. They are the words the web page's Configuration tab shows, so
 /// the assertions are on the values.
 /// </summary>
-public sealed class ViewerAgentAlertsTextTests
+[Collection("viewer-time-statics")]
+public sealed class ViewerAgentAlertsTextTests : IDisposable
 {
+    /* #7343: the capture and scan times follow the display mode; these assertions are on the machine-local words, so the class runs in Local mode. */
+    private readonly TimeDisplayMode _savedMode = ViewerTimeHelper.CurrentDisplayMode;
+
+    public ViewerAgentAlertsTextTests() => ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+
+    public void Dispose() => ViewerTimeHelper.CurrentDisplayMode = _savedMode;
+
+    public static TheoryData<TimeDisplayMode> Modes => new() { TimeDisplayMode.ServerTime, TimeDisplayMode.UTC, TimeDisplayMode.LocalTime };
+
+    /// <summary>The time of <paramref name="utc"/> as each display mode words it on the page's clock (#8576), to the second with its zone: UTC in
+    /// Server and UTC modes, as the refresh stamp beside it reads, and this machine's time with this machine's zone name in Local mode.</summary>
+    private static string Worded(DateTime utc, TimeDisplayMode mode) => mode switch
+    {
+        TimeDisplayMode.ServerTime or TimeDisplayMode.UTC => utc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture) + " UTC",
+        _ => LocalWorded(utc),
+    };
+
+    private static string LocalWorded(DateTime utc) =>
+        TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.Local).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture)
+        + " " + (TimeZoneInfo.Local.IsDaylightSavingTime(utc) ? TimeZoneInfo.Local.DaylightName : TimeZoneInfo.Local.StandardName);
+
+    [Theory]
+    [MemberData(nameof(Modes))]
+    public void TheStatusLineCaptureTime_FollowsTheDisplayMode_OnTheRefreshStampsClock(TimeDisplayMode mode)
+    {
+        ViewerTimeHelper.CurrentDisplayMode = mode;
+        var captured = new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.EndsWith("Captured: " + Worded(captured, mode), ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray())), StringComparison.Ordinal);
+    }
+
+    /// <summary>#8576: the capture time is stamped to the second and names its zone, on the same clock as the tab's "Last refreshed" stamp. Server
+    /// Time has no server clock to apply to this page's stamps, so it reads UTC and says so, whatever the picked server's offset.</summary>
+    [Fact]
+    public void TheStatusLineCaptureTime_NamesItsZone_AndServerModeReadsUtcAsTheRefreshStampDoes()
+    {
+        var read = Read(Complete().ToArray());
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.EndsWith("Captured: 2026-10-28 12:00:00 UTC", ViewerAgentAlertsText.StatusLine(read), StringComparison.Ordinal);
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+        Assert.EndsWith("Captured: " + LocalWorded(new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc)), ViewerAgentAlertsText.StatusLine(read), StringComparison.Ordinal);
+    }
+
+
     private static AgentAlertFact Alert(int id, string name, int severity = 0, int message = 0, bool enabled = true, int operators = 1, bool? fired = null) =>
         new(id, name, enabled, "MSSQLSERVER", message, severity, null, null, null, 300, new DateTime(2026, 10, 27, 13, 5, 9), null, 4, null,
             operators > 0 ? 1 : 0, operators, null, fired);
@@ -55,7 +104,7 @@ public sealed class ViewerAgentAlertsTextTests
 
         Assert.Equal(
             [
-                new ViewerAgentAlertGapRow("No alert for severity 21, 23.", "21, 23"),
+                new ViewerAgentAlertGapRow("No alert for severity 21, 23.", ""),
                 new ViewerAgentAlertGapRow("An enabled alert tells no operator, so nobody hears when it fires.", "Sev 20"),
             ],
             rows);
@@ -66,17 +115,17 @@ public sealed class ViewerAgentAlertsTextTests
     {
         var rows = ViewerAgentAlertsText.GapRows(Read(Complete().Where(a => a.MessageId is not (824 or 825)).ToArray()));
 
-        Assert.Equal([new ViewerAgentAlertGapRow("No alert for error 824, 825.", "824, 825")], rows);
+        Assert.Equal([new ViewerAgentAlertGapRow("No alert for error 824, 825.", "")], rows);
     }
 
     [Fact]
     public void TheStatusLine_NamesTheWord_TheCount_AndTheCaptureTime()
     {
         var read = Read(Complete().Where(a => a.Severity != 21).ToArray());
-        var captured = new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc).ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+        var captured = LocalWorded(new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc));
 
-        Assert.Equal($"Alert setup: gaps   Alerts defined: 9   Captured: {captured}", ViewerAgentAlertsText.StatusLine(read));
-        Assert.StartsWith("Alert setup: ok   Alerts defined: 10", ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray())), StringComparison.Ordinal);
+        Assert.Equal($"Alert setup: 1 gap   Alerts defined: 9   Captured: {captured}", ViewerAgentAlertsText.StatusLine(read));
+        Assert.StartsWith("Alert setup: OK   Alerts defined: 10", ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray())), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -109,8 +158,12 @@ public sealed class ViewerAgentAlertsTextTests
             Alert(8, "Err 823", message: 823, enabled: false, fired: false),
             Alert(9, "Sev 19", severity: 19, fired: null)));
 
-        Assert.Equal(new ViewerAgentAlertRow("Sev 20", "yes", "20", "0", "", "0", "yes", "4", "2026-10-27T13:05:09"), rows[0]);
-        Assert.Equal(new ViewerAgentAlertRow("Err 823", "no", "0", "823", "", "1", "no", "4", "2026-10-27T13:05:09"), rows[1]);
+        /* #7243: the server's own clock is written in the viewer's date and time format, not as an ISO stamp, and the grid sorts on the time. */
+        var fired = new DateTime(2026, 10, 27, 13, 5, 9);
+        var shown = fired.ToString("G", System.Globalization.CultureInfo.CurrentCulture);
+        Assert.NotEqual("2026-10-27T13:05:09", shown);
+        Assert.Equal(new ViewerAgentAlertRow("Sev 20", "yes", "20", "0", "", "0", "yes", "4", shown, fired), rows[0]);
+        Assert.Equal(new ViewerAgentAlertRow("Err 823", "no", "0", "823", "", "1", "no", "4", shown, fired), rows[1]);
         Assert.Equal("—", rows[2].FiredInWindow);
     }
 

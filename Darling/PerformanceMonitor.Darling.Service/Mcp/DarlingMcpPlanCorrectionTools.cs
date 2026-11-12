@@ -68,7 +68,7 @@ public sealed class DarlingMcpPlanCorrectionTools
     }
 
     [McpServerTool(Name = "get_plan_corrections"), Description(
-        "Gets SQL Server automatic plan correction (APC) activity: FORCE_LAST_GOOD_PLAN recommendations/actions over the window ending at as_of, newest capture first, plus each database's automatic-tuning enablement. Rows recur per capture, not per distinct recommendation. THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated means more rows existed; oldest/newest_returned_collection_time bound the page. automatic_tuning ignores the window: the latest snapshot; each row's as_of says when. All timestamps are UTC. No rows and no automatic_tuning: empty (not_collected checked first). <<GUIDE>> Gets SQL Server automatic plan correction (APC) activity: the engine's FORCE_LAST_GOOD_PLAN recommendations and actions over the window, NEWEST CAPTURE FIRST, plus each database's current automatic-tuning enablement state. Use when a query's plan changed suddenly - APC forcing or unforcing a plan is a first-class explanation - or to check whether automatic tuning is on and actually working (desired vs actual state). Rows come from sys.dm_db_tuning_recommendations captured on a schedule, and the collector RE-CAPTURES every open recommendation on every cycle, so the same recommendation appears once per capture and a few open recommendations fill a page fast. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: recommendations_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_collection_time / newest_returned_collection_time bound the page - under newest-first ordering the oldest stamp IS how far back this read reached, and on a server with open recommendations a week-long request at the default limit reaches back hours, not days. Raise limit or narrow hours_back when truncated is true. automatic_tuning is a latest-snapshot read that ignores the window entirely; its as_of stamps say when. A recommendation's state moves through Active/Verifying/Success/Reverted as the engine acts. query_text is a preview by default, capped at 150 characters with query_text_truncated marking whichever rows were actually cut - pass full_text=true for the whole regressed statement on every row instead, the same opt-in get_store_query_stats uses. Every timestamp here is UTC, including valid_since / last_refresh / execute_action_initiated_time / revert_action_initiated_time - sys.dm_db_tuning_recommendations reports those four in UTC and they are stored and returned unconverted - so they order correctly against collection_time and against get_query_store_regressions.")]
+        "Gets SQL Server automatic plan correction (APC) activity: FORCE_LAST_GOOD_PLAN recommendations/actions over the window ending at as_of, newest capture first, plus each database's automatic-tuning enablement. Rows recur per capture, not per distinct recommendation. THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated means more rows existed; oldest/newest_returned_collection_time bound the page. automatic_tuning ignores the window: the latest snapshot; each row's as_of says when. All timestamps are UTC. No rows and no automatic_tuning: empty (not_collected checked first). <<GUIDE>> Gets SQL Server automatic plan correction (APC) activity: the engine's FORCE_LAST_GOOD_PLAN recommendations and actions over the window, NEWEST CAPTURE FIRST, plus each database's current automatic-tuning enablement state. Use when a query's plan changed suddenly - APC forcing or unforcing a plan is a first-class explanation - or to check whether automatic tuning is on and actually working (desired vs actual state). Rows come from sys.dm_db_tuning_recommendations captured on a schedule, and the collector RE-CAPTURES every open recommendation on every cycle, so the same recommendation appears once per capture and a few open recommendations fill a page fast. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: recommendations_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_collection_time / newest_returned_collection_time bound the page - under newest-first ordering the oldest stamp IS how far back this read reached, and on a server with open recommendations a week-long request at the default limit reaches back hours, not days. Raise limit or narrow hours_back when truncated is true. automatic_tuning is a latest-snapshot read that ignores the window entirely; its as_of stamps say when. A recommendation's state moves through Active/Verifying/Success/Reverted as the engine acts. query_text is a preview by default, capped at 150 characters with query_text_truncated marking whichever rows were actually cut - pass full_text=true for the whole regressed statement on every row instead, the same opt-in get_query_store_top uses. Every timestamp here is UTC, including valid_since / last_refresh / execute_action_initiated_time / revert_action_initiated_time - sys.dm_db_tuning_recommendations reports those four in UTC and they are stored and returned unconverted - so they order correctly against collection_time and against get_query_store_regressions.")]
     public static Task<string> GetPlanCorrections(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -136,15 +136,19 @@ public sealed class DarlingMcpPlanCorrectionTools
             if (tuning.Count == 0 && rows.Count == 0)
             {
                 return McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "plan_correction", cancellationToken), databaseFilter.Describe())
-                    ?? McpHelpers.StatusForDatabase("empty",
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.StatusForDatabase("empty",
                         !databaseFilter.IsAll
                             ? $"No plan correction data found{DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)}."
-                            : "No plan correction data collected for this server. The collector runs against SQL Server 2017+ " +
-                        "(sys.dm_db_tuning_recommendations); a server that has never produced a row here either predates " +
-                        "that or has no databases with Query Store on.",
+                            /* #7813: the version decides the sentence, read from the registry the way the PVS tool reads it. */
+                            : PerformanceMonitor.Collectors.PlanCorrectionCollector.NoRowsMessage(await DarlingMcpPvsTools.ReadTargetAsync(postgres, resolved.ServerId, cancellationToken)),
                         databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
-                        notice.AsHints());
+                        notice.AsHints()), cancellationToken, windowStart);
             }
+
+            /* The plan_correction collector's effective schedule on the server, for the automatic-tuning snapshot's staleness note. */
+            var tuningSchedule = tuning.Count > 0
+                ? await DarlingGatedCollectorRows.CollectorScheduleAsync(postgres, resolved.ServerId, "plan_correction", cancellationToken)
+                : default;
 
             var recommendations = page.Select(r => new
             {
@@ -194,6 +198,16 @@ public sealed class DarlingMcpPlanCorrectionTools
                     force_last_good_plan_reason = t.Reason,
                     as_of = t.CollectionTime.ToString("o"),
                 }),
+                /* The latest snapshot whatever its age: on a readable secondary the collector no longer writes one, so the rows are
+                   the last primary-role capture, and the note says so and how old they are. The age is measured at the window's
+                   end (as_of when given), so a read of a past instant is not graded against the present. */
+                automatic_tuning_note = QueryStoreSnapshotStaleness.Join(
+                    tuning.Count > 0 ? await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken) : null,
+                    tuning.Count > 0
+                        ? QueryStoreSnapshotStaleness.Note(
+                            DateTime.SpecifyKind(tuning.Max(t => t.CollectionTime), DateTimeKind.Utc), now, "plan_correction",
+                            tuningSchedule.Enabled, tuningSchedule.IntervalMinutes)
+                        : null),
                 /* #3541 A3: the page described as a page. Newest-capture-first makes it a contiguous slice of
                    the window's tail, so the oldest stamp IS the reach; null when the window held no
                    recommendation rows and only the tuning snapshot answered. */

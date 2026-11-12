@@ -159,7 +159,7 @@ public sealed class ViewerOverviewExplainsItselfTests
 
         Assert.Equal(1, pg.MeasuredMetricCount);
         Assert.Equal(6, pg.MetricCount);
-        Assert.StartsWith("Healthy — 1 of 6 measured", pg.StatusTooltip, StringComparison.Ordinal);
+        Assert.StartsWith("Healthy: 1 of 6 measured", pg.StatusTooltip, StringComparison.Ordinal);
         Assert.DoesNotContain("every metric on this card", pg.StatusTooltip, StringComparison.Ordinal);
 
         /* The counts are the shared classifier's own fold over the card's metrics — the service's
@@ -180,7 +180,7 @@ public sealed class ViewerOverviewExplainsItselfTests
         Assert.Equal(6, card.MeasuredMetricCount);
         Assert.Equal(6, card.MetricCount);
         Assert.StartsWith(
-            "Healthy — every metric on this card is inside its threshold", card.StatusTooltip, StringComparison.Ordinal);
+            "Healthy: every metric on this card is inside its threshold", card.StatusTooltip, StringComparison.Ordinal);
         Assert.DoesNotContain("measured", card.StatusTooltip, StringComparison.Ordinal);
     }
 
@@ -194,7 +194,7 @@ public sealed class ViewerOverviewExplainsItselfTests
         var card = Busy();
 
         Assert.Equal(4, card.MeasuredMetricCount);
-        Assert.StartsWith("Critical — CPU 96%, Blocking 6 · 4 of 6 measured", card.StatusTooltip, StringComparison.Ordinal);
+        Assert.StartsWith("Critical: SQL CPU 96%, Blocking 6 (longest block 1.2 min) · 4 of 6 measured", card.StatusTooltip, StringComparison.Ordinal);
         Assert.Contains(FleetRollup.BuildReason(card), card.StatusTooltip, StringComparison.Ordinal);
     }
 
@@ -205,7 +205,7 @@ public sealed class ViewerOverviewExplainsItselfTests
     {
         var tooltip = FleetRollup.BuildStatusTooltip(Offline());
 
-        Assert.StartsWith("Offline — no recent collection", tooltip, StringComparison.Ordinal);
+        Assert.StartsWith("Offline: no recent collection", tooltip, StringComparison.Ordinal);
         Assert.Equal(1, CountOccurrences(tooltip, "Offline"));
         Assert.StartsWith("Awaiting first collection", FleetRollup.BuildStatusTooltip(Awaiting()), StringComparison.Ordinal);
     }
@@ -224,7 +224,7 @@ public sealed class ViewerOverviewExplainsItselfTests
         var unknown = UnknownStatus();
 
         Assert.Equal("Unknown", unknown.StatusDisplay);
-        Assert.StartsWith("Unknown — no collection status for this server", unknown.StatusTooltip, StringComparison.Ordinal);
+        Assert.StartsWith("Unknown: no collection status for this server", unknown.StatusTooltip, StringComparison.Ordinal);
         Assert.DoesNotContain("Healthy", unknown.StatusTooltip, StringComparison.Ordinal);
 
         /* An unknown card with a genuinely bad metric still gets the metric named — the status word being

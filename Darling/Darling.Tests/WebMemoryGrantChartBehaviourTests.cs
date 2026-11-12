@@ -71,10 +71,10 @@ public sealed class WebMemoryGrantChartBehaviourTests
         // Sizing: the desktop's five metrics (the two ceilings included) for each of two pools. Activity: four metrics each.
         var sizing = charts[0];
         Assert.Equal(10, sizing.GetProperty("series").GetArrayLength());
-        Assert.Contains("Pool 2: Max Target MB (ceiling)", sizing.GetProperty("series").EnumerateArray().Select(s => s.GetProperty("label").GetString()));
+        Assert.Contains("Default pool: Max Target MB (ceiling)", sizing.GetProperty("series").EnumerateArray().Select(s => s.GetProperty("label").GetString()));
         var activity = charts[1];
         Assert.Equal(8, activity.GetProperty("series").GetArrayLength());
-        Assert.Contains("Pool 1: Forced Grants", activity.GetProperty("series").EnumerateArray().Select(s => s.GetProperty("label").GetString()));
+        Assert.Contains("Internal pool: Forced Grants", activity.GetProperty("series").EnumerateArray().Select(s => s.GetProperty("label").GetString()));
 
         // Three collection times, each its own x position: the window is a series, not one instant.
         var times = sizing.GetProperty("points").EnumerateArray().Select(p => p.GetProperty("collection_time").GetString()).ToArray();
@@ -120,5 +120,14 @@ public sealed class WebMemoryGrantChartBehaviourTests
         var r = Run("failed");
         Assert.Empty(r.GetProperty("charts").EnumerateArray());
         Assert.Equal(2, r.GetProperty("errors").GetArrayLength());
+    }
+
+    /// <summary>#7945: the activity chart's points are bucket means of counts (waiters, grantees), so a mean of 0.4 waiters is a real figure.
+    /// Its tooltip prints 0.4 and 2.5 as they are, and a whole count still prints whole.</summary>
+    [Fact]
+    public void AnActivityTooltip_PrintsABucketMeanUnderOne_NotZero()
+    {
+        var activity = Run("series").GetProperty("charts")[1];
+        Assert.Equal(new[] { "0.4", "2.5", "3" }, activity.GetProperty("tooltip").EnumerateArray().Select(t => t.GetString()));
     }
 }

@@ -46,8 +46,9 @@
  */
 
 import { keepScroll, refreshGridInPlace, replaceNodes } from "../refresh-in-place.js";
-import { el, mount, apiGetFleet, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, storeHash } from "../util.js";
-import { getDatabaseFilter } from "../viewer-local.js";
+import { keepLonePanelsWide } from "../panel-layout.js";
+import { el, mount, apiGet, apiGetFleet, setChartDataStart, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, localizeIsoText, storeHash, clampTileDetails } from "../util.js";
+import { getDatabaseFilter, hasDatabaseFilter, isRememberedPostgres, rememberEngine, rememberedServerId, rememberServerId } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
 import { serverTabsFor, isPostgresTarget, findServerTab, tabNote } from "./server-tabs.js";
@@ -133,12 +134,43 @@ onPageLeave(() => {
   setPanelSignal();
   renderGeneration++;
   current = { server: null, tab: null };
+  setChartDataStart(null);
 });
+
+/* #7386: when each server was first collected (UTC-epoch ms), so a chart over a range longer than the server's history starts its
+   axis where the data starts. One small read per server (/api/server-data-start, not the fleet roll-up), kept for ten minutes.
+   A failed read leaves what the page had, and with nothing it leaves every chart on the picked range. */
+const DATA_START_MAX_AGE_MS = 600000;
+const dataStarts = new Map();
+
+/** Give the charts the data start for `server` now (the kept answer, however old) and read it again when it is older than ten minutes. */
+function loadServerDataStart(server, generation) {
+  const kept = dataStarts.get(server);
+  setChartDataStart(kept ? kept.ms : null);
+  if (kept && Date.now() - kept.at < DATA_START_MAX_AGE_MS) return;
+  (async () => {
+    const res = await apiGet("/api/server-data-start?server=" + encodeURIComponent(server));
+    if (res.kind !== "data") return;
+    const ms = Date.parse(res.data && res.data.data_start_utc);
+    const answer = Number.isFinite(ms) ? ms : null;
+    dataStarts.set(server, { ms: answer, at: Date.now() });
+    if (generation === renderGeneration && current.server === server) setChartDataStart(answer);
+  })();
+}
 
 /* The last card seen for a server name, so a repeat render can choose its registry without a round trip. Keyed
    on the ROUTE's name (which may be either the server name or the display name — the same key loadServerCard
    matches on), module-scoped like pageHours, and bounded by the number of servers visited in one session. */
 const lastCard = new Map();
+
+/* #7395: the header tiles the reader opened on this server (the Protection tile's list of overdue databases), by label. The head is
+   drawn again on every poll and every tab click, and a tile that snapped shut on each one could not be read. Moving to another
+   server starts closed. */
+let openTiles = { server: null, labels: new Set() };
+function openTilesFor(server) {
+  if (openTiles.server !== server) openTiles = { server, labels: new Set() };
+  return openTiles.labels;
+}
 
 /** How long a tab click may reuse the remembered card (#6310): the 60 s poll's cadence, so a click never shows a header older than one poll. */
 export const REMEMBERED_CARD_MAX_AGE_MS = 60000;
@@ -225,17 +257,20 @@ export function rangeContext(nowMs = Date.now()) {
          The range stays held (the next tab may take all of it), and reachNoteText says what happened (#5562 review r1 M4). */
       const cut = tabReachRefusal(resolved.range.spanMs, reach) != null;
       const range = cut ? { ...resolved.range, startMs: resolved.range.endMs - reach * HOUR_MS, spanMs: reach * HOUR_MS } : resolved.range;
+      /* #7932: the window is the read's, not the picked pair's. A fixed range whose end has not arrived (today's date alone, a date-box end later
+         today) is read live up to now, so its `live` and `endMs` come from readWindow: the charts, the slicer, the label and the held range all
+         end where the read did. The range key below still names the picked pair. */
       const w = readWindow(range, nowMs);
-      setActiveRange({ server: current.server, hours: w.hours, startMs: range.startMs, endMs: range.endMs, asOf: w.asOf });
+      setActiveRange({ server: current.server, hours: w.hours, startMs: range.startMs, endMs: w.endMs, asOf: w.asOf });
       /* Totals and rankings are read over whole hours back from the end, so they can begin earlier than the picked start:
          when the span is not a whole number of hours the label says where they begin. */
       const aggregateFrom = w.endMs - w.hours * HOUR_MS;
       const rounded = aggregateFrom < range.startMs ? "; totals and rankings aggregate from " + localTime(new Date(aggregateFrom).toISOString()) : "";
-      const times = localTime(new Date(range.startMs).toISOString()) + " to " + (range.live ? "now" : localTime(new Date(range.endMs).toISOString()));
+      const times = localTime(new Date(range.startMs).toISOString()) + " to " + (w.live ? "now" : localTime(new Date(w.endMs).toISOString()));
       const picked = custom.spec.kind === "relative" || custom.spec.kind === "calendar" ? specName(custom.spec).toLowerCase() : "custom";
       const named = cut ? "last " + reachText(reach) + " of " + picked : picked;
       /* #6301: the exact pair and a key that changes when the range does, for the time slicer on the Top Queries and Top Procedures cards. */
-      const endMs = range.live ? nowMs : range.endMs;
+      const endMs = w.live ? nowMs : w.endMs;
       /* The key names the range the reader PICKED (resolved.range), not this tab's cut of it: tabs with different reach must share one key, or
          a tab switch would drop the narrowing (the held window is clamped to each tab's reach instead). */
       const pickedRange = resolved.range;
@@ -304,6 +339,7 @@ export function renderServer(main, server, tabId, opts) {
   if (!isPoll && cancelRefresh) { cancelRefresh(); cancelRefresh = null; }
   keepGrid = false;
   current = { server, tab: null };
+  loadServerDataStart(server, generation);
 
   const dot = el("span", { class: "dot" });
   /* The route's server KEY until the fleet card is known; fillServerHead then swaps in the display name. */
@@ -328,7 +364,11 @@ export function renderServer(main, server, tabId, opts) {
   const tabsSlot = el("div", { class: "subtabs-slot" }, [loadingStrip()]);
   /* The notice for a carried-over range this tab reads only part of (reachNoteText), between the tab bar and the panels. */
   reachSlot = el("div", { class: "reach-note-slot" });
-  if (!keep && !inPlace) gridNode = el("div", { class: "panel-grid" });
+  if (!keep && !inPlace) {
+    gridNode = el("div", { class: "panel-grid" });
+    /* #7534: a half-width panel with no partner on its row takes the whole row, whatever tab it is on and whichever panels hide. */
+    keepLonePanelsWide(gridNode);
+  }
   if (inPlace) {
     /* The grid is not detached: replacing only the pieces around it keeps its panels' scroll positions and the reader's place. */
     keepScroll(() => replaceNodes(main, shellNodes, [head, whySlot, tabsSlot, reachSlot]));
@@ -344,11 +384,19 @@ export function renderServer(main, server, tabId, opts) {
   let painted = null;
   /* The offline state the painted panels were built with (ctx.offline), so a fresh card that flips it repaints them. */
   let paintedOffline = false;
+  /* #8554: true while the panels on screen were started before the card arrived and the tab bar is not drawn yet. */
+  let beforeCard = false;
   if (remembered) {
     fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, remembered.card, remembered.reason);
     fillDatabaseFilter(dbSlot, server, remembered.card);
     painted = paintTabsKeeping(keep, tabsSlot, server, tabId, remembered.card, inPlace);
     paintedOffline = serverIsOffline(server);
+  } else if (!isPoll && mayStartBeforeCard(server, tabId)) {
+    /* The fleet roll-up of a big store takes a second or more, and the panels' reads need only the route's server. The card says
+       which tab set the server has, so the reads start on the SQL Server tabs, the set an unclaimed server has always had, and the
+       card's arrival below keeps those panels when it agrees, or draws the right set when it does not. */
+    painted = startPanelsBeforeCard(server, tabId);
+    beforeCard = true;
   }
 
   /* /api/fleet is fetched again only to place a server this page has no card for yet, or on the poll's real
@@ -359,12 +407,41 @@ export function renderServer(main, server, tabId, opts) {
   /* #6310: a remembered card is reused for a tab click only while it is young. The charts re-read on every click, so an old card
      kept the header tiles (Deadlocks 0) behind a chart that already showed the event, for as long as the poll was slow or off. */
   if (!remembered || isPoll || rememberedCardIsStale(remembered, Date.now())) {
-    loadServerCard(server, (card, reason) => {
+    loadServerCard(server, (card, reason, found) => {
       /* A newer render has started since this fetch went out — everything below writes module state or mounts
          into nodes this render no longer owns, so the only correct thing to do with a stale answer is drop it. */
       if (generation !== renderGeneration) return;
 
-      if (card) lastCard.set(server, { card, reason, at: Date.now() });
+      /* #8741: the fleet answered, and no one server answers to the route's name. The read API refuses or guesses on such a name,
+         so the page says so and reads nothing, rather than drawing panels under a header it cannot fill. */
+      if (found && (found.kind === "none" || found.kind === "ambiguous")) {
+        lastCard.delete(server);
+        showUnknownServer(tabsSlot, gridNode, dot, unknownServerText(server, found));
+        beforeCard = false;
+        return;
+      }
+
+      /* #8741: the name matched one server only in part (or in another letter case). Open the page by that server's own name, as the
+         sidebar does: the card is kept under the new name so the render that follows paints at once, and the link is replaced, not
+         pushed, so Back does not return to the partial name. */
+      if (card && found && !found.canonical && found.kind !== "failed") {
+        const exactName = cardRouteName(card);
+        if (exactName && exactName !== server) {
+          lastCard.set(exactName, { card, reason, at: Date.now() });
+          rememberEngine(exactName, isPostgresTarget(card));
+          rememberServerId(exactName, card.server_id);
+          const next = storeHash("#/server/" + encodeURIComponent(exactName)) + (tabId ? "/" + encodeURIComponent(tabId) : "");
+          if (typeof history !== "undefined" && history.replaceState) history.replaceState(null, "", next);
+          window.dispatchEvent(new Event("hashchange"));
+          return;
+        }
+      }
+
+      if (card) {
+        lastCard.set(server, { card, reason, at: Date.now() });
+        rememberEngine(server, isPostgresTarget(card));
+        rememberServerId(server, card.server_id);
+      }
       fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason);
       fillDatabaseFilter(dbSlot, server, card);
 
@@ -376,9 +453,39 @@ export function renderServer(main, server, tabId, opts) {
       if (!painted || (card && serverTabsFor(card) !== painted) || serverIsOffline(server) !== paintedOffline) {
         painted = paintTabsKeeping(keep && !painted, tabsSlot, server, tabId, card, inPlace);
         paintedOffline = serverIsOffline(server);
+      } else if (beforeCard) {
+        /* The card agrees with the set the panels were started on (#8554): draw the tab bar and notes around them, and read nothing again. */
+        painted = paintTabsKeeping(true, tabsSlot, server, tabId, card, inPlace);
       }
+      beforeCard = false;
     });
   }
+}
+
+/** Whether the page may start a server's panel reads before its fleet card arrives (#8554). Not for a server this browser has seen as
+ *  PostgreSQL (its tab set is the other one), not for a tab only the PostgreSQL set has, and not while a database filter is saved and
+ *  this browser does not know the server's id: a filter is keyed by the card's server id, so reads sent without it would be the
+ *  unfiltered ones. The one fleet roll-up that gate waits for is the server's own store's, never the other stores' (#8554). */
+function mayStartBeforeCard(server, tabId) {
+  if (isRememberedPostgres(server)) return false;
+  /* A saved filter is looked up by the card's server id. With the id this browser remembered for the server the filter is known now, so the
+     reads leave with it (or without one, when none is saved for it). With no remembered id the filter cannot be told from the route, and the
+     reads wait for the card of this server's own store, as before. */
+  if (hasDatabaseFilter() && rememberedServerId(server) === null) return false;
+  return !tabId || serverTabsFor(null).some((t) => t.id === tabId);
+}
+
+/** Start the tab's panels on the default tab set for a server with no card yet. The tab bar and its notes wait for the card, which
+ *  says whether this is the set to show. Returns the registry the panels were built from, as paintTabs does. */
+function startPanelsBeforeCard(server, tabId) {
+  const tabs = serverTabsFor(null);
+  const tab = findServerTab(tabId, tabs);
+  current = { server, tab };
+  gridKey = server + "|" + (tabId || "");
+  /* The previous server's note slot is gone from the page: the notes draw with the tab bar, once the card is in. */
+  tabNoteSlot = null;
+  redrawPanels();
+  return tabs;
 }
 
 /* paintTabs, leaving the panels the previous render drew in place when `keep`. The flag is raised only for this one
@@ -498,7 +605,9 @@ function redrawPanels() {
    card's id keys the choice, not the route's name, so a rename keeps it. */
 function applyDatabaseFilter() {
   const card = current.server ? (lastCard.get(current.server) || {}).card : null;
-  const databases = card && !isPostgresTarget(card) && card.server_id ? getDatabaseFilter(card.server_id) : [];
+  /* #8554: before the card is in, the id this browser remembered for the server stands in for it. */
+  const id = card ? card.server_id : current.server ? rememberedServerId(current.server) : null;
+  const databases = (!card || !isPostgresTarget(card)) && id ? getDatabaseFilter(id) : [];
   setActiveDatabaseFilter({ server: current.server, databases });
 }
 
@@ -601,16 +710,72 @@ function heldSpanMs(nowMs = Date.now()) {
 function loadServerCard(server, onCard) {
   (async () => {
     const res = await apiGetFleet();
-    if (res.kind !== "data") return onCard(null, null);
+    if (res.kind !== "data") return onCard(null, null, { kind: "failed" });
 
-    const matches = (c) => c.server_name === server || c.display_name === server;
-    const card = (res.data.cards || []).find(matches) || null;
+    /* A roll-up with no cards at all is a store that has not built its fleet yet, not proof that this server is unknown: like a failed
+       read it leaves the page as it is. */
+    if (!(res.data.cards || []).length) return onCard(null, null, { kind: "failed" });
+    const found = resolveFleetCard(res.data.cards, server);
+    const card = found.card;
     /* The reason belongs to the RANKING, not to the card, so it travels as its own value rather than being
        stapled onto the card object — and a server outside the ranking has none, which stays a null here
        rather than becoming a sentence invented in the browser. */
     const ranked = (res.data.worst_servers || []).find((w) => w.display_name === server);
-    onCard(card, ranked && ranked.reason ? ranked.reason : null);
+    onCard(card, ranked && ranked.reason ? ranked.reason : null, found);
   })();
+}
+
+/** The fleet card a route's server name answers to (#8741), by the rule the read API resolves a server_name with
+ *  (ServerNameMatcher.Match, a read): a single exact storage name, then every card whose storage or display name equals the name
+ *  ignoring case, then every card whose storage or display name contains it. One card answers; none is "none"; several is "ambiguous"
+ *  and carries them. `kind` is "exact" or "partial" for an answer, and `canonical` is true when the name is already the card's own
+ *  storage or display name (no link rewrite). */
+export function resolveFleetCard(cards, name) {
+  const want = String(name == null ? "" : name).trim();
+  if (!want) return { kind: "none", card: null, matches: [] };
+  const lower = want.toLowerCase();
+  const has = (value, test) => typeof value === "string" && test(value.toLowerCase());
+  const one = (kind, list) => ({ kind, card: list[0], matches: list, canonical: list[0].server_name === name || list[0].display_name === name });
+  const many = (list) => ({ kind: "ambiguous", card: null, matches: list });
+
+  const bySame = cards.filter((c) => c.server_name === want);
+  if (bySame.length === 1) return one("exact", bySame);
+  const byStored = cards.filter((c) => has(c.server_name, (v) => v === lower));
+  if (byStored.length === 1) return one("exact", byStored);
+
+  const exact = cards.filter((c) => has(c.server_name, (v) => v === lower) || has(c.display_name, (v) => v === lower));
+  if (exact.length === 1) return one("exact", exact);
+  if (exact.length > 1) return many(exact);
+
+  const partial = cards.filter((c) => has(c.server_name, (v) => v.includes(lower)) || has(c.display_name, (v) => v.includes(lower)));
+  if (partial.length === 1) return one("partial", partial);
+  if (partial.length > 1) return many(partial);
+  return { kind: "none", card: null, matches: [] };
+}
+
+/** The route name a card is opened by from the sidebar and the fleet page: its storage name, else its display name. */
+function cardRouteName(card) {
+  return card.server_name || card.display_name;
+}
+
+/** Replace the page's panels with the not-found sentence (#8741) and stop the reads that are out. Nothing is read for the name after this:
+ *  `current` is emptied, so a range or poll redraw has no server to read for. */
+function showUnknownServer(tabsSlot, grid, dot, text) {
+  if (panelAbort) panelAbort.abort();
+  setPanelSignal();
+  current = { server: null, tab: null };
+  gridKey = "";
+  dot.className = "dot";
+  if (grid) mount(grid, []);
+  mount(tabsSlot, el("div", { class: "strip error", role: "alert", text }));
+}
+
+/** The sentence for a route name that no single server answers to (#8741). The page draws it in place of the panels. */
+function unknownServerText(name, found) {
+  if (found.kind !== "ambiguous") return "No monitored server is named \"" + name + "\". Open one from the sidebar or the Fleet page.";
+  const names = found.matches.slice(0, 5).map((c) => c.display_name || c.server_name);
+  const more = found.matches.length > names.length ? " and " + (found.matches.length - names.length) + " more" : "";
+  return "\"" + name + "\" matches " + found.matches.length + " monitored servers (" + names.join(", ") + more + "). Open one from the sidebar or the Fleet page.";
 }
 
 /* The server header's title, status dot, band badge, engine badge and the WHY beneath them, all from the card above.
@@ -622,7 +787,7 @@ function loadServerCard(server, onCard) {
  * rendered by fleet.js's own metricBands so there is one implementation rather than two, the reason is the same
  * sentence the fleet page shows, and the engine is the token the store recorded. A server outside the ranking
  * gets the chips and no sentence, because inventing one here is the second derivation this comment refuses. */
-function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason) {
+export function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason) {
   if (!card) return;
 
   /* The title names the server the way the sidebar, the fleet cards and every other page do: by display name.
@@ -631,10 +796,12 @@ function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason
      in the heading. */
   if (card.display_name) title.textContent = card.display_name;
 
+  /* #7726: the unreachable-since reason has no seconds; the card's connect_down_since has them, so the strip prints the tile's own time. */
+  const sinceOpts = { minutes: true, since: card.connect_down_since || null };
   dot.className = "dot " + bandClass(card.band);
   mount(
     badgeSlot,
-    el("span", { class: "badge " + bandClass(card.band), text: card.status || card.band, title: reason || null })
+    el("span", { class: "badge " + bandClass(card.band), text: card.status || card.band, title: reason ? localizeIsoText(reason, sinceOpts) : null })
   );
 
   /* The engine badge is the answer to "why does this server have six tabs and that one twelve". Only a card
@@ -646,7 +813,8 @@ function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason
   }
 
   mount(whySlot, [
-    reason ? el("div", { class: "server-reason " + bandClass(card.band), text: reason }) : null,
-    metricBands(card),
+    reason ? el("div", { class: "server-reason " + bandClass(card.band), text: localizeIsoText(reason, sinceOpts) }) : null,
+    /* current.server is the server this render drew (set at the top of renderServer), so a redraw of the same server keeps its open tiles. */
+    clampTileDetails(metricBands(card), undefined, openTilesFor(current.server)),
   ]);
 }

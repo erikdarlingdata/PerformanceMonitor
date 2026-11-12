@@ -176,6 +176,28 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         Assert.Empty(Strings(r, "errors"));
     }
 
+    /// <summary>#7586: on the Queries tab a row's History button runs the card's own pick closure: the Query picker moves to that row's
+    /// hash and database, the trend is read for that row, and the picker scrolls into view. The closure is the only route to a row's history.</summary>
+    [Fact]
+    public void TheQueriesCardHistoryButton_SelectsThatRowInThePicker_AndReadsItsTrend()
+    {
+        if (!TryRun("historyPicksRow", out var r)) return;
+        var found = r.GetProperty("found");
+        Assert.Equal(2, found.GetProperty("buttons").GetInt32());
+        Assert.Equal("0", found.GetProperty("startedOn").GetString());
+        Assert.Equal("1", found.GetProperty("selected").GetString());
+        var before = found.GetProperty("before").GetInt32();
+        Assert.Equal(1, before);
+        var reads = found.GetProperty("reads").EnumerateArray().ToArray();
+        var read = Assert.Single(reads);
+        Assert.Equal("0xBBB", read.GetProperty("query_hash").GetString());
+        Assert.Equal("db2", read.GetProperty("database_name").GetString());
+        Assert.Equal(1, found.GetProperty("scrolled").GetInt32());
+        // The click's own synchronous work: the scroll starts before the chart slot is redrawn, because the redraw (a loading strip) shortens
+        // the page and a smooth scroll begun after it stops short of the picker.
+        Assert.Equal(new[] { "scroll", "redraw" }, Strings(found, "order"));
+    }
+
     [Fact]
     public void AHandBuiltComposite_IsAskedAgainTheSameWay()
     {
@@ -264,6 +286,45 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         Assert.Equal(0, r.GetProperty("loading").GetInt32());
     }
 
+    /// <summary>#7538, #7651: the Queries tab's Top Queries composite names the databases a read left out. It draws the window note first, then
+    /// the left-out sentence, then the grid; with no window note the left-out sentence is first. A read that left none out draws neither.</summary>
+    [Fact]
+    public void TheTopQueriesCard_DrawsTheLeftOutSentenceAfterTheWindowNote_AndBeforeTheGrid()
+    {
+        const string WindowNote = "The window reaches further back than this server's raw query_stats retains, so the older part of it was not read.";
+        const string LeftOut = "2 databases were left out because the server no longer lists them. They were dropped or detached: a_old, b_old.";
+        var rows = new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject { ["query_id"] = 1, ["query_text"] = "select 1" });
+        string Reply(bool withWindowNote, bool withLeftOut)
+        {
+            var o = new System.Text.Json.Nodes.JsonObject { ["queries"] = rows.DeepClone() };
+            if (withWindowNote)
+            {
+                o["window_truncated"] = true;
+                o["effective_start"] = "2026-01-02T00:00:00.0000000";
+                o["truncation_note"] = WindowNote;
+            }
+
+            if (withLeftOut)
+            {
+                o["databases_left_out"] = new System.Text.Json.Nodes.JsonArray("a_old", "b_old");
+                o["databases_left_out_count"] = 2;
+                o["databases_left_out_note"] = "These databases were left out of this read because the server's newest database snapshot no longer lists them. Name one in database_name to read its history.";
+            }
+
+            return o.ToJsonString();
+        }
+
+        string[] Order(bool withWindowNote, bool withLeftOut)
+        {
+            if (!TryRun("topQueriesLeftOutOrder", out var r, Reply(withWindowNote, withLeftOut))) return Array.Empty<string>();
+            return r.GetProperty("found").GetProperty("order").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        }
+
+        Assert.Equal(new[] { "notice: " + WindowNote, "notice: " + LeftOut, "table" }, Order(true, true));
+        Assert.Equal(new[] { "notice: " + LeftOut, "table" }, Order(false, true));
+        Assert.Equal(new[] { "notice: " + WindowNote, "table" }, Order(true, false));
+    }
+
     /// <summary>
     /// The same routing as source, so it holds where Node is not installed: the descriptor loader runs through the
     /// shared helper, and no hand-built composite calls <c>readTool</c> directly with a window.
@@ -273,7 +334,7 @@ public sealed class WebRangeKeptHistoryBehaviourTests
     {
         var util = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js");
         Assert.Contains("export async function readWithinKeptHistory(fetchWith, params) {", util, StringComparison.Ordinal);
-        Assert.Contains("export function readToolWithinKeptHistory(tool, params, signal) {", util, StringComparison.Ordinal);
+        Assert.Contains("export function readToolWithinKeptHistory(tool, params, signal, options) {", util, StringComparison.Ordinal);
         Assert.Contains("export function keptWindowStrip(res) {", util, StringComparison.Ordinal);
 
         var panels = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js");
@@ -282,12 +343,92 @@ public sealed class WebRangeKeptHistoryBehaviourTests
 
         var serverTabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         Assert.DoesNotMatch(new Regex(@"readTool\(\s*[A-Za-z_""]+\s*,\s*\{[^}]*\bhours\b"), serverTabs);
-        Assert.Contains("const res = await readToolWithinKeptHistory(read, params, signal);", serverTabs, StringComparison.Ordinal);
+        Assert.Contains("const res = await readToolWithinKeptHistory(read, params, signal, plotPx > 0 ? { plotPx } : undefined);", serverTabs, StringComparison.Ordinal);
 
         /* The view editor's three sample reads (Save, Auto-detect fields, the field lists) send the panel's own params,
            hours included, so none of them may call readTool directly. */
         var editor = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "editor.js");
         Assert.DoesNotMatch(new Regex(@"\breadTool\("), editor);
         Assert.Equal(3, Regex.Matches(editor, Regex.Escape("await readToolWithinKeptHistory(p.read, cleanParams(p.params));")).Count);
+    }
+
+    /// <summary>#7945: a trend read's rows are bucket starts whatever name the stamp carries (get_cpu_utilization stamps its buckets under
+    /// sample_time, the trends under time or collection_time, system_health under event_time, the heatmap under time_bucket), so the bucket that
+    /// starts at the range's end lies outside the range and is cut. A read of instants keeps the one stamped at the end.</summary>
+    [Fact]
+    public void TheCustomRange_CutsTheBucketThatStartsAtItsEnd_AndKeepsTheInstantAtItsEnd()
+    {
+        if (!TryRun("customBucketEdge", out var r)) return;
+        var found = r.GetProperty("found");
+        foreach (var read in new[] { "get_cpu_utilization", "get_wait_trend", "get_lock_wait_trend", "get_health_parser_system_health", "get_query_heatmap" })
+        {
+            Assert.True(found.GetProperty(read).GetInt32() == 2, read + " kept " + found.GetProperty(read).GetInt32() + " of 3 buckets; the one that starts at the range's end is outside it");
+        }
+        Assert.Equal(3, found.GetProperty("get_memory_pressure_events").GetInt32());
+    }
+
+    /// <summary>#8577: a read cell that carries <c>as_of</c> (an alert notebook's read cells name the time of the alert) draws the
+    /// <c>hours</c> ending there. It used to draw "the last N hours ending now", so a chart opened a day after its alert had its line outside the
+    /// axis. The cell says which window it is with the composed cell's "Pinned: start to end". A cell with no <c>as_of</c>, or one whose
+    /// <c>as_of</c> is not yet in the past (a link opened within minutes of the alert), keeps the window that ends now and shows no pin.</summary>
+    [Fact]
+    public void AReadCellWithAnAsOf_DrawsTheHoursEndingThere_AndSaysItIsPinned()
+    {
+        const long fourHours = 4L * 3600000;
+
+        if (!TryRun("pinnedReadLine:pinned", out var pinned)) return;
+        var asOf = pinned.GetProperty("found").GetProperty("asOfMs").GetInt64();
+        var window = pinned.GetProperty("chartWindows")[0];
+        Assert.Equal(asOf, window[1].GetInt64());
+        Assert.Equal(asOf - fourHours, window[0].GetInt64());
+        var times = pinned.GetProperty("chartPointTimes")[0].EnumerateArray().Select(t => t.GetInt64()).ToArray();
+        Assert.Equal(2, times.Length);
+        Assert.All(times, t => Assert.InRange(t, asOf - fourHours, asOf));
+        var pin = Assert.Single(Strings(pinned, "pins"));
+        Assert.StartsWith("Pinned: ", pin, StringComparison.Ordinal);
+        Assert.Contains("\u2192", pin, StringComparison.Ordinal);
+
+        foreach (var live in new[] { "live", "future" })
+        {
+            if (!TryRun("pinnedReadLine:" + live, out var r)) return;
+            var found = r.GetProperty("found");
+            var now = found.GetProperty("now").GetInt64();
+            var w = r.GetProperty("chartWindows")[0];
+            Assert.InRange(w[1].GetInt64(), now, now + 10000);
+            Assert.Equal(fourHours, w[1].GetInt64() - w[0].GetInt64());
+            Assert.Empty(Strings(r, "pins"));
+        }
+    }
+
+    /// <summary>#8577: a read's own empty sentence says "in the last 4 hour(s)", which is false for a pinned window. The page names the
+    /// window's end instead, and leaves the sentence of a read that ends now as it was.</summary>
+    [Fact]
+    public void AnEmptyReadWithAnAsOf_NamesTheWindowItEndsAt_NotTheLastHours()
+    {
+        if (!TryRun("pinnedReadEmpty:pinned", out var pinned)) return;
+        var sentence = Assert.Single(Strings(pinned, "empties"));
+        Assert.Contains("in the 4 hours ending ", sentence, StringComparison.Ordinal);
+        Assert.DoesNotContain("in the last", sentence, StringComparison.Ordinal);
+        Assert.Single(Strings(pinned, "pins"));
+
+        if (!TryRun("pinnedReadEmpty:live", out var live)) return;
+        Assert.Contains("in the last 4 hours matched", Assert.Single(Strings(live, "empties")), StringComparison.Ordinal);
+        Assert.Empty(Strings(live, "pins"));
+    }
+
+    /// <summary>#8630: an alert notebook for an alert a day old carries <c>as_of</c> on every read cell. A read whose tool takes no <c>as_of</c>
+    /// (the server summary, the collection health) shows the present, so its cell says so and draws no "Pinned" badge. A read that takes one
+    /// (CPU utilization) keeps its badge.</summary>
+    [Fact]
+    public void AnAlertNotebookCell_WhoseReadTakesNoAsOf_SaysCurrentState_AndNeverPinned()
+    {
+        if (!TryRun("alertNotebookPins", out var r)) return;
+
+        var cells = r.GetProperty("found").GetProperty("cells").EnumerateArray()
+            .ToDictionary(c => c.GetProperty("read").GetString()!, c => Strings(c, "badges"));
+        Assert.Equal(new[] { "Current state, not pinned" }, cells["get_server_summary"]);
+        Assert.Equal(new[] { "Current state, not pinned" }, cells["get_collection_health"]);
+        var pin = Assert.Single(cells["get_cpu_utilization"]);
+        Assert.StartsWith("Pinned: ", pin, StringComparison.Ordinal);
     }
 }

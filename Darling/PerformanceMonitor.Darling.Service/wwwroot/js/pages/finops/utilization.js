@@ -30,6 +30,14 @@ const SUMMARY_SUBTITLE = "Last 24 hours";
 const VERDICT_SEV = { RIGHT_SIZED: "Healthy", OVER_PROVISIONED: "Warning", UNDER_PROVISIONED: "Critical" };
 const BAND_SEV = { good: "Healthy", fair: "Warning", poor: "Critical" };
 
+/* #7562: the sentence under the tiles names two colors, amber from 60% and red above 85%. The service sends that sentence only from 60%, so the tile is
+   colored when the sentence is there: amber, and red above 85%, the same line both desktop bars use. */
+const STOLEN_RED_PCT = 85;
+function stolenSev(memory) {
+  if (!memory || memory.stolen_memory_pct == null || !memory.stolen_memory_note) return undefined;
+  return memory.stolen_memory_pct > STOLEN_RED_PCT ? "Critical" : "Warning";
+}
+
 /* Both come from the shared catalog, so a label or format changed there changes here (the Server page does the same). */
 const CPU_SERIES = READ_FIELDS.get_cpu_utilization.line.series;
 const SIZE_COLUMNS = READ_FIELDS.get_database_sizes.table.columns;
@@ -39,12 +47,12 @@ const SIZE_COLUMNS = READ_FIELDS.get_database_sizes.table.columns;
    the host's RAM, so they are named that way and the read's own memory_note is shown. */
 const AZURE_SQL_DATABASE = { key: "engine_edition", equals: 5 };
 
-const MEMORY_STATS = [
+export const MEMORY_STATS = [
   { key: "captured_at", label: "Collected", format: "reltime", small: true },
   { key: "total_physical_memory_mb", label: "Physical", format: "mb", hideWhen: AZURE_SQL_DATABASE },
   { key: "total_physical_memory_mb", label: "Memory limit", format: "mb", showWhen: AZURE_SQL_DATABASE },
-  { key: "available_physical_memory_mb", label: "Available", format: "mb", hideWhen: AZURE_SQL_DATABASE },
-  { key: "available_physical_memory_mb", label: "Available under limit", format: "mb", showWhen: AZURE_SQL_DATABASE },
+  { key: "available_physical_memory_mb", label: "Available", format: "mbfit", hideWhen: AZURE_SQL_DATABASE },
+  { key: "available_physical_memory_mb", label: "Available under limit", format: "mbfit", showWhen: AZURE_SQL_DATABASE },
   { key: "memory_utilization_pct", label: "Utilization", format: "pct" },
   { key: "total_server_memory_mb", label: "Total server", format: "mb" },
   { key: "target_server_memory_mb", label: "Target server", format: "mb" },
@@ -59,7 +67,8 @@ const MEMORY_STATS = [
 const DERIVED_KEYS = ["verdict_label", "verdict_sev", "day_label", "monthly_cost_text", "annual_cost_text", "workers_in_use"];
 
 const SUMMARY_STATS = [
-  { key: "verdict_label", label: "Verdict", format: "text" },
+  /* #7562: the word UNDER PROVISIONED is wider than a tile at the full value size and broke before its last letter, so it takes the small size. */
+  { key: "verdict_label", label: "Verdict", format: "text", small: true },
   { key: "health_score", label: "Health", format: "int" },
   { key: "monthly_cost_text", label: "Budget", format: "text" },
   { key: "annual_cost_text", label: "Annual", format: "text" },
@@ -92,7 +101,7 @@ const TREND_COLUMNS = [
 
 /* top-keys:begin */
 const TOP_TOTAL_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "cpu_share_pct", label: "CPU %", format: "num1" },
   { key: "io_share_pct", label: "IO %", format: "num1" },
   { key: "cpu_time_ms", label: "CPU (ms)", format: "int" },
@@ -100,7 +109,7 @@ const TOP_TOTAL_COLUMNS = [
 ];
 
 const TOP_AVG_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "avg_cpu_ms", label: "Avg CPU (ms)", format: "num2" },
   { key: "avg_io_mb", label: "Avg IO (MB)", format: "num2" },
   { key: "execution_count", label: "Execs", format: "int" },
@@ -112,6 +121,7 @@ const TOP_AVG_COLUMNS = [
 function verdictLabel(v, samples) {
   if (v == null) return "No Data";
   if (v === "NOT_APPLICABLE") return "N/A";
+  if (v === "NOT_JUDGED_SECONDARY") return "Not judged (secondary replica)";
   if (v === "NOT_ENOUGH_DATA") return samples == null ? "not enough data yet" : "not enough data yet (" + fmtInt(samples) + (samples === 1 ? " sample)" : " samples)");
   return String(v).replace(/_/g, " ");
 }
@@ -128,7 +138,8 @@ function loadUtilization(body, server, ctx) {
       const res = await readTool("get_finops", { server, view: "utilization" }, ctx && ctx.signal);
       if (res.kind === "aborted" || res.kind === "auth") return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-      if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
+      /* #8555: the strip carries its panel's title, so it says which data it stands for. */
+      if (res.kind === "empty") return mount(body, [el("h3", { text: SUMMARY_TITLE }), gatedEmptyStrip(res, ctx)]);
       const data = res.data || {};
       const hasCost = data.monthly_cost_usd != null;
       const view = {
@@ -143,10 +154,11 @@ function loadUtilization(body, server, ctx) {
         .map((s) =>
           s.key === "verdict_label" ? { ...s, sev: VERDICT_SEV[data.verdict] }
             : s.key === "health_score" ? { ...s, sev: BAND_SEV[data.health_band] }
+            : s.key === "memory.stolen_memory_pct" ? { ...s, sev: stolenSev(data.memory) }
             : s);
       const trend = (data.provisioning_trend || []).map((r) => ({
         ...r,
-        day_label: trendDay(r.day),
+        day_label: trendDay(r.day) + (r.part_day ? ", so far" : ""),
         verdict_label: verdictLabel(r.verdict),
         verdict_sev: VERDICT_SEV[r.verdict],
       }));
@@ -173,7 +185,7 @@ function loadTopDatabases(body, server, ctx) {
       const res = await readTool("get_finops", { server, view: "database_resources", hours: TOP_HOURS, limit: TOP_LIMIT }, ctx && ctx.signal);
       if (res.kind === "aborted" || res.kind === "auth") return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-      if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
+      if (res.kind === "empty") return mount(body, [el("h3", { text: "Top Databases by CPU" }), gatedEmptyStrip(res, ctx)]);
       const data = res.data || {};
       mount(body, [
         el("h3", { text: "Top Databases by Total CPU" }),
@@ -213,6 +225,8 @@ export const tab = {
           rowsKey: "samples",
           xKey: "sample_time",
           series: CPU_SERIES,
+          hideEmptySeries: true,
+          footNoteKey: "host_cpu_note",
           format: "pct",
           unit: "%",
           emptyText: "No CPU samples in this window.",
@@ -229,6 +243,7 @@ export const tab = {
           viz: "stat",
           stats: MEMORY_STATS,
           noteKey: "memory_note",
+          noteShort: "On an Azure SQL Database these figures are the database's own memory limit, not the host's. Utilization near 100% is normal once the database has grown to that limit.",
           span: 2,
         }),
       ]),

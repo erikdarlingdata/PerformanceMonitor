@@ -37,14 +37,14 @@ public sealed class AlertHistoryCountFilterTests
             }
 
             tab.ShowAlerts(rows);
-            Assert.Equal("500 alert(s) (showing the newest 500)", tab.AlertCountIndicator.Text);
+            Assert.Equal("500 alerts (showing the newest 500)", tab.AlertCountIndicator.Text);
 
             tab.ApplyColumnFilter(new ColumnFilterState { ColumnName = "ServerName", Operator = FilterOperator.Equals, Value = "example-sql-01" });
-            Assert.Equal("7 alert(s) (showing the newest 500)", tab.AlertCountIndicator.Text);
+            Assert.Equal("7 alerts (showing the newest 500)", tab.AlertCountIndicator.Text);
 
             /* The popup's Clear button raises FilterApplied with an empty filter: the full count comes back. */
             tab.ApplyColumnFilter(new ColumnFilterState { ColumnName = "ServerName", Operator = FilterOperator.Contains, Value = "" });
-            Assert.Equal("500 alert(s) (showing the newest 500)", tab.AlertCountIndicator.Text);
+            Assert.Equal("500 alerts (showing the newest 500)", tab.AlertCountIndicator.Text);
         });
     }
 

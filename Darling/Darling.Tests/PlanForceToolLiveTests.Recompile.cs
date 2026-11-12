@@ -99,7 +99,7 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Contains("sp_recompile", (string?)done["after"]!["statement"], StringComparison.Ordinal);
             Assert.Equal((long)json["journal_id"]!, (long)done["called_id"]!);
 
-            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct);
+            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct);
             var change = Assert.Single(list.Changes);
             Assert.Equal(RecompileKind, change.Kind);
             Assert.Equal(AgentChangeResult.Done, change.Result);

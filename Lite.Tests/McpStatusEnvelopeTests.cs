@@ -390,6 +390,47 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         Assert.Contains("readable secondary", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
+    /// <summary>#7584: get_query_store_health on a readable secondary with no health rows answers the readable-secondary text, as the other Query Store reads do.</summary>
+    [Fact]
+    public async Task GetQueryStoreHealth_OnASecondaryRole_WithNoHealthRows_AnswersNotCollected()
+    {
+        await SeedAgReplicaRoleAsync("Secondary");
+
+        var root = Parse(await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager, runTimes: new McpCollectorRunTimes(null, _serverManager)));
+
+        Assert.Equal("not_collected", root.GetProperty("status").GetString());
+        Assert.Contains("readable secondary", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #7584: the on-prem health capture always holds a tempdb row, so a readable secondary's snapshot is never empty. A capture of only
+    /// tempdb has no database Query Store is read for and answers the readable-secondary text, not a tempdb-only OFF row.
+    /// </summary>
+    [Fact]
+    public async Task GetQueryStoreHealth_OnASecondaryRole_WithOnlyTempdbInTheCapture_AnswersNotCollected()
+    {
+        await SeedAgReplicaRoleAsync("Secondary");
+        await SeedQueryStoreHealthAsync("tempdb", "OFF", readonlyReason: 0, captureTime: DateTime.UtcNow.AddMinutes(-5));
+
+        var root = Parse(await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager, runTimes: new McpCollectorRunTimes(null, _serverManager)));
+
+        Assert.Equal("not_collected", root.GetProperty("status").GetString());
+        Assert.Contains("readable secondary", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7584: a primary whose capture holds only tempdb keeps its rows (the secondary check answers null for it).</summary>
+    [Fact]
+    public async Task GetQueryStoreHealth_OnAPrimary_WithOnlyTempdbInTheCapture_KeepsTheRows()
+    {
+        await SeedAgReplicaRoleAsync("Primary");
+        await SeedQueryStoreHealthAsync("tempdb", "OFF", readonlyReason: 0, captureTime: DateTime.UtcNow.AddMinutes(-5));
+
+        var json = await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager, runTimes: new McpCollectorRunTimes(null, _serverManager));
+
+        Assert.DoesNotContain("readable secondary", json, StringComparison.Ordinal);
+        Assert.Contains("tempdb", json, StringComparison.Ordinal);
+    }
+
     /// <summary>Tempdb (OFF) beside the secondary-flagged rows of a pre-#6252 capture: the flagged rows are every database Query Store is read for.</summary>
     [Fact]
     public async Task GetQueryStoreTop_WithTempdbOffBesideSecondaryFlaggedRows_AnswersNotCollected()
@@ -518,6 +559,53 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         P(DateTime.UtcNow.AddMinutes(-5));
         P(_serverId);
         P(role);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// #7675: the top-queries tool is where rows from a Query Store stopped on an internal error reach a caller as if they were current.
+    /// The answer carries a note that names the ERROR databases the returned rows come from, and no other. A call narrowed to a healthy
+    /// database carries none. Drives the tool itself: the note's own unit tests never reach <c>McpQueryTools.GetQueryStoreTop</c>'s call.
+    /// </summary>
+    [Fact]
+    public async Task GetQueryStoreTop_WithRowsFromAnErrorStore_CarriesTheNote_NamingOnlyThatDatabase()
+    {
+        /* One capture, as the collector writes it: the newest capture_time is the whole snapshot. */
+        var capture = DateTime.UtcNow.AddMinutes(-5);
+        await SeedQueryStoreHealthAsync("ErrDb", "ERROR", captureTime: capture);
+        await SeedQueryStoreHealthAsync("OkDb", "READ_WRITE", captureTime: capture);
+        await SeedQueryStoreStatsRowAsync("ErrDb", queryId: 1);
+        await SeedQueryStoreStatsRowAsync("OkDb", queryId: 2);
+
+        var both = Parse(await McpQueryTools.GetQueryStoreTop(_dataService, _serverManager));
+        Assert.Equal(2, both.GetProperty("queries").GetArrayLength());
+        var note = both.GetProperty(McpRuntimePrecondition.QueryStoreErrorNoteKey).GetString()!;
+        Assert.Contains("ERROR state", note, StringComparison.Ordinal);
+        Assert.Contains("ErrDb", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("OkDb", note, StringComparison.Ordinal);
+
+        var healthy = Parse(await McpQueryTools.GetQueryStoreTop(_dataService, _serverManager, database_name: "OkDb"));
+        Assert.Equal(1, healthy.GetProperty("queries").GetArrayLength());
+        Assert.False(healthy.TryGetProperty(McpRuntimePrecondition.QueryStoreErrorNoteKey, out _));
+    }
+
+    private async Task SeedQueryStoreStatsRowAsync(string databaseName, long queryId)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO query_store_stats
+            (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, query_hash, execution_type_desc,
+             execution_count, avg_duration_us, last_execution_time, runtime_stats_interval_id, interval_start_time_utc)
+            VALUES ($1, $2, $3, 'TestServer', $4, $5, $5, '0x00000000000000AA', 'Regular', 3, 1000, $2, $6, $2)";
+        void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        P(_nextId--);
+        P(DateTime.UtcNow.AddMinutes(-30));
+        P(_serverId);
+        P(databaseName);
+        P(queryId);
+        P(queryId);
         await cmd.ExecuteNonQueryAsync();
     }
 

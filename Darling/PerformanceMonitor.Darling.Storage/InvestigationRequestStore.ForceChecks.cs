@@ -117,9 +117,10 @@ LIMIT 100";
     internal const string OpenForceCheckSql = @"
 INSERT INTO config.investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
-     window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, max_severity, force_check_of, force_check_no)
+     window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, max_severity, force_check_of, force_check_no, trigger_kind, chat_thread_of)
 SELECT $1, r.route_id, r.server_id, r.server_name, r.family, r.first_metric, r.story_path_hash, r.first_alert_at, r.last_alert_at,
-       r.window_until, $3, $3 + (r.expires_at - r.opened_at), r.lease_minutes, r.autonomy_level, r.alert_count, r.max_severity, $4, $5
+       r.window_until, $3, $3 + (r.expires_at - r.opened_at), r.lease_minutes, r.autonomy_level, r.alert_count, r.max_severity, $4, $5,
+       " + ChatKindCopySql + @"
 FROM config.investigation_requests AS r
 WHERE r.request_id = $2
 ON CONFLICT (force_check_of, force_check_no) WHERE force_check_of IS NOT NULL DO NOTHING
@@ -213,6 +214,9 @@ RETURNING route_id, server_id, server_name";
                 serverId = returned.GetInt32(1);
                 serverName = returned.GetString(2);
             }
+
+            /* #7659: a check of a chat request keeps its askers; an alert request has none to copy. */
+            await ExecAsync(connection, transaction, CopyAskersSql, cancellationToken, P(checkId), P(candidate.RequestId));
 
             await ExecAsync(connection, transaction, CopyFollowUpAlertsSql, cancellationToken, P(checkId), P(candidate.RequestId));
             var content = await ForceCheckContentAsync(candidate, serverName, due.No, due.Trigger, now, cancellationToken);

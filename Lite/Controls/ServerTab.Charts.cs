@@ -126,6 +126,9 @@ public partial class ServerTab : UserControl
         return plain == null ? null : plain.Contains;
     }
 
+    /// <summary>The line under the CPU chart when no sample carries other-process CPU (#7682).</summary>
+    internal const string CpuHostUnknownNote = "This server cannot report host CPU (SQL Server on Linux before 2025 CU1), so only SQL Server CPU is drawn.";
+
     private void UpdateCpuChart(List<CpuUtilizationRow> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(CpuChart);
@@ -136,21 +139,18 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        if (data.Count == 0)
-        {
-            CpuChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            CpuChart.Plot.Axes.SetLimitsX(xMin, xMax);
-            ReapplyAxisColors(CpuChart);
-            CpuChart.Refresh();
-            return;
-        }
+        /* #8644: a window with no rows is the one empty look, not an empty plot on the default -10 to 10 axes. */
+        if (data.Count == 0) { RefreshEmptyChart(CpuChart, "CPU", ""); return; }
 
         /* #4766: the CPU read asks for the UTC frame (RefreshCpuAsync), so each point is plotted at its own instant:
            the two readings of a repeated hour are two points, and the ticks and the hover word the instant in the
            display zone. SampleTime is the server's wall clock and is not what a chart plots. */
         var times = data.Select(d => d.SampleTimeUtc.ToOADate()).ToArray();
         var sqlCpu = data.Select(d => (double)d.SqlServerCpu).ToArray();
-        var otherCpu = data.Select(d => (double)d.OtherProcessCpu).ToArray();
+        var otherCpu = data.Select(d => d.OtherProcessCpu.HasValue ? (double)d.OtherProcessCpu.Value : double.NaN).ToArray();
+        /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so the store holds NULL for other-process
+           CPU. A flat line at 0 would claim the host is idle; draw the SQL line alone and say why under the chart. */
+        var hostCpuKnown = data.Any(d => d.OtherProcessCpu.HasValue);
 
         var sqlPlot = CpuChart.Plot.Add.TimeSeries(times, sqlCpu);
         sqlPlot.LegendText = "SQL Server";
@@ -158,11 +158,14 @@ public partial class ServerTab : UserControl
         ChartStyle.StyleScatter(sqlPlot);
         _cpuHover?.Add(sqlPlot, "SQL Server");
 
-        var otherPlot = CpuChart.Plot.Add.TimeSeries(times, otherCpu);
-        otherPlot.LegendText = "Other";
-        otherPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("OtherCpu"));
-        ChartStyle.StyleScatter(otherPlot);
-        _cpuHover?.Add(otherPlot, "Other");
+        if (hostCpuKnown)
+        {
+            var otherPlot = CpuChart.Plot.Add.TimeSeries(times, otherCpu);
+            otherPlot.LegendText = "Other";
+            otherPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("OtherCpu"));
+            ChartStyle.StyleScatter(otherPlot);
+            _cpuHover?.Add(otherPlot, "Other");
+        }
 
         /* A point whose stored wall time names two instants sits at the first of them, so the hover words it
            without the repeated-hour offset (#4766). Set after Clear() emptied it above. */
@@ -172,9 +175,13 @@ public partial class ServerTab : UserControl
         }
 
         CpuChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        CpuChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        CpuChart.Plot.Axes.SetLimitsX(ChartXStart(CpuChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(CpuChart);
-        CpuChart.Plot.YLabel("CPU %");
+        CpuChart.Plot.YLabel("%");
+        if (!hostCpuKnown)
+        {
+            CpuChart.Plot.XLabel(CpuHostUnknownNote);
+        }
         CpuChart.Plot.Axes.SetLimitsY(0, 105);
 
         ShowChartLegend(CpuChart);
@@ -191,14 +198,8 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        if (data.Count == 0)
-        {
-            MemoryChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            MemoryChart.Plot.Axes.SetLimitsX(xMin, xMax);
-            ReapplyAxisColors(MemoryChart);
-            MemoryChart.Refresh();
-            return;
-        }
+        /* #8644: a window with no rows is the one empty look, not an empty plot on the default -10 to 10 axes. */
+        if (data.Count == 0) { RefreshEmptyChart(MemoryChart, "Memory", ""); return; }
 
         var times = data.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var totalMem = data.Select(d => d.TotalServerMemoryMb / 1024.0).ToArray();
@@ -244,15 +245,35 @@ public partial class ServerTab : UserControl
         _memoryHover?.Add(grantPlot, "Memory Grants");
 
         MemoryChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        MemoryChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        MemoryChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(MemoryChart);
-        MemoryChart.Plot.YLabel("Memory (GB)");
+        MemoryChart.Plot.YLabel("GB");
 
-        var maxVal = totalMem.Max();
+        var maxVal = MemoryOverviewYMax(totalMem, targetMem, bufferPool, grantMb);
         SetChartYLimitsWithLegendPadding(MemoryChart, 0, maxVal);
 
         ShowChartLegend(MemoryChart);
         MemoryChart.Refresh();
+    }
+
+    /// <summary>
+    /// The top of the Memory Overview's data range: the largest sample across every series the chart draws
+    /// (Total Server Memory, Target Memory, Buffer Pool and Memory Grants), so the Y axis the shared headroom
+    /// is added to covers all four. Target Memory is the engine's ceiling and moves with the host's free
+    /// memory when no max server memory cap is set, so it can sit well above Total while the workload holds
+    /// Total where it is; a grant spike can do the same. An empty series is skipped, and with nothing plotted
+    /// the top is 0, which the shared helper widens to a visible band.
+    /// </summary>
+    internal static double MemoryOverviewYMax(params double[][] series)
+    {
+        double max = 0;
+        foreach (var values in series)
+        {
+            if (values.Length == 0) continue;
+            var seriesMax = values.Max();
+            if (seriesMax > max) max = seriesMax;
+        }
+        return max;
     }
 
     private void UpdateMemoryGrantCharts(List<MemoryGrantChartPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -268,18 +289,11 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        EmptyState.Show(MemoryGrantSizingChart, data.Count == 0, "No memory grants in the selected time window.");
-        EmptyState.Show(MemoryGrantActivityChart, data.Count == 0, "No memory grants in the selected time window.");
-
+        /* #8644: a window with no rows is the one empty look, not two empty plots on the default -10 to 10 axes. */
         if (data.Count == 0)
         {
-            foreach (var c in new[] { MemoryGrantSizingChart, MemoryGrantActivityChart })
-            {
-                c.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-                c.Plot.Axes.SetLimitsX(xMin, xMax);
-                ReapplyAxisColors(c);
-                c.Refresh();
-            }
+            RefreshEmptyChart(MemoryGrantSizingChart, "Memory Grant Sizing", "");
+            RefreshEmptyChart(MemoryGrantActivityChart, "Memory Grant Activity", "");
             return;
         }
 
@@ -304,7 +318,7 @@ public partial class ServerTab : UserControl
             {
                 var values = poolData.Select(d => metric.Selector(d)).ToArray();
                 var plot = MemoryGrantSizingChart.Plot.Add.TimeSeries(times, values);
-                var label = $"Pool {poolId}: {metric.Name}";
+                var label = $"{ResourceGovernorPools.Name(poolId)}: {metric.Name}";
                 plot.LegendText = label;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[colorIndex % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);
@@ -315,9 +329,9 @@ public partial class ServerTab : UserControl
         }
 
         MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        MemoryGrantSizingChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        MemoryGrantSizingChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryGrantSizingChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(MemoryGrantSizingChart);
-        MemoryGrantSizingChart.Plot.YLabel("Memory (MB)");
+        MemoryGrantSizingChart.Plot.YLabel("MB");
         SetChartYLimitsWithLegendPadding(MemoryGrantSizingChart, 0, sizingMax > 0 ? sizingMax : 100);
         ShowChartLegend(MemoryGrantSizingChart);
         MemoryGrantSizingChart.Refresh();
@@ -342,7 +356,7 @@ public partial class ServerTab : UserControl
             {
                 var values = poolData.Select(d => metric.Selector(d)).ToArray();
                 var plot = MemoryGrantActivityChart.Plot.Add.TimeSeries(times, values);
-                var label = $"Pool {poolId}: {metric.Name}";
+                var label = $"{ResourceGovernorPools.Name(poolId)}: {metric.Name}";
                 plot.LegendText = label;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[colorIndex % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);
@@ -353,9 +367,10 @@ public partial class ServerTab : UserControl
         }
 
         MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        MemoryGrantActivityChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        MemoryGrantActivityChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryGrantActivityChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(MemoryGrantActivityChart);
-        MemoryGrantActivityChart.Plot.YLabel("Count");
+        MemoryGrantActivityChart.Plot.YLabel("count");
+        PerformanceMonitor.Ui.ChartStyle.UseCountAxis(MemoryGrantActivityChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(MemoryGrantActivityChart, 0, activityMax > 0 ? activityMax : 10);
         ShowChartLegend(MemoryGrantActivityChart);
         MemoryGrantActivityChart.Refresh();
@@ -376,24 +391,21 @@ public partial class ServerTab : UserControl
         double xMax = rangeEnd.ToOADate();
 
         /* Only count rows where SQL Server reported actual pressure (indicator >= 2 matches sp_pressuredetector). */
-        var pressureRows = data
+        var pressureRows = MemoryPressureEventCount.OnePerEvent(data
             .Where(d => d.MemoryIndicatorsProcess >= 2 || d.MemoryIndicatorsSystem >= 2)
-            .OrderBy(d => d.SampleTime)
-            .ToList();
+            .OrderBy(d => d.SampleTime));
 
         bool hasData = false;
         int maxBarCount = 0;
 
         if (pressureRows.Count > 0)
         {
-            var grouped = pressureRows
-                .GroupBy(d => new DateTime(d.SampleTime.Year, d.SampleTime.Month, d.SampleTime.Day, d.SampleTime.Hour, 0, 0))
-                .OrderBy(g => g.Key)
-                .ToList();
+            /* #8109: binned on the display zone's hour, where the ticks are; each hour's two stacks sit inside that hour, either side of its midpoint. */
+            var hours = MemoryPressureBars.Place(
+                pressureRows.Select(d => (d.SampleTime, d.MemoryIndicatorsProcess, d.MemoryIndicatorsSystem)),
+                GetPickerZone());
 
-            double hourWidth = 1.0 / 24.0;
-            double barSize = hourWidth * 0.4;
-            double barOffset = hourWidth * 0.22;
+            double barSize = MemoryPressureBars.BarSize;
 
             var sqlMediumColor = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SqlPressureMedium"));
             var sqlSevereColor = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SqlPressureSevere"));
@@ -405,22 +417,23 @@ public partial class ServerTab : UserControl
             var osMediumBars = new List<ScottPlot.Bar>();
             var osSevereBars = new List<ScottPlot.Bar>();
 
-            foreach (var g in grouped)
+            foreach (var h in hours)
             {
-                int sqlMedium = g.Count(d => d.MemoryIndicatorsProcess == 2);
-                int sqlSevere = g.Count(d => d.MemoryIndicatorsProcess >= 3);
-                int osMedium = g.Count(d => d.MemoryIndicatorsSystem == 2);
-                int osSevere = g.Count(d => d.MemoryIndicatorsSystem >= 3);
-                double x = g.Key.ToOADate();
+                int sqlMedium = h.SqlMedium;
+                int sqlSevere = h.SqlSevere;
+                int osMedium = h.OsMedium;
+                int osSevere = h.OsSevere;
+                double sqlX = h.SqlStackPosition;
+                double osX = h.OsStackPosition;
 
                 if (sqlMedium > 0)
-                    sqlMediumBars.Add(new ScottPlot.Bar { Position = x - barOffset, ValueBase = 0, Value = sqlMedium, Size = barSize, FillColor = sqlMediumColor, LineWidth = 0 });
+                    sqlMediumBars.Add(new ScottPlot.Bar { Position = sqlX, ValueBase = 0, Value = sqlMedium, Size = barSize, FillColor = sqlMediumColor, LineWidth = 0 });
                 if (sqlSevere > 0)
-                    sqlSevereBars.Add(new ScottPlot.Bar { Position = x - barOffset, ValueBase = sqlMedium, Value = sqlMedium + sqlSevere, Size = barSize, FillColor = sqlSevereColor, LineWidth = 0 });
+                    sqlSevereBars.Add(new ScottPlot.Bar { Position = sqlX, ValueBase = sqlMedium, Value = sqlMedium + sqlSevere, Size = barSize, FillColor = sqlSevereColor, LineWidth = 0 });
                 if (osMedium > 0)
-                    osMediumBars.Add(new ScottPlot.Bar { Position = x + barOffset, ValueBase = 0, Value = osMedium, Size = barSize, FillColor = osMediumColor, LineWidth = 0 });
+                    osMediumBars.Add(new ScottPlot.Bar { Position = osX, ValueBase = 0, Value = osMedium, Size = barSize, FillColor = osMediumColor, LineWidth = 0 });
                 if (osSevere > 0)
-                    osSevereBars.Add(new ScottPlot.Bar { Position = x + barOffset, ValueBase = osMedium, Value = osMedium + osSevere, Size = barSize, FillColor = osSevereColor, LineWidth = 0 });
+                    osSevereBars.Add(new ScottPlot.Bar { Position = osX, ValueBase = osMedium, Value = osMedium + osSevere, Size = barSize, FillColor = osSevereColor, LineWidth = 0 });
 
                 int sqlTotal = sqlMedium + sqlSevere;
                 int osTotal = osMedium + osSevere;
@@ -460,9 +473,10 @@ public partial class ServerTab : UserControl
         }
 
         MemoryPressureEventsChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        MemoryPressureEventsChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        MemoryPressureEventsChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryPressureEventsChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(MemoryPressureEventsChart);
-        MemoryPressureEventsChart.Plot.YLabel("Pressure Events per Hour");
+        MemoryPressureEventsChart.Plot.YLabel("events/hour");
+        PerformanceMonitor.Ui.ChartStyle.UseCountAxis(MemoryPressureEventsChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(MemoryPressureEventsChart, 0, Math.Max(maxBarCount, 5));
 
         if (hasData)
@@ -484,14 +498,8 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        if (data.Count == 0)
-        {
-            TempDbChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            TempDbChart.Plot.Axes.SetLimitsX(xMin, xMax);
-            ReapplyAxisColors(TempDbChart);
-            TempDbChart.Refresh();
-            return;
-        }
+        /* #8644: a window with no rows is the one empty look, not an empty plot on the default -10 to 10 axes. */
+        if (data.Count == 0) { RefreshEmptyChart(TempDbChart, "tempdb", ""); return; }
 
         var times = data.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var userObj = data.Select(d => d.UserObjectReservedMb).ToArray();
@@ -517,7 +525,7 @@ public partial class ServerTab : UserControl
         _tempDbHover?.Add(vsPlot, "Version Store");
 
         TempDbChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        TempDbChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        TempDbChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(TempDbChart);
         TempDbChart.Plot.YLabel("MB");
 
@@ -540,29 +548,29 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        if (data.Count == 0)
-        {
-            TempDbSizeChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            TempDbSizeChart.Plot.Axes.SetLimitsX(xMin, xMax);
-            ReapplyAxisColors(TempDbSizeChart);
-            TempDbSizeChart.Refresh();
-            return;
-        }
+        /* #8644: a window with no rows is the one empty look, not an empty plot on the default -10 to 10 axes. */
+        if (data.Count == 0) { RefreshEmptyChart(TempDbSizeChart, "tempdb Size", ""); return; }
 
         var sorted = data.OrderBy(d => d.CollectionTime).ToList();
         var times = sorted.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var totals = sorted.Select(d => d.TotalReservedMb + d.UnallocatedMb).ToArray();
 
         var sizePlot = TempDbSizeChart.Plot.Add.TimeSeries(times, totals);
+        sizePlot.LegendText = "Allocated MB";
         sizePlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("UnallocatedTempdb"));
         ChartStyle.StyleScatter(sizePlot);
         _tempDbSizeHover?.Add(sizePlot, "Allocated MB");
 
         TempDbSizeChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         ReapplyAxisColors(TempDbSizeChart);
-        TempDbSizeChart.Plot.YLabel("Allocated MB");
+        TempDbSizeChart.Plot.YLabel("MB");
         TempDbSizeChart.Plot.Axes.AutoScaleY();
-        TempDbSizeChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        /* A near-flat allocation (the file sizes rarely move) would otherwise fit an axis a hundredth of a megabyte tall. */
+        ChartYSpan.ApplyMinimum(TempDbSizeChart.Plot, totals);
+        TempDbSizeChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbSizeChart.Plot, xMin, xMax), xMax);
+        /* #8307: the chart group gives every plot the same bottom, so without a legend of its own this chart kept an empty band
+           under its time axis the height of its siblings' legends. */
+        ShowChartLegend(TempDbSizeChart);
         TempDbSizeChart.Refresh();
     }
 
@@ -576,14 +584,8 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        if (data.Count == 0)
-        {
-            TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            TempDbFileIoChart.Plot.Axes.SetLimitsX(xMin, xMax);
-            ReapplyAxisColors(TempDbFileIoChart);
-            TempDbFileIoChart.Refresh();
-            return;
-        }
+        /* #8644: a window with no rows is the one empty look, not an empty plot on the default -10 to 10 axes. */
+        if (data.Count == 0) { RefreshEmptyChart(TempDbFileIoChart, "tempdb File I/O Latency", ""); return; }
 
         var files = data
             .GroupBy(d => d.DatabaseName)
@@ -614,9 +616,9 @@ public partial class ServerTab : UserControl
         }
 
         TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        TempDbFileIoChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        TempDbFileIoChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbFileIoChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(TempDbFileIoChart);
-        TempDbFileIoChart.Plot.YLabel("tempdb File I/O Latency (ms)");
+        TempDbFileIoChart.Plot.YLabel("ms");
         SetChartYLimitsWithLegendPadding(TempDbFileIoChart, 0, maxLatency > 0 ? maxLatency : 10);
         ShowChartLegend(TempDbFileIoChart);
         TempDbFileIoChart.Refresh();
@@ -635,15 +637,11 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
+        /* #8644: a window with no rows is the one empty look, not two empty plots on the default -10 to 10 axes. */
         if (data.Count == 0)
         {
-            foreach (var c in new[] { FileIoReadChart, FileIoWriteChart })
-            {
-                c.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-                c.Plot.Axes.SetLimitsX(xMin, xMax);
-                ReapplyAxisColors(c);
-                c.Refresh();
-            }
+            RefreshEmptyChart(FileIoReadChart, "Read Latency", "");
+            RefreshEmptyChart(FileIoWriteChart, "Write Latency", "");
             return;
         }
 
@@ -729,19 +727,19 @@ public partial class ServerTab : UserControl
         }
 
         FileIoReadChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        FileIoReadChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        FileIoReadChart.Plot.Axes.SetLimitsX(ChartXStart(FileIoReadChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(FileIoReadChart);
-        FileIoReadChart.Plot.YLabel("Read Latency (ms)");
+        FileIoReadChart.Plot.YLabel("ms");
         SetChartYLimitsWithLegendPadding(FileIoReadChart, 0, readMax > 0 ? readMax : 10);
-        ShowChartLegend(FileIoReadChart);
+        ShowChartLegend(FileIoReadChart, oneRow: true);
         FileIoReadChart.Refresh();
 
         FileIoWriteChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        FileIoWriteChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        FileIoWriteChart.Plot.Axes.SetLimitsX(ChartXStart(FileIoWriteChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(FileIoWriteChart);
-        FileIoWriteChart.Plot.YLabel("Write Latency (ms)");
+        FileIoWriteChart.Plot.YLabel("ms");
         SetChartYLimitsWithLegendPadding(FileIoWriteChart, 0, writeMax > 0 ? writeMax : 10);
-        ShowChartLegend(FileIoWriteChart);
+        ShowChartLegend(FileIoWriteChart, oneRow: true);
         FileIoWriteChart.Refresh();
     }
 
@@ -758,15 +756,11 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
+        /* #8644: a window with no rows is the one empty look, not two empty plots on the default -10 to 10 axes. */
         if (data.Count == 0)
         {
-            foreach (var c in new[] { FileIoReadThroughputChart, FileIoWriteThroughputChart })
-            {
-                c.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-                c.Plot.Axes.SetLimitsX(xMin, xMax);
-                ReapplyAxisColors(c);
-                c.Refresh();
-            }
+            RefreshEmptyChart(FileIoReadThroughputChart, "Read Throughput", "");
+            RefreshEmptyChart(FileIoWriteThroughputChart, "Write Throughput", "");
             return;
         }
 
@@ -811,25 +805,25 @@ public partial class ServerTab : UserControl
         }
 
         FileIoReadThroughputChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        FileIoReadThroughputChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        FileIoReadThroughputChart.Plot.Axes.SetLimitsX(ChartXStart(FileIoReadThroughputChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(FileIoReadThroughputChart);
-        FileIoReadThroughputChart.Plot.YLabel("Read Throughput (MB/s)");
+        FileIoReadThroughputChart.Plot.YLabel("MB/s");
         SetChartYLimitsWithLegendPadding(FileIoReadThroughputChart, 0, readMax > 0 ? readMax : 1);
-        ShowChartLegend(FileIoReadThroughputChart);
+        ShowChartLegend(FileIoReadThroughputChart, oneRow: true);
         FileIoReadThroughputChart.Refresh();
 
         FileIoWriteThroughputChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        FileIoWriteThroughputChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        FileIoWriteThroughputChart.Plot.Axes.SetLimitsX(ChartXStart(FileIoWriteThroughputChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(FileIoWriteThroughputChart);
-        FileIoWriteThroughputChart.Plot.YLabel("Write Throughput (MB/s)");
+        FileIoWriteThroughputChart.Plot.YLabel("MB/s");
         SetChartYLimitsWithLegendPadding(FileIoWriteThroughputChart, 0, writeMax > 0 ? writeMax : 1);
-        ShowChartLegend(FileIoWriteThroughputChart);
+        ShowChartLegend(FileIoWriteThroughputChart, oneRow: true);
         FileIoWriteThroughputChart.Refresh();
     }
 
     /* ========== Blocking/Deadlock Trend Charts ========== */
 
-    private void UpdateLockWaitTrendChart(List<LockWaitTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    internal void UpdateLockWaitTrendChart(List<LockWaitTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(LockWaitTrendChart);
         ApplyTheme(LockWaitTrendChart);
@@ -848,16 +842,16 @@ public partial class ServerTab : UserControl
         _lockWaitTrendHover?.Clear();
         if (data.Count == 0)
         {
-            var zeroLine = LockWaitTrendChart.Plot.Add.Scatter(
+            var zeroLine = PerformanceMonitor.Ui.ChartAxisStart.Baseline(LockWaitTrendChart.Plot.Add.Scatter(
                 new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
-                new[] { 0.0, 0.0 });
+                new[] { 0.0, 0.0 }));
             zeroLine.LegendText = "Lock Waits";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("LockWaits"));
             zeroLine.MarkerSize = 0;
             LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+            LockWaitTrendChart.Plot.Axes.SetLimitsX(ChartXStart(LockWaitTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(LockWaitTrendChart);
-            LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
+            LockWaitTrendChart.Plot.YLabel("ms/sec");
             SetChartYLimitsWithLegendPadding(LockWaitTrendChart, 0, 1);
             ShowChartLegend(LockWaitTrendChart);
             LockWaitTrendChart.Refresh();
@@ -883,15 +877,15 @@ public partial class ServerTab : UserControl
         }
 
         LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+        LockWaitTrendChart.Plot.Axes.SetLimitsX(ChartXStart(LockWaitTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(LockWaitTrendChart);
-        LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
+        LockWaitTrendChart.Plot.YLabel("ms/sec");
         SetChartYLimitsWithLegendPadding(LockWaitTrendChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(LockWaitTrendChart);
         LockWaitTrendChart.Refresh();
     }
 
-    private void UpdateBlockingTrendChart(List<TrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    internal void UpdateBlockingTrendChart(List<TrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(BlockingTrendChart);
         ApplyTheme(BlockingTrendChart);
@@ -913,16 +907,17 @@ public partial class ServerTab : UserControl
         if (data.Count == 0)
         {
             /* No blocking events — show a flat line at zero so the chart looks active */
-            var zeroLine = BlockingTrendChart.Plot.Add.Scatter(
+            var zeroLine = PerformanceMonitor.Ui.ChartAxisStart.Baseline(BlockingTrendChart.Plot.Add.Scatter(
                 new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
-                new[] { 0.0, 0.0 });
-            zeroLine.LegendText = "Blocking Incidents";
+                new[] { 0.0, 0.0 }));
+            zeroLine.LegendText = PerformanceMonitor.Ui.BlockingTrendLabels.PerMinute;
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
             zeroLine.MarkerSize = 0;
             BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+            BlockingTrendChart.Plot.Axes.SetLimitsX(ChartXStart(BlockingTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(BlockingTrendChart);
-            BlockingTrendChart.Plot.YLabel("Blocking Incidents");
+            BlockingTrendChart.Plot.YLabel("reports/min");
+            PerformanceMonitor.Ui.ChartStyle.UseCountAxis(BlockingTrendChart); // #7606: a count, whole-number ticks
             SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, 1);
             ShowChartLegend(BlockingTrendChart);
             BlockingTrendChart.Refresh();
@@ -955,22 +950,27 @@ public partial class ServerTab : UserControl
         expandedTimes.Add(rangeEnd.ToOADate());
         expandedCounts.Add(0);
 
-        var plot = BlockingTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
-        plot.LegendText = "Blocking Incidents";
+        var plot = PerformanceMonitor.Ui.ChartAxisStart.PaddedFrom(BlockingTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()), expandedTimes[2]); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
+        /* #7219: the read counts blocked-process reports, or DMV snapshot rows when the window holds no reports, so the legend, hover
+           and axis name the arm that answered. The axis title stays short (the legend has the width): three star-height charts stack here. */
+        var sources = data.Select(d => d.Source).ToList();
+        plot.LegendText = PerformanceMonitor.Ui.BlockingTrendLabels.LegendFor(sources);
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
         plot.MarkerSize = 0; /* No markers, just lines */
-        _blockingTrendHover?.Add(plot, "Blocking Incidents");
+        if (_blockingTrendHover != null) _blockingTrendHover.Unit = PerformanceMonitor.Ui.BlockingTrendLabels.UnitFor(sources);
+        _blockingTrendHover?.Add(plot, PerformanceMonitor.Ui.BlockingTrendLabels.HoverNameFor(sources));
 
         BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+        BlockingTrendChart.Plot.Axes.SetLimitsX(ChartXStart(BlockingTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTrendChart);
-        BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingSourceLabel.For("Blocking Incidents", data.Select(d => d.Source)));
+        BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingTrendLabels.AnsweredBySnapshot(sources) ? "snapshots/min" : "reports/min");
+        PerformanceMonitor.Ui.ChartStyle.UseCountAxis(BlockingTrendChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(BlockingTrendChart);
         BlockingTrendChart.Refresh();
     }
 
-    private void UpdateDeadlockTrendChart(List<TrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    internal void UpdateDeadlockTrendChart(List<TrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(DeadlockTrendChart);
         ApplyTheme(DeadlockTrendChart);
@@ -992,16 +992,17 @@ public partial class ServerTab : UserControl
         if (data.Count == 0)
         {
             /* No deadlocks — show a flat line at zero so the chart looks active */
-            var zeroLine = DeadlockTrendChart.Plot.Add.Scatter(
+            var zeroLine = PerformanceMonitor.Ui.ChartAxisStart.Baseline(DeadlockTrendChart.Plot.Add.Scatter(
                 new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
-                new[] { 0.0, 0.0 });
+                new[] { 0.0, 0.0 }));
             zeroLine.LegendText = "Deadlocks";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Deadlocks"));
             zeroLine.MarkerSize = 0;
             DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            DeadlockTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+            DeadlockTrendChart.Plot.Axes.SetLimitsX(ChartXStart(DeadlockTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(DeadlockTrendChart);
-            DeadlockTrendChart.Plot.YLabel("Deadlocks");
+            DeadlockTrendChart.Plot.YLabel("count");
+            PerformanceMonitor.Ui.ChartStyle.UseCountAxis(DeadlockTrendChart); // #7606: a count, whole-number ticks
             SetChartYLimitsWithLegendPadding(DeadlockTrendChart, 0, 1);
             ShowChartLegend(DeadlockTrendChart);
             DeadlockTrendChart.Refresh();
@@ -1034,22 +1035,35 @@ public partial class ServerTab : UserControl
         expandedTimes.Add(rangeEnd.ToOADate());
         expandedCounts.Add(0);
 
-        var plot = DeadlockTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
+        var plot = PerformanceMonitor.Ui.ChartAxisStart.PaddedFrom(DeadlockTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()), expandedTimes[2]); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
         plot.LegendText = "Deadlocks";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Deadlocks"));
         plot.MarkerSize = 0; /* No markers, just lines */
         _deadlockTrendHover?.Add(plot, "Deadlocks");
 
         DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        DeadlockTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+        DeadlockTrendChart.Plot.Axes.SetLimitsX(ChartXStart(DeadlockTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(DeadlockTrendChart);
-        DeadlockTrendChart.Plot.YLabel("Deadlocks");
+        DeadlockTrendChart.Plot.YLabel("count");
+        PerformanceMonitor.Ui.ChartStyle.UseCountAxis(DeadlockTrendChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(DeadlockTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(DeadlockTrendChart);
         DeadlockTrendChart.Refresh();
     }
 
     /* ========== Current Waits Charts ========== */
+
+    /// <summary>
+    /// #7571: the Waiting Tasks chart's bars. The read returns one row per collection time and wait type, so each time
+    /// gets one bar position with the wait types stacked on it; a line per wait type joined moments hours apart into a
+    /// ramp. Returns the tallest stack for the Y limit. Static so a test can draw it without the control.
+    /// </summary>
+    internal static double AddWaitingTaskBars(ScottPlot.Plot plot, ChartHoverHelper? hover, List<WaitingTaskTrendPoint> data, double windowStartOa, double windowEndOa)
+        => StackedBarTrend.Add(plot, hover, data, d => d.CollectionTime, d => d.WaitType, d => d.TotalWaitMs, windowStartOa, windowEndOa);
+
+    /// <summary>#7571: the Blocked Sessions chart's bars, one stack per collection time with the databases stacked on it (see <see cref="AddWaitingTaskBars"/>).</summary>
+    internal static double AddBlockedSessionBars(ScottPlot.Plot plot, ChartHoverHelper? hover, List<BlockedSessionTrendPoint> data, double windowStartOa, double windowEndOa)
+        => StackedBarTrend.Add(plot, hover, data, d => d.CollectionTime, d => d.DatabaseName, d => d.BlockedCount, windowStartOa, windowEndOa);
 
     private void UpdateCurrentWaitsDurationChart(List<WaitingTaskTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
@@ -1070,45 +1084,29 @@ public partial class ServerTab : UserControl
         _currentWaitsDurationHover?.Clear();
         if (data.Count == 0)
         {
-            var zeroLine = CurrentWaitsDurationChart.Plot.Add.Scatter(
+            var zeroLine = PerformanceMonitor.Ui.ChartAxisStart.Baseline(CurrentWaitsDurationChart.Plot.Add.Scatter(
                 new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
-                new[] { 0.0, 0.0 });
+                new[] { 0.0, 0.0 }));
             zeroLine.LegendText = "Current Waits";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("CurrentWaits"));
             zeroLine.MarkerSize = 0;
             CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+            CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(ChartXStart(CurrentWaitsDurationChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(CurrentWaitsDurationChart);
-            CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
+            CurrentWaitsDurationChart.Plot.YLabel("ms");
             SetChartYLimitsWithLegendPadding(CurrentWaitsDurationChart, 0, 1);
             ShowChartLegend(CurrentWaitsDurationChart);
             CurrentWaitsDurationChart.Refresh();
             return;
         }
 
-        var grouped = data.GroupBy(d => d.WaitType).OrderBy(g => g.Key).ToList();
-        double globalMax = 0;
-
-        for (int i = 0; i < grouped.Count; i++)
-        {
-            var group = grouped[i];
-            var ordered = group.OrderBy(t => t.CollectionTime).ToList();
-            var times = ordered.Select(t => t.CollectionTime.ToOADate()).ToArray();
-            var values = ordered.Select(t => (double)t.TotalWaitMs).ToArray();
-
-            var plot = CurrentWaitsDurationChart.Plot.Add.TimeSeries(times, values);
-            plot.LegendText = group.Key;
-            plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
-            ChartStyle.StyleScatter(plot);
-            _currentWaitsDurationHover?.Add(plot, group.Key);
-
-            if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
-        }
+        /* #7571: a bar at each collection time, stacked by wait type. A line per key joined moments hours apart into a ramp. */
+        double globalMax = AddWaitingTaskBars(CurrentWaitsDurationChart.Plot, _currentWaitsDurationHover, data, rangeStart.ToOADate(), rangeEnd.ToOADate());
 
         CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+        CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(ChartXStart(CurrentWaitsDurationChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(CurrentWaitsDurationChart);
-        CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
+        CurrentWaitsDurationChart.Plot.YLabel("ms");
         SetChartYLimitsWithLegendPadding(CurrentWaitsDurationChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(CurrentWaitsDurationChart);
         CurrentWaitsDurationChart.Refresh();
@@ -1133,45 +1131,31 @@ public partial class ServerTab : UserControl
         _currentWaitsBlockedHover?.Clear();
         if (data.Count == 0)
         {
-            var zeroLine = CurrentWaitsBlockedChart.Plot.Add.Scatter(
+            var zeroLine = PerformanceMonitor.Ui.ChartAxisStart.Baseline(CurrentWaitsBlockedChart.Plot.Add.Scatter(
                 new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
-                new[] { 0.0, 0.0 });
+                new[] { 0.0, 0.0 }));
             zeroLine.LegendText = "Blocked Sessions";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("BlockedSessions"));
             zeroLine.MarkerSize = 0;
             CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+            CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(ChartXStart(CurrentWaitsBlockedChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(CurrentWaitsBlockedChart);
-            CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
+            CurrentWaitsBlockedChart.Plot.YLabel("count");
+            PerformanceMonitor.Ui.ChartStyle.UseCountAxis(CurrentWaitsBlockedChart); // #7606: a count, whole-number ticks
             SetChartYLimitsWithLegendPadding(CurrentWaitsBlockedChart, 0, 1);
             ShowChartLegend(CurrentWaitsBlockedChart);
             CurrentWaitsBlockedChart.Refresh();
             return;
         }
 
-        var grouped = data.GroupBy(d => d.DatabaseName).OrderBy(g => g.Key).ToList();
-        double globalMax = 0;
-
-        for (int i = 0; i < grouped.Count; i++)
-        {
-            var group = grouped[i];
-            var ordered = group.OrderBy(t => t.CollectionTime).ToList();
-            var times = ordered.Select(t => t.CollectionTime.ToOADate()).ToArray();
-            var values = ordered.Select(t => (double)t.BlockedCount).ToArray();
-
-            var plot = CurrentWaitsBlockedChart.Plot.Add.TimeSeries(times, values);
-            plot.LegendText = group.Key;
-            plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
-            ChartStyle.StyleScatter(plot);
-            _currentWaitsBlockedHover?.Add(plot, group.Key);
-
-            if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
-        }
+        /* #7571: a bar at each collection time, stacked by database. A line per key joined moments hours apart into a ramp. */
+        double globalMax = AddBlockedSessionBars(CurrentWaitsBlockedChart.Plot, _currentWaitsBlockedHover, data, rangeStart.ToOADate(), rangeEnd.ToOADate());
 
         CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+        CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(ChartXStart(CurrentWaitsBlockedChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(CurrentWaitsBlockedChart);
-        CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
+        CurrentWaitsBlockedChart.Plot.YLabel("count");
+        PerformanceMonitor.Ui.ChartStyle.UseCountAxis(CurrentWaitsBlockedChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(CurrentWaitsBlockedChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(CurrentWaitsBlockedChart);
         CurrentWaitsBlockedChart.Refresh();
@@ -1212,7 +1196,7 @@ public partial class ServerTab : UserControl
         /* #3541 A12: the window's first collection carries a null rate (nothing to difference against) and
            a chart has nowhere to draw "unknown" — it is skipped, not plotted as the 0 it used to be. */
         var rated = data.Where(d => d.HasRate).ToList();
-        if (rated.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "Duration (ms/sec)"); return; }
+        if (rated.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "ms/sec"); return; }
 
         var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
@@ -1230,9 +1214,9 @@ public partial class ServerTab : UserControl
         MarkDiscontinuities(QueryDurationTrendChart, discontinuities);
 
         QueryDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        QueryDurationTrendChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        QueryDurationTrendChart.Plot.Axes.SetLimitsX(ChartXStart(QueryDurationTrendChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(QueryDurationTrendChart);
-        QueryDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
+        QueryDurationTrendChart.Plot.YLabel("ms/sec");
         SetChartYLimitsWithLegendPadding(QueryDurationTrendChart, 0, values.Max());
         ShowChartLegend(QueryDurationTrendChart);
         QueryDurationTrendChart.Refresh();
@@ -1246,7 +1230,7 @@ public partial class ServerTab : UserControl
         /* #3541 A12: the window's first collection carries a null rate (nothing to difference against) and
            a chart has nowhere to draw "unknown" — it is skipped, not plotted as the 0 it used to be. */
         var rated = data.Where(d => d.HasRate).ToList();
-        if (rated.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "Duration (ms/sec)"); return; }
+        if (rated.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "ms/sec"); return; }
 
         var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
@@ -1264,9 +1248,9 @@ public partial class ServerTab : UserControl
         MarkDiscontinuities(ProcDurationTrendChart, discontinuities);
 
         ProcDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        ProcDurationTrendChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        ProcDurationTrendChart.Plot.Axes.SetLimitsX(ChartXStart(ProcDurationTrendChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(ProcDurationTrendChart);
-        ProcDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
+        ProcDurationTrendChart.Plot.YLabel("ms/sec");
         SetChartYLimitsWithLegendPadding(ProcDurationTrendChart, 0, values.Max());
         ShowChartLegend(ProcDurationTrendChart);
         ProcDurationTrendChart.Refresh();
@@ -1282,7 +1266,7 @@ public partial class ServerTab : UserControl
            the point left unrated is the window's first one when it stored no end (nothing to difference
            against). */
         var rated = data.Where(d => d.HasRate).ToList();
-        if (rated.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "Duration (ms/sec)"); return; }
+        if (rated.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "ms/sec"); return; }
 
         var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
@@ -1300,9 +1284,9 @@ public partial class ServerTab : UserControl
         MarkDiscontinuities(QueryStoreDurationTrendChart, discontinuities);
 
         QueryStoreDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        QueryStoreDurationTrendChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        QueryStoreDurationTrendChart.Plot.Axes.SetLimitsX(ChartXStart(QueryStoreDurationTrendChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(QueryStoreDurationTrendChart);
-        QueryStoreDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
+        QueryStoreDurationTrendChart.Plot.YLabel("ms/sec");
         SetChartYLimitsWithLegendPadding(QueryStoreDurationTrendChart, 0, values.Max());
         ShowChartLegend(QueryStoreDurationTrendChart);
         QueryStoreDurationTrendChart.Refresh();
@@ -1316,7 +1300,7 @@ public partial class ServerTab : UserControl
         /* #3541 A12: the window's first collection carries a null rate (nothing to difference against) and
            a chart has nowhere to draw "unknown" — it is skipped, not plotted as the 0 it used to be. */
         var rated = data.Where(d => d.HasRate).ToList();
-        if (rated.Count == 0) { RefreshEmptyChart(ExecutionCountTrendChart, "Executions", "Executions/sec"); return; }
+        if (rated.Count == 0) { RefreshEmptyChart(ExecutionCountTrendChart, "Executions", "exec/sec"); return; }
 
         var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
@@ -1334,15 +1318,18 @@ public partial class ServerTab : UserControl
         MarkDiscontinuities(ExecutionCountTrendChart, discontinuities);
 
         ExecutionCountTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        ExecutionCountTrendChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        ExecutionCountTrendChart.Plot.Axes.SetLimitsX(ChartXStart(ExecutionCountTrendChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(ExecutionCountTrendChart);
-        ExecutionCountTrendChart.Plot.YLabel("Executions/sec");
+        ExecutionCountTrendChart.Plot.YLabel("exec/sec");
         SetChartYLimitsWithLegendPadding(ExecutionCountTrendChart, 0, values.Max());
         ShowChartLegend(ExecutionCountTrendChart);
         ExecutionCountTrendChart.Refresh();
     }
 
     /* ========== Query Heatmap ========== */
+
+    /// <summary>#8224: how far below the data the heatmap's colour range starts, as a share of the data's span, so the smallest count is not drawn at the colormap's dark end.</summary>
+    private const double HeatmapLowCountLift = 0.5;
 
     private void UpdateQueryHeatmapChart(HeatmapResult result)
     {
@@ -1378,6 +1365,14 @@ public partial class ServerTab : UserControl
         heatmap.FlipVertically = true; // row 0 ("0-1ms") at bottom, row 6 (">100s") at top
         heatmap.Colormap = new ScottPlot.Colormaps.Viridis();
         heatmap.NaNCellColor = QueryHeatmapChart.Plot.DataBackground.Color;
+        /* #8224: an empty cell is the background, so no cell is at 0, and a count of one at the colormap's dark end was all but
+           invisible on the Dark data background. The colour range starts below the data by a third of its span, so the smallest
+           count is drawn a third of the way up the ramp (a visible blue in every theme) and the largest keeps the top. */
+        double maxScaled = 0;
+        for (int r = 0; r < numRows; r++)
+            for (int c = 0; c < numCols; c++)
+                if (!double.IsNaN(scaled[r, c]) && scaled[r, c] > maxScaled) maxScaled = scaled[r, c];
+        heatmap.ManualRange = new ScottPlot.Range(-maxScaled * HeatmapLowCountLift, maxScaled > 0 ? maxScaled : 1);
 
         // Let ScottPlot use default extent (0..numCols, 0..numRows).
         // No custom Position — avoids cell-centering offset issues.
@@ -1387,22 +1382,17 @@ public partial class ServerTab : UserControl
         // X-axis: time labels at column positions. #1831: NumericManual labels bypass the shared
         // DateTime formatter, so this axis words each bucket's UTC instant in the display zone itself
         // (#4766) — the same zone this same chart's tooltip uses.
-        var xTicks = new ScottPlot.TickGenerators.NumericManual();
-        int xStep = Math.Max(1, numCols / 12); // ~12 labels max
-        for (int i = 0; i < numCols; i += xStep)
+        // #8220: one line per label, and as many labels as the axis has room for at the moment of each render (a fixed ~12 touched at 900x600).
+        var xTicks = new PerformanceMonitor.Ui.HeatmapLabelTicks(numCols, i =>
         {
             var t = DisplayZone.ToDisplay(result.TimeBuckets[i], GetPickerZone());
-            xTicks.AddMajor(i, t.ToString("M/d\nHH:mm"));
-        }
+            return t.ToString("M/d HH:mm");
+        }, horizontal: true);
         QueryHeatmapChart.Plot.Axes.Bottom.TickGenerator = xTicks;
         QueryHeatmapChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = QueryHeatmapChart.Plot.Axes.Left.TickLabelStyle.ForeColor;
 
         // Y-axis: bucket labels
-        var yTicks = new ScottPlot.TickGenerators.NumericManual();
-        for (int i = 0; i < result.BucketLabels.Length; i++)
-        {
-            yTicks.AddMajor(i, result.BucketLabels[i]);
-        }
+        var yTicks = new PerformanceMonitor.Ui.HeatmapLabelTicks(result.BucketLabels.Length, i => result.BucketLabels[i], horizontal: false);
         QueryHeatmapChart.Plot.Axes.Left.TickGenerator = yTicks;
 
         // Axis limits match default heatmap extent
@@ -1413,28 +1403,23 @@ public partial class ServerTab : UserControl
         var colorBar = new ScottPlot.Panels.ColorBar(heatmap, ScottPlot.Edge.Right);
         colorBar.Label = "Query Count";
         colorBar.LabelStyle.ForeColor = QueryHeatmapChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
+        colorBar.LabelStyle.Bold = false; // #8224: the same style as every axis unit (ChartStyle.ApplyAxisTitleStyle)
+        colorBar.LabelStyle.FontSize = (float)PerformanceMonitor.Ui.ChartAxisTitle.BaseFontSize;
         colorBar.Axis.TickLabelStyle.ForeColor = QueryHeatmapChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
+        colorBar.Axis.TickLabelStyle.FontSize = 13;
         double maxRaw = 0;
         for (int r = 0; r < numRows; r++)
             for (int c = 0; c < numCols; c++)
                 if (result.Intensities[r, c] > maxRaw) maxRaw = result.Intensities[r, c];
-        var cbTicks = new ScottPlot.TickGenerators.NumericManual();
-        cbTicks.AddMajor(0, "0");
+        /* No "0": an empty cell is the background, not the ramp's floor. #8224: the round values present and the maximum, with a round
+           value left out when its label would touch the maximum's or its neighbour's at the bar's length at each render. */
         int[] niceValues = { 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000 };
-        foreach (var n in niceValues)
-        {
-            if (n > maxRaw) break;
-            cbTicks.AddMajor(Math.Log(1 + n), n.ToString("N0"));
-        }
-        cbTicks.AddMajor(Math.Log(1 + maxRaw), ((int)maxRaw).ToString("N0"));
-        colorBar.Axis.TickGenerator = cbTicks;
+        var roundTicks = niceValues.Where(n => n <= maxRaw).Select(n => (Math.Log(1 + n), n.ToString("N0"))).ToList();
+        colorBar.Axis.TickGenerator = new PerformanceMonitor.Ui.ColorBarCountTicks(roundTicks, (Math.Log(1 + maxRaw), ((int)maxRaw).ToString("N0")));
         QueryHeatmapChart.Plot.Axes.AddPanel(colorBar);
         _chartHelper.SetLegendPanel(QueryHeatmapChart, colorBar);
 
-        var metricName = ((ComboBoxItem)HeatmapMetricCombo.SelectedItem).Content?.ToString() ?? "Duration (ms)";
-        QueryHeatmapChart.Plot.Title($"Query Distribution by {metricName}");
-        QueryHeatmapChart.Plot.Axes.Title.Label.ForeColor = QueryHeatmapChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
-
+        /* #8224: the card names the chart and the metric picker names the metric, so the plot draws no title of its own. */
         QueryHeatmapChart.Refresh();
     }
 
@@ -1488,7 +1473,7 @@ public partial class ServerTab : UserControl
             ? _lastHeatmapResult.BucketLabels[row]
             : "?";
 
-        var tipText = $"{time}  |  {bucketLabel}  |  {count:N0} queries";
+        var tipText = $"{time}  |  {bucketLabel}  |  {QueryHeatmapCellText.CountText(count)}";
         if (cell != null && !string.IsNullOrEmpty(cell.TopQueryText))
         {
             // Single line, collapse whitespace, truncate
@@ -1525,19 +1510,84 @@ public partial class ServerTab : UserControl
     /// <summary>
     /// Clears a chart and removes any existing legend panel to prevent duplication.
     /// </summary>
-    private void ClearChart(ScottPlot.WPF.WpfPlot chart) => _chartHelper.ClearChart(chart);
+    private void ClearChart(ScottPlot.WPF.WpfPlot chart)
+    {
+        _chartHelper.ClearChart(chart);
+        MarkAllZero(chart); // #8144: a cleared chart has drawn nothing, so the card stops saying "0 throughout"
+    }
 
     /// <summary>
     /// Sets up an empty chart with dark theme, Y-axis label, legend, and "No Data" annotation.
     /// Matches Full Dashboard behavior for consistent UX.
     /// </summary>
     private void RefreshEmptyChart(ScottPlot.WPF.WpfPlot chart, string legendText, string yAxisLabel)
-        => _chartHelper.RefreshEmptyChart(chart, legendText, yAxisLabel);
+    {
+        _chartHelper.RefreshEmptyChart(chart, legendText, yAxisLabel);
+        MarkAllZero(chart); // #8144: a window with no rows is not a window of zeros
+    }
 
     /// <summary>
     /// Shows legend on chart and tracks it for proper cleanup on next refresh.
     /// </summary>
-    private void ShowChartLegend(ScottPlot.WPF.WpfPlot chart) => _chartHelper.ShowChartLegend(chart);
+    private void ShowChartLegend(ScottPlot.WPF.WpfPlot chart, bool oneRow = false)
+    {
+        _chartHelper.ShowChartLegend(chart, oneRow);
+        MarkAllZero(chart);
+    }
+
+    /// <summary>The ChartPanel card a chart sits in, or null for a chart that is not in one.</summary>
+    internal static ChartPanel? CardOf(ScottPlot.WPF.WpfPlot chart)
+    {
+        for (var up = LogicalTreeHelper.GetParent(chart); up is not null; up = LogicalTreeHelper.GetParent(up))
+        {
+            if (up is ChartPanel card) return card;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// #8144: a chart whose plotted values are all zero says so in its card's header ("0 throughout"), the same rule that gives it a
+    /// Y axis from 0 (<see cref="ChartStyle.FloorAllZeroYAxis"/>): every drawn series has a zero minimum and a zero maximum.
+    /// </summary>
+    internal static void MarkAllZero(ScottPlot.WPF.WpfPlot chart)
+    {
+        var card = CardOf(chart);
+        if (card is null) return;
+        var seen = false;
+        var allZero = true;
+        foreach (var plottable in chart.Plot.PlottableList)
+        {
+            if (!plottable.LegendItems.Any()) continue;
+            var limits = plottable.GetAxisLimits();
+            if (!double.IsFinite(limits.Bottom) || !double.IsFinite(limits.Top)) continue;
+            seen = true;
+            if (limits.Bottom != 0 || limits.Top != 0) { allZero = false; break; }
+        }
+
+        var show = seen && allZero;
+        if (show == card.HeaderContent is TextBlock) return;
+        if (!show) { card.HeaderContent = null; return; }
+        var note = new TextBlock { Text = "0 throughout" };
+        note.SetResourceReference(FrameworkElement.StyleProperty, "PanelSubtitleText");
+        card.HeaderContent = note;
+    }
+
+    /// <summary>The unit a chart drawn by a shared renderer carries on its Y axis (the renderer's own title names the chart, and the card does that now).</summary>
+    private static void SetYUnit(ScottPlot.WPF.WpfPlot chart, string unit)
+    {
+        chart.Plot.YLabel(unit);
+        chart.Refresh();
+    }
+
+    /// <summary>The blocking charts name the collector that answered ("blocked-process-report" or "DMV snapshot") in their card's subtitle; null or no recognised source clears it.</summary>
+    private static void SetCardSourceNote(ScottPlot.WPF.WpfPlot chart, IEnumerable<string?>? sources)
+    {
+        var card = CardOf(chart);
+        if (card is null) return;
+        var tag = sources is null ? string.Empty : BlockingSourceLabel.For(string.Empty, sources).Trim(' ', '(', ')');
+        card.Subtitle = tag.Length == 0 ? string.Empty : "Source: " + tag;
+    }
 
     /// <summary>
     /// Applies the chrome theme to a ScottPlot chart.
@@ -1596,7 +1646,7 @@ public partial class ServerTab : UserControl
            is this tab. */
         var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
         var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
-        chart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+        chart.Plot.Axes.SetLimitsX(ChartXStart(chart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         chart.Plot.Axes.AutoScaleY();
         chart.Refresh();
     }
@@ -1663,9 +1713,13 @@ public partial class ServerTab : UserControl
     internal static void PlotCollectorDurationSeries(ScottPlot.WPF.WpfPlot chart, ChartHoverHelper? hover, IReadOnlyList<CollectorDurationSeries> series)
     {
         int colorIdx = 0;
+        /* #8644: a collector with two or three buckets has no cadence of its own to judge a gap by, so it drew a straight line across
+           hours in which nothing was collected. The spans where no collector drew a bucket break every line, as the others do. */
+        var outages = TimeSeriesGaps.OutagesAcross(series.Select(s => s.Xs));
         foreach (var line in series)
         {
-            var scatter = chart.Plot.Add.TimeSeries(line.Xs, line.MaxMs);
+            var (gapXs, gapYs) = TimeSeriesGaps.BreakAtGaps(line.Xs, line.MaxMs, outages);
+            var scatter = chart.Plot.Add.Scatter(gapXs, gapYs);
             scatter.LegendText = line.Collector;
             scatter.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
             scatter.LineWidth = 2;
@@ -1696,14 +1750,8 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        if (data.Count == 0)
-        {
-            CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            CollectorDurationChart.Plot.Axes.SetLimitsX(xMin, xMax);
-            ReapplyAxisColors(CollectorDurationChart);
-            CollectorDurationChart.Refresh();
-            return;
-        }
+        /* #8644: a window with no rows is the one empty look, not an empty plot on the default -10 to 10 axes. */
+        if (data.Count == 0) { RefreshEmptyChart(CollectorDurationChart, "Collector Duration", ""); return; }
 
         /* One series per collector, each point a bucket's slowest successful run (the read keeps only the runs the chart
            has always drawn: SUCCESS with a duration). */
@@ -1712,9 +1760,9 @@ public partial class ServerTab : UserControl
         CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         ReapplyAxisColors(CollectorDurationChart);
         /* Each point is a bucket's slowest run, and the label says so (the Darling viewer's chart uses the same words). */
-        CollectorDurationChart.Plot.YLabel("Slowest run per bucket (ms)");
+        CollectorDurationChart.Plot.YLabel("ms");
         CollectorDurationChart.Plot.Axes.AutoScaleY();
-        CollectorDurationChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        CollectorDurationChart.Plot.Axes.SetLimitsX(ChartXStart(CollectorDurationChart.Plot, xMin, xMax), xMax);
         ShowChartLegend(CollectorDurationChart);
         CollectorDurationChart.Refresh();
     }

@@ -276,6 +276,50 @@ public sealed class WhoDroveItLiveTests
         Assert.Equal(3000.0, callers[0].GetProperty("cpu_ms").GetDouble(), 3);
     });
 
+    /// <summary>
+    /// #8090 item 3: the sp_server_diagnostics session is not load, as a WAITFOR shell is not. It runs for the life of the instance,
+    /// so its cumulative elapsed is days wide at every capture; left in, it takes the whole of <c>total_elapsed_ms</c> and every
+    /// application caller's <c>elapsed_share</c> reads near zero.
+    /// </summary>
+    [Fact]
+    public Task LoadByCaller_DropsTheServerDiagnosticsSession_SoApplicationSharesAreOfTheirOwnWork() => RunAsync(async (postgres, ct) =>
+    {
+        var t = End.AddMinutes(-50);
+        foreach (var capture in new[] { t, t.AddMinutes(20), t.AddMinutes(40) })
+            await SnapshotAsync(postgres, ct, capture, 999, "0xDIAG", "sa", "NODE1", "SQLAgent", 100, 300_000_000, text: "EXEC sp_server_diagnostics");
+        for (var session = 1; session <= 10; session++)
+            await SnapshotAsync(postgres, ct, t.AddMinutes(20), session, "0xHA", "svc", "APP01", "api", 100, 60_000, text: "SELECT 1");
+
+        using var doc = JsonDocument.Parse(await DarlingMcpWhoDroveItTools.GetLoadByCallerCore(postgres, ServerName, 1, 20, 2, AsOf, ct));
+        var root = doc.RootElement;
+        var app = Assert.Single(root.GetProperty("callers").EnumerateArray());
+        Assert.Equal("APP01", app.GetProperty("host_name").GetString());
+        Assert.Equal(10, root.GetProperty("total_requests").GetInt64());
+        Assert.Equal(600_000.0, root.GetProperty("total_elapsed_ms").GetDouble(), 1);
+        Assert.Equal(1.0, app.GetProperty("elapsed_share").GetDouble(), 4);
+    });
+
+    /// <summary>
+    /// #8090 item 3: a request that started before the window counts only the part of its elapsed that lies inside it, the capture
+    /// time less the window start, as the sampling note says. Its cumulative figure at the capture is its whole lifetime.
+    /// </summary>
+    [Fact]
+    public Task LoadByCaller_CountsOnlyTheWindowsPart_OfARequestThatStartedBeforeIt() => RunAsync(async (postgres, ct) =>
+    {
+        /* A one-hour window ending at End. The batch began two hours before its only capture, fifty minutes of which are inside the window. */
+        await SnapshotAsync(postgres, ct, End.AddMinutes(-10), 50, "0xHB", "etl", "BATCH01", "etl", 500, 7_200_000, text: "SELECT 2");
+        await SnapshotAsync(postgres, ct, End.AddMinutes(-10), 51, "0xHA", "svc", "APP01", "api", 100, 60_000, text: "SELECT 1");
+
+        using var doc = JsonDocument.Parse(await DarlingMcpWhoDroveItTools.GetLoadByCallerCore(postgres, ServerName, 1, 20, 2, AsOf, ct));
+        var root = doc.RootElement;
+        var callers = root.GetProperty("callers").EnumerateArray().ToArray();
+        var batch = Assert.Single(callers, c => c.GetProperty("host_name").GetString() == "BATCH01");
+        Assert.Equal(1, batch.GetProperty("requests").GetInt64());
+        Assert.Equal(3_000_000.0, batch.GetProperty("elapsed_ms").GetDouble(), 1);
+        Assert.Equal(3_060_000.0, root.GetProperty("total_elapsed_ms").GetDouble(), 1);
+        Assert.Equal(Math.Round(60_000 / 3_060_000.0, 4), Assert.Single(callers, c => c.GetProperty("host_name").GetString() == "APP01").GetProperty("elapsed_share").GetDouble(), 4);
+    });
+
     [Fact]
     public Task LoadByCaller_AnEmptyWindow_SaysWhy_AndABadStatementCountIsRefused() => RunAsync(async (postgres, ct) =>
     {

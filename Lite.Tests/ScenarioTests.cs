@@ -386,7 +386,7 @@ public class ScenarioTests : IClassFixture<SharedDuckDbFixture>
 
         var fact = facts["PLAN_REGRESSION"];
         // 1.2s vs 100ms CPU = 12x; 1.35s vs 120ms duration = 11.25x → CPU dimension wins.
-        Assert.Equal(12.0, fact.Metadata["worst_regression_factor"], precision: 1);
+        Assert.Equal(12.0, fact.Metadata["lead_regression_factor"], precision: 1);
         Assert.Equal(1.0, fact.Metadata["regressed_dimension"]); // 1 = cpu
         Assert.Equal(1.0, fact.Metadata["offender_count"]);
     }

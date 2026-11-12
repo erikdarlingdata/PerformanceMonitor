@@ -106,9 +106,10 @@ UNION ALL
         return times;
     }
 
-    /// <summary>Successful runs of one collector inside a window. $1 server_id, $2 collector_name, $3/$4 window.</summary>
+    /// <summary>Successful runs of one collector inside a window, and the earliest of them (#7442; NULL when there is none). $1 server_id,
+    /// $2 collector_name, $3/$4 window. Twin of <c>DarlingCollectorRunFactsReader.RunsInWindowSql</c>.</summary>
     public const string CollectorRunsInWindowSql = @"
-SELECT COUNT(*)
+SELECT COUNT(*), MIN(collection_time)
 FROM v_collection_log
 WHERE server_id = $1
 AND   collector_name = $2
@@ -158,6 +159,7 @@ AND   collection_time <= $4";
         }
 
         long? inWindow = null;
+        DateTime? firstInWindow = null;
         if (window is not null || hoursBack is not null)
         {
             /* #6651: a grid's custom range or slicer window counts the runs inside that exact window (GetQueriesTabWindowUtc), not the
@@ -169,9 +171,14 @@ AND   collection_time <= $4";
             command.Parameters.Add(new DuckDBParameter { Value = collectorName });
             command.Parameters.Add(new DuckDBParameter { Value = startTime });
             command.Parameters.Add(new DuckDBParameter { Value = endTime });
-            inWindow = Convert.ToInt64(await command.ExecuteScalarAsync() ?? 0L);
+            using var windowReader = await command.ExecuteReaderAsync();
+            if (await windowReader.ReadAsync())
+            {
+                inWindow = Convert.ToInt64(windowReader.GetValue(0));
+                firstInWindow = windowReader.IsDBNull(1) ? null : DateTime.SpecifyKind(windowReader.GetDateTime(1), DateTimeKind.Utc);
+            }
         }
 
-        return new CollectorRunFacts(runs, inWindow, last, lastRows);
+        return new CollectorRunFacts(runs, inWindow, last, lastRows, firstInWindow);
     }
 }

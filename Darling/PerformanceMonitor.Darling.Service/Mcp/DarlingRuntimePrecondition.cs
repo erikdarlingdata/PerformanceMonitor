@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -125,12 +126,12 @@ SELECT (
     /// Store, and a server-wide answer would hide an off database behind a healthy sibling.</para>
     /// </summary>
     public const string LatestQueryStoreStatesSql = @"
-SELECT database_name, actual_state, capture_time, interval_length_minutes
+SELECT database_name, actual_state, capture_time, interval_length_minutes, readonly_reason::integer
 FROM v_query_store_health
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)
 AND   ($2::text[] IS NULL OR database_name = ANY($2))
-ORDER BY database_name";
+ORDER BY lower(database_name), database_name";
 
     /// <summary>
     /// The <c>precondition</c> envelope when the collector serving this read recorded one on its most recent
@@ -161,7 +162,7 @@ ORDER BY database_name";
         var message = CollectorRuntimePrecondition.CollectionOutcomeMessage(
             serverName, collectorName, status, errorMessage, observedUtc);
 
-        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
+        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message, CollectorRuntimePrecondition.StructuredReason(collectorName, status));
     }
 
     /// <summary>
@@ -289,26 +290,8 @@ ORDER BY database_name";
         }
 
         var message = CollectorRuntimePrecondition.QueryStoreDisabledMessage(serverName, states, observedUtc);
-        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
+        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.QueryStoreDisabledStatusWord(states), message);
     }
-
-    /// <summary>
-    /// #6554: the three facts <see cref="CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage"/> judges, in one round trip:
-    /// the newest collected <c>ag_replica_role</c>, whether the server names a <c>query_store_replica</c>, and how many databases
-    /// in the newest <c>query_store_health</c> capture carry the readable-secondary bit (of how many, leaving out tempdb and databases whose
-    /// Query Store is OFF: the on-prem capture always holds tempdb, and neither has Query Store rows to read). $1 server_id.
-    /// </summary>
-    public const string ReadableSecondaryFactsSql = @"
-SELECT
-    (SELECT sp.ag_replica_role FROM server_properties AS sp WHERE sp.server_id = $1 ORDER BY sp.collection_time DESC LIMIT 1),
-    (SELECT COALESCE(NULLIF(btrim(c.query_store_replica), ''), NULL) FROM config.config_monitored_servers AS c WHERE c.server_id = $1),
-    (SELECT COUNT(*) FROM v_query_store_health AS h
-      WHERE h.server_id = $1 AND h.capture_time = (SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1)
-        AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF'),
-    (SELECT COUNT(*) FROM v_query_store_health AS h
-      WHERE h.server_id = $1 AND (h.readonly_reason & 8) <> 0
-        AND h.capture_time = (SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1)
-        AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF')";
 
     /// <summary>
     /// #6554: the <c>not_collected</c> envelope for a Query Store read on a server that is a readable secondary with
@@ -325,36 +308,15 @@ SELECT
     /// <summary>
     /// #6554: the one-line reason a Query Store read on this server is empty because it is a readable secondary with
     /// <c>query_store_replica</c> off, or <c>null</c> when it is not or the read fails. The one source of the wording: the
-    /// Query Store reads' <c>not_collected</c> answer and a Change Watch request's brief both use it.
+    /// Query Store reads' <c>not_collected</c> answer, a Change Watch request's brief, the tag roll-up (#7376) and the viewer all read it
+    /// through <see cref="DarlingQueryStoreReadableSecondary"/>. #8402: the same judgment the scheduler's gate on
+    /// <c>query_store_hints</c> and <c>get_collection_health</c> reach, with the <c>query_store_health</c> collector's effective
+    /// schedule read from the store's rows (<see cref="DarlingGatedCollectorRows.QueryStoreSecondaryMessageAsync"/>), so a read
+    /// never calls a server a secondary while the gate runs the collector on it, or the reverse.
     /// </summary>
-    public static async Task<string?> QueryStoreReadableSecondaryMessageAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            await using var command = postgres.CreateCommand(ReadableSecondaryFactsSql);
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            DarlingMcpReadParameters.AddInt(command, serverId);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            if (!await reader.ReadAsync(cancellationToken))
-            {
-                return null;
-            }
-
-            return CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
-                serverName,
-                reader.IsDBNull(0) ? null : reader.GetString(0),
-                (int)reader.GetInt64(2),
-                (int)reader.GetInt64(3),
-                replicaConfigured: !reader.IsDBNull(1),
-                "Darling collects Query Store from a registered server only when that server is not a readable secondary, and query_store_replica is off for it. " +
-                "Register the primary, or set query_store_replica on the primary to read Query Store from a readable secondary (edit_server).");
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return null;
-        }
-    }
+    public static Task<string?> QueryStoreReadableSecondaryMessageAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, CancellationToken cancellationToken = default) =>
+        DarlingGatedCollectorRows.QueryStoreSecondaryMessageAsync(postgres, serverId, serverName, cancellationToken);
 
     /// <summary>
     /// #6181: the message for a Query Store read that found no sample EVER stored, when the latest health snapshot says Query
@@ -399,15 +361,48 @@ SELECT
         }
     }
 
+    /// <summary>The payload member that carries <see cref="QueryStoreErrorNoteAsync"/>'s sentence on an answer with rows (#7675).</summary>
+    public const string QueryStoreErrorNoteKey = "query_store_error_note";
+
+    /// <summary>
+    /// #7675: the sentence for an answer WITH rows when a database those rows come from has a Query Store in the ERROR state
+    /// (<see cref="CollectorRuntimePrecondition.QueryStoreErrorNote"/>). Null when none is, when there is no health row, and when the
+    /// read fails: the rows are already in hand and a diagnostic must not turn them into an error.
+    /// </summary>
+    public static async Task<string?> QueryStoreErrorNoteAsync(
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, IEnumerable<string> rowDatabases, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var (states, observedUtc) = await ReadQueryStoreStatesAsync(postgres, serverId, databases, cancellationToken);
+            return CollectorRuntimePrecondition.QueryStoreErrorNote(states, observedUtc, rowDatabases);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>
     /// <paramref name="answer"/> with <see cref="QueryStoreNotWritingHintAsync"/>'s sentence appended to its message when the
     /// answer is an empty or unavailable status (#6074). Other statuses (a precondition, a not-collected answer, an error) already say their own cause.
     /// </summary>
     public static async Task<string> WithQueryStoreNotWritingHintAsync(
-        string answer, NpgsqlDataSource postgres, int serverId, string serverName, DatabaseFilter databases, CancellationToken cancellationToken = default)
+        string answer, NpgsqlDataSource postgres, int serverId, string serverName, DatabaseFilter databases,
+        IEnumerable<string>? rowDatabases = null, CancellationToken cancellationToken = default)
     {
         if (!McpHelpers.IsEmptyOrUnavailableStatus(answer))
         {
+            /* #7675: an answer WITH rows (rowDatabases names the databases they come from) says so when one of those stores is in the
+               ERROR state: its rows are old and nothing says so. A JSON object only; the empty and unavailable answers keep their hint. */
+            if (rowDatabases is not null
+                && await QueryStoreErrorNoteAsync(postgres, serverId, databases, rowDatabases, cancellationToken) is { } errorNote
+                && System.Text.Json.Nodes.JsonNode.Parse(answer) is System.Text.Json.Nodes.JsonObject payload)
+            {
+                payload[QueryStoreErrorNoteKey] = errorNote;
+                return payload.ToJsonString(McpHelpers.JsonOptions);
+            }
+
             return answer;
         }
 
@@ -502,7 +497,8 @@ SELECT
             states.Add(new CollectorRuntimePrecondition.QueryStoreDatabaseState(
                 reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
                 reader.IsDBNull(1) ? null : reader.GetString(1),
-                reader.IsDBNull(3) ? null : reader.GetInt64(3)));
+                reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                reader.IsDBNull(4) ? null : reader.GetInt32(4)));
 
             observedUtc ??= reader.IsDBNull(2)
                 ? null

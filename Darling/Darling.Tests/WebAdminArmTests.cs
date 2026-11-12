@@ -120,7 +120,7 @@ public sealed class WebAdminArmTests
 
     [Theory]
     [InlineData(true, null, true, true, "Admin writes")]
-    [InlineData(true, null, false, true, "list-only")]
+    [InlineData(true, null, false, true, "monitored servers")]
     [InlineData(false, null, false, true, "depends on the web login's grants")]
     [InlineData(true, "groups", true, false, null)]
     [InlineData(false, "groups", false, false, null)]
@@ -166,7 +166,10 @@ public sealed class WebAdminArmTests
 
         var line = Assert.Single(on.Lines);
         Assert.Contains("Admin writes are on (web.allowAdminWrites)", line, StringComparison.Ordinal);
-        Assert.Contains("Set it to false to keep the dashboard list-only", line, StringComparison.Ordinal);
+        // #8609: false turns off the Admin writes alone, so the line names the writes a sign-in that can edit keeps and never says list-only.
+        Assert.DoesNotContain("list-only", line, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("monitored servers", line, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("mute rules", line, StringComparison.OrdinalIgnoreCase);
 
         var off = new ListLogger();
         Assert.Null(WebAdminArm.ForHost(new PostgresConfig { Managed = true }, false, off));
@@ -176,6 +179,48 @@ public sealed class WebAdminArmTests
         var byo = new ListLogger();
         Assert.Null(WebAdminArm.ForHost(new PostgresConfig { Managed = false }, true, byo));
         Assert.Empty(byo.Lines);
+    }
+
+    /// <summary>#8609: with the switch off on the managed store a sign-in that can edit still adds and edits monitored servers and writes mute
+    /// rules, dismissals and custom alert rules, through the web login's own grants. The start lines are what an operator reads to learn
+    /// what the dashboard can change, so none of them says list-only, each names those writes, and each names an Admin write the switch
+    /// does turn off. With OIDC and no role mapping every signed-in user can edit, and the warning says each one can add a server.</summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("groups")]
+    public void WithTheSwitchOff_TheStartLinesNameTheWritesAnEditSignInKeeps_AndNeverSayListOnly(string? roleClaim)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var log = new ListLogger();
+        var arm = WebAdminArm.ForHost(new PostgresConfig { Managed = true }, false, log);
+        Assert.Null(arm);
+        using var oidc = OidcClient(roleClaim);
+        var warned = WebAdminArm.WarnWhenOidcHasNoRoleMapping(oidc, managedStore: true, arm, log);
+
+        Assert.Equal(roleClaim is null, warned);
+        Assert.Equal(warned ? 2 : 1, log.Lines.Count);
+        Assert.All(log.Lines, line =>
+        {
+            Assert.DoesNotContain("list-only", line, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("lists only", line, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("web.allowAdminWrites", line, StringComparison.Ordinal);
+            Assert.Contains("threshold overrides", line, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("monitored servers", line, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("mute rules", line, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("dismissals", line, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("custom alert", line, StringComparison.OrdinalIgnoreCase);
+        });
+        Assert.Contains("are off", log.Lines[0], StringComparison.Ordinal);
+
+        if (warned)
+        {
+            Assert.Contains("every user who signs in", log.Lines[1], StringComparison.Ordinal);
+            Assert.Contains("add", log.Lines[1], StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     private sealed class ListLogger : Microsoft.Extensions.Logging.ILogger
@@ -188,6 +233,21 @@ public sealed class WebAdminArmTests
 
         public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state,
             Exception? exception, Func<TState, Exception?, string> formatter) => Lines.Add(formatter(state, exception));
+    }
+
+    [Fact]
+    public void TheManagedRefusal_ClaimsNoSwitch_WhenTheSwitchIsOn_AndSaysTurnedOffOnlyWhenItIsOff()
+    {
+        // Switch on: the refusal is about privilege (no admin credential yet, or the store refused the web login), so nothing was turned off.
+        var privilege = DarlingWebStoreWrites.Refused("press a proposal", managedStore: true, adminWritesOff: false);
+        Assert.DoesNotContain("turned off", privilege, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("web.allowAdminWrites", privilege, StringComparison.Ordinal);
+        Assert.Equal("This dashboard's store login has no write access, so it cannot press a proposal. Use the Viewer app to make the change.", privilege);
+
+        // Switch off: the switch is the cause, so the sentence says so and names it.
+        var off = DarlingWebStoreWrites.Refused("press a proposal", managedStore: true, adminWritesOff: true);
+        Assert.StartsWith("Changes from this page are turned off", off, StringComparison.Ordinal);
+        Assert.Contains("web.allowAdminWrites", off, StringComparison.Ordinal);
     }
 
     [Fact]

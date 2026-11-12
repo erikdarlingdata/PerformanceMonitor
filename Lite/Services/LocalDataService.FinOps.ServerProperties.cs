@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -108,10 +109,15 @@ SELECT
     /// socket/core topology. That DMV needs VIEW SERVER STATE (VIEW DATABASE STATE on Azure SQL DB),
     /// so it runs in its OWN best-effort read — a permission gap loses only these fields, never the
     /// inventory row above (#1535). Columns: 0 cpu_count, 1 physical_memory_mb, 2 sqlserver_start_time,
-    /// 3 socket_count, 4 cores_per_socket.
+    /// 3 socket_count, 4 cores_per_socket, 5 uptime_seconds: two tick counts of the same DMV row, so no wall clock (the client's or the
+    /// server's, which a daylight saving change shifts by an hour) enters the uptime (#7176).
     /// </summary>
+    /// <summary>The UTC start instant for an uptime the server counted in ticks. Plain subtraction from a UTC instant: no zone, so a start
+    /// before a daylight saving change is exactly as far back as the tick count says (#7176).</summary>
+    internal static DateTime StartUtcFromUptimeSeconds(double uptimeSeconds, DateTime utcNow) => utcNow.AddSeconds(-uptimeSeconds);
+
     internal const string HardwareQueryText =
-        "SELECT cpu_count, physical_memory_kb / 1024, sqlserver_start_time, socket_count, cores_per_socket FROM sys.dm_os_sys_info;";
+        "SELECT cpu_count, CONVERT(bigint, ROUND(physical_memory_kb / 1024.0, 0)), sqlserver_start_time, socket_count, cores_per_socket, (ms_ticks - sqlserver_start_time_ms_ticks) / 1000 FROM sys.dm_os_sys_info;";
 
     /// <summary>
     /// Queries a SQL Server directly for its properties. Inventory facts (edition, version, storage)
@@ -155,9 +161,9 @@ SELECT
                 EngineEdition = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10)),
                 IsHadrEnabled = reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)) == 1,
                 IsClustered = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)) == 1,
-                HostOsVersion = reader.IsDBNull(13) ? "" : reader.GetString(13),
+                HostOsVersion = HostOsText.Clean(reader.IsDBNull(13) ? null : reader.GetString(13)),
                 AgReplicaRole = reader.IsDBNull(14) ? "Standalone" : reader.GetString(14),
-                LastUpdated = DateTime.Now
+                LastUpdated = DateTime.UtcNow
             };
         }
 
@@ -175,16 +181,47 @@ SELECT
                 result.SqlServerStartTime = hardwareReader.IsDBNull(2) ? null : hardwareReader.GetDateTime(2);
                 result.SocketCount = hardwareReader.IsDBNull(3) ? null : Convert.ToInt32(hardwareReader.GetValue(3));
                 result.CoresPerSocket = hardwareReader.IsDBNull(4) ? null : Convert.ToInt32(hardwareReader.GetValue(4));
+                result.SqlServerStartUtc = hardwareReader.IsDBNull(5) ? null : StartUtcFromUptimeSeconds(Convert.ToDouble(hardwareReader.GetValue(5)), DateTime.UtcNow);
             }
         }
         catch (SqlException ex)
         {
-            result.HardwareUnavailableReason =
-                "Hardware inventory (CPU, memory, sockets) unavailable - the monitoring login likely lacks VIEW DATABASE STATE on this database.";
+            result.HardwareUnavailableReason = HardwareUnavailableNote;
             AppLogger.Warn("FinOps", $"Hardware inventory unavailable for '{connection.DataSource}': {ex.Message}");
         }
 
         return result;
+    }
+
+    /// <summary>The Hardware Note of an inventory row whose hardware read was denied: set here when the live read's
+    /// sys.dm_os_sys_info query fails, and by <see cref="FinOpsServerInventory.FromCollected"/> for a collected row the
+    /// collector stored with no CPU count and no memory, which is what it stores after the same denial.</summary>
+    internal const string HardwareUnavailableNote =
+        "Hardware inventory (CPU, memory, sockets) unavailable - the monitoring login likely lacks VIEW DATABASE STATE on this database.";
+
+    /// <summary>
+    /// The relation a newest-row lookup reads for the servers in <paramref name="serverIds"/> (#7014): the hot <paramref name="table"/>, plus the
+    /// archive view <paramref name="view"/> restricted to the servers that have no row in the hot table (collection stopped and archival moved
+    /// every row out), so such a server still shows its last values. With no such server the archive is not read at all. The ids are ints from
+    /// this process, never text. <paramref name="columns"/> is a literal column list from this file.
+    /// </summary>
+    private static async Task<string> HotFirstRelationAsync(LockedConnection connection, List<int> serverIds, string table, string view, string columns)
+    {
+        var hotIds = new HashSet<int>();
+        using (var hot = connection.CreateCommand())
+        {
+            hot.CommandText = "SELECT DISTINCT server_id FROM " + table;
+            using var reader = await hot.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+                hotIds.Add(Convert.ToInt32(reader.GetValue(0)));
+        }
+
+        var archiveOnly = serverIds.Where(id => !hotIds.Contains(id)).ToList();
+        if (archiveOnly.Count == 0)
+            return "(SELECT " + columns + " FROM " + table + ")";
+
+        return "(SELECT " + columns + " FROM " + table + " UNION ALL SELECT " + columns + " FROM " + view
+            + " WHERE server_id IN (" + string.Join(", ", archiveOnly) + "))";
     }
 
     /// <summary>One fleet server's overlay metrics — <see cref="GetServerMetricsAsync"/>'s per-server result.</summary>
@@ -213,16 +250,47 @@ SELECT
     /// </summary>
     public async Task<Dictionary<int, ServerMetricsRow>> GetServerMetricsAsync()
     {
+        /* The servers that meet the idle-coverage rule, before this read's own connection opens (the statements take their own, in turn,
+           so no read lock is held while another is taken). A fleet with none gets an empty set, which no server is in. */
+        var idleCovered = await IdleCoveredServerIdsAsync(DateTime.UtcNow, serverId: null);
+        var idleCoverageSql = idleCovered.Count == 0
+            ? "SELECT server_id FROM known_servers WHERE false"
+            : "SELECT * FROM (VALUES " + string.Join(", ", idleCovered.Select(id => "(" + id + ")")) + ") AS c(server_id)";
+
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var cpuCutoff = DateTime.UtcNow.AddHours(-24);
         var idleCutoff = DateTime.UtcNow.AddDays(-7);
 
+        /* #7014: the newest-row lookups below (memory, size snapshot, properties) have no time bound, so through the v_ views they
+           scanned every archived row of those tables, and database_size_stats holds a row per database per collection. Each reads the
+           hot table for a server that still has rows there and the archive view only for a server whose rows are all archived
+           (collection stopped), which still shows its last values, as the Utilization card does (#7000). The set of servers keeps the
+           view: a server known only from the archive must still be listed, and the properties archive is one narrow row per collection. */
+        var knownIds = new List<int>();
+        using (var known = connection.CreateCommand())
+        {
+            known.CommandText = "SELECT DISTINCT server_id FROM v_server_properties ORDER BY server_id";
+            using var knownReader = await known.ExecuteReaderAsync();
+            while (await knownReader.ReadAsync())
+                knownIds.Add(Convert.ToInt32(knownReader.GetValue(0)));
+        }
+
+        if (knownIds.Count == 0)
+            return [];
+
+        var knownServersSql = "SELECT * FROM (VALUES " + string.Join(", ", knownIds.Select(id => "(" + id + ")")) + ") AS k(server_id)";
+        var memoryRelation = await HotFirstRelationAsync(connection, knownIds, "memory_stats", "v_memory_stats",
+            "server_id, collection_time, max_workers_count, current_workers_count, total_physical_memory_mb, buffer_pool_mb, total_server_memory_mb");
+        var sizeRelation = await HotFirstRelationAsync(connection, knownIds, "database_size_stats", "v_database_size_stats",
+            "server_id, collection_time, database_name, total_size_mb, used_size_mb");
+        var propertiesRelation = await HotFirstRelationAsync(connection, knownIds, "server_properties", "v_server_properties",
+            "server_id, collection_time, engine_edition, edition, ag_replica_role");
+
         command.CommandText = @"
 WITH known_servers AS (
-    SELECT DISTINCT server_id
-    FROM v_server_properties
+    " + knownServersSql + @"
 ),
 cpu_24h AS (
     SELECT
@@ -250,7 +318,7 @@ mem_latest AS (
     FROM known_servers s
     LEFT JOIN LATERAL (
         SELECT max_workers_count, current_workers_count, total_physical_memory_mb, buffer_pool_mb, total_server_memory_mb, collection_time
-        FROM v_memory_stats
+        FROM " + memoryRelation + @"
         WHERE server_id = s.server_id
         ORDER BY collection_time DESC
         LIMIT 1
@@ -268,6 +336,7 @@ grants AS (
         MAX(100.0 * granted_memory_mb / NULLIF(target_memory_mb, 0)) AS grant_utilization_pct
     FROM v_memory_grant_stats
     WHERE collection_time >= $1
+    AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before the small-query row (id 1) was collected */
     GROUP BY server_id
 ),
 /* The latest size-snapshot TIME per server, shared by storage_totals (sums every database at that instant)
@@ -279,7 +348,7 @@ size_latest AS (
     FROM known_servers s
     LEFT JOIN LATERAL (
         SELECT collection_time
-        FROM v_database_size_stats
+        FROM " + sizeRelation + @"
         WHERE server_id = s.server_id
         ORDER BY collection_time DESC
         LIMIT 1
@@ -294,7 +363,7 @@ storage_totals AS (
         COALESCE(SUM(vd.total_size_mb), 0) AS alloc_mb,
         COALESCE(SUM(CASE WHEN vd.total_size_mb IS NOT NULL AND vd.used_size_mb IS NOT NULL THEN vd.total_size_mb - vd.used_size_mb END), 0) AS free_mb
     FROM size_latest sl
-    JOIN v_database_size_stats vd
+    JOIN " + sizeRelation + @" vd
       ON vd.server_id = sl.server_id
      AND vd.collection_time = sl.collection_time
     GROUP BY sl.server_id
@@ -304,7 +373,7 @@ latest_dbs AS (
         sl.server_id,
         vd.database_name
     FROM size_latest sl
-    JOIN v_database_size_stats vd
+    JOIN " + sizeRelation + @" vd
       ON vd.server_id = sl.server_id
      AND vd.collection_time = sl.collection_time
     WHERE vd.database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
@@ -315,16 +384,13 @@ active_dbs AS (
     WHERE collection_time >= $2
     AND   delta_execution_count > 0
 ),
-/* The recommendation row's coverage rule (HasQueryStatsCoverageAsync, IdleCoverageBounds): a database is called idle for 7 days only when
-   the oldest query-stats sample is at or before now minus 7 days ($5) AND each of the 7 complete UTC days from $3 up to (not including)
-   $6 holds a sample; today is not required. A server without that coverage has no idle_dbs row, so its count is NULL (a dash), never a
-   count made from a window nothing watched. Covered servers count 0 when nothing is idle. */
+/* The recommendation row's coverage rule (IdleCoveredServerIdsAsync, shared with HasQueryStatsCoverageAsync): a database is called idle for 7
+   days only when the oldest query-stats sample is at least 7 days old AND each of the 7 complete UTC days before today holds a sample; today
+   is not required. The servers that meet it are worked out before this statement, from a windowed read and a bounded probe instead of a
+   MIN over the whole archive (#7014). A server without that coverage has no idle_dbs row, so its count is NULL (a dash), never a count made
+   from a window nothing watched. Covered servers count 0 when nothing is idle. */
 idle_coverage AS (
-    SELECT server_id
-    FROM v_query_stats
-    GROUP BY server_id
-    HAVING MIN(collection_time) <= $5
-       AND COUNT(DISTINCT CASE WHEN collection_time >= $3 AND collection_time < $6 THEN CAST(collection_time AS DATE) END) >= $4
+    " + idleCoverageSql + @"
 ),
 idle_dbs AS (
     SELECT
@@ -346,10 +412,10 @@ SELECT
     c.p95_cpu_pct,
     COALESCE(m.max_workers_count, 0),
     m.current_workers_count,
-    COALESCE(g.max_grant_waiters, 0),
-    COALESCE(g.grant_timeouts, 0),
-    COALESCE(g.forced_grants, 0),
-    COALESCE(g.grant_utilization_pct, 0),
+    g.max_grant_waiters,
+    g.grant_timeouts,
+    g.forced_grants,
+    g.grant_utilization_pct,
     props.engine_edition,
     props.edition,
     m.total_physical_memory_mb,
@@ -358,11 +424,12 @@ SELECT
     st.alloc_mb,
     st.free_mb,
     c.cpu_samples,
-    m.total_server_memory_mb
+    m.total_server_memory_mb,
+    props.ag_replica_role
 FROM known_servers s
 LEFT JOIN LATERAL (
-    SELECT engine_edition, edition
-    FROM v_server_properties
+    SELECT engine_edition, edition, ag_replica_role
+    FROM " + propertiesRelation + @"
     WHERE server_id = s.server_id
     ORDER BY collection_time DESC
     LIMIT 1
@@ -375,11 +442,6 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
 
         command.Parameters.Add(new DuckDBParameter { Value = cpuCutoff });
         command.Parameters.Add(new DuckDBParameter { Value = idleCutoff });
-        var (coverageStart, coverageEnd, coverageOldestCutoff) = IdleCoverageBounds(DateTime.UtcNow);
-        command.Parameters.Add(new DuckDBParameter { Value = coverageStart });
-        command.Parameters.Add(new DuckDBParameter { Value = (long)IdleCoverageDays });
-        command.Parameters.Add(new DuckDBParameter { Value = coverageOldestCutoff });
-        command.Parameters.Add(new DuckDBParameter { Value = coverageEnd });
 
         var results = new Dictionary<int, ServerMetricsRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -408,7 +470,7 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
     /// inputs over the same window (<see cref="FinOpsHealthCalculator.Score"/>): the 24-hour p95 CPU, the newest memory row's buffer pool over
     /// its physical memory, and the free share of the newest database-size snapshot. This used to be built from the 24-hour AVERAGE CPU and a
     /// fixed memory and storage term, so every server of similar CPU read the same number beside a Utilization score that differed.
-    /// Null (a dash) when the window holds no CPU sample or the server has no memory row (no Utilization card either). Ordinals: 1 avg CPU,
+    /// Null (the cell says Not collected) when the window holds no CPU sample or the server has no memory row (no Utilization card either). Ordinals: 1 avg CPU,
     /// 5 p95 CPU, 14 physical memory, 15 buffer pool, 16 memory row time, 17 allocated MB, 18 free MB.
     /// </summary>
     internal static int? FleetHealthScoreFor(System.Data.Common.DbDataReader reader)
@@ -431,10 +493,10 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
     ///
     /// <para>Null, not a verdict from zeros: with nothing to average, <c>Evaluate</c> reads 0% CPU and calls
     /// the server OVER_PROVISIONED — a server that has sent no CPU sample is told to shrink. The Server
-    /// Inventory grid already shows a null status as blank. A server WITH CPU samples gets the same verdict as
+    /// Inventory grid shows a null status as Not collected. A server WITH CPU samples gets the same verdict as
     /// before, except that a logical server's master gets the N/A verdict. Ordinals match the fleet SELECT: 1 avg CPU,
     /// 4 max CPU, 5 p95 CPU, 6 max workers, 7 current workers, 8 grant waiters, 9 grant timeouts, 10 forced grants,
-    /// 11 grant utilization, 12 engine edition, 13 edition, 15 buffer pool, 19 CPU sample count, 20 total server memory. Under
+    /// 11 grant utilization, 12 engine edition, 13 edition, 15 buffer pool, 19 CPU sample count, 20 total server memory, 21 the AG replica role (a secondary gets NOT_JUDGED_SECONDARY, #7705). Under
     /// <see cref="ProvisioningVerdict.MinSamples"/> samples the verdict is NOT_ENOUGH_DATA; high stolen memory is UNDER_PROVISIONED (#6139).</para>
     /// </summary>
     internal static string? FleetProvisioningStatusFor(System.Data.Common.DbDataReader reader)
@@ -455,6 +517,7 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
             edition: reader.IsDBNull(13) ? null : reader.GetString(13),
             cpuSamples: reader.IsDBNull(19) ? 0L : ToInt64(reader.GetValue(19)),
             stolenMemoryPercent: ProvisioningVerdict.StolenMemoryPercent(
-                reader.IsDBNull(20) ? 0 : Convert.ToInt32(reader.GetValue(20)), reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15))));
+                reader.IsDBNull(20) ? 0 : Convert.ToInt32(reader.GetValue(20)), reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15))),
+            isAgSecondary: ProvisioningVerdict.IsSecondaryReplicaRole(reader.IsDBNull(21) ? null : reader.GetString(21)));
     }
 }

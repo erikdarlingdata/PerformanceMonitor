@@ -175,6 +175,11 @@ public sealed partial class ViewerDataService
     /// speaks the same names as the rest of the viewer.
     /// </para>
     /// </summary>
+    /// <summary>#8133: when set, an All Servers job-history read guarantees each server with rows in the window its share of the row cap
+    /// (<see cref="JobHistoryFilter.ShareCapPerServer"/>) before the newest runs of the rest. The Job History tab sets it; every other
+    /// caller reads the newest runs of the whole fleet.</summary>
+    internal bool ShareJobHistoryCapPerServer { get; set; }
+
     public async Task<List<ViewerJobHistoryRow>> GetJobHistoryAsync(
         DateTime sinceUtc, int? serverId = null, int limit = 2000, DateTime? untilUtc = null, int? runStatus = null, string? category = null,
         CancellationToken cancellationToken = default)
@@ -187,13 +192,18 @@ public sealed partial class ViewerDataService
            and one busy server (a job every minute) fills it with its latest runs, so a filter applied to the rows afterwards never
            saw an older failure on a quieter server: the All Servers grid lost runs the single-server grid showed. The reader's
            filters run inside the per-server top-N, so the cap counts only matching runs. They do not touch the job stats (the long-running
-           flag and the last success come from the job's successful outcomes, whatever status the grid is filtered to). */
-        var filter = untilUtc is null && runStatus is null && string.IsNullOrWhiteSpace(category)
+           flag and the last success come from the job's successful outcomes, whatever status the grid is filtered to).
+           #8133: with ShareJobHistoryCapPerServer an All Servers read guarantees every server with rows in the window its share of the
+           cap (JobHistoryFilter.ShareCapPerServer), so one server that runs a job every minute cannot fill the page alone and a
+           fleet that fits under the cap comes back whole. One server reads its whole cap either way. */
+        var share = serverId is null && ShareJobHistoryCapPerServer;
+        var filter = untilUtc is null && runStatus is null && string.IsNullOrWhiteSpace(category) && !share
             ? null
             : new JobHistoryFilter(
                 RunStatus: runStatus,
                 Category: string.IsNullOrWhiteSpace(category) ? null : category,
-                UntilUtc: untilUtc is { } until ? until.AddTicks(-TimeSpan.TicksPerMicrosecond) : null);
+                UntilUtc: untilUtc is { } until ? until.AddTicks(-TimeSpan.TicksPerMicrosecond) : null,
+                ShareCapPerServer: share);
         var dtos = await DarlingJobHistoryReader.GetAsync(
             _dataSource, sinceUtc, serverId, limit, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, filter, cancellationToken);
 
@@ -232,7 +242,13 @@ public sealed partial class ViewerDataService
         (await GetJobHistoryServersAsync(cancellationToken)).Choices;
 
     /// <summary>The Job History tab's registered servers: the Server drop-down's choices, and which of them are Azure SQL Databases (no SQL Agent).</summary>
-    public sealed record JobHistoryServers(List<JobHistoryFilterChoices.ServerChoice> Choices, IReadOnlySet<int> AzureSqlDatabaseIds);
+    /// <param name="Choices">The offered servers.</param>
+    /// <param name="AzureSqlDatabaseIds">Which of them are Azure SQL Databases.</param>
+    /// <param name="EngineGapNotes">The servers whose engine never runs the job history collector (a PostgreSQL target), by id, each with the engine's own sentence
+    /// (#8564). Null reads as none.</param>
+    public sealed record JobHistoryServers(
+        List<JobHistoryFilterChoices.ServerChoice> Choices, IReadOnlySet<int> AzureSqlDatabaseIds,
+        IReadOnlyDictionary<int, string>? EngineGapNotes = null);
 
     /// <summary>Reads the registered servers the Job History tab offers (<see cref="OffersJobHistory"/>), with the Azure SQL Databases among them marked.</summary>
     public async Task<JobHistoryServers> GetJobHistoryServersAsync(CancellationToken cancellationToken = default)
@@ -249,7 +265,21 @@ public sealed partial class ViewerDataService
     /// </summary>
     internal static bool OffersJobHistory(DarlingServer server) =>
         JobHistoryCollector.CollectsOn(server.IsEnabled, server.EngineKind, server.EngineEdition)
-        || IsEnabledAzureSqlDatabase(server);
+        || IsEnabledAzureSqlDatabase(server)
+        || EngineGapNoteOf(server) is not null;
+
+    /// <summary>
+    /// #8564: the engine's own sentence for an enabled server whose engine never runs the job history collector (a PostgreSQL target), the same
+    /// <see cref="CollectorEngineCapability.NotCollectedMessage"/> the Agent Alerts, Database Protection and Identity Capacity tabs show. It is
+    /// offered in the Server drop-down so the tab can say why it has no runs, instead of the usual note that reads as a true negative. Null for a
+    /// server that runs SQL Agent, an Azure SQL Database (it has its own sentence) or a disabled server.
+    /// </summary>
+    internal static string? EngineGapNoteOf(DarlingServer server) =>
+        server.IsEnabled && !JobHistoryCollector.CollectsOn(true, server.EngineKind, CollectorEngineCapability.UnknownEngineEdition)
+            ? CollectorEngineCapability.NotCollectedMessage(
+                string.IsNullOrEmpty(server.DisplayName) ? server.ServerName : server.DisplayName,
+                server.EngineEdition, server.EngineKind, "job_history", server.AwsRdsKind)
+            : null;
 
     private static bool IsEnabledAzureSqlDatabase(DarlingServer server) =>
         server.EngineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition
@@ -263,7 +293,11 @@ public sealed partial class ViewerDataService
             offered
                 .Select(s => new JobHistoryFilterChoices.ServerChoice(s.ServerId, string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName))
                 .ToList(),
-            offered.Where(IsEnabledAzureSqlDatabase).Select(s => s.ServerId).ToHashSet());
+            offered.Where(IsEnabledAzureSqlDatabase).Select(s => s.ServerId).ToHashSet(),
+            offered
+                .Select(s => (s.ServerId, Note: EngineGapNoteOf(s)))
+                .Where(x => x.Note is not null)
+                .ToDictionary(x => x.ServerId, x => x.Note!));
     }
 
     /// <summary>Maps the managed servers to Server choices (see <see cref="ServersOf"/>).</summary>
@@ -334,6 +368,228 @@ public sealed partial class ViewerDataService
                 _dataSource, [source], null, startUtc, endUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
     }
 
+    /// <summary>One server's oldest <c>job_history</c> row by collection: an ordered one-row read on <c>idx_job_history_time</c>
+    /// <c>(server_id, collection_time)</c>, as <see cref="ServerDataStart.SqlServerSql"/> does for the charts. $1 server_id.</summary>
+    public const string JobHistoryOldestCollectionServerSql =
+        "SELECT collection_time FROM job_history WHERE server_id = $1 ORDER BY collection_time ASC LIMIT 1";
+
+    /// <summary>The All Servers twin of <see cref="JobHistoryOldestCollectionServerSql"/>: the oldest collection of any server.</summary>
+    public const string JobHistoryOldestCollectionFleetSql =
+        "SELECT collection_time FROM job_history ORDER BY collection_time ASC LIMIT 1";
+
+    /// <summary>One server's oldest run, on the server's wall clock as stored: an ordered one-row read on <c>idx_job_history_server_run</c>
+    /// <c>(server_id, run_datetime)</c>. The caller takes it to UTC on the server's clock, as the grid takes each row. $1 server_id.
+    /// Exact and fast on an uncompressed table, so it is the read where the store has no oldest-run rollup. On a TimescaleDB store a
+    /// compressed chunk keeps no rows in that index, and the read sorts every chunk's rows for the server to keep one (#8549), so
+    /// <see cref="GetJobHistoryOldestRunsAsync"/> takes the rollup there.</summary>
+    public const string JobHistoryOldestRunServerSql =
+        "SELECT server_id, run_datetime FROM job_history WHERE server_id = $1 ORDER BY run_datetime ASC LIMIT 1";
+
+    /// <summary>The All Servers twin of <see cref="JobHistoryOldestRunServerSql"/>: every server's oldest run, each found by its own
+    /// ordered one-row read, on each server's wall clock as stored.</summary>
+    public const string JobHistoryOldestRunsFleetSql = @"
+SELECT s.server_id, r.run_datetime
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT run_datetime FROM job_history WHERE server_id = s.server_id ORDER BY run_datetime ASC LIMIT 1
+) AS r";
+
+    /// <summary>Is <c>collect.job_history_oldest_daily</c> (V263, #8549) a real continuous aggregate, not the plain view a store without
+    /// a hypertable carries? Read from the core catalogs, so it runs on plain PostgreSQL: a continuous aggregate's view reads from a table
+    /// in <c>_timescaledb_internal</c>, the plain view reads <c>job_history</c>. False when the relation is absent (an older store).</summary>
+    public const string JobHistoryOldestDailyIsAggregateSql = @"
+SELECT EXISTS
+(
+    SELECT 1
+    FROM pg_rewrite AS rw
+    JOIN pg_depend AS d ON d.classid = 'pg_rewrite'::regclass AND d.objid = rw.oid AND d.refclassid = 'pg_class'::regclass
+    JOIN pg_class AS t ON t.oid = d.refobjid
+    JOIN pg_namespace AS n ON n.oid = t.relnamespace
+    WHERE rw.ev_class = to_regclass('collect.job_history_oldest_daily')
+    AND   n.nspname = '_timescaledb_internal'
+)";
+
+    /// <summary>What the rollup read needs to decide which days it can take from the rollup: the rollup's oldest and newest bucket, and
+    /// the oldest <c>job_history</c> row of the whole store by collection (the raw tier's edge: retention drops whole chunks, so the day
+    /// that row is on may have lost rows the rollup's bucket for that day still counts). Three values, one read.</summary>
+    public const string JobHistoryOldestDailyBoundsSql = @"
+SELECT
+    (SELECT min(bucket) FROM collect.job_history_oldest_daily),
+    (SELECT max(bucket) FROM collect.job_history_oldest_daily),
+    (SELECT collection_time FROM job_history ORDER BY collection_time ASC LIMIT 1)";
+
+    /// <summary>The rollup's form of <see cref="JobHistoryOldestRunsFleetSql"/> (#8549): every server's oldest run, from the rollup's buckets in
+    /// [$1, $2) and raw <c>job_history</c> for every collection before $1 or from $2 on. The caller picks $1 and $2 so that every bucket in the
+    /// range is whole in raw's retention and in the rollup: $1 is the first bucket after the day of raw's oldest row (and no earlier than the
+    /// rollup's first), $2 the end of the rollup's last bucket. The two raw reads are plain ranges on <c>collection_time</c>, which exclude
+    /// every chunk inside [$1, $2), and each reads the one edge day, or the one open day, not the whole store. Joined to <c>servers</c>
+    /// as the read it replaces is.</summary>
+    public const string JobHistoryOldestRunsFleetRollupSql = @"
+SELECT s.server_id, m.oldest_run
+FROM servers AS s
+JOIN
+(
+    SELECT u.server_id, min(u.oldest_run) AS oldest_run
+    FROM
+    (
+        SELECT server_id, oldest_run_datetime AS oldest_run FROM collect.job_history_oldest_daily WHERE bucket >= $1 AND bucket < $2
+        UNION ALL
+        SELECT server_id, min(run_datetime) FROM job_history WHERE collection_time < $1 GROUP BY server_id
+        UNION ALL
+        SELECT server_id, min(run_datetime) FROM job_history WHERE collection_time >= $2 GROUP BY server_id
+    ) AS u
+    GROUP BY u.server_id
+) AS m ON m.server_id = s.server_id";
+
+    /// <summary>The one-server form of <see cref="JobHistoryOldestRunsFleetRollupSql"/>. $1 and $2 as there, $3 server_id.</summary>
+    public const string JobHistoryOldestRunServerRollupSql = @"
+SELECT $3::integer AS server_id, min(u.oldest_run) AS oldest_run
+FROM
+(
+    SELECT oldest_run_datetime AS oldest_run FROM collect.job_history_oldest_daily WHERE server_id = $3 AND bucket >= $1 AND bucket < $2
+    UNION ALL
+    SELECT min(run_datetime) FROM job_history WHERE server_id = $3 AND collection_time < $1
+    UNION ALL
+    SELECT min(run_datetime) FROM job_history WHERE server_id = $3 AND collection_time >= $2
+) AS u";
+
+    /// <summary>
+    /// The oldest instant the store holds job history from, for the Job History tab's time range picker's "Data starts" note: the
+    /// earlier of the oldest <c>job_history</c> row's collection and the oldest run it holds, for <paramref name="serverId"/>, or for
+    /// every server with a null <paramref name="serverId"/> (the tab's All Servers view), as naive UTC, or null when the scope has no
+    /// row yet. A first collection copies the history msdb already holds, so a run can sit long before the collection that stored
+    /// it, and the grid shows it: the note names that run. The note previews whatever range a reader types, so it cannot take the
+    /// grid's window-bounded coverage probe (<see cref="GetJobHistoryDataStartAsync"/>): a probe answers the oldest row inside the
+    /// window it was asked about, which for a covered window is the window's own start. Each server's oldest run is read on its wall
+    /// clock as stored and taken to UTC here, on the clock the grid takes that server's rows to UTC with
+    /// (<see cref="ViewerTimeHelper.ClockForServerOrMachine"/> over <see cref="GetServerClocksAsync"/>): the clock follows the
+    /// server's time zone across a daylight-saving change, which one fixed offset cannot. Two indexed one-row reads per scope and
+    /// the clocks; the tab caches the answer per scope. A read that fails throws; the caller keeps what it had.
+    /// </summary>
+    public async Task<DateTime?> GetJobHistoryOldestRetainedAsync(int? serverId, CancellationToken cancellationToken = default)
+    {
+        DateTime? oldest = null;
+        await using (var command = _dataSource.CreateCommand(serverId is null ? JobHistoryOldestCollectionFleetSql : JobHistoryOldestCollectionServerSql))
+        {
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            if (serverId is int id)
+            {
+                command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = id });
+            }
+
+            if (await command.ExecuteScalarAsync(cancellationToken) is DateTime collected)
+            {
+                oldest = DateTime.SpecifyKind(collected, DateTimeKind.Utc);
+            }
+        }
+
+        var runs = await GetJobHistoryOldestRunsAsync(serverId, cancellationToken);
+
+        if (runs.Count > 0)
+        {
+            var clocks = await GetServerClocksAsync(serverId, cancellationToken);
+            var nowUtc = DateTime.UtcNow;
+            foreach (var (id, runWall) in runs)
+            {
+                var runUtc = DateTime.SpecifyKind(
+                    ViewerTimeHelper.ClockForServerOrMachine(clocks, id, TimeZoneInfo.Local, nowUtc).ToUtc(runWall), DateTimeKind.Utc);
+                if (oldest is null || runUtc < oldest.Value)
+                {
+                    oldest = runUtc;
+                }
+            }
+        }
+
+        return oldest;
+    }
+
+    /// <summary>
+    /// Every server's oldest run as stored, or <paramref name="serverId"/>'s alone (#8549). Where the store holds the oldest-run rollup
+    /// as a real continuous aggregate (<see cref="JobHistoryOldestDailyIsAggregateSql"/>) the days the rollup holds are read from it and the
+    /// rest from raw: the day raw's oldest row is on (retention drops whole chunks, so that day can have lost rows its bucket still counts),
+    /// every day before the rollup's first bucket, and every day after its last (the open day, and any day its refresh has not reached).
+    /// The answer is the same one <see cref="JobHistoryOldestRunsFleetSql"/> and <see cref="JobHistoryOldestRunServerSql"/> give: a bucket
+    /// is the smallest run among rows collected that day, a late collection holding an older run sits in the day it was collected, and a
+    /// day the rollup holds whole is never part of the raw reads. A store with no rollup, a plain view, or no usable bucket takes the
+    /// ordered one-row reads, which are exact on an uncompressed table.
+    /// </summary>
+    internal async Task<List<(int ServerId, DateTime RunWall)>> GetJobHistoryOldestRunsAsync(int? serverId, CancellationToken cancellationToken)
+    {
+        var range = await ReadJobHistoryOldestDailyRangeAsync(cancellationToken);
+        var runs = new List<(int ServerId, DateTime RunWall)>();
+        string sql;
+        if (range is not null)
+        {
+            sql = serverId is null ? JobHistoryOldestRunsFleetRollupSql : JobHistoryOldestRunServerRollupSql;
+        }
+        else
+        {
+            sql = serverId is null ? JobHistoryOldestRunsFleetSql : JobHistoryOldestRunServerSql;
+        }
+
+        await using var command = _dataSource.CreateCommand(sql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        if (range is { } window)
+        {
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = window.Lo });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = window.Hi });
+        }
+
+        if (serverId is int id)
+        {
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = id });
+        }
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(1))
+            {
+                runs.Add((reader.GetInt32(0), reader.GetDateTime(1)));
+            }
+        }
+
+        return runs;
+    }
+
+    /// <summary>
+    /// The bucket range [lo, hi) <see cref="JobHistoryOldestRunsFleetRollupSql"/> may take from the rollup, or null when the store has no
+    /// real rollup or it holds no bucket past raw's edge day. <c>lo</c> is the later of the rollup's first bucket and the first midnight after
+    /// the day of raw's oldest row; <c>hi</c> is the end of the rollup's last bucket.
+    /// </summary>
+    internal async Task<(DateTime Lo, DateTime Hi)?> ReadJobHistoryOldestDailyRangeAsync(CancellationToken cancellationToken)
+    {
+        await using (var probe = _dataSource.CreateCommand(JobHistoryOldestDailyIsAggregateSql))
+        {
+            probe.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
+            {
+                return null;
+            }
+        }
+
+        await using var bounds = _dataSource.CreateCommand(JobHistoryOldestDailyBoundsSql);
+        bounds.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        await using var reader = await bounds.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.IsDBNull(1) || reader.IsDBNull(2))
+        {
+            return null;
+        }
+
+        return JobHistoryOldestDailyRange(reader.GetDateTime(0), reader.GetDateTime(1), reader.GetDateTime(2));
+    }
+
+    /// <summary><see cref="ReadJobHistoryOldestDailyRangeAsync"/>'s rule on its three inputs, apart from the read: the rollup's first and
+    /// last bucket and raw's oldest collection. Null when no bucket is left after raw's edge day.</summary>
+    internal static (DateTime Lo, DateTime Hi)? JobHistoryOldestDailyRange(DateTime firstBucket, DateTime lastBucket, DateTime rawOldestCollection)
+    {
+        var afterEdgeDay = rawOldestCollection.Date.AddDays(1);
+        var lo = firstBucket > afterEdgeDay ? firstBucket : afterEdgeDay;
+        var hi = lastBucket.AddDays(1);
+        return lo < hi ? (lo, hi) : null;
+    }
+
     /// <summary>
     /// Each server's clock from its newest <c>server_properties</c> row that has an offset (the time zone id
     /// alongside it where the store has the V134 column, else the offset alone), keyed by server id. A server
@@ -342,6 +598,14 @@ public sealed partial class ViewerDataService
     /// </summary>
     internal Task<Dictionary<int, ServerClock>> GetServerClocksAsync(int? serverId, CancellationToken cancellationToken) =>
         DarlingServerClocksReader.GetAsync(_dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>
+    /// One server's clock for text that belongs to it (#7343): its collected clock, else the viewer machine's offset, the rule
+    /// every list row uses (<see cref="ViewerTimeHelper.ClockForServerOrMachine"/>).
+    /// </summary>
+    internal async Task<ServerClock> GetServerClockOrMachineAsync(int serverId, CancellationToken cancellationToken) =>
+        ViewerTimeHelper.ClockForServerOrMachine(
+            await GetServerClocksAsync(serverId, cancellationToken), serverId, TimeZoneInfo.Local, DateTime.UtcNow);
 
     internal static string BuildServerClocksSql(bool scopedToServer, bool withZone) =>
         DarlingServerClocksReader.BuildSql(scopedToServer, withZone);

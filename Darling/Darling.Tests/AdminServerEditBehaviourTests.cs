@@ -899,7 +899,7 @@ public sealed class AdminServerEditBehaviourTests
     [Theory]
     [InlineData("403", "This account has read-only access.")]
     [InlineData("500", "admin server read failed (InvalidOperationException)")]
-    [InlineData("network", "Network error: connection refused")]
+    [InlineData("network", "Could not reach the Darling service (connection refused). Check that the service is running and that you can open this address, then reload.")]
     public void AFailedEditRead_ShowsTheSentence_OpensNoForm_AndKeepsTheList(string kind, string sentence)
     {
         var page = Run("byIdFails:" + kind);
@@ -1043,12 +1043,13 @@ public sealed class AdminServerEditBehaviourTests
         var page = Run("frame");
 
         Assert.Equal(
-            new[] { "Display Name", "Server", "Auth", "Engine", "Version", "Status", "Freshness", "Monthly Cost ($)", "Read only", "Added", "Last Collected", "Same machine as" },
+            new[] { "Display Name", "Server", "Auth", "Engine", "Version", "Status", "Freshness", "Monthly Cost", "Read only", "Added", "Last Collected", "Same machine as" },
             page.GetProperty("headers").EnumerateArray().Select(h => h.GetString()).ToArray());
         var cells = page.GetProperty("cells").EnumerateArray().Select(r => r.EnumerateArray().Select(c => c.GetString()).ToArray()).ToArray();
         Assert.Equal(2, cells.Length);
-        Assert.Equal(new[] { "Alpha", "alpha", "Windows", "sqlserver", "SQL Server 2022", "Enabled", "Online", "$1,234" }, cells[0].Take(8).ToArray());
-        Assert.Equal(new[] { "Bravo", "bravo", "SQL Server", "postgres", "PostgreSQL 18", "Disabled", "AwaitingFirstCollection", "—" }, cells[1].Take(8).ToArray());
+        // #7702: the Engine cell prints the registry's word for a person (sqlserver reads SQL Server, postgres reads PostgreSQL).
+        Assert.Equal(new[] { "Alpha", "alpha", "Windows", "SQL Server", "SQL Server 2022", "Enabled", "Online", "$1,234" }, cells[0].Take(8).ToArray());
+        Assert.Equal(new[] { "Bravo", "bravo", "SQL Server", "PostgreSQL", "PostgreSQL 18", "Disabled", "AwaitingFirstCollection", "—" }, cells[1].Take(8).ToArray());
         // The grid's time cells follow the process zone, so the harness pins UTC; the cell text itself depends on the locale.
         Assert.Equal(0, page.GetProperty("utcOffsetMinutes").GetInt32());
         Assert.Equal(12, cells[0].Length);
@@ -1269,7 +1270,7 @@ public sealed class AdminServerEditBehaviourTests
     [InlineData("limited", "Another server change is in progress. Try again in a moment.")]
     [InlineData("broken", "admin server edit failed (InvalidOperationException)")]
     [InlineData("collides", "Another server already uses the address alpha.")]
-    [InlineData("network", "Network error: connection refused")]
+    [InlineData("network", "Could not reach the Darling service (connection refused). Check that the service is running and that you can open this address, then reload.")]
     [InlineData("conflict", "This server was changed since you opened it. Nothing was saved.")]
     public void AnAnswerThatKeepsTheForm_ShowsItsSentenceInTheBanner_ClearsThePassword_AndEnablesSaveAgain(string kind, string sentence)
     {

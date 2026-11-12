@@ -113,8 +113,8 @@ public sealed class ViewerNotificationRouteSeveritiesTests
                     new NotificationRouteRow { MetricMatch = "performance", SmtpRecipients = "c@example.invalid", Severities = "major" }, ct));
             }
 
-            /* A store below V229 has no column: the list still reads, and every route is Both. */
-            await ExecAsync(connection, "ALTER TABLE config.config_notification_routes DROP COLUMN severities", ct);
+            /* A store below V229 has no column, and every later sentinel goes too: the version probe reads newest first and would still answer the newest one left without them. The list still reads, and every route is Both. */
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 228, ct);
             await using (var older = new ViewerDataService(scratch.ConnectionString))
             {
                 Assert.True(await older.GetStoreSchemaVersionAsync(ct) < 229);

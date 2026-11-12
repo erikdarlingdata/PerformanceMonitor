@@ -26,6 +26,7 @@
  * a double click sends one request. All server text reaches the DOM through el()/textContent.
  */
 
+import { countWord } from "../plain-text.js";
 import { el, mount, apiGetFleet, apiWrite, loadingStrip, errorStrip, emptyStrip } from "../util.js";
 import { getSession } from "../views-api.js";
 
@@ -195,7 +196,7 @@ export async function renderManageTags(main) {
   const newRoot = canEdit ? lockButton({ class: "btn primary", type: "button", text: "New root tag", onClick: () => openForm({ mode: "create", values: { name: "", colour: "", parent_id: "" } }) }) : null;
   const headEl = el("div", { class: "page-head" }, [
     el("h2", { text: "Manage Tags" }),
-    el("div", { class: "meta", text: canEdit ? "tags scope custom alert rules" : "read-only sign-in: tags can be viewed, not changed" }),
+    el("div", { class: "meta", text: canEdit ? "tags scope custom alert rules" : session.probe_failed === true ? "could not check this sign-in: tags can be viewed, not changed until you reload" : "read-only sign-in: tags can be viewed, not changed" }),
     el("div", { class: "spacer" }),
     newRoot,
   ]);
@@ -283,8 +284,8 @@ function rulesNode(rules, heading) {
 function ruleLine(r) {
   const bits = [r.name || "(unnamed rule)"];
   if (r.effect) bits.push(r.effect);
-  if (r.servers_lost_count) bits.push(r.servers_lost_count + " server(s) lost");
-  if (r.servers_gained_count) bits.push(r.servers_gained_count + " server(s) gained");
+  if (r.servers_lost_count) bits.push(countWord(r.servers_lost_count, "server") + " lost");
+  if (r.servers_gained_count) bits.push(countWord(r.servers_gained_count, "server") + " gained");
   if (r.enabled === false) bits.push("rule disabled");
   return bits.join(" — ");
 }

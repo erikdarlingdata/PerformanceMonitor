@@ -999,7 +999,7 @@ public sealed class PgIndexBloatCoverageTests
 
         /* The hook exists, is fed from the READ's own response, and renders as a notice. */
         Assert.Contains("desc.noteKey", renderer, StringComparison.Ordinal);
-        Assert.Contains("noticeStrip(note)", renderer, StringComparison.Ordinal);
+        Assert.Contains("noteStrip(desc, note, res.data)", renderer, StringComparison.Ordinal);
         Assert.Contains("noticeStrip,", renderer, StringComparison.Ordinal);
 
         /* ON THE POPULATED PATH. The empty and error branches return before the viz runs, so a note read
@@ -1019,7 +1019,7 @@ public sealed class PgIndexBloatCoverageTests
         /* Through getPath, so it is a data lookup rather than a hard-coded key, and rendered as TEXT. */
         Assert.Contains("getPath(res.data, desc.noteKey)", renderer, StringComparison.Ordinal);
 
-        var tabs = ReadSource(
+        var tabs = RepoFile.ReadRepoFile(
             "Darling/PerformanceMonitor.Darling.Service/wwwroot/js/pages/server-tabs.js");
 
         /* The helper forwards it to the descriptor, or the panel below configures something nothing reads. */

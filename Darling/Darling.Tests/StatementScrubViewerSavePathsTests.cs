@@ -56,7 +56,6 @@ public sealed class StatementScrubViewerSavePathsTests
     public void EveryViewerPlanSaveSite_RefusesTheWithheldMarkerFirst()
     {
         var problems = new List<string>();
-        var sites = 0;
         foreach (var file in ViewerSources())
         {
             var text = File.ReadAllText(file);
@@ -65,15 +64,14 @@ public sealed class StatementScrubViewerSavePathsTests
                 continue;
             }
 
-            sites++;
             if (!text.Contains("WithheldPlanGuard.RefuseSave(", StringComparison.Ordinal))
             {
                 problems.Add(Path.GetFileName(file) + " writes a .sqlplan without WithheldPlanGuard.RefuseSave");
             }
         }
 
-        /* The three history windows. The tab's own plan saves go through the shared FileSaveHelper, which Lite.Tests scans. */
-        Assert.True(sites >= 3, "expected at least 3 viewer plan save sites, found " + sites);
+        /* Since #7228 the three history windows and the tab's plan saves all go through the shared FileSaveHelper, which
+           StatementScrubViewerPlanWithheldTests scans, so the Viewer project holds no site of its own. A new one must still guard. */
         Assert.Empty(problems);
     }
 

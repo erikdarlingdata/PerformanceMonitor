@@ -142,6 +142,8 @@ public static class AlertFamily
         ["Capture Down"] = SelfMonitor,
         ["Compression Job Stuck"] = SelfMonitor,
         ["Store Disk Pressure"] = SelfMonitor,
+        /* #7368: big tables past 3 times their autoanalyze threshold on two hourly reads in a row. */
+        ["Store Autovacuum Behind"] = SelfMonitor,
         ["Store Runtime Upgrade"] = SelfMonitor,
         /* #5450: raised once per service start when the store shows the service was not collecting. */
         ["Collection Gap At Start"] = SelfMonitor,
@@ -183,6 +185,8 @@ public static class AlertFamily
            history row, mute rule and route is keyed on, so renaming it would orphan all three. */
         ["Refresh Job Stuck"] = SelfMonitor,
         ["Retention Job Stuck"] = SelfMonitor,
+        /* #8302: a daily rollup behind its source, the store's own condition like the policy-job names above. */
+        ["Daily Rollup Stale"] = SelfMonitor,
         ["Store Job Failing"] = SelfMonitor,
 
         /* ---- reports: the three daily documents ---- */
@@ -190,6 +194,8 @@ public static class AlertFamily
         ["Fleet Sweep Rollup"] = Reports,
         /* #3712: the once-a-day copy of the analysis findings the corroboration gate routed away from a page. */
         ["Analysis Singles Digest"] = Reports,
+        /* #7041: the scheduled Daily Health Report, a report to read and never a page. */
+        ["Daily Health Report"] = Reports,
     };
 
     /// <summary>

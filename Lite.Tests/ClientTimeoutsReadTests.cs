@@ -204,6 +204,11 @@ VALUES (799, $1, 'test-server', $2, $3, 5, $4, 'The specified object Performance
         Assert.Contains("\"precondition\"", json, StringComparison.Ordinal);
         Assert.Contains("attention collector", json, StringComparison.Ordinal);
         Assert.Contains("ALTER ANY EVENT SESSION", json, StringComparison.Ordinal);
+
+        /* #7410: the same structured reason Darling's twin sends, so a client that reads `hints` gets it from either product. */
+        var hints = System.Text.Json.JsonDocument.Parse(json).RootElement.GetProperty("hints");
+        Assert.Equal("capture_session_missing", hints.GetProperty("reason").GetString());
+        Assert.Equal(AttentionWindowSql.CollectorName, hints.GetProperty("collector").GetString());
     }
 
     [Fact]

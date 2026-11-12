@@ -52,16 +52,17 @@ namespace PerformanceMonitorLite.Tests;
 /// field offender and Darling's #1 measured tool, same shape <c>QueryStoreRegressionsBudgetTests</c> already
 /// proves against this schema), 30 multi-process deadlock graphs, 30 blocked-process reports with report XML,
 /// 10 DMV-sourced blocking snapshots, every SQL Server collector's worth of collection-log history with mixed
-/// SUCCESS/ERROR rows so nothing compacts away, plan-correction recommendations across several databases, and
-/// a page of long query completions -- the same seven tables Darling's twin seeds, using the exact column
+/// SUCCESS/ERROR rows so nothing compacts away, plan-correction recommendations across several databases,
+/// a page of long query completions, and one daily snapshot of 120 tables' index and object stats (#8655: more
+/// tables than <c>get_table_index_sizes</c>' 100-table page holds, each row carrying the growth note a single
+/// snapshot gives it) -- the same eight tables Darling's twin seeds, using the exact column
 /// lists <c>McpPageContractTests</c>, <c>QueryStoreRegressionsBudgetTests</c> and <c>QueryStoreTopBudgetTests</c>
 /// already prove against Lite's DuckDB schema (generated from the same engine-neutral collector catalog
 /// Darling's Postgres schema is, per <c>DuckDbSchemaGenerator</c>'s own remarks).</para>
 ///
 /// <para><b>Known gaps.</b> A tool whose required parameter has no default and is not one of the DI services
 /// below gets a placeholder (0/false/null) instead -- it likely answers empty/not-found and passes trivially,
-/// because this fixture does not seed its backing rows/state. Object-level stats (<c>get_index_usage</c>/
-/// <c>get_object_locking</c>, backed by <c>index_object_stats</c>), DMV query stats (<c>get_query_heatmap</c>/
+/// because this fixture does not seed its backing rows/state. DMV query stats (<c>get_query_heatmap</c>/
 /// <c>get_top_queries_by_cpu</c>/<c>get_top_procedures_by_cpu</c>, backed by <c>query_stats</c>), analysis
 /// findings (<c>get_analysis_findings</c>), and every single-row drill-down (<c>get_plan_xml</c>, ...) are in
 /// this bucket, matching Darling's twin's own gaps for the same tables; each run's GAPS output (and the PR
@@ -70,7 +71,7 @@ namespace PerformanceMonitorLite.Tests;
 [Trait("Stage", "Guard")]
 public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
-    private const string ServerName = "mcp-read-tool-budget-4198";
+    internal const string ServerName = "mcp-read-tool-budget-4198";
 
     private const int DbCount = 4;
     private const int QueriesPerDb = 10;
@@ -80,6 +81,7 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
     private const int CollectionLogSamplesPerCollector = 10;
     private const int PlanCorrectionRows = 30;
     private const int LongQueryRows = 20;
+    private const int TableRows = 120;
 
     private readonly DuckDbInitializer _duckDb;
     private readonly string _configDir;
@@ -285,14 +287,15 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
         name == "audit_config" ||
         WriteToolRoster.Contains(name);
 
-    private static (string Name, MethodInfo Method)[] ReadToolMethods() =>
+    internal static (string Name, MethodInfo Method)[] ReadToolMethods() =>
         AllToolMethods().Where(x => !IsExcluded(x.Name)).ToArray();
 
     /// <summary>Binds one tool's parameters: its DI services, <c>server_name</c> at the seeded server, every
     /// other optional parameter at its declared default. A required parameter that is none of those gets a
     /// placeholder and a <paramref name="gaps"/> note -- see the class remarks' "Known gaps".</summary>
-    private static object?[] BindArgs(MethodInfo method, LocalDataService dataService, ServerManager serverManager,
-        AnalysisService analysisService, McpToolGuideCatalog catalog, List<string> gaps, string toolName)
+    internal static object?[] BindArgs(MethodInfo method, LocalDataService dataService, ServerManager serverManager,
+        AnalysisService analysisService, McpToolGuideCatalog catalog, List<string> gaps, string toolName,
+        IReadOnlyDictionary<string, object?>? overrides = null)
     {
         var parameters = method.GetParameters();
         var args = new object?[parameters.Length];
@@ -304,6 +307,8 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
             if (p.ParameterType == typeof(AnalysisService)) { args[i] = analysisService; continue; }
             if (p.ParameterType == typeof(McpToolGuideCatalog)) { args[i] = catalog; continue; }
             if (p.Name == "server_name") { args[i] = ServerName; continue; }
+            /* #6984: the window matrix sets hours_back and as_of per run; every other parameter keeps its default. */
+            if (p.Name is not null && overrides is not null && overrides.TryGetValue(p.Name, out var overridden)) { args[i] = overridden; continue; }
             if (p.HasDefaultValue) { args[i] = p.DefaultValue; continue; }
 
             gaps.Add($"{toolName}: '{p.Name}' ({p.ParameterType.Name}) has no default and is not a known DI service -- placeholder passed, likely answers empty/invalid.");
@@ -314,7 +319,7 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
 
     /// <summary>Every MCP tool method returns either <c>string</c> (<c>get_tool_guide</c>) or <c>Task&lt;string&gt;</c>
     /// (everything else); this is the reply an MCP client would receive either way.</summary>
-    private static async Task<string> InvokeAsync(MethodInfo method, object?[] args)
+    internal static async Task<string> InvokeAsync(MethodInfo method, object?[] args)
     {
         var result = method.Invoke(null, args);
         return result switch
@@ -456,6 +461,24 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
                 _nextId--, Naive(t), _serverId, ServerName, Naive(t), "sql_batch_completed", db,
                 (long)(i + 1) * 500_000, "EXEC dbo.usp_NightlyReconcile_" + i + " " + PadBlock(400));
+        }
+
+        /* index_object_stats: one daily snapshot of more tables than get_table_index_sizes' 100-table page holds (#8655),
+           spread over the tenant databases. A store with a single snapshot gives every row its growth note, the widest
+           row the read writes; get_index_usage and get_object_locking read the same rows. */
+        for (var i = 0; i < TableRows; i++)
+        {
+            var db = $"TenantDb{i % DbCount:00}";
+            var table = $"OrderLineHistory_{i:000}";
+            await ExecAsync(
+                @"INSERT INTO index_object_stats
+    (collection_id, collection_time, server_id, server_name, sqlserver_start_time, database_name, database_id,
+     schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows,
+     user_seeks, user_scans, user_lookups, user_updates, row_lock_wait_in_ms, index_lock_promotion_count)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)",
+                _nextId--, Naive(now.AddHours(-2)), _serverId, ServerName, Naive(now.AddDays(-12)), db, 5 + (i % DbCount),
+                "dbo", i + 1, table, 1, "PK_" + table, "CLUSTERED", 5000m - i, 4999m - i, 1000L + i,
+                10L + i, 5L, 2L, 20L + i, 40L + i, 0L);
         }
 
         batch.Commit();

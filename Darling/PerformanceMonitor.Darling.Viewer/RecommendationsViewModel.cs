@@ -119,8 +119,8 @@ public sealed class RecommendationItem
     /// is derived from. Carried so the card can reconstruct the incident-vs-config-fix distinction the
     /// Dashboard draws from its RecommendationSetting taxonomy (<c>RecommendationsViewModel.IsIncident</c>).
     /// The viewer reads only engine findings (there is no legacy critical_issues RecommendationSetting
-    /// store here), so a structured standing-config action — DB_CONFIG / RCSI / FILE_AUTOGROWTH_PERCENT /
-    /// SERVER_CONFIG — is the only signal that a finding is a config fix rather than a time-bound incident,
+    /// store here), so a structured standing-config action — DB_CONFIG / RCSI / FILE_AUTOGROWTH_PERCENT
+    /// — is the only signal that a finding is a config fix rather than a time-bound incident,
     /// and it gates whether the "Open in Active Queries" deep-link is offered.
     /// </summary>
     public RemediationAction? Remediation { get; init; }
@@ -198,10 +198,10 @@ public sealed class RecommendationCardViewModel
         _ => ""                                 // info
     };
 
-    /// <summary>The card heading.</summary>
-    public string Title => Item.Title;
+    /// <summary>The card heading: the finding's headline, or its fact token read as words (<see cref="RecommendationTitleText"/>).</summary>
+    public string Title => RecommendationTitleText.Readable(Item.Title);
 
-    /// <summary>#6159: false when the card is the only finding in its section, whose expander header already carries the title.</summary>
+    /// <summary>#6159: false when the section's header already carries this card's title, so the title is read once.</summary>
     public bool ShowTitle { get; internal set; } = true;
 
     /// <summary>
@@ -245,13 +245,12 @@ public sealed class RecommendationCardViewModel
 
     /// <summary>
     /// Whether this row carries a STRUCTURED standing config-fix action — a persisted
-    /// <see cref="RemediationAction"/> whose typed per-target lists map to a database- or server-level
+    /// <see cref="RemediationAction"/> whose typed per-target lists map to a database-level
     /// configuration change: DB_CONFIG safe settings (<see cref="RemediationAction.DbConfigTargets"/>),
     /// per-database RCSI (<see cref="RemediationAction.RcsiTargets"/> — a DB_CONFIG action can carry ONLY
-    /// these, so they must be checked), percent-autogrowth files
-    /// (<see cref="RemediationAction.FileGrowthTargets"/>), or server config MAXDOP/CTFP/memory
-    /// (<see cref="RemediationAction.ServerConfigTargets"/>). Mirrors the Dashboard card's
-    /// <c>HasStructuredFixAction</c>. Plan-regression (force-plan), clear-plan, and MISSING_INDEX actions
+    /// these, so they must be checked), or percent-autogrowth files
+    /// (<see cref="RemediationAction.FileGrowthTargets"/>). Mirrors the Dashboard card's
+    /// <c>HasStructuredFixAction</c>. Plan-regression (force-plan) and MISSING_INDEX actions
     /// are deliberately NOT structured config fixes — their target lists are empty here — so they remain
     /// incidents, matching the Dashboard (where MISSING_INDEX keeps the incident affordances).
     /// </summary>
@@ -286,7 +285,8 @@ public sealed class RecommendationCardViewModel
     /// </summary>
     public bool ShowOpenInActiveQueries =>
         IsIncident && Item.ServerId != 0 && Item.WindowStartUtc.HasValue && Item.WindowEndUtc.HasValue
-        && LinkTarget != RecommendationLinkTarget.None;
+        && LinkTarget != RecommendationLinkTarget.None
+        && !FactKinds.IsStandingStateKey(Item.RootFactKey); // #7416: no running query explains a setting or a volume's free space
 
     /// <summary>
     /// Where the deep-link goes for this finding's engine (#6134): Active Queries on SQL Server, the PostgreSQL
@@ -455,7 +455,7 @@ public sealed class RecommendationsViewModel
 
     /// <summary>The default insufficient-data prose when the engine supplied no message (mirrors Lite's).</summary>
     public const string DefaultInsufficientDataMessage =
-        "Still collecting — the engine needs about 24 hours of history before recommendations are " +
+        "Still collecting: the engine needs about 24 hours of history before recommendations are " +
         "meaningful. Keep the collector running and check back later.";
 
     /// <summary>Builds the loading-state view-model (no data yet, read in flight).</summary>
@@ -476,7 +476,7 @@ public sealed class RecommendationsViewModel
 
     /// <summary>The default window-empty prose when the marker carried no message (mirrors Lite's).</summary>
     public const string DefaultWindowEmptyMessage =
-        "Nothing was collected in this analysis window, so nothing was measured — this is not an all-clear.";
+        "Nothing was collected in this analysis window, so nothing was measured. This is not an all-clear.";
 
     /// <summary>
     /// Appended to every window-empty message so the operator lands on the surface that diagnoses a
@@ -519,11 +519,16 @@ public sealed class RecommendationsViewModel
     /// rows arrive pre-sorted (severity band desc, raw desc, database, title) from the read, and grouping
     /// preserves that order. <paramref name="insufficientData"/> and <paramref name="windowEmpty"/> default
     /// false so the callers that carry no marker keep the prior loaded/empty behavior.
+    /// <paramref name="forcePlanStates"/> is the store's forcing and automatic-plan-correction state for the rows'
+    /// force-plan targets and <paramref name="forcePlanStateUnavailableReason"/> is why that read failed; each card's
+    /// copy-paste command is rendered against them (<see cref="BuildCopyPasteSql"/>).
     /// </summary>
     public static RecommendationsViewModel FromFindings(
         IReadOnlyList<ViewerFindingRow> rows, string serverName, ServerClock? serverClock = null,
         bool insufficientData = false, string? insufficientDataMessage = null,
-        bool windowEmpty = false, string? windowEmptyMessage = null, bool isPostgres = false)
+        bool windowEmpty = false, string? windowEmptyMessage = null, bool isPostgres = false,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates = null,
+        string? forcePlanStateUnavailableReason = null)
     {
         if (rows is null || rows.Count == 0)
             return ZeroFindingState(insufficientData, insufficientDataMessage, windowEmpty, windowEmptyMessage);
@@ -533,7 +538,7 @@ public sealed class RecommendationsViewModel
         {
             if (row is null)
                 continue;
-            items.Add(MapItem(row, serverName, isPostgres));
+            items.Add(MapItem(row, serverName, isPostgres, forcePlanStates, forcePlanStateUnavailableReason));
         }
 
         if (items.Count == 0)
@@ -567,9 +572,13 @@ public sealed class RecommendationsViewModel
     /// the grid mapping exactly), and derives the advice prose + copy-paste SQL + incident/window from
     /// the carried <see cref="AnalysisFinding"/>. Advice comes from <see cref="FactAdvice"/> for the
     /// root fact key; copy-paste SQL comes from the PERSISTED remediation action
-    /// (<see cref="BuildCopyPasteSql"/>). Exposed <c>internal</c> for tests.
+    /// (<see cref="BuildCopyPasteSql"/>), rendered against <paramref name="forcePlanStates"/> and
+    /// <paramref name="forcePlanStateUnavailableReason"/>. Exposed <c>internal</c> for tests.
     /// </summary>
-    internal static RecommendationItem MapItem(ViewerFindingRow row, string serverName, bool isPostgres = false)
+    internal static RecommendationItem MapItem(
+        ViewerFindingRow row, string serverName, bool isPostgres = false,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates = null,
+        string? forcePlanStateUnavailableReason = null)
     {
         var finding = row.Finding;
         var advice = FactAdvice.GetComposedForFinding(finding);
@@ -585,7 +594,7 @@ public sealed class RecommendationsViewModel
             AdviceText = PgTargetAdvice.IsPgKey(finding.RootFactKey)
                 ? ComposeShortPostgresAdvice(advice)
                 : ComposeAdvice(advice),
-            CopyPasteSql = BuildCopyPasteSql(finding.Remediation),
+            CopyPasteSql = BuildCopyPasteSql(finding.Remediation, forcePlanStates, forcePlanStateUnavailableReason),
             Remediation = finding.Remediation,
             IncidentId = finding.IncidentId,
             ServerName = serverName ?? string.Empty,
@@ -682,16 +691,25 @@ public sealed class RecommendationsViewModel
     /// ephemeral drill-down is NOT stored (so <see cref="FactRemediation.GenerateForFinding"/> returns
     /// null on read), and the built action IS persisted. Because the viewer has NO in-app remediation
     /// executor (advise-only, Postgres read-through), a runnable copy-paste command is the ONLY
-    /// remediation surface, so the shared renderer covers ALL seven remediation shapes — the three
+    /// remediation surface, so the shared renderer covers ALL five remediation shapes — the three
     /// always-safe ones (percent-autogrowth MODIFY FILE, missing-index CREATE, safe DB-config
-    /// ALTER DATABASE … SET) render bare, and force-plan, server-config, RCSI, and clear-plan (the four
-    /// that were previously copy-paste dead ends) now render too, the two destructive ones (RCSI,
-    /// clear-plan) carrying their two-sided risk disclosure as a comment header. Kept as a thin
+    /// ALTER DATABASE … SET) render bare, and force-plan and RCSI render too, the destructive one
+    /// (RCSI) carrying its two-sided risk disclosure as a comment header. Kept as a thin
     /// <c>internal</c> seam (exercised directly by the viewer tests) over the shared renderer so the
     /// viewer and the Dashboard reader cannot drift. Null when the action carries no renderable target.
+    /// <para>
+    /// <paramref name="states"/> is the store's forcing and automatic-plan-correction state for the action's
+    /// force-plan targets: a target that state blocks gets no force statement, only its blockers in comments. Null
+    /// <paramref name="states"/> with a <paramref name="stateUnavailableReason"/> means the state read failed: every
+    /// statement stays and the text opens with <see cref="FactRemediation.StateNotReadPrefix"/> and the reason. The
+    /// other remediation shapes ignore both.
+    /// </para>
     /// </summary>
-    internal static string? BuildCopyPasteSql(RemediationAction? action) =>
-        FactRemediation.RenderCopyPasteCommand(action);
+    internal static string? BuildCopyPasteSql(
+        RemediationAction? action,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states = null,
+        string? stateUnavailableReason = null) =>
+        FactRemediation.RenderCopyPasteCommand(action, states, stateUnavailableReason);
 
     /// <summary>
     /// Appends a "what else fired in this analysis window" cross-reference to each card's advice text
@@ -760,7 +778,8 @@ public sealed class RecommendationsViewModel
             .Select(i => new RecommendationCardViewModel(i, serverClock))
             .ToList();
         var primary = cards[0]; // severity-desc sorted -> the first card is the incident primary
-        if (cards.Count == 1) primary.ShowTitle = false; // the section header already names it (#6159)
+        foreach (var card in cards)
+            card.ShowTitle = card.Title != primary.Title; // the section header already names the primary (#6159)
         var severity = primary.Severity;
         var label = severity switch
         {
@@ -804,11 +823,12 @@ public sealed class RecommendationsViewModel
     /// the tab was for another server), and the label is taken from the same clock at the same instant, so it
     /// always names the zone the time beside it is in. Pure (no WPF, no statics) so the text is unit-testable.
     /// </summary>
-    internal static string FormatLastAnalyzed(DateTime analysisTimeUtc, TimeDisplayMode mode, ServerClock serverClock)
+    internal static string FormatLastAnalyzed(DateTime analysisTimeUtc, TimeDisplayMode mode)
     {
-        var shown = ViewerTimeHelper.ConvertToDisplay(analysisTimeUtc, mode, serverClock);
-        var zone = ViewerTimeHelper.GetTimezoneLabel(mode, serverClock, analysisTimeUtc);
-        return $"Last analyzed {shown:yyyy-MM-dd HH:mm:ss} ({zone})";
+        /* #8576: the page's own refresh stamp is fleet-wide (this machine's zone in Local mode, UTC otherwise), and this line used to
+           read the server's offset ("(UTC-05:00)") beside it, a second clock on one tab. It now takes the refresh stamp's clock and
+           names it in the same words, "2026-06-01 15:00:00 UTC". */
+        return $"Last analyzed {ViewerTimeHelper.FormatFleetWide(analysisTimeUtc, "yyyy-MM-dd HH:mm:ss", mode)}";
     }
 
     /// <summary>

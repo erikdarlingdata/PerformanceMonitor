@@ -64,7 +64,7 @@ public sealed class WebPgGridTextTests
 
         Assert.Equal(new[] { "Low", "Moderate", "High" }, Strings(r, "bloat"));
         Assert.Equal(
-            new[] { "Invalid", "No, primary key", "No, constraint", "No, replica identity", "Too early", "No, in use", "Candidate" },
+            new[] { "Invalid", "No, primary key", "No, uniqueness", "No, replica identity", "Too early", "No, in use", "Candidate" },
             Strings(r, "droppability"));
         Assert.Equal(new[] { "977 KB, 11.1% of heap", "3 GB, 10% of heap", "Not measured" }, Strings(r, "cost"));
         Assert.Equal(new[] { "None recorded" }, Strings(r, "lastScan"));
@@ -88,6 +88,50 @@ public sealed class WebPgGridTextTests
 
     private static string[] Strings(JsonElement r, string name) =>
         r.GetProperty(name).EnumerateArray().Select(e => e.GetString() ?? "").ToArray();
+
+    [Fact]
+    public void TheEvictionSentence_IsBuiltFromTheReadsFields_NotFromItsNoteText()
+    {
+        var unknown = new DarlingPgStatementReader.PgEvictionInfo(false, null, null);
+        var none = new DarlingPgStatementReader.PgEvictionInfo(true, 0, 5000);
+        var one = new DarlingPgStatementReader.PgEvictionInfo(true, 1, 5000);
+        var many = new DarlingPgStatementReader.PgEvictionInfo(true, 1234, 5000);
+        var evictions = new[] { unknown, none, one, many }
+            .Select(i => JsonSerializer.SerializeToElement(DarlingMcpPgStatementTools.BuildEvictions(i))).ToArray();
+
+        var shown = Strings(RunHarness(new { evictions }), "evictionShort");
+
+        Assert.StartsWith("This server does not report how often pg_stat_statements dropped entries.", shown[0], StringComparison.Ordinal);
+        Assert.Equal("", shown[1]);
+        Assert.StartsWith("pg_stat_statements dropped its least-used entries 1 time in this window", shown[2], StringComparison.Ordinal);
+        Assert.StartsWith("pg_stat_statements dropped its least-used entries 1,234 times in this window", shown[3], StringComparison.Ordinal);
+        // The note itself is a paragraph with a restart caveat and a count in brackets; the sentence over the grid is not that text.
+        Assert.DoesNotContain("postmaster", shown[3], StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #8075: on an Aurora target whose collector database has no pg_stat_statements row, the sentence over the grid names the
+    /// missing extension, not the old major or old extension version that the stock sentence names.
+    /// </summary>
+    [Fact]
+    public void TheEvictionSentence_OnAuroraWithoutTheExtension_NamesTheMissingExtension()
+    {
+        var aurora = PgStatementEvictionNoteTests.AuroraWithoutExtension();
+        var elsewhere = new DarlingPgStatementReader.PgEvictionInfo(false, null, null);
+        var evictions = new[] { aurora, elsewhere }
+            .Select(i => JsonSerializer.SerializeToElement(DarlingMcpPgStatementTools.BuildEvictions(i))).ToArray();
+
+        var shown = Strings(RunHarness(new { evictions }), "evictionShort");
+
+        Assert.StartsWith("This server does not report how often pg_stat_statements dropped entries.", shown[0], StringComparison.Ordinal);
+        Assert.Contains("CREATE EXTENSION pg_stat_statements", shown[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("PostgreSQL 14", shown[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("1.9", shown[0], StringComparison.Ordinal);
+
+        Assert.StartsWith("This server does not report how often pg_stat_statements dropped entries.", shown[1], StringComparison.Ordinal);
+        Assert.Contains("PostgreSQL 14", shown[1], StringComparison.Ordinal);
+        Assert.DoesNotContain("CREATE EXTENSION", shown[1], StringComparison.Ordinal);
+    }
 
     private static JsonElement RunHarness(object input)
     {

@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Text.Json;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -117,26 +118,49 @@ public class TriageLinkTests
     }
 
     [Fact]
-    public void SlackPayload_CarriesALinkButton_WhenATriageUrlIsPassed()
+    public void SlackPayload_CarriesAMrkdwnLinkInAContextBlock_NotAButton_WhenATriageUrlIsPassed()
     {
+        /* #6965: a url button still makes Slack send an interaction payload, which a webhook-only app cannot
+           answer, so the link is mrkdwn text and no actions block is emitted. The URL's query carries "&"
+           between its parameters, which mrkdwn needs as &amp;. */
         var url = TriageLink.Build("http://box:5153", "SRV", "High CPU", Fired, "k")!;
+        Assert.Contains("&", url, StringComparison.Ordinal);
         var payload = WebhookAlertService.BuildSlackPayload("High CPU", "SRV", "97%", "90%", Branding, triageUrl: url);
 
         using var doc = JsonDocument.Parse(payload);
         var blocks = doc.RootElement.GetProperty("attachments")[0].GetProperty("blocks");
+        var expected = $"<{url.Replace("&", "&amp;", StringComparison.Ordinal)}|Open triage page>";
         var found = false;
         foreach (var block in blocks.EnumerateArray())
         {
-            if (block.GetProperty("type").GetString() == "actions")
+            Assert.NotEqual("actions", block.GetProperty("type").GetString());
+            if (block.GetProperty("type").GetString() == "context"
+                && block.GetProperty("elements")[0].GetProperty("text").GetString() == expected)
             {
-                var button = block.GetProperty("elements")[0];
-                Assert.Equal("button", button.GetProperty("type").GetString());
-                Assert.Equal(url, button.GetProperty("url").GetString());
                 found = true;
             }
         }
 
-        Assert.True(found, "no actions block with the triage link button was found");
+        Assert.True(found, "no context block with the mrkdwn triage link was found");
+    }
+
+    [Fact]
+    public void SlackPayload_PercentEncodesAPipeInTheBaseUrl_SoTheLinkTargetCannotEndEarly()
+    {
+        var url = TriageLink.Build("http://box:5153/a|b", "SRV", "High CPU", Fired, "k")!;
+        var payload = WebhookAlertService.BuildSlackPayload("High CPU", "SRV", "97%", "90%", Branding, triageUrl: url);
+
+        using var doc = JsonDocument.Parse(payload);
+        var blocks = doc.RootElement.GetProperty("attachments")[0].GetProperty("blocks");
+        var texts = blocks.EnumerateArray()
+            .Where(b => b.GetProperty("type").GetString() == "context")
+            .Select(b => b.GetProperty("elements")[0].GetProperty("text").GetString()!)
+            .Where(t => t.StartsWith("<http", StringComparison.Ordinal))
+            .ToList();
+
+        var link = Assert.Single(texts);
+        Assert.Contains("/a%7Cb/", link, StringComparison.Ordinal);
+        Assert.Single(link, c => c == '|');
     }
 
     [Fact]

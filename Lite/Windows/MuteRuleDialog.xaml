@@ -110,10 +110,15 @@
             <TextBlock Grid.Row="2" Grid.Column="2" x:Name="JobNameLabel" Text="Job Name (substring)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
             <TextBox Grid.Row="3" Grid.Column="2" x:Name="JobNamePatternBox" Margin="0,0,0,8"/>
 
-            <TextBlock Grid.Row="4" Grid.Column="0" x:Name="ClientAppLabel" Text="Client Application (substring)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
-            <TextBox Grid.Row="5" Grid.Column="0" x:Name="ClientAppPatternBox" Margin="0,0,0,8"
+            <TextBlock Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" x:Name="ClientAppLabel" Text="Client Application (substring)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+            <TextBox Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" x:Name="ClientAppPatternBox" Margin="0,0,0,8"
                      ToolTip="Alerts raised for a client application whose name contains this value (case-insensitive) will be muted, for example Management Studio to mute SSMS cancels."/>
         </Grid>
+
+        <!-- Shown when the alert the dialog opened from has no metric name, so the rule cannot be narrowed to a type -->
+        <TextBlock Grid.Row="14" x:Name="MetricScopeNote" Visibility="Collapsed" TextWrapping="Wrap" Margin="0,0,0,8"
+                   Foreground="{DynamicResource ForegroundDimBrush}"
+                   Text="This alert has no metric name, so the rule cannot be limited to one alert type. With Metric left at (any), it mutes every alert type that matches the other fields."/>
 
         <!-- Buttons -->
         <StackPanel Grid.Row="16" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">

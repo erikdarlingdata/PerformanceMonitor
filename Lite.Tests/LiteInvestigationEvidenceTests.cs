@@ -248,6 +248,25 @@ VALUES ({++_reportId}, '{Ts(collectedAt)}', '{Ts(eventAt)}', {Server}, 'srv', 'A
 
     private static JsonObject OnlyRow(JsonNode section) => Assert.Single(section["rows"]!.AsArray())!.AsObject();
 
+    /* #7573: the monitor's own sessions are stored again and are heavier here than the application's. The old read had no program
+       predicate, so the monitor's host was a row of its own and counted its CPU. */
+    [Fact]
+    public async Task ActiveRequests_LeaveTheMonitorsOwnSessionsOut()
+    {
+        var at = T0.AddMinutes(-5);
+        var sections = await HighCpuSections(() =>
+        {
+            Exec($@"INSERT INTO query_snapshots (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, status, blocking_session_id, cpu_time_ms, total_elapsed_time_ms, login_name, host_name, program_name)
+VALUES (2, '{Ts(at)}', {Server}, 'srv', 61, 'AppDb', 'SELECT 1', 'running', 0, 100, 5000, 'app_login', 'web01', 'AppSvc'),
+       (3, '{Ts(at)}', {Server}, 'srv', 62, 'AppDb', 'SELECT 1', 'running', 0, 9000, 5000, 'sa', 'MONHOST', 'PerformanceMonitorLite'),
+       (4, '{Ts(at)}', {Server}, 'srv', 63, 'AppDb', 'SELECT 1', 'running', 0, 8000, 5000, 'sa', 'MONHOST2', 'PerformanceMonitorDarling')");
+        });
+
+        var active = OnlyRow(sections["active_requests"]);
+        Assert.Equal("web01", active["host_name"]!.GetValue<string>());
+        Assert.Equal(100L, active["total_cpu_ms"]!.GetValue<long>());
+    }
+
     [Fact]
     public async Task HighCpuSections_EachFreezeTheRowCollectedInTheWindow()
     {
@@ -465,6 +484,33 @@ VALUES ({id}, '{Ts(seen)}', {Server}, 'srv', 'AppDb', {queryId}, {plan}, 'Regula
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// #8090 item 5, Lite twin of Darling's <c>ReportXml_WithLessThanAnElementsRoomLeft_IsCutToNothing_NotAFragment</c>: when the cap
+    /// leaves a report fewer characters than an opening element takes, the report is cut to nothing and flagged, not to a fragment like
+    /// <c>&lt;</c> that nothing parses. The room left is measured first: the longest prefix one report can keep beside a flagged empty
+    /// second row, less ten characters, fits whole and leaves the second row a few dozen bytes.
+    /// </summary>
+    [Fact]
+    public void ReportXml_WithLessThanAnElementsRoomLeft_IsCutToNothing_NotAFragment()
+    {
+        var huge = "<r>" + string.Concat(Enumerable.Repeat("<n>x</n>", 5_000)) + "</r>";
+        static List<JsonObject> Rows() => new() { new JsonObject { ["blocked_spid"] = 60, ["report_xml"] = null }, new JsonObject { ["blocked_spid"] = 61, ["report_xml"] = null } };
+        var from = T0 - LiteInvestigationEvidenceCapture.BreachLeadIn;
+        var to = T0 + LiteInvestigationEvidenceCapture.BreachTail;
+
+        var probe = JsonNode.Parse(LiteInvestigationEvidenceCapture.FitReportXml(from, to, Rows(), new[] { huge, huge }))!["rows"]!.AsArray();
+        var longest = probe[0]!["report_xml"]!.GetValue<string>().Length;
+        Assert.InRange(longest, 1_000, huge.Length - 1);
+        var first = huge[..(longest - 10)];
+
+        var kept = JsonNode.Parse(LiteInvestigationEvidenceCapture.FitReportXml(from, to, Rows(), new[] { first, huge }))!["rows"]!.AsArray();
+        Assert.Equal(2, kept.Count);
+        Assert.Equal(first, kept[0]!["report_xml"]!.GetValue<string>());
+        Assert.Null(kept[0]!["report_xml_truncated"]);
+        Assert.True(kept[1]!["report_xml_truncated"]!.GetValue<bool>());
+        Assert.Equal("", kept[1]!["report_xml"]!.GetValue<string>());
     }
 
     private static string? Scalar2(DuckDbInitializer db, string sql)

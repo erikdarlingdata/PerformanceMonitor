@@ -167,7 +167,7 @@ public sealed class TimeRangePickerControlTests
             var window = new Window { Content = picker, Width = 300, Height = 200, ShowActivated = false, WindowStyle = WindowStyle.None, ShowInTaskbar = false, Left = -4000, Top = -4000 };
             try
             {
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 picker.PickerPopup.IsOpen = true;
                 // Let the Opened handler and its Loaded-priority theming pass run.
                 window.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);

@@ -7,6 +7,8 @@
  */
 
 
+using System.Collections.Generic;
+
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
@@ -52,6 +54,13 @@ public static class QueryStoreTextStore
     /// never had text. The cost of being late is a few rows of text nobody reads.</para>
     /// </summary>
     public const int PruneMarginDays = 2;
+
+    /// <summary>
+    /// The collectors whose fact rows carry a <c>query_id</c> this table resolves to text. The prune horizon is the widest
+    /// effective retention among them (<c>DarlingRetention.WidestEffectiveRetentionDays</c>), so a retention raised on any
+    /// one of them keeps the text its facts point at for as long as those facts live.
+    /// </summary>
+    public static readonly IReadOnlyList<string> ReferencingCollectors = new[] { "query_store", "query_store_forced_plans", "query_store_hints" };
 
     /* This const mirrors the IMMUTABLE V74 migration rung and stays byte-frozen with it, EXCEPT for V149
        (#4250): the rung drops the last_seen btree index and sets fillfactor 90 on the live table so the

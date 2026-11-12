@@ -237,7 +237,7 @@ public static partial class PgTargetScorer
             var amplifiers = LoadAnomalyAmplifiers(key);
             amplifiers.Add(new()
             {
-                Description = "A named PostgreSQL wait crossed its own threshold in the same window — the profile shift is a nameable wait, not diffuse noise",
+                Description = "A named PostgreSQL wait crossed its own threshold in the same window: the profile shift is a nameable wait, not diffuse noise",
                 /* unmeasured: LoadAnomalyCoFireBoost, derived, not measured — see its declaration. */
                 Boost = LoadAnomalyCoFireBoost,
                 Predicate = facts =>
@@ -276,16 +276,16 @@ public static partial class PgTargetScorer
             });
         }
 
-        Sibling(PgTargetFactKeys.AnomalySessionSpike, "Session-count anomaly co-fired — the surge is visible in connections too");
-        Sibling(PgTargetFactKeys.AnomalyTps, "Transaction-rate anomaly co-fired — the surge is visible in throughput too");
-        Sibling(PgTargetFactKeys.AnomalyCpuSpike, "Capacity anomaly co-fired — the surge is consuming CPU far above this instance's norm");
+        Sibling(PgTargetFactKeys.AnomalySessionSpike, "Session-count anomaly co-fired: the surge is visible in connections too");
+        Sibling(PgTargetFactKeys.AnomalyTps, "Transaction-rate anomaly co-fired: the surge is visible in throughput too");
+        Sibling(PgTargetFactKeys.AnomalyCpuSpike, "Capacity anomaly co-fired: the surge is consuming CPU far above this instance's norm");
         /* The stock confirmer (lane 36's measurement): cores busy from pg_stat_kcache against this server's own
            hour-of-week routine — the same surge statement as the capacity anomaly, available where there is no
            Performance Insights. See the summary above for why it joined. */
-        Sibling(PgTargetFactKeys.AnomalyCpuBurn, "CPU-burn anomaly co-fired — cores busy ran far above this server's own routine for the hour, so the surge is burning real CPU");
+        Sibling(PgTargetFactKeys.AnomalyCpuBurn, "CPU-burn anomaly co-fired: cores busy ran far above this server's own routine for the hour, so the surge is burning real CPU");
         amplifiers.Add(new()
         {
-            Description = "Instance CPU at or past the capacity warning bar (Aurora, percent of the configured ceiling) — the surge is consuming real capacity, not just moving a counter",
+            Description = "Instance CPU at or past the capacity warning bar (Aurora, percent of the configured ceiling): the surge is consuming real capacity, not just moving a counter",
             /* unmeasured: LoadAnomalyCoFireBoost (derived) and CpuCapacityWarningPercent (the fleet ladder, repeated) — see their declarations. */
             Boost = LoadAnomalyCoFireBoost,
             Predicate = facts =>

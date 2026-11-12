@@ -47,6 +47,70 @@ public sealed class DarlingBlockingTrendEmptyTests
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
+    /// <summary>
+    /// #7724: a server that went offline partway through the window. Both trends ran inside it, and a window that ends after the outage began
+    /// is not a genuine all-clear: the answer says what was collected, through when, and that nothing after is known.
+    /// </summary>
+    [Fact]
+    public async Task AnOfflineServer_WithCollectionInTheWindow_SaysWhatWasCollected_NotAnAllClear_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live blocking-trend empty test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            /* Three days of runs that saw nothing, the last one three days ago: inside a 7-day window, long before its end. */
+            var last = HoursAgo(72);
+            foreach (var collector in new[] { "blocked_process_report", "dmv_blocking_snapshot", "deadlocks" })
+            {
+                await SeedRunAsync(connection, ct, collector, last.AddHours(-2));
+                await SeedRunAsync(connection, ct, collector, last);
+            }
+
+            var expected = DateTime.SpecifyKind(last, DateTimeKind.Utc).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+            foreach (var answer in new[]
+            {
+                await DarlingMcpBlockingTools.GetBlockingTrend(dataSource, ServerName, 168),
+                await DarlingMcpBlockingTools.GetDeadlockTrend(dataSource, ServerName, 168),
+            })
+            {
+                var root = JsonDocument.Parse(answer).RootElement;
+                Assert.Equal("unavailable", root.GetProperty("status").GetString());
+                var sentence = "Nothing was recorded through the last collection at " + expected + ". Nothing after that is known.";
+                /* The message keeps the offline lead an MCP caller needs, then the sentence; the note is the sentence alone, which the web page prints. */
+                var message = root.GetProperty("message").GetString()!;
+                Assert.StartsWith(ServerName + " is offline: ", message, StringComparison.Ordinal);
+                Assert.EndsWith(" " + sentence, message, StringComparison.Ordinal);
+                Assert.Equal(sentence, root.GetProperty("collected_through_note").GetString());
+                Assert.StartsWith(expected[..19], root.GetProperty("collected_through").GetString(), StringComparison.Ordinal);
+                Assert.DoesNotContain("genuine all-clear", answer, StringComparison.Ordinal);
+            }
+
+            /* A window that holds no collection keeps its own answer: the server is offline, but nothing of it was collected inside the window. */
+            var narrow = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(dataSource, ServerName, 1)).RootElement;
+            Assert.False(narrow.TryGetProperty("collected_through", out _));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     [Fact]
     public async Task NeverCollected_AGapInTheWindow_AndAGenuineAllClear_AreThreeDifferentAnswers_AgainstDevPostgres()
     {
@@ -92,6 +156,10 @@ public sealed class DarlingBlockingTrendEmptyTests
                collected before is a coverage gap, not a server that never collected. */
             Assert.DoesNotContain("EVER", gapText, StringComparison.Ordinal);
 
+            /* #7010: the window keys ride under hints; the one run is 48 hours back, outside this 1-hour window, so the store holds
+               no collection in it. */
+            Assert.Equal(JsonValueKind.True, gapRoot.GetProperty("hints").GetProperty("window_truncated").ValueKind);
+
             /* ── the collector ran inside the window and stored nothing: a genuine all-clear ── */
             var t10 = MinutesAgo(10);
             await SeedRunAsync(connection, ct, "blocked_process_report", t10);
@@ -122,6 +190,9 @@ public sealed class DarlingBlockingTrendEmptyTests
             var hitRoot = JsonDocument.Parse(hit).RootElement;
             Assert.False(hitRoot.TryGetProperty("status", out _));
             Assert.Equal(1, hitRoot.GetProperty("trend").GetArrayLength());
+            /* #7010: a data answer carries the three window keys, as get_blocking does. */
+            Assert.True(hitRoot.TryGetProperty("window_truncated", out _));
+            Assert.True(hitRoot.TryGetProperty("effective_start", out _));
 
             bodySucceeded = true;
         }
@@ -225,12 +296,17 @@ public sealed class DarlingBlockingTrendEmptyTests
             Assert.Contains("genuine all-clear", clearText, StringComparison.Ordinal);
             Assert.DoesNotContain("EVER", clearText, StringComparison.Ordinal);
             Assert.Equal(1, clear.GetProperty("hints").GetProperty("capture_count").GetInt64());
+            /* #7010: the window keys ride beside the run counts under hints. */
+            Assert.True(clear.GetProperty("hints").TryGetProperty("window_truncated", out _));
 
             await SeedDeadlockAsync(connection, ct, MinutesAgo(5));
             var hit = JsonDocument.Parse(
                 await DarlingMcpBlockingTools.GetDeadlockTrend(dataSource, ServerName, 4)).RootElement;
             Assert.False(hit.TryGetProperty("status", out _));
             Assert.Equal(1, hit.GetProperty("trend").GetArrayLength());
+            /* #7010: a data answer carries the three window keys. */
+            Assert.True(hit.TryGetProperty("window_truncated", out _));
+            Assert.True(hit.TryGetProperty("effective_start", out _));
 
             bodySucceeded = true;
         }

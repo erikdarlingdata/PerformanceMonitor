@@ -39,11 +39,15 @@ public sealed class QueryStoreIntervalPartitionsLiveTests
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static DateTime Today => DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified);
+    /* #8699: one clock reading per test. The steps take Now and the expectations take Today, and a run that straddles 00:00 UTC
+       must not give them two different days (the partition bound is the product's day of Now plus two). */
+    private readonly DateTime _clock = DateTime.UtcNow;
 
-    private static DateTime Now => DateTime.UtcNow;
+    private DateTime Today => DateTime.SpecifyKind(_clock.Date, DateTimeKind.Unspecified);
 
-    private sealed class ListLogger : ILogger
+    private DateTime Now => _clock;
+
+    internal sealed class ListLogger : ILogger
     {
         public List<(LogLevel Level, string Message)> Lines { get; } = new();
 
@@ -99,7 +103,7 @@ public sealed class QueryStoreIntervalPartitionsLiveTests
         NpgsqlConnection connection, QueryStoreIntervalPartitions.IntervalTable table, DateTime utcNow, ILogger logger, CancellationToken ct) =>
         QueryStoreIntervalPartitions.RunPromotionAsync(connection, table, utcNow, logger, NoDelay, NoDelay, ct);
 
-    private static async Task InsertAsync(NpgsqlConnection connection, QueryStoreIntervalPartitions.IntervalTable table, DateTime first, long query, CancellationToken ct)
+    internal static async Task InsertAsync(NpgsqlConnection connection, QueryStoreIntervalPartitions.IntervalTable table, DateTime first, long query, CancellationToken ct)
     {
         var sql = table == Wide
             ? "INSERT INTO collect.query_store_interval_wide (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time, query_text, execution_count, avg_duration_us, runtime_stats_interval_id, interval_start_time_utc) "

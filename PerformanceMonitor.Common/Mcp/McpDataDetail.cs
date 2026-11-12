@@ -83,9 +83,10 @@ public static class McpDataDetailModes
 }
 
 /// <summary>
-/// The level an MCP host serves, registered as a singleton in the host's services so that
-/// <see cref="McpDataDetailFilter"/> reads it from each request (#5632). The service registers it once from
-/// <c>darling.json</c>; a test host changes <see cref="Mode"/> between calls to drive one host through every level.
+/// The level an MCP host serves, registered in the host's services so that <see cref="McpDataDetailFilter"/> reads it from each
+/// request (#5632). Lite registers one singleton from its config. Darling registers it per request, from <c>mcp.dataDetail</c> and the
+/// calling token's own level (#7023), so a Darling instance is never shared between requests; a test host that registered a singleton
+/// can still change <see cref="Mode"/> between calls to drive one host through every level.
 /// </summary>
 public sealed class McpDataDetailSetting
 {

@@ -38,6 +38,10 @@ internal sealed class ReadPhaseTimer
     internal const string Execute = "execute";
     internal const string RowRead = "row read";
 
+    /// <summary>The wait for a slot of the shared archive-read limiter (#7256). Only an archive read has one, so
+    /// <see cref="Describe"/> leaves it out and <see cref="DescribeAgainstElapsed"/> prints it when it was measured.</summary>
+    internal const string ArchiveSlotWait = "archive slot wait";
+
     private static readonly string[] s_order = { LockWait, Open, Execute, RowRead };
 
     private readonly Dictionary<string, double> _phasesMs = new();
@@ -75,6 +79,28 @@ internal sealed class ReadPhaseTimer
             sb.Append(CultureInfo.InvariantCulture, $"{phase} {PhaseMs(phase):F0} ms");
             if (phase == Execute) sb.Append(" (prepare and bind included)");
         }
+        return sb.ToString();
+    }
+
+    /// <summary>True once any phase has been measured.</summary>
+    internal bool HasPhases => _phasesMs.Count > 0;
+
+    /// <summary>
+    /// The slow-read line of a <c>TimeQuery</c> read (#7256): <c>lock wait 12 ms, open 3 ms, query and row read 900 ms</c>.
+    /// Such a read times itself from its first line, so it cannot tell the statement from the row reading: whatever
+    /// part of <paramref name="elapsedMs"/> the lock wait, the open and a limiter slot wait do not account for is
+    /// reported as the query and the row reading together. A read that waited for an archive slot says so.
+    /// </summary>
+    internal string DescribeAgainstElapsed(double elapsedMs)
+    {
+        var lockWait = PhaseMs(LockWait);
+        var open = PhaseMs(Open);
+        var slot = PhaseMs(ArchiveSlotWait);
+        var rest = Math.Max(0, elapsedMs - lockWait - open - slot);
+        var sb = new StringBuilder();
+        if (_phasesMs.ContainsKey(ArchiveSlotWait))
+            sb.Append(CultureInfo.InvariantCulture, $"{ArchiveSlotWait} {slot:F0} ms, ");
+        sb.Append(CultureInfo.InvariantCulture, $"{LockWait} {lockWait:F0} ms, {Open} {open:F0} ms, query and row read {rest:F0} ms");
         return sb.ToString();
     }
 

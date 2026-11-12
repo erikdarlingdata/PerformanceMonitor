@@ -31,14 +31,31 @@ public static class FactRemediation
     /// markup — renderers wrap it as needed (Slack mrkdwn code block, HTML
     /// &lt;pre&gt;, etc.).
     /// </summary>
-    public static string? GenerateForFinding(AnalysisFinding finding)
+    public static string? GenerateForFinding(AnalysisFinding finding) =>
+        GenerateForFinding(finding, states: null);
+
+    /// <summary>
+    /// <see cref="GenerateForFinding(AnalysisFinding)"/> with the read-time forcing and
+    /// automatic-plan-correction state of the finding's force-plan targets (#8542). A target that state
+    /// blocks (<see cref="BlockersFor"/>) is named in comments with its blockers and gets no runnable
+    /// statement. A target the read holds no row for keeps its statement under a line saying its state
+    /// is unknown (<see cref="StateUnknownLine"/>). A null <paramref name="states"/> withholds nothing;
+    /// when the read failed, pass why in <paramref name="stateUnavailableReason"/> and the force-plan text
+    /// opens by saying no target was checked (<see cref="StateNotReadPrefix"/>). With a null
+    /// <paramref name="states"/> and no reason the text carries no such line: the caller made no read,
+    /// and says nothing about the store.
+    /// </summary>
+    public static string? GenerateForFinding(
+        AnalysisFinding finding,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states,
+        string? stateUnavailableReason = null)
     {
         if (finding is null || string.IsNullOrEmpty(finding.RootFactKey))
             return null;
 
         return finding.RootFactKey switch
         {
-            "PLAN_REGRESSION" => GenerateForPlanRegression(finding),
+            "PLAN_REGRESSION" => GenerateForPlanRegression(finding, states, stateUnavailableReason),
             "DB_CONFIG" => GenerateForDbConfig(finding),
             "FILE_AUTOGROWTH_PERCENT" => GenerateForFileAutogrowth(finding),
             _ => null
@@ -132,18 +149,11 @@ public static class FactRemediation
                                     MissingIndexTargets: indexTargets);
     }
 
-    // ── WS3: server-level config (MAXDOP / CTFP / max & min server memory) ──────────
+    // ── Server-level config constants (MAXDOP / max & min server memory) ──────────
     //
-    // The per-setting CONFIG_* facts (CONFIG_MAXDOP / CONFIG_CTFP / CONFIG_MAX_MEMORY_MB /
-    // CONFIG_MIN_MAX_MEMORY_NARROW) each root their OWN advisory finding. The drill-down
-    // attaches a `server_config` array carrying ONLY the bad setting(s) for that finding plus
-    // the edition + cores-per-socket needed to compute the recommended MAXDOP. The recommended
-    // value is computed HERE (not in the collector) so the edition-aware MAXDOP cap is unit-
-    // testable without a server. CTFP is a flat 50; the two memory settings are advise-only and
-    // carry their current value as "recommended" (the executor refuses to apply them).
-
-    /// <summary>The CTFP value WS3 recommends — the canonical AuditConfig figure.</summary>
-    public const long RecommendedCostThreshold = 50;
+    // Shared by the CONFIG_* advice text and the collectors that emit those facts. There is no
+    // server-config remediation action: the builder that read a `server_config` drill-down was
+    // removed in #7220 because no Lite or Darling code ever wrote that drill-down.
 
     /// <summary>The MAXDOP default (0) WS3 flags as bad — unlimited parallelism.</summary>
     public const long BadMaxdopValue = 0;
@@ -182,11 +192,11 @@ public static class FactRemediation
         /// <summary>The parenthetical that states the figure, such as "(cores per socket 4)" or "(4 vCores)"; empty when unknown.</summary>
         public string Note => Cores <= 0 ? string.Empty : FromVcores ? $"({Cores} vCores)" : $"(cores per socket {Cores})";
 
-        /// <summary>What the recommended MAXDOP is capped from, as a noun phrase: "this server's per-NUMA-node processor count" or "this database's vCores".</summary>
-        public string Source => FromVcores ? "this database's vCores" : "this server's per-NUMA-node processor count";
+        /// <summary>What the recommended MAXDOP is capped from, as a noun phrase: "this server's cores-per-socket" or "this database's vCores". The cores-per-socket figure stands in for the per-NUMA-node processor count.</summary>
+        public string Source => FromVcores ? "this database's vCores" : "this server's cores-per-socket";
 
-        /// <summary>The same figure named without "this server's" / "this database's": "the per-NUMA-node processor count" or "the database's vCores".</summary>
-        public string Bare => FromVcores ? "the database's vCores" : "the per-NUMA-node processor count";
+        /// <summary>The same figure named without "this server's" / "this database's": "the cores-per-socket" or "the database's vCores".</summary>
+        public string Bare => FromVcores ? "the database's vCores" : "the cores-per-socket";
     }
 
     /// <summary>Reads the <see cref="MaxdopBasis"/> off the SERVER_HARDWARE fact; <c>cores_per_socket</c> when it carries one, else <c>vcore_count</c>.</summary>
@@ -199,95 +209,6 @@ public static class FactRemediation
         return hardware.Metadata.TryGetValue("vcore_count", out var vcores)
             ? new MaxdopBasis((int)vcores, FromVcores: true)
             : default;
-    }
-
-    /// <summary>
-    /// Builds the server-level config action for a CONFIG_* finding (WS3), or null when the
-    /// drill-down carries no bad server-config setting. Parallel to <see cref="BuildAction"/> —
-    /// a SEPARATE entry point so neither switch grows. The action carries FactKey
-    /// "SERVER_CONFIG" and the "set" verb. MAXDOP / CTFP targets are APPLY-able
-    /// (ServerConfigHandler runs <c>sp_configure</c>+<c>RECONFIGURE</c>); the two memory targets
-    /// are advise-only (the executor refuses them) but still ride the persisted-action round-trip
-    /// so the Recommendations reader can render their copy-paste on read (the drill-down is
-    /// ephemeral). Each finding roots on a single CONFIG_* key, so its drill-down carries a
-    /// single bad setting → a single target; the reader's fan loop turns each into one card.
-    /// </summary>
-    public static RemediationAction? BuildServerConfigAction(AnalysisFinding finding)
-    {
-        var targets = ExtractServerConfigTargets(finding);
-        return targets.Count == 0
-            ? null
-            : new RemediationAction("SERVER_CONFIG", "set", Array.Empty<ForcePlanTarget>(),
-                                    ServerConfigTargets: targets);
-    }
-
-    /// <summary>
-    /// Extracts the server-config target(s) from a CONFIG_* finding's drill-down
-    /// <c>server_config</c> array. Each row carries the structured fields <c>setting</c>
-    /// (canonical id), <c>current_value</c>, and (for MAXDOP) <c>cores_per_socket</c> — never
-    /// parsing human prose. The recommended value is computed per setting (topology-based MAXDOP =
-    /// min(cores-per-socket, 8) / flat CTFP 50 / current for the advise-only memory settings). A
-    /// defensive cap of 8 mirrors the other extractors.
-    /// </summary>
-    public static IReadOnlyList<ServerConfigTarget> ExtractServerConfigTargets(AnalysisFinding finding)
-    {
-        var targets = new List<ServerConfigTarget>();
-
-        if (finding?.DrillDown is null ||
-            !finding.DrillDown.TryGetValue("server_config", out var raw) ||
-            raw is null)
-            return targets;
-
-        JsonElement element;
-        try
-        {
-            element = JsonSerializer.SerializeToElement(raw);
-        }
-        catch
-        {
-            return targets;
-        }
-
-        if (element.ValueKind != JsonValueKind.Array)
-            return targets;
-
-        foreach (var row in element.EnumerateArray())
-        {
-            if (targets.Count >= 8) break;
-            if (row.ValueKind != JsonValueKind.Object) continue;
-
-            var settingId = GetString(row, "setting");
-            if (string.IsNullOrEmpty(settingId))
-                continue;
-
-            var current = GetInt64(row, "current_value");
-            var cores = GetInt(row, "cores_per_socket");
-
-            switch (settingId)
-            {
-                case "maxdop":
-                    targets.Add(new ServerConfigTarget(
-                        ServerConfigSetting.Maxdop, current, RecommendedMaxdop(cores)));
-                    break;
-                case "ctfp":
-                    targets.Add(new ServerConfigTarget(
-                        ServerConfigSetting.CostThreshold, current, RecommendedCostThreshold));
-                    break;
-                case "max_memory":
-                    // Advise-only: the right value is RAM-dependent. Carry current as
-                    // "recommended" — the executor never applies it; the card is copy-paste only.
-                    targets.Add(new ServerConfigTarget(
-                        ServerConfigSetting.MaxServerMemory, current, current));
-                    break;
-                case "min_memory":
-                    // Advise-only (pinned near max). Carry current as "recommended".
-                    targets.Add(new ServerConfigTarget(
-                        ServerConfigSetting.MinServerMemory, current, current));
-                    break;
-            }
-        }
-
-        return targets;
     }
 
     /// <summary>
@@ -332,26 +253,6 @@ public static class FactRemediation
         };
     }
 
-    /// <summary>The hardcoded <c>sp_configure</c> name for a server-config setting (display + executor share the taxonomy).</summary>
-    public static string SpConfigureName(ServerConfigSetting setting) => setting switch
-    {
-        ServerConfigSetting.Maxdop => "max degree of parallelism",
-        ServerConfigSetting.CostThreshold => "cost threshold for parallelism",
-        ServerConfigSetting.MaxServerMemory => "max server memory (MB)",
-        ServerConfigSetting.MinServerMemory => "min server memory (MB)",
-        _ => throw new ArgumentOutOfRangeException(nameof(setting), setting, "Unknown ServerConfigSetting")
-    };
-
-    /// <summary>
-    /// Renders one copy-paste <c>EXEC sys.sp_configure N'&lt;name&gt;', &lt;value&gt;; RECONFIGURE;</c>
-    /// statement for a server-config target. The name is a hardcoded literal selected by the enum;
-    /// the value is the recommended value. Advisory text only — the executor builds its OWN
-    /// statement with a bound @value parameter and never executes this rendered string.
-    /// </summary>
-    public static string BuildSpConfigureStatement(ServerConfigSetting setting, long value)
-    {
-        return $"EXEC sys.sp_configure N'{SpConfigureName(setting)}', {value};\nRECONFIGURE;";
-    }
     /// <summary>
     /// Builds the DESTRUCTIVE RCSI remediation action for a DB_CONFIG finding, or null
     /// when it does not apply (B3 Phase 3). Parallel to <see cref="BuildAction"/>, which
@@ -395,8 +296,9 @@ public static class FactRemediation
     /// <see cref="BuildRcsiAction"/> — a row qualifies only when its <c>rcsi</c> value is
     /// <c>false</c> (M2-1 polarity: RCSI is OFF) AND the §3.3 enrichment is present
     /// (<see cref="HasRcsiEnrichment"/>) — but additionally GATES on REAL contention: a row is
-    /// included only when it carries a positive <c>rcsi_blocking_events</c> OR
-    /// <c>rcsi_deadlocks</c> count. An RCSI-off database with NO observed blocking/deadlocks is
+    /// included only when its <c>rcsi_reader_writer_pct</c> reaches
+    /// <see cref="FactRiskDisclosure.ReaderWriterMeaningfulPct"/> (null, from a store that did not
+    /// measure it, never qualifies). An RCSI-off database with NO observed reader/writer blocking is
     /// NOT recommended: enabling RCSI there only adds tempdb version-store cost for no
     /// concurrency benefit. Unlike <see cref="BuildRcsiAction"/> (which stops at the first
     /// qualifying db for the singular alert action) this returns ALL qualifying databases, each
@@ -453,10 +355,10 @@ public static class FactRemediation
             // a reader's S lock). Writer/writer blocking (X/IX/U) and raw deadlock counts are NOT
             // helped by RCSI — recommending it there only adds tempdb version-store overhead. So
             // gate on the reader/writer SHARE (classified from the blocked-process report's lock
-            // modes in CollectRcsiInactionFigures), using the SAME threshold the consent disclosure
+            // modes in each store's DB_CONFIG drill-down, #7448, through RcsiFigureAccumulator), using the SAME threshold the consent disclosure
             // uses to say "RCSI eliminates this". An rcsi-off db whose contention is writer/writer-
-            // dominant (pct below the threshold) or where no reader/writer blocking was captured
-            // (pct null) gets NO card. The alert path and the cards share this gate (BuildRcsiAction
+            // dominant (pct below the threshold) or where too little reader/writer blocking was captured
+            // to judge (pct null, under RcsiFigureAccumulator.MinReaderWriterWaits) gets NO card. The alert path and the cards share this gate (BuildRcsiAction
             // builds from this same list). The raw blocking/deadlock counts are still carried for
             // the consent dialog's magnitude context.
             var readerWriterPct = GetNullableInt(row, "rcsi_reader_writer_pct");
@@ -493,153 +395,11 @@ public static class FactRemediation
         sb.AppendLine($"-- Database: {db}");
         sb.AppendLine($"ALTER DATABASE {quoted} SET READ_COMMITTED_SNAPSHOT ON;   -- was OFF");
         sb.AppendLine();
-        sb.AppendLine("-- To back out (itself a destructive change — blocking returns):");
+        sb.AppendLine("-- To back out (itself a destructive change. Blocking returns):");
         sb.AppendLine($"-- ALTER DATABASE {quoted} SET READ_COMMITTED_SNAPSHOT OFF;");
         sb.AppendLine();
         sb.Append("-- Test on a copy first if the application relies on default locking behavior or uses NOLOCK hints.");
         return sb.ToString();
-    }
-
-    /// <summary>
-    /// Renders the display-only clear-cached-plan code block for the "Clear cached plan
-    /// (advanced)" detail item (§5/§6, PR-B). It shows, per qualifying query hash, the
-    /// anomaly figures the detector captured and a NOTE that the actual plan handle(s)
-    /// are LIVE-RESOLVED at apply (the snapshot handle is display-only, never executed).
-    /// Returns null when no CLEAR_PLAN action applies. The Dashboard executor builds its
-    /// OWN single-`@plan_handle` DBCC statements at apply against the live-resolved handles
-    /// and never executes this rendered text.
-    /// </summary>
-    public static string? GenerateClearPlanPreview(AnalysisFinding finding)
-    {
-        var action = BuildClearPlanAction(finding);
-        if (action?.ClearPlanTargets is not { Count: > 0 } targets)
-            return null;
-
-        var sb = new StringBuilder();
-        var emitted = 0;
-        foreach (var t in targets)
-        {
-            if (emitted > 0)
-                sb.AppendLine();
-
-            var dbLabel = string.IsNullOrEmpty(t.Database) ? "(unknown — resolved live)" : t.Database;
-            sb.AppendLine($"-- Database: {dbLabel}");
-            sb.AppendLine($"-- query_hash = {t.QueryHash}");
-            sb.AppendLine(
-                $"--   ~{t.AnomalyRatio.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}x normal per-exec CPU " +
-                $"({t.CurrentCpuPerExecMs.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)} ms vs baseline " +
-                $"{t.BaselineCpuPerExecMs.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)} ms)");
-            if (!string.IsNullOrEmpty(t.LatestPlanHandle))
-                sb.AppendLine($"--   last-seen plan handle: {t.LatestPlanHandle} (display only — apply RE-RESOLVES live)");
-            sb.AppendLine("-- Apply live-resolves the currently-cached plan_handle(s) for this query hash and runs:");
-            sb.AppendLine("--   DBCC FREEPROCCACHE(<resolved plan_handle>);   -- per surviving handle");
-            sb.AppendLine("-- There is NO un-clear: the prior plan is gone. The recompile is not guaranteed better.");
-            emitted++;
-        }
-
-        return sb.ToString().TrimEnd();
-    }
-
-    /// <summary>
-    /// Builds the DESTRUCTIVE clear-cached-plan remediation action for a CPU finding
-    /// (CPU_SQL_PERCENT / CPU_SPIKE), or null when it does not apply. PARALLEL to
-    /// <see cref="BuildAction"/>, which stays EXACTLY as-is (it never emits CLEAR_PLAN) —
-    /// this is a SEPARATE entry point, mirroring <see cref="BuildRcsiAction"/>, so the
-    /// CPU finding's normal actions are unchanged and the CLEAR_PLAN action rides a
-    /// SECOND "Clear cached plan (advanced)" detail item (emitted in PR-B).
-    ///
-    /// <para>
-    /// Emits ONLY when the finding carries an <c>abnormal_cpu_plans</c> drill-down (the
-    /// §2 detector enrichment) with at least one qualifying row (the detector has
-    /// already applied the per-exec anomaly threshold + materiality gate + the §2a
-    /// row-level first-collection/restart exclusion server-side; this builder does NOT
-    /// re-derive the math). The action carries FactKey "CLEAR_PLAN" (a distinct
-    /// destructive handler), one <see cref="ClearPlanTarget"/> per qualifying row (the
-    /// stable <c>query_hash</c> is the only execution input — the executor re-resolves
-    /// the live <c>plan_handle(s)</c> at apply), and the <see cref="ClearPlanFigures"/>
-    /// from the FIRST qualifying row so the informed-consent dialog renders the REAL
-    /// numbers at apply time even with no finding in hand.
-    /// </para>
-    /// </summary>
-    public static RemediationAction? BuildClearPlanAction(AnalysisFinding finding)
-    {
-        if (finding is null ||
-            (!string.Equals(finding.RootFactKey, "CPU_SQL_PERCENT", StringComparison.Ordinal) &&
-             !string.Equals(finding.RootFactKey, "CPU_SPIKE", StringComparison.Ordinal)))
-            return null;
-
-        if (finding.DrillDown is null ||
-            !finding.DrillDown.TryGetValue("abnormal_cpu_plans", out var raw) ||
-            raw is null)
-            return null;
-
-        JsonElement element;
-        try
-        {
-            element = JsonSerializer.SerializeToElement(raw);
-        }
-        catch
-        {
-            return null;
-        }
-
-        if (element.ValueKind != JsonValueKind.Array)
-            return null;
-
-        var targets = new List<ClearPlanTarget>();
-        ClearPlanFigures? figures = null;
-
-        foreach (var row in element.EnumerateArray())
-        {
-            if (targets.Count >= 5) break;       // defensive cap, sibling of the force-plan cap discipline
-            if (row.ValueKind != JsonValueKind.Object) continue;
-
-            var queryHash = GetString(row, "query_hash");
-            // query_hash is the ONLY execution input. It must be present and look like a
-            // hex handle (0x...); the detector emits it via CONVERT(VARCHAR, .., 1). A
-            // blank/garbage value cannot become a target (it would never resolve a handle).
-            if (string.IsNullOrEmpty(queryHash) ||
-                !queryHash.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ||
-                queryHash.Length <= 2)
-                continue;
-
-            var database = GetString(row, "database");
-            var current = GetDouble(row, "current_cpu_per_exec_ms");
-            var baseline = GetDouble(row, "baseline_cpu_per_exec_ms");
-            var ratio = GetDouble(row, "anomaly_ratio");
-
-            targets.Add(new ClearPlanTarget(
-                Database: database,
-                QueryHash: queryHash,
-                CurrentCpuPerExecMs: current,
-                BaselineCpuPerExecMs: baseline,
-                AnomalyRatio: ratio,
-                LatestPlanHandle: GetString(row, "latest_plan_handle")));
-
-            // Capture the risk-of-NOT-changing figures from the FIRST qualifying row,
-            // carried on the persisted action so the dialog shows REAL numbers at apply
-            // time (the RcsiInactionFigures precedent). The co-fired flags steer the
-            // honest tool-choice disclosure (§5).
-            figures ??= new ClearPlanFigures(
-                CurrentCpuPerExecMs: current,
-                BaselineCpuPerExecMs: baseline,
-                AnomalyRatio: ratio,
-                CpuPercent: GetInt(row, "cpu_percent"),
-                PlanRegressionCoFired: GetBool(row, "plan_regression_cofired"),
-                ParameterSensitivityCoFired: GetBool(row, "parameter_sensitivity_cofired"));
-        }
-
-        if (targets.Count == 0)
-            return null;
-
-        return new RemediationAction(
-            "CLEAR_PLAN",
-            "clear",
-            Array.Empty<ForcePlanTarget>(),
-            DbConfigTargets: null,
-            RcsiFigures: null,
-            ClearPlanTargets: targets,
-            ClearPlanFigures: figures);
     }
 
     /// <summary>
@@ -696,7 +456,7 @@ public static class FactRemediation
     /// an AG with Query Store for secondary replicas enabled, one query can regress on the primary AND
     /// on a secondary and arrive as two rows differing in <c>replica_role</c>, each with its own
     /// <c>best_plan_id</c>. #1850 de-duped on (database, query_id) keeping the FIRST row — which, since
-    /// the SQL orders <c>regression_factor DESC</c>, is the worst regression on any replica — and
+    /// the SQL orders by the CPU the regression lost and then the factor (<see cref="PlanRegressionRanking"/>, #7417), is the worst regression on any replica — and
     /// deliberately left the product question open. It is answered here: <b>the primary's row wins when
     /// both exist</b>, and regression factor only breaks ties among rows of the same replica class.</para>
     ///
@@ -757,7 +517,8 @@ public static class FactRemediation
 
         /* Insertion order is kept separately from the winners so the emitted order stays what it always
            was — worst regression first, since a query's FIRST row is its worst and the rows arrive
-           regression_factor DESC. Upgrading a query to its primary row changes WHICH plan is forced, never
+           ordered by the CPU the regression lost, then the factor (PlanRegressionRanking, #7417), the order
+           of the PLAN_REGRESSION fact, so the first target is the fact's lead offender. Upgrading a query to its primary row changes WHICH plan is forced, never
            where the query sits in the list. */
         var order = new List<(string Database, long QueryId)>();
         var winners = new Dictionary<(string Database, long QueryId), ForcePlanTarget>();
@@ -829,7 +590,10 @@ public static class FactRemediation
     /// all. That is what keeps the byte-for-byte golden meaningful rather than merely re-baselined:
     /// the no-replica rendering is still the one it pins.</para>
     /// </summary>
-    private static string? GenerateForPlanRegression(AnalysisFinding finding)
+    private static string? GenerateForPlanRegression(
+        AnalysisFinding finding,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states,
+        string? stateUnavailableReason)
     {
         var targets = ExtractPlanRegressionTargets(finding);
         if (targets.Count == 0)
@@ -837,36 +601,170 @@ public static class FactRemediation
 
         var sb = new StringBuilder();
         var emitted = 0;
+        var eligible = 0;
 
         foreach (var target in targets)
         {
             if (emitted > 0)
                 sb.AppendLine();
 
-            sb.AppendLine($"-- Database: {target.Database}");
-            sb.AppendLine($"-- query_id = {target.QueryId}, forcing plan_id = {target.PlanId}");
+            /* #8542: a target the store's state blocks is described and named, never handed over as a statement. */
+            var blockers = BlockersFor(target, states);
+
+            sb.AppendLine($"-- Database: {OneLine(target.Database)}");
+            sb.AppendLine(blockers.Count == 0
+                ? $"-- query_id = {target.QueryId}, forcing plan_id = {target.PlanId}"
+                : $"-- query_id = {target.QueryId}, best plan_id = {target.PlanId} (not offered as a force)");
             if (!string.IsNullOrEmpty(target.LatestPlanHash))
-                sb.AppendLine($"--   latest plan hash: {target.LatestPlanHash} (cpu/exec {target.LatestCpuPerExecUs:F0} us)");
+                sb.AppendLine($"--   latest plan hash: {OneLine(target.LatestPlanHash)} (cpu/exec {target.LatestCpuPerExecUs.ToString("N0", CultureInfo.InvariantCulture)} us)");
             if (!string.IsNullOrEmpty(target.BestPlanHash))
-                sb.AppendLine($"--   best plan hash:   {target.BestPlanHash}   (cpu/exec {target.BestCpuPerExecUs:F0} us)");
+                sb.AppendLine($"--   best plan hash:   {OneLine(target.BestPlanHash)}   (cpu/exec {target.BestCpuPerExecUs.ToString("N0", CultureInfo.InvariantCulture)} us)");
             AppendBestPlanAge(sb, target);
             sb.AppendLine($"--   regression factor: {target.RegressionFactor:F1}x");
             if (!string.IsNullOrEmpty(target.ReplicaRole))
-                sb.AppendLine($"--   measured on replica: {target.ReplicaRole}");
+                sb.AppendLine($"--   measured on replica: {OneLine(target.ReplicaRole)}");
+            emitted++;
+
+            if (blockers.Count > 0)
+            {
+                AppendNotEligible(sb, target, blockers);
+                continue;
+            }
+
+            eligible++;
             AppendSecondaryReplicaDisclosure(sb, target);
             AppendParameterSensitivityCaution(sb, target);
+            if (StateUnknownLine(target, states) is { } stateUnknown)
+                sb.AppendLine(stateUnknown);
             sb.AppendLine($"USE {QuoteName(target.Database)};");
             sb.AppendLine($"EXEC sys.sp_query_store_force_plan @query_id = {target.QueryId}, @plan_id = {target.PlanId};");
             sb.AppendLine();
             sb.AppendLine($"-- To back out:");
             sb.AppendLine($"-- EXEC sys.sp_query_store_unforce_plan @query_id = {target.QueryId}, @plan_id = {target.PlanId};");
             AppendUnforceScopeNote(sb, target);
-
-            emitted++;
         }
 
-        return sb.ToString().TrimEnd();
+        var body = sb.ToString().TrimEnd();
+        if (eligible == 0)
+            body = NoEligibleForceTarget + Environment.NewLine + Environment.NewLine + body;
+
+        return WithStateNotRead(body, states, stateUnavailableReason);
     }
+
+    /// <summary>The line a force-plan remediation opens with when the store's state blocks every target
+    /// (#8542): the text then carries no force statement at all.</summary>
+    public const string NoEligibleForceTarget =
+        "-- No force statement is offered: the store's forcing state blocks every target below.";
+
+    /// <summary>How a force-plan remediation says the store's forcing state does not stand behind a
+    /// statement (#8542): one comment line that starts with this. It opens the text when the state could
+    /// not be read at all, and sits above one target's statement when the read holds no row for that
+    /// target, so neither statement is taken for one the store was asked about and cleared.</summary>
+    public const string StateNotReadPrefix = "-- NOT CHECKED:";
+
+    /// <summary>What a state read that holds no row for a target observed, in the words
+    /// <c>structured_remediation</c>'s <c>state_note</c> and the copy-paste text share.</summary>
+    private static string NoStateRowInLookback =>
+        $"no query_store_stats or plan_correction row for this target within the last {ForcePlanTargetState.Lookback.TotalHours:0} hours";
+
+    /// <summary>The instruction every unknown-state note and line ends with.</summary>
+    private const string CheckBeforeForcing = "Check get_plan_corrections and sys.query_store_plan before forcing.";
+
+    /// <summary>
+    /// The comment line a target's force statement sits under when the state read ran and holds no row
+    /// for the target (#8542): the dictionary has no key for it, or its state
+    /// <see cref="ForcePlanTargetState.IsEmpty"/>. The line starts with <see cref="StateNotReadPrefix"/>
+    /// and says what <c>structured_remediation</c>'s <c>state_note</c> says of the same target: its state
+    /// is unknown, check before forcing. The statement stays, because nothing observed is not a blocker.
+    /// Null for a target with a state row, and for a null <paramref name="states"/>, where the whole
+    /// read is spoken for once by <see cref="WithStateNotRead"/>.
+    /// </summary>
+    private static string? StateUnknownLine(
+        ForcePlanTarget target,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states)
+    {
+        if (states is null)
+            return null;
+
+        if (states.TryGetValue(ForcePlanTargetKey.Of(target), out var found) && found is not null && !found.IsEmpty)
+            return null;
+
+        return $"{StateNotReadPrefix} unknown: {NoStateRowInLookback}. {CheckBeforeForcing}";
+    }
+
+    /// <summary>The comment line that names a target the store's state blocks (#8542) starts with this.</summary>
+    public const string NotEligiblePrefix = "-- NOT ELIGIBLE:";
+
+    /// <summary>
+    /// Opens a force-plan text with the not-read line when the state read failed: no state, and a reason.
+    /// The reason is flattened to one line. With a state, or with no reason, the text is returned as is.
+    /// </summary>
+    private static string WithStateNotRead(
+        string text,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states,
+        string? stateUnavailableReason)
+    {
+        if (states is not null || string.IsNullOrWhiteSpace(stateUnavailableReason))
+            return text;
+
+        return $"{StateNotReadPrefix} the store's forcing and automatic-plan-correction state could not be read, so no target below was checked against it. {OneLine(stateUnavailableReason.Trim())}" +
+               Environment.NewLine + Environment.NewLine + text;
+    }
+
+    /// <summary>
+    /// The blockers that withhold one target's statement in the copy-paste renderers (#8542). The gate
+    /// (<see cref="ForcePlanBlockers(ForcePlanTarget, ForcePlanTargetState?)"/>) runs over the target's
+    /// read-time state, and its whole list comes back when it holds at least one blocker read from the
+    /// store's forcing or automatic-plan-correction state: <c>apc_owns_it</c>, <c>already_forced</c>,
+    /// <c>forcing_failed_on_this_plan</c>, <c>apc_withdrew_it</c>, <c>apc_resolved_differently</c>.
+    /// Empty otherwise. The two blockers a target carries from its own finding
+    /// (<c>parameter_sensitivity_cofired</c>, <c>secondary_replica_evidence</c>) withhold nothing on
+    /// their own: such a target renders its caution or disclosure WITH the statement (#1882, #2138),
+    /// the decision staying with the person who reads it.
+    /// </summary>
+    private static IReadOnlyList<ForcePlanBlocker> BlockersFor(
+        ForcePlanTarget target,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states)
+    {
+        ForcePlanTargetState? state = null;
+        if (states is not null &&
+            states.TryGetValue(ForcePlanTargetKey.Of(target), out var found) &&
+            found is not null && !found.IsEmpty)
+        {
+            state = found;
+        }
+
+        if (state is null)
+            return Array.Empty<ForcePlanBlocker>();
+
+        var all = ForcePlanBlockers(target, state);
+        foreach (var blocker in all)
+        {
+            if (!string.Equals(blocker.Name, ForcePlanBlockerNames.ParameterSensitivityCoFired, StringComparison.Ordinal) &&
+                !string.Equals(blocker.Name, ForcePlanBlockerNames.SecondaryReplicaEvidence, StringComparison.Ordinal))
+            {
+                return all;
+            }
+        }
+
+        return Array.Empty<ForcePlanBlocker>();
+    }
+
+    /// <summary>
+    /// Names a target the store's state blocks and each of its blockers as comment lines (#8542). The
+    /// evidence is flattened to one line so collected text in it stays inside the comment.
+    /// </summary>
+    private static void AppendNotEligible(StringBuilder sb, ForcePlanTarget target, IReadOnlyList<ForcePlanBlocker> blockers)
+    {
+        sb.AppendLine($"{NotEligiblePrefix} no force statement is given for {OneLine(QuoteName(target.Database))} query_id = {target.QueryId}, plan_id = {target.PlanId}.");
+        foreach (var blocker in blockers)
+            sb.AppendLine($"--   {blocker.Name}: {OneLine(blocker.Evidence)}");
+    }
+
+    private static string OneLine(string? text) =>
+        string.IsNullOrEmpty(text)
+            ? string.Empty
+            : text.Replace('\r', ' ').Replace('\n', ' ').Replace('\u2028', ' ').Replace('\u2029', ' ').Replace('\u0085', ' ');
 
     /// <summary>
     /// #4736: one comment line saying when the target's best plan last ran and how long before the analysis
@@ -945,7 +843,7 @@ public static class FactRemediation
             return;
 
         sb.AppendLine("--");
-        sb.AppendLine($"-- HEADS UP: this regression was measured on the {target.ReplicaRole} replica's workload,");
+        sb.AppendLine($"-- HEADS UP: this regression was measured on the {OneLine(target.ReplicaRole)} replica's workload,");
         sb.AppendLine("-- but the statement below forces on the PRIMARY. sp_query_store_force_plan is executed on");
         sb.AppendLine("-- the primary in every case, and its @replica_group_id argument defaults to the primary");
         sb.AppendLine("-- when omitted -- so running this as written changes the plan the primary's WRITE workload");
@@ -1118,31 +1016,37 @@ public static class FactRemediation
         var apcState = state.ApcState ?? string.Empty;
         var apcReason = state.ApcStateReason;
 
-        /* apc_owns_it — three shapes, one blocker: the engine is doing this, on this plan or on this query. */
-        if (planForcedAuto)
+        /* apc_owns_it — three shapes, one blocker: the engine is doing this, on this plan or on this query.
+           #8628: the two AUTO-forced-row shapes rest on a query_store_stats observation, and the plan_correction
+           state beside it is its own, separate observation. When the plan_correction state is the NEWER one and says
+           the engine has backed out (Reverted or Expired) or that the plan it named is not forced, the older AUTO row
+           is stale and does not raise the blocker. When the forced-plan row is the newer (or the same age), it decides
+           as before. The same predicate serves every reader of this gate, so get_plan_force_precheck cannot differ. */
+        if (planForcedAuto && !ApcSupersedesForcedRow(state, state.PlanObservedAtUtc, target.PlanId))
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcOwnsIt,
-                $"query_store_stats: plan {target.PlanId} is_forced_plan = true, plan_forcing_type = {state.PlanForcingType} at {Stamp(state.PlanObservedAtUtc)} — automatic plan correction placed this force; a manual force would replace it and remove the engine's revert path"));
+                $"query_store_stats: plan {target.PlanId} is_forced_plan = true, plan_forcing_type = {state.PlanForcingType} at {Stamp(state.PlanObservedAtUtc)}, automatic plan correction placed this force; a manual force would replace it and remove the engine's revert path"));
         }
         else if (apcOnTarget && (Is(apcState, "Verifying") || Is(apcState, "Success")))
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcOwnsIt,
                 $"plan_correction: recommendation state {apcState}{Reason(apcReason)} with last_good_plan_id = {target.PlanId}" +
-                $"{ForcedClause(state.ApcLastGoodPlanIsForced, state.ApcLastGoodPlanForcingType)} at {Stamp(state.ApcObservedAtUtc)} — the engine is already forcing exactly this plan"));
+                $"{ForcedClause(state.ApcLastGoodPlanIsForced, state.ApcLastGoodPlanForcingType)} at {Stamp(state.ApcObservedAtUtc)}, the engine is already forcing exactly this plan"));
         }
-        else if (state.OtherForcedPlanId is long otherAuto && IsAutoForcing(state.OtherForcedPlanForcingType))
+        else if (state.OtherForcedPlanId is long otherAuto && IsAutoForcing(state.OtherForcedPlanForcingType)
+            && !ApcSupersedesForcedRow(state, state.OtherForcedPlanObservedAtUtc, otherAuto))
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcOwnsIt,
-                $"query_store_stats: plan {otherAuto} of this query is forced with plan_forcing_type = {state.OtherForcedPlanForcingType} at {Stamp(state.OtherForcedPlanObservedAtUtc)} — automatic plan correction is handling this query through a different plan; forcing {target.PlanId} would take it over"));
+                $"query_store_stats: plan {otherAuto} of this query is forced with plan_forcing_type = {state.OtherForcedPlanForcingType} at {Stamp(state.OtherForcedPlanObservedAtUtc)}, automatic plan correction is handling this query through a different plan; forcing {target.PlanId} would take it over"));
         }
         else if (apcOnOther && Is(apcState, "Verifying"))
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcOwnsIt,
-                $"plan_correction: recommendation state Verifying{Reason(apcReason)} with last_good_plan_id = {state.ApcLastGoodPlanId} (not {target.PlanId}) at {Stamp(state.ApcObservedAtUtc)} — the engine is mid-verification on a different plan for this query"));
+                $"plan_correction: recommendation state Verifying{Reason(apcReason)} with last_good_plan_id = {state.ApcLastGoodPlanId} (not {target.PlanId}) at {Stamp(state.ApcObservedAtUtc)}, the engine is mid-verification on a different plan for this query"));
         }
 
         /* already_forced — by hand, here or on a sibling plan. */
@@ -1150,13 +1054,13 @@ public static class FactRemediation
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.AlreadyForced,
-                $"query_store_stats: plan {target.PlanId} is_forced_plan = true, plan_forcing_type = {state.PlanForcingType ?? "(unknown)"} at {Stamp(state.PlanObservedAtUtc)} — this plan is already forced; there is nothing to force"));
+                $"query_store_stats: plan {target.PlanId} is_forced_plan = true, plan_forcing_type = {state.PlanForcingType ?? "(unknown)"} at {Stamp(state.PlanObservedAtUtc)}, this plan is already forced; there is nothing to force"));
         }
         else if (state.OtherForcedPlanId is long otherManual && !IsAutoForcing(state.OtherForcedPlanForcingType))
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.AlreadyForced,
-                $"query_store_stats: plan {otherManual} of this query is forced (plan_forcing_type = {state.OtherForcedPlanForcingType ?? "(unknown)"}) at {Stamp(state.OtherForcedPlanObservedAtUtc)} — SQL Server keeps one forced plan per query, so forcing {target.PlanId} silently replaces it; decide that on purpose"));
+                $"query_store_stats: plan {otherManual} of this query is forced (plan_forcing_type = {state.OtherForcedPlanForcingType ?? "(unknown)"}) at {Stamp(state.OtherForcedPlanObservedAtUtc)}, SQL Server keeps one forced plan per query, so forcing {target.PlanId} silently replaces it; decide that on purpose"));
         }
 
         /* forcing_failed_on_this_plan — the counter the alert family pages on, and the engine's own verdict. */
@@ -1164,7 +1068,7 @@ public static class FactRemediation
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ForcingFailedOnThisPlan,
-                $"query_store_stats: plan {target.PlanId} force_failure_count = {state.ForceFailureCount}, last_force_failure_reason = {state.LastForceFailureReason ?? "(none recorded)"} at {Stamp(state.PlanObservedAtUtc)} — forcing this plan is already failing on this server"));
+                $"query_store_stats: plan {target.PlanId} force_failure_count = {state.ForceFailureCount}, last_force_failure_reason = {state.LastForceFailureReason ?? "(none recorded)"} at {Stamp(state.PlanObservedAtUtc)}, forcing this plan is already failing on this server"));
         }
         else if (apcOnTarget && (Is(apcState, "Reverted") || Is(apcReason, "ForcingFailed") || !string.IsNullOrEmpty(state.ApcLastGoodPlanForceFailureReason)))
         {
@@ -1172,7 +1076,7 @@ public static class FactRemediation
                 ForcePlanBlockerNames.ForcingFailedOnThisPlan,
                 $"plan_correction: recommendation state {apcState}{Reason(apcReason)} on last_good_plan_id = {target.PlanId}" +
                 (string.IsNullOrEmpty(state.ApcLastGoodPlanForceFailureReason) ? string.Empty : $", last_good_plan_force_failure_reason = {state.ApcLastGoodPlanForceFailureReason}") +
-                $" at {Stamp(state.ApcObservedAtUtc)} — the engine already tried this plan and " +
+                $" at {Stamp(state.ApcObservedAtUtc)}, the engine already tried this plan and " +
                 (Is(apcState, "Reverted") && !Is(apcReason, "ForcingFailed") ? "reverted it for no significant gain" : "could not force it")));
         }
         /* apc_withdrew_it — after the failure arm, so Expired/ForcingFailed is named a failure. */
@@ -1180,7 +1084,7 @@ public static class FactRemediation
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcWithdrewIt,
-                $"plan_correction: recommendation state Expired{Reason(apcReason)} on last_good_plan_id = {target.PlanId} at {Stamp(state.ApcObservedAtUtc)} — the engine recommended this plan and withdrew the recommendation for the reason quoted"));
+                $"plan_correction: recommendation state Expired{Reason(apcReason)} on last_good_plan_id = {target.PlanId} at {Stamp(state.ApcObservedAtUtc)}, the engine recommended this plan and withdrew the recommendation for the reason quoted"));
         }
 
         /* apc_resolved_differently — Success through another plan. */
@@ -1189,7 +1093,7 @@ public static class FactRemediation
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcResolvedDifferently,
                 $"plan_correction: recommendation state Success{Reason(apcReason)} with last_good_plan_id = {state.ApcLastGoodPlanId} (not {target.PlanId})" +
-                $"{ForcedClause(state.ApcLastGoodPlanIsForced, state.ApcLastGoodPlanForcingType)} at {Stamp(state.ApcObservedAtUtc)} — the engine already resolved this query's regression through plan {state.ApcLastGoodPlanId}"));
+                $"{ForcedClause(state.ApcLastGoodPlanIsForced, state.ApcLastGoodPlanForcingType)} at {Stamp(state.ApcObservedAtUtc)}, the engine already resolved this query's regression through plan {state.ApcLastGoodPlanId}"));
         }
 
         return blockers;
@@ -1209,6 +1113,31 @@ public static class FactRemediation
 
     private static bool IsAutoForcing(string? forcingType) =>
         string.Equals(forcingType, ForcePlanTargetState.ForcingTypeAuto, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// #8628: whether the automatic-plan-correction (<c>plan_correction</c>) observation is NEWER than the
+    /// forced-plan (<c>query_store_stats</c>) row and says that row no longer holds: the recommendation is
+    /// <c>Reverted</c> or <c>Expired</c> (the engine has backed out), or the plan it named
+    /// (<c>last_good_plan_id</c>, the forced plan in question) is not forced. Only a strictly newer
+    /// observation supersedes; the same age or an older one leaves the forced-plan row to decide, and a forced
+    /// row with no snapshot time is never superseded. One predicate for every reader of the gate, so the
+    /// analyze_server blocker, the guidance and <c>get_plan_force_precheck</c> read it the same way.
+    /// </summary>
+    internal static bool ApcSupersedesForcedRow(ForcePlanTargetState state, DateTime? forcedObservedAtUtc, long forcedPlanId)
+    {
+        if (state.ApcObservedAtUtc is not DateTime apcAt || forcedObservedAtUtc is not DateTime forcedAt || apcAt <= forcedAt)
+        {
+            return false;
+        }
+
+        return IsApcBackedOut(state.ApcState)
+            || (state.ApcLastGoodPlanIsForced == false && state.ApcLastGoodPlanId == forcedPlanId);
+    }
+
+    /// <summary>The engine's recommendation states in which it has stopped managing the plan: <c>Reverted</c> (no gain) and <c>Expired</c> (the situation changed). The others are <c>Active</c>, <c>Verifying</c> and <c>Success</c>.</summary>
+    internal static bool IsApcBackedOut(string? apcState) =>
+        string.Equals(apcState, "Reverted", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(apcState, "Expired", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// #4736: the engine's own OPEN (<c>Active</c>) recommendation names the proposed plan as the regressed,
@@ -1235,8 +1164,8 @@ public static class FactRemediation
             : "(no snapshot time)";
 
     /// <summary>
-    /// Whether the action is a standing CONFIG fix: a database-config, RCSI, percent-autogrowth file or
-    /// server-config target list is non-empty. Force-plan, clear-plan and missing-index actions are not config
+    /// Whether the action is a standing CONFIG fix: a database-config, RCSI, or percent-autogrowth file
+    /// target list is non-empty. Force-plan and missing-index actions are not config
     /// fixes, so those findings stay incidents. The viewer card and the MCP <c>is_config_fix</c> field share this.
     /// </summary>
     public static bool IsConfigFix(RemediationAction? action)
@@ -1244,8 +1173,7 @@ public static class FactRemediation
         if (action is null) return false;
         return (action.DbConfigTargets?.Count ?? 0) > 0
             || (action.RcsiTargets?.Count ?? 0) > 0
-            || (action.FileGrowthTargets?.Count ?? 0) > 0
-            || (action.ServerConfigTargets?.Count ?? 0) > 0;
+            || (action.FileGrowthTargets?.Count ?? 0) > 0;
     }
 
     /// <summary>
@@ -1295,7 +1223,7 @@ public static class FactRemediation
             else if (!states.TryGetValue(ForcePlanTargetKey.Of(t), out state) || state is null || state.IsEmpty)
             {
                 state = null;
-                note = $"unknown: no query_store_stats or plan_correction row for this target within the last {ForcePlanTargetState.Lookback.TotalHours:0} hours; eligible reflects only the finding's own evidence. Check get_plan_corrections and sys.query_store_plan before forcing.";
+                note = $"unknown: {NoStateRowInLookback}; eligible reflects only the finding's own evidence. {CheckBeforeForcing}";
             }
             else
             {
@@ -1339,11 +1267,11 @@ public static class FactRemediation
                 ForcingState: state,
                 StateNote: note,
                 ApcMode: apcMode,
-                Guidance: BuildForcePlanGuidance(t, state)));
+                Guidance: BuildForcePlanGuidance(t, state, detailed)));
         }
 
         var guidance = anyApcOn
-            ? "Automatic plan correction (FORCE_LAST_GOOD_PLAN) is ON for at least one of these databases: the engine forces and verifies its own last-good plan there and reverts it if it does not help. Read each target's guidance and blockers before forcing by hand — a manual force replaces AUTO forcing and removes the engine's revert path. Intervene only where a recommendation has reverted or expired, or where the engine has none."
+            ? "Automatic plan correction (FORCE_LAST_GOOD_PLAN) is ON for at least one of these databases: the engine forces and verifies its own last-good plan there and reverts it if it does not help. Read each target's guidance and blockers before forcing by hand: a manual force replaces AUTO forcing and removes the engine's revert path. Intervene only where a recommendation has reverted or expired, or where the engine has none."
             : null;
 
         return new StructuredRemediation(action.FactKey, action.Action, structured, guidance);
@@ -1352,12 +1280,14 @@ public static class FactRemediation
     /// <summary>
     /// The per-target verb (#3652): when FORCE_LAST_GOOD_PLAN is ON for the database the remediation is no
     /// longer "run this" but "the engine is doing X for this query; intervene only if it reverts or
-    /// expires" — stated with the engine's own state and reason. When the enablement is OFF or unknown,
+    /// expires" — stated with the engine's own state and reason. #8628: once the state IS Reverted or
+    /// Expired the engine has backed out, and the sentence says that (with the state, its reason and any
+    /// standing blocker's reason) instead of telling the reader to wait for what already happened. When the enablement is OFF or unknown,
     /// the only guidance is the non-blocking disagreement cases (an <c>Active</c> recommendation naming a
     /// different plan, or naming this plan as the regressed one — #4736). Null when there is nothing to add
     /// to the blockers.
     /// </summary>
-    private static string? BuildForcePlanGuidance(ForcePlanTarget t, ForcePlanTargetState? state)
+    private static string? BuildForcePlanGuidance(ForcePlanTarget t, ForcePlanTargetState? state, IReadOnlyList<ForcePlanBlocker> blockers)
     {
         if (state is null)
         {
@@ -1381,7 +1311,32 @@ public static class FactRemediation
                 var via = state.ApcLastGoodPlanId is long lg
                     ? (lg == t.PlanId ? $" via plan {lg} (the plan proposed here)" : $" via plan {lg} (not the plan proposed here, {t.PlanId})")
                     : string.Empty;
-                sb.Append($" and is currently {apcState}{reason} for query {t.QueryId}{via} as of {Stamp(state.ApcObservedAtUtc)}; intervene only if it reverts or expires.");
+                sb.Append($" and is currently {apcState}{reason} for query {t.QueryId}{via} as of {Stamp(state.ApcObservedAtUtc)}; ");
+                if (IsApcBackedOut(apcState))
+                {
+                    /* #8628: Reverted and Expired are the engine withdrawing, so "intervene only if it reverts or
+                       expires" would tell the reader to wait for what already happened. The engine has let go; a
+                       manual force is the reader's call, and a blocker that still stands is named beside it. */
+                    if (blockers.Count == 0)
+                    {
+                        sb.Append("the engine has backed out of it, so a manual force here is yours to decide.");
+                    }
+                    else
+                    {
+                        sb.Append("the engine has backed out of it, but this target is not eligible:");
+                        foreach (var blocker in blockers)
+                        {
+                            sb.Append($" {blocker.Name} ({OneLine(blocker.Evidence)});");
+                        }
+
+                        sb.Length--;
+                        sb.Append('.');
+                    }
+                }
+                else
+                {
+                    sb.Append("intervene only if it reverts or expires.");
+                }
             }
 
             if (namedAsRegressed)
@@ -1398,13 +1353,13 @@ public static class FactRemediation
         if (namedAsRegressed)
         {
             var better = state.ApcLastGoodPlanId is long good ? $" and plan {good} as the better one" : string.Empty;
-            return $"The engine's own open recommendation{reason} for query {t.QueryId} names plan {t.PlanId} (the plan proposed here) as the regressed, worse plan{better}, as of {Stamp(state.ApcObservedAtUtc)} — the engine disagrees with this page's choice; compare both plans before forcing either.";
+            return $"The engine's own open recommendation{reason} for query {t.QueryId} names plan {t.PlanId} (the plan proposed here) as the regressed, worse plan{better}, as of {Stamp(state.ApcObservedAtUtc)}: the engine disagrees with this page's choice; compare both plans before forcing either.";
         }
 
         if (string.Equals(apcState, "Active", StringComparison.OrdinalIgnoreCase) &&
             state.ApcLastGoodPlanId is long activePlan && activePlan != t.PlanId)
         {
-            return $"The engine's own open recommendation{reason} for query {t.QueryId} names plan {activePlan}, not {t.PlanId}, as of {Stamp(state.ApcObservedAtUtc)} — two candidate plans; compare both before forcing either.";
+            return $"The engine's own open recommendation{reason} for query {t.QueryId} names plan {activePlan}, not {t.PlanId}, as of {Stamp(state.ApcObservedAtUtc)}: two candidate plans; compare both before forcing either.";
         }
 
         return null;
@@ -1591,18 +1546,18 @@ public static class FactRemediation
                 {
                     // Close out the previous database group with its RCSI note (if any).
                     if (rcsiOffDatabases.Contains(currentDb))
-                        sb.AppendLine($"-- NOTE: {QuoteName(currentDb)} also has RCSI OFF — intentionally NOT auto-fixed (test on a copy first).");
+                        sb.AppendLine($"-- NOTE: {QuoteName(currentDb)} also has RCSI OFF. Intentionally NOT auto-fixed (test on a copy first).");
                     sb.AppendLine();
                 }
                 currentDb = target.Database;
-                sb.AppendLine($"-- Database: {target.Database}");
+                sb.AppendLine($"-- Database: {OneLine(target.Database)}");
             }
 
             sb.AppendLine($"{StatementFor(target.Setting, target.Database)}   -- was {target.CurrentValue}");
         }
 
         if (currentDb is not null && rcsiOffDatabases.Contains(currentDb))
-            sb.AppendLine($"-- NOTE: {QuoteName(currentDb)} also has RCSI OFF — intentionally NOT auto-fixed (test on a copy first).");
+            sb.AppendLine($"-- NOTE: {QuoteName(currentDb)} also has RCSI OFF. Intentionally NOT auto-fixed (test on a copy first).");
 
         return sb.ToString().TrimEnd();
     }
@@ -1777,26 +1732,43 @@ public static class FactRemediation
     // The Darling viewer is advise-only (Postgres read-through, no in-app remediation executor), so a
     // runnable copy-paste command IS its remediation surface: for EVERY remediable finding it must
     // hand the operator T-SQL they can run themselves. RenderCopyPasteCommand turns a PERSISTED
-    // RemediationAction back into that runnable T-SQL for all seven shapes — the single source of
+    // RemediationAction back into that runnable T-SQL for all five shapes — the single source of
     // truth so no surface (Darling / Dashboard reader / email / MCP) can drift from another. The three
     // always-safe shapes render bare (percent-autogrowth MODIFY FILE, missing-index CREATE, safe
-    // DB-config ALTER); the four that were previously copy-paste dead ends now render too — force-plan
-    // (USE + sp_query_store_force_plan, which is database-scoped so each target carries its own USE),
-    // server-config (sp_configure + RECONFIGURE), RCSI, and clear-plan. The two DESTRUCTIVE shapes
-    // (RCSI, clear-plan — both IsDestructive) prepend their two-sided FactRiskDisclosure text as a
-    // /* ... */ header so the copy-paste itself states the risk of changing AND of not changing.
-    // Reuses BuildModifyFileStatement / BuildSpConfigureStatement / StatementFor / FactRiskDisclosure.
+    // DB-config ALTER); force-plan (USE + sp_query_store_force_plan, which is database-scoped so each
+    // target carries its own USE) and RCSI render too. RCSI is DESTRUCTIVE (IsDestructive) and prepends
+    // its two-sided FactRiskDisclosure text as a /* ... */ header so the copy-paste itself states the
+    // risk of changing AND of not changing. Reuses BuildModifyFileStatement / StatementFor /
+    // FactRiskDisclosure.
 
     /// <summary>
     /// Renders runnable, copy-paste T-SQL for a persisted <see cref="RemediationAction"/> — one command
-    /// (or block) per target across all seven remediation shapes — or null when the action carries no
+    /// (or block) per target across all five remediation shapes — or null when the action carries no
     /// renderable target. This is the shared source the Darling viewer's copy-paste affordance delegates
     /// to; it operates purely on the persisted typed targets (the ephemeral drill-down is gone on
-    /// read-back), so it never parses preview prose. The always-safe shapes render bare; the two
-    /// destructive shapes (RCSI, clear-plan) prepend the two-sided <see cref="FactRiskDisclosure"/> text
+    /// read-back), so it never parses preview prose. The always-safe shapes render bare; the
+    /// destructive shape (RCSI) prepends the two-sided <see cref="FactRiskDisclosure"/> text
     /// as a <c>/* ... */</c> comment header. Nothing here executes — it is advisory text the operator runs.
     /// </summary>
-    public static string? RenderCopyPasteCommand(RemediationAction? action)
+    public static string? RenderCopyPasteCommand(RemediationAction? action) =>
+        RenderCopyPasteCommand(action, states: null);
+
+    /// <summary>
+    /// <see cref="RenderCopyPasteCommand(RemediationAction?)"/> with the read-time forcing and
+    /// automatic-plan-correction state of the action's force-plan targets (#8542). A force-plan target
+    /// that state blocks (<see cref="BlockersFor"/>) is named in comments with its blockers and gets no
+    /// runnable statement; when it blocks every target the text says so and carries no force statement.
+    /// A target the read holds no row for keeps its statement under a line saying its state is unknown
+    /// (<see cref="StateUnknownLine"/>). A null <paramref name="states"/> withholds nothing; when the
+    /// read failed, pass why in <paramref name="stateUnavailableReason"/> and the force-plan text opens by
+    /// saying no target was checked (<see cref="StateNotReadPrefix"/>). With a null
+    /// <paramref name="states"/> and no reason the text carries no such line: the caller made no read,
+    /// and says nothing about the store. The other remediation shapes ignore both.
+    /// </summary>
+    public static string? RenderCopyPasteCommand(
+        RemediationAction? action,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states,
+        string? stateUnavailableReason = null)
     {
         if (action is null)
             return null;
@@ -1828,16 +1800,6 @@ public static class FactRemediation
             return sb.Length == 0 ? null : sb.ToString();
         }
 
-        // SERVER_CONFIG — one sp_configure + RECONFIGURE per setting (shared builder), incl. the
-        // advise-only memory settings (the operator wants the sp_configure scaffold regardless). Safe.
-        if (action.ServerConfigTargets is { Count: > 0 } serverTargets)
-        {
-            var blocks = new List<string>(serverTargets.Count);
-            foreach (var t in serverTargets)
-                blocks.Add(BuildSpConfigureStatement(t.Setting, t.RecommendedValue));
-            return blocks.Count == 0 ? null : string.Join(nl + nl, blocks);
-        }
-
         // PLAN_REGRESSION (force-plan) — sp_query_store_force_plan is DATABASE-scoped, so each target
         // is a standalone USE + EXEC block (the copy-paste runs without an ambient database). Safe.
         //
@@ -1851,10 +1813,11 @@ public static class FactRemediation
         if (action.Targets is { Count: > 0 } forceTargets)
         {
             var blocks = new List<string>(forceTargets.Count);
+            var eligible = 0;
             foreach (var t in forceTargets)
             {
                 var disclosure = IsNonPrimaryReplicaRow(t.ReplicaRole)
-                    ? $"-- Measured on the {t.ReplicaRole} replica; this forces on the PRIMARY (@replica_group_id" + nl +
+                    ? $"-- Measured on the {OneLine(t.ReplicaRole)} replica; this forces on the PRIMARY (@replica_group_id" + nl +
                       "-- defaults there when omitted). Scope it with @replica_group_id to target that replica." + nl
                     : string.Empty;
 
@@ -1866,21 +1829,34 @@ public static class FactRemediation
                       "-- Forcing pins ONE shape for every value; consider stats updates first (see the preview)." + nl
                     : string.Empty;
 
+                /* #8542: a target the store's state blocks is named with its blockers, in comments only. */
+                var blockers = BlockersFor(t, states);
+                if (blockers.Count > 0)
+                {
+                    var blocked = new StringBuilder();
+                    AppendNotEligible(blocked, t, blockers);
+                    blocks.Add(blocked.ToString().TrimEnd());
+                    continue;
+                }
+
+                eligible++;
                 blocks.Add(
                     disclosure +
                     pspCaution +
+                    (StateUnknownLine(t, states) is { } stateUnknown ? stateUnknown + nl : string.Empty) +
                     $"USE {QuoteName(t.Database)};" + nl +
                     $"EXEC sys.sp_query_store_force_plan @query_id = {t.QueryId}, @plan_id = {t.PlanId};");
             }
 
-            return blocks.Count == 0 ? null : string.Join(nl + nl, blocks);
-        }
+            if (blocks.Count == 0)
+                return null;
 
-        // CLEAR_PLAN — DESTRUCTIVE. Two-sided disclosure header + a self-contained resolve-and-free
-        // script (live-resolve the currently-cached plan handles for the abnormal query hashes, then
-        // DBCC FREEPROCCACHE each).
-        if (action.ClearPlanTargets is { Count: > 0 } clearTargets)
-            return RenderClearPlanScript(action, clearTargets, nl);
+            var forceText = string.Join(nl + nl, blocks);
+            if (eligible == 0)
+                forceText = NoEligibleForceTarget + nl + nl + forceText;
+
+            return WithStateNotRead(forceText, states, stateUnavailableReason);
+        }
 
         // RCSI reconstructed action (FactKey "RCSI") — DESTRUCTIVE. Carries a ReadCommittedSnapshotOn
         // DbConfigTarget (the alert-path / Dashboard-reader shape); render header + ALTER per target.
@@ -1941,73 +1917,6 @@ public static class FactRemediation
     }
 
     /// <summary>
-    /// Renders the destructive clear-cached-plan script: the two-sided disclosure header, a per-hash
-    /// comment (database + anomaly figures), a review SELECT (the currently-cached plans the free will
-    /// affect — a query_hash is not unique to one query, so the operator confirms the blast radius
-    /// first), then a cursor that frees each live-resolved <c>plan_handle</c> via DBCC FREEPROCCACHE.
-    /// Only query hashes that look like a hex literal (<c>0x…</c>) are inlined (they were validated at
-    /// build time; re-checked here because this text is runnable SQL); null when none qualify.
-    /// </summary>
-    private static string? RenderClearPlanScript(RemediationAction action, IReadOnlyList<ClearPlanTarget> targets, string nl)
-    {
-        var hashes = new List<string>(targets.Count);
-        var lines = new List<string>(targets.Count);
-        foreach (var t in targets)
-        {
-            if (!IsHexLiteral(t.QueryHash)) continue;
-            hashes.Add(t.QueryHash);
-            var dbLabel = string.IsNullOrEmpty(t.Database) ? "(resolved live)" : QuoteName(t.Database);
-            lines.Add(t.AnomalyRatio > 0
-                ? $"--   {dbLabel} {t.QueryHash} (~{t.AnomalyRatio.ToString("0.0", CultureInfo.InvariantCulture)}x normal per-exec CPU: " +
-                  $"{t.CurrentCpuPerExecMs.ToString("0.0", CultureInfo.InvariantCulture)} ms vs baseline " +
-                  $"{t.BaselineCpuPerExecMs.ToString("0.0", CultureInfo.InvariantCulture)} ms)"
-                : $"--   {dbLabel} {t.QueryHash}");
-        }
-
-        if (hashes.Count == 0)
-            return null;
-
-        var inList = string.Join(", ", hashes);
-        var sb = new StringBuilder();
-
-        var disclosure = FactRiskDisclosure.GetForAction(action, null);
-        if (disclosure is not null)
-            sb.Append(RenderRiskDisclosureComment(disclosure, nl)).Append(nl);
-
-        sb.Append("-- Clear the currently-cached plan(s) for these abnormal-CPU query hashes:").Append(nl);
-        foreach (var line in lines)
-            sb.Append(line).Append(nl);
-        sb.Append("-- STEP 1 (review): run this SELECT first — a query_hash can map to more than one query,").Append(nl);
-        sb.Append("-- so confirm the databases/queries below are the ones you intend to clear.").Append(nl);
-        sb.Append("SELECT DISTINCT").Append(nl);
-        sb.Append("    DB_NAME(st.dbid) AS database_name,").Append(nl);
-        sb.Append("    qs.plan_handle,").Append(nl);
-        sb.Append("    qs.execution_count,").Append(nl);
-        sb.Append("    st.text AS batch_text").Append(nl);
-        sb.Append("FROM sys.dm_exec_query_stats AS qs").Append(nl);
-        sb.Append("CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st").Append(nl);
-        sb.Append($"WHERE qs.query_hash IN ({inList});").Append(nl);
-        sb.Append(nl);
-        sb.Append("-- STEP 2 (apply): free every currently-cached plan for those hashes. There is NO un-clear —").Append(nl);
-        sb.Append("-- the prior plans are gone and the recompile is not guaranteed to be better.").Append(nl);
-        sb.Append("DECLARE @plan_handle varbinary(64);").Append(nl);
-        sb.Append("DECLARE plan_cursor CURSOR LOCAL FAST_FORWARD FOR").Append(nl);
-        sb.Append("    SELECT DISTINCT qs.plan_handle").Append(nl);
-        sb.Append("    FROM sys.dm_exec_query_stats AS qs").Append(nl);
-        sb.Append($"    WHERE qs.query_hash IN ({inList});").Append(nl);
-        sb.Append("OPEN plan_cursor;").Append(nl);
-        sb.Append("FETCH NEXT FROM plan_cursor INTO @plan_handle;").Append(nl);
-        sb.Append("WHILE @@FETCH_STATUS = 0").Append(nl);
-        sb.Append("BEGIN").Append(nl);
-        sb.Append("    DBCC FREEPROCCACHE(@plan_handle);").Append(nl);
-        sb.Append("    FETCH NEXT FROM plan_cursor INTO @plan_handle;").Append(nl);
-        sb.Append("END;").Append(nl);
-        sb.Append("CLOSE plan_cursor;").Append(nl);
-        sb.Append("DEALLOCATE plan_cursor;");
-        return sb.ToString();
-    }
-
-    /// <summary>
     /// Renders a two-sided <see cref="RiskDisclosure"/> as a <c>/* … */</c> T-SQL comment header, so a
     /// destructive copy-paste command states the risk of changing AND of not changing inline. The prose
     /// is fixed/reviewed (only validated identifiers + numeric figures are substituted); any embedded
@@ -2033,21 +1942,6 @@ public static class FactRemediation
     /// <summary>Defuses an embedded C-style comment terminator so disclosure prose cannot close the header early.</summary>
     private static string SanitizeForComment(string text) =>
         string.IsNullOrEmpty(text) ? string.Empty : text.Replace("*/", "* /");
-
-    /// <summary>True when the value is a non-empty hex literal (<c>0x</c> + at least one hex digit) safe to inline into SQL.</summary>
-    private static bool IsHexLiteral(string? value)
-    {
-        if (value is null || value.Length <= 2 ||
-            !(value[0] == '0' && (value[1] == 'x' || value[1] == 'X')))
-            return false;
-        for (var i = 2; i < value.Length; i++)
-        {
-            var c = value[i];
-            var isHex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-            if (!isHex) return false;
-        }
-        return true;
-    }
 
     /// <summary>
     /// QUOTENAME-equivalent: wrap an identifier in square brackets and double

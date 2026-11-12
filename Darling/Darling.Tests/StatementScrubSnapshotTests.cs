@@ -331,6 +331,31 @@ public sealed partial class StatementCollectionCensusTests
     }
 
     [Fact]
+    public void OversizedPlanSweep_TheTimeAPlanTakesToParseIsChargedOnTheSessionsClock_NotTheRealOne()
+    {
+        /* #7348: the partly-spent test above gives a one-value plan 1 s of a 1.5 s budget on a fake clock and expects it
+           to be judged. The parse time used to be charged from the real clock, so a slow parse on a loaded test host
+           (cold JIT, a descheduled thread) spent the other half second and the plan came back Failed. A clock that moves
+           1 s on every read makes the parse's charge visible without any real delay: when the parse reads the session's
+           clock the budget is spent, when it reads the real one (a few milliseconds) the plan is judged. */
+        var ticks = TimeSpan.Zero;
+        var session = new SensitiveStatements.Session(
+            _ => SensitiveStatements.Verdict.Clean,
+            () =>
+            {
+                ticks += TimeSpan.FromSeconds(1);
+                return ticks;
+            },
+            TimeSpan.FromMilliseconds(1500),
+            new SensitiveStatements.TimedOutMemo());
+
+        var (verdict, _, _) = OversizedPlanBacklogSweep.JudgeFetchedPlan(session, OnePlainValuePlan, 0);
+
+        Assert.True(session.Spent, "the parse's time must be read from the session's clock");
+        Assert.NotEqual(OversizedPlanBacklogSweep.PlanFetchVerdict.Captured, verdict);
+    }
+
+    [Fact]
     public void OversizedPlanSweep_OnlyAJudgeTimeoutAddsAnAttempt()
     {
         /* #5367 review, A-M1: attempt_count is the retirement limit's count of judge timeouts, so a connect failure,

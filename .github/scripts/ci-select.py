@@ -271,12 +271,10 @@ def decide(files: list[str], event: str, rules: Rules) -> dict:
     release = event == "release"
     all_count, docs_count = a["all_count"], a["docs_count"]
     docs_only = all_count > 0 and all_count == docs_count
-    area_names = ("root", "core", "installer_core", "dashboard", "lite", "installer", "darling")
+    area_names = ("root", "core", "lite", "darling")
     fastpath = (not release) and docs_only and not any(a[n] for n in area_names)
 
     build_lite = release or a["lite"] or a["core"] or a["root"]
-    build_installer = release or a["installer"] or a["installer_core"] or a["root"]
-    build_dashboard = release or a["dashboard"] or a["core"] or a["installer_core"] or a["root"]
     build_darling = release or a["darling"] or a["core"] or a["root"]
 
     pg_run = (not release) and a["gate_darling"]
@@ -290,8 +288,6 @@ def decide(files: list[str], event: str, rules: Rules) -> dict:
         "guard_run": (not release) and not docs_only,
         "docs_fastpath": fastpath,
         "build_lite_tests": build_lite,
-        "build_installer_tests": build_installer,
-        "build_dashboard_tests": build_dashboard,
         "build_darling_tests": build_darling,
         "darling_scope": darling_scope(
             event, build_darling, pg_run, release or a["darling_full"] or a["core"] or a["root"]),
@@ -377,16 +373,12 @@ GATE_ENV_LITERAL = re.compile(r'"DARLING_TEST_PG(?:RUNTIME)?_[A-Z0-9_]+"')
 SUITE_DIRS = {
     "darling": os.path.join("Darling", "Darling.Tests"),
     "lite": "Lite.Tests",
-    "dashboard": os.path.join("deprecated", "Dashboard.Tests"),
-    "installer": os.path.join("deprecated", "Installer.Tests"),
 }
 SUITE_BY_PREFIX = {
     "Darling.Tests": "darling",
     "PerformanceMonitor.Darling.Tests": "darling",
     "Lite.Tests": "lite",
     "PerformanceMonitorLite.Tests": "lite",
-    "Dashboard.Tests": "dashboard",
-    "Installer.Tests": "installer",
 }
 
 
@@ -539,6 +531,57 @@ def scan_classes(root: str = ROOT) -> dict[str, dict[str, set[str]]]:
     return out
 
 
+# #7739: scan_classes() reads class declarations and [Fact]/[Theory] lines as plain text, so it also finds a private nested
+# fixture class (xunit lists only public classes), an abstract base, and a `class W { }` or `[Fact]` that sits inside a test's
+# string (a census test's sample source). The test host lists none of them, and a plan that names one stops the leg (#6734).
+# The nightly map holds the classes the host listed, so a name in the map is real. A name the map has never seen (a class
+# added since it was built) is checked here against the source with its comments and strings blanked, which is slow (about
+# 12 ms a file) and is therefore asked only for those names, never for the whole tree.
+_CLASS_MODS = re.compile(r"^[ \t]*((?:(?:public|internal|private|protected|sealed|static|abstract|partial)\s+)*)class\s+(\w+)")
+_NOT_LISTED_WORDS = frozenset({"private", "protected", "internal", "abstract", "static"})
+
+
+def _listed_in_code(text: str, cls: str) -> bool:
+    """Does `text` declare `cls` in code (not in a string or a comment) as a class the test host lists: public, or partial
+    with no access word (another part may say public), not abstract or static, and holding a [Fact]/[Theory] of its own or
+    naming a base class (it may inherit the tests; the caller already knows the class holds or inherits one)."""
+    lines = cs_code_and_literals(text)[0].split("\n")
+    holders = _holders_of(lines)
+    for n, line in enumerate(lines):
+        m = _CLASS_MODS.match(line)
+        if not m or m.group(2) != cls:
+            continue
+        words = set(m.group(1).split())
+        if words & _NOT_LISTED_WORDS or not words & {"public", "partial"}:
+            continue
+        tail = line[m.end():]
+        if ":" not in tail and "{" not in tail and n + 1 < len(lines):
+            tail += " " + lines[n + 1]
+        if cls in holders or _BASE_LIST.match(tail):
+            return True
+    return False
+
+
+def listed_checker(root: str = ROOT) -> "Callable[[str, str], bool]":
+    """`(suite, Class) -> bool`: is it a class the test host lists (#7739, see _listed_in_code)? Parses the files that declare
+    the class the first time it is asked and remembers the answer. A class no test file declares is not listed."""
+    homes: "dict[tuple[str, str], list[str]] | None" = None
+    memo: "dict[tuple[str, str], bool]" = {}
+
+    def check(suite: str, cls: str) -> bool:
+        nonlocal homes
+        if (suite, cls) not in memo:
+            if homes is None:
+                homes = {}
+                for s, rel, name, _traits in _walk_classes(root):
+                    homes.setdefault((s, name), []).append(rel)
+            memo[(suite, cls)] = any(_listed_in_code(read_source(os.path.join(root, rel), "replace"), cls)
+                                     for rel in dict.fromkeys(homes.get((suite, cls), ())))
+        return memo[(suite, cls)]
+
+    return check
+
+
 def class_selected(suite: str, traits: set[str], d: dict) -> bool:
     """Would today's rules run this class for this decision?"""
     guard = "Stage=Guard" in traits
@@ -557,10 +600,6 @@ def class_selected(suite: str, traits: set[str], d: dict) -> bool:
         if d["lite_mode"] in ("full", "release"):
             return True
         return d["lite_mode"] == "reads" and "Reads=Darling" in traits
-    if suite == "dashboard":
-        return d["build_dashboard_tests"]
-    if suite == "installer":
-        return d["build_installer_tests"]
     return True
 
 
@@ -907,6 +946,68 @@ def reads_classes(root: str = ROOT, suites: "tuple[str, ...]" = ("darling", "lit
     return out
 
 
+# #7734: a draft runs the test classes whose source names a changed product file, by path or by file name, so a pin that reads
+# the file as text (a path or file-name pin) fails on the draft's own run, not one round late when it is marked ready. A
+# file name that more than NAME_COMMON_CLASSES test classes name (Program.cs and the like) is matched by path only: the
+# directory the file sits in and its name, both among the string literals of the class's file.
+NAME_COMMON_CLASSES = 100
+_LITERAL_SPLIT = re.compile(r"[/\s\"'`,;()<>|]+")
+
+
+def literal_tokens(text: str) -> "set[str]":
+    """The words of every string literal of a C# source, split at slashes (either kind), blanks, quotes and brackets: a path
+    `"Lite/Services/X.cs"`, an interpolated `$"{root}/X.cs"` and a path built from literals each give their file names and
+    directory names. Comments are not literals, so a comment that mentions a file does not name it."""
+    _code, bodies = cs_code_and_literals(text)
+    out: set[str] = set()
+    for _start, body in bodies:
+        out.update(t for t in _LITERAL_SPLIT.split(body.replace("\\", "/")) if t)
+    return out
+
+
+def classes_naming_files(changed: "list[str]", root: str = ROOT, common: int = NAME_COMMON_CLASSES,
+                         suites: "tuple[str, ...]" = ("darling", "lite"),
+                         doc_patterns: "tuple[str, ...] | list[str] | None" = None) -> "tuple[dict[str, list[str]], list[str]]":
+    """({suite: simple names of the test classes whose source names a changed product file}, the file names matched by path only).
+    A product file is a changed file outside the test projects and the documentation allowlist. A test source (one with a
+    [Fact] or [Theory]) names it when a string literal of it holds the file's name; for a file name that more than
+    `common` test classes name, when it holds the name and the name of the directory the file sits in. All the classes of
+    that source are named, the way reads_classes() names them (#7734)."""
+    docs = DOC_PATTERNS if doc_patterns is None else doc_patterns
+    product = [f for f in changed if not _TEST_PROJECT_FILE.search(f) and not any(matches(p, f) for p in docs)]
+    picks: dict[str, set[str]] = {s: set() for s in suites}
+    if not product:
+        return {s: [] for s in suites}, []
+    bases = {f: f.rsplit("/", 1)[-1] for f in product}
+    hits: list[tuple[str, list[str], set[str]]] = []
+    for suite in suites:
+        paths = _rc_suite_files(root, suite)
+        prefetch_sources(paths)
+        for path in paths:
+            try:
+                text = read_source(path).replace("\r\n", "\n")
+            except OSError:
+                continue
+            if not _RC_TEST_ATTR.search(text) or not any(b in text for b in bases.values()):
+                continue
+            tokens = literal_tokens(text)
+            if any(b in tokens for b in bases.values()):
+                hits.append((suite, [re.split(r"[.+/]", c)[-1] for c in test_classes_of_text(text)], tokens))
+    by_name: dict[str, set[str]] = {}
+    for _suite, classes, tokens in hits:
+        for b in set(bases.values()) & tokens:
+            by_name.setdefault(b, set()).update(classes)
+    common_names = sorted(b for b, c in by_name.items() if len(c) > common)
+    for suite, classes, tokens in hits:
+        for f, b in bases.items():
+            if b not in tokens:
+                continue
+            parent = f.rsplit("/", 2)[-2] if f.count("/") else ""
+            if b not in common_names or (parent and parent in tokens):
+                picks[suite].update(classes)
+    return {s: sorted(v) for s, v in picks.items()}, common_names
+
+
 def with_reads_traits(classes: "dict[str, dict[str, set[str]]]", root: str = ROOT) -> None:
     """Put Reads=Lite / Reads=Darling on the scanned classes the source scan names, in place (the rules in class_selected())."""
     reads = reads_classes(root)
@@ -937,6 +1038,15 @@ def with_reads_traits(classes: "dict[str, dict[str, set[str]]]", root: str = ROO
 # When the changed file list is unknown (the API call failed, or it came back empty) nothing is skipped.
 
 SLOW_TRAIT = "Cost=Slow"
+# Two rules read _BUILD_INPUT_NAMES and _BUILD_INPUT_SUFFIXES: SlowIndex.skip below, and restore_input, through which
+# pr.yml's plan job decides whether the build job restores the WPF smoke harness in locked mode (harness_restore). A name or
+# suffix taken out for one rule is taken out for both. ci-plan-test.py's harness rows hold all eleven: the five suffixes and
+# the three names no suffix matches by what restore_input answers, and the three Directory.* names, which a suffix matches
+# too, by reading the set.
+#
+# CI runs those rows only on a "CI scripts only" plan (ci-plan.py's script_tests, #7743): documentation plus files under
+# .github/scripts/ that no area knows. A change to these constants that also touches any other file plans every area, and
+# that plan runs no Python check, so run `python -I .github/scripts/tests/ci-plan-test.py` by hand on such a change.
 _BUILD_INPUT_NAMES = {"directory.build.props", "directory.build.targets", "directory.packages.props", "global.json",
                       "nuget.config", "packages.lock.json"}
 _BUILD_INPUT_PATHS = {".github/workflows/build.yml", ".github/scripts/ci-select.py", ".github/darling-paths-filter.yml",
@@ -1031,6 +1141,40 @@ class SlowIndex:
                     out[suite].append(name)
             out[suite].sort()
         return out
+
+
+# ---------------------------------------------------------------------------------------------------------
+# The WPF smoke harness: pr.yml's build job restores it in locked mode when a restore input changed (#8529).
+# ---------------------------------------------------------------------------------------------------------
+#
+# tools/ui-smoke-wpf is outside the solution and referenced by no test project, so the locked-mode restores of the test
+# projects do not reach its lock file. pr.yml's plan job calls harness_restore and the build job restores the harness
+# when it answers true.
+
+HARNESS_DIR = "tools/ui-smoke-wpf/"
+
+
+def restore_input(path: str) -> bool:
+    """Whether a changed file can move what a locked-mode restore resolves: a csproj, props, targets or solution file,
+    global.json, nuget.config or a packages.lock.json, in any folder. The file name is matched in lower case."""
+    low = path.lower()
+    return low.rsplit("/", 1)[-1] in _BUILD_INPUT_NAMES or low.endswith(_BUILD_INPUT_SUFFIXES)
+
+
+def harness_restore(event: str, base_ref: str, plan_areas: str, files: list[str]) -> bool:
+    """Whether pr.yml's build job restores the WPF smoke harness in locked mode.
+
+    True when a changed file is a restore input or a file of the harness itself. Also true on every run whose file list
+    cannot narrow anything: an event that is not a pull request or a push, a plan of every area, a base other than dev,
+    an empty list, and a list that cannot be trusted (an unknown/ path)."""
+    return (
+        event not in ("pull_request", "push")
+        or plan_areas == "all"
+        or base_ref != "dev"
+        or not files
+        or any(f.startswith("unknown/") for f in files)
+        or any(restore_input(f) or f.startswith(HARNESS_DIR) for f in files)
+    )
 
 
 def changed_files_of_pr(repo: str, pr: str) -> list[str]:
@@ -1134,18 +1278,33 @@ KEEP_FULL = (
     "**/*.targets",
     "**/packages.lock.json",
     "**/xunit.runner.json",
+    # The store factory (#7097): 1,218 sites build their store through it, and the map cannot see a change in the stores they get.
+    "Darling/Darling.Tests/ScratchPostgres.cs",
 )
 
-# The shared projects (#5951). A change under one of them used to run everything, because both are referenced by
-# every product and a compiled `const` or `enum` value is copied into the caller at build time, so the map's call
-# edges cannot see the caller change. The measured price was 182 merged dev pull requests in four weeks, all FULL, 71
-# of which a map selection would have narrowed to a median 1,180 classes. The rule now reads the diff: FULL only for
-# a change to a constant or an enum, or to a registration file below; any other change selects by the map's edges.
-SHARED_PROJECT_DIRS = ("PerformanceMonitor.Common/", "PerformanceMonitor.PlanAnalysis/")
+# The shared projects (#5951, and the other five in #7734). A change under one of them used to run everything, because
+# every one is referenced by more than one product and a compiled `const` or `enum` value is copied into the caller at
+# build time, so the map's call edges cannot see the caller change. The measured price for Common and PlanAnalysis was
+# 182 merged dev pull requests in four weeks, all FULL, 71 of which a map selection would have narrowed to a median
+# 1,180 classes. The rule now reads the diff: FULL only for a change to a constant or an enum, or to a registration
+# file below; any other change selects by the map's edges. Collectors, Analysis, Ui, Notifications and Alerting were
+# kept FULL wholesale by build.yml's `core` filter until #7734 replayed them under the map (142 of 637 dev commits, 22%).
+SHARED_PROJECT_DIRS = (
+    "PerformanceMonitor.Common/",
+    "PerformanceMonitor.PlanAnalysis/",
+    "PerformanceMonitor.Collectors/",
+    "PerformanceMonitor.Analysis/",
+    "PerformanceMonitor.Ui/",
+    "PerformanceMonitor.Notifications/",
+    "PerformanceMonitor.Alerting/",
+)
 
 # The files of the shared projects that register or discover types, or load a resource by name, so a census class
 # sees the change without any edge to the file: a change to one of them is FULL (#5951). Each has the one-line reason.
-# Found with: grep -rnE "AddSingleton|AddScoped|AddTransient|GetTypes\(\)|Assembly\." under the two projects.
+# Found with: grep -rnE "AddSingleton|AddScoped|AddTransient|GetTypes\(\)|Assembly\." under the projects.
+# #7734 ran it under the five more: only the two Ui files below match. A wider grep (GetMethods, GetCustomAttribute,
+# Enum.GetValues, ManifestResource) adds AnalysisContext.CountFamilies, which reflects over a type its caller hands in, so
+# the test that calls it has the edge, and enums, which the enum rule below already keeps FULL.
 REGISTRATION_FILES = {
     "PerformanceMonitor.Common/Mcp/McpSchemaCompat.cs":
         "registers the MCP tool catalog and parameter types in the service collection (AddSingleton) and discovers "
@@ -1156,6 +1315,10 @@ REGISTRATION_FILES = {
         "reads the running build's version from the entry assembly (Assembly.GetEntryAssembly)",
     "PerformanceMonitor.PlanAnalysis/WaitStatsConfig.cs":
         "loads the embedded Resources/WaitStats.json by manifest resource name (Assembly.GetManifestResourceNames)",
+    "PerformanceMonitor.Ui/ThemeManager.cs":
+        "loads the embedded Themes/*.xaml text by manifest resource name (Assembly.GetManifestResourceStream)",
+    "PerformanceMonitor.Ui/SingleInstanceCoordinator.cs":
+        "reads the running build's version from the entry assembly (Assembly.GetEntryAssembly)",
 }
 
 # A `const` declaration on a diff line (modifiers and attributes allowed before it), and an `enum` declaration.
@@ -1323,7 +1486,8 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                now: "datetime.datetime | None" = None, max_age_days: "float | None" = MAP_MAX_AGE_DAYS,
                max_drift: int = MAP_MAX_DRIFT, base_ref: str = "",
                named: "dict[str, set[str]] | None" = None, guard_stage_separate: bool = False,
-               shared_diff: "str | None" = None, shared_dirs: "tuple[str, ...]" = SHARED_PROJECT_DIRS) -> dict:
+               shared_diff: "str | None" = None, shared_dirs: "tuple[str, ...]" = SHARED_PROJECT_DIRS,
+               listed: "Callable[[str, str], bool] | None" = None) -> dict:
     """Which test classes a pull request runs, from a class-to-file map. Pure: no file, git or clock access
     (`now` is the clock; `max_age_days=None` turns the age check off, for a replay of old runs).
 
@@ -1341,6 +1505,9 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
     scan_classes() returns it, which is how a class the map has never seen is found. `named` is `{suite: {Class, ...}}`:
     the test classes whose source names a symbol the pull request declares or changes (symbol_classes(), tight tokens
     only, #5776); None or empty adds nothing.
+    `listed` is listed_checker()'s answer (#7739): a selected class the map has never seen is kept only when it says the test
+    host lists it (not a private nested fixture, an abstract base, or a class declared inside a test's string). A class in the
+    map ran, so it is never asked. None asks nothing.
 
     A class is selected when it carries Stage=Guard, its own file changed, it covers a changed file, a text pattern
     of it matches a changed file, it reads the whole tree and any non-documentation file changed, the map has
@@ -1531,6 +1698,11 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
         for cls in sorted({} if docs_only else (named or {}).get(suite, ())):
             if cls in mapped or cls in found:
                 reasons.setdefault(cls, "names a changed symbol")
+        # #7739: a class the map has never seen (it only reaches `reasons` through the tree scan's text rules) must be one the
+        # test host lists, or a plan that names it stops its leg (#6734).
+        if listed is not None:
+            for c in [c for c in reasons if c not in mapped and not listed(suite, c)]:
+                del reasons[c]
         # #5894: the caller runs the whole Stage=Guard trait on its own, so a Guard class in the selection would run twice.
         # It keeps its `why` entry (the printed summary still counts it) but is not selected.
         in_guard_stage = {c for c in reasons if "Stage=Guard" in found.get(c, ())} if guard_stage_separate else set()
@@ -1568,7 +1740,7 @@ def git_drift(map_sha: str, base: str, root: str = ROOT) -> "list[str] | None":
 def selection_args(rules: Rules) -> dict:
     """The keep-full and documentation patterns, read from the same filters the workflow evaluates."""
     keep = list(KEEP_FULL)
-    for name in ("root", "core", "installer_core"):
+    for name in ("root", "core"):
         # #5951: the shared projects are judged by map_select()'s shared_change_reason(), not as keep-full wholesale.
         keep.extend(p for p in rules.build.get(name, []) if not p.startswith(SHARED_PROJECT_DIRS))
     return {"keep_full": tuple(dict.fromkeys(keep)), "doc_patterns": tuple(rules.build["docs"])}
@@ -2194,7 +2366,7 @@ def local_classes(root: str, base: str, map_path: "str | None" = None, wide: boo
         if isinstance(test_map, dict) and isinstance(test_map.get("classes"), dict):
             discovered = {s: v for s, v in discovered.items() if s in test_map["classes"]}
         sel = map_select(test_map, paths, drift, discovered, named=named_classes(match), shared_diff=text,
-                         **selection_args(Rules()))
+                         listed=listed_checker(root), **selection_args(Rules()))
         lines.append(f"MAP coverage answer ({map_path}):")
         if sel["full"]:
             lines.append(f"MAP FULL: {sel['reason']}")
@@ -2283,7 +2455,8 @@ def local_filter(root: str, base: str, map_path: "str | None" = None, cap: "int 
         if isinstance(test_map, dict) and isinstance(test_map.get("classes"), dict):
             mapped = {s: v for s, v in discovered.items() if s in test_map["classes"]}
         args = selection_args(Rules())
-        sel = map_select(test_map, paths, drift, mapped, named=named_classes(match), shared_diff=text, **args)
+        sel = map_select(test_map, paths, drift, mapped, named=named_classes(match), shared_diff=text,
+                         listed=listed_checker(root), **args)
         count = sum(len(v) for v in sel["selected"].values())
         part = ("the classes that name a changed symbol, sit in a changed test file or have a text pattern in the "
                 "map that matches a changed file")
@@ -2649,7 +2822,7 @@ def main(argv: list[str]) -> int:
             shared_diff = sd[1] if sd else None
         result = map_select(test_map, files, drift, discovered, event=args.event, base_ref=args.base_ref,
                             named=named, guard_stage_separate=args.guard_stage_separate, shared_diff=shared_diff,
-                            **selection_args(Rules()))
+                            listed=listed_checker(args.root), **selection_args(Rules()))
         if result.get("docs_only"):
             print(f"::notice::test map: {result['reason']}")
         if result["full"]:

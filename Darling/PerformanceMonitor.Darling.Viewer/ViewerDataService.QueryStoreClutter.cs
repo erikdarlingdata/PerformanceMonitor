@@ -247,7 +247,7 @@ public partial class ViewerDataService
         {
             DatabaseName = row.DatabaseName,
             Verdict = row.Verdict.ToString(),
-            Reasons = row.Reasons.Count == 0 ? Absent : string.Join(", ", row.Reasons),
+            Reasons = row.Reasons.Count == 0 && row.Verdict != HealthSeverity.Unknown ? Absent : QueryStoreClutter.ReasonsLine(row.Verdict, row.Reasons),
             Excluded = row.Excluded ? "excluded" : Absent,
             ExcludedReason = row.ExcludedReason ?? Absent,
             RunsSlowestPct = a is null ? null : Math.Round(QueryStoreClutter.RunsSlowestPct(a), 1),

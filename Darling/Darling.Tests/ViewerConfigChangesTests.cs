@@ -58,7 +58,7 @@ public sealed class ViewerConfigChangesSqlTests
         Assert.Contains("is_optimized_locking_on::text", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("capture_time <= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY database_name, capture_time", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY lower(database_name), database_name, capture_time", sql, StringComparison.Ordinal);
     }
 
     [Fact]

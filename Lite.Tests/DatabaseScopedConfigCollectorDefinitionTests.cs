@@ -110,7 +110,7 @@ public sealed class DatabaseScopedConfigCollectorDefinitionTests
         /* Already connected to the database, so the payload body runs bare — no three-part name, no
            sp_executesql at all, and no parameters to map. */
         var plan = DatabaseScopedConfigCollector.Instance.BuildQuery(azure);
-        Assert.Contains("FROM sys.database_scoped_configurations AS dsc", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("FROM sys.database_scoped_configurations AS PerformanceMonitorLite", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotMatch(s_threePartReference, plan.Text);
         Assert.DoesNotContain("sp_executesql", plan.Text, StringComparison.Ordinal);
         Assert.Empty(plan.Parameters);
@@ -158,9 +158,9 @@ public sealed class DatabaseScopedConfigCollectorDefinitionTests
         /* And the three reader ordinals, in ReadRowsAsync's order, on both. */
         foreach (var text in new[] { azureBody, onPremText })
         {
-            var name = text.IndexOf("configuration_name = dsc.name", StringComparison.Ordinal);
-            var value = text.IndexOf("value = CONVERT(nvarchar(256), dsc.value)", StringComparison.Ordinal);
-            var secondary = text.IndexOf("value_for_secondary = CONVERT(nvarchar(256), dsc.value_for_secondary)", StringComparison.Ordinal);
+            var name = text.IndexOf("configuration_name = PerformanceMonitorLite.name", StringComparison.Ordinal);
+            var value = text.IndexOf("value = CONVERT(nvarchar(256), PerformanceMonitorLite.value)", StringComparison.Ordinal);
+            var secondary = text.IndexOf("value_for_secondary = CONVERT(nvarchar(256), PerformanceMonitorLite.value_for_secondary)", StringComparison.Ordinal);
 
             Assert.True(name >= 0 && name < value && value < secondary,
                 "the payload must select configuration_name, value, value_for_secondary in that order — ReadRowsAsync reads ordinals 0, 1, 2");

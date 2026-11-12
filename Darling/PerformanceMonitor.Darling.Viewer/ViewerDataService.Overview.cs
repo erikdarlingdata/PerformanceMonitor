@@ -43,24 +43,28 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// the card's status from COLLECTION FRESHNESS instead — how old the newest <c>v_collection_log</c> row
 /// is (see <see cref="ServerSummaryItem.ClassifyFreshness"/>): fresh → Online (green), stale (older than
 /// twice the fastest collector's cadence) → Warning (amber), and no collection / long-dead → Offline
-/// (the red overlay). (2) The Dashboard's health card live-queries currently-blocked sessions / current
+/// (the red border and status word). (2) The Dashboard's health card live-queries currently-blocked sessions / current
 /// scheduler state; the viewer reads the newest COLLECTED snapshot instead (the freshness band already
 /// answers "is this server reporting"). The severity BANDS themselves are reproduced verbatim from
 /// <c>ServerHealthStatus</c> so a viewer card colours a metric exactly as the Dashboard would.</para>
 /// </summary>
 public sealed partial class ViewerDataService
 {
-    /// <summary>Latest SQL + other-process CPU for one server (newest ring-buffer sample). $1 server_id.
+    /// <summary>Latest SQL + other-process CPU for one server (newest ring-buffer sample). $1 server_id, $2 now
+    /// (naive UTC), $3 the freshness floor in minutes. The read is cut off on <c>collection_time</c> at now minus the
+    /// larger of the floor and twice this server's <c>cpu_utilization</c> interval (<see cref="CpuReadingFreshnessSql"/>), so a reading from a collector that stopped days ago is not shown as current (#7196). The fleet
+    /// card (<c>DarlingFleetReader.FleetCpuSql</c>) carries the same bound, so the two cards agree.
     /// Ordered on <c>collection_time</c> — the hypertable's partition column, which earns TimescaleDB's
     /// ordered ChunkAppend and so touches ONE chunk instead of appending and top-N sorting the server's whole
-    /// retained history — with <c>sample_time</c> as the within-batch tiebreak. Carries no time predicate:
+    /// retained history — with <c>sample_time</c> as the within-batch tiebreak. Carries no predicate on <c>sample_time</c>:
     /// <c>sample_time</c> is the monitored server's local wall clock, so bounding on it against store time
     /// returns zero rows for any server behind the store. Full reasoning on
     /// <c>DarlingWorker.LatestCpuSql</c>.</summary>
-    public const string ServerSummaryCpuSql = @"
+    public static readonly string ServerSummaryCpuSql = $@"
 SELECT sqlserver_cpu_utilization, other_process_cpu_utilization
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
+AND   collection_time >= {CpuReadingFreshnessSql.Cutoff("$1", "$2", "$3")}
 ORDER BY collection_time DESC, sample_time DESC
 LIMIT 1";
 
@@ -103,8 +107,8 @@ LIMIT 1";
     /// <c>get_resource_semaphore</c> / <c>ServerHealthStatus.MemorySeverity</c> reads: grant waiters,
     /// timeout-error and forced-grant deltas, and total granted MB, summed across every pool at the newest
     /// collection instant. The Dashboard live-sums <c>sys.dm_exec_query_resource_semaphores.waiter_count</c>
-    /// (WHERE max_target_memory_kb IS NOT NULL, which the <c>memory_grant_stats</c> collector already
-    /// applies at capture); the viewer sums the collected per-pool rows at MAX(collection_time). $1 server_id.
+    /// (WHERE max_target_memory_kb IS NOT NULL, which is the regular semaphore: this read filters
+    /// <c>resource_semaphore_id = 0</c> because the <c>memory_grant_stats</c> collector now keeps the small-query row too, #7676); the viewer sums the collected per-pool rows at MAX(collection_time). $1 server_id.
     /// </summary>
     public const string ServerSummaryMemoryPressureSql = @"
 SELECT
@@ -114,6 +118,7 @@ SELECT
     CAST(COALESCE(SUM(granted_memory_mb), 0) AS double precision)
 FROM v_memory_grant_stats
 WHERE server_id = $1
+AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: the small-query semaphore (id 1) is collected too; the Dashboard's filter now lives here */
 AND   collection_time = (SELECT MAX(collection_time) FROM v_memory_grant_stats WHERE server_id = $1)";
 
     /// <summary>
@@ -160,16 +165,27 @@ FROM newest";
     /// they ask for the newest event in all of history, which a floor would change the answer to.</para>
     /// </summary>
     /* #5644 W1: the two counts are WAITS (BlockingWaits.WaitsCteSql), not report rows, as the fleet tile's are.
-       The last two columns are the raw report / snapshot rows (the CTE's *_marked relation holds every source row):
-       the unit the health band's per-hour count tiers were measured in, so the band reads them (#5644 review). */
+       #7028: the band bands on these waits (the card's window is one hour, so XE-or-DMV for the window is the per-hour
+       choice the blocking alerts make for their rolling hour) and on the last column, the Blocking Wait Time alert's own
+       measure: the largest total blocked wait of one DMV snapshot in the window after the alert's persistence gate,
+       in milliseconds, taken from the DMV snapshots whichever source the count chose. The gate is the one shared definition
+       (DailySummarySql.BlockingSnapshotGateSql): the server's own snapshot cadence, snapshots read from before the window
+       start so a streak that began before it counts. */
     public static readonly string ServerSummaryBlockingSql = @"
-WITH " + BlockingWaits.WaitsCteSql(
+WITH dmv_src AS (
+    /* #7028: ONE scan of the snapshots, shared by the wait count and the snapshot gate (reading them once for each
+       took the statement to 1.3 times the buffers of the statement before the gate). */
+    SELECT server_id, blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1 AND collection_time >= $3
+),"
+    + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "xe_waits",
         @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_blocked_process_reports
     WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + "," + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "dmv_waits",
-        @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + @"
+        @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM dmv_src
+    WHERE event_time >= $2") + ","
+    + DailySummarySql.BlockingSnapshotGateSql("dmv_gated", "$2", null, false, "$1", "$3", "dmv_src") + @"
 SELECT
     (SELECT COUNT(*)          FROM xe_waits),
     (SELECT MAX(wait_time_ms) FROM xe_waits),
@@ -177,8 +193,7 @@ SELECT
     (SELECT MAX(wait_time_ms) FROM dmv_waits),
     (SELECT MAX(event_time)   FROM v_blocked_process_reports WHERE server_id = $1),
     (SELECT MAX(event_time)   FROM v_dmv_blocking_snapshots   WHERE server_id = $1),
-    (SELECT COUNT(*)          FROM xe_waits_marked),
-    (SELECT COUNT(*)          FROM dmv_waits_marked)";
+    (SELECT CAST(ROUND(MAX(peak_snapshot_wait_ms)) AS bigint) FROM dmv_gated)";
 
     /// <summary>
     /// Deadlock count in the window plus the newest deadlock ever — the windowed count for the card value,
@@ -234,7 +249,10 @@ FROM
 ) AS sampled";
 
     /// <summary>
-    /// Newest collection time across all collectors for one server. $1 server_id.
+    /// Newest successful collection time across all collectors for one server. $1 server_id. #8464: only a
+    /// <c>SUCCESS</c> row counts (<see cref="CollectionRunSql.SuccessfulCollectorRun"/>). Every attempt writes a row, a failed
+    /// one included, so a read over every row moved this stamp, and the freshness band under it, forward on each failed
+    /// attempt, and a dark server read fresh. Collection Health and the alert notebook already counted SUCCESS rows only.
     ///
     /// <para><b>#3976: <c>ORDER BY collection_time DESC LIMIT 1</c>, not <c>MAX(collection_time)</c>.</b> Same
     /// answer — <c>ExecuteScalarAsync</c> reads null identically whether MAX found no matching row or LIMIT 1
@@ -250,7 +268,7 @@ FROM
 SELECT collection_time
 FROM v_collection_log
 WHERE server_id = $1
-AND   {CollectionCycleRow.NotCycleRowSql}
+AND   {CollectionRunSql.SuccessfulCollectorRun}
 ORDER BY collection_time DESC
 LIMIT 1";
 
@@ -263,11 +281,24 @@ LIMIT 1";
     {
         var read = await DarlingIdentityCapacityReader.ReadNewestScansAsync(
             _dataSource, serverId, DatabaseFilter.All, nowUtc.AddHours(-168), nowUtc,
-            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, ViewerStoreLogger.Instance, cancellationToken);
         var bands = read.Columns.Select(c => c.Band).Where(b => b is IdentityCapacityMath.BandWarning or IdentityCapacityMath.BandCritical).ToList();
+        var worst = read.Columns.Where(c => c.Band is IdentityCapacityMath.BandWarning or IdentityCapacityMath.BandCritical)
+            .OrderByDescending(c => c.PercentUsed ?? 0).FirstOrDefault();
         return bands.Count == 0
             ? null
-            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count);
+            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count, bands.Count(b => b == IdentityCapacityMath.BandCritical), worst);
+    }
+
+    /// <summary>
+    /// One server's database states for its Overview card (#7647), through <see cref="DarlingDatabaseStateDeviations.ReadAsync"/>, the Database State alert's own statement
+    /// the service's fleet card reads too. <see cref="DatabaseStateRead.Collected"/> false is "not collected" (no snapshot that fresh), which is neither healthy nor zero.
+    /// </summary>
+    public async Task<DatabaseStateRead> GetDatabaseStatesAsync(int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        return await DarlingDatabaseStateDeviations.ReadAsync(
+            connection, serverId, nowUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
     }
 
     /// <summary>
@@ -308,7 +339,7 @@ LIMIT 1";
         double? memoryMb = null;
         double? bufferPoolMb = null;
         var blockingCount = 0;
-        var blockingReportCount = 0;
+        long peakSnapshotWaitMs = 0;
         long maxBlockingWaitMs = 0;
         int? lastBlockingMinutesAgo = null;
         var deadlockCount = 0;
@@ -331,6 +362,11 @@ LIMIT 1";
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified),
+            });
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = CpuReadingFreshnessSql.FloorMinutes });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
@@ -425,15 +461,14 @@ LIMIT 1";
             {
                 var xeCount = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
                 var xeMaxWait = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1));
-                var xeReports = reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6));
-                var dmvReports = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7));
+                peakSnapshotWaitMs = reader.IsDBNull(6) ? 0L : Convert.ToInt64(reader.GetValue(6));
                 if (separate.Count > 0)
                 {
                     /* The XE arm without the separately monitored databases' reports; the DMV arm and the
                        XE-then-DMV fallback below are unchanged. */
                     try
                     {
-                        (xeCount, xeMaxWait, xeReports) = await ReadScopedBlockingAsync(serverId, windowStart, scopeEnd, separate, cancellationToken);
+                        (xeCount, xeMaxWait) = await ReadScopedBlockingAsync(serverId, windowStart, scopeEnd, separate, cancellationToken);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
@@ -450,13 +485,11 @@ LIMIT 1";
                 if (xeCount > 0)
                 {
                     blockingCount = xeCount;
-                    blockingReportCount = xeReports;
                     maxBlockingWaitMs = xeMaxWait;
                 }
                 else
                 {
                     blockingCount = dmvCount;
-                    blockingReportCount = dmvReports;
                     maxBlockingWaitMs = dmvMaxWait;
                 }
 
@@ -533,6 +566,11 @@ LIMIT 1";
             }
         }
 
+        /* #7616: a PostgreSQL target's blocking is read from its capture, through the reader the Blocking tab uses. Like the deadlock arm above it
+           is read for every card (this method does not know the engine yet): a SQL Server has no such capture, so its total is 0 and the card
+           ignores both numbers. */
+        var pgBlockingCaptures = await DarlingPgBlockingReader.GetPgBlockingCaptureCountsAsync(_dataSource, serverId, windowStart, scopeEnd, cancellationToken);
+
         /* No deadlock "Last" for a master with separately monitored databases, for the blocking reason above. */
         lastDeadlockMinutesAgo = separate.Count > 0 ? null : MinutesAgo(lastDeadlock, nowUtc);
 
@@ -557,9 +595,14 @@ LIMIT 1";
         var protectionChip = await GetDatabaseProtectionChipAsync(serverId, nowUtc, cancellationToken);
 
         var identityCapacity = await GetIdentityCapacityCardAsync(serverId, nowUtc, cancellationToken);
+        var databaseStates = await GetDatabaseStatesAsync(serverId, nowUtc, cancellationToken);
+        /* #8645: the card reads on its own server's clock, never the active server tab's (every card took that one clock). */
+        var cardClock = ViewerTimeHelper.ClockForServerOrMachine(await _alertClocks.GetAsync(cancellationToken), serverId, TimeZoneInfo.Local, nowUtc);
         return new ServerSummaryItem
         {
+            Clock = cardClock,
             IdentityCapacity = identityCapacity,
+            DatabaseStates = databaseStates,
             DisplayName = displayName,
             ServerId = serverId,
             CpuPercent = cpuPercent,
@@ -574,12 +617,14 @@ LIMIT 1";
             MemoryTimeoutCount = memoryTimeoutCount,
             MemoryForcedCount = memoryForcedCount,
             BlockingCount = blockingCount,
-            BlockingReportCount = blockingReportCount,
+            PeakSnapshotWaitMs = peakSnapshotWaitMs,
             MaxBlockingWaitMs = maxBlockingWaitMs,
             LastBlockingMinutesAgo = lastBlockingMinutesAgo,
             DeadlockCount = deadlockCount,
             LastDeadlockMinutesAgo = lastDeadlockMinutesAgo,
             PgDeadlockIntervals = pgDeadlockIntervals,
+            PgBlockingCapturesTotal = pgBlockingCaptures.CapturesTotal,
+            PgBlockingCapturesWithBlocking = pgBlockingCaptures.CapturesWithBlocking,
             /* #3368: the count's denominator and the store's tiers, so this card bands on the same rate and
                the same numbers the service's fleet card does. #3539 A3: the blocking count was read over the
                same window, and carries it on its own terms. */
@@ -601,6 +646,7 @@ LIMIT 1";
             LastCollectionTime = lastCollection,
             AgentAlertGaps = await GetAgentAlertGapsAsync(serverId, nowUtc, cancellationToken),
             DatabaseProtectionChipValue = protectionChip.Value,
+            DatabaseProtectionOverdueCount = protectionChip.Count,
             DatabaseProtectionChipDetail = protectionChip.Detail,
         };
     }
@@ -723,9 +769,35 @@ WHERE id = 1";
 /// </summary>
 public sealed class ServerSummaryItem
 {
+    /// <summary>This card's own server's clock (#8645), read from the fleet's held clocks, else the viewer machine's. <see cref="LastCollectionDisplay"/>
+    /// converts on it in Server Time. Null on a hand-built card, which reads on the machine's clock.</summary>
+    public PerformanceMonitor.Analysis.Baselines.ServerClock? Clock { get; init; }
+
     /// <summary>The identity columns at the warning bar or past it (#6875), the same worst band and count the web fleet card's "Identity capacity" chip
     /// carries. Null when none is, and on a server that never scans. Shown as its own row and never changes the card's band.</summary>
     public IdentityCapacityCard? IdentityCapacity { get; set; }
+
+    /// <summary>#7647: the databases whose state deviates, from the Database State alert's own read. Null before it is read. <see cref="DatabaseStateRead.Collected"/> false
+    /// is not collected: no reading, and no claim either way. A Critical state (SUSPECT, RECOVERY_PENDING, EMERGENCY) bands the card Critical, as the service's fleet card does.</summary>
+    public DatabaseStateRead? DatabaseStates { get; set; }
+
+    /// <summary>The deviating databases the alert grades Critical.</summary>
+    public int DatabaseStateCriticalCount => DatabaseStates is { Collected: true } ? DarlingDatabaseStateDeviations.Critical(DatabaseStates.Deviations).Count : 0;
+
+    /// <summary>The Needs attention clause for the databases whose state deviates, or empty when none does or the state is not collected.</summary>
+    public string DatabaseStateReason => DatabaseStates is { Collected: true, Deviations.Count: > 0 } ? DarlingDatabaseStateDeviations.Reason(DatabaseStates.Deviations) : "";
+
+    /// <summary>True when the Database state row shows: collected, and at least one database deviates (#7647).</summary>
+    public bool HasDatabaseStateDeviations => DatabaseStates is { Collected: true, Deviations.Count: > 0 };
+
+    /// <summary>Database state value, "1 database" or "N databases" (the web chip's words).</summary>
+    public string DatabaseStateDisplay => DatabaseStates is { Collected: true, Deviations.Count: > 0 } ? (DatabaseStates.Deviations.Count == 1 ? "1 database" : $"{DatabaseStates.Deviations.Count} databases") : "";
+
+    /// <summary>Database state detail: the databases named, Critical first, at most <see cref="DarlingDatabaseStateDeviations.NamesShown"/> then "and N more".</summary>
+    public string DatabaseStateDetail => DatabaseStateReason;
+
+    /// <summary>The row's dot and value brush: the card's critical red when a Critical state bands the card, else its warning amber.</summary>
+    public SolidColorBrush DatabaseStateBrush => DatabaseStateCriticalCount > 0 ? s_criticalBrush : s_warningBrush;
 
     /// <summary>True when the Identity capacity row shows.</summary>
     public bool HasIdentityCapacity => IdentityCapacity is { ColumnsAtBar: > 0 };
@@ -734,7 +806,7 @@ public sealed class ServerSummaryItem
     public string IdentityCapacityDisplay => IdentityCapacity is null ? "" : IdentityCapacity.ColumnsAtBar == 1 ? "1 column" : $"{IdentityCapacity.ColumnsAtBar} columns";
 
     /// <summary>Identity capacity detail: the fullest column's band.</summary>
-    public string IdentityCapacityDetail => IdentityCapacity is null ? "" : $"At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is {IdentityCapacity.WorstBand}.";
+    public string IdentityCapacityDetail => IdentityCapacity is null ? "" : IdentityCapacity.Detail;
 
     /// <summary>The row's dot and value brush: the card's critical red when the fullest is critical, else its warning amber.</summary>
     public SolidColorBrush IdentityCapacityBrush => IdentityCapacity?.WorstBand == IdentityCapacityMath.BandCritical ? s_criticalBrush : s_warningBrush;
@@ -742,11 +814,12 @@ public sealed class ServerSummaryItem
     /* Freshness + per-metric severity thresholds live once in PerformanceMonitor.Common's
        ServerHealthThresholds / ServerHealthClassifier (#1562); this card keeps only the brush mapping. */
 
-    /* Per-severity dot / value brushes, frozen once (the viewer's dark-theme palette). */
-    private static readonly SolidColorBrush s_criticalBrush = MakeBrush("#E57373");
-    private static readonly SolidColorBrush s_warningBrush = MakeBrush("#FFD54F");
-    private static readonly SolidColorBrush s_healthyBrush = MakeBrush("#81C784");
-    private static readonly SolidColorBrush s_unknownBrush = MakeBrush("#888888");
+    /* Per-severity dot / value brushes. Read from the current theme each time (#8221): they were frozen once under whichever theme
+       loaded first. The Overview binds its cards again on a theme change. */
+    private static SolidColorBrush s_criticalBrush => MakeBrush("#E57373");
+    private static SolidColorBrush s_warningBrush => MakeBrush("#FFD54F");
+    private static SolidColorBrush s_healthyBrush => MakeBrush("#81C784");
+    private static SolidColorBrush s_unknownBrush => MakeBrush("#888888");
 
     public string DisplayName { get; set; } = "";
 
@@ -773,7 +846,7 @@ public sealed class ServerSummaryItem
     /// <summary>
     /// True when no collection has EVER landed for this server (<see cref="ServerFreshness.NeverCollected"/>):
     /// the service hasn't reached it yet — a registered-but-queued server during bootstrap, not a dead one.
-    /// Drives the amber "Awaiting first collection" status instead of the red Offline overlay.
+    /// Drives the amber "Awaiting first collection" status instead of the red Offline status.
     /// </summary>
     public bool AwaitingFirstCollection { get; set; }
 
@@ -840,6 +913,15 @@ public sealed class ServerSummaryItem
     public long MemoryForcedCount { get; set; }
 
     public int BlockingCount { get; set; }
+
+    /// <summary>#7616: how many of a PostgreSQL target's per-minute blocking captures ran in the card's window, and how many of those saw any
+    /// blocking. Both are 0 on a SQL Server. A PostgreSQL target with 0 captures has no blocking reading (shown as "--"), which is not a 0.</summary>
+    public long PgBlockingCapturesTotal { get; set; }
+
+    public long PgBlockingCapturesWithBlocking { get; set; }
+
+    /// <summary>Whether a PostgreSQL target's blocking was measured: at least one capture ran in the window.</summary>
+    public bool PgBlockingMeasured => PgBlockingCapturesTotal > 0;
 
     /// <summary>The worst blocking wait (ms) observed in the window — the "max: Ns" detail + Critical band input.</summary>
     public long MaxBlockingWaitMs { get; set; }
@@ -975,11 +1057,27 @@ public sealed class ServerSummaryItem
     /// <summary>#6873: "3 overdue" when a full backup, a log backup or a CHECKDB is overdue on this server, else null. Not a band: nothing reads it for the card's band.</summary>
     public string? DatabaseProtectionChipValue { get; set; }
 
+    /// <summary>#7561: how many facts are overdue, for the Needs attention reason ("Protection 3 overdue items"). 0 with <see cref="DatabaseProtectionChipValue"/> null.</summary>
+    public int DatabaseProtectionOverdueCount { get; set; }
+
     /// <summary>#6873: the overdue facts in words, for the chip's detail. Null with <see cref="DatabaseProtectionChipValue"/>.</summary>
     public string? DatabaseProtectionChipDetail { get; set; }
 
     /// <summary>The chip shows only when something is overdue, and not on an offline card (its figures are old).</summary>
     public bool HasDatabaseProtectionOverdue => DatabaseProtectionChipValue is not null && !IsOffline;
+
+    /// <summary>#7561: the tiles no band reads and that still want a person (a warning Identity capacity column, an Agent alerts gap, an overdue backup or CHECKDB), by name,
+    /// from <see cref="ServerHealthClassifier.AdvisoryTiles"/>, the one rule the web fleet card and <c>get_fleet_overview</c> read too. Empty when there are none.</summary>
+    public System.Collections.Generic.IReadOnlyList<string> AdvisoryTiles => ServerHealthClassifier.AdvisoryTiles(
+        AgentAlertGaps.Count,
+        HasDatabaseProtectionOverdue ? 1 : 0,
+        IdentityCapacity?.ColumnsAtBar ?? 0,
+        IdentityCapacity?.WorstBand == IdentityCapacityMath.BandCritical,
+        DatabaseStates is { Collected: true } ? DatabaseStates.Deviations.Count : 0,
+        DatabaseStateCriticalCount > 0);
+
+    /// <summary>#7561: true when <see cref="AdvisoryTiles"/> names any. The band stays what the metrics say; the fleet's Needs attention list and ranking count the server.</summary>
+    public bool HasAdvisoryTile => AdvisoryTiles.Count > 0;
 
     /// <summary>The chip's colour: always the Warning tone, like the web chip.</summary>
     public SolidColorBrush DatabaseProtectionBrush => s_warningBrush;
@@ -994,6 +1092,18 @@ public sealed class ServerSummaryItem
     /// from one that has never collected.
     /// </summary>
     public DateTime? RegisteredAt { get; set; }
+
+    /// <summary>#8464: whether any collector has run against this server, a failed attempt included, copied from the registry row the card
+    /// was built from. With no successful collection, <see cref="ApplyFreshness(DateTime)"/> bands a tried-and-refused server Offline and a
+    /// server no collector has reached yet as awaiting its first collection.</summary>
+    public bool Attempted { get; set; }
+
+    /// <summary>When the service's connect to this server first failed (UTC), or null (#7590). Copied from the registry row the card was built
+    /// from; set, <see cref="ApplyFreshness(DateTime)"/> bands the card Offline and <see cref="FleetRollup.BuildReason"/> says why.</summary>
+    public DateTime? ConnectDownSince { get; set; }
+
+    /// <summary>The last connect error text while <see cref="ConnectDownSince"/> is set (#7590).</summary>
+    public string? LastConnectError { get; set; }
 
     /// <summary>
     /// Headline CPU display: total non-idle CPU prominently with the SQL-only number alongside, e.g.
@@ -1010,7 +1120,7 @@ public sealed class ServerSummaryItem
     {
         get
         {
-            if (!TotalCpuPercent.HasValue || IsOffline) return "--";
+            if (IsOffline || (!TotalCpuPercent.HasValue && !CpuPercent.HasValue)) return "--";
 
             /* #3281: on the Performance Insights arm the headline is percent of the capacity CURRENTLY
                ALLOCATED, which is NOT the figure the band read — so the figure that did is shown beside
@@ -1022,7 +1132,10 @@ public sealed class ServerSummaryItem
                 return $"{TotalCpuPercent:F0}% (ACU {AcuUtilizationPercent:F0}%)";
             }
 
-            if (!CpuPercent.HasValue || !OtherProcessCpuPercent.HasValue) return $"{TotalCpuPercent:F0}%";
+            /* #7682: a ring-buffer reading with no other-process share (SQL Server on Linux before 2025 CU1 cannot report
+               host CPU) has no known total, so the figure is the SQL Server's own and the headline says so. */
+            if (CpuPercent.HasValue && !OtherProcessCpuPercent.HasValue) return $"SQL CPU {CpuPercent:F0}%";
+            if (!CpuPercent.HasValue) return $"{TotalCpuPercent:F0}%";
             return $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
         }
     }
@@ -1076,7 +1189,11 @@ public sealed class ServerSummaryItem
         }
     }
 
-    public string BlockingDisplay => IsOffline ? "--" : BlockingCount > 0 ? BlockingCount.ToString() : "0";
+    /* #7616: a PostgreSQL card shows how many of its blocking captures saw blocking. "--" is the word the tile uses for a reading it does
+       not have: a target with no capture in the window (#7654), and an offline server. */
+    public string BlockingDisplay => IsOffline ? "--"
+        : IsPostgres ? (PgBlockingMeasured ? PgBlockingCapturesWithBlocking + (PgBlockingCapturesWithBlocking == 1 ? " capture" : " captures") : "--")
+        : BlockingCount > 0 ? BlockingCount.ToString() : "0";
 
     /// <summary>
     /// The blocking detail (Dashboard's BlockingDetailText): while blocking is present in the window, the
@@ -1090,11 +1207,26 @@ public sealed class ServerSummaryItem
         get
         {
             if (IsOffline) return "";
+            /* #7616: PostgreSQL has captures, not waits, so no longest wait and no "Last"; the rate it banded on, then the sample size. */
+            if (IsPostgres)
+            {
+                if (!PgBlockingMeasured) return "no capture in the hour";
+                if (PgBlockingCapturesTotal < ServerHealthClassifier.PostgresBlockingMinimumCaptures)
+                {
+                    return ServerHealthClassifier.PostgresBlockingTooFewCapturesDetail;
+                }
+
+                var of = $"of {PgBlockingCapturesTotal} sampled";
+                return BlockingRatePerHour.HasValue
+                    ? $"{DailyHealthBandCalculator.RatePerHourText(BlockingRatePerHour.Value)}/hr, {of}"
+                    : of;
+            }
+
             if (BlockingCount > 0)
             {
                 var max = $"max: {MaxBlockedSeconds:F0}s";
                 return BlockingRatePerHour.HasValue
-                    ? $"{BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr, {max}"
+                    ? $"{DailyHealthBandCalculator.RatePerHourText(BlockingRatePerHour.Value)}/hr, {max}"
                     : max;
             }
 
@@ -1129,7 +1261,7 @@ public sealed class ServerSummaryItem
             var parts = new List<string>(2);
             if (DeadlockRatePerHour.HasValue)
             {
-                parts.Add($"{DeadlockRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr");
+                parts.Add($"{DailyHealthBandCalculator.RatePerHourText(DeadlockRatePerHour.Value)}/hr");
             }
 
             if (LastDeadlockMinutesAgo.HasValue)
@@ -1164,7 +1296,7 @@ public sealed class ServerSummaryItem
     /// stale collector counts, and they are not "OK" — they are unmeasured. The verdict keys only on the
     /// FAILING count (a stale collector is neither healthy nor failing, so it stays 0 and reads a green "OK"
     /// while the server is dark). Rather than invent a stale-count threshold, reuse the reachability signal the
-    /// card already carries (<see cref="IsOffline"/>, the same one that drives the offline overlay): an offline
+    /// card already carries (<see cref="IsOffline"/>, the same one that greys the metric rows): an offline
     /// server's collectors read a neutral "Stale", never a green "OK".
     ///
     /// <para>#3539 A6: a REACHABLE server with no collector banded at all reads "--" — the card's word for a
@@ -1204,19 +1336,41 @@ public sealed class ServerSummaryItem
             + (WarningCollectorCount > 0 ? $"Warning: {WarningCollectorCount}, " : "")
             + $"Failing: {FailedCollectorCount}"
             + (NotCollectedCollectorCount > 0 ? $", Not collected: {NotCollectedCollectorCount}" : "")
-            + (NoPermissionCollectorCount > 0 ? $", No permission: {NoPermissionCollectorCount}" : "");
+            + (NoPermissionCollectorCount > 0 ? $", Need setup: {NoPermissionCollectorCount}" : "");
 
     /// <summary>
     /// The stored collection_time is naive UTC; the viewer shows it in the viewer machine's local time
     /// (the viewer convention — Lite used its per-server offset helper instead).
     ///
-    /// <para>With no collection to show, "Never" only when the card is awaiting its first one. A card that
-    /// reads Offline with nothing to show is a server whose history retention has dropped (#3967): something
-    /// was collected, and none of it is retained, which is what the row says.</para>
+    /// <para>With no collection to show, "None retained" only for a server registered before the collection log's
+    /// retention horizon (#3967, <see cref="HistoryAgedOut"/>): it had time to collect before everything the store
+    /// keeps, so what it collected is gone. Every other such card reads "Never", whatever its band.</para>
     /// </summary>
     public string LastCollectionDisplay => LastCollectionTime.HasValue
-        ? FormatLastCollect(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayZone(), DateTime.UtcNow)
-        : IsOnline == false ? "None retained" : "Never";
+        ? LastCollectLabelled(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.MachineClock(), WordingNowUtc)
+        : HistoryAgedOut(RegisteredAt, WordingNowUtc) ? "None retained" : "Never";
+
+    /* #8722, #8464: the instant this card's Last Collect wording reads. It is the clock ApplyFreshness banded the card on, so the band
+       and the words cannot disagree about whether the server's history has aged out. The wall clock is only the fallback for a card
+       nobody has banded yet. Before this, a caller that banded on its own clock (a test pinned in September) got "None retained"
+       once the wall clock passed the 60-day horizon. */
+    private DateTime? _freshnessNowUtc;
+    private DateTime WordingNowUtc => _freshnessNowUtc ?? DateTime.UtcNow;
+
+    /// <summary>
+    /// The card's Last Collect text for <paramref name="mode"/> on <paramref name="clock"/>: the time
+    /// <see cref="FormatLastCollect"/> words in that mode's zone, and in Server Time the clock's offset after it,
+    /// "09:56:40 (UTC-04:00)" (<see cref="ViewerTimeHelper.WithServerZoneLabel"/>), so the card says whose clock it reads.
+    /// </summary>
+    internal static string LastCollectLabelled(DateTime lastCollectionUtc, TimeDisplayMode mode, PerformanceMonitor.Analysis.Baselines.ServerClock clock, DateTime nowUtc) =>
+        ViewerTimeHelper.WithServerZoneLabel(
+            FormatLastCollect(lastCollectionUtc, ViewerTimeHelper.DisplayZoneFor(mode, clock), nowUtc), mode, clock, lastCollectionUtc);
+
+    /// <summary>#3967, #8464: true when <paramref name="registeredAtUtc"/> precedes the collection log's retention horizon at
+    /// <paramref name="nowUtc"/>, so a server with no retained collection collected before everything the store keeps. The
+    /// Overview card and Manage Servers word their empty Last Collect from this alone; the band is a separate question.</summary>
+    public static bool HistoryAgedOut(DateTime? registeredAtUtc, DateTime nowUtc) =>
+        registeredAtUtc is { } registered && registered < DarlingRetentionHorizons.CollectionLogHorizon(nowUtc);
 
     /// <summary>
     /// The Last Collect time as the card words it (D4 of the final walk, the twin of Lite's
@@ -1297,15 +1451,20 @@ public sealed class ServerSummaryItem
     /// semaphore to read (every PostgreSQL target).</summary>
     public bool? MemoryPressureForBand => ServerMetricSources.DmvSourced(HasMemoryPressure, IsPostgres);
 
-    /// <summary>Blocking as a BANDABLE reading — null when this card reads no blocking source for this engine.
-    /// It is the REPORT count (<see cref="BlockingReportCount"/>), not the wait count the card shows
-    /// (<see cref="BlockingCount"/>, #5644 W1): the band's per-hour count tiers (5 / 20) were measured in blocked-process
-    /// reports per server-hour, and a long wait is many reports and one wait.</summary>
-    public int? BlockingCountForBand => ServerMetricSources.DmvSourced(BlockingReportCount ?? BlockingCount, IsPostgres);
+    /// <summary>Blocking as a BANDABLE reading - null when this card reads no blocking source for this engine. It is
+    /// the wait count the card shows (<see cref="BlockingCount"/>, #5644 W1 and #7028): the unit the blocking alerts
+    /// count, so a tier set to the alert's number means the same thing on the card.</summary>
+    public int? BlockingCountForBand => IsPostgres
+        ? (PgBlockingMeasured ? (int)Math.Min(PgBlockingCapturesWithBlocking, int.MaxValue) : null)
+        : BlockingCount;
 
-    /// <summary>The winning source's blocked-process report (or DMV snapshot) rows in the window, before they collapse
-    /// to waits (#5644). Set by the read; null on a card built without one, which bands on <see cref="BlockingCount"/>.</summary>
-    public int? BlockingReportCount { get; set; }
+    /// <summary>#7028: the blocking band's snapshot arm in milliseconds, the largest total blocked wait of one DMV
+    /// snapshot in the window after the Blocking Wait Time alert's persistence gate. 0 when the window holds no
+    /// snapshot wait; the arm is off unless a snapshot tier is above 0.</summary>
+    public long PeakSnapshotWaitMs { get; set; }
+
+    /// <summary>The snapshot arm as a BANDABLE reading in seconds - null on a card that reads no blocking source.</summary>
+    public double? PeakSnapshotWaitSecondsForBand => BlockingCountForBand.HasValue ? PeakSnapshotWaitMs / 1000.0 : null;
 
     /// <summary>Deadlocks as a BANDABLE reading (#3539). On a SQL Server card it is the count itself — a
     /// graph count is an observation even at zero (#3272's engine-not-collector rule). On a PostgreSQL card
@@ -1333,7 +1492,9 @@ public sealed class ServerSummaryItem
     /// the raw count, for <see cref="DeadlockRatePerHour"/>'s reason: a PostgreSQL target's raw zero would
     /// render 0.0/hr on a card whose severity says Unknown.</summary>
     public double? BlockingRatePerHour =>
-        BlockingCountForBand.HasValue
+        IsPostgres
+            ? ServerHealthClassifier.PostgresBlockingRatePerHour(BlockingCountForBand, PgBlockingCapturesTotal)
+            : BlockingCountForBand.HasValue
             ? ServerHealthClassifier.BlockingRatePerHour(BlockingCountForBand.Value, BlockingWindow)
             : null;
 
@@ -1341,7 +1502,9 @@ public sealed class ServerSummaryItem
     /// hour over the window against the store's tiers (#6927, 20/hr Critical, 5/hr Warning by default); a 10 s block
     /// Warning by default; no source Unknown.</summary>
     public HealthSeverity BlockingSeverity =>
-        ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds, BlockingWindow, BlockingBandThresholds);
+        IsPostgres
+            ? ServerHealthClassifier.PostgresBlockingSeverity(BlockingCountForBand, PgBlockingCapturesTotal, BlockingBandThresholds)
+            : ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds, BlockingWindow, BlockingBandThresholds, PeakSnapshotWaitSecondsForBand);
 
     /// <summary>
     /// The window <see cref="DeadlockCount"/> and <see cref="BlockingCount"/> cover (#3368) — the
@@ -1392,7 +1555,7 @@ public sealed class ServerSummaryItem
     /// Critical when the FAILING share of <see cref="CollectorCount"/> passes the collector-health
     /// classifier's 20% bar, and Unknown again when <see cref="CollectorCount"/> is zero with nothing
     /// failing — a reachable server nothing has banded yet (#3539 A6), which the offline arm here does not
-    /// cover. Offline is already painted by the card border / overlay, so this governs only
+    /// cover. Offline is already painted by the card border and status word, so this governs only
     /// the per-metric dot: it must not show a green "healthy" dot on a dark server. The overall metric band
     /// reads the counts straight from ToHealthMetrics(), not this property, so the neutral offline reading
     /// never leaks into the card's worst-band or fleet score.
@@ -1400,7 +1563,7 @@ public sealed class ServerSummaryItem
     public HealthSeverity CollectorSeverity =>
         IsOffline ? HealthSeverity.Unknown : ServerHealthClassifier.CollectorSeverity(FailedCollectorCount, CollectorCount);
 
-    /// <summary>The card's worst metric band (offline handled separately by the border / overlay).</summary>
+    /// <summary>The card's worst metric band (offline handled separately by the border and status word).</summary>
     public HealthSeverity OverallMetricSeverity => ServerHealthClassifier.OverallMetricSeverity(ToHealthMetrics());
 
     /// <summary>
@@ -1429,9 +1592,11 @@ public sealed class ServerSummaryItem
         CpuSource = CpuSource,
         HasMemoryPressure = MemoryPressureForBand,
         BlockingCount = BlockingCountForBand,
+        BlockingCapturesTaken = IsPostgres ? PgBlockingCapturesTotal : null,
         MaxBlockedSeconds = MaxBlockedSeconds,
         /* #3539 A3: the count's denominator, for the reason the deadlock trio below travels together. */
         BlockingWindow = BlockingWindow,
+        PeakSnapshotWaitSeconds = PeakSnapshotWaitSecondsForBand,
         DeadlockCount = DeadlockCountForBand,
         /* #3368: the three travel together. Without them the card's overall band and its border would
            re-band the same count against no window while the deadlock dot banded a rate — a card
@@ -1446,6 +1611,10 @@ public sealed class ServerSummaryItem
         FailedCollectorCount = FailedCollectorCount,
         /* #3539 A8d: the share's denominator, or the overall band would grade presence-flat again. */
         CollectorCount = CollectorCount,
+        /* #7561: a column at its critical bar is a failing insert, so the card bands Critical, as the service's fleet card does. */
+        IdentityCapacityCritical = IdentityCapacity is { ColumnsAtBar: > 0 } && IdentityCapacity.WorstBand == IdentityCapacityMath.BandCritical,
+        /* #7647: a database in a state the alert grades Critical bands the card, as the service's fleet card does. Not collected leaves it false. */
+        DatabaseStateCritical = DatabaseStateCriticalCount > 0,
     };
 
     // ── Per-metric dot / value brushes ───────────────────────────────────────────────────────────────
@@ -1464,7 +1633,7 @@ public sealed class ServerSummaryItem
     /// <summary>
     /// The card border reflects the worst signal: offline (red) &gt; a Critical metric (red) &gt; a Warning
     /// metric (amber-orange) &gt; a stale collection, a never-collected server, or a card on which NOTHING
-    /// was measured (amber) &gt; calm (dark). Enriches Lite's border (which only knew CPU / blocking /
+    /// was measured (amber) &gt; calm (the theme's neutral card border). Enriches Lite's border (which only knew CPU / blocking /
     /// deadlock) with the added Threads / Memory / Collectors bands via <see cref="OverallMetricSeverity"/>.
     ///
     /// <para>The nothing-measured arm (#3539 A6) paints the Warning brush, because that is the band it is:
@@ -1472,8 +1641,9 @@ public sealed class ServerSummaryItem
     /// <see cref="FleetRollup.ClassifyBand"/> bands that Warning the way it bands a server awaiting its
     /// first collection — and the two amber arms below are the SAME hex (<c>#FFD54F</c>), so the border says
     /// what the band says in the colour the card already uses for "nothing to report yet". A dark border
-    /// here was the card claiming calm about readings it never took. The cached brush rather than
-    /// another <c>MakeBrush</c>: this getter runs per card per refresh.</para>
+    /// here was the card claiming calm about readings it never took. Each read builds a fresh frozen
+    /// brush (#8221: the band takes the current theme's color, so nothing is cached across a theme change), and the Overview binds its cards again
+    /// on a theme change.</para>
     /// </summary>
     public SolidColorBrush CardBorderBrush
     {
@@ -1485,9 +1655,24 @@ public sealed class ServerSummaryItem
                 HealthSeverity.Critical => s_criticalBrush,
                 HealthSeverity.Warning => s_warningBrush,
                 HealthSeverity.Unknown => s_warningBrush,
-                _ => CollectionStale || AwaitingFirstCollection ? MakeBrush("#FFD54F") : MakeBrush("#2a2d35"),
+                _ => CollectionStale || AwaitingFirstCollection ? MakeBrush("#FFD54F") : ThemeNeutralBorderBrush(),
             };
         }
+    }
+
+    /// <summary>#8221: the current theme's card border (the <c>CardBorderBrush</c> resource), as a frozen copy, for a calm card. The old
+    /// fixed <c>#2a2d35</c> was a Dark hex shown in every theme: near-black on Light and Cool Breeze. The Dark value when there is no
+    /// running application to ask, as in a unit test. The Overview binds its cards again on a theme change.</summary>
+    private static SolidColorBrush ThemeNeutralBorderBrush()
+    {
+        if (System.Windows.Application.Current?.TryFindResource("CardBorderBrush") is SolidColorBrush themed)
+        {
+            var copy = new SolidColorBrush(themed.Color);
+            copy.Freeze();
+            return copy;
+        }
+
+        return MakeBrush("#3A3D45");
     }
 
     /// <summary>
@@ -1511,9 +1696,22 @@ public sealed class ServerSummaryItem
         ServerHealthClassifier.ClassifyFreshness(
             lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc);
 
+    /// <summary>The registration rule with the service's own connection answer folded in (#7590): a failed connect is Offline at once.
+    /// One rule for every surface, <see cref="ServerHealthClassifier.ClassifyFreshness(DateTime?, DateTime?, DateTime, DateTime, DateTime?)"/>.</summary>
+    public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, DateTime? connectDownSinceUtc) =>
+        ServerHealthClassifier.ClassifyFreshness(
+            lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc, connectDownSinceUtc);
+
+    /// <summary>The rule above with the log's failed rows folded in (#8464): a server any collector has run against and none has
+    /// collected from is Offline, not awaiting its first collection. The card, the sidebar dot and the server tab's header call this one.</summary>
+    public static ServerFreshness ClassifyFreshness(
+        DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, DateTime? connectDownSinceUtc, bool attempted) =>
+        ServerHealthClassifier.ClassifyFreshness(
+            lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc, connectDownSinceUtc, attempted);
+
     /// <summary>
     /// Maps the freshness band onto the card's three status flags, taking the live-ping's place: Fresh →
-    /// Online, Stale → the amber Warning state, Offline → the red Offline overlay, NeverCollected → the amber
+    /// Online, Stale → the amber Warning state, Offline → the red Offline status, NeverCollected → the amber
     /// "Awaiting first collection" state (IsOnline stays null: the truth is "unknown, not reached yet", not
     /// "was up and died").
     ///
@@ -1524,7 +1722,10 @@ public sealed class ServerSummaryItem
     /// </summary>
     public void ApplyFreshness(DateTime nowUtc)
     {
-        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, RegisteredAt, nowUtc));
+        _freshnessNowUtc = nowUtc;
+        /* #7590: as on the sidebar row, a collection newer than the first failed connect makes the stored flag stale. */
+        ConnectDownSince = ServerHealthClassifier.EffectiveConnectDownSince(LastCollectionTime, ConnectDownSince);
+        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, RegisteredAt, nowUtc, ConnectDownSince, Attempted));
         IsOnline = flags.IsOnline;
         CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;
@@ -1538,18 +1739,18 @@ public sealed class ServerSummaryItem
         _ => s_unknownBrush,
     };
 
-    /// <summary>Human "N ago" rendering of an elapsed minutes count — verbatim from ServerHealthStatus.</summary>
-    private static string FormatMinutesAgo(int minutes)
-    {
-        if (minutes < 1) return "just now";
-        if (minutes < 60) return $"{minutes}m ago";
-        if (minutes < 1440) return $"{minutes / 60}h ago";   // 24 hours
-        if (minutes < 10080) return $"{minutes / 1440}d ago"; // 7 days
-        return $"{minutes / 10080}w ago";
-    }
+    /// <summary>Human "N ago" rendering of an elapsed minutes count: <see cref="MinutesAgoText"/>, the wording Lite's card
+    /// shares (#8465).</summary>
+    private static string FormatMinutesAgo(int minutes) => MinutesAgoText.Format(minutes);
 
     private static SolidColorBrush MakeBrush(string hex)
     {
+        /* #8221: on Light and Cool Breeze a band takes the theme's status brush (the Dark pale tones are 1.4:1 to 2.5:1 as card text). */
+        if (ThemedBandBrush.ForLightTheme(hex) is { } themedBrush)
+        {
+            return themedBrush;
+        }
+
         var color = (Color)ColorConverter.ConvertFromString(hex);
         var brush = new SolidColorBrush(color);
         brush.Freeze();
@@ -1562,13 +1763,18 @@ public sealed class ServerSummaryItem
 /// colour). The label brush is a constant readable light, so a pill looks the same in either theme.</summary>
 public sealed class ServerTagPill
 {
-    public ServerTagPill(string name, string? colour)
+    public ServerTagPill(string name, string? colour, System.Collections.Generic.IReadOnlyList<string>? ancestorNames = null)
     {
         Name = name;
         Fill = TagColorBrushes.Fill(colour);
+        AncestorNames = ancestorNames ?? System.Array.Empty<string>();
     }
 
     public string Name { get; }
+
+    /// <summary>The names of the tags above this one, nearest first (#7984). The Overview search matches them, so a
+    /// server tagged HOSTS under PROD &gt; BULK is found by "BULK"; the pill itself shows only <see cref="Name"/>.</summary>
+    public System.Collections.Generic.IReadOnlyList<string> AncestorNames { get; }
 
     public System.Windows.Media.Brush Fill { get; }
 
@@ -1576,4 +1782,24 @@ public sealed class ServerTagPill
 }
 
 /// <summary>The identity columns at a bar on one server, as the Overview card carries them (#6875): the worst band and how many columns are at warning or critical.</summary>
-public sealed record IdentityCapacityCard(string WorstBand, int ColumnsAtBar);
+public sealed record IdentityCapacityCard(string WorstBand, int ColumnsAtBar, int CriticalColumns, IdentityColumnFact? Worst = null)
+{
+    /// <summary>The tile's second line (#7416): the fullest column and its figures, as the web tile says them, and where the rest are listed. The generic
+    /// sentence when no column is known.</summary>
+    public string Detail
+    {
+        get
+        {
+            if (Worst is null)
+                return $"At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is {WorstBand}.";
+            var name = string.Join(".", new[] { Worst.DatabaseName, Worst.SchemaName, Worst.TableName, Worst.ColumnName }.Where(p => !string.IsNullOrEmpty(p)));
+            var percent = Worst.PercentUsed is { } p
+                ? string.Create(CultureInfo.InvariantCulture, $": {(p >= 99.95 || p == 0 ? p.ToString("0", CultureInfo.InvariantCulture) : p.ToString("0.0", CultureInfo.InvariantCulture))}% used")
+                : "";
+            var left = Worst.ValuesRemaining is { } r ? ", " + r.ToString("N0", CultureInfo.InvariantCulture) + " left" : "";
+            return name + percent + left + (ColumnsAtBar > 1
+                ? string.Create(CultureInfo.InvariantCulture, $". The fullest of {ColumnsAtBar} columns at 70% or more. The Identity Capacity tab lists them.")
+                : ". The Identity Capacity tab lists it.");
+        }
+    }
+}

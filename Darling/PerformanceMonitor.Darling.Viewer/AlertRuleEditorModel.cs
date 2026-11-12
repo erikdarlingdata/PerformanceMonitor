@@ -236,8 +236,20 @@ public static class AlertRuleEditorModel
         var scope = root["scope"] as JsonObject;
         var servers = (scope?["servers"] as JsonArray)?.Select(n => n?.ToString() ?? string.Empty).Where(s => s.Length > 0).ToList() ?? new List<string>();
         var mode = scope?["mode"]?.ToString()?.ToLowerInvariant();
-        var kind = mode switch { "servers" => AlertRuleScopeKind.Servers, "tag" => AlertRuleScopeKind.Tag, _ => AlertRuleScopeKind.All };
         int? tagId = scope?["tagId"] is JsonValue tv && tv.TryGetValue<int>(out var t) ? t : null;
+
+        // #8077: with no 'mode', the one key present is the author's statement of the scope, so the form loads that mode and a
+        // save writes it back rather than 'all'. With both keys, or an explicit mode beside another mode's key, the form does not
+        // guess: it shows what the mode says (every server when there is none) and the validator's refusal of the stored rule
+        // stands until the author resolves it.
+        var kind = mode switch
+        {
+            "servers" => AlertRuleScopeKind.Servers,
+            "tag" => AlertRuleScopeKind.Tag,
+            null or "" when servers.Count > 0 && tagId is null => AlertRuleScopeKind.Servers,
+            null or "" when tagId is not null && servers.Count == 0 => AlertRuleScopeKind.Tag,
+            _ => AlertRuleScopeKind.All,
+        };
 
         return new AlertRuleForm(
             Text(metric?["measure"]) is { Length: > 0 } m ? m : Text(metric?["ratio"]),

@@ -71,8 +71,10 @@ public static class PoisonWaitEvaluator
     /// bucket on that population. Nothing measured on either engine would have fired it, which is the
     /// point: these waits are near-zero when healthy, and a full task pinned for ten straight minutes is
     /// categorically not that.</para>
+    /// <para>The value is defined once, as <c>FindingPageFloor.WaitProfileAvgWaitersFloor</c> (PerformanceMonitor.Analysis), because
+    /// the analysis findings' page floor must be this same bar and Analysis cannot reference this assembly (#7084).</para>
     /// </summary>
-    public const double WarningAvgWaiters = 1.0;
+    public const double WarningAvgWaiters = PerformanceMonitor.Analysis.FindingPageFloor.WaitProfileAvgWaitersFloor;
 
     /// <summary>
     /// Critical at ten tasks/backends continuously stuck on average — an active contention collapse,
@@ -145,7 +147,7 @@ public static class PoisonWaitEvaluator
         /// <summary>The bar that was crossed, in the PostgreSQL twin's exact clause order.</summary>
         public string ThresholdValue => string.Create(CultureInfo.InvariantCulture,
             $"{BreachedAvgWaiters * WindowMinutes * 60:N0}s accumulated over {WindowMinutes}m "
-            + $"(an average of {BreachedAvgWaiters:0.#} task(s) continuously waiting)");
+            + $"(an average of {BreachedAvgWaiters:0.#} {(BreachedAvgWaiters == 1 ? "task" : "tasks")} continuously waiting)");
 
         /// <summary>The numeric twin of <see cref="ThresholdValue"/>: the breached bar as milliseconds.</summary>
         public double NumericThresholdValue => BreachedAvgWaiters * WindowMs;
@@ -157,7 +159,7 @@ public static class PoisonWaitEvaluator
         /// </summary>
         public string ShortMessage => string.Create(CultureInfo.InvariantCulture,
             $"[{WaitType}] {AccumulatedSeconds:N0}s of wait accumulated in the last {WindowMinutes} minutes "
-            + $"across {AccumulatedWaits:N0} waits — on average {AvgWaiters:N1} task(s) continuously stuck");
+            + $"across {AccumulatedWaits:N0} waits. On average {AvgWaiters:N1} {(AvgWaiters == 1 ? "task" : "tasks")} continuously stuck");
     }
 
     /// <summary>
@@ -230,15 +232,15 @@ public static class PoisonWaitEvaluator
     /// </summary>
     public static string SqlServerRemedyFor(string? waitType) => waitType?.ToUpperInvariant() switch
     {
-        "THREADPOOL" => "Tasks are queueing for a worker thread — the server has run out of workers, usually "
+        "THREADPOOL" => "Tasks are queueing for a worker thread. The server has run out of workers, usually "
             + "because blocking or parallelism is holding the ones it has. Look at the blocking and active-query "
             + "snapshots for this window before touching max worker threads; adding workers to a blocked pile "
             + "adds to the pile.",
-        "RESOURCE_SEMAPHORE" => "Queries are queueing for memory grants — the grants in flight have consumed the "
+        "RESOURCE_SEMAPHORE" => "Queries are queueing for memory grants. The grants in flight have consumed the "
             + "query memory budget and new queries wait for one to finish. Look at the memory-grant snapshots "
             + "for the largest requested grants and the plans that asked for them (sorts, hashes, "
             + "over-estimated row counts).",
-        "RESOURCE_SEMAPHORE_QUERY_COMPILE" => "Queries are queueing for compile memory — too many large plans are "
+        "RESOURCE_SEMAPHORE_QUERY_COMPILE" => "Queries are queueing for compile memory. Too many large plans are "
             + "compiling at once, typically a burst of non-parameterized or freshly-evicted statements. Look at "
             + "the compile and recompile rates and at the statement shapes that are compiling in this window.",
         _ => "Sample the active-query snapshots for the sessions in this wait type.",

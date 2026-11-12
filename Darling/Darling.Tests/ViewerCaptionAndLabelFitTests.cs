@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// duration. Each element is laid out at the width it gets on a 1366 screen and checked: wrapping text keeps all of its text, a label
 /// shows in full, and the label and duration keep a gap.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerCaptionAndLabelFitTests
 {
     private const double ScreenWidth = 1366;
@@ -67,18 +68,6 @@ public sealed class ViewerCaptionAndLabelFitTests
             foreach (var inner in Logical<T>(child))
             {
                 yield return inner;
-            }
-        }
-    }
-
-    /// <summary>Selects every tab between the element and the root, so the element is laid out and visible.</summary>
-    private static void Reveal(FrameworkElement element)
-    {
-        for (DependencyObject? at = element; at is not null; at = LogicalTreeHelper.GetParent(at))
-        {
-            if (at is TabItem tab && ItemsControl.ItemsControlFromItemContainer(tab) is TabControl owner)
-            {
-                owner.SelectedItem = tab;
             }
         }
     }
@@ -136,7 +125,7 @@ public sealed class ViewerCaptionAndLabelFitTests
                 new DarlingServer(1, "caption-fit-test", "caption-fit-test", true, null));
             var window = new Window { Content = tab, Width = ScreenWidth, Height = ScreenHeight };
             window.Resources.MergedDictionaries.Add(Theme());
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 typeof(ViewerServerTab).GetField("_suppressDrillDownAutoRefresh", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(tab, true);
@@ -144,7 +133,7 @@ public sealed class ViewerCaptionAndLabelFitTests
                 banner.Text = "Showing since 2026-10-26 10:03: this server's Query Store history starts after the baseline window does, so a regression that can come only from a run before the window that is not held here cannot be listed.";
                 banner.Visibility = Visibility.Visible;
                 var caption = Logical<TextBlock>(tab).Single(b => b.Text.StartsWith("Queries whose Query Store performance regressed", StringComparison.Ordinal));
-                Reveal(caption);
+                StaTestThread.Reveal(caption);
                 ClippedTextProbe.Settle(window);
 
                 var found = ClippedTextProbe.Clipped((DependencyObject)caption.Parent, tab);
@@ -172,7 +161,7 @@ public sealed class ViewerCaptionAndLabelFitTests
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = ScreenWidth, Height = ScreenHeight };
             window.Resources.MergedDictionaries.Add(Theme());
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ((FrameworkElement)tab.FindName("FinOpsUtilizationContent")).Visibility = Visibility.Visible;
@@ -180,7 +169,7 @@ public sealed class ViewerCaptionAndLabelFitTests
                     .Where(b => b.Text is ViewerLabels.AvgSqlServerCpu or ViewerLabels.P95SqlServerCpu or ViewerLabels.MaxSqlServerCpu)
                     .ToList();
                 Assert.Equal(3, labels.Count);
-                Reveal(labels[0]);
+                StaTestThread.Reveal(labels[0]);
                 ClippedTextProbe.Settle(window);
 
                 var found = ClippedTextProbe.Clipped((DependencyObject)labels[0].Parent, tab);
@@ -220,7 +209,7 @@ public sealed class ViewerCaptionAndLabelFitTests
             };
             var window = new Window { Content = picker, Width = ScreenWidth, Height = ScreenHeight };
             window.Resources.MergedDictionaries.Add(Theme());
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             var found = new List<string>();
             try
             {

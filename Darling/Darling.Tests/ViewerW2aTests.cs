@@ -102,8 +102,10 @@ public sealed class ViewerOverviewSqlTests
         /* #3895: every WINDOWED read carries the partition-column floor, and the two "ever" reads none — a
            floor would change what "newest event ever" answers. */
         /* #5644 W1: the two windowed reads are now the two wait CTEs' sources (count and worst wait both come off
-           the CTEs), each closed by the CTE's subquery parenthesis. */
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"event_time >= \$2 AND collection_time >= \$3\)").Count);
+           the CTEs), each closed by the CTE's subquery parenthesis. #7028: the DMV side reads the snapshots once, into
+           dmv_src (floored there), which the wait count and the snapshot gate then share. */
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, @"event_time >= \$2 AND collection_time >= \$3\)"));
+        Assert.Contains("WHERE server_id = $1 AND collection_time >= $3", sql, StringComparison.Ordinal);
         Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"\(SELECT MAX\(event_time\)\s+FROM \w+\s+WHERE server_id = \$1\)").Count);
     }
 
@@ -233,6 +235,7 @@ public sealed class ViewerOverviewSqlTests
 /// every display property is a pure format. Verifies the one semantic change — status from collection
 /// freshness, not a live ping — maps onto Lite's Online / Warning / Offline card states.
 /// </summary>
+[Collection("application-theme")] // #8395: reads a card brush off the STA thread
 public sealed class ViewerServerSummaryDisplayTests
 {
     private static readonly DateTime Now = new(2026, 7, 3, 12, 0, 0, DateTimeKind.Utc);
@@ -311,7 +314,7 @@ public sealed class ViewerServerSummaryDisplayTests
     }
 
     [Theory]
-    [InlineData(60.0, null, "60%")]                    // SQL-only when other-process is unavailable
+    [InlineData(60.0, null, "SQL CPU 60%")]            // SQL-only when other-process is unavailable (#7682)
     [InlineData(60.0, 15.0, "75% (SQL 60%)")]          // total prominently, SQL alongside
     public void CpuDisplay_ShowsTotalWithSqlAlongside(double sqlCpu, double? otherCpu, string expected)
     {
@@ -349,15 +352,27 @@ public sealed class ViewerServerSummaryDisplayTests
     [Fact]
     public void LastCollectionDisplay_TreatsStoredValueAsUtc_ShownLocal()
     {
+        /* #7422: the display zone is named, so the answer does not depend on the machine's zone or on today's date. The property reads
+           ViewerTimeHelper.CurrentDisplayZone(), whose default clock is a fixed offset taken from today's offset, and ToLocalTime applies
+           the offset of the stored value's own date: on a daylight saving machine a July value and a November today differ by an hour. */
         var storedUtc = new DateTime(2026, 7, 3, 3, 30, 45, DateTimeKind.Unspecified);
-        var expected = DateTime.SpecifyKind(storedUtc, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
-        Assert.Equal(expected, new ServerSummaryItem { LastCollectionTime = storedUtc }.LastCollectionDisplay);
+        var minusFour = TimeZoneInfo.CreateCustomTimeZone("w2a-minus-four", TimeSpan.FromHours(-4), "w2a", "w2a");
+        var now = new DateTime(2026, 11, 3, 12, 0, 0, DateTimeKind.Utc);
+        Assert.Equal("2026-07-02 23:30:45", ServerSummaryItem.FormatLastCollect(storedUtc, minusFour, now));
     }
 
     [Fact]
     public void LastCollectionDisplay_NoData_IsNever()
     {
         Assert.Equal("Never", new ServerSummaryItem().LastCollectionDisplay);
+    }
+
+    // #7560: a PostgreSQL server has no blocking count behind the tile, so it reads -- and not a 0 that looks measured.
+    [Fact]
+    public void BlockingDisplay_OnPostgres_IsNotAZero()
+    {
+        Assert.Equal("--", new ServerSummaryItem { IsPostgres = true, BlockingCount = 0 }.BlockingDisplay);
+        Assert.Equal("0", new ServerSummaryItem { IsPostgres = false, BlockingCount = 0 }.BlockingDisplay);
     }
 
     [Fact]
@@ -413,7 +428,8 @@ public sealed class ViewerServerSummaryDisplayTests
 
         var calm = new ServerSummaryItem { LastCollectionTime = Now };
         calm.ApplyFreshness(Now);
-        Assert.Equal("#FF2A2D35", calm.CardBorderBrush.Color.ToString());
+        /* #8221: a calm card draws the current theme's neutral border, which the render test pins per theme (ViewerThemeLeftoversRenderTests); here it is only not a band colour. */
+        Assert.DoesNotContain(calm.CardBorderBrush.Color.ToString(), new[] { "#FFE57373", "#FFFFD54F", "#FFFFB74D" });
     }
 
     // ── Enrichment: per-metric severity bands (verbatim mirrors of ServerHealthStatus) ──────────────
@@ -616,6 +632,36 @@ public sealed class ViewerServerSummaryDisplayTests
         Assert.Equal(
             "0.0/hr",
             new ServerSummaryItem { DeadlockCount = 0, DeadlockWindow = TimeSpan.FromHours(1) }.DeadlockDetail);
+    }
+
+    /// <summary>#8532: a card that counted an event never shows a zero rate beside the count. One deadlock or one
+    /// blocked wait over a 24 hour window is 0.04/hr, which one decimal place writes as "0.0"; the detail says
+    /// "&lt;0.1" there. A count of zero over a measured window still reads "0.0/hr", which is a measurement.</summary>
+    [Fact]
+    public void DeadlockDetail_SaysLessThanATenth_WhenAPositiveRateRoundsToZero()
+    {
+        var day = TimeSpan.FromHours(24);
+        Assert.Equal("<0.1/hr", new ServerSummaryItem { DeadlockCount = 1, DeadlockWindow = day }.DeadlockDetail);
+        Assert.Equal("0.1/hr", new ServerSummaryItem { DeadlockCount = 2, DeadlockWindow = day }.DeadlockDetail); // 0.08/hr
+        Assert.Equal("0.0/hr", new ServerSummaryItem { DeadlockCount = 0, DeadlockWindow = day }.DeadlockDetail);
+    }
+
+    /// <summary>#8532: the blocking detail follows the deadlock detail's rule, for a SQL Server card's waits and for
+    /// a PostgreSQL card's captures.</summary>
+    [Fact]
+    public void BlockingDetail_SaysLessThanATenth_WhenAPositiveRateRoundsToZero()
+    {
+        var sqlServer = new ServerSummaryItem { BlockingCount = 1, MaxBlockingWaitMs = 42000, BlockingWindow = TimeSpan.FromHours(24) };
+        Assert.Equal("<0.1/hr, max: 42s", sqlServer.BlockingDetail);
+
+        var postgres = new ServerSummaryItem
+        {
+            IsPostgres = true,
+            PgBlockingCapturesTotal = 2000,
+            PgBlockingCapturesWithBlocking = 1,
+            BlockingWindow = TimeSpan.FromHours(1),
+        };
+        Assert.Equal("<0.1/hr, of 2000 sampled", postgres.BlockingDetail);
     }
 
     [Fact]

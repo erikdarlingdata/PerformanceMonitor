@@ -51,12 +51,12 @@ public sealed class ComposeStatementTimeoutReloadTests
         Assert.Contains(shared, batch, StringComparison.Ordinal);
 
         /* And the batch carries the pair exactly once — an embed that also left the old inline copy behind
-           would still satisfy Contains, while writing the ceiling twice. The slow-statement line (#3899) rides
+           would still satisfy Contains, while writing the ceiling twice. One statement per role that carries it: viewer, web and mcp. The slow-statement line (#3899) rides
            the same renderer, and is written once too. temp_file_limit (#4605, #4610) rides its OWN renderer,
            unconditionally, so it is asserted separately from the timeout-derived pair above. */
-        Assert.Equal(2, Regex.Matches(batch, @"SET statement_timeout = '").Count);
-        Assert.Equal(2, Regex.Matches(batch, @"SET log_min_duration_statement = '").Count);
-        Assert.Equal(2, Regex.Matches(batch, @"SET temp_file_limit = '").Count);
+        Assert.Equal(3, Regex.Matches(batch, @"SET statement_timeout = '").Count);
+        Assert.Equal(3, Regex.Matches(batch, @"SET log_min_duration_statement = '").Count);
+        Assert.Equal(3, Regex.Matches(batch, @"SET temp_file_limit = '").Count);
     }
 
     /// <summary>

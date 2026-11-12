@@ -307,7 +307,7 @@ public sealed class PgTargetBloatTests
             [PgTargetFactKeys.AutovacuumBacklog] = Scored(Backlog(5.0, "public.customers")),
         };
         var other = PgTargetAdvice.Compose(PgTargetFactKeys.BloatTrend, otherLookup)!;
-        Assert.Contains("PG_AUTOVACUUM_BACKLOG fired on public.customers — a different table", other.Investigation, StringComparison.Ordinal);
+        Assert.Contains("PG_AUTOVACUUM_BACKLOG fired on public.customers: a different table", other.Investigation, StringComparison.Ordinal);
         Assert.Contains("autovacuum_vacuum_scale_factor", other.Remediation, StringComparison.Ordinal);
     }
 
@@ -316,7 +316,7 @@ public sealed class PgTargetBloatTests
     {
         var fromZero = Scored(Table("public.orders", GiB, 0, 300 * MiB));
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.BloatTrend, Lookup(fromZero))!;
-        Assert.Contains("from an earlier estimate of zero — no percentage to state", block.Headline, StringComparison.Ordinal);
+        Assert.Contains("from an earlier estimate of zero, no percentage to state", block.Headline, StringComparison.Ordinal);
         Assert.Contains("This table crossed it.", block.Investigation, StringComparison.Ordinal);
 
         var under = Scored(Table("public.orders", GiB, 2 * GiB, 300 * MiB));
@@ -346,9 +346,9 @@ public sealed class PgTargetBloatTests
         Assert.Contains(headlineFragment, block.Headline, StringComparison.Ordinal);
         Assert.Contains("a withheld estimate never reads as zero bloat", block.Investigation, StringComparison.Ordinal);
         Assert.Contains(remediationFragment, block.Remediation, StringComparison.Ordinal);
-        Assert.EndsWith("a spot percentage — when one becomes available — is not.", block.Remediation, StringComparison.Ordinal);
+        Assert.EndsWith("a spot percentage (when one becomes available) is not.", block.Remediation, StringComparison.Ordinal);
         if (reason is PgTargetScorer.BloatReasonPgstattupleUnavailable or PgTargetScorer.BloatReasonAllSkipped)
-            Assert.Contains("75% of the indexes seen were skipped at their latest sample — a majority, across 3 distinct reasons", block.Investigation, StringComparison.Ordinal);
+            Assert.Contains("75% of the indexes seen were skipped at their latest sample: a majority, across 3 distinct reasons", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("CREATE INDEX", block.Investigation + block.Remediation, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -374,7 +374,7 @@ public sealed class PgTargetBloatTests
         Assert.Contains("The index measures 512 MB", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("The spot estimate reads 61.5% and was NOT graded", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("needs 3 daily samples", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("75% of the indexes seen were skipped at their latest sample — a majority, across 4 distinct reasons", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("75% of the indexes seen were skipped at their latest sample: a majority, across 4 distinct reasons", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("PG_BLOAT_TREND co-fired on this index's table", block.Investigation, StringComparison.Ordinal);
 
         var rem = block.Remediation;

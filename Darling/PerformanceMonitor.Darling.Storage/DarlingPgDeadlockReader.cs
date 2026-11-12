@@ -44,7 +44,10 @@ public static class DarlingPgDeadlockReader
         string? LockModes,
         string? Resources,
         string? VictimStatement,
-        int TimesSeen);
+        int TimesSeen,
+        /* #7082: the normalized graph the statements come from, for the statement-pair key. Null when the report has no
+           stored graph. */
+        string? GraphText = null);
 
     public readonly record struct PgDeadlockDetailRow(
         DateTime OccurredAtUtc,
@@ -191,6 +194,7 @@ public static class DarlingPgDeadlockReader
             var occurredAt = reader.IsDBNull(0) ? default : reader.GetDateTime(0);
             var victimPid = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
             var rawHash = !reader.IsDBNull(8) && reader.GetBoolean(8);
+            var graph = reader.IsDBNull(9) ? null : PgDeadlockLogParser.NormalizeGraph(reader.GetString(9))?.TrimEnd('\n');
             rows.Add(new PgDeadlockRow(
                 occurredAt,
                 victimPid,
@@ -203,9 +207,10 @@ public static class DarlingPgDeadlockReader
                 reader.IsDBNull(9)
                     ? reader.IsDBNull(6) ? null : PgDeadlockLogParser.NormalizeStatement(reader.GetString(6))
                     : PgDeadlockLogParser.VictimStatementOf(
-                        PgDeadlockLogParser.NormalizeGraph(reader.GetString(9))?.TrimEnd('\n'),
+                        graph,
                         reader.IsDBNull(1) ? null : victimPid),
-                reader.IsDBNull(7) ? 0 : reader.GetInt32(7)));
+                reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
+                graph));
         }
 
         return rows;

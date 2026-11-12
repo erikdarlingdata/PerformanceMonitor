@@ -149,7 +149,7 @@ public static class ContextMenuHelper
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to export: {ex.Message}", "Export Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not write {dialog.FileName}: {ex.Message}", "Export Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
@@ -354,7 +354,7 @@ public static class ContextMenuHelper
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show($"Error exporting data:\n\n{ex.Message}", "Export Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    MessageBox.Show($"Could not write {saveDialog.FileName}:\n\n{ex.Message}", "Export Error", MessageBoxButton.OK, MessageBoxImage.Error);
                 }
             }
         };

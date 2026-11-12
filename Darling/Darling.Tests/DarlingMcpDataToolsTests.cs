@@ -512,7 +512,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     {
         var sql = DarlingDataReader.QueryStoreTopSql;
         Assert.Contains("FROM query_store_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("AVG(CAST(avg_duration_us AS double precision))", sql, StringComparison.Ordinal);
+        Assert.Contains(QueryStoreWeightedAverage.DurationUs, sql, StringComparison.Ordinal);  /* #7169: execution-weighted, not AVG of interval averages */
         /* replica_role is a grouping key: an AG's shared Query Store (2022+) would otherwise report
            primary and secondary workload blended into one row. */
         Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role", sql, StringComparison.Ordinal);

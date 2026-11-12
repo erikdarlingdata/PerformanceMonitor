@@ -106,7 +106,7 @@ public sealed class TimescaleEnableConnectionSafetyTests
     [Fact]
     public void DarlingWorker_TouchesTheTimescaleConnectionOnlyBehindTheAvailabilityFlag()
     {
-        var worker = File.ReadAllText(FindRepoFile(Path.Combine(
+        var worker = RepoFile.ReadRepoFile(FindRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs")));
 
         /* The block: from the dedicated connection to the catch that degrades to plain-PostgreSQL mode. */

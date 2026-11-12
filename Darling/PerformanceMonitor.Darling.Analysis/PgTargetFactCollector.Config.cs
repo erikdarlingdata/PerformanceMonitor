@@ -44,9 +44,12 @@ public sealed partial class PgTargetFactCollector
     /// session, not the server (the argument is on <c>SessionScopedSources</c>); none of the names here can
     /// carry a session scope, but a filter that differs from the shipped reader's is a filter someone will one
     /// day have to explain, and the parse-analysis pin over the reader family rests on the list being spelled
-    /// inline. <c>is_default</c> is PostgreSQL's own verdict (<c>source = 'default'</c>), never a string
-    /// comparison against <c>boot_val</c> — the reader's comment records the three settings that comparison
-    /// gets wrong.</para>
+    /// inline. <c>is_default</c> here is PostgreSQL's own verdict (<c>source = 'default'</c>), which is NOT the
+    /// reader's <c>is_default</c> since #7409: the reader also treats a file value equal to the default as no
+    /// difference, and this one calls it a choice. So <c>max_connections = 100</c> in the file reads
+    /// <c>is_default: true</c> from <c>get_pg_server_config</c> and <c>0</c> in this fact's metadata. Nothing
+    /// reads this metadata today. The two settle different questions: the tool asks what differs from the
+    /// default, and a fact asks whether somebody set this.</para>
     /// </summary>
     public const string PgTargetConfigSnapshotSql = @"
 SELECT
@@ -192,6 +195,21 @@ AND   c.name IN (
                     fact.Metadata["bgwriter_delay_ms"] = bgwriterDelayMs;
                 if (TryNumber(settings, "bgwriter_lru_maxpages", out var lruMaxPages))
                     fact.Metadata["bgwriter_lru_maxpages"] = lruMaxPages;
+
+                /* #8322: on aurora-postgres the service sets shared_buffers from the instance's capacity (a parameter-group
+                   formula over the instance class's memory, or the current capacity units on Serverless, which moves it as
+                   the capacity moves), so a value at the initdb figure is not "nobody sized this". The fact is still
+                   emitted (the buffer composite reads bytes and the bgwriter knobs off it) but stamped not_applicable, the
+                   stamp max_wal_size takes below for the same engine, and PgTargetScorer.Config.cs scores it 0 off the flag
+                   so no advisory card roots and no co-fire can lift it. Engine off the registry fact emitted before this
+                   method (emission order: Metadata before Config), through MonitoredEngineKind — never a column's presence
+                   (#2530). */
+                var registry = facts.Find(f => f.Key == PgTargetFactKeys.ServerMajorVersion);
+                if (registry is not null && registry.Metadata.GetValueOrDefault("is_aurora") > 0)
+                {
+                    fact.Metadata["not_applicable"] = 1;
+                    fact.Metadata["not_applicable_on_aurora"] = 1;
+                }
                 facts.Add(fact);
             }
 

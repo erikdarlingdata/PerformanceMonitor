@@ -124,6 +124,25 @@ public sealed class FleetSweepEngineTests
         Assert.Contains("\"blocking_rate_per_hour\":0", verdictA.VerdictJson, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #8572: the blocking rate in the evidence payload is rounded for reading, and a rare rate is not rounded to
+    /// nothing. One blocking event over 30 days is 1/720 an hour, which a fixed two places would answer as 0.
+    /// </summary>
+    [Fact]
+    public void VerdictJson_ABlockingRateOfOneInThirtyDays_IsNotRoundedToZero()
+    {
+        var reading = new FleetSweepServerReading(
+            1, "server-a",
+            new DailyHealthSignals { HasData = true, BlockingEvents = 1, Window = TimeSpan.FromDays(30) }, 0, null);
+        var verdict = ComposeSimple(new[] { reading }).Verdicts.Single();
+
+        using var doc = System.Text.Json.JsonDocument.Parse(verdict.VerdictJson!);
+        var rate = doc.RootElement.GetProperty("blocking_rate_per_hour").GetDouble();
+        Assert.NotEqual(0.0, rate);
+        Assert.Equal(1.0 / 720, rate, 3);
+        Assert.True(rate.ToString("R", System.Globalization.CultureInfo.InvariantCulture).Length <= 8, "the rate is rounded, not the raw quotient");
+    }
+
     /* ─────────────────────── the diff: sweep N against sweep N−1's rows ─────────────────────── */
 
     /// <summary>
@@ -353,7 +372,7 @@ public sealed class FleetSweepEngineTests
             previousRun: PreviousRun(alertsEnabled: false),
             instruments: SteadyInstruments(passes: 500));
         Assert.True(muted.Run.InstrumentsAlive);
-        Assert.Contains("expected under the alert master switch", muted.Run.InstrumentLivenessJson, StringComparison.Ordinal);
+        Assert.Contains("Expected under the alert master switch", muted.Run.InstrumentLivenessJson, StringComparison.Ordinal);
 
         /* A restart since the previous sweep resets the in-memory counter: baseline declared reset,
            comparison declared unjudgeable, liveness not failed on it. */
@@ -363,6 +382,39 @@ public sealed class FleetSweepEngineTests
             instruments: new FleetSweepInstrumentCounters(Now.AddMinutes(-30), 5, 0));
         Assert.True(restarted.Run.InstrumentsAlive);
         Assert.Contains("baseline_reset\":true", restarted.Run.InstrumentLivenessJson, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #8572 row 2c: the note a restart leaves in the liveness document is a sentence with a colon, not an em dash, and it appears only
+    /// when the service started after the previous sweep. The same sweep with no restart carries no such note.
+    /// </summary>
+    [Fact]
+    public void ARestartSinceThePreviousSweep_AddsTheBaselineResetNote_WithoutAnEmDash_AndASteadyServiceAddsNone()
+    {
+        static string[] Notes(FleetSweepComposition composition)
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(composition.Run.InstrumentLivenessJson);
+            return document.RootElement.GetProperty("notes").EnumerateArray().Select(n => n.GetString()!).ToArray();
+        }
+
+        FleetSweepRun PreviousRun(bool alertsEnabled) => new(
+            100, Now.AddHours(-1), Now.AddHours(-2), Now.AddHours(-1), null, alertsEnabled, 1, 1, true,
+            JsonSerializer.Serialize(new { alert_passes_total = 500 }), "{}");
+
+        var restarted = ComposeSimple(
+            new[] { Healthy(1, "server-a") },
+            previousRun: PreviousRun(alertsEnabled: true),
+            instruments: new FleetSweepInstrumentCounters(Now.AddMinutes(-30), 5, 0));
+        var restartNotes = Notes(restarted).Where(n => n.StartsWith("Service restarted since the previous sweep", StringComparison.Ordinal)).ToArray();
+        Assert.Single(restartNotes);
+        Assert.StartsWith("Service restarted since the previous sweep: the pass-counter baseline reset", restartNotes[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("\u2014", restartNotes[0], StringComparison.Ordinal);
+
+        var steady = ComposeSimple(
+            new[] { Healthy(1, "server-a") },
+            previousRun: PreviousRun(alertsEnabled: true),
+            instruments: SteadyInstruments(passes: 600));
+        Assert.DoesNotContain(Notes(steady), n => n.StartsWith("Service restarted", StringComparison.Ordinal));
     }
 
     /* ─────────────────────── master-off: the sweep produces, and delivers nothing ─────────────────────── */
@@ -580,7 +632,7 @@ public sealed class FleetSweepEngineTests
             .WouldHavePaged.Single(w => w.AlertFamily == FleetSweepEngine.FamilyBlocking);
         using (var evidence = JsonDocument.Parse(rateRow.EvidenceJson))
         {
-            Assert.Equal("blocking events per hour over the sweep span", evidence.RootElement.GetProperty("trigger").GetString());
+            Assert.Equal("blocking waits per hour over the sweep span", evidence.RootElement.GetProperty("trigger").GetString());
             Assert.Equal(20.0, evidence.RootElement.GetProperty("value").GetDouble());
             Assert.Equal(ServerHealthThresholds.BlockingCriticalPerHour, evidence.RootElement.GetProperty("threshold").GetDouble());
             Assert.Equal(20, evidence.RootElement.GetProperty("blocking_count").GetInt64());
@@ -614,35 +666,62 @@ public sealed class FleetSweepEngineTests
     }
 
     /// <summary>
-    /// #5644 review: the blocking family bands on the span's blocked-process REPORT count (the unit its 20/hr tier was
-    /// measured in), while the evidence's <c>blocking_count</c> stays the count of WAITS. One long wait written as 20
-    /// reports in an hour pages as it did before waits were counted; the same wait with no report count, as 1 event,
-    /// does not.
+    /// #7028: the blocking family bands on the span's blocking WAITS, the unit the blocking alerts count, and the
+    /// evidence's <c>blocking_count</c> is that same count. Twenty waits in an hour page on the shipped 20 per hour tier.
+    /// One wait does not, however many report rows SQL Server wrote for it.
     /// </summary>
     [Fact]
-    public void TheBlockingFamily_BandsOnReports_AndShowsWaits()
+    public void TheBlockingFamily_BandsOnWaits()
     {
-        var oneLongWait = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        var twentyWaits = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
         {
             HasData = true,
-            BlockingEvents = 1,
-            BlockingReports = 20,
+            BlockingEvents = 20,
             Window = FixtureSpan,
         }, 0, null);
-        var row = ComposeSimple(new[] { oneLongWait }, alertsEnabled: false)
+        var row = ComposeSimple(new[] { twentyWaits }, alertsEnabled: false)
             .WouldHavePaged.Single(w => w.AlertFamily == FleetSweepEngine.FamilyBlocking);
         using var evidence = JsonDocument.Parse(row.EvidenceJson);
-        Assert.Equal("blocked-process reports per hour over the sweep span", evidence.RootElement.GetProperty("trigger").GetString());
+        Assert.Equal("blocking waits per hour over the sweep span", evidence.RootElement.GetProperty("trigger").GetString());
         Assert.Equal(20.0, evidence.RootElement.GetProperty("value").GetDouble());
-        Assert.Equal(1, evidence.RootElement.GetProperty("blocking_count").GetInt64());
+        Assert.Equal(20, evidence.RootElement.GetProperty("blocking_count").GetInt64());
 
-        var withoutReports = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        var oneWait = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
         {
             HasData = true,
             BlockingEvents = 1,
             Window = FixtureSpan,
         }, 0, null);
-        Assert.Empty(ComposeSimple(new[] { withoutReports }, alertsEnabled: false).WouldHavePaged);
+        Assert.Empty(ComposeSimple(new[] { oneWait }, alertsEnabled: false).WouldHavePaged);
+    }
+
+    /// <summary>
+    /// #7028: the snapshot arm (the Blocking Wait Time alert's measure) pages the blocking family when its Critical tier is
+    /// set and the span's peak snapshot value is at it, and names itself in the evidence. With the arm off (the default,
+    /// 0) the same peak pages nothing.
+    /// </summary>
+    [Fact]
+    public void TheBlockingFamily_BandsOnTheSnapshotArm_OnlyWhenItsTierIsSet()
+    {
+        var reading = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        {
+            HasData = true,
+            BlockingEvents = 1,
+            PeakSnapshotWaitMs = 200_000,
+            Window = FixtureSpan,
+        }, 0, null);
+
+        Assert.Empty(ComposeSimple(new[] { reading }, alertsEnabled: false).WouldHavePaged);
+
+        var tiers = new BlockingBandThresholds(5, 20, 30, 60, WarnSnapshotWaitSecondsRaw: 90, CriticalSnapshotWaitSecondsRaw: 180);
+        var composition = FleetSweepEngine.Compose(
+            Now, Now.AddHours(-1), false, 1, new[] { reading }, null, Array.Empty<FleetSweepServerVerdict>(),
+            Array.Empty<FleetSweepWatchItem>(), SteadyInstruments(), DeadlockRateThresholds.Default, blockingBandTiers: tiers);
+        var row = composition.WouldHavePaged.Single(w => w.AlertFamily == FleetSweepEngine.FamilyBlocking);
+        using var evidence = JsonDocument.Parse(row.EvidenceJson);
+        Assert.Contains("DMV snapshot", evidence.RootElement.GetProperty("trigger").GetString());
+        Assert.Equal(200.0, evidence.RootElement.GetProperty("value").GetDouble());
+        Assert.Equal(180.0, evidence.RootElement.GetProperty("threshold").GetDouble());
     }
 
     /// <summary>

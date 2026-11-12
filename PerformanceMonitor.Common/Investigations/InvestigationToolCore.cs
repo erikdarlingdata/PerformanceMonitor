@@ -71,6 +71,20 @@ internal static class InvestigationToolCore
     /// <summary>The agent a submit refusal is journaled under when its claim_id resolves to no claim holder.</summary>
     internal const string UnclaimedAgent = "unclaimed";
 
+    /// <summary>The agent a write through the legacy single token is journaled under when it names no claim (Darling's direct mute, as
+    /// <c>agent:legacy-token</c>).</summary>
+    internal const string LegacyTokenAgent = "legacy-token";
+
+    /// <summary>The three names a journal row is written under when no agent made the call: <see cref="InvestigationRules.InvalidAgentId"/> (an
+    /// agent_id that was refused), <see cref="UnclaimedAgent"/> (a claim_id no claim holds) and <see cref="LegacyTokenAgent"/> (a write through the
+    /// legacy token with no claim). An agent or a token carrying any of them would make its own rows read as those placeholders, so both apps refuse
+    /// them (#8611; Darling's token names and legacy-token agent_id, Lite's claim).</summary>
+    internal static readonly string[] ReservedAgentIds = { InvestigationRules.InvalidAgentId, UnclaimedAgent, LegacyTokenAgent };
+
+    /// <summary>True when <paramref name="agentId"/> is one of <see cref="ReservedAgentIds"/>, compared case-insensitively.</summary>
+    internal static bool IsReservedAgentId(string? agentId) =>
+        agentId is not null && ReservedAgentIds.Contains(agentId, StringComparer.OrdinalIgnoreCase);
+
     /// <summary>The longest <c>agent_action.reason</c> (#5912), as a note.</summary>
     internal const int MaxActionReasonChars = 2000;
 
@@ -146,11 +160,13 @@ internal static class InvestigationToolCore
     /// Every problem with a report, as <c>field: sentence</c>, in parameter order: an empty list is a valid report. Lists
     /// them all at once, so an agent fixes the report in one round. Any action proposal is refused at Level 1.
     /// <paramref name="requireBasis"/> (#6004) makes each evidence item carry a <c>basis</c> of verified or inferred: Darling's
-    /// submit passes true; Lite's, advise-only, keeps the older shape until its own slice (#6011).
+    /// submit passes true; Lite's, advise-only, keeps the older shape until its own slice (#6011). <paramref name="serverActionTools"/>
+    /// (#7109, Darling) makes the <c>action_proposals</c> refusal name the action tools: a server action is proposed through its own tool,
+    /// so it passes the gate and a dry run, never through the report.
     /// </summary>
     internal static List<string> ValidateReport(string? request_id, string? claim_id, string? verdict, string? root_cause,
         string? evidence, string? summary, string? proposed_note, string? action_proposals,
-        out Guid requestId, out Guid claimId, out string? evidenceJson, bool requireBasis = false)
+        out Guid requestId, out Guid claimId, out string? evidenceJson, bool requireBasis = false, bool serverActionTools = false)
     {
         var problems = new List<string>();
         evidenceJson = null;
@@ -176,7 +192,9 @@ internal static class InvestigationToolCore
             problems.Add("evidence: " + evidenceProblem);
 
         if (!string.IsNullOrWhiteSpace(action_proposals) && action_proposals.Trim() is not ("[]" or "null"))
-            problems.Add("action_proposals: refused at Level 1; an investigation proposes no action. Omit it.");
+            problems.Add(serverActionTools
+                ? "action_proposals: refused. A report proposes no action. To propose a server action, call its tool with dry_run false while your claim is live: force_query_store_plan, unforce_query_store_plan, evict_cached_plan, kill_session, recompile_module, create_plan_guide or drop_plan_guide. When the action needs a person's approval, the tool stores the proposal. Omit action_proposals."
+                : "action_proposals: refused at Level 1; an investigation proposes no action. Omit it.");
 
         return problems;
     }

@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System.Windows;
+using System.Windows.Controls;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -19,10 +21,19 @@ namespace PerformanceMonitor.Darling.Viewer;
 public partial class ViewerServerTab
 {
     private readonly ChartRenderHelper _chartHelper = new();
+    private FirstPaintLoading? _firstPaint;
+    /// <summary>#8647: "Loading..." where a sub-tab's empty-state sentence goes until its first read returns.</summary>
+    private FirstPaintLoading FirstPaint => _firstPaint ??= new FirstPaintLoading(_chartHelper, ApplyTheme);
 
-    private void ClearChart(ScottPlot.WPF.WpfPlot chart) => _chartHelper.ClearChart(chart);
+    private void ShowFirstPaintLoading() => FirstPaint.Show((InnerTabs.SelectedItem as TabItem)?.Content as DependencyObject);
 
-    private void ShowChartLegend(ScottPlot.WPF.WpfPlot chart) => _chartHelper.ShowChartLegend(chart);
+    private void ClearChart(ScottPlot.WPF.WpfPlot chart)
+    {
+        _chartHelper.ClearChart(chart);
+        ViewerChartCards.AttachChart(chart); // #8151: the clear swapped in a new plot
+    }
+
+    private void ShowChartLegend(ScottPlot.WPF.WpfPlot chart, bool oneRow = false) => _chartHelper.ShowChartLegend(chart, oneRow);
 
     private void RefreshEmptyChart(ScottPlot.WPF.WpfPlot chart, string legendText, string yAxisLabel)
         => _chartHelper.RefreshEmptyChart(chart, legendText, yAxisLabel);

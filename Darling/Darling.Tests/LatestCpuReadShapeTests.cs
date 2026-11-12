@@ -107,8 +107,9 @@ public sealed class LatestCpuReadShapeSqlTests
             /* now() / CURRENT_TIMESTAMP / LOCALTIMESTAMP are all the STORE's clock, and none of them shares a
                frame with sample_time. A bound on collection_time WOULD be frame-correct, but it buys nothing
                once the ordering prunes to one chunk, and it drops a server that has stopped reporting out of
-               alerting altogether — so these reads carry no time predicate at all and the guard is absolute
-               rather than per-column. */
+               alerting altogether — so the guard is absolute rather than per-column. The two display cards
+               (DarlingFleetReader.FleetCpuSql and ViewerDataService.ServerSummaryCpuSql) do bound
+               collection_time (#7196), but with a bound parameter and not a store clock, so they pass. */
             foreach (var clock in new[] { "now(", "CURRENT_TIMESTAMP", "LOCALTIMESTAMP" })
             {
                 Assert.False(
@@ -168,6 +169,8 @@ public sealed class LatestCpuReadShapeSqlTests
        CPU value rather than on time. A LIMIT-1-only rule pulled it in and demanded a fix it does not
        need. */
     [InlineData(false, "const string S = @\"\nSELECT (SELECT collection_time FROM v_cpu_utilization_stats\nWHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3\nORDER BY sqlserver_cpu_utilization DESC LIMIT 1) AS peak_time\nFROM v_cpu_utilization_stats\nWHERE server_id = $1\";")]
+    /* A latest-row read with a freshness cutoff as $2 (#7196) is still a latest-row read. */
+    [InlineData(true, "const string S = @\"\nSELECT a FROM v_cpu_utilization_stats\nWHERE server_id = $1\nAND collection_time >= $2\nORDER BY collection_time DESC, sample_time DESC\nLIMIT 1\";")]
     /* A different table entirely. */
     [InlineData(false, "const string S = @\"\nSELECT a FROM memory_stats\nWHERE server_id = $1\nORDER BY collection_time DESC\nLIMIT 1\";")]
     public void TheScanFindsLatestRowCpuReadsAndNothingElse(bool expected, string source)
@@ -208,8 +211,9 @@ public sealed class LatestCpuReadShapeSqlTests
     /// ways — and kept if that span is a latest-row read in either shape: per-server (<c>LIMIT 1</c> with
     /// <c>$1</c> as its only parameter) or fleet-wide (<c>DISTINCT ON (server_id)</c>, which has neither).
     ///
-    /// <para>The single-parameter test is what separates this class from a WINDOWED read. A windowed read
-    /// takes its bounds as <c>$2</c>/<c>$3</c> and bounding <c>collection_time</c> is the right answer there;
+    /// <para>The parameter-and-ordering test is what separates this class from a WINDOWED read. A windowed read
+    /// takes its bounds as <c>$2</c>/<c>$3</c> and does not order newest-first (a latest-row display card may take
+    /// a freshness cutoff as <c>$2</c> and still orders that way, #7196), and bounding <c>collection_time</c> is the right answer there;
     /// <c>PgAnomalyDetector.CpuWindowSql</c> is one, and a <c>LIMIT 1</c>-only rule swept it in and demanded a
     /// change it does not need. Both directions are pinned by
     /// <see cref="TheScanFindsLatestRowCpuReadsAndNothingElse"/>.</para>
@@ -250,8 +254,12 @@ public sealed class LatestCpuReadShapeSqlTests
             }
 
             var span = code[open..close];
+            /* A second parameter alone no longer separates the two: the display cards take a freshness cutoff
+               as $2 (#7196). A windowed PEAK read orders on the CPU value, a latest-row read on the
+               partition column, so a $2 read is still a latest-row read when it orders that way. */
             var perServerNewest = span.Contains("LIMIT 1", StringComparison.Ordinal)
-                                  && !span.Contains("$2", StringComparison.Ordinal);
+                                  && (!span.Contains("$2", StringComparison.Ordinal)
+                                      || span.Contains(RequiredOrdering, StringComparison.Ordinal));
             var fleetNewest = span.Contains("DISTINCT ON (server_id)", StringComparison.Ordinal);
             if (perServerNewest || fleetNewest)
             {

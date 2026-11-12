@@ -201,6 +201,17 @@ public sealed class ReadScopeStatementLabelTests
     }
 
     [Fact]
+    public void TheLabel_SkipsLeadingBlockCommentsAndTheWhitespaceBetweenComments()
+    {
+        Assert.Equal("SELECT a FROM t",
+            StatementLabel.Label("/* the window's rows are read first,\n   then the rest */\nSELECT a FROM t\nWHERE x = 1"));
+        Assert.Equal("SELECT a FROM t",
+            StatementLabel.Label("  /* one */ -- two\n\t/* three */\r\n  SELECT a FROM t\r\nWHERE x"));
+        Assert.Equal(string.Empty, StatementLabel.Label("/* never closed\nSELECT 1"));
+        Assert.Equal(string.Empty, StatementLabel.Label("-- only a comment"));
+    }
+
+    [Fact]
     public void TheLabel_IsCutAt120Characters()
     {
         var label = StatementLabel.Label("SELECT " + new string('x', 400));

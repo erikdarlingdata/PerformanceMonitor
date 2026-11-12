@@ -64,9 +64,9 @@ public sealed class ViewerSlicerRangeLabelTests
     }
 
     /// <summary>
-    /// The caption's zone is the display mode's zone on the active server's clock, and the viewer's caption no longer
-    /// words the range from <c>ForDisplay</c>. The tick labels are the one place the slicer still does, so they stay
-    /// the plain wall time.
+    /// The caption's zone is the display mode's zone on the active server's clock, and the viewer's slicer words nothing
+    /// from <c>ForDisplay</c>: the caption and the tick labels both go through the display zone (#8224, the tick labels
+    /// through <c>SlicerLabels</c>, as Lite's do).
     /// </summary>
     [Fact]
     public void TheViewersRangeCaption_ReadsTheCurrentDisplayZone_AndTheTickLabelsStayPlain()
@@ -76,10 +76,6 @@ public sealed class ViewerSlicerRangeLabelTests
 
         Assert.Contains("var zone = ViewerTimeHelper.CurrentDisplayZone();", caption);
         Assert.DoesNotMatch(@"\bForDisplay\b", caption);
-
-        var code = ViewerTypedRangeTests.StripComments(source);
-        Assert.Single(Regex.Matches(code, @"ViewerTimeHelper\.ForDisplay\(tickTime\)\.ToString\(""MM/dd HH:mm""\)"));
-        Assert.Single(Regex.Matches(code, @"\bForDisplay\("));
     }
 
     /// <summary>

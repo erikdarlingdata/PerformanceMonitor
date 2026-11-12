@@ -66,7 +66,7 @@ RETURNING old.capture_plans, old.query_store_backfill_enabled, old.query_store_t
         "returns status invalid, names the argument and its range, and writes NOTHING. Cannot change the MCP or web on/off flag or port, or " +
         "pause (turning MCP off from MCP would lock the admin out; use the Viewer). Returns {status:\"updated\", previous:{...}, settings:{...}} " +
         "with all five values before and after, or {status:\"unavailable\"} when the store has not been seeded by the service yet. The running " +
-        "service picks the change up on its next sweep; no restart. Needs mcp.allowWrites; never offered to an investigation agent.")]
+        "service picks the change up on its next sweep; no restart. Needs mcp.allowWrites or a named operator token; never offered to an investigation agent.")]
     public static async Task<string> UpdateServiceFlags(
         NpgsqlDataSource postgres,
         [Description("True to capture query plans on every server, false to stop. Omit to keep the stored value.")] bool? capture_plans = null,

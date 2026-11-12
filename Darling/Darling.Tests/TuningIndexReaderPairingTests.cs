@@ -41,6 +41,7 @@ public sealed class TuningIndexReaderPairingTests
             [PgTableTuning.QueryStatsRestartRowIndexName] = ("collection_time", IntervalRollupRestartRows.QueryStatsRestartRowsSql),
             [PgTableTuning.ProcedureStatsRestartRowIndexName] = ("collection_time", IntervalRollupRestartRows.ProcedureStatsRestartRowsSql),
             ["idx_store_metrics_kind_name_time"] = ("object_kind", DarlingStoreMetricsReader.StoreMetricsLatestSql),
+            [PgTableTuning.WaitStatsDailyCoverIndexName] = ("server_id", DailySummarySql.RangeSql),
         };
 
     /// <summary>Every <c>CREATE INDEX IF NOT EXISTS &lt;name&gt; ON ... (&lt;leading&gt;, ...)</c> statement
@@ -93,9 +94,9 @@ public sealed class TuningIndexReaderPairingTests
     {
         var created = CreatedIndexes().ToList();
 
-        /* Sanity: this must actually see the seven indexes the list ships today (#4247 dropped five others),
+        /* Sanity: this must actually see the eight indexes the list ships today (#4247 dropped five others),
            or the regex/list drifted and the pairing check below would be vacuously true. */
-        Assert.Equal(7, created.Count);
+        Assert.Equal(8, created.Count);
 
         foreach (var (indexName, leadingColumn) in created)
         {

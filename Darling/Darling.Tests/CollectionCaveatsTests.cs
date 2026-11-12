@@ -187,7 +187,7 @@ public sealed class CollectionCaveatsTests
 
         var sentence = state.Describe();
         Assert.NotNull(sentence);
-        Assert.StartsWith("2 of 16 fact families could not be read (vacuum (missing_schema/timeout), write (error)) — the absence of findings is not evidence", sentence, StringComparison.Ordinal);
+        Assert.StartsWith("2 of 16 fact families could not be read (vacuum (missing_schema/timeout), write (error)), the absence of findings is not evidence", sentence, StringComparison.Ordinal);
         Assert.Contains("get_collection_health", sentence, StringComparison.Ordinal);
 
         Assert.Equal("cov " + sentence, CollectionCaveats.Compose("cov", sentence));

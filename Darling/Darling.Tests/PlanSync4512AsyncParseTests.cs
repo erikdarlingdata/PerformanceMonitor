@@ -68,6 +68,19 @@ public sealed class PlanSync4512AsyncParseTests
             plan.ParseError);
     }
 
+    /// <summary>
+    /// The async path's size refusal carries the same flag the synchronous path's does, so a reader of
+    /// <see cref="ParsedPlan.ExceedsParseLimit"/> is told the same thing whichever path parsed the plan.
+    /// </summary>
+    [Fact]
+    public async Task ParseAsyncOverTheSizeLimitSetsTheSizeFlagTheSyncPathSets()
+    {
+        var xml = new string('a', ShowPlanParser.MaxParseCharacters + 1);
+
+        Assert.True(ShowPlanParser.Parse(xml).ExceedsParseLimit, "the synchronous path does not flag its size refusal");
+        Assert.True((await ShowPlanParser.ParseAsync(xml, CancellationToken.None)).ExceedsParseLimit, "ParseAsync refused a plan over the size limit and did not flag the refusal as the size refusal");
+    }
+
     private static ParsedPlan? ParseAsyncOnOneMegabyteStackThread(string xml)
     {
         ParsedPlan? plan = null;

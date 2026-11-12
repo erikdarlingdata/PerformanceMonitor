@@ -35,6 +35,8 @@ class FakeNode {
     return this.children[0] || null;
   }
   appendChild(child) {
+    /* The loading strip is what a trend redraw puts in the chart slot first; __order keeps it beside the scroll (#7586). */
+    if (child.className === "strip loading") (globalThis.__order ||= []).push("redraw");
     this.children.push(child);
     return child;
   }
@@ -49,7 +51,25 @@ class FakeNode {
   getAttribute(name) {
     return name in this.attrs ? this.attrs[name] : null;
   }
-  addEventListener() {}
+  /* Recorded, so a scenario can fire a click or a change (#7586); nothing else in the harness calls them. */
+  addEventListener(type, fn) {
+    (this.listeners ||= {})[type] = (this.listeners[type] || []).concat(fn);
+  }
+  fire(type) {
+    for (const fn of (this.listeners && this.listeners[type]) || []) fn({ preventDefault() {}, target: this });
+  }
+  all(pred, acc = []) {
+    if (pred(this)) acc.push(this);
+    for (const c of this.children) c.all && c.all(pred, acc);
+    return acc;
+  }
+  querySelector(tag) {
+    return this.all((n) => n.tag === tag)[0] || null;
+  }
+  scrollIntoView(opts) {
+    (globalThis.__scrolled ||= []).push(opts);
+    (globalThis.__order ||= []).push("scroll");
+  }
   set textContent(value) {
     this.children = [];
     this.text = String(value);
@@ -102,6 +122,7 @@ const editorScenario = scenario.startsWith("editor");
    ensureFieldConfigs. */
 const serverPageScenario = scenario === "offeredRanges" || scenario.startsWith("custom") || scenario.startsWith("picker") || scenario.startsWith("tabReach");
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "kept-history-"));
+const alertNotebookScenario = scenario.startsWith("alertNotebook");
 let modules;
 try {
   /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
@@ -117,7 +138,7 @@ try {
       "export const chartCalls = [];\n" +
       "export function normalizeColor(color) { return color; }\n" +
       "export function renderLineChart(opts) {\n" +
-      "  chartCalls.push({ windowStart: opts.windowStart, windowEnd: opts.windowEnd, points: (opts.points || []).length });\n" +
+      "  chartCalls.push({ windowStart: opts.windowStart, windowEnd: opts.windowEnd, points: (opts.points || []).length, times: (opts.points || []).map((pt) => Date.parse(pt[opts.xKey])) });\n" +
       "  return el('div', { class: 'chart-stub' });\n" +
       "}\n" +
       "export function zoomableLineChart(opts) { return renderLineChart(opts); }\n" +
@@ -129,6 +150,16 @@ try {
       fs.readFileSync(path.join(jsDir, "editor.js"), "utf8") + "\nexport { ensureFieldConfigs };\n"
     );
     fs.writeFileSync(path.join(scratch, "compose.js"), "export function renderComposedPanelCard() { throw new Error('not drawn here'); }\n");
+  }
+  if (alertNotebookScenario) {
+    /* The alert notebook page draws no composed chart here, so compose.js (and the chart renderers it needs) is a stand-in with the names the page and the notebook editor import. */
+    fs.writeFileSync(
+      path.join(scratch, "compose.js"),
+      "export function renderComposedPanelCard() { throw new Error('not drawn here'); }\n" +
+        "export function cellRange() { return null; }\n" +
+        "export function formatComposedValue(v) { return String(v); }\n" +
+        'export { pinRangeLabel } from "./util.js";\n'
+    );
   }
   if (serverPageScenario) {
     fs.writeFileSync(
@@ -144,6 +175,7 @@ try {
     charts: await load("charts.js"),
     editor: editorScenario ? await load("editor.js") : null,
     server: serverPageScenario ? await load(path.join("pages", "server.js")) : null,
+    views: alertNotebookScenario ? await load(path.join("pages", "views.js")) : null,
     timeRange: serverPageScenario ? await load("time-range.js") : null,
     pageRange: serverPageScenario ? await load("page-range.js") : null,
   };
@@ -332,9 +364,48 @@ const scenarios = {
     answer = () => data(INPUT);
     return [modules.panels.renderPanel(queryStorePanel)];
   },
+  // #7586: a row's History button on the Top Queries card selects that row in the Query picker, draws its trend and scrolls to it. The
+  // real closure runs: the click is fired on the second row's button, and the picker's select and the trend read are looked at.
+  historyPicksRow: async () => {
+    answer = (url) =>
+      tool(url) === "get_top_queries_by_cpu"
+        ? data({
+            queries: [
+              { query_hash: "0xAAA", database_name: "db1", query_text: "select 1" },
+              { query_hash: "0xBBB", database_name: "db2", query_text: "select 2" },
+            ],
+          })
+        : data({});
+    const card = modules.tabs.topQueriesPanel("SRV1", RANGE);
+    await settleFast();
+    const buttons = card.all((n) => n.tag === "button" && n.textContent === "History");
+    const select = card.all((n) => n.tag === "select" && n.attrs["aria-label"] === "Query")[0];
+    const trendReads = () => fetches.filter((f) => f.includes("get_query_trend")).map((f) => Object.fromEntries(new URL(f, "http://viewer.test").searchParams));
+    const before = trendReads().length;
+    const startedOn = select.value;
+    globalThis.__order = [];
+    buttons[1].fire("click");
+    const order = globalThis.__order.slice();
+    await settleFast();
+    found = { buttons: buttons.length, startedOn, selected: select.value, before, reads: trendReads().slice(before), scrolled: (globalThis.__scrolled || []).length, order };
+    return [card];
+  },
   topQueriesLocal: () => {
     answer = (url) => (tool(url) === "get_top_queries_by_cpu" ? data(INPUT) : data({}));
     return [modules.tabs.topQueriesPanel("SRV1", RANGE)];
+  },
+  // #7538, #7651: the Top Queries composite draws the left-out sentence from the reply's own fields, after the window note and before the grid.
+  // `found.order` is every notice and grid under the card in the order the page drew them.
+  topQueriesLeftOutOrder: async () => {
+    answer = (url) => (tool(url) === "get_top_queries_by_cpu" ? data(INPUT) : data({}));
+    const card = modules.tabs.topQueriesPanel("SRV1", RANGE);
+    await settleFast();
+    found = {
+      order: card
+        .all((n) => n.tag === "table" || n.className === "strip notice")
+        .map((n) => (n.tag === "table" ? "table" : "notice: " + n.textContent)),
+    };
+    return [card];
   },
   // The Wait Stats composite draws the note above its grid.
   floorWaitStats: () => {
@@ -538,6 +609,19 @@ Object.assign(scenarios, {
     found = { err, hours: ctx.hours, label: ctx.label, custom: ctx.custom === true, reads: fetches.slice(before), rows: cpu.data.samples.length };
     return [];
   },
+  // #7932: a picked range whose end has not arrived (today's date alone, a date-box end later today) is read live up to now, so the page
+  // context, the label and the chart window end at now too; the range key still names the picked pair, so a tab switch matches it.
+  pickerFutureEnd: async () => {
+    answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));
+    await customServerPage("SRV1");
+    const start = NOW - 6 * 3600000;
+    const end = NOW + 6 * 3600000;
+    const err = modules.server.holdSpec("SRV1", modules.timeRange.fixedSpec(start, end), NOW);
+    const ctx = modules.server.rangeContext(NOW);
+    const axis = modules.util.windowFromHours(ctx.hours);
+    found = { err, hours: ctx.hours, label: ctx.label, endMs: ctx.endMs, axisEnd: axis ? axis.windowEnd : null, rangeKey: ctx.rangeKey, now: NOW, pickedKey: "custom:" + start + "-" + end };
+    return [];
+  },
   // Every preset and calendar period the picker offers, held for a server in the browser's zone (the scenario name carries it).
   pickerPresetsLocal: async () => {
     answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));
@@ -616,6 +700,28 @@ Object.assign(scenarios, {
     const lat = await modules.util.readTool("get_latch_stats", { server: "SRV1", hours: 4 });
     const cpu = await modules.util.readTool("get_cpu_utilization", { server: "SRV1", hours: 4 });
     found = { latchRows: lat.data.latches.length, seriesRows: cpu.data.samples.length };
+    return [];
+  },
+  // #7945: a trend read's rows are bucket starts whatever name the stamp carries (sample_time, time, collection_time, event_time, time_bucket),
+  // so the bucket that starts at the range's end lies outside the range and is cut; a read of instants keeps the one stamped at the end.
+  customBucketEdge: async () => {
+    const stamps = [T0, new Date((Date.parse(T0) + Date.parse(T1)) / 2).toISOString(), T1];
+    const rows = (field) => stamps.map((s) => ({ [field]: s, v: 1 }));
+    const shapes = {
+      get_cpu_utilization: ["samples", rows("sample_time")],
+      get_wait_trend: ["trend", rows("time")],
+      get_lock_wait_trend: ["trend", rows("collection_time")],
+      get_health_parser_system_health: ["entries", rows("event_time")],
+      get_query_heatmap: ["cells", rows("time_bucket")],
+      get_memory_pressure_events: ["events", rows("sample_time")],
+    };
+    answer = (url) => data({ [shapes[tool(url)][0]]: shapes[tool(url)][1] });
+    modules.util.setActiveRange({ server: "SRV1", hours: 4, startMs: Date.parse(T0), endMs: Date.parse(T1), asOf: T1 });
+    found = {};
+    for (const [read, [key]] of Object.entries(shapes)) {
+      const res = await modules.util.readTool(read, { server: "SRV1", hours: 4 });
+      found[read] = res.data[key].length;
+    }
     return [];
   },
   // The label says where totals begin when the span is not whole hours.
@@ -732,6 +838,64 @@ Object.assign(scenarios, {
     found = { readsBeforeRelease, builds, reads, distinct: new Set(reads).size };
     return [holder, again];
   },
+  // #8577: a read cell with an `as_of` draws the window that ends there. The value is "pinned" (two days back), "future" (15 minutes ahead,
+  // an alert opened within minutes of firing) or "live" (no `as_of`); the line cell has one point an hour before the window's end.
+  pinnedReadLine: () => {
+    const HOUR = 3600000;
+    const now = Date.now();
+    const asOfMs = scenarioValue === "pinned" ? now - 48 * HOUR : scenarioValue === "future" ? now + 15 * 60000 : null;
+    const endMs = asOfMs != null && asOfMs < now ? asOfMs : now;
+    const params = { server: "SRV1", hours: 4 };
+    if (asOfMs != null) params.as_of = new Date(asOfMs).toISOString();
+    answer = () => data({ samples: [{ sample_time: new Date(endMs - HOUR).toISOString(), cpu: 5 }, { sample_time: new Date(endMs - 2 * HOUR).toISOString(), cpu: 7 }] });
+    found = { asOfMs, endMs, now };
+    return [modules.panels.renderPanel({ ...cpuPanel, params })];
+  },
+  // #8577: the empty answer's own "in the last 4 hour(s)" sentence names the pinned window when the cell carries an `as_of`.
+  pinnedReadEmpty: () => {
+    const asOfMs = scenarioValue === "pinned" ? Date.now() - 48 * 3600000 : null;
+    const params = { server: "SRV1", hours: 4 };
+    if (asOfMs != null) params.as_of = new Date(asOfMs).toISOString();
+    answer = () => data({ status: "empty", message: "No active query snapshots on SRV1 in the last 4 hour(s) matched blocking_only." });
+    found = { asOfMs };
+    return [modules.panels.renderPanel({ ...waitingTasksPanel, params })];
+  },
+  // #8630: the alert notebook page (views.js) over the real panels, with a catalog that lists each read's own parameters. The alert is a day old
+  // and every cell carries its `as_of`, as the templates write them. found.cells names each cell's read and the badges drawn on it.
+  alertNotebookPins: async () => {
+    const asOf = new Date(Date.now() - 24 * 3600000).toISOString();
+    const catalog = {
+      reads: [
+        { name: "get_server_summary", params: [{ name: "server" }] },
+        { name: "get_collection_health", params: [{ name: "server" }, { name: "collector_name" }] },
+        { name: "get_cpu_utilization", params: [{ name: "server" }, { name: "hours" }, { name: "as_of" }] },
+      ],
+      compose: { measures: [] },
+    };
+    const cell = (read, viz) => ({ type: "read", read, viz, title: read, params: { server: "SRV1", as_of: asOf, hours: "24" } });
+    answer = (url) => (tool(url) === "get_cpu_utilization" ? data({ samples: [{ sample_time: asOf, cpu: 5 }] }) : data({ status: "empty", message: "No rows on SRV1 in the last 24 hour(s)." }));
+    globalThis.location = { hash: "#/triage" };
+    const main = new FakeNode("main");
+    await modules.views.renderNotebookDoc(main, {
+      mode: "alert",
+      definition: { kind: "notebook", cells: [cell("get_server_summary", "stat"), cell("get_collection_health", "table"), { ...cell("get_cpu_utilization", "line"), rowsKey: "samples", xKey: "sample_time", series: [{ key: "cpu", label: "CPU" }] }] },
+      status: "Unknown",
+      notes: [],
+      canEdit: false,
+      provenance: "from alert template test",
+      onOpenLive: () => {},
+      alert: { server_name: "SRV1", metric_name: "Client Timeouts", alert_time: asOf },
+      catalog,
+      scopeServer: "SRV1",
+    });
+    await settle();
+    const cells = main.all((n) => n.getAttribute("data-panel") != null).map((n) => ({
+      read: n.getAttribute("data-panel"),
+      badges: n.all((c) => String(c.className).split(" ").includes("pin-badge")).map((c) => c.textContent),
+    }));
+    found = { cells };
+    return [main];
+  },
 });
 
 const chosen = scenarios[scenario];
@@ -787,5 +951,8 @@ console.log(JSON.stringify({
   notes,
   found,
   chartPoints: modules.charts.chartCalls.map((c) => c.points),
+  chartWindows: modules.charts.chartCalls.map((c) => [c.windowStart == null ? null : c.windowStart, c.windowEnd == null ? null : c.windowEnd]),
+  chartPointTimes: modules.charts.chartCalls.map((c) => c.times),
+  pins: root.all((n) => n.className === "pin-badge").map((n) => n.textContent),
   rejections,
 }));

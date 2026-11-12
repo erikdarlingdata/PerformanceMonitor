@@ -88,7 +88,7 @@ public sealed class JobHistoryPageTests
         var app = Wwwroot("js", "app.js");
         Assert.Contains("import { renderJobHistory } from \"./pages/job-history.js\";", app);
         Assert.Contains("if (h === \"#/job-history\" || h === \"#/job-history/\") return { name: \"jobHistory\" };", app);
-        Assert.Contains("else if (r.name === \"jobHistory\") renderJobHistory(main);", app);
+        Assert.Contains("jobHistory: (m) => renderJobHistory(m),", app);
         Assert.Contains("if (r.name === \"jobHistory\") return \"job-history\";", app);
     }
 
@@ -196,7 +196,7 @@ public sealed class JobHistoryPageTests
         Assert.Contains("AND   jh.run_datetime <= ${UntilParam(firstParam)} + make_interval(mins => so.offset_minutes)", reader);
         Assert.Contains("return ApplyWindow(rows, sinceUtc, limit, filter?.UntilUtc);", reader);
         var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpJobTools.cs").ReplaceLineEndings("\n");
-        Assert.Matches(@"windowEnd,\s*min_duration_seconds\);", tool);
+        Assert.Matches(@"windowEnd,\s*min_duration_seconds\)\s*(?:\{|;)", tool);
         Assert.Contains("DarlingJobHistoryReader.GetAsync(", tool);
     }
 
@@ -250,7 +250,7 @@ public sealed class JobHistoryPageTests
         var notices = run.GetProperty("notices");
         Assert.Equal(2, notices.GetProperty("noticeCount").GetInt32());
         var text = notices.GetProperty("text").GetString()!;
-        Assert.Contains("partial window: the store keeps job history from ", text);
+        Assert.Contains("Partial window: the store keeps job history from ", text);
         Assert.Contains("Showing the newest 2 runs; more matched.", text);
         Assert.Equal(0, run.GetProperty("quiet").GetProperty("noticeCount").GetInt32());
     }
@@ -286,6 +286,32 @@ public sealed class JobHistoryPageTests
     }
 
     /// <summary>
+    /// #7960: the read takes whole hours, and the row limit cuts the oldest runs of that read. When the trim at a sub-hour start removes a
+    /// run, the cut lay before the start too, so every run inside the window is on the page and no limit note is drawn. When the trim
+    /// removes none, the note stays, with the runs shown as its N. The trim itself clears <c>truncated</c> only when it removed a run.
+    /// </summary>
+    [Fact]
+    public void ARowLimitCut_ThatTookOnlyRunsBeforeTheWindowsStart_DrawsNoLimitNote()
+    {
+        var run = Run();
+        var before = run.GetProperty("range").GetProperty("cutBeforeStart");
+        Assert.Equal("1", Assert.Single(before.GetProperty("calls").EnumerateArray()).GetProperty("hours").GetString());
+        Assert.Equal("1 runs shown", Strings(before.GetProperty("shown")).Single());
+        Assert.Empty(before.GetProperty("notices").EnumerateArray());
+
+        var inside = run.GetProperty("range").GetProperty("cutInsideWindow");
+        Assert.Equal("2 runs shown", Strings(inside.GetProperty("shown")).Single());
+        var note = Assert.Single(Strings(inside.GetProperty("notices")));
+        Assert.StartsWith("Showing the newest 2 runs; more matched.", note, StringComparison.Ordinal);
+
+        var trim = run.GetProperty("trim");
+        Assert.False(trim.GetProperty("removedOne").GetProperty("truncated").GetBoolean());
+        Assert.Equal(1, trim.GetProperty("removedOne").GetProperty("runs").GetInt32());
+        Assert.True(trim.GetProperty("removedNone").GetBoolean());
+        Assert.False(trim.GetProperty("notCut").GetBoolean());
+    }
+
+    /// <summary>
     /// #6178: a not_collected answer that names Azure SQL Database reads "Azure SQL Database has no SQL Agent, so it has no job history."
     /// Any other engine, an empty answer, and no answer at all keep their own sentence (null here).
     /// </summary>
@@ -315,7 +341,7 @@ public sealed class JobHistoryPageTests
     {
         var empty = Run().GetProperty("emptyPartial");
         Assert.Equal(1, empty.GetProperty("noticeCount").GetInt32());
-        Assert.Contains("partial window: the store keeps job history from ", empty.GetProperty("text").GetString());
+        Assert.Contains("Partial window: the store keeps job history from ", empty.GetProperty("text").GetString());
     }
 
     [Fact]

@@ -7,7 +7,7 @@
  */
 
 /* Admin: a window onto what the desktop's Manage Servers, Notification Routes and Settings windows show.
-   Ten tabs (the first three each one existing read):
+   Eleven tabs (the first three each one existing read):
      Servers             GET /api/admin/servers (every configured server, enabled or not)
      Notification Routes get_notification_routes
      Alert Settings      get_alert_settings
@@ -19,6 +19,7 @@
      Agent changes       what agents changed and were refused, with Undo and the switch that turns agent changes off (#5917)
      Server actions      GET /api/server-actions, with the per-server action switches an admin store login can change (#6269)
      Environment Profiles GET /api/environment-profiles, edited as in the Viewer (#6264)
+     People              GET /api/people: people, their sign-ins and grants, kept by a signed-in admin, and the session's own sign-in key (#7107)
    Alert Settings changes nothing; Notification Routes edits the agent channel for a sign-in that can make changes (#6264). The Servers tab also lets a sign-in that can make changes edit one server in place
    (#5240): an Edit button on each row opens a form above the grid, filled from GET /api/admin/servers/{id}.
    The active tab rides in the hash (#/admin/<tab>) and in module scope, so the 60 s repaint keeps it.
@@ -27,22 +28,28 @@
    it reaches a row. */
 
 import { VIZ } from "../panels.js";
-import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, listOnlyNote, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText, storeHash } from "../util.js";
+import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, noticeStrip, captionStrip, adminListOnlyNote, ADMIN_WRITES_OFF_NOTE, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText, storeHash } from "../util.js";
 import { getSession } from "../views-api.js";
+import { severityLabel } from "./analysis-findings.js";
 import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
+import { dailyReportEditor, dailyReportPreviewOnly, clearDailyReportDraft } from "./admin-daily-report.js";
+import { databaseProtectionEditor, clearDatabaseProtectionDraft } from "./admin-database-protection.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
-import { buildServerActions, resetServerActionsStatus } from "./admin-server-actions.js";
-import { buildProfiles, readAgentSetupAccess, routeColumns, routeEditorNodes, routeListOnlyNodes, routeUseText } from "./admin-agent-setup.js";
+import { buildServerActions, resetServerActionsStatus, engineWord } from "./admin-server-actions.js";
+import { buildPeople, resetPeopleStatus } from "./admin-people.js";
+import { buildProfiles, nobodyCanApproveNodes, readAgentSetupAccess, routeColumns, routeEditorNodes, routeListOnlyNodes, routeUseText } from "./admin-agent-setup.js";
+import { slackBotTokenNodes } from "./admin-slack-bot.js";
 
 export const SERVER_COLUMNS = [
   { key: "display_name", label: "Display Name" },
   { key: "server_name", label: "Server" },
   { key: "auth", label: "Auth" },
-  { key: "engine", label: "Engine" },
+  { key: "engine", label: "Engine", display: (r) => engineWord(r.engine) },
   { key: "version", label: "Version" },
   { key: "status", label: "Status" },
   { key: "freshness", label: "Freshness", statusSev: true },
-  { key: "monthly_cost", label: "Monthly Cost ($)", align: "right", sortValue: (r) => r.monthly_cost_usd },
+  /* #7670: the cells carry the "$", so the header does not. A server with no cost set (the service sends 0, which FinOps says as "Monthly cost not set") shows a dash, not "$0". */
+  { key: "monthly_cost", label: "Monthly Cost", align: "right", sortValue: (r) => r.monthly_cost_usd, display: (r) => (r.monthly_cost_usd > 0 ? r.monthly_cost : "—") },
   { key: "read_only", label: "Read only", format: "bool" },
   { key: "added", label: "Added", format: "time" },
   { key: "last_collected", label: "Last Collected", format: "time" },
@@ -93,6 +100,8 @@ export const ROUTE_COLUMNS = [
   { key: "family", label: "Family" },
   { key: "applies_to", label: "Applies to" },
   { key: "severities", label: "Severity" },
+  { key: "report_notice", label: "Report notice" },
+  { key: "slack_bot_channel", label: "Bot channel" },
   { key: "status", label: "Status" },
   { key: "channels", label: "Channels set", wrap: true },
   { key: "agent", label: "Agent" },
@@ -131,15 +140,17 @@ const GROUP_LABELS = {
   agent_alert_gaps: "Agent alert gaps",
   ag: "Availability Groups",
   delivery: "Delivery",
-  health_bands: "Health bands",
-  analysis: "Automated analysis",
-  fleet_sweep: "Fleet sweep reports",
+  health_bands: "Health Bands",
+  analysis: "Automated Analysis",
+  fleet_sweep: "Fleet Sweep Reports",
+  daily_report: "Daily Health Report",
 };
 
 /* A unit at the end of a key reads as a bracketed unit: wait_threshold_seconds -> "wait threshold (seconds)". */
 const KEY_UNITS = [
   ["_seconds", "seconds"],
   ["_minutes", "minutes"],
+  ["_hours", "hours"],
   ["_percent", "%"],
   ["_ms", "ms"],
   ["_gb", "GB"],
@@ -160,7 +171,8 @@ export function settingLabel(prefix, key) {
       break;
     }
   }
-  words = words.replace(/_/g, " ").replace(/\bpg\b/g, "PostgreSQL");
+  /* A procedure name inside a key keeps its underscores: exclude_sp_server_diagnostics names sp_server_diagnostics. */
+  words = words.replace(/_/g, " ").replace(/\bpg\b/g, "PostgreSQL").replace(/\bsp server diagnostics\b/g, "sp_server_diagnostics");
   words = words.charAt(0).toUpperCase() + words.slice(1);
   if (!prefix) return words + unit;
   const group = GROUP_LABELS[prefix] || prefix.replace(/_/g, " ");
@@ -171,7 +183,7 @@ export function settingLabel(prefix, key) {
    named group; a group the read does not carry is left out rather than shown empty. */
 export const SETTING_SECTIONS = [
   {
-    title: "Alert thresholds",
+    title: "Alert Thresholds",
     groups: ["cpu", "blocking", "deadlocks", "poison_wait", "runnable_queue", "client_timeouts", "long_running_query", "tempdb_space", "low_disk",
       "self_alerts", "pvs", "file_growth", "long_running_job", "failed_job", "database_state", "agent_alert_gaps", "backup_overdue", "log_backup_overdue", "checkdb_overdue", "identity_capacity", "ag", "delivery"],
     top: ["alerts_enabled", "notify_connection_changes", "notify_connection_down_at_startup", "connection_refire_minutes",
@@ -185,10 +197,11 @@ export const SETTING_SECTIONS = [
     groupFields: { long_running_query: ["exclude_sp_server_diagnostics", "exclude_wait_for", "exclude_backups",
       "exclude_misc_waits", "exclude_cdc", "excluded_program_name_prefixes", "excluded_logins"] },
   },
-  { title: "Health bands", groups: ["health_bands"], top: [] },
-  { title: "Global alert filters", groups: [], top: ["excluded_databases", "excluded_volumes"] },
-  { title: "Automated analysis", groups: ["analysis"], top: [] },
-  { title: "Fleet sweep reports", groups: ["fleet_sweep"], top: [] },
+  { title: "Health Bands", groups: ["health_bands"], top: [] },
+  { title: "Global Alert Filters", groups: [], top: ["excluded_databases", "excluded_volumes"] },
+  { title: "Automated Analysis", groups: ["analysis"], top: [] },
+  { title: "Fleet Sweep Reports", groups: ["fleet_sweep"], top: [] },
+  { title: "Daily Health Report", groups: ["daily_report"], top: [] },
 ];
 
 /* The fields the page shows for each group. A key the read carries that is not listed here is not drawn, so a field
@@ -198,7 +211,7 @@ export const GROUP_FIELDS = {
   blocking: ["enabled", "count_threshold", "wait_threshold_seconds", "pg_count_threshold"],
   deadlocks: ["enabled", "count_threshold", "pg_count_threshold"],
   health_bands: ["deadlock_warn_per_hour", "deadlock_critical_per_hour", "blocking_warn_per_hour", "blocking_critical_per_hour",
-    "blocking_warn_wait_seconds", "blocking_critical_wait_seconds"],
+    "blocking_warn_wait_seconds", "blocking_critical_wait_seconds", "blocking_warn_snapshot_wait_seconds", "blocking_critical_snapshot_wait_seconds"],
   poison_wait: ["enabled", "threshold_ms"],
   runnable_queue: ["enabled", "warning_per_scheduler", "critical_per_scheduler"],
   client_timeouts: ["enabled", "warning_per_minute", "critical_per_minute", "warning_multiple", "critical_multiple"],
@@ -214,15 +227,16 @@ export const GROUP_FIELDS = {
   long_running_job: ["enabled", "multiplier"],
   failed_job: ["enabled", "lookback_minutes"],
   database_state: ["enabled"],
-  backup_overdue: ["enabled"],
-  log_backup_overdue: ["enabled"],
-  checkdb_overdue: ["enabled"],
+  backup_overdue: ["enabled", "threshold_hours"],
+  log_backup_overdue: ["enabled", "threshold_minutes"],
+  checkdb_overdue: ["enabled", "threshold_hours"],
   agent_alert_gaps: ["enabled"],
   ag: ["enabled", "lag_threshold_seconds", "redo_queue_threshold_kb", "disconnect_refire_minutes"],
   delivery: ["mode", "per_event_max", "cooldown_minutes", "send_resolutions"],
   analysis: ["enabled", "interval_minutes", "notifications_enabled", "notify_severity", "notify_cooldown_minutes",
     "uncorroborated_route", "uncorroborated_route_source"],
   fleet_sweep: ["enabled", "interval_minutes"],
+  daily_report: ["enabled", "send_at", "time_zone", "title"],
 };
 
 /* A key that names a credential or a destination is never shown, whatever the read carries. */
@@ -250,8 +264,14 @@ export function sendResolutionsText(v) {
   return parts.length ? parts.join(", ") : "—";
 }
 
-/* A listed field whose value is an object, drawn by its own formatter (valueText draws any object as "—"). */
-const FIELD_TEXT = { "delivery.send_resolutions": sendResolutionsText };
+/** The analysis notify severity, a score, with the word the findings page gives it: 1.5 reads "Critical (1.5)". */
+export function notifySeverityText(v) {
+  if (v == null || v === "" || !Number.isFinite(Number(v))) return valueText(v);
+  return severityLabel(v) + " (" + String(v) + ")";
+}
+
+/* A listed field whose value is an object or a score, drawn by its own formatter (valueText draws any object as "—"). */
+const FIELD_TEXT = { "delivery.send_resolutions": sendResolutionsText, "analysis.notify_severity": notifySeverityText };
 
 /** Setting rows for one group: [{ setting, value }], only the fields the group allow-list names (or `fields`, when a
     section shows part of a group) that the group carries; a secret-shaped key is dropped even if it were listed. */
@@ -316,6 +336,13 @@ export function routeSeveritiesText(r) {
   return word === "critical" ? "Critical only" : word === "warning" ? "Warning only" : "Both";
 }
 
+/** The Report notice column (#6979), in the route dialog's words: whether the route posts a chat notice when an agent files a report. A
+    route read without the field, or with a word this page does not know, reads as Off, the same as the service. */
+export function routeReportNoticeText(r) {
+  const word = r && typeof r.report_notice === "string" ? r.report_notice.trim().toLowerCase() : "";
+  return word === "needs_person_or_change" ? "Needs a person or made a change" : word === "all" ? "All reports" : "Off";
+}
+
 /** The Send resolutions column (#5825), in the route dialog's words: send_resolutions null follows each channel's own
     "Send resolutions" setting, true always sends the cleared message to this route's destinations, false never does. A
     route read without the field reads as the channel setting, the same as null. */
@@ -335,6 +362,9 @@ export function routeRows(data) {
     family: r.family,
     applies_to: routeScopeText(r),
     severities: routeSeveritiesText(r),
+    report_notice: routeReportNoticeText(r),
+    /* #7656: the Slack channel id the bot posts the route's request threads into; blank when the route has none. */
+    slack_bot_channel: typeof r.slack_bot_channel === "string" ? r.slack_bot_channel : "",
     status: routeStatusText(r),
     channels: Array.isArray(r.configured_channels) ? r.configured_channels.filter((c) => !isSecretKey(c)).join(", ") : null,
     agent: routeAgentText(r),
@@ -702,7 +732,7 @@ export function redactPassword(text, ...secrets) {
   return out;
 }
 
-const TABS = [
+export const TABS = [
   { id: "servers", label: "Servers" },
   { id: "routes", label: "Notification Routes" },
   { id: "settings", label: "Alert Settings" },
@@ -713,6 +743,7 @@ const TABS = [
   { id: "agent-changes", label: "Agent changes" },
   { id: "server-actions", label: "Server actions" },
   { id: "profiles", label: "Environment Profiles" },
+  { id: "people", label: "People" },
 ];
 
 /* The tab last shown, so a repaint with a bare #/admin returns to it. */
@@ -773,6 +804,8 @@ let editForm = null;
 let opening = 0;
 let notice = null;
 let summary = null;
+/* #7558: the Servers summary is a quiet caption, except when the sign-in probe failed: that one is a real warning. */
+let summaryWarns = false;
 let busy = false;
 let held = null;
 let hashWatched = false;
@@ -796,7 +829,7 @@ function drawNotice() {
   if (notice) {
     nodes.push(el("div", { class: "strip " + (notice.isError ? "error" : "notice"), role: notice.isError ? "alert" : "status", text: notice.message }));
   }
-  if (summary) nodes.push(noticeStrip(summary));
+  if (summary) nodes.push(summaryWarns ? noticeStrip(summary) : captionStrip(summary));
   mount(layout.noticeBox, nodes);
 }
 
@@ -849,6 +882,7 @@ async function buildServers(body, generation) {
   }
   const rows = serverRows(res.data);
   summary = rows.length + (rows.length === 1 ? " server. " : " servers. ") + serversNote(session);
+  summaryWarns = session.probe_failed === true;
   drawNotice();
   mount(boxes.tableBox, VIZ.table({ servers: rows }, {
     rowsKey: "servers",
@@ -1255,7 +1289,8 @@ export function signingStatusLines(data) {
 }
 
 async function buildRoutes(body, generation) {
-  const [res, signing, session] = await Promise.all([readTool("get_notification_routes", {}), apiGet("/api/webhook-signing"), getSession()]);
+  const [res, signing, session, approvers] = await Promise.all([readTool("get_notification_routes", {}), apiGet("/api/webhook-signing"), getSession(),
+    apiGet("/api/notification-routes/nobody-can-approve")]);
   if (generation !== renderGeneration) return;
   const bad = failure(res);
   if (bad) return mount(body, bad);
@@ -1264,21 +1299,25 @@ async function buildRoutes(body, generation) {
   if (generation !== renderGeneration) return;
   const sourceRoutes = Array.isArray(res.data && res.data.routes) ? res.data.routes : [];
   const rows = routeRows(res.data).map((row, i) => ({ ...row, agent_use: routeUseText(sourceRoutes[i]) }));
-  const scopes = access.routes ? await readScopes() : { servers: [], tags: [] };
+  const scopes = access.routes ? await readScopes() : { servers: [], tags: [], complete: true };
   if (generation !== renderGeneration) return;
   const options = {
     canEdit: access.routes,
     routes: sourceRoutes,
     servers: scopes.servers,
     tags: scopes.tags,
+    scopesComplete: scopes.complete,
     repaint: () => (shownTab === "routes" && shownBody ? startBuilder("routes", shownBody, ++renderGeneration) : undefined),
   };
   /* A failed signing read leaves the strip out; the routes below are the page. */
   const signingNodes = signing && signing.kind === "data" ? signingStatusLines(signing.data).map((t) => noticeStrip(t)) : [];
   mount(body, [
     ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes(access.message, access.managed, access.adminWritesOff)),
-    noticeStrip(ROUTES_NOTE),
+    /* #7656: the Slack bot's tokens, for the same seat that edits routes. */
+    ...(access.routes ? slackBotTokenNodes(options) : []),
+    captionStrip(ROUTES_NOTE),
     ...signingNodes,
+    ...nobodyCanApproveNodes(approvers),
     VIZ.table({ routes: rows }, {
       rowsKey: "routes",
       columns: routeColumns(ROUTE_COLUMNS, options),
@@ -1287,13 +1326,22 @@ async function buildRoutes(body, generation) {
   ]);
 }
 
-/** The servers and tags the scope pickers offer, from the fleet read: [{id, name}]. */
-async function readScopes() {
-  const res = await apiGetFleet();
-  const d = res && res.kind !== "error" ? res.data || {} : {};
+/** The servers and tags the scope pickers offer: [{id, name, disabled}] and [{id, name}]. #7949: the servers come from the Servers tab's read, which
+    lists every configured server with its enabled state, so a disabled server is still in a picker and its name says so. The fleet read lists
+    enabled servers only; it is the tags' source and the servers' fallback. `complete` is false when either read failed, so a tab can say that a
+    scope may be missing from the list. */
+export async function readScopes() {
+  const [fleet, list] = await Promise.all([apiGetFleet(), apiGet("/api/admin/servers")]);
+  const fleetRead = !!fleet && fleet.kind === "data";
+  const d = fleetRead ? fleet.data || {} : {};
+  const listed = list && list.kind === "data" && list.data && Array.isArray(list.data.servers) ? list.data.servers : null;
+  const rows = listed
+    ? listed.filter((s) => Number.isInteger(s.server_id)).map((s) => ({ id: s.server_id, name: s.display_name || s.server_name || "server " + s.server_id, disabled: s.status === "Disabled" }))
+    : (Array.isArray(d.cards) ? d.cards : []).filter((c) => Number.isInteger(c.server_id)).map((c) => ({ id: c.server_id, name: c.display_name || "server " + c.server_id, disabled: false }));
   return {
-    servers: (Array.isArray(d.cards) ? d.cards : []).filter((c) => Number.isInteger(c.server_id)).map((c) => ({ id: c.server_id, name: c.display_name || "server " + c.server_id })),
+    servers: rows.map((s) => ({ id: s.id, name: s.disabled ? s.name + " (disabled)" : s.name, disabled: s.disabled })),
     tags: (Array.isArray(d.tags) ? d.tags : []).filter((t) => Number.isInteger(t.id)).map((t) => ({ id: t.id, name: t.name || "tag " + t.id })),
+    complete: listed !== null && fleetRead,
   };
 }
 
@@ -1307,20 +1355,41 @@ const buildProfilesTab = (body, generation) => buildProfiles(body, generation, {
 });
 
 const SETTINGS_NOTE =
-  "Read only. Delivery credentials (SMTP, webhooks) are not reported by this read. The data-collection flags " +
+  "Read only, except the Database Protection overdue ages and the Daily Health Report, which a signed-in admin can change here. When changes from the web are turned off, this page is read only. Delivery credentials (SMTP, webhooks) are not shown on this page. The data-collection flags " +
   "(plan capture and similar) are not carried by it either; they stay in the desktop Settings window.";
 
+/** #7410: a store with no saved alert settings yet says so in one plain sentence; the tool's text (it talks of rows and the store)
+    stays behind "More detail". Null for any other reply. */
+export function settingsUnavailableStrip(res) {
+  if (!res || res.kind !== "empty" || res.status !== "unavailable") return null;
+  return plainEmptyStrip(res, "No alert settings have been saved yet, so the service is running on its defaults.");
+}
+
 async function buildSettings(body, generation) {
-  const res = await readTool("get_alert_settings", {});
+  const [res, session] = await Promise.all([readTool("get_alert_settings", {}), getSession()]);
   if (generation !== renderGeneration) return;
-  const bad = failure(res);
+  const bad = settingsUnavailableStrip(res) || failure(res);
   if (bad) return mount(body, bad);
   const sections = settingSections(res.data);
   if (!sections.length) return mount(body, emptyStrip("The service reported no alert settings."));
-  const nodes = [noticeStrip(SETTINGS_NOTE)];
+  const nodes = [captionStrip(SETTINGS_NOTE)];
+  /* #7700: with web.allowAdminWrites off the service refuses both forms, so they are not drawn and the page says why. */
+  const writesOff = !!session && session.can_edit === true && session.admin_writes_off === true;
+  const canEditSettings = !!session && session.can_edit === true && !writesOff;
+  if (writesOff) nodes.push(captionStrip(adminListOnlyNote(session.managed_store === true, "this page lists the settings only", "To change one", true)));
   for (const s of sections) {
     nodes.push(el("h3", { class: "section-title", text: s.title }));
     nodes.push(VIZ.table({ rows: s.rows }, { rowsKey: "rows", columns: SETTING_COLUMNS }));
+    /* #7041: the Daily Health Report is the one setting group the web edits; a signed-in admin gets the form under its rows. */
+    /* #7611: the three Database Protection overdue ages are editable under the alert thresholds, the same way. */
+    if (s.title === "Alert Thresholds" && canEditSettings && ["backup_overdue", "log_backup_overdue", "checkdb_overdue"].some((g) => res.data[g])) {
+      nodes.push(databaseProtectionEditor(res.data, () => (shownTab === "settings" && shownBody ? startBuilder("settings", shownBody, ++renderGeneration) : undefined)));
+    }
+    /* #7700: Preview only reads, so with writes off the Preview button is still drawn (no Save, no inputs). */
+    if (s.title === "Daily Health Report" && writesOff) nodes.push(dailyReportPreviewOnly());
+    if (s.title === "Daily Health Report" && canEditSettings) {
+      nodes.push(dailyReportEditor(res.data.daily_report, () => (shownTab === "settings" && shownBody ? startBuilder("settings", shownBody, ++renderGeneration) : undefined)));
+    }
   }
   mount(body, nodes);
 }
@@ -1351,13 +1420,17 @@ export const FEEDBACK_NOTE =
   "one that did. A second feedback from the same person replaces their first. Reports are listed newest first.";
 
 /* Shown instead of the form when the store says this dashboard's login may not record (can_record false). */
-export const feedbackListOnly = (managed, adminWritesOff) => listOnlyNote(managed, "this page is list-only", "To record feedback", adminWritesOff);
+export const feedbackListOnly = (managed, adminWritesOff) => adminListOnlyNote(managed, "this page is list-only", "To record feedback", adminWritesOff);
 
 /* What the counts and the list are taken over, in words: the answer's own window (hours_back). */
 export function feedbackWindowLabel(hours) {
-  const h = Number.isInteger(hours) && hours > 0 ? hours : 168;
-  const span = h % 24 === 0 ? (h / 24) + (h === 24 ? " day" : " days") : h + " hours";
-  return "Counts and reports cover the requests opened in the last " + span + " that have a report.";
+  return "Counts and reports cover the requests opened in the last " + windowSpan(hours, 168) + " that have a report.";
+}
+
+/* #7558: a window the read counts in hours, in the unit a person reads: whole days when it is one ("7 days"), hours otherwise. */
+export function windowSpan(hours, fallback) {
+  const h = Number.isInteger(hours) && hours > 0 ? hours : fallback;
+  return h % 24 === 0 ? (h / 24) + (h === 24 ? " day" : " days") : h + " hours";
 }
 
 export const FEEDBACK_FAMILY_COLUMNS = [
@@ -1470,16 +1543,19 @@ async function buildFeedback(body, generation) {
   const data = res.data || {};
   const requests = Array.isArray(data.requests) ? data.requests : [];
   const families = Array.isArray(data.families) ? data.families : [];
-  const rerender = () => buildFeedback(body, generation);
+  /* #7953: the re-read after a feedback write runs under a new render generation, as every other tab's repaint does. The generation this
+     card was built under is stale once the 60 s poll has drawn, and a re-read under it would return at buildFeedback's first line and
+     draw nothing, leaving "No feedback yet." beside "Feedback recorded." until the next poll. */
+  const rerender = () => (shownTab === "feedback" && shownBody ? startBuilder("feedback", shownBody, ++renderGeneration) : undefined);
   const canRecord = session.can_edit === true && data.can_record === true;
-  const nodes = [noticeStrip(FEEDBACK_NOTE)];
-  if (data.can_record !== true) nodes.push(noticeStrip(feedbackListOnly(session.managed_store === true, session.admin_writes_off === true)));
+  const nodes = [captionStrip(FEEDBACK_NOTE)];
+  if (data.can_record !== true) nodes.push(captionStrip(feedbackListOnly(session.managed_store === true, session.admin_writes_off === true)));
   nodes.push(el("h3", { class: "section-title", text: "False positives by alert family" }));
   nodes.push(el("p", { class: "mute-label", "data-fb-window": "1", text: feedbackWindowLabel(data.hours_back) }));
   nodes.push(VIZ.table({ families }, {
     rowsKey: "families",
     columns: FEEDBACK_FAMILY_COLUMNS,
-    emptyText: "No investigation reports in the last " + (data.hours_back || 168) + " hours.",
+    emptyText: "No investigation reports in the last " + windowSpan(data.hours_back, 168) + ".",
   }));
   nodes.push(el("h3", { class: "section-title", text: "Reports" }));
   if (data.truncated === true) nodes.push(noticeStrip("Showing the newest " + requests.length + " reports; older ones in the window are not listed, and the counts above still cover them."));
@@ -1577,15 +1653,16 @@ async function buildPractice(body, generation) {
   if (bad) return mount(body, bad);
   const data = res.data || {};
   const agents = practiceRows(data.agents);
-  const nodes = [noticeStrip(PRACTICE_NOTE)];
+  const nodes = [captionStrip(PRACTICE_NOTE)];
   const practiceAccess = writeAccess(session);
-  if (practiceAccess === "sign-in") nodes.push(noticeStrip(SIGN_IN_SENTENCE));
+  if (practiceAccess === "sign-in") nodes.push(captionStrip(SIGN_IN_SENTENCE));
+  if (practiceAccess === "off") nodes.push(captionStrip(adminListOnlyNote(session.managed_store === true, "this page lists the scores only", "To start a practice request", true)));
   if (practiceAccess === "yes") {
     const feedback = await apiGet("/api/investigation-feedback");
     if (generation !== renderGeneration) return;
     nodes.push(practiceStartForm(feedback.kind === "data" ? judgedCases(feedback.data) : []));
   }
-  nodes.push(el("p", { class: "mute-label", "data-practice-window": "1", text: "Practice requests opened in the last " + (data.hours_back || 720) + " hours." }));
+  nodes.push(el("p", { class: "mute-label", "data-practice-window": "1", text: "Practice requests opened in the last " + windowSpan(data.hours_back, 720) + "." }));
   if (!agents.length) nodes.push(emptyStrip("No agent has reported on a practice request in this window."));
   else nodes.push(VIZ.table({ agents }, { rowsKey: "agents", columns: PRACTICE_COLUMNS, emptyText: "No practice scores." }));
   mount(body, nodes);
@@ -1612,7 +1689,9 @@ export const NOTE_COLUMNS = [
 const NOTES_NOTE_EDITING =
   "Notes an agent proposed that nobody has decided. An approved note goes into the briefs for its server; a rejected note " +
   "is kept, marked rejected, and never goes into a brief. The text cannot be edited here.";
+const NOTES_NOTE_LISTED = "Notes an agent proposed that nobody has decided.";
 const NOTES_NOTE_READ_ONLY = "Notes an agent proposed that nobody has decided. This sign-in is read-only, so it cannot approve or reject them.";
+const NOTES_NOTE_UNCONFIRMED = "Notes an agent proposed that nobody has decided. Could not check whether this sign-in can approve or reject them. Reload the page to try again.";
 const NOTES_NOTE_EXPIRY =
   " A note stops reaching briefs when it expires (the Expires column), and an expired note is not listed.";
 const NOTE_NOT_PENDING = "That note is not pending: it was already decided, or it is gone.";
@@ -1645,6 +1724,15 @@ export function pendingNotesTruncatedNotice(data) {
   return "This list shows the oldest " + shown + " pending notes and more are waiting. Approve or reject some and the next ones appear.";
 }
 
+/** The service's own sentence for a refused change, or null. A refusal the service made is a 403 whose body carries a `reason`
+    code beside its `error` sentence (store_refused, admin_writes_off, read_only_seat, reads_only_dashboard, sign_in_required: #7955),
+    and the sentence says what to do about that reason. The page shows it as sent and never matches its words. A 403 with no reason or
+    no sentence did not come from the service's refusal (a proxy, say), so the caller says its own read-only line. */
+function refusalSentence(res, body) {
+  if (!res || res.status !== 403 || !body) return null;
+  return typeof body.reason === "string" && body.reason !== "" && typeof body.error === "string" && body.error !== "" ? body.error : null;
+}
+
 /** What a decision's answer says, in plain words: { message, isError, reread }. `verb` is "approve" or "reject". An expired
     session says nothing here (the shell has already told the person). A note that was already decided, or is gone, is a 404:
     the list is stale, so it is read again. */
@@ -1655,9 +1743,9 @@ export function noteDecisionOutcome(verb, noteId, res) {
   const body = res.body && typeof res.body === "object" ? res.body : null;
   if (res.status === 200 && body && body.status === past) return { message: "Note " + noteId + " " + past + ".", isError: false, reread: true };
   if (res.status === 404) return { message: "Note " + noteId + " was not changed. " + ((body && body.error) || NOTE_NOT_PENDING), isError: true, reread: true };
-  /* The store refused the write for privilege: the web host's login is not the admin role. Its sentence says how to decide; the list stays. */
-  if (res.status === 403 && body && typeof body.error === "string" && body.error.indexOf("Deciding a note needs") === 0) return { message: body.error, isError: true, reread: false };
-  if (res.status === 403 && body && body.error === SIGN_IN_SENTENCE) return { message: body.error, isError: true, reread: false };
+  /* A refusal the service made (the store login's privilege, the admin-writes switch, a read-only seat, no sign-in): its own sentence says what to do; the list stays. */
+  const refused = refusalSentence(res, body);
+  if (refused) return { message: refused, isError: true, reread: false };
   if (res.status === 403) return { message: "This sign-in is read-only, so it cannot " + verb + " notes.", isError: true, reread: false };
   const said = body && typeof body.error === "string" && body.error ? " " + body.error : "";
   return { message: "Note " + noteId + " was not " + past + ". The service answered " + res.status + "." + said, isError: true, reread: false };
@@ -1743,7 +1831,7 @@ function noteWriteForm(servers) {
     [el("option", { value: "", text: "Fleet (every server)" })].concat(
       servers.filter((s) => Number.isInteger(s.server_id)).map((s) => el("option", { value: String(s.server_id), text: s.display_name || s.server_name || "server " + s.server_id }))));
   const metric = el("input", { type: "text", class: "tag-input", "data-note-field": "metric_name", placeholder: "optional, such as Blocking", "aria-label": "Metric the note is about" });
-  const text = el("textarea", { "data-note-field": "note_text", rows: "3", maxlength: String(NOTE_MAX_LENGTH), "aria-label": "Note text" });
+  const text = el("textarea", { class: "tag-input", "data-note-field": "note_text", rows: "3", maxlength: String(NOTE_MAX_LENGTH), "aria-label": "Note text" });
   const days = el("input", { type: "number", class: "tag-input", "data-note-field": "days", min: "1", max: String(NOTE_MAX_DAYS), "aria-label": "Keep for days" });
   server.value = noteDraft.server_id;
   metric.value = noteDraft.metric_name;
@@ -1798,8 +1886,9 @@ async function buildPending(body, generation) {
      not signed in sees the list and the sentence that says what to do. */
   const access = writeAccess(session);
   const canEdit = access === "yes";
-  nodes.push(noticeStrip((canEdit ? NOTES_NOTE_EDITING : NOTES_NOTE_READ_ONLY) + NOTES_NOTE_EXPIRY));
-  if (access === "sign-in") nodes.push(noticeStrip(SIGN_IN_SENTENCE));
+  nodes.push(captionStrip((canEdit ? NOTES_NOTE_EDITING : session.probe_failed === true ? NOTES_NOTE_UNCONFIRMED : access === "off" ? NOTES_NOTE_LISTED : NOTES_NOTE_READ_ONLY) + NOTES_NOTE_EXPIRY));
+  if (access === "sign-in") nodes.push(captionStrip(SIGN_IN_SENTENCE));
+  if (access === "off") nodes.push(captionStrip(adminListOnlyNote(session.managed_store === true, "this page lists the notes only", "To approve, reject or write a note", true)));
   if (canEdit) {
     const serverList = await apiGet("/api/admin/servers");
     if (generation !== renderGeneration) return;
@@ -1833,12 +1922,12 @@ export const OVERRIDE_COLUMNS = [
 ];
 
 const OVERRIDES_NOTE_EDITING =
-  "A threshold held for one server, for one database on it, or for a server tag (every server under the tag and the tags below it), that differs from the global value. " +
+  "This list shows each threshold that differs from the global value, for one server, one database or a server tag (every server under the tag and the tags below it). " +
   "A database override wins over a server override, then the deepest tag the server is under, then the global value. A change applies within the alert engine's reload interval. To silence an alert, mute it.";
 const overridesNoteReadOnly = (managed, adminWritesOff) =>
-  "A threshold held for one server, for one database on it, or for a server tag, that differs from the global value. " +
-  listOnlyNote(managed, "this page lists them only", "To change an override", adminWritesOff);
-const OVERRIDE_DENIED = "Changing a threshold override needs";
+  "This list shows each threshold that differs from the global value, for one server, one database or a server tag. " +
+  adminListOnlyNote(managed, "this page lists them only", "To change an override", adminWritesOff);
+const OVERRIDES_NOTE_UNCONFIRMED = "This list shows each threshold that differs from the global value, for one server, one database or a server tag. Could not check whether this sign-in can change them. Reload the page to try again.";
 
 /** The rows of the overrides grid from the list read's body. `database` and `server_id` stay on the row for Edit and Remove. */
 export function overrideRows(data) {
@@ -1894,9 +1983,8 @@ export function overrideOutcome(verb, res) {
   if (res.status === 200 && body && (body.status === "ok" || body.status === "cleared")) {
     return { message: body.status === "cleared" ? "Override removed. The global value applies again." : "Override saved.", isError: false, reread: true };
   }
-  if (res.status === 403 && body && typeof body.error === "string" && body.error.indexOf(OVERRIDE_DENIED) === 0) {
-    return { message: body.error, isError: true, reread: false };
-  }
+  const refused = refusalSentence(res, body);
+  if (refused) return { message: refused, isError: true, reread: false };
   if (res.status === 403) return { message: "This sign-in is read-only, so it cannot change overrides.", isError: true, reread: false };
   const said = body && typeof body.error === "string" && body.error ? " " + body.error : "";
   return {
@@ -1982,7 +2070,12 @@ function overrideActions(row) {
   });
   const remove = el("button", {
     class: "btn", type: "button", text: "Remove", "aria-label": "Remove " + row.key + " for " + row.scope_text, "data-action": "remove-override",
-    onClick: () => changeOverride("clear", { server: row.tag_id == null ? row.server_name : "", tag: row.tag_id == null ? "" : String(row.tag_id), key: row.key, database: row.database }),
+    onClick: () => {
+      /* #7954: Remove sits beside Edit, so it asks first and names what goes away, as the route Delete does. */
+      const where = row.scope_text + (row.database ? ", database " + row.database : "");
+      if (!window.confirm("Remove the " + row.key + " override for " + where + "? Its value " + row.value + " goes away and the global value applies at the engine's next reload.")) return undefined;
+      return changeOverride("clear", { server: row.tag_id == null ? row.server_name : "", tag: row.tag_id == null ? "" : String(row.tag_id), key: row.key, database: row.database });
+    },
   });
   return el("span", { class: "row-actions" }, [edit, remove]);
 }
@@ -2004,7 +2097,7 @@ async function buildOverrides(body, generation) {
      the store login holds the write grant on this table. */
   const canEdit = session.can_edit === true && !!res.data && res.data.can_edit === true;
   const keys = Array.isArray(res.data && res.data.keys) ? res.data.keys : [];
-  nodes.push(noticeStrip(canEdit ? OVERRIDES_NOTE_EDITING : overridesNoteReadOnly(session.managed_store === true, session.admin_writes_off === true)));
+  nodes.push(captionStrip(canEdit ? OVERRIDES_NOTE_EDITING : session.probe_failed === true ? OVERRIDES_NOTE_UNCONFIRMED : overridesNoteReadOnly(session.managed_store === true, session.admin_writes_off === true)));
   if (res.data && typeof res.data.note === "string" && res.data.note) nodes.push(noticeStrip(res.data.note));
   if (canEdit) nodes.push(overrideFormNode(Array.isArray(res.data.servers) ? res.data.servers : [], keys, res.data.tags));
   nodes.push(VIZ.table({ overrides: overrideRows(res.data) }, {
@@ -2037,7 +2130,18 @@ const serverActionsContext = {
 };
 const buildServerActionsTab = (body, generation) => buildServerActions(body, generation, serverActionsContext);
 
-const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, practice: buildPractice, pending: buildPending, overrides: buildOverrides, "agent-changes": buildAgentChangesTab, profiles: buildProfilesTab, "server-actions": buildServerActionsTab };
+/* People (#7107) lives in its own file too, with the same helpers and the scope pickers' servers and tags. */
+const peopleContext = {
+  ...agentChangesContext,
+  readScopes,
+  repaint: () => {
+    if (shownTab === "people" && shownBody) return startBuilder("people", shownBody, ++renderGeneration);
+    return null;
+  },
+};
+const buildPeopleTab = (body, generation) => buildPeople(body, generation, peopleContext);
+
+const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, practice: buildPractice, pending: buildPending, overrides: buildOverrides, "agent-changes": buildAgentChangesTab, profiles: buildProfilesTab, "server-actions": buildServerActionsTab, people: buildPeopleTab };
 
 /* Run a tab's builder. A builder that throws leaves an error strip: in the Servers tab's table area when its boxes are on the
    page (the form above it is never replaced), else in the body. */
@@ -2049,41 +2153,74 @@ function startBuilder(tabId, body, generation) {
   });
 }
 
+/* True when `hash` is this page's: #/admin or #/admin/<tab>. */
+const showsAdmin = (hash) => hash === "#/admin" || hash.startsWith("#/admin/");
+
 /* True when `hash` shows the Servers tab: #/admin or #/admin/servers, or a tab name the page does not know while the
    Servers tab is the one on screen (renderAdmin falls back the same way). */
 function showsServers(hash) {
-  if (hash !== "#/admin" && !hash.startsWith("#/admin/")) return false;
+  if (!showsAdmin(hash)) return false;
   return findTab(hash.slice("#/admin".length).replace(/^\//, "")).id === "servers";
+}
+
+/* #7951: the Alert Settings editors' unsaved text is dropped, so the next draw of the tab shows the saved values. */
+function clearSettingsDrafts() {
+  clearDailyReportDraft();
+  clearDatabaseProtectionDraft();
 }
 
 /* The one hashchange listener (D6, review finding 6). Another Admin tab is seen by renderAdmin, but leaving the page for
    another one is seen by nothing else, because no render of this page follows it. A hash that no longer shows the Servers
-   tab discards the open form, password first, and drops a by-id read still in flight. Discarding twice is harmless. */
+   tab discards the open form, password first, and drops a by-id read still in flight. Discarding twice is harmless.
+   #7951: a hash that leaves Admin also drops the Alert Settings editors' unsaved text. */
 function onHashChange() {
-  if (!showsServers(routeHash())) closeEdit();
+  const hash = routeHash();
+  if (!showsServers(hash)) closeEdit();
+  if (!showsAdmin(hash)) clearSettingsDrafts();
 }
 
-export function renderAdmin(main, tabId) {
+/* #7951: input types a person clicks rather than types in. A click leaves the focus on one, and a poll while it has the focus still draws. */
+const CLICK_INPUT_TYPES = ["checkbox", "radio", "button", "submit", "reset", "file", "range", "color"];
+
+/* #7951: true while the focused element inside `root` is a box a person types in or picks from: a textarea, a select, or an input that
+   takes text (not one of CLICK_INPUT_TYPES). */
+function typingInside(root) {
+  const focused = document.activeElement;
+  if (!focused || !root || !root.contains(focused)) return false;
+  const tag = String(focused.tagName).toUpperCase();
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  return tag === "INPUT" && !CLICK_INPUT_TYPES.includes(String(focused.type || "").toLowerCase());
+}
+
+/** `opts.poll` is true when the 60 s poll (or the Refresh button) re-renders the page; a hashchange and the first paint carry no opts. */
+export function renderAdmin(main, tabId, opts) {
   if (!hashWatched) {
     hashWatched = true;
     window.addEventListener("hashchange", onHashChange);
   }
   const tab = findTab(tabId);
   activeTab = tab.id;
-  const generation = ++renderGeneration;
   /* A repaint of the tab already on screen keeps the body it drew, so the page does not collapse and lose its scroll
      position while the read is in flight; the loading strip is only for the first draw of a tab. */
   const sameTab = !!shownBody && shownTab === tab.id;
+  /* #7951: every tab but Servers mounts new nodes on each draw, so a box being typed in would be a new node and the caret, an open
+     list and an IME composition would be lost. While a form box inside the tab body has the focus, the poll's tick leaves the tab as it
+     is; the next tick draws from the then-current state. A hashchange, a save's repaint and the first paint are not polls and still draw.
+     The Servers tab keeps its nodes across a draw (serverBoxes), so its poll reads the list under an open form and is not held back. */
+  if (opts && opts.poll === true && sameTab && tab.id !== "servers" && shownBody.parentNode === main && typingInside(shownBody)) return;
+  const generation = ++renderGeneration;
   if (!sameTab) {
-    /* Arriving at a tab other than the one on screen discards an open edit form (its password is cleared first) and the
-       Servers tab's page state. The one thing kept is the answer of a save that landed while the Servers tab was off screen:
-       arriving at that tab shows it, once. */
+    /* Arriving at a tab other than the one on screen discards an open edit form (its password is cleared first), the
+       Servers tab's page state and the Alert Settings editors' unsaved text (#7951). The one thing kept is the answer of a
+       save that landed while the Servers tab was off screen: arriving at that tab shows it, once. */
     closeEdit();
+    clearSettingsDrafts();
     layout = null;
     summary = null;
     notesStatus = null;
     resetAgentChangesStatus();
     resetServerActionsStatus();
+    resetPeopleStatus();
     notice = tab.id === "servers" ? held : null;
     if (tab.id === "servers") held = null;
   }
@@ -2094,7 +2231,12 @@ export function renderAdmin(main, tabId) {
      around the body changes, so main is NOT mounted again. Mounting main takes the body, and the open form inside it, out of
      the document, and a focused box inside a node taken out loses its focus. Only the builder runs. */
   if (!(sameTab && body.parentNode === main)) {
-    mount(main, [el("div", { class: "page-head" }, [el("h2", { text: "Admin" })]), tabBar(tab), body]);
+    const writesOffBox = el("div", { class: "admin-writes-off" });
+    mount(main, [el("div", {}, [el("div", { class: "page-head" }, [el("h2", { text: "Admin" })]), writesOffBox]), tabBar(tab), body]);
+    /* #7558: with web.allowAdminWrites off, every tab used to open its note with the same "turned off" sentence. It is said once, here. */
+    getSession().then((session) => {
+      if (session && session.managed_store === true && session.admin_writes_off === true) mount(writesOffBox, [captionStrip(ADMIN_WRITES_OFF_NOTE)]);
+    }, () => {});
   }
   startBuilder(tab.id, body, generation);
 }

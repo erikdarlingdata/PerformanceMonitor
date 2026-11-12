@@ -45,7 +45,7 @@ public sealed class McpToolGuideHeadsHealthParserTests
         ("get_health_parser_scheduler_issues", "Gated: only samples where SQL Server's own CPU is pinned, other processes are using half the box or more, or memory utilization has dropped to half or below."),
         ("get_health_parser_memory_conditions", "Gated: only snapshots whose last notification is RESOURCE_MEMPHYSICAL_LOW."),
         ("get_health_parser_cpu_tasks", "Gated: WARNING-state results with at least 10 pending tasks only."),
-        ("get_health_parser_memory_broker", "Gated: RESOURCE_MEMPHYSICAL_LOW notifications only."),
+        ("get_health_parser_memory_broker", "Gated: SHRINK notifications only."),
         ("get_health_parser_significant_waits", "Floors: a real session, a non-BACKUP statement, at least 500 ms, and a wait type off the idle/background list; shorter waits are never listed."),
     ];
 

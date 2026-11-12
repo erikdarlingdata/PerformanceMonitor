@@ -256,15 +256,3 @@ export function closeDatabaseFilter() {
   const paint = painters.get(id);
   if (paint) paint();
 }
-
-/** Forgets the held inventories and the open flag. For tests. */
-export function resetDatabaseFilterState() {
-  inventories.clear();
-  cutInventories.clear();
-  for (const id of [...searchTimers.keys()]) dropSearch(id);
-  searchAnswers.clear();
-  searchSeqs.clear();
-  painters.clear();
-  openFor = null;
-  loadFailed = "";
-}

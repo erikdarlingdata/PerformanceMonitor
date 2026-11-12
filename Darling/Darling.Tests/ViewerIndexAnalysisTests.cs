@@ -319,7 +319,8 @@ public sealed class ViewerIndexAnalysisTests
 
         // sp_IndexCleanup @min_reads / @min_writes / @min_size_gb / @min_rows / @dedupe_only defaults (0 / off).
         Assert.False(options.DedupeOnly);
-        Assert.Equal(0m, options.MinSizeGb);
+        // The size minimum is 0.01 GB (#7706): a smaller index is not offered for compression.
+        Assert.Equal(0.01m, options.MinSizeGb);
         Assert.Equal(0, options.MinReads);
         Assert.Equal(0, options.MinWrites);
         Assert.Equal(0, options.MinRows);

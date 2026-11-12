@@ -78,7 +78,8 @@ const findAll = (node, test, out = []) => {
   return out;
 };
 const byTag = (tag) => (n) => n.tag === tag;
-const noticeTexts = (root) => findAll(root, (n) => String(n.className).split(" ").includes("notice")).map((n) => n.textContent);
+// #7402: a plain count is the quiet "source" caption and a cut list is the yellow "notice"; both are the tab's one-line count note.
+const noticeTexts = (root) => findAll(root, (n) => String(n.className).split(" ").some((c) => c === "notice" || c === "source")).map((n) => n.textContent);
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "index-analysis-limit-"));
 try {
@@ -167,6 +168,71 @@ try {
   stored.handlers.change();
   await settle();
   out.storedSpelling = { typedLower: lower, typedUnknown: seen().map((r) => r.database_name), shown: stored.value };
+
+  // #7701 / #7702: a 2 MB size reads in MB (not 0.00), a left-over database carries its mark, and Collected sits right after Database.
+  body = JSON.stringify({
+    ...payload(1, 1, 500),
+    overall: { total_size_gb: 0.0021, total_max_savings_gb: 0.001 },
+    databases: [
+      { database_name: "Alpha", total_size_gb: 0.002, unused_size_gb: 0.0004, captured_at: "2026-01-15T12:00:00.0000000Z" },
+      { database_name: "Alpha", total_size_gb: 0.5, left_over: true, captured_at: "2026-01-05T12:00:00.0000000Z" },
+    ],
+    // 0.000391 GB is how the read sends an index of 0.4 MB (six places); it must print 0.4 MB, not 0.400384 MB.
+    recommendations: [{ ...rec(1), index_size_gb: 0.000391 }],
+  });
+  root = tab.build("srv-f", {});
+  await settle();
+  const headerRow = findAll(root, byTag("tr"))[0];
+  out.sizes = {
+    text: root.textContent,
+    header: findAll(headerRow, byTag("th")).map((n) => n.textContent),
+    // every grid as header + body rows, so a test can read one cell of one row
+    tables: findAll(root, byTag("table")).map((t) => ({
+      header: findAll(t, byTag("th")).map((n) => n.textContent),
+      rows: findAll(t, byTag("tr")).map((r) => findAll(r, byTag("td")).map((n) => n.textContent)).filter((r) => r.length),
+    })),
+  };
+  // #7702 item 1: the size helper at its edges. Each database carries one Size, sent in GB as the read sends it.
+  const mbToGb = (mb) => mb / 1024;
+  const edges = {
+    Exact: mbToGb(0.005), Below: mbToGb(0.004999), Zero: 0, Negative: mbToGb(-0.4), NegTiny: mbToGb(-0.001),
+    Under1: mbToGb(0.994), RoundsTo1: mbToGb(0.999), Over1: mbToGb(1.001), Over1Half: mbToGb(1.5),
+  };
+  body = JSON.stringify({
+    ...payload(1, 1, 500),
+    overall: { total_size_gb: 0 },
+    databases: Object.keys(edges).map((k) => ({ database_name: k, total_size_gb: edges[k], captured_at: "2026-01-15T12:00:00.0000000Z" })),
+    recommendations: [rec(1)],
+  });
+  root = tab.build("srv-g", {});
+  await settle();
+  const edgeGrid = findAll(root, byTag("table")).find((t) => findAll(t, byTag("th")).some((n) => n.textContent === "Size"));
+  const edgeHeader = findAll(edgeGrid, byTag("th")).map((n) => n.textContent);
+  out.edges = {};
+  for (const r of findAll(edgeGrid, byTag("tr"))) {
+    const cells = findAll(r, byTag("td")).map((n) => n.textContent);
+    if (cells.length && edges[cells[edgeHeader.indexOf("Database")]] !== undefined) out.edges[cells[edgeHeader.indexOf("Database")]] = cells[edgeHeader.indexOf("Size")];
+  }
+  // #7538, #7651: a read that left databases out names them on the empty page and on the page with rows. The empty page's own sentence no
+  // longer repeats the count, so the page must draw the left-out strip itself. Each step is every strip under the tab, in the order drawn.
+  const leftOutFields = {
+    databases_left_out: ["a_old", "b_old"],
+    databases_left_out_count: 2,
+    databases_left_out_note: "These databases were left out of this read because the server's newest database snapshot no longer lists them. Name one in database_name to read its history.",
+  };
+  const stripsOf = (node) => findAll(node, (n) => String(n.className).split(" ").some((c) => c === "notice" || c === "source" || c === "empty")).map((n) => n.textContent);
+  body = JSON.stringify({ status: "empty", message: "No index statistics for a database this server still has in the latest snapshots.", ...leftOutFields });
+  root = tab.build("srv-h", {});
+  await settle();
+  out.leftOutEmpty = stripsOf(root);
+  body = JSON.stringify({ ...payload(3, 3, 500), ...leftOutFields });
+  root = tab.build("srv-i", {});
+  await settle();
+  out.leftOutData = stripsOf(root);
+  body = JSON.stringify(payload(3, 3, 500));
+  root = tab.build("srv-j", {});
+  await settle();
+  out.leftOutNone = stripsOf(root);
   console.log(JSON.stringify(out));
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });

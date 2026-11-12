@@ -25,7 +25,7 @@ public sealed class PlanViewerBenefitDisplayTests
     {
         var warning = new PlanWarning { WarningType = "Serial Plan", MaxBenefitPercent = 67.5 };
 
-        Assert.Equal("\u26A0 Serial Plan \u2014 up to 67.5% benefit", PlanWarningDisplay.PlanWarningHeader(warning));
+        Assert.Equal("\u26A0 Serial Plan: up to 67.5% benefit", PlanWarningDisplay.PlanWarningHeader(warning));
     }
 
     [Fact]
@@ -38,7 +38,7 @@ public sealed class PlanViewerBenefitDisplayTests
             Source = PlanWarningSource.SqlServer
         };
 
-        Assert.Equal("\u26A0 Serial Plan [SQL Server] \u2014 up to 67.5% benefit", PlanWarningDisplay.PlanWarningHeader(warning));
+        Assert.Equal("\u26A0 Serial Plan [SQL Server]: up to 67.5% benefit", PlanWarningDisplay.PlanWarningHeader(warning));
     }
 
     [Fact]

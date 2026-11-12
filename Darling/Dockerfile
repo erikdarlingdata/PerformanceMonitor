@@ -37,6 +37,25 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0.403 AS build
 # existed.
 ARG VERSION=
 WORKDIR /src
+
+# #7100: restore from only the files that decide WHAT is restored (the build-wide props, the SDK pin, the feed, and the
+# project files of the service's closure), in a layer of its own, so a source-only change reuses the restored packages
+# instead of downloading them again (darling-linux-store.yml carries the layer cache across runs). Nothing here can break
+# the build: the publish below restores again, so a project the service newly references and this list lacks costs the
+# cached layer for that project, not a failure.
+COPY global.json Directory.Build.props Directory.Packages.props nuget.config ./
+COPY Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj Darling/PerformanceMonitor.Darling.Service/
+COPY Darling/PerformanceMonitor.Darling.Analysis/PerformanceMonitor.Darling.Analysis.csproj Darling/PerformanceMonitor.Darling.Analysis/
+COPY Darling/PerformanceMonitor.Darling.Remediation/PerformanceMonitor.Darling.Remediation.csproj Darling/PerformanceMonitor.Darling.Remediation/
+COPY Darling/PerformanceMonitor.Darling.Storage/PerformanceMonitor.Darling.Storage.csproj Darling/PerformanceMonitor.Darling.Storage/
+COPY PerformanceMonitor.Alerting/PerformanceMonitor.Alerting.csproj PerformanceMonitor.Alerting/
+COPY PerformanceMonitor.Analysis/PerformanceMonitor.Analysis.csproj PerformanceMonitor.Analysis/
+COPY PerformanceMonitor.Collectors/PerformanceMonitor.Collectors.csproj PerformanceMonitor.Collectors/
+COPY PerformanceMonitor.Common/PerformanceMonitor.Common.csproj PerformanceMonitor.Common/
+COPY PerformanceMonitor.Notifications/PerformanceMonitor.Notifications.csproj PerformanceMonitor.Notifications/
+COPY PerformanceMonitor.PlanAnalysis/PerformanceMonitor.PlanAnalysis.csproj PerformanceMonitor.PlanAnalysis/
+RUN dotnet restore Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj
+
 COPY . .
 RUN dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj \
     -c Release -o /app/publish ${VERSION:+-p:Version=$VERSION}
@@ -51,10 +70,16 @@ WORKDIR /app
 COPY --from=build /app/publish .
 
 # #3914: where the service keeps the passwords of the least-privilege roles it provisions on the compose store.
-# Created owner-only here because Docker seeds a new named volume from the image's directory, mode included, so
-# the compose file's darling-credentials volume starts owner-only too. The service creates each file 0600, and
-# keeps the store's log-hash key there as well (#4004).
-RUN mkdir -p /var/lib/darling/credentials && chmod 700 /var/lib/darling/credentials
+# Created owner-only here and given to $APP_UID, because Docker seeds a new named volume from the image's directory,
+# owner and mode included, so the compose file's darling-credentials volume starts owned by $APP_UID, mode 0700.
+# The service creates each file 0600, and keeps the store's log-hash key there as well (#4004).
+# The file log lives under CommonApplicationData, which is /usr/share on Linux, so that folder is given to $APP_UID too.
+# A volume created by an earlier release is owned by root and is not reseeded: it needs the documented chown to $APP_UID,
+# and until then the service stops collection and says so (#8141).
+RUN mkdir -p /var/lib/darling/credentials /usr/share/PerformanceMonitorDarling/logs \
+    && chown -R $APP_UID:$APP_UID /var/lib/darling /usr/share/PerformanceMonitorDarling \
+    && chmod 700 /var/lib/darling/credentials
+USER $APP_UID
 
 # The config mount point the compose file uses; override DARLING_CONFIG to relocate.
 ENV DARLING_CONFIG=/config/darling.json

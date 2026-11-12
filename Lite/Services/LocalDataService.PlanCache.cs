@@ -196,7 +196,8 @@ LIMIT 30";
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
-        command.CommandText = @"
+        /* #7445: the compiled-plan and size figures the shared bloat rule needs, beside the totals. */
+        command.CommandText = $@"
 WITH latest AS
 (
     SELECT MAX(collection_time) AS mx
@@ -209,7 +210,11 @@ SELECT
     COALESCE(SUM(total_plans), 0) AS total_plans,
     COALESCE(SUM(single_use_plans), 0) AS single_use_plans,
     MIN(oldest_plan_create_time) AS oldest_plan_create_time,
-    (SELECT mx FROM latest) AS collection_time
+    (SELECT mx FROM latest) AS collection_time,
+    COALESCE(SUM(total_size_mb), 0) AS total_size_mb,
+    COALESCE(SUM(total_plans) FILTER (WHERE {PlanCacheBloatRule.CompiledPredicateSql}), 0) AS compiled_plans,
+    COALESCE(SUM(single_use_plans) FILTER (WHERE {PlanCacheBloatRule.CompiledPredicateSql}), 0) AS compiled_single_use_plans,
+    COALESCE(SUM(single_use_size_mb) FILTER (WHERE {PlanCacheBloatRule.CompiledPredicateSql}), 0) AS compiled_single_use_size_mb
 FROM v_plan_cache_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT mx FROM latest)";
@@ -231,32 +236,23 @@ AND   collection_time = (SELECT mx FROM latest)";
             OldestPlanCreateTime = reader.IsDBNull(2) ? null : reader.GetDateTime(2),
             /* #3541 A10: the snapshot's own stamp, from the same `latest` CTE the totals are keyed on. NULL
                (no snapshot in the window) is the (0, 0, null) empty case the summary already returns. */
-            CollectionTime = reader.IsDBNull(3) ? null : reader.GetDateTime(3)
+            CollectionTime = reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+            TotalSizeMb = reader.IsDBNull(4) ? 0 : ToInt64(reader.GetValue(4)),
+            CompiledPlans = reader.IsDBNull(5) ? 0 : ToInt64(reader.GetValue(5)),
+            CompiledSingleUsePlans = reader.IsDBNull(6) ? 0 : ToInt64(reader.GetValue(6)),
+            CompiledSingleUseSizeMb = reader.IsDBNull(7) ? 0 : ToInt64(reader.GetValue(7))
         };
     }
 
     /// <summary>
-    /// The plan-cache bloat classification (single-use plan bloat), a pure client-side derivation mirroring
-    /// install/47's <c>report.plan_cache_bloat</c> and the Darling viewer's
-    /// <c>ViewerDataService.ClassifyPlanCacheBloat</c>. The ratio is single-use plans / total plans:
-    /// &gt; 50% CRITICAL, &gt; 30% HIGH, &gt; 20% MEDIUM, else NORMAL; the recommendation flips to the
-    /// "unparameterized queries / Forced Parameterization" hint at the same &gt; 20% threshold. An empty
-    /// cache (totalPlans == 0) is NORMAL.
+    /// The plan-cache bloat classification (single-use plan bloat), a pure client-side derivation by the one rule
+    /// every surface shares, <see cref="PlanCacheBloatRule"/> (#7445): a ratio over compiled plans only, and no
+    /// bloat while the single-use plans take under 100 MB.
     /// </summary>
-    public static PlanCacheBloat ClassifyPlanCacheBloat(long totalPlans, long singleUsePlans)
+    public static PlanCacheBloat ClassifyPlanCacheBloat(PlanCacheSummary summary)
     {
-        double singleUsePercent = totalPlans > 0 ? singleUsePlans * 100.0 / totalPlans : 0.0;
-
-        var level =
-            singleUsePercent > 50 ? "CRITICAL" :
-            singleUsePercent > 30 ? "HIGH" :
-            singleUsePercent > 20 ? "MEDIUM" :
-            "NORMAL";
-
-        var recommendation = singleUsePercent > 20
-            ? "Check for unparameterized queries / Consider Forced Parameterization"
-            : "Plan cache composition is healthy";
-
+        var (level, recommendation) = PlanCacheBloatRule.Classify(
+            summary.TotalPlans, summary.TotalSizeMb, summary.CompiledPlans, summary.CompiledSingleUsePlans, summary.CompiledSingleUseSizeMb);
         return new PlanCacheBloat(level, recommendation);
     }
 }
@@ -297,6 +293,12 @@ public class PlanCacheSummary
     public long TotalPlans { get; set; }
     public long SingleUsePlans { get; set; }
     public DateTime? OldestPlanCreateTime { get; set; }
+    /// <summary>The figures the bloat rule needs (#7445): the whole cache's size, and the plan count, single-use
+    /// count and single-use size over compiled plans only.</summary>
+    public long TotalSizeMb { get; set; }
+    public long CompiledPlans { get; set; }
+    public long CompiledSingleUsePlans { get; set; }
+    public long CompiledSingleUseSizeMb { get; set; }
 }
 
 /// <summary>The plan-cache bloat classification for the summary badge: the banded severity level plus the

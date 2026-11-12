@@ -698,6 +698,71 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     /// <summary>
+    /// #7776: the grid bounds its window on the same interval start the bars are keyed on, so an interval that started before the
+    /// window but was collected inside it is not a grid row (the left edge the slicer test above pins for the bars).
+    /// </summary>
+    [Fact]
+    public async Task Grid_DropsAnIntervalThatStartedBeforeTheWindow_EvenWhenItWasCollectedInsideIt()
+    {
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var startedBeforeWindow = HourFloor(now.AddHours(-26));
+        var collectedInsideWindow = now.AddHours(-22);
+
+        await SeedAsync(collectedInsideWindow, queryId: 92, planId: 992, FirstExecA,
+            executionCount: 4, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xEDGE3",
+            intervalId: 9003, intervalStart: startedBeforeWindow);
+
+        var rows = await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 24);
+
+        Assert.Empty(rows);
+    }
+
+    /// <summary>
+    /// #7776: the window's last interval, still open when the window ends and so collected after it, is a grid row, as it is a bar.
+    /// </summary>
+    [Fact]
+    public async Task Grid_KeepsAnIntervalThatStartedInsideTheWindow_ThoughItsClosingFetchLandedAfterIt()
+    {
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var startedInsideWindow = HourFloor(now.AddHours(-2));
+        var collectedAfterWindow = now.AddHours(2);
+
+        await SeedAsync(collectedAfterWindow, queryId: 93, planId: 993, FirstExecB,
+            executionCount: 6, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xEDGE4",
+            intervalId: 9004, intervalStart: startedInsideWindow);
+
+        var rows = await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 24);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(93, row.QueryId);
+        Assert.Equal(6, row.TotalExecutions);
+    }
+
+    /// <summary>
+    /// #7776: Lite's <c>get_query_store_top</c> MCP tool goes through the same <c>GetQueryStoreTopQueriesAsync</c> (it passes
+    /// <c>hours_back</c> and <c>as_of</c> straight in), so it places its window by interval start too. At <c>hours_back=4</c> an
+    /// interval that started five hours ago and was collected three and a half hours ago is outside the window, and a neighbouring
+    /// interval that started three hours ago is inside it. Darling's MCP tool still windows on collection_time (#7814).
+    /// </summary>
+    [Fact]
+    public async Task McpTopTool_PlacesTheWindowByIntervalStart_AtTheEdge()
+    {
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+
+        await SeedAsync(now.AddHours(-3.5), queryId: 94, planId: 994, FirstExecA,
+            executionCount: 4, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xEDGE5",
+            intervalId: 9005, intervalStart: HourFloor(now.AddHours(-5)));
+        await SeedAsync(now.AddHours(-2), queryId: 95, planId: 995, FirstExecB,
+            executionCount: 6, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xEDGE6",
+            intervalId: 9006, intervalStart: HourFloor(now.AddHours(-3)));
+
+        var rows = await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 4, asOfUtc: now);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(95, row.QueryId);
+    }
+
+    /// <summary>
     /// WATCHED (mutation): the duration trend carries the identical mismatch, and fixing only the slicer
     /// leaves the two charts on the same screen disagreeing about which interval is in the window.
     /// </summary>
@@ -760,6 +825,32 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
            (over-deduped to one row per query/plan). */
         var row = Assert.Single(rows);
         Assert.Equal(11L, row.TotalExecutions);
+    }
+
+    /// <summary>
+    /// #7169: the average over several intervals is weighted by each interval's executions, and the grid ranks on
+    /// total duration. Plan 5 has one 10 s execution in one interval and 10,000 executions of 1 ms in another: about
+    /// 2 ms on average and 20 s in total. The old read averaged the two interval averages (about 5 s) and ranked on
+    /// SUM(execution_count) * AVG(avg), about 50,000 s, which put it above plan 6 that really ran 30 s.
+    /// </summary>
+    [Fact]
+    public async Task TopQueries_AverageIsWeightedByExecutions_AndTheRankIsTotalDuration()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), queryId: 5, planId: 55, FirstExecA,
+            executionCount: 1, avgCpuUs: 10_000_000, avgDurationUs: 10_000_000, avgReads: 100, queryHash: "0xHASH_W5");
+        await SeedAsync(BucketStart.AddMinutes(15), queryId: 5, planId: 55, FirstExecB,
+            executionCount: 10_000, avgCpuUs: 1_000, avgDurationUs: 1_000, avgReads: 1, queryHash: "0xHASH_W5");
+        await SeedAsync(BucketStart.AddMinutes(5), queryId: 6, planId: 66, FirstExecA,
+            executionCount: 10_000, avgCpuUs: 3_000, avgDurationUs: 3_000, avgReads: 1, queryHash: "0xHASH_W6");
+
+        var rows = await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 24);
+
+        Assert.Equal(new long[] { 6, 5 }, rows.Select(r => r.QueryId).ToArray());
+        var skew = Assert.Single(rows, r => r.QueryId == 5);
+        Assert.Equal(10_001L, skew.TotalExecutions);
+        Assert.Equal((10_000_000.0 + 10_000.0 * 1_000.0) / 10_001.0 / 1000.0, skew.AvgDurationMs, precision: 6);
+        Assert.Equal(skew.AvgDurationMs, skew.AvgCpuTimeMs, precision: 6);
+        Assert.Equal((100.0 + 10_000.0) / 10_001.0, skew.AvgLogicalReads, precision: 6);
     }
 
     /// <summary>
@@ -961,9 +1052,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Contains("interval_start_time_utc AS point_time", source, StringComparison.Ordinal);
         Assert.Contains("collection_time AS point_time", source, StringComparison.Ordinal);
 
-        /* Both bucketed reads place work at the interval start when there is one — the slicer's
-           one-bucket lag fix. COALESCE, not a bare column, so legacy rows keep collection_time. */
-        Assert.Equal(2, Regex.Matches(source, @"date_trunc\('hour', COALESCE\(interval_start_time_utc, collection_time\)\)").Count);
+        /* The slicer places work at the interval start when there is one — its one-bucket lag fix. COALESCE, not a bare
+           column, so legacy rows keep collection_time. The bucket is the window's width in minutes (SlicerBuckets), built
+           once and used by both the SELECT and the GROUP BY. */
+        Assert.Single(Regex.Matches(source, @"time_bucket\(to_minutes\(CAST\(\$4 AS INTEGER\)\), COALESCE\(interval_start_time_utc, collection_time\)"));
     }
 
     /// <summary>Walks up from the test binary to the repo root so the pin works from any run directory.</summary>
@@ -1045,5 +1137,60 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             Assert.Equal(100L, r.TotalExecutions);
             Assert.Equal(8.0, r.AvgDurationMs, precision: 6);
         }
+    }
+
+    /// <summary>
+    /// #8575: the Query Store interval still open is rated over the time it has covered, not over its whole length. Two closed
+    /// hourly intervals keep their whole hour, the open one last captured 23.5 minutes in reads as its executions over 1,410 seconds
+    /// and is marked partial, and the same interval captured 30 seconds in is unrated.
+    /// </summary>
+    [Fact]
+    public async Task QueryStoreDurationTrend_RatesTheOpenIntervalOverTheTimeItHasCovered()
+    {
+        var openStart = new DateTime(DateTime.UtcNow.AddMinutes(-40).Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Unspecified);
+        var closedA = openStart.AddHours(-2);
+        var closedB = openStart.AddHours(-1);
+
+        await SeedAsync(closedA.AddHours(1).AddMinutes(5), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 4_412_812, avgCpuUs: 100, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xO1",
+            intervalId: 8101, intervalStart: closedA, intervalEnd: closedA.AddHours(1));
+        await SeedAsync(closedB.AddHours(1).AddMinutes(5), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 4_955_449, avgCpuUs: 100, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xO1",
+            intervalId: 8102, intervalStart: closedB, intervalEnd: closedB.AddHours(1));
+        await SeedAsync(openStart.AddSeconds(1410), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 2_020_046, avgCpuUs: 100, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xO1",
+            intervalId: 8103, intervalStart: openStart, intervalEnd: openStart.AddHours(1));
+
+        var points = await new LocalDataService(_duckDb).GetQueryStoreDurationTrendAsync(ServerId, hoursBack: 24);
+
+        Assert.Equal(3, points.Count);
+        Assert.Equal(4_412_812d / 3600d, points[0].ExecutionsPerSecond!.Value, 9);
+        Assert.Equal(4_955_449d / 3600d, points[1].ExecutionsPerSecond!.Value, 9);
+        Assert.Null(points[0].PartialCoveredSeconds);
+        Assert.Null(points[1].PartialCoveredSeconds);
+        Assert.Equal(2_020_046d / 1410d, points[2].ExecutionsPerSecond!.Value, 6);
+        Assert.Equal(1410d, points[2].PartialCoveredSeconds!.Value, 6);
+
+        /* The same interval last captured 30 seconds in: under a minute, so the point is unrated, with its count kept. */
+        using (var readLock = _duckDb.AcquireReadLock())
+        {
+            var connection = await SeedConnectionAsync();
+            using var delete = connection.CreateCommand();
+            delete.CommandText = "DELETE FROM query_store_stats WHERE runtime_stats_interval_id = 8103";
+            await delete.ExecuteNonQueryAsync();
+        }
+
+        await SeedAsync(openStart.AddSeconds(30), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 4_000, avgCpuUs: 100, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xO1",
+            intervalId: 8103, intervalStart: openStart, intervalEnd: openStart.AddHours(1));
+
+        var brief = await new LocalDataService(_duckDb).GetQueryStoreDurationTrendAsync(ServerId, hoursBack: 24);
+
+        Assert.Equal(3, brief.Count);
+        Assert.False(brief[2].HasRate);
+        Assert.Null(brief[2].ExecutionsPerSecond);
+        Assert.Equal(4_000L, brief[2].ExecutionCount);
+        Assert.Equal(30d, brief[2].PartialCoveredSeconds!.Value, 6);
+        Assert.Equal(4_412_812d / 3600d, brief[0].ExecutionsPerSecond!.Value, 9);
     }
 }

@@ -35,7 +35,7 @@ public sealed partial class PgTargetRelationshipGraph
            PgTargetScorer.Memory.cs's with its lineage. When the sum fits the box, the pressure roots alone and its
            advice says the memory is going to something the configuration did not budget. */
         AddEdge(PgTargetFactKeys.HostMemoryPressure, PgTargetFactKeys.ConfigMemoryOvercommit, HostMemoryCategory,
-            "The configured memory worst case exceeds this host — the arithmetic predicted the shortage the OS is reporting",
+            "The configured memory worst case exceeds this host: the arithmetic predicted the shortage the OS is reporting",
             facts => facts.TryGetValue(PgTargetFactKeys.ConfigMemoryOvercommit, out var sum) && sum.BaseSeverity > 0);
 
         /* Lane 2's knob is one term of the sum. Both are 0.4 advisories on a quiet server; joined, the knob's card carries

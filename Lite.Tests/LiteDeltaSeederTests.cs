@@ -398,6 +398,31 @@ public sealed class LiteDeltaSeederTests : IClassFixture<SharedDuckDbFixture>, I
     }
 
     /// <summary>
+    /// #7156: query_stats writes only the statements that moved, so a key idle across a restart has its newest row
+    /// older than the fifteen-minute window the other families seed from. The query_stats seed reads the gap policy's
+    /// hour, so that key's first post-restart interval is credited instead of stored as 0. The row is 40 minutes old
+    /// (inside the policy, outside fifteen minutes); on the old window it was never read and the delta was 0.
+    /// </summary>
+    [Fact]
+    public async Task Seed_QueryStats_KeyIdleLongerThanTheShortWindow_ButInsideTheGapPolicy_IsRestored()
+    {
+        var now = Truncate(DateTime.UtcNow);
+        await InsertKeyedQueryStatsAsync(RecentServerId, now.AddMinutes(-40), "0xSH1", 0, -1, "0xPH1", 10);
+        /* Older than the gap policy: outside even the wider window. */
+        await InsertKeyedQueryStatsAsync(RecentServerId, now.AddMinutes(-70), "0xSH2", 0, -1, "0xPH2", 10);
+
+        var deltas = new DeltaCalculator(NullLogger.Instance);
+        await deltas.SeedFromDatabaseAsync(_duckDb);
+
+        const int Gap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
+        Assert.Equal(5, deltas.CalculateDeltaWithInterval(RecentServerId, "query_stats_exec", "0xSH1:0:-1:0xPH1", 15, out var interval, now, Gap));
+        Assert.Equal(2400, interval);
+
+        /* Gap policy off, so only a first sighting reads 0: the 70-minute-old row was not read. */
+        Assert.Equal(0, deltas.CalculateDelta(RecentServerId, "query_stats_exec", "0xSH2:0:-1:0xPH2", 15, now, 0));
+    }
+
+    /// <summary>
     /// THE pass-window pin (#3540 A4 / #2235). Until v61 query_stats had no key seed — the store could not
     /// reproduce its key — and only its pass window was seeded from the table's collection times, so on the
     /// FIRST post-restart pass a plan compiled since the last pre-restart pass is credited in full with a
@@ -413,7 +438,8 @@ public sealed class LiteDeltaSeederTests : IClassFixture<SharedDuckDbFixture>, I
     {
         /* One whole-second anchor for every instant — see Seed_LatchAndSpinlock_LatestPassBecomesTheBaseline. */
         var now = Truncate(DateTime.UtcNow);
-        var stale = now - CollectorDeltaCalculator.SeedLookback - TimeSpan.FromMinutes(5);
+        /* #7156: query_stats reads the gap policy's hour, not the fifteen minutes the other families read. */
+        var stale = now - CollectorDeltaCalculator.QueryStatsSeedLookback - TimeSpan.FromMinutes(5);
         var older = now.AddMinutes(-4);
         var latest = now.AddMinutes(-2);
         foreach (var t in new[] { stale, older, latest })

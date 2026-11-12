@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
@@ -348,6 +349,28 @@ ORDER BY 1";
         ReadBucketedDurationTrendAsync("v_procedure_stats", serverId, hoursBack, asOfUtc, bucketMinutes, databaseNames);
 
     /// <summary>
+    /// #7498: whether the window holds a stored procedure row. Darling's duration read answers no points when it holds none
+    /// (the window <c>EXISTS</c> in <c>DurationTrendRouting</c>). Lite's unfiltered read plots each idle run as a 0, so
+    /// <c>get_procedure_duration_trend</c> asks the same question here.
+    /// </summary>
+    public async Task<bool> HasProcedureStatInWindowAsync(int serverId, int hoursBack, DateTime asOfUtc)
+    {
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        return await ReadWindowSkippingEmptyArchiveAsync<bool>("procedure_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<bool> ReadAsync(string relation)
+        {
+            using var connection = await OpenConnectionAsync();
+            using var command = connection.CreateCommand();
+            command.CommandText = $"SELECT 1 FROM {relation} WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3 LIMIT 1";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = startTime });
+            command.Parameters.Add(new DuckDBParameter { Value = endTime });
+            return await command.ExecuteScalarAsync() is not null and not DBNull;
+        }
+    }
+
+    /// <summary>
     /// The shared body of the two bucketed duration reads (#3897), Darling's
     /// <c>DurationTrendRouting.BuildBucketedRawTrendSql</c> in DuckDB's dialect: the desktop read's per-collection
     /// CTE (the stored interval three-state, #3653 A11), then each bucket's rate is its RATED collections' summed
@@ -365,12 +388,22 @@ ORDER BY 1";
         string relation, int serverId, int hoursBack, DateTime asOfUtc, int bucketMinutes,
         IReadOnlyList<string>? databaseNames = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+
+        /* #7256: a table whose archive holds nothing at or after the start of what the statement reads is read as the hot table alone. A view opens every Parquet file of its archive (one per day) however short the window is.
+           The statement reads from one gap policy before the window start (so the first point has its previous point), and the procedure form also reads the collection log its axis comes from.
+           The statement is built with the view's name, because the procedure form is chosen by it, and each view is swapped for its hot table afterwards. */
+        var tables = relation == "v_procedure_stats" ? new[] { "procedure_stats", "collection_log" } : new[] { relation.Substring(2) };
+        var readsFrom = startTime.AddSeconds(-PerformanceMonitor.Collectors.CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        return await ReadWindowSkippingEmptyArchivesAsync(tables, "collection_time", readsFrom, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryTrendPoint>> ReadAsync(Func<string, string> relationFor)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
-        command.CommandText = BucketedDurationTrendSql(relation, dbClause);
+        command.CommandText = SwapViews(BucketedDurationTrendSql(relation, dbClause), tables, relationFor);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -385,12 +418,13 @@ ORDER BY 1";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            /* NULL stays NULL (#3541 A12): a bucket whose every collection was unrated is an unrated point. */
+            /* NULL stays NULL (#3541 A12): a bucket whose every collection was unrated is an unrated point, and its
+               count is null too (#8073): the executions summed are the rated collections', the rate's numerator. */
             items.Add(new QueryTrendPoint
             {
                 CollectionTime = reader.GetDateTime(0),
                 Value = reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? null : (long)ToDouble(reader.GetValue(2)),
+                ExecutionCount = reader.IsDBNull(6) ? null : ToInt64(reader.GetValue(6)),
                 ExecutionsPerSecond = reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2)),
                 PeakElapsedMsPerSecond = reader.IsDBNull(3) ? null : ToDouble(reader.GetValue(3)),
                 FirstCollectionTime = reader.GetDateTime(4),
@@ -399,6 +433,7 @@ ORDER BY 1";
         }
 
         return items;
+        }
     }
 
     /// <summary>
@@ -411,9 +446,6 @@ ORDER BY 1";
     internal static string BucketedDurationTrendSql(string relation, string dbClause)
     {
         /* #5414 M1: the database filter is applied INSIDE the aggregates, not in the WHERE (see DbInPredicate). */
-        var matchedRows = dbClause.Length == 0
-            ? ""
-            : $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows";
         var matchedCarry = dbClause.Length == 0 ? "" : ",\n        matched_rows";
         /* #5414 round 2: whether the chosen databases had any row is decided once for the whole window (the tool's
            empty), never per bucket: a bucket they were quiet in is a measured 0, and dropping it made it read missing and
@@ -424,22 +456,7 @@ ORDER BY 1";
            (the collector's runs are the axis, an idle run is a 0 point, a bucket's seconds are the rated gaps). */
         var collections = relation == "v_procedure_stats"
             ? ProcedureCollectionsSql(dbClause)
-            : $@"raw AS
-(
-    SELECT
-        collection_time,
-        {FilteredSum("delta_elapsed_time", dbClause)} / 1000.0 AS total_elapsed_ms,
-        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
-        CASE WHEN MAX(sample_interval_seconds) IS NULL
-             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-             ELSE NULLIF(MAX(sample_interval_seconds), 0)
-        END AS interval_seconds{matchedRows}
-    FROM {relation}
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    GROUP BY collection_time
-),";
+            : QueryCollectionsSql(relation, dbClause, includeElapsed: true);
 
         return $@"
 WITH {collections}
@@ -460,7 +477,8 @@ SELECT
     CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
     MAX(elapsed_ms_per_second) AS peak_elapsed_ms_per_second,
     MIN(collection_time) AS first_collection_time,
-    COUNT(*) - COUNT(rated_seconds) AS unrated_collections
+    COUNT(*) - COUNT(rated_seconds) AS unrated_collections,
+    SUM(rated_executions) AS execution_count
 FROM rated{windowHasRows}
 GROUP BY 1
 ORDER BY 1";
@@ -474,6 +492,9 @@ ORDER BY 1";
     /// read drops), and a bucket holding none is left out; a bucket's rate is its summed wait over the seconds its
     /// rated collections covered, and its peak the busiest single collection. Darling's twin is
     /// <c>DarlingDataReader.WaitTrendBucketedSql</c>.
+    /// <para>#7880: the user's ignored (benign) wait list is applied here as <see cref="GetWaitStatsAsync"/> and
+    /// <see cref="GetDistinctWaitTypesAsync"/> apply it, keyed on <c>rtrim(wait_type)</c>, so rows stored for a type
+    /// before it was ignored are hidden from this read the same way they are hidden from those.</para>
     /// </summary>
     internal async Task<List<WaitBucketPoint>> GetWaitBucketsAsync(int serverId, string waitType, int hoursBack, DateTime asOfUtc, int bucketMinutes)
     {
@@ -482,6 +503,7 @@ ORDER BY 1";
 
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
+        var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
 WITH raw AS
 (
@@ -498,6 +520,7 @@ WITH raw AS
     AND   rtrim(wait_type) = rtrim($2)
     AND   collection_time >= $3
     AND   collection_time <= $4
+    {exclude}
 ),
 rated AS
 (
@@ -541,11 +564,17 @@ ORDER BY 1";
 
     /// <summary>
     /// CPU bucketed (#3960) — <see cref="GetCpuUtilizationAsync"/>'s window (the stored UTC instant, and for a
-    /// pre-v63 row with none its server-local stamp against the server-local bounds), averaged per bucket of the
-    /// server-local <c>sample_time</c> the tool has always published and the MCP tool used to average to the
-    /// minute itself. The busiest sample's SQL and total CPU ride beside the averages; a NULL reading counts as 0,
-    /// as that read always read it. Stamped at each bucket's start, unclamped, as Darling's twin
-    /// (<c>DarlingDataReader.CpuUtilizationBucketedSql</c>) is.
+    /// pre-v63 row with none its server-local stamp against the server-local bounds), averaged per bucket. A row
+    /// that has a <c>sample_time_utc</c> is bucketed on that instant, as the chart read's UTC frame does (#7908), so
+    /// the two passes through a repeated autumn hour are two points rather than one average; a pre-v63 row with none
+    /// is bucketed on its server-local <c>sample_time</c>, and the two kinds never share a bucket. Every point is
+    /// stamped in the server-local form the tool has always published: a UTC-cut bucket's start taken through the
+    /// server's clock, so the two repeated-hour points share a wall-clock stamp and differ in their figures, and the
+    /// points come back in instant order. The busiest sample's SQL and total CPU ride beside the averages. A NULL SQL reading counts as 0,
+    /// as that read always read it. A NULL other-process reading (SQL Server on Linux before 2025 CU1, #7682) is not
+    /// 0: it leaves the sample out of the other, total, idle and peak-total figures, so a bucket whose samples all
+    /// lack it returns null for them and a mixed bucket averages only the samples that have it. Stamped at each bucket's start, unclamped, as Darling's twin
+    /// (<c>DarlingDataReader.CpuUtilizationBucketedSql</c>, which buckets on the instant too) is.
     /// </summary>
     internal async Task<List<CpuBucketPoint>> GetCpuBucketsAsync(int serverId, int hoursBack, DateTime asOfUtc, ServerClock serverClock, int bucketMinutes)
     {
@@ -561,21 +590,25 @@ ORDER BY 1";
 
         command.CommandText = $@"
 SELECT
-    time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time, {TrendBuckets.OriginSql}) AS bucket_start,
+    CASE WHEN sample_time_utc IS NULL
+         THEN time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time, {TrendBuckets.OriginSql})
+         ELSE time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time_utc, {TrendBuckets.OriginSql})
+    END AS bucket_start,
     AVG(COALESCE(sqlserver_cpu_utilization, 0)) AS sql_server_cpu,
-    AVG(COALESCE(other_process_cpu_utilization, 0)) AS other_process_cpu,
-    AVG(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS total_cpu,
-    AVG(GREATEST(0, 100 - (COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)))) AS idle_cpu,
+    AVG(other_process_cpu_utilization) AS other_process_cpu,
+    AVG(CASE WHEN other_process_cpu_utilization IS NOT NULL THEN COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization END) AS total_cpu,
+    AVG(CASE WHEN other_process_cpu_utilization IS NOT NULL THEN GREATEST(0, 100 - (COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization)) END) AS idle_cpu,
     MAX(COALESCE(sqlserver_cpu_utilization, 0)) AS peak_sql_server_cpu,
-    MAX(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS peak_total_cpu,
-    COUNT(*) AS samples
+    MAX(CASE WHEN other_process_cpu_utilization IS NOT NULL THEN COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization END) AS peak_total_cpu,
+    COUNT(*) AS samples,
+    (sample_time_utc IS NULL) AS bucket_is_server_local
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   (
           (sample_time_utc IS NOT NULL AND sample_time_utc >= $2 AND sample_time_utc <= $3)
        OR (sample_time_utc IS NULL AND sample_time >= $4 AND sample_time <= $5)
       )
-GROUP BY 1
+GROUP BY 1, 9
 ORDER BY 1";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -585,22 +618,30 @@ ORDER BY 1";
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<CpuBucketPoint>();
+        /* bucket_start is in UTC for a bucket of rows that had a sample_time_utc and in the server's clock for a bucket of
+           rows that had none, so each is stamped in the server's clock and ordered by its instant, a UTC-cut bucket ahead
+           of a server-local one at the same instant so the two kinds never trade places between reads; a wall-clock start
+           that names two instants takes the first, as ServerClock.ToUtc does. */
+        var items = new List<(DateTime Instant, bool ServerLocal, CpuBucketPoint Point)>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            items.Add(new CpuBucketPoint(
-                reader.GetDateTime(0),
+            var bucketStart = reader.GetDateTime(0);
+            var bucketIsServerLocal = reader.GetBoolean(8);
+            var instant = bucketIsServerLocal ? serverClock.ToUtc(bucketStart) : bucketStart;
+            var stamp = bucketIsServerLocal ? bucketStart : serverClock.ToServerLocal(bucketStart);
+            items.Add((instant, bucketIsServerLocal, new CpuBucketPoint(
+                stamp,
                 ToDouble(reader.GetValue(1)),
-                ToDouble(reader.GetValue(2)),
-                ToDouble(reader.GetValue(3)),
-                ToDouble(reader.GetValue(4)),
+                reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? null : ToDouble(reader.GetValue(3)),
+                reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4)),
                 (int)ToInt64(reader.GetValue(5)),
-                (int)ToInt64(reader.GetValue(6)),
-                ToInt64(reader.GetValue(7))));
+                reader.IsDBNull(6) ? null : (int)ToInt64(reader.GetValue(6)),
+                ToInt64(reader.GetValue(7)))));
         }
 
-        return items;
+        return items.OrderBy(i => i.Instant).ThenBy(i => i.ServerLocal).Select(i => i.Point).ToList();
     }
 
     /// <summary>
@@ -775,6 +816,14 @@ ORDER BY 1";
     /// than manufacturing a 0, but keeps its count in <see cref="PerfmonBucketsResult.ArtifactsSetAside"/> so a
     /// dropped bucket does not silently drop its own count too — the same shape as Darling's
     /// <c>DarlingTrendReader.GetPerfmonBucketsAsync</c>.</para>
+    /// <para>The per-collection point is built per object first (<c>objects</c>). An object whose instances include
+    /// <c>_Total</c> (the Databases and Locks objects) contributes that row alone, since it already is the sum of
+    /// the object's other instances and adding them again doubles the point; an object with no <c>_Total</c> row
+    /// contributes the sum of its instances. <c>collections</c> then sums the objects, so a counter name two
+    /// objects share (Transaction Delay on Database Replica and Database Mirroring, #7416) keeps both objects'
+    /// rows whichever of them carries <c>_Total</c>. The interval is MAX at both layers, <c>objects</c> carries the
+    /// smallest and largest type its rows hold and <c>collections</c> compares those across the objects, and the
+    /// artifact count is summed up through them.</para>
     /// </summary>
     internal async Task<PerfmonBucketsResult> GetPerfmonBucketsAsync(int serverId, string counterName, int hoursBack, DateTime asOfUtc, int bucketMinutes)
     {
@@ -792,15 +841,18 @@ WITH flagged AS
 (
     SELECT
         collection_time,
+        object_name,
         cntr_value,
         delta_cntr_value,
         sample_interval_seconds,
         cntr_type,
+        instance_name,
         {isArtifact} AS is_artifact
     FROM (
         SELECT
             collection_time,
             object_name,
+            instance_name,
             cntr_value,
             delta_cntr_value,
             sample_interval_seconds,
@@ -820,6 +872,7 @@ WITH flagged AS
         SELECT
             collection_time,
             object_name,
+            instance_name,
             cntr_value,
             delta_cntr_value,
             sample_interval_seconds,
@@ -834,16 +887,34 @@ WITH flagged AS
         AND   NOT ({isWaitStatistics})
     ) AS raw
 ),
+objects AS
+(
+    SELECT
+        collection_time,
+        object_name,
+        CASE WHEN bool_or(instance_name = '_Total')
+             THEN SUM(cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
+             ELSE SUM(cntr_value) FILTER (WHERE NOT is_artifact) END AS cntr_value,
+        CASE WHEN bool_or(instance_name = '_Total')
+             THEN SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
+             ELSE SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) END AS delta_cntr_value,
+        MAX(sample_interval_seconds) AS sample_interval_seconds,
+        MIN(cntr_type) AS min_type,
+        MAX(cntr_type) AS max_type,
+        COUNT(*) FILTER (WHERE is_artifact) AS artifacts
+    FROM flagged
+    GROUP BY collection_time, object_name
+),
 collections AS
 (
     SELECT
         collection_time,
-        SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS cntr_value,
-        SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS delta_cntr_value,
+        SUM(cntr_value) AS cntr_value,
+        SUM(delta_cntr_value) AS delta_cntr_value,
         MAX(sample_interval_seconds) AS sample_interval_seconds,
-        CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
-        COUNT(*) FILTER (WHERE is_artifact) AS artifacts
-    FROM flagged
+        CASE WHEN MIN(min_type) = MAX(max_type) THEN MAX(max_type) END AS cntr_type,
+        SUM(artifacts) AS artifacts
+    FROM objects
     GROUP BY collection_time
 )
 SELECT

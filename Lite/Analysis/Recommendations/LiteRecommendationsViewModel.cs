@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Analysis.Recommendations;
@@ -95,10 +96,10 @@ public sealed class LiteRecommendationCardViewModel
         _ => ""                                      // info
     };
 
-    /// <summary>The card heading.</summary>
-    public string Title => Item.Title;
+    /// <summary>The card heading: the finding's headline, or its fact token read as words (<see cref="RecommendationTitleText"/>).</summary>
+    public string Title => RecommendationTitleText.Readable(Item.Title);
 
-    /// <summary>#6159: false when the card is the only finding in its section, whose expander header already carries the title.</summary>
+    /// <summary>#6159: false when the section's header already carries this card's title, so the title is read once.</summary>
     public bool ShowTitle { get; internal set; } = true;
 
     /// <summary>
@@ -121,7 +122,7 @@ public sealed class LiteRecommendationCardViewModel
     /// and the tray, prefixed so the line reads as a status rather than as more advice.</summary>
     public string NotPagedText => string.IsNullOrEmpty(Item.NotPagedReason)
         ? string.Empty
-        : "Not paged — " + Item.NotPagedReason;
+        : "Not paged: " + Item.NotPagedReason;
 
     /// <summary>Whether the not-paged line should be shown (a delivered finding, or one below the notify
     /// floor, has nothing to say here).</summary>
@@ -290,7 +291,7 @@ public sealed class LiteRecommendationsViewModel
 
     /// <summary>The default insufficient-data prose when the engine supplied none.</summary>
     public const string DefaultInsufficientDataMessage =
-        "Collecting data — recommendations appear after the engine has at least 24 hours of history. " +
+        "Collecting data: recommendations appear after the engine has at least 24 hours of history. " +
         "Keep the collector running and check back later.";
 
     /// <summary>Builds the loading-state view-model (no data yet, read in flight).</summary>
@@ -309,7 +310,7 @@ public sealed class LiteRecommendationsViewModel
 
     /// <summary>The default window-empty prose when the engine supplied no message.</summary>
     public const string DefaultWindowEmptyMessage =
-        "Nothing was collected in this analysis window, so nothing was measured — this is not an all-clear.";
+        "Nothing was collected in this analysis window, so nothing was measured: this is not an all-clear.";
 
     /// <summary>
     /// Appended to every window-empty message so the operator lands on the surface that diagnoses a
@@ -415,7 +416,8 @@ public sealed class LiteRecommendationsViewModel
             .Select(i => new LiteRecommendationCardViewModel(i, serverClock))
             .ToList();
         var primary = cards[0]; // reader sorted severity-desc -> the first card is the incident primary
-        if (cards.Count == 1) primary.ShowTitle = false; // the section header already names it (#6159)
+        foreach (var card in cards)
+            card.ShowTitle = card.Title != primary.Title; // the section header already names the primary (#6159)
         var severity = primary.Severity;
         var label = severity switch
         {

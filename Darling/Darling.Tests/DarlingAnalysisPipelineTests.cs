@@ -143,6 +143,7 @@ public sealed class DarlingAnalysisPipelineTests
         "CollectPlanAdvisoryDetail",
         "CollectPlanAnalysis",
         "CollectQueriesAtSpike",
+        "CollectRcsiInactionFigures",
         "CollectReconstructedBlockingChains",
         "CollectRegressedQueries",
         "CollectTempDbBreakdown",
@@ -178,8 +179,10 @@ public sealed class DarlingAnalysisPipelineTests
            store for: its DuckDB keeps no latest-snapshot interval table. And the parameter-sensitivity
            drill-down's text read (#4821): its main read runs before the cap, so resolving text there would
            resolve it for every plan its rough filter passes; Lite carries that text inline and has no such
-           second statement. #5794 adds the per-day twin of the table read, which Lite has no store for either. */
-        Assert.Equal(LiteDrillDownMethodSurface.Length + 4, PgDrillDownCollector.AllSql.Count);
+           second statement. #5794 adds the per-day twin of the table read, which Lite has no store for either.
+           #7448's CollectRcsiInactionFigures runs two reads (blocked-process waits, deadlocks), one more than a
+           method's one. */
+        Assert.Equal(LiteDrillDownMethodSurface.Length + 5, PgDrillDownCollector.AllSql.Count);
         Assert.Contains(PgDrillDownCollector.RegressedQueriesDailySql, PgDrillDownCollector.AllSql);
         Assert.Contains(PgDrillDownCollector.RegressedQueriesTableSql, PgDrillDownCollector.AllSql);
         Assert.Contains(PgDrillDownCollector.ParameterSensitiveTextSql, PgDrillDownCollector.AllSql);
@@ -251,8 +254,11 @@ public sealed class DarlingAnalysisPipelineTests
            class's own TableName rather than spelled here, so a rename cannot leave this guard asserting
            against a table that no longer exists. query_text_dim is the second (#3902): the
            parameter-sensitivity drill-down resolves text for its five output rows by digest rather than
-           reading v_query_stats, whose join resolves it for every row in the window. */
-        var sideTables = new[] { QueryStoreTextStore.TableName, PayloadDimensions.QueryTextDimTable, QueryStoreIntervalLatest.TableName, PlanRegressionDaily.TableName }
+           reading v_query_stats, whose join resolves it for every row in the window. query_plan_dim is the
+           third (#8570): the plan advisory reads plan content for its ten winners by digest, and tests the
+           dimension row for presence, rather than reading v_query_stats, whose join carried every row's
+           plan into the rank's sort. */
+        var sideTables = new[] { QueryStoreTextStore.TableName, PayloadDimensions.QueryTextDimTable, PayloadDimensions.QueryPlanDimTable, QueryStoreIntervalLatest.TableName, PlanRegressionDaily.TableName }
             .Select(t => t.Contains('.', StringComparison.Ordinal) ? t.Split('.')[^1] : t)
             .ToHashSet(StringComparer.Ordinal);
 
@@ -271,6 +277,8 @@ public sealed class DarlingAnalysisPipelineTests
                Stripping both rather than loosening the assertion: the point of this guard is that every
                real relation reference resolves, and that must stay exact. */
             var scanSql = Regex.Replace(sql, @"--[^\n]*", " ");
+            /* Block comments are the same case as the `--` ones: prose that says "join to" is not a relation. */
+            scanSql = Regex.Replace(scanSql, @"/\*.*?\*/", " ", RegexOptions.Singleline);
             scanSql = Regex.Replace(scanSql, @"\bIS\s+(?:NOT\s+)?DISTINCT\s+FROM\b", " ", RegexOptions.IgnoreCase);
 
             /* #5794: JOIN LATERAL (subquery) names no relation, and unnest() is a set-returning function, not a table. */
@@ -508,7 +516,7 @@ public sealed class DarlingAnalysisPipelineTests
             {
                 Assert.Equal(5, anomaly.DefinedAmplifiers);
             }
-            var expectedDecision = FindingRouting.Classify(anomaly, FindingRoute.Digest);
+            var expectedDecision = FindingRouting.Classify(anomaly, FindingRoute.Digest, 0.3);
             Assert.Equal(expectedDecision.Route, sentAnomaly.Route);
             Assert.NotNull(sentAnomaly.Context.Routing);
             Assert.Equal(expectedDecision.RouteText, sentAnomaly.Context.Routing!.Route);

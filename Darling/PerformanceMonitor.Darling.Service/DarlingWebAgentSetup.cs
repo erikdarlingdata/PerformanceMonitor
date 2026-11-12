@@ -56,7 +56,8 @@ internal static class DarlingWebAgentSetup
     private static readonly string[] s_routeKeys =
     [
         "metric_match", "enabled", "scope_server_id", "scope_tag_id", "agent_level", "agent_max_per_hour", "agent_max_per_day",
-        "agent_lease_minutes", "agent_expiry_minutes", "send_resolutions", "fallback_route_id", "severities",
+        "agent_lease_minutes", "agent_expiry_minutes", "send_resolutions", "fallback_route_id", "severities", "report_notice",
+        "action_approval", "approval_single_person", "slack_bot_channel",
         "teams_webhook_url", "slack_webhook_url", "generic_webhook_url", "pagerduty_routing_key", "email_recipients",
         "expected_modified_at",
     ];
@@ -296,7 +297,8 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
                 return "metric_match must be text.";
             }
 
-            draft.MetricMatch = match.GetValue<string>();
+            /* #7999: any spelling of Analysis: * is stored canonically, as the Viewer, Lite and MCP writers store it. */
+            draft.MetricMatch = NotificationRoute.CanonicalMatch(match.GetValue<string>());
         }
 
         if (body.ContainsKey("enabled"))
@@ -329,6 +331,50 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
             }
 
             draft.Severities = severities.GetValue<string>();
+        }
+
+        /* #6979: the report notice setting. A word other than off, needs_person_or_change or all is refused by the writer's validation with its sentence. */
+        if (body.ContainsKey("report_notice"))
+        {
+            if (body["report_notice"] is not JsonValue reportNotice || reportNotice.GetValueKind() != JsonValueKind.String)
+            {
+                return "report_notice must be text.";
+            }
+
+            draft.ReportNotice = reportNotice.GetValue<string>();
+        }
+
+        /* #7109: the approval setting and single-person approval. An admin seat sets any value; a word other than required or off is refused
+           by the writer's validation with its sentence. */
+        if (body.ContainsKey("action_approval"))
+        {
+            if (body["action_approval"] is not JsonValue actionApproval || actionApproval.GetValueKind() != JsonValueKind.String)
+            {
+                return "action_approval must be text.";
+            }
+
+            draft.ActionApproval = actionApproval.GetValue<string>();
+        }
+
+        if (body.ContainsKey("approval_single_person"))
+        {
+            if (body["approval_single_person"] is not JsonValue singlePerson || singlePerson.GetValueKind() is not (JsonValueKind.True or JsonValueKind.False))
+            {
+                return "approval_single_person must be true or false.";
+            }
+
+            draft.ApprovalSinglePerson = singlePerson.GetValue<bool>();
+        }
+
+        /* #7656: the bot channel id. A value that is not a Slack channel id is refused by the writer's validation with its sentence; blank is none. */
+        if (body.ContainsKey("slack_bot_channel"))
+        {
+            if (body["slack_bot_channel"] is not JsonValue slackBotChannel || slackBotChannel.GetValueKind() != JsonValueKind.String)
+            {
+                return "slack_bot_channel must be text.";
+            }
+
+            draft.SlackBotChannel = slackBotChannel.GetValue<string>();
         }
 
         if (!TryInt(body, "scope_server_id", out var hasServer, out var server, out var error)

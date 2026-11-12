@@ -402,7 +402,7 @@ public class CrossAppGuardCiGateTests
                #3067 anchor is exercised on the evaluated population too. */
             var project = WriteCrossAppFixture(fixture);
 
-            var evaluation = Evaluate(fixture, project);
+            var evaluation = Evaluate(project);
             AssertInvocationSucceeded(evaluation);
 
             /* The per-type floor. Every requested type present AND non-empty - key presence alone proves
@@ -491,7 +491,7 @@ public class CrossAppGuardCiGateTests
         try
         {
             /* A project that does not exist. */
-            var missing = Evaluate(scratch, Path.Combine(scratch, "NoSuchProject.csproj"));
+            var missing = Evaluate(Path.Combine(scratch, "NoSuchProject.csproj"));
             Assert.NotEqual(0, missing.ExitCode);
             Assert.NotEqual(string.Empty, missing.Failure);
             Assert.Empty(missing.Items);
@@ -503,7 +503,7 @@ public class CrossAppGuardCiGateTests
             File.WriteAllText(
                 malformed,
                 "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup><Compile Include=</ItemGroup></Project>");
-            var broken = Evaluate(scratch, malformed);
+            var broken = Evaluate(malformed);
             Assert.NotEqual(0, broken.ExitCode);
             Assert.NotEqual(string.Empty, broken.Failure);
             Assert.Empty(broken.Items);
@@ -638,7 +638,7 @@ public class CrossAppGuardCiGateTests
             var evaluated = new HashSet<string>(StringComparer.Ordinal);
             foreach (var file in projectFiles)
             {
-                var evaluation = Evaluate(repo, file);
+                var evaluation = Evaluate(file);
                 AssertInvocationSucceeded(evaluation);
                 evaluated.UnionWith(CrossAppItems(repo, evaluation, other).Select(r => r.Rooted));
             }
@@ -1328,7 +1328,7 @@ public class CrossAppGuardCiGateTests
         /* EVERY project file, not the first of them. There is one under each test project today, and
            taking only one would be a silent miss the moment a second arrives - the read would answer
            about whichever sorted first and say nothing about the other. */
-        var evaluations = projectFiles.Select(f => Evaluate(repo, f)).ToList();
+        var evaluations = projectFiles.Select(f => Evaluate(f)).ToList();
 
         foreach (var evaluation in evaluations.Where(e => e.Failure.Length == 0))
         {
@@ -1403,7 +1403,7 @@ public class CrossAppGuardCiGateTests
     /// <para><see cref="Evaluation.Failure"/> rather than an exception, because the caller is asserting on
     /// a population: the three ways this returns nothing without having looked are floored by
     /// <see cref="AssertInvocationSucceeded"/> in the same shape as every other floor here.</para></summary>
-    private static Evaluation Evaluate(string repo, string projectPath)
+    private static Evaluation Evaluate(string projectPath)
     {
         var arguments = new[]
         {
@@ -1415,7 +1415,11 @@ public class CrossAppGuardCiGateTests
         };
 
         var commandLine = "dotnet " + string.Join(" ", arguments);
-        var (exitCode, stdout, stderr) = RunDotnet(repo, arguments);
+        /* Not run from the repository: the working directory is where the dotnet host looks for global.json, and the CI
+           legs run on the runner image's SDK, an older patch than the one global.json pins (#7098), so a host
+           started in the repository refuses to run at all. The project path is absolute, and MSBuild finds its
+           Directory.Build.props from the project's own folder, so the answer does not depend on the directory. */
+        var (exitCode, stdout, stderr) = RunDotnet(Path.GetTempPath(), arguments);
         var diagnostics = $"exit={exitCode}, stderr={Truncate(stderr)}, stdout={Truncate(stdout)}";
 
         if (exitCode != 0)

@@ -42,15 +42,23 @@ internal static class DarlingAlwaysOnXeSessions
         AlwaysOnXeSessionKind kind,
         string captureName,
         ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        DarlingXeSessions.CaptureEnsureOutcome? outcome = null)
     {
         try
         {
             var current = runner.AlwaysOnChoices.Get(ServerKey(server), databaseName, kind);
             var ownName = runner.AlwaysOnOwnSessionName(kind);
-            var result = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, ownName, current, cancellationToken);
+            var result = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, ownName, current, cancellationToken, ringBufferMaxEvents: runner.RingBufferMaxEvents);
             runner.AlwaysOnChoices.Set(ServerKey(server), databaseName, kind, result.Choice);
             runner.AlwaysOnChoices.ClearReadOnlyRefusal(ServerKey(server), databaseName, kind);
+
+            /* #8528: a session this pass created or started was not running when the collector last read it, so its newest row is from
+               before the start. The Capture Down self-alert holds its verdict for the collector until it reads again. */
+            if (result.Change is AlwaysOnXeChange.Created or AlwaysOnXeChange.CreatedWithoutStatementText or AlwaysOnXeChange.Started)
+            {
+                outcome?.Started.Add(DarlingXeSessions.CaptureEnsureOutcome.CollectorNameOf(kind));
+            }
 
             switch (result.Change)
             {
@@ -102,9 +110,11 @@ internal static class DarlingAlwaysOnXeSessions
 
             /* #5640 (H2): the client-timeout session's permission denial, for the run to record as PERMISSIONS. Any other failure of
                that session leaves it absent and its read records SESSION_MISSING. #6893: the deadlock and blocked-process sessions
-               carry every failure, classified the same way. */
-            return kind == AlwaysOnXeSessionKind.Attention
-                ? DarlingXeSessions.AttentionFaultFor(ex) is { } attentionFault ? new DarlingXeSessions.XeEnsureFailure(attentionFault.Message, IsPermission: true) : null
+               carry every failure, classified the same way. #7639: the client-timeout session's other failures are carried too (as
+               not a permission), so the caller can name the databases that refused it in the run note, as Lite does; the caller's
+               PERMISSIONS rule still looks at IsPermission alone. */
+            return kind == AlwaysOnXeSessionKind.Attention && DarlingXeSessions.AttentionFaultFor(ex) is { } attentionFault
+                ? new DarlingXeSessions.XeEnsureFailure(attentionFault.Message, IsPermission: true) { ServerText = ex.Message }
                 : DarlingXeSessions.CaptureFaultFor(ex, captureName);
         }
     }

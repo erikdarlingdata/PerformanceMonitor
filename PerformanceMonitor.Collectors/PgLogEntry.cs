@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -110,4 +111,41 @@ public readonly record struct PgLogEntry(
         "LOG" => 1,
         _ => 0,
     };
+
+    /// <summary>
+    /// Reads a log stamp as UTC: the one parse every PostgreSQL log reader shares (#7222). The
+    /// <c>AssumeUniversal</c> half is deliberate. The zone is judged elsewhere (see
+    /// <see cref="TryParseStampAndZone"/>), so the stamp is read as written and never shifted.
+    /// </summary>
+    internal static bool TryParseStampUtc(string stamp, out DateTime occurredAtUtc) =>
+        DateTime.TryParse(
+            stamp,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+            out occurredAtUtc);
+
+    /// <summary>
+    /// Splits <c>YYYY-MM-DD HH:MM:SS.mmm ZONE</c> at its last space and reads the stamp (#7222). The csvlog
+    /// <c>log_time</c> and the jsonlog <c>timestamp</c> share this shape with the stderr prefix. The check
+    /// decides only "is this a record", a stamp that parses, never whether the zone is UTC (#4053 review H1):
+    /// a non-zero-offset zone is still a record, and the zone decision belongs to the caller's foreign-zone
+    /// filter, which runs after every record has been recovered. <paramref name="zoneText"/> is set whenever
+    /// the text has a zone token, even when the stamp then fails to parse.
+    /// </summary>
+    internal static bool TryParseStampAndZone(string text, out DateTime occurredAtUtc, out string zoneText)
+    {
+        occurredAtUtc = default;
+        zoneText = string.Empty;
+
+        var spaceIndex = text.LastIndexOf(' ');
+
+        if (spaceIndex < 0 || spaceIndex == text.Length - 1)
+        {
+            return false;
+        }
+
+        zoneText = text[(spaceIndex + 1)..];
+
+        return TryParseStampUtc(text[..spaceIndex], out occurredAtUtc);
+    }
 }

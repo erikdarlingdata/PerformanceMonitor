@@ -222,6 +222,10 @@ if ($current.Count -gt 0) { $chunks.Add($current.ToArray()) }
 # A failing chunk must set $LASTEXITCODE, not throw, or the later chunks would be skipped.
 $PSNativeCommandUseErrorActionPreference = $false
 New-Item -ItemType Directory -Force -Path TestResults | Out-Null
+# #8190: a chunk's test host that dies with a native fault writes a minidump under TestResults/crash-dumps, and its exit code is
+# recorded there. A caller that set the dump variables itself keeps its own.
+. (Join-Path $PSScriptRoot 'crash-dumps.ps1')
+Enable-CrashDumps
 $failedChunks = 0
 $chunkNumber = 0
 foreach ($chunk in $chunks) {
@@ -235,6 +239,7 @@ foreach ($chunk in $chunks) {
         $failedChunks++
         Write-Host "shard ${Shard} chunk $chunkNumber of $($chunks.Count) failed with exit code $LASTEXITCODE"
     }
+    Write-CrashMarker "lite shard $Shard chunk $chunkNumber" $LASTEXITCODE
 }
 if ($failedChunks -gt 0) { Write-Host "shard ${Shard}: $failedChunks of $($chunks.Count) chunks failed"; exit 1 }
 exit 0

@@ -38,7 +38,7 @@ public sealed class ViewerQueryTabLoadTests
     [Theory]
     [InlineData("LoadTopQueriesAsync", "GetQueryStatsSlicerDataAsync", "AwaitReadWatchingProbeAsync(dataReadTask, floorTask, \"Query Stats\")")]
     [InlineData("LoadTopProceduresAsync", "GetProcStatsSlicerDataAsync", "AwaitReadWatchingProbeAsync(dataReadTask, floorTask, \"Procedure Stats\")")]
-    [InlineData("LoadQueryStoreAsync", "GetQueryStoreSlicerDataAsync", "AwaitReadWatchingProbeAsync(dataReadTask, floorTask, \"Query Store\")")]
+    [InlineData("LoadQueryStoreAsync", "GetQueryStoreSlicerWithReachAsync", "AwaitReadWatchingProbeAsync(dataReadTask, floorTask, \"Query Store\")")]
     public void EachGridLoad_StartsItsSlicerRead_BesideTheGridRead_NotAfterIt(string loader, string slicerRead, string gridAwait)
     {
         var source = Source("ViewerServerTab.Queries.cs");
@@ -77,7 +77,7 @@ public sealed class ViewerQueryTabLoadTests
     public void EveryInnerTabLoad_IsTimed_AndASlowOneLogsItsPhaseSplit()
     {
         var shell = Source("ViewerServerTab.xaml.cs");
-        Assert.Contains("var timer = new ViewerLoadTimer();", shell, StringComparison.Ordinal);
+        Assert.Contains("var timer = loadTimer ?? new ViewerLoadTimer();", shell, StringComparison.Ordinal);
         Assert.Contains("timer.Finish(", shell, StringComparison.Ordinal);
         Assert.Contains("ViewerLogger.Warn(\"SlowLoad\"", shell, StringComparison.Ordinal);
     }
@@ -118,14 +118,16 @@ public sealed class ViewerQueryTabLoadTests
         Assert.Contains("700 ms of client work", line, StringComparison.Ordinal);
     }
 
+    /// <summary>A completed task is booked as one phase before <c>Track</c> hands it back: the watcher's await of a
+    /// finished task never suspends, so the phase is recorded on the caller's own thread. The load is quick, so
+    /// <c>Finish</c> still says nothing; <c>PhaseCount</c> is what shows the phase was recorded at all.</summary>
     [Fact]
-    public async Task LoadTimer_Track_RecordsAPhase_AndHandsTheTaskBackUnchanged()
+    public void LoadTimer_Track_RecordsAPhase_AndHandsTheTaskBackUnchanged()
     {
         var timer = new ViewerLoadTimer();
         var task = Task.FromResult(7);
         Assert.Same(task, timer.Track("grid read", task));
-        await task;
-        await Task.Delay(50, TestContext.Current.CancellationToken);
+        Assert.Equal(1, timer.PhaseCount);
         timer.Surface = "x";
         Assert.Null(timer.Finish("fallback"));
     }
@@ -379,6 +381,14 @@ public sealed class ViewerQueryTabLoadTests
         return dbId;
     }
 
+    /// <summary>Clears the module's counters for this database, so the counts that follow are of this run's statements alone.</summary>
+    private static async Task ResetStatementCountAsync(NpgsqlConnection connection, long dbId, CancellationToken ct)
+    {
+        await using var reset = new NpgsqlCommand("SELECT pg_stat_statements_reset(0, $1, 0)", connection);
+        reset.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
+        await reset.ExecuteNonQueryAsync(ct);
+    }
+
     private static async Task<long> CountCallsAsync(string connectionString, long dbId, string likePattern, CancellationToken ct)
     {
         await using var conn = new NpgsqlConnection(connectionString);
@@ -390,7 +400,10 @@ public sealed class ViewerQueryTabLoadTests
     }
 
     [Fact]
-    public async Task HourlyTextLookup_IsOneStatement_ForAnyNumberOfRows_AndAnswersEachRowsOwnText()
+    public Task HourlyTextLookup_IsOneStatement_ForAnyNumberOfRows_AndAnswersEachRowsOwnText()
+        => HourlyTextLookupIsOneStatementAsync(forcePass: false);
+
+    internal async Task HourlyTextLookupIsOneStatementAsync(bool forcePass)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the live query-tab load pins.");
         var ct = TestContext.Current.CancellationToken;
@@ -410,22 +423,34 @@ FROM generate_series(1, 30) q", setup);
         }
 
         var dbId = await StartStatementCountingAsync(scratch.ConnectionString, ct);
+        await using var table = new NpgsqlConnection(scratch.ConnectionString);
+        await table.OpenAsync(ct);
         var bodySucceeded = false;
         await using var service = new ViewerDataService(scratch.ConnectionString);
         try
         {
-            var databases = Enumerable.Range(1, 31).Select(q => "db" + (q % 3)).ToArray();
-            var hashes = Enumerable.Range(1, 31).Select(q => "0xH" + q).ToArray();
-            var texts = await service.ReadHourlyQueryTextsAsync(7001, databases, hashes, ct);
+            /* The whole window, from the counter's reset to the count, runs under PgStatementTable: the view is cluster-wide,
+               and an eviction pass from another session between the lookup and the count takes the one statement's entry (run
+               once, the least-used kind there is), which a run the pass landed in is voided and run again for. */
+            var run = await PgStatementTable.RunAsync(table, ct, async pass =>
+            {
+                await ResetStatementCountAsync(table, dbId, ct);
+                var databases = Enumerable.Range(1, 31).Select(q => "db" + (q % 3)).ToArray();
+                var hashes = Enumerable.Range(1, 31).Select(q => "0xH" + q).ToArray();
+                var texts = await service.ReadHourlyQueryTextsAsync(7001, databases, hashes, ct);
 
-            Assert.Equal(31, texts.Length);
-            Assert.Equal("SELECT 1", texts[0]);
-            Assert.Equal("SELECT 30", texts[29]);
-            Assert.Equal("", texts[6]);   /* q = 7 has no text anywhere */
-            Assert.Equal("", texts[30]);  /* q = 31 has no row at all */
+                Assert.Equal(31, texts.Length);
+                Assert.Equal("SELECT 1", texts[0]);
+                Assert.Equal("SELECT 30", texts[29]);
+                Assert.Equal("", texts[6]);   /* q = 7 has no text anywhere */
+                Assert.Equal("", texts[30]);  /* q = 31 has no row at all */
 
-            var calls = await CountCallsAsync(scratch.ConnectionString, dbId, "%v_query_stats%", ct);
-            Assert.True(calls == 1, $"31 rows' text must take ONE store call, not one each; saw {calls}");
+                await pass.BeforeReadAsync(ct);
+
+                var calls = await CountCallsAsync(scratch.ConnectionString, dbId, "%v_query_stats%", ct);
+                Assert.True(calls == 1, $"31 rows' text must take ONE store call, not one each; saw {calls}");
+            }, forcePass);
+            PgStatementTable.AssertNoPassInside(run);
             bodySucceeded = true;
         }
         finally
@@ -509,7 +534,10 @@ FROM (VALUES
     }
 
     [Fact]
-    public async Task StatusBarStoreSize_MeasuresTheLiveDirectoryOnce_WhenNoSizeIsRecorded()
+    public Task StatusBarStoreSize_MeasuresTheLiveDirectoryOnce_WhenNoSizeIsRecorded()
+        => StatusBarMeasuresOnceAsync(forcePass: false);
+
+    internal async Task StatusBarMeasuresOnceAsync(bool forcePass)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the live query-tab load pins.");
         var ct = TestContext.Current.CancellationToken;
@@ -521,18 +549,40 @@ FROM (VALUES
         }
 
         var dbId = await StartStatementCountingAsync(scratch.ConnectionString, ct);
+        await using var table = new NpgsqlConnection(scratch.ConnectionString);
+        await table.OpenAsync(ct);
         var bodySucceeded = false;
-        await using var service = new ViewerDataService(scratch.ConnectionString);
+        ViewerDataService? service = null;
         try
         {
-            var size = await service.GetStoreSizeBytesAsync(ct);
-            Assert.True(size > 0, "a store with no recorded size reads its live size");
-            var live = await CountCallsAsync(scratch.ConnectionString, dbId, "%pg_database_size%current_database%", ct);
-            Assert.True(live == 1, $"one live directory walk expected; saw {live}");
+            /* The same bracket as the text lookup's, around the size read and its count. Each run starts a service of its own,
+               since a reading is cached on the instance for StoreSizeCacheLifetime. */
+            var run = await PgStatementTable.RunAsync(table, ct, async pass =>
+            {
+                if (service is not null)
+                {
+                    await service.DisposeAsync();
+                }
+
+                await ResetStatementCountAsync(table, dbId, ct);
+                service = new ViewerDataService(scratch.ConnectionString);
+                var size = await service.GetStoreSizeBytesAsync(ct);
+                Assert.True(size > 0, "a store with no recorded size reads its live size");
+                await pass.BeforeReadAsync(ct);
+
+                var live = await CountCallsAsync(scratch.ConnectionString, dbId, "%pg_database_size%current_database%", ct);
+                Assert.True(live == 1, $"one live directory walk expected; saw {live}");
+            }, forcePass);
+            PgStatementTable.AssertNoPassInside(run);
             bodySucceeded = true;
         }
         finally
         {
+            if (service is not null)
+            {
+                await service.DisposeAsync();
+            }
+
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
         }
     }
@@ -565,4 +615,22 @@ FROM (VALUES
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
         }
     }
+}
+
+/* pg-cluster-roles, not the parallel own-store shape: the fact fills pg_stat_statements until eviction passes have taken the
+   body's own entries, on purpose, and in the parallel collections those passes take the other sessions' entries run once
+   as well. The collection runs alone, after the parallel collections, so the fill takes nobody else's entries. The body
+   is the one ViewerQueryTabLoadTests runs without the forced pass, and it mints its own scratch database. */
+
+/// <summary>The forcing run of <see cref="ViewerQueryTabLoadTests"/>'s counting body: an eviction pass between the statements and the count, and the count is still of the calls the statements made.</summary>
+[Collection("pg-cluster-roles")]
+public sealed class ViewerQueryTabLoadForcedPassLiveTests
+{
+    [Fact]
+    public Task HourlyTextLookup_IsOneStatement_ForAnyNumberOfRows_AndAnswersEachRowsOwnText_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => new ViewerQueryTabLoadTests().HourlyTextLookupIsOneStatementAsync(forcePass: true);
+
+    [Fact]
+    public Task StatusBarStoreSize_MeasuresTheLiveDirectoryOnce_WhenNoSizeIsRecorded_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => new ViewerQueryTabLoadTests().StatusBarMeasuresOnceAsync(forcePass: true);
 }

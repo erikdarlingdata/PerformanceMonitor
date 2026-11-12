@@ -193,7 +193,7 @@ public sealed class DarlingListenerTlsTests
             Assert.Null(state.Read());
             Assert.Empty(log.At(LogLevel.Warning));
             Assert.Equal(
-                $"{labels.Surface} TLS is misconfigured ({section}.network.tls is present but sets none of pfxPath, certPath or keyPath. "
+                $"{labels.Surface} TLS is misconfigured ({section}.network.tls is present but sets none of pfxPath, certPath, keyPath or store. "
                 + "Check the key names, or remove the block for plain HTTP.) — refusing to expose; binding loopback-only.",
                 Assert.Single(log.At(LogLevel.Critical)));
         }

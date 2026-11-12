@@ -13,6 +13,7 @@ using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
@@ -77,7 +78,7 @@ public sealed class AgentLevel2StoreRungTests
     [Fact]
     public async Task ANewStore_HoldsTheWholeRung()
     {
-        await WithStoreAsync(async (store, ct) =>
+        await WithStoreAsync(async (store, _, ct) =>
         {
             /* The switch reads on on a new store. */
             Assert.Equal("True", await ScalarAsync(store, "SELECT agent_actions_enabled FROM config.config_service", ct));
@@ -200,7 +201,7 @@ public sealed class AgentLevel2StoreRungTests
     [Fact]
     public async Task AnUpgradedStore_KeepsItsRows_ReadsTheSwitchOn_AndASecondRunChangesNothing()
     {
-        await WithStoreAsync(async (store, ct) =>
+        await WithStoreAsync(async (store, _, ct) =>
         {
             await RungRewindArtifacts.DropSentinelsAboveAsync(store, Rung.Version - 1, ct);
             await ExecAsync(store, "DELETE FROM darling_schema_version WHERE version >= " + Rung.Version.ToString(CultureInfo.InvariantCulture), ct);
@@ -246,7 +247,7 @@ public sealed class AgentLevel2StoreRungTests
     [Fact]
     public async Task Retention_AgesFeedbackWithItsRequest_AndNeverAgesOverrides()
     {
-        await WithStoreAsync(async (store, ct) =>
+        await WithStoreAsync(async (store, storeConnectionString, ct) =>
         {
             await ExecAsync(store, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES (5909, 'srv-a', 'host-a')", ct);
             await ExecAsync(store, "INSERT INTO config.config_threshold_overrides (server_id, database_name, threshold_key, value, set_by, created_at, updated_at) "
@@ -263,8 +264,13 @@ public sealed class AgentLevel2StoreRungTests
                 await ExecAsync(store, $"INSERT INTO config.investigation_feedback (request_id, verdict, author) VALUES ('{request}', 'right', 'erik')", ct);
             }
 
-            await using var dataSource = NpgsqlDataSource.Create(store.ConnectionString);
-            await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, logger: null, TestContext.Current.CancellationToken);
+            await using var dataSource = NpgsqlDataSource.Create(storeConnectionString);
+            var logger = new CapturingTestLogger();
+            await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, logger, ct);
+            /* A purge that cannot reach the store isolates every table's failure and returns as if it had run; only its log
+               says so. A clean purge logs no warning or error. */
+            Assert.True(logger.CountAtLevel(LogLevel.Warning) + logger.CountAtLevel(LogLevel.Error) == 0,
+                "the purge isolated a failure instead of deleting: " + logger.Joined);
 
             Assert.Equal(Young, await ScalarAsync(store, "SELECT string_agg(request_id::text, ',' ORDER BY request_id) FROM config.investigation_requests", ct));
             Assert.Equal(Young, await ScalarAsync(store, "SELECT string_agg(request_id::text, ',' ORDER BY request_id) FROM config.investigation_feedback", ct));
@@ -272,11 +278,12 @@ public sealed class AgentLevel2StoreRungTests
         });
     }
 
-    private static async Task WithStoreAsync(Func<NpgsqlConnection, CancellationToken, Task> body)
+    /* Npgsql leaves the password out of an opened connection's ConnectionString, so a data source the body builds comes from the scratch store's own string. */
+    private static async Task WithStoreAsync(Func<NpgsqlConnection, string, CancellationToken, Task> body)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the Level 2 store pins.");
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var store = new NpgsqlConnection(scratch.ConnectionString);
         await store.OpenAsync(ct);
         await PgMigrations.MigrateAsync(store, ct);
@@ -286,7 +293,7 @@ public sealed class AgentLevel2StoreRungTests
         var bodySucceeded = false;
         try
         {
-            await body(store, ct);
+            await body(store, scratch.ConnectionString, ct);
             bodySucceeded = true;
         }
         finally
@@ -332,7 +339,7 @@ public sealed class AgentLevel2StoreGrantLiveTests
 {
     /* #1776 own-store: each test mints its own scratch database through ScratchPostgres; the fixed admin/viewer/mcp roles
        are why the class sits in the pg-cluster-roles collection. */
-    private static readonly string[] s_cleanupRoles = ["admin", "viewer", "mcp"];
+    private static readonly string[] s_cleanupRoles = ["admin", "viewer", "web", "mcp"];
 
     private static string RequireLivePostgres()
     {
@@ -377,8 +384,8 @@ public sealed class AgentLevel2StoreGrantLiveTests
 
     private static async Task<bool> SkipIfRolesExistAsync(NpgsqlConnection owner, CancellationToken ct)
     {
-        var exist = await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct) == "True";
-        Assert.SkipWhen(exist, "A cluster-wide admin/viewer/mcp role already exists on this rig; the grants would adopt it.");
+        var exist = await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp'))", ct) == "True";
+        Assert.SkipWhen(exist, "A cluster-wide admin/viewer/web/mcp role already exists on this rig; the grants would adopt it.");
         return exist;
     }
 
@@ -391,12 +398,15 @@ public sealed class AgentLevel2StoreGrantLiveTests
             ("admin", "config.investigation_feedback", "SELECT,INSERT,UPDATE,DELETE"),
             ("viewer", "config.config_threshold_overrides", "SELECT"),
             ("viewer", "config.investigation_feedback", "SELECT"),
+            ("web", "config.config_threshold_overrides", "SELECT"),
+            ("web", "config.investigation_feedback", "SELECT"),
             ("mcp", "config.config_threshold_overrides", "SELECT,INSERT,UPDATE,DELETE"),
             ("mcp", "config.investigation_feedback", "SELECT"),
             /* V196 (#5632): the per-server action switches. Every role reads them; none writes them (the store owner does), so no MCP
                tool, web route or login the service hands out can turn one on. */
             ("admin", "config.config_server_actions", "SELECT"),
             ("viewer", "config.config_server_actions", "SELECT"),
+            ("web", "config.config_server_actions", "SELECT"),
             ("mcp", "config.config_server_actions", "SELECT"),
         ];
         foreach (var (role, table, verbs) in expected)
@@ -412,7 +422,7 @@ public sealed class AgentLevel2StoreGrantLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -446,7 +456,7 @@ public sealed class AgentLevel2StoreGrantLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -458,25 +468,26 @@ public sealed class AgentLevel2StoreGrantLiveTests
                 await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'darling')", ct) == "True",
                 "The script names the store owner 'darling', and this rig has no such role.");
 
-            const string AdminPassword = "ScriptAdmin5909", ViewerPassword = "ScriptViewer5909", McpPassword = "ScriptMcp5909";
+            const string AdminPassword = "ScriptAdmin5909", ViewerPassword = "ScriptViewer5909", WebPassword = "ScriptWeb5909", McpPassword = "ScriptMcp5909";
             var script = ComposeStoreRolesLiveTests.WithoutPsqlMetaCommands(
                     System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql")))
                 .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_ADMIN_PASSWORD", AdminPassword, StringComparison.Ordinal)
                 .Replace("CHANGE_ME_VIEWER_PASSWORD", ViewerPassword, StringComparison.Ordinal)
+                .Replace("CHANGE_ME_WEB_PASSWORD", WebPassword, StringComparison.Ordinal)
                 .Replace("CHANGE_ME_MCP_PASSWORD", McpPassword, StringComparison.Ordinal);
 
             /* Behind the rung (the feedback table is absent): the script warns, skips the block and grants nothing on the overrides. */
             await RungRewindArtifacts.DropSentinelsAboveAsync(owner, 190, ct);
             await ExecAsync(owner, script, ct);
-            Assert.Equal("3", await ScalarAsync(owner, "SELECT count(*) FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp')", ct));
+            Assert.Equal("4", await ScalarAsync(owner, "SELECT count(*) FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp')", ct));
 
             /* #6170: the store's password-rules trigger and the edit function the script made must also run on a store that does not
-               have the V203 columns yet (a script run before the service migrated it): a viewer add and a viewer edit both go through. */
+               have the V203 columns yet (a script run before the service migrated it): a web add and a web edit both go through. */
             Assert.Equal("False", await ScalarAsync(owner,
                 "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'config.config_monitored_servers'::regclass AND attname = 'hypothetical_index_username' AND NOT attisdropped)", ct));
             await ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
-            await ExecAsync(owner, "SET ROLE viewer", ct);
+            await ExecAsync(owner, "SET ROLE web", ct);
             await ExecAsync(owner, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES (5911, 'behind-v203', 'host-b')", ct);
             Assert.Equal("saved", await ScalarAsync(owner,
                 "SELECT outcome FROM config.edit_monitored_server(5911, (SELECT modified_at FROM config.config_monitored_servers WHERE server_id = 5911), "
@@ -527,7 +538,7 @@ public sealed class AgentLevel2StoreGrantLiveTests
             "[{\"tool\":\"get_blocking\",\"arguments\":{},\"key_numbers\":\"12\"}]"), new AgentActionTarget(7, "srv-7", null, null));
         AgentActionHooks Hooks(int level) => new()
         {
-            LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => level),
+            LoadRoutes = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((_, _, _) => TestRouteHooks.AtLevel(level)),
             ReadBefore = (_, _, _) => Task.FromResult<string?>(null),
             Write = (_, _, _) => { writes++; return Task.FromResult<string?>("{}"); },
         };

@@ -197,7 +197,7 @@ public sealed class RunnableQueueIncidentReplayTests
         h.Settings.RunnableQueueEnabled = true;
         var engine = h.Build();
 
-        var warningFiredAt = default(DateTime);
+        var warningHeldAt = default(DateTime);
         var criticalFiredAt = default(DateTime);
         var cleared = new List<DateTime>();
         var seenResolutions = 0;
@@ -209,10 +209,11 @@ public sealed class RunnableQueueIncidentReplayTests
             var firedBefore = h.Deliverer.Outcomes.Count;
             await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
 
-            if (h.Deliverer.Outcomes.Count > firedBefore && warningFiredAt == default)
+            if (h.Deliverer.Outcomes.Count > firedBefore && warningHeldAt == default)
             {
-                warningFiredAt = t;
+                warningHeldAt = t;
                 Assert.Equal(AlertSeverityLevel.Warning, h.Deliverer.Outcomes[^1].Severity);
+                Assert.NotNull(h.Deliverer.Outcomes[^1].Hold);
             }
 
             if (h.Deliverer.Outcomes.Count > firedBefore && criticalFiredAt == default
@@ -228,18 +229,20 @@ public sealed class RunnableQueueIncidentReplayTests
             }
         }
 
-        Assert.Equal(At("15:43:45.000"), warningFiredAt);
+        /* #7086: the Warning at 15:43:45 is HELD (a digest row, nothing sent), so the first page is the Critical. */
+        Assert.Equal(At("15:43:45.000"), warningHeldAt);
 
-        /* #5641 (seat decision): the Warning is delivered at 15:43:45 and the Critical on the FIRST evaluation at or
-           after the 15:45:00.871 collection that took the average to 17.94, not four to five minutes later when the
-           Warning's cooldown ran out (the 10-09 replay delivered it about 15:48:45, 4 seconds before High CPU). */
+        /* #5641 (seat decision): the Critical is delivered on the FIRST evaluation at or after the 15:45:00.871 collection
+           that took the average to 17.94, not four to five minutes later. Since #7086 nothing stamped the page cooldown
+           before it (the held Warning leaves it alone), so it needs no bypass flag to go out at once. */
         Assert.Equal(At("15:45:15.000"), criticalFiredAt);
-        Assert.True(criticalFiredAt - warningFiredAt < TimeSpan.FromMinutes(5));
+        Assert.True(criticalFiredAt - warningHeldAt < TimeSpan.FromMinutes(5));
         Assert.Equal(
             new[] { AlertSeverityLevel.Warning, AlertSeverityLevel.Critical },
             h.Deliverer.Outcomes.Take(2).Select(o => o.Severity!.Value).ToArray());
-        Assert.True(h.Deliverer.Outcomes[1].Context!.EscalationBypassesCooldown);
-        Assert.False(h.Deliverer.Outcomes[0].Context!.EscalationBypassesCooldown);
+        Assert.NotNull(h.Deliverer.Outcomes[0].Hold);
+        Assert.Null(h.Deliverer.Outcomes[1].Hold);
+        Assert.False(h.Deliverer.Outcomes[1].Context!.EscalationBypassesCooldown);
         Assert.Equal(new[] { At("15:55:45.000") }, cleared);
         Assert.All(h.Deliverer.Outcomes, o => Assert.Equal("Runnable Queue", o.MetricName));
         Assert.Contains(h.Deliverer.Outcomes, o => o.Severity == AlertSeverityLevel.Critical);

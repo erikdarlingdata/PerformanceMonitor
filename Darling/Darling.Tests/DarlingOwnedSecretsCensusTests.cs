@@ -343,7 +343,8 @@ public sealed class DarlingOwnedSecretsCensusTests
             }
             else if (file.Name != "DarlingConfig.cs" && s_loadsAConfig.IsMatch(file.Text))
             {
-                types.Add(Path.GetFileNameWithoutExtension(file.Name));
+                /* #7024: the type, not the partial: DarlingWorker.Bootstrap.cs declares DarlingWorker. */
+                types.Add(Path.GetFileNameWithoutExtension(file.Name).Split('.')[0]);
             }
         }
 

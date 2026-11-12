@@ -45,6 +45,8 @@ public sealed class LiteQueryTagRollupAnswerNameTests : IDisposable
         _serverManager = new ServerManager(_tempDir);
         _serverManager.AddServer(new ServerConnection { ServerName = KeyOne, DisplayName = NameOne });
         _serverManager.AddServer(new ServerConnection { ServerName = KeyTwo, DisplayName = NameTwo });
+        /* #8083: the tool reads no section on a store that defines no tag, so the fixture defines one. It maps nothing, so every row stays untagged. */
+        _service.CreateQueryTagAsync("fixture", null).GetAwaiter().GetResult();
     }
 
     public void Dispose()

@@ -42,10 +42,11 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class RdsDeadlockIngestorTests
 {
-    /* A store that cannot be written to. Port 1 on loopback refuses immediately, and Timeout=1 bounds the
-       attempt, so the write fails deterministically and fast rather than hanging a CI job. */
+    /* A store that cannot be written to. Port 1 on loopback refuses immediately, and Timeout=15 bounds the
+       attempt, so the write fails deterministically and fast rather than hanging a CI job. A shorter bound can expire
+       before Npgsql looks at an already-cancelled token, and the write then reports a timeout instead of the cancellation. */
     private const string DeadStore =
-        "Host=127.0.0.1;Port=1;Username=none;Password=none;Database=none;Timeout=1";
+        "Host=127.0.0.1;Port=1;Username=none;Password=none;Database=none;Timeout=15";
 
     private const string Host = "solo.abc123.us-east-1.rds.amazonaws.com";
 

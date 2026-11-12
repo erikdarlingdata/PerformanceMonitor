@@ -101,7 +101,8 @@ public partial class ServerTab : UserControl
 
         LatchSpinlockRenderer.Render(LatchStatsChart, _latchStatsHover, data,
             d => d.CollectionTime, d => d.LatchClass, d => d.WaitTimeMsPerSecond,
-            "Latch Waits", "Wait Time (ms/sec)", rangeStart.ToOADate(), rangeEnd.ToOADate());
+            "Latch Waits", "ms/sec", ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
+        KeepPlottedInView(LatchStatsChart, rangeStart, rangeEnd);
     }
 
     /// <summary>The spinlock collisions trend: one collisions/sec series per top-5 spinlock (heaviest
@@ -122,7 +123,8 @@ public partial class ServerTab : UserControl
 
         LatchSpinlockRenderer.Render(SpinlockStatsChart, _spinlockStatsHover, data,
             d => d.CollectionTime, d => d.SpinlockName, d => d.CollisionsPerSecond,
-            "Spinlock Collisions", "Collisions/sec", rangeStart.ToOADate(), rangeEnd.ToOADate());
+            "Spinlock Collisions", "count/sec", ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
+        KeepPlottedInView(SpinlockStatsChart, rangeStart, rangeEnd);
     }
 
     /// <summary>Tears down the latch/spinlock hover helpers (mirrors the other tabs' dispose) so their
@@ -131,5 +133,22 @@ public partial class ServerTab : UserControl
     {
         _latchStatsHover?.Dispose();
         _spinlockStatsHover?.Dispose();
+    }
+
+    /// <summary>
+    /// A snapshot grid inside an expander on the page that scrolls as one: a wheel over a grid that cannot scroll further in the wheel's
+    /// direction moves the page instead (<see cref="PageScroll.ForwardWheel"/>). The page keeps the wheel over its plots for their zoom, so
+    /// the forwarding is wired on the grids alone.
+    /// </summary>
+    private void SnapshotGrid_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    {
+        for (var up = sender as System.Windows.DependencyObject; up is not null; up = System.Windows.Media.VisualTreeHelper.GetParent(up))
+        {
+            if (up is System.Windows.Controls.ScrollViewer page)
+            {
+                PageScroll.ForwardWheel(page, e);
+                return;
+            }
+        }
     }
 }

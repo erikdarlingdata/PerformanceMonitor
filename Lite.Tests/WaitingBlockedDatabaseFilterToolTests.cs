@@ -274,7 +274,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         var root = Parse(await McpWaitTools.GetWaitingTasks(_service, _serverManager, ServerName));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Equal("No waiting tasks captured in the specified time range.", root.GetProperty("message").GetString());
+        /* #7573: the default read leaves the monitor's own statements out and the empty answer says so. */
+        Assert.Equal("No waiting tasks captured in the specified time range. The monitor's own statements are left out. Pass include_monitor=true to include them.", root.GetProperty("message").GetString());
+
+        /* With them included nothing is left out, so the sentence is the unfiltered one, word for word. */
+        var included = Parse(await McpWaitTools.GetWaitingTasks(_service, _serverManager, ServerName, include_monitor: true));
+        Assert.Equal("No waiting tasks captured in the specified time range.", included.GetProperty("message").GetString());
     }
 
     /* ───────────────────────── get_blocked_process_reports ───────────────────────── */
@@ -361,7 +366,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             _service, _serverManager, ServerName, database_name: "NoSuchDb"));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Contains("No blocked process reports found in the specified time range for the database NoSuchDb.",
+        Assert.Contains("No blocked process reports found in this window for the database NoSuchDb.",
             root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
@@ -371,7 +376,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         var root = Parse(await McpBlockingTools.GetBlockedProcessReports(_service, _serverManager, ServerName));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Equal("No blocked process reports found in the specified time range.", root.GetProperty("message").GetString());
+        Assert.Equal("No blocked process reports found in this window.", root.GetProperty("message").GetString());
     }
 
     /* ───────────────────────── seeding ───────────────────────── */

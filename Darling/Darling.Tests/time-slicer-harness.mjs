@@ -416,5 +416,26 @@ out.reach = {
   outside: outsideShort.narrowed === true,
 };
 
+/* 22. #7931: a window that ends at :40 of a minute (a live range built mid-minute). A selection that ends at the window end stays inside it: the
+   rounding to whole minutes must not carry the end past the window, so the read's `as_of`, the readout and the drawn box all stop at the end. */
+const END40 = END + 40000;
+const edgeWin = { startMs: END40 - 24 * HOUR, endMs: END40 };
+const edgeSel = S.clampSlice({ startMs: END40 - 6 * HOUR, endMs: END40 }, edgeWin);
+const edgeCtx = { hours: 24, label: "last 24 hours", startMs: edgeWin.startMs, endMs: edgeWin.endMs, rangeKey: "custom:live:edge" };
+const edgeRoot = await draw(edgeCtx, "cpu", "p");
+asks.length = 0;
+await drag(edgeRoot, 750, 1000);
+const edgeBody = byClass(edgeRoot, "slicer-sel")[0];
+out.edge = {
+  windowEnd: new Date(END40).toISOString(),
+  clampedEnd: edgeSel ? new Date(edgeSel.endMs).toISOString() : null,
+  clampedStartMinute: edgeSel ? edgeSel.startMs % 60000 === 0 : null,
+  endText: modules.util.localTime(new Date(END40).toISOString()),
+  queries: lastTop("get_top_queries_by_cpu"),
+  readout: readoutOf(edgeRoot),
+  boxRight: Math.round((parseFloat(edgeBody.style.left) + parseFloat(edgeBody.style.width)) * 1000) / 1000,
+  endValueNow: byClass(edgeRoot, "slicer-handle-end")[0].attrs["aria-valuenow"],
+};
+
 console.log(JSON.stringify(out));
 process.exit(0);

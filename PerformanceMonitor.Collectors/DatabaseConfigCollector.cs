@@ -258,8 +258,7 @@ OPTION(RECOMPILE);";
 
     private static (bool Has2019Columns, bool HasOptimizedLockingColumn) VersionGates(CollectorTargetInfo target)
     {
-        var isAzure = target.IsAzureSqlDb || target.IsAzureManagedInstance;
-        var has2019 = target.SqlMajorVersion >= 15 || target.SqlMajorVersion == 0 || isAzure;
+        var has2019 = target.MeetsMinimumVersion(15, unknownIsNewest: true);
         /* Azure SQL Database reports major 12 but has the column; Managed Instance is not documented to. */
         var hasOptimizedLocking = target.SqlMajorVersion >= 17 || target.IsAzureSqlDb;
         return (has2019, hasOptimizedLocking);

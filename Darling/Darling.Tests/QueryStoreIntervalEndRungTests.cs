@@ -154,7 +154,7 @@ public sealed class QueryStoreIntervalEndRungTests
 
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -188,7 +188,7 @@ public sealed class QueryStoreIntervalEndRungTests
 
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {

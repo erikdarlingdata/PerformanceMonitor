@@ -139,8 +139,7 @@ public sealed class DarlingAlertReadAdapterTests
         Assert.Contains("{0}", DarlingAlertReadAdapter.LongRunningQueriesSqlTemplate);
         Assert.Contains("ORDER BY r.total_elapsed_time_ms DESC", DarlingAlertReadAdapter.LongRunningQueriesSqlTemplate);
 
-        /* Volumes: latest collection only, no-mount-point rows excluded, worst ratio first. */
-        Assert.Contains("volume_mount_point IS NOT NULL", DarlingAlertReadAdapter.VolumeFreeSpaceSql);
+        /* Volumes: latest collection only, worst ratio first (the no-name filter is proved by LinuxVolumeNameLiveTests, #7704). */
         Assert.Contains("ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)", DarlingAlertReadAdapter.VolumeFreeSpaceSql);
 
         /* Anomalous jobs: latest snapshot, 60-second noise floor, threshold + cap. */

@@ -51,8 +51,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// hands back for a name that resolves to nothing is <see cref="McpHelpers.Refusal"/>'s
 /// <c>{"status":"invalid","message":"Could not resolve server. …","hints":{"parameter":"server_name"}}</c>, so
 /// the ~190 tools that <c>return error;</c> put a status word on the wire without any of them changing. The
-/// SENTENCE is unchanged — <see cref="MissSentence"/> still begins "Could not resolve server." and still
-/// carries the local listing and the peer disclosure — and the consumers that want the words (the CLI's
+/// SENTENCE still begins "Could not resolve server." (callers match on those words), then says why — the name
+/// sent matched no monitored server, or none was sent and several are monitored (<see cref="McpHelpers.ServerMissOpening"/>,
+/// #7077) — and carries the local listing and the peer disclosure. The consumers that want the words (the CLI's
 /// stderr, the triage page's note, <c>remove_servers</c>' <c>not_found</c> outcome) read them back through
 /// <see cref="McpHelpers.ErrorMessageOf"/>. The one return here that is NOT a refusal — the registry read
 /// itself failing — stays a bare sentence on purpose: it is a store fault, not the caller's, and wearing
@@ -60,6 +61,58 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 internal static class DarlingServerResolver
 {
+    private static readonly AsyncLocal<int?> WebServerId = new();
+    private static readonly AsyncLocal<(int ServerId, string ServerName, string DisplayName)?> WebPinnedServer = new();
+    private static readonly AsyncLocal<(IReadOnlyList<int> Ids, IReadOnlyList<int> Tags)?> WebScope = new();
+
+    internal static IReadOnlyList<int>? WebAllowedServerIds => WebScope.Value?.Ids;
+    internal static IReadOnlyList<int>? WebAllowedTagIds => WebScope.Value?.Tags;
+
+    internal static async Task<T> ReadWebScopeAsync<T>(IReadOnlyList<int> ids, IReadOnlyList<int> tags, Func<Task<T>> read)
+    {
+        var previous = WebScope.Value;
+        WebScope.Value = (ids, tags);
+        try
+        {
+            return await read();
+        }
+        finally
+        {
+            WebScope.Value = previous;
+        }
+    }
+
+    /// <summary>Keep every resolution in an authorized web read on the same server, and answer the exact canonical name from this row
+    /// without a registry read.</summary>
+    internal static async Task<T> ReadWebServerAsync<T>((int ServerId, string ServerName, string DisplayName) server, Func<Task<T>> read)
+    {
+        var previous = WebPinnedServer.Value;
+        WebPinnedServer.Value = server;
+        try
+        {
+            return await ReadWebServerAsync(server.ServerId, read);
+        }
+        finally
+        {
+            WebPinnedServer.Value = previous;
+        }
+    }
+
+    /// <summary>Keep every resolution in an authorized web read on the same server ID.</summary>
+    internal static async Task<T> ReadWebServerAsync<T>(int serverId, Func<Task<T>> read)
+    {
+        var previous = WebServerId.Value;
+        WebServerId.Value = serverId;
+        try
+        {
+            return await read();
+        }
+        finally
+        {
+            WebServerId.Value = previous;
+        }
+    }
+
     /// <summary>The registry-read fault sentence's fixed prefix (#4283 H2) — a constant so the web surface's
     /// <see cref="PerformanceMonitor.Darling.Service.DarlingWebEndpoints.ClassifyToolResponse"/> and the
     /// triage note/card can recognize this specific store fault and route it through <c>ServerErrorResult</c>
@@ -95,6 +148,13 @@ ORDER BY server_name";
         NameClash nameClash = NameClash.StoredNameWins)
     #pragma warning restore CA1068
     {
+        /* An authorized web read already resolved this exact name against the registry: answer from that row instead of reading it again. */
+        if (WebPinnedServer.Value is { } pinned && WebServerId.Value == pinned.ServerId && pinned.ServerName.Length > 0
+            && string.Equals(serverName?.Trim(), pinned.ServerName, StringComparison.OrdinalIgnoreCase))
+        {
+            return (pinned, null);
+        }
+
         var (servers, fault) = await LoadEnabledOrFaultAsync(postgres, cancellationToken);
         if (fault is not null)
         {
@@ -102,6 +162,13 @@ ORDER BY server_name";
         }
 
         var answer = ResolveOrErrorForAnswer(servers, serverName, nameClash);
+        if ((WebServerId.Value is int authorizedId &&
+             (answer.error is not null || answer.resolved.ServerId != authorizedId)) ||
+            (WebAllowedServerIds is { } allowedIds &&
+             (answer.error is not null || !allowedIds.Contains(answer.resolved.ServerId))))
+        {
+            return (default, McpHelpers.Refusal("server_name", "Server data is unavailable to this token."));
+        }
         if (answer.error is null)
         {
             /* #5097: the slow-read record names the server a read resolved; one site covers every server-scoped tool. */
@@ -300,7 +367,8 @@ ORDER BY server_name";
     /// the peer disclosure is appended, naming the sibling store whose declared coverage matches. It is
     /// APPENDED rather than substituted because the local server listing is still the right answer to the
     /// commonest miss (a typo), and because the leading "Could not resolve server." is what callers key off.
-    /// With nothing declared the sentence is byte-for-byte what it was; since #3739 it travels as the
+    /// With nothing declared the sentence is the opening <see cref="McpHelpers.ServerMissOpening"/> builds (#7077) and the
+    /// server list; since #3739 it travels as the
     /// <c>message</c> of the <c>invalid</c> envelope (<see cref="McpHelpers.Refusal"/>), and a caller that
     /// keys off the words reads them through <see cref="McpHelpers.ErrorMessageOf"/>.</para>
     /// </summary>
@@ -310,6 +378,13 @@ ORDER BY server_name";
         DarlingPeerDirectory.Snapshot peers,
         NameClash nameClash = NameClash.StoredNameWins)
     {
+        if (WebServerId.Value is not null || WebAllowedServerIds is not null)
+        {
+            servers = servers.Where(server =>
+                (WebServerId.Value is null || server.ServerId == WebServerId.Value) &&
+                (WebAllowedServerIds is null || WebAllowedServerIds.Contains(server.ServerId))).ToList();
+        }
+
         if (string.IsNullOrWhiteSpace(serverName))
         {
             /* No name: the only server there is, or nothing to choose from. */
@@ -346,7 +421,12 @@ ORDER BY server_name";
         string? serverName,
         DarlingPeerDirectory.Snapshot peers)
     {
-        var message = $"Could not resolve server. Available servers:\n{ListAvailableServers(servers)}";
+        if (WebServerId.Value is not null || WebAllowedServerIds is not null)
+        {
+            return "Server data is unavailable to this token.";
+        }
+
+        var message = $"{McpHelpers.ServerMissOpening(serverName, servers.Count)} Available servers:\n{ListAvailableServers(servers)}";
         var disclosure = DarlingPeerDirectory.ResolutionMissDisclosure(peers, serverName);
 
         return disclosure.Length == 0 ? message : $"{message}\n\n{disclosure}";
@@ -432,7 +512,16 @@ ORDER BY server_name";
             return (default, fault);
         }
 
-        return ResolveWithFingerprintName(servers, serverName);
+        var answer = ResolveWithFingerprintName(servers, serverName);
+        if ((WebServerId.Value is int authorizedId &&
+             (answer.error is not null || answer.resolved.ServerId != authorizedId)) ||
+            (WebAllowedServerIds is { } allowedIds &&
+             (answer.error is not null || !allowedIds.Contains(answer.resolved.ServerId))))
+        {
+            return (default, McpHelpers.Refusal("server_name", "Server data is unavailable to this token."));
+        }
+
+        return answer;
     }
 
     /// <summary>The pure half of <see cref="ResolveWithFingerprintNameAsync"/>, over an already-read registry.</summary>

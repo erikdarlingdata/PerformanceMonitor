@@ -85,6 +85,30 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
         AssertPayload(await McpMemoryTools.GetMemoryTrend(service, _serverManager, ServerName, 4));
     }
 
+    /// <summary>#7167: a window that ends before the oldest row the store holds was never read, so the empty answer must not call it
+    /// genuinely quiet. Darling's twin says the same through McpHelpers.QuietUnlessCut.</summary>
+    [Fact]
+    public async Task MemoryAndFileIoTrend_AWindowBeforeTheStoresFirstRow_DoesNotClaimToBeQuiet()
+    {
+        var service = new LocalDataService(_duckDb);
+        await SeedMemoryAsync(DateTime.UtcNow.AddMinutes(-10));
+        await SeedFileIoAsync(DateTime.UtcNow.AddMinutes(-10));
+        var asOf = DateTime.UtcNow.AddHours(-3).ToString("o");
+
+        foreach (var payload in new[]
+        {
+            await McpMemoryTools.GetMemoryTrend(service, _serverManager, ServerName, 1, asOf),
+            await McpIoTools.GetFileIoTrend(service, _serverManager, ServerName, 1, as_of: asOf),
+        })
+        {
+            var root = JsonDocument.Parse(payload).RootElement;
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+            var text = root.GetProperty("message").GetString()!;
+            Assert.DoesNotContain("genuinely quiet", text, StringComparison.Ordinal);
+            Assert.True(root.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+        }
+    }
+
     [Fact]
     public async Task FileIoTrend_NeverCollected_AndAQuietWindow_AreDifferentAnswers()
     {
@@ -149,8 +173,13 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
         var single = JsonDocument.Parse(
             await McpQueryTools.GetQueryTrend(service, _serverManager, "0xEMPTYTRENDHASH", "AppDb", ServerName, 4)).RootElement;
         Assert.Equal("raw", single.GetProperty("source").GetString());
-        Assert.Equal("per-collection", single.GetProperty("bucket").GetString());
-        Assert.Equal(single.GetProperty("trend")[0].GetProperty("collection_time").GetString(), single.GetProperty("effective_start").GetString());
+        /* #7907: bucketed like its siblings (two minutes over four hours); effective_start is the collection the store
+           held, and the point is stamped at its bucket's start, at or before it. */
+        Assert.Equal("2 minutes", single.GetProperty("bucket").GetString());
+        Assert.StartsWith(seededAt.ToString("yyyy-MM-ddTHH:mm:ss"), single.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
+        Assert.True(
+            string.CompareOrdinal(single.GetProperty("trend")[0].GetProperty("collection_time").GetString(), single.GetProperty("effective_start").GetString()) <= 0,
+            "the point is stamped at its bucket's start, which is not after the collection it holds");
         Assert.True(single.GetProperty("window_truncated").GetBoolean(), "a series beginning 10 minutes ago in a 4-hour window starts past the slack");
         Assert.Equal(1, single.GetProperty("data_points").GetInt32());
     }

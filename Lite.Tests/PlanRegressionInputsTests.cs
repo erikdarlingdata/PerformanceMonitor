@@ -230,7 +230,7 @@ public sealed class PlanRegressionInputsTests : IClassFixture<SharedDuckDbFixtur
         /* The statistics flip is the worst of the two that stay (factor 6 against 3), and its basis is 2. */
         Assert.Equal(2, fact.Metadata["offender_count"]);
         Assert.Equal(StatisticsFlipQuery, (long)fact.Metadata["worst_query_id"]);
-        Assert.Equal(6, fact.Metadata["worst_regression_factor"], precision: 6);
+        Assert.Equal(6, fact.Metadata["lead_regression_factor"], precision: 6);
         Assert.Equal(3, fact.Metadata["cross_input_excluded_count"]);
         Assert.Equal(0, fact.Metadata["inputs_unverified_count"]);
         Assert.Equal(2, fact.Metadata["worst_input_basis"]);

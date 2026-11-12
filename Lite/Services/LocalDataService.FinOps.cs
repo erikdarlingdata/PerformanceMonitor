@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Services;
@@ -23,7 +24,13 @@ public class ProvisioningTrendRow
     public decimal P95CpuPct { get; set; }
     public decimal MemoryRatio { get; set; }
     public string Status { get; set; } = "";
-    public string DayDisplay => Day.ToString("ddd MM/dd");
+    /// <summary>Stolen memory as a share of total server memory over the day; null when the day has no memory sample.</summary>
+    public decimal? StolenMemoryPct { get; set; }
+    /// <summary>Why the day read UNDER PROVISIONED, in the badge's words; null for any other verdict.</summary>
+    public string? StatusReason { get; set; }
+    /// <summary>True for a day that has not ended (today): the row is judged on the hours collected so far.</summary>
+    public bool IsPartial { get; set; }
+    public string DayDisplay => ProvisioningTrendWindow.DayLabel(Day, IsPartial);
     public string StatusDisplay => ProvisioningVerdict.StatusLabel(Status);
 }
 
@@ -45,6 +52,12 @@ public class MemoryGrantEfficiencyRow
 public class TopResourceConsumerRow
 {
     public string DatabaseName { get; set; } = "";
+    /// <summary>#7725: true for a database the server no longer lists (its figures are real and keep the row). The grid shows "(dropped)".
+    /// Private set, so a reflection walk over the public setters does not see it; <see cref="MarkDropped"/> sets it.</summary>
+    public bool IsDropped { get; private set; }
+    public void MarkDropped(bool dropped) => IsDropped = dropped;
+    /// <summary>#7725: what the grid's database cell shows: the name, with " (dropped)" after a database the server no longer lists.</summary>
+    public string DatabaseDisplay => PerformanceMonitor.Common.DroppedDatabaseMark.Display(DatabaseName, IsDropped);
     public long CpuTimeMs { get; set; }
     public long ExecutionCount { get; set; }
     public decimal IoTotalMb { get; set; }
@@ -64,6 +77,10 @@ public class DatabaseSizeSummaryRow
     public decimal FreeMb => UsedMb.HasValue ? TotalMb - UsedMb.Value : TotalMb;
     public decimal UsedPct => TotalMb > 0 && UsedMb.HasValue ? Math.Round(UsedMb.Value * 100m / TotalMb, 1) : 0;
 
+    /// <summary>#8115: the bar's "used / allocated MB" label. A database whose used size was not collected says so instead of
+    /// leaving the slash standing in front of the allocation.</summary>
+    public string SizeLabel => UsedMb.HasValue ? $"{UsedMb.Value:N0} / {TotalMb:N0} MB" : $"used size not collected / {TotalMb:N0} MB";
+
     /* Star-width GridLength for XAML binding — drives the stacked bar proportions */
     public System.Windows.GridLength UsedStarWidth =>
         new(Math.Max((double)(UsedMb ?? 0m), 0.1), System.Windows.GridUnitType.Star);
@@ -73,6 +90,8 @@ public class DatabaseSizeSummaryRow
 
 public class UtilizationEfficiencyRow
 {
+    /// <summary>The server is an Availability Group secondary replica (#7705): its verdict is not judged from its own load, and it gets no CPU or memory right-sizing row.</summary>
+    public bool IsAgSecondary { get; set; }
     public decimal AvgCpuPct { get; set; }
     public int MaxCpuPct { get; set; }
     public decimal P95CpuPct { get; set; }
@@ -90,17 +109,17 @@ public class UtilizationEfficiencyRow
 
     /// <summary>Peak resource-semaphore waiters over the window. Any waiter at all means a query asked for
     /// workspace memory and did not simply get it — the signal the verdict uses in place of the ratio that
-    /// pinned at 1.0 (#2246).</summary>
-    public long MaxGrantWaiters { get; set; }
+    /// pinned at 1.0 (#2246). Null when the window holds no memory grant sample (#7906), as are the three figures below.</summary>
+    public long? MaxGrantWaiters { get; set; }
 
     /// <summary>Grant timeouts accrued over the window (delta, not cumulative).</summary>
-    public long GrantTimeouts { get; set; }
+    public long? GrantTimeouts { get; set; }
 
     /// <summary>Grants forced through below what was requested, over the window.</summary>
-    public long ForcedGrants { get; set; }
+    public long? ForcedGrants { get; set; }
 
     /// <summary>Peak granted-over-target workspace memory, as a percentage. Fleet max is 18.8%.</summary>
-    public decimal GrantUtilizationPct { get; set; }
+    public decimal? GrantUtilizationPct { get; set; }
 
     public int MaxWorkersCount { get; set; }
 
@@ -130,13 +149,13 @@ public class UtilizationEfficiencyRow
 
     /// <summary>The Avg CPU figure: a dash when the window held no CPU sample (<see cref="HasCpuSample"/> false), never the 0.00% that
     /// came from nothing.</summary>
-    public string AvgCpuText => HasCpuSample ? $"{AvgCpuPct:N2}%" : "-";
+    public string AvgCpuText => HasCpuSample ? $"{AvgCpuPct:N1}%" : "-";
 
     /// <summary>The P95 CPU figure: a dash when the window held no CPU sample, never a 0.00%.</summary>
-    public string P95CpuText => HasCpuSample ? $"{P95CpuPct:N2}%" : "-";
+    public string P95CpuText => HasCpuSample ? $"{P95CpuPct:N1}%" : "-";
 
     /// <summary>The Max CPU figure: a dash when the window held no CPU sample, never a 0%.</summary>
-    public string MaxCpuText => HasCpuSample ? $"{MaxCpuPct}%" : "-";
+    public string MaxCpuText => HasCpuSample ? $"{MaxCpuPct:N1}%" : "-";
 
     /// <summary>False when the window held no CPU sample: the server is stale or its CPU collector is off, and its latest database
     /// sizes may be days old, so the Allocated vs Used chart is hidden rather than shown as current.</summary>
@@ -171,6 +190,12 @@ public class UtilizationEfficiencyRow
 public class DatabaseResourceUsageRow
 {
     public string DatabaseName { get; set; } = "";
+    /// <summary>#7725: true for a database the server no longer lists (its figures are real and keep the row). The grid shows "(dropped)".
+    /// Private set, so a reflection walk over the public setters does not see it; <see cref="MarkDropped"/> sets it.</summary>
+    public bool IsDropped { get; private set; }
+    public void MarkDropped(bool dropped) => IsDropped = dropped;
+    /// <summary>#7725: what the grid's database cell shows: the name, with " (dropped)" after a database the server no longer lists.</summary>
+    public string DatabaseDisplay => PerformanceMonitor.Common.DroppedDatabaseMark.Display(DatabaseName, IsDropped);
     public long CpuTimeMs { get; set; }
     public long LogicalReads { get; set; }
     public long PhysicalReads { get; set; }
@@ -294,8 +319,8 @@ public class DatabaseSizeRow
     {
         if (rows.Count == 0) return "";
         return rows.Any(r => r.IsAzureSiblingRow)
-            ? $"{rows.Count} file(s). {AzureSiblingDatabaseSize.GridCaption}"
-            : $"{rows.Count} file(s){scopeNote}";
+            ? $"{CountText.Plural(rows.Count, "file")}. {AzureSiblingDatabaseSize.GridCaption}"
+            : $"{CountText.Plural(rows.Count, "file")}{scopeNote}";
     }
 
     /// <summary>The caption under the Allocated vs Used chart, or null when none of its bars needs one. The chart
@@ -341,8 +366,24 @@ public class DatabaseSizeRow
         ? (VlfCount ?? 0) : -1;
 }
 
-public class ServerPropertyRow
+/// <summary>One Server Inventory row. The collected overlay's cells (average CPU, storage, idle databases, Status, Health) and the
+/// Last Updated text raise <see cref="PropertyChanged"/>, so a re-read of the overlay or a change of the time display redraws
+/// those cells in place and the grid keeps its rows, its selection and its scroll position.</summary>
+public class ServerPropertyRow : System.ComponentModel.INotifyPropertyChanged
 {
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+
+    private void Raise(params string[] names)
+    {
+        foreach (var name in names)
+        {
+            PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(name));
+        }
+    }
+
+    /// <summary>The time display changed: the Last Updated cell and the value its column filters on are read again.</summary>
+    public void NotifyTimeDisplayChanged() => Raise(nameof(LastUpdatedDisplay), nameof(LastUpdatedLocal));
+
     public string ServerName { get; set; } = "";
     public string Edition { get; set; } = "";
     public string ProductVersion { get; set; } = "";
@@ -367,8 +408,73 @@ public class ServerPropertyRow
     public long? PhysicalMemoryMb { get => HostHardware ? null : _physicalMemoryMb; set => _physicalMemoryMb = value ?? 0L; }
     public int? SocketCount { get => HostHardware ? null : _socketCount; set => _socketCount = value; }
     public int? CoresPerSocket { get => HostHardware ? null : _coresPerSocket; set => _coresPerSocket = value; }
+    /// <summary>The server's start time on the SERVER's own clock, shown as-is. Never subtract it from the client's clock (#7176).</summary>
     public DateTime? SqlServerStartTime { get; set; }
+
+    /// <summary>The start instant in UTC, worked out at read time from the uptime the server itself measured as two tick counts
+    /// (<c>(ms_ticks - sqlserver_start_time_ms_ticks) / 1000</c>), so neither the client's zone nor a daylight saving change enters it (#7176). Null when unknown.</summary>
+    public DateTime? SqlServerStartUtc { get; set; }
+
+    /// <summary>The instant the row's figures are from, in UTC: when a live row was read, or the collection time of a row built
+    /// from the store. Null on a row nothing stamped. The Last Updated column sorts on it.</summary>
     public DateTime? LastUpdated { get; set; }
+
+    /// <summary>
+    /// The row's own server's clock (#4766): the one the store collected for it, else its open tab's, else the machine's, set by
+    /// the loader. The inventory lists every server, so each row reads its own server's wall time in Server mode. Null (a row
+    /// built without one) falls back to the active tab's clock.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>The server's id in the store (the hash of its storage name), set by the inventory build. A re-read of the collected
+    /// overlay finds the row's metrics by it. Not shown in the grid.</summary>
+    public int StorageServerId { get; set; }
+
+    /// <summary><see cref="LastUpdated"/> on the clock of the selected display mode: UTC as stored, this machine's zone, or the
+    /// row's server's own clock (<see cref="Clock"/>). The Last Updated column filters on it, so a filter reads the times the
+    /// cells show.</summary>
+    public DateTime? LastUpdatedLocal => LastUpdated is { } utc ? DisplayZone.ToDisplay(utc, DisplayZoneNow) : null;
+
+    /// <summary>True when the row was built from the newest collected <c>server_properties</c> row because the server could not be
+    /// reached (<see cref="FinOpsServerInventory.FromCollected"/>); <see cref="LastUpdated"/> is then that row's collection time.</summary>
+    public bool IsLastKnown { get; set; }
+
+    /// <summary>The Last Updated cell: the time a live row was read, or "last known, " and the collection time of a row built from the
+    /// store, as <see cref="ServerTimeHelper.FormatInstant"/> words <see cref="LastUpdated"/> on the selected display mode's clock, so
+    /// in the repeated autumn hour it carries its UTC offset. In Server Time every row is on its own server's clock, so the text
+    /// ends with that clock's offset, "2026-11-10 09:30 (UTC-08:00)"; UTC and Local Time are one zone for every row and carry
+    /// none. The column sorts on <see cref="LastUpdated"/>.</summary>
+    public string LastUpdatedDisplay
+    {
+        get
+        {
+            if (LastUpdated is not { } utc) return "";
+            var text = ZoneLabelledText(utc);
+
+            return IsLastKnown ? "last known, " + text : text;
+        }
+    }
+
+    /// <summary>#8634: one instant as this row's time columns word it: the display mode's zone on the row's own clock, then that clock's
+    /// offset in Server Time. Start Time and Last Updated both go through it, so neither shows a zone label the other lacks.</summary>
+    private string ZoneLabelledText(DateTime utc)
+    {
+        var mode = ServerTimeHelper.CurrentDisplayMode;
+        var clock = Clock ?? ServerTimeHelper.ActiveServerClock;
+        return ServerTimeHelper.WithServerZoneLabel(
+            ServerTimeHelper.FormatInstant(utc, ServerTimeHelper.DisplayZoneFor(mode, clock), "yyyy-MM-dd HH:mm"), mode, clock, utc);
+    }
+
+    /// <summary>The Start Time cell (#8634): <see cref="SqlServerStartUtc"/>, the instant the server's own tick counts give, worded like
+    /// <see cref="LastUpdatedDisplay"/> on the selected display mode's clock. A row with no such instant shows the server's own clock
+    /// reading <see cref="SqlServerStartTime"/> as it was read, with no label. The column sorts on <see cref="SqlServerStartTime"/>.</summary>
+    public string StartTimeDisplay => SqlServerStartUtc is { } utc
+        ? ZoneLabelledText(utc)
+        : SqlServerStartTime is { } local ? local.ToString("yyyy-MM-dd HH:mm") : "";
+
+    private TimeZoneInfo DisplayZoneNow =>
+        ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, Clock ?? ServerTimeHelper.ActiveServerClock);
+
     public bool? IsHadrEnabled { get; set; }
     public bool? IsClustered { get; set; }
     public string AgReplicaRole { get; set; } = "Standalone";
@@ -385,28 +491,89 @@ public class ServerPropertyRow
         set => _hardwareUnavailableReason = value;
     }
 
-    public decimal? AvgCpuPct { get; set; }
-    public decimal? StorageTotalGb { get; set; }
-    public int? IdleDbCount { get; set; }
-    public string? ProvisioningStatus { get; set; }
+    private decimal? _avgCpuPct;
+    private decimal? _storageTotalGb;
+    private int? _idleDbCount;
+    private string? _provisioningStatus;
+    private int? _healthScore;
+
+    public decimal? AvgCpuPct
+    {
+        get => _avgCpuPct;
+        set { if (_avgCpuPct != value) { _avgCpuPct = value; Raise(nameof(AvgCpuPct)); } }
+    }
+
+    public decimal? StorageTotalGb
+    {
+        get => _storageTotalGb;
+        set { if (_storageTotalGb != value) { _storageTotalGb = value; Raise(nameof(StorageTotalGb)); } }
+    }
+
+    /// <summary>The storage total this row's own read brought, before any collected overlay: the live read's figure, and none for a
+    /// row built from the store. <see cref="StorageTotalGb"/> reads it again when a re-read of the overlay holds no total for the
+    /// server (<see cref="FinOpsServerInventory.ReapplyCollectedMetrics"/>).</summary>
+    internal decimal? OwnStorageTotalGb { get; set; }
+
+    public int? IdleDbCount
+    {
+        get => _idleDbCount;
+        set { if (_idleDbCount != value) { _idleDbCount = value; Raise(nameof(IdleDbCount)); } }
+    }
+
+    public string? ProvisioningStatus
+    {
+        get => _provisioningStatus;
+        set
+        {
+            if (_provisioningStatus == value) return;
+            _provisioningStatus = value;
+            Raise(nameof(ProvisioningStatus), nameof(ProvisioningDisplay), nameof(ProvisioningNote), nameof(HealthDisplay), nameof(HealthScoreNote));
+        }
+    }
 
     /// <summary>The uptime in seconds, the sort key of the Uptime column (#6086): <see cref="UptimeDisplay"/> is text, which sorts
     /// "10d" before "2d". Null when the start time is unknown.</summary>
-    public double? UptimeSeconds => SqlServerStartTime is { } start ? (DateTime.Now - start).TotalSeconds : null;
+    public double? UptimeSeconds => SqlServerStartUtc is { } start ? Math.Max(0d, (DateTime.UtcNow - start).TotalSeconds) : null;
 
     public string UptimeDisplay
     {
         get
         {
-            if (SqlServerStartTime == null) return "";
-            var uptime = DateTime.Now - SqlServerStartTime.Value;
+            if (UptimeSeconds is not { } seconds) return "";
+            var uptime = TimeSpan.FromSeconds(seconds);
             return $"{(int)uptime.TotalDays}d {uptime.Hours}h";
         }
     }
     public string HadrDisplay => IsHadrEnabled.HasValue ? (IsHadrEnabled.Value ? "Yes" : "No") : "";
     public string ClusteredDisplay => IsClustered.HasValue ? (IsClustered.Value ? "Yes" : "No") : "";
-    public string AgReplicaRoleDisplay => string.Equals(AgReplicaRole, "Standalone", StringComparison.OrdinalIgnoreCase) ? "—" : AgReplicaRole;
-    public string ProvisioningDisplay => string.IsNullOrEmpty(ProvisioningStatus) ? "" : ProvisioningVerdict.StatusLabel(ProvisioningStatus);
+    public string AgReplicaRoleDisplay => string.Equals(AgReplicaRole, "Standalone", StringComparison.OrdinalIgnoreCase) ? "-" : AgReplicaRole;
+
+    private bool _overlayReadFailed;
+
+    /// <summary>True when the last read of the collected overlay for this row failed (the fleet read threw, or this server's merge
+    /// did). A cell with no value then reads <see cref="ProvisioningVerdict.CouldNotReadLabel"/>: the store may hold one. A value
+    /// an earlier read brought stays on screen.</summary>
+    public bool OverlayReadFailed
+    {
+        get => _overlayReadFailed;
+        set
+        {
+            if (_overlayReadFailed == value) return;
+            _overlayReadFailed = value;
+            Raise(nameof(OverlayReadFailed), nameof(ProvisioningDisplay), nameof(ProvisioningNote), nameof(HealthDisplay), nameof(HealthScoreNote));
+        }
+    }
+
+    private string NoValueLabel => OverlayReadFailed ? ProvisioningVerdict.CouldNotReadLabel : ProvisioningVerdict.NotCollectedLabel;
+
+    /// <summary>The Status cell: the verdict's words, or, for a server with no verdict, <see cref="ProvisioningVerdict.NotCollectedLabel"/>
+    /// (the last 24 hours hold no CPU sample to judge it by) or <see cref="ProvisioningVerdict.CouldNotReadLabel"/> (the overlay read
+    /// failed), never an empty cell.</summary>
+    public string ProvisioningDisplay => string.IsNullOrEmpty(ProvisioningStatus) ? NoValueLabel : ProvisioningVerdict.StatusLabel(ProvisioningStatus);
+
+    /// <summary>The tooltip on a Status cell with no verdict: what was not collected, or that the read failed; null when there is a verdict.</summary>
+    public string? ProvisioningNote => !string.IsNullOrEmpty(ProvisioningStatus) ? null
+        : OverlayReadFailed ? ProvisioningVerdict.CouldNotReadNote : ProvisioningVerdict.NoStatusNote;
 
     // FinOps cost — from server config
     public decimal MonthlyCost { get; set; }
@@ -426,14 +593,31 @@ public class ServerPropertyRow
     }
 
     // Health score (Increment 6)
-    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid shows a dash,
-    /// not a score built from memory and storage alone. It is the Utilization tab's score for the same server
+    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server or it has no memory
+    /// sample: the grid says which (<see cref="HealthDisplay"/>), not a score built from the inputs it has. It is the Utilization tab's score for the same server
     /// (<see cref="FinOpsHealthCalculator.Score"/>), read by <see cref="LocalDataService.GetServerMetricsAsync"/>.</summary>
-    public int? HealthScore { get; set; }
+    public int? HealthScore
+    {
+        get => _healthScore;
+        set
+        {
+            if (_healthScore == value) return;
+            _healthScore = value;
+            Raise(nameof(HealthScore), nameof(HealthDisplay), nameof(HealthScoreColor), nameof(HealthScoreNote));
+        }
+    }
+
     public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
 
-    /// <summary>The tooltip on the dash shown in place of a score; null when there is a score.</summary>
-    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoInventoryScoreNote;
+    /// <summary>The Health cell: the score, or the words shown in place of one. <see cref="ProvisioningVerdict.CouldNotReadLabel"/>
+    /// when the overlay read failed; else the input the score lacks (<see cref="ProvisioningVerdict.NoHealthScoreLabel"/>): "Not
+    /// collected" for a server with no verdict, "No memory sample" beside a verdict. The column sorts on <see cref="HealthScore"/>.</summary>
+    public string HealthDisplay => HealthScore is int score ? score.ToString(System.Globalization.CultureInfo.CurrentCulture)
+        : OverlayReadFailed ? ProvisioningVerdict.CouldNotReadLabel : ProvisioningVerdict.NoHealthScoreLabel(ProvisioningStatus);
+
+    /// <summary>The tooltip on the words shown in place of a score, naming the one cause that applies; null when there is a score.</summary>
+    public string? HealthScoreNote => HealthScore.HasValue ? null
+        : OverlayReadFailed ? ProvisioningVerdict.CouldNotReadNote : ProvisioningVerdict.NoHealthScoreNote(ProvisioningStatus);
 }
 
 public class StorageGrowthRow
@@ -517,10 +701,6 @@ public static class FinOpsHealthCalculator
 
     /// <summary>The tooltip on the dash shown in place of a health score when the last 24 hours hold no CPU sample.</summary>
     public const string NoScoreNote = "No health score: the last 24 hours hold no CPU sample.";
-    /// <summary>The tooltip on the dash shown in place of a health score on the Server Inventory. That score is null for two reasons: the last 24 hours hold no
-    /// CPU sample, or no memory sample has been collected (memory_stats off in the schedule, or not yet run on a new server). The row does not say which,
-    /// so the note names both. The Utilization view keeps <see cref="NoScoreNote"/>: it has no row at all without a memory sample.</summary>
-    public const string NoInventoryScoreNote = "No health score: the last 24 hours hold no CPU sample, or no memory sample has been collected.";
 
     public static int CpuScore(decimal p95Pct)
     {
@@ -698,7 +878,7 @@ public static class HighImpactScorer
         foreach (var hash in allRows.OrderByDescending(r => r.TotalDurationMs).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
         foreach (var hash in allRows.OrderByDescending(r => r.TotalReads).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
         foreach (var hash in allRows.OrderByDescending(r => r.TotalWrites).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
-        foreach (var hash in allRows.OrderByDescending(r => r.TotalMemoryMb).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
+        foreach (var hash in allRows.OrderByDescending(r => r.PeakMemoryMb).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
         foreach (var hash in allRows.OrderByDescending(r => r.TotalExecutions).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
 
         var filtered = allRows.Where(r => interesting.Contains(r.QueryHash)).ToList();
@@ -710,14 +890,14 @@ public static class HighImpactScorer
         var durationValues = filtered.Select(r => r.TotalDurationMs).OrderBy(v => v).ToList();
         var readsValues = filtered.Select(r => (decimal)r.TotalReads).OrderBy(v => v).ToList();
         var writesValues = filtered.Select(r => (decimal)r.TotalWrites).OrderBy(v => v).ToList();
-        var memoryValues = filtered.Select(r => r.TotalMemoryMb).OrderBy(v => v).ToList();
+        var memoryValues = filtered.Select(r => r.PeakMemoryMb).OrderBy(v => v).ToList();
         var execValues = filtered.Select(r => (decimal)r.TotalExecutions).OrderBy(v => v).ToList();
 
         var totalCpu = filtered.Sum(r => r.TotalCpuMs);
         var totalDuration = filtered.Sum(r => r.TotalDurationMs);
         var totalReads = filtered.Sum(r => (decimal)r.TotalReads);
         var totalWrites = filtered.Sum(r => (decimal)r.TotalWrites);
-        var totalMemory = filtered.Sum(r => r.TotalMemoryMb);
+        var totalMemory = filtered.Sum(r => r.PeakMemoryMb);
         var totalExecs = filtered.Sum(r => (decimal)r.TotalExecutions);
 
         foreach (var row in filtered)
@@ -726,14 +906,14 @@ public static class HighImpactScorer
             var durationPctl = PercentRank(durationValues, row.TotalDurationMs);
             var readsPctl = PercentRank(readsValues, (decimal)row.TotalReads);
             var writesPctl = PercentRank(writesValues, (decimal)row.TotalWrites);
-            var memoryPctl = PercentRank(memoryValues, row.TotalMemoryMb);
+            var memoryPctl = PercentRank(memoryValues, row.PeakMemoryMb);
             var execsPctl = PercentRank(execValues, (decimal)row.TotalExecutions);
 
             row.CpuShare = totalCpu > 0 ? Math.Round(100m * row.TotalCpuMs / totalCpu, 1) : 0;
             row.DurationShare = totalDuration > 0 ? Math.Round(100m * row.TotalDurationMs / totalDuration, 1) : 0;
             row.ReadsShare = totalReads > 0 ? Math.Round(100m * row.TotalReads / totalReads, 1) : 0;
             row.WritesShare = totalWrites > 0 ? Math.Round(100m * row.TotalWrites / totalWrites, 1) : 0;
-            row.MemoryShare = totalMemory > 0 ? Math.Round(100m * row.TotalMemoryMb / totalMemory, 1) : 0;
+            row.MemoryShare = totalMemory > 0 ? Math.Round(100m * row.PeakMemoryMb / totalMemory, 1) : 0;
             row.ExecutionsShare = totalExecs > 0 ? Math.Round(100m * row.TotalExecutions / totalExecs, 1) : 0;
 
             var pctlSum = cpuPctl + durationPctl + readsPctl + writesPctl + memoryPctl + execsPctl;
@@ -755,12 +935,25 @@ public class HighImpactQueryRow
 {
     public string QueryHash { get; set; } = "";
     public string DatabaseName { get; set; } = "";
+
+    /// <summary>How many databases the row's figures are summed across (#7695). <see cref="DatabaseName"/> is the one with the most CPU.</summary>
+    public int DatabaseCount { get; set; } = 1;
+
+    /// <summary>#7725: true when <see cref="DatabaseName"/> is a database the server no longer lists. Private set, so a reflection walk over the public setters does not see it; <see cref="MarkDropped"/> sets it.</summary>
+    public bool IsDropped { get; private set; }
+    public void MarkDropped(bool dropped) => IsDropped = dropped;
+
+    /// <summary>The Database cell: the name (with " (dropped)" when the server no longer lists it), then "+ N more" when the figures span several databases.</summary>
+    public string DatabaseDisplay => HighImpactDatabaseText.Cell(PerformanceMonitor.Common.DroppedDatabaseMark.Display(DatabaseName, IsDropped), DatabaseCount);
+
+    /// <summary>The cell's tooltip, null when one database is in the total.</summary>
+    public string? DatabaseTooltip => HighImpactDatabaseText.Tooltip(DatabaseCount);
     public long TotalExecutions { get; set; }
     public decimal TotalCpuMs { get; set; }
     public decimal TotalDurationMs { get; set; }
     public long TotalReads { get; set; }
     public long TotalWrites { get; set; }
-    public decimal TotalMemoryMb { get; set; }
+    public decimal PeakMemoryMb { get; set; }
     public decimal CpuShare { get; set; }
     public decimal DurationShare { get; set; }
     public decimal ReadsShare { get; set; }

@@ -46,6 +46,21 @@ public sealed class ClickThroughUiTextTests : IDisposable
     private static readonly ServerClock Pacific = ServerClock.FixedOffset(-480);
 
     [Fact]
+    public void LastCollect_ServerMode_WithNoClockOfItsOwn_TakesTheMachinesClock_NotTheLastOpenedTabs()
+    {
+        /* #8645: a card with no clock stamped took whichever server tab was opened last. */
+        var machineMinutes = (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes;
+        var otherMinutes = machineMinutes + 180 > 840 ? machineMinutes - 180 : machineMinutes + 180;
+        ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(otherMinutes);
+        var collected = Utc(2026, 1, 15, 20, 30, 15);
+
+        var text = ServerSummaryItem.FormatLastCollect(collected, TimeDisplayMode.ServerTime, null, Utc(2026, 1, 15, 21, 0));
+
+        Assert.EndsWith("(" + PerformanceMonitor.Ui.MultiServerTime.OffsetLabel(machineMinutes) + ")", text);
+        Assert.DoesNotContain(PerformanceMonitor.Ui.MultiServerTime.OffsetLabel(otherMinutes), text);
+    }
+
+    [Fact]
     public void LastCollect_ServerMode_ConvertsOnTheCardsOwnServerClock_NotTheActiveOne()
     {
         ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(600);
@@ -53,7 +68,8 @@ public sealed class ClickThroughUiTextTests : IDisposable
 
         var text = ServerSummaryItem.FormatLastCollect(Utc(2026, 1, 15, 20, 30, 15), TimeDisplayMode.ServerTime, Pacific, now);
 
-        Assert.Equal("12:30:15", text);
+        /* In Server Time each card is on its own server's clock, so the text names that clock's offset. */
+        Assert.Equal("12:30:15 (UTC-08:00)", text);
     }
 
     [Fact]
@@ -83,7 +99,7 @@ public sealed class ClickThroughUiTextTests : IDisposable
         /* LITE/01-start.png: five cards at launch read "19:25:47 (stopped)" for a collection nine days old. */
         var text = ServerSummaryItem.FormatLastCollect(Utc(2026, 1, 6, 20, 30, 15), TimeDisplayMode.ServerTime, Pacific, Utc(2026, 1, 15, 21, 0));
 
-        Assert.Equal("2026-01-06 12:30:15", text);
+        Assert.Equal("2026-01-06 12:30:15 (UTC-08:00)", text);
     }
 
     [Fact]
@@ -94,7 +110,7 @@ public sealed class ClickThroughUiTextTests : IDisposable
         var now = Utc(2026, 1, 16, 3, 0);
         var collected = Utc(2026, 1, 16, 2, 0);
 
-        Assert.Equal("18:00:00", ServerSummaryItem.FormatLastCollect(collected, TimeDisplayMode.ServerTime, Pacific, now));
+        Assert.Equal("18:00:00 (UTC-08:00)", ServerSummaryItem.FormatLastCollect(collected, TimeDisplayMode.ServerTime, Pacific, now));
         Assert.Equal("2026-01-16 02:00:00", ServerSummaryItem.FormatLastCollect(collected, TimeDisplayMode.UTC, Pacific, Utc(2026, 1, 17, 3, 0)));
     }
 
@@ -128,11 +144,11 @@ public sealed class ClickThroughUiTextTests : IDisposable
     public void ListMarkup_NamesItsRowsCardsAndComboItemsForScreenReaders()
     {
         var main = File.ReadAllText(FindRepoFile(@"Lite\MainWindow.xaml"));
-        var finOps = File.ReadAllText(FindRepoFile(@"Lite\Controls\FinOpsTab.xaml"));
+        var card = File.ReadAllText(FindRepoFile(@"Lite\Controls\ServerOverviewCard.xaml"));
 
         Assert.Contains("AutomationProperties.Name\" Value=\"{Binding AutomationName", main, StringComparison.Ordinal);
-        Assert.Contains("AutomationProperties.Name=\"{Binding DisplayName}\"", main, StringComparison.Ordinal);
-        Assert.Contains("AutomationProperties.Name\" Value=\"{Binding DisplayNameWithIntent", finOps, StringComparison.Ordinal);
+        Assert.Contains("AutomationProperties.Name=\"{Binding DisplayName}\"", card, StringComparison.Ordinal);
+        // The server picker's item names are checked on the rendered containers: ThemeLeftoversRenderTests.TheServerBoxItems_AreNamedByTheServer_AfterARunTimeThemeSwitch.
     }
 
     [Fact]

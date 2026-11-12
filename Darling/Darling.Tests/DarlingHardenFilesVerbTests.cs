@@ -98,7 +98,7 @@ public class DarlingHardenFilesVerbTests
         var source = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
 
-        var at = source.IndexOf("private static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
+        var at = source.IndexOf("internal static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
         Assert.True(at >= 0, "HardenFiles is gone (#2352)");
 
         /* The same window as the two pins below: #4004's review added the log-hash key's targets to the list, which
@@ -143,7 +143,7 @@ public class DarlingHardenFilesVerbTests
         var source = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
 
-        var at = source.IndexOf("private static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
+        var at = source.IndexOf("internal static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
         Assert.True(at >= 0, "HardenFiles is gone (#2352)");
 
         var body = source[at..Math.Min(source.Length, at + 17000)];
@@ -173,7 +173,7 @@ public class DarlingHardenFilesVerbTests
         var source = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
 
-        var at = source.IndexOf("private static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
+        var at = source.IndexOf("internal static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
         /* 11,000: the viewer and mcp credentials joined the target list, which moved the verify pass past 10,000. */
         var body = source[at..Math.Min(source.Length, at + 18000)];
 

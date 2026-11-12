@@ -32,7 +32,7 @@ public sealed class JobCountWithinWorkerSizingTests
     private const long Gb = 1024L * 1024 * 1024;
 
     /// <summary>
-    /// The formula, pinned at 4, 8 and 16 GB hosts for the measured schema (72 hypertables, 29 aggregates) and at
+    /// The formula, pinned at 4, 8 and 16 GB hosts for the schema as measured in #5633 (72 hypertables, 29 aggregates; the live test below holds the real counts, 30 aggregates since V259) and at
     /// the empty store. workers = clamp(16 x GB, hypertables + 2, hypertables + 3 x aggregates + 2 + 16).
     /// </summary>
     [Fact]

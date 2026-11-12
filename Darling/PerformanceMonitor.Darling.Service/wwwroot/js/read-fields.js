@@ -21,7 +21,7 @@ export const READ_FIELDS = {
         { key: "event_time", label: "Time", format: "time" },
         { key: "blocked_sql_text", label: "Blocked SQL", wrap: true },
         { key: "blocking_sql_text", label: "Blocking SQL", wrap: true },
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "blocked_spid", label: "Blocked", format: "int" },
         { key: "blocking_spid", label: "Blocker", format: "int" },
         { key: "wait_time_ms", label: "Wait", format: "ms" },
@@ -39,7 +39,7 @@ export const READ_FIELDS = {
          wider one) outran what the raw tier still holds. */
       noteKey: "truncation_note",
       columns: [
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "query_text", label: "Query", wrap: true },
         { key: "execution_count", label: "Execs", format: "int" },
         { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
@@ -56,7 +56,7 @@ export const READ_FIELDS = {
       noteKey: "truncation_note",
       columns: [
         { key: "full_name", label: "Procedure" },
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "execution_count", label: "Execs", format: "int" },
         { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
         { key: "avg_cpu_ms", label: "Avg CPU", format: "ms" },
@@ -103,9 +103,9 @@ export const READ_FIELDS = {
       emptyText: "No active-query snapshots in this window.",
       columns: [
         { key: "collection_time", label: "Time", format: "time" },
-        { key: "query_text", label: "Query", wrap: true },
+        { key: "query_text", label: "Query", wrap: true, follow: true },
         { key: "session_id", label: "SPID", format: "int" },
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "status", label: "Status" },
         { key: "cpu_time_ms", label: "CPU", format: "ms" },
         { key: "elapsed_time_formatted", label: "Elapsed" },
@@ -123,7 +123,7 @@ export const READ_FIELDS = {
         { key: "pressure_level", label: "Pressure" },
         { key: "schedulers", label: "Schedulers", format: "int" },
         { key: "runnable_tasks", label: "Runnable tasks", format: "int" },
-        { key: "runnable_percent", label: "Runnable %", format: "num1" },
+        { key: "runnable_percent", label: "Runnable %", format: "num1", nullAs: 0, hint: "The share of the other requests running at that moment that were waiting for a CPU. 0.0 means no other request was running." },
         { key: "worker_utilization_percent", label: "Worker use %", format: "num1" },
         { key: "queued_requests", label: "Queued requests", format: "int" },
       ],
@@ -134,7 +134,7 @@ export const READ_FIELDS = {
         { key: "pressure_level", label: "Pressure", format: "text", small: true },
         { key: "schedulers", label: "Schedulers", format: "int" },
         { key: "runnable_tasks", label: "Runnable tasks", format: "int" },
-        { key: "runnable_percent", label: "Runnable %", format: "num1" },
+        { key: "runnable_percent", label: "Runnable %", format: "num1", nullAs: 0, hint: "The share of the other requests running at that moment that were waiting for a CPU. 0.0 means no other request was running." },
         { key: "worker_utilization_percent", label: "Worker use %", format: "num1" },
         { key: "queued_requests", label: "Queued requests", format: "int" },
       ],
@@ -164,8 +164,55 @@ export const READ_FIELDS = {
       rowsKey: "trend",
       xKey: "time",
       format: "int",
-      emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
+      emptyText: "No deadlocks in this window: an empty trend here means none happened, not that nothing was collected.",
       series: [{ key: "count", label: "Deadlocks" }],
+    },
+  },
+  /* #8553: the PostgreSQL deadlock reads a deadlock alert's notebook carries on a PostgreSQL target. The columns are the
+     Activity tab's (PG_DEADLOCK_COLUMNS, PG_DEADLOCK_GRAPH_COLUMNS in server-tabs/pg-activity.js). */
+  get_pg_deadlocks: {
+    table: {
+      rowsKey: "deadlocks",
+      emptyText: "No deadlock in this window. If you expected one, the server log may not be readable.",
+      noteKey: "truncation_note",
+      columns: [
+        { key: "occurred_at", label: "When", format: "time" },
+        { key: "victim_pid", label: "Victim PID", format: "id" },
+        { key: "participant_count", label: "Sessions", format: "int" },
+        { key: "lock_modes", label: "Lock Modes" },
+        { key: "resources", label: "Resources" },
+        { key: "victim_statement", label: "Victim Statement", wrap: true },
+        { key: "times_seen", label: "Sightings", format: "int" },
+      ],
+    },
+  },
+  get_pg_deadlock_detail: {
+    table: {
+      rowsKey: "deadlocks",
+      emptyText: "No deadlock graph stored for this server.",
+      columns: [
+        { key: "occurred_at", label: "When", format: "time" },
+        { key: "victim_pid", label: "Victim PID", format: "id" },
+        { key: "graph", label: "Graph", wrap: true },
+      ],
+    },
+  },
+  /* #8584: the PostgreSQL blocking notebook cell. One row per sampled chain, worst first by victim count. */
+  get_pg_blocking: {
+    table: {
+      rowsKey: "chains",
+      emptyText: "No blocking was sampled in this window. Captures are periodic, so a shorter episode leaves no trace.",
+      columns: [
+        { key: "captured_at", label: "Captured", format: "time" },
+        { key: "root_pid", label: "Root PID", format: "int" },
+        { key: "root_application", label: "Application" },
+        { key: "root_state", label: "Root State" },
+        { key: "total_victims", label: "Victims", format: "int" },
+        { key: "worst_victim_wait_ms", label: "Worst Wait", format: "ms" },
+        { key: "root_xact_duration_ms", label: "Root Xact", format: "ms" },
+        { key: "root_query", label: "Root Query", wrap: true },
+        { key: "recommended_action", label: "Action", wrap: true },
+      ],
     },
   },
   get_pg_wait_stats: {
@@ -189,8 +236,9 @@ export const READ_FIELDS = {
         { key: "session_id", label: "SPID", format: "int" },
         { key: "wait_type", label: "Wait" },
         { key: "wait_duration_ms", label: "Duration", format: "ms" },
+        { key: "thread_count", label: "Threads", format: "int" },
         { key: "blocking_session_id", label: "Blocked by", format: "int" },
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
       ],
     },
   },
@@ -200,10 +248,10 @@ export const READ_FIELDS = {
       emptyText: "No resource semaphore samples in this window.",
       columns: [
         { key: "collection_time", label: "Time", format: "time" },
-        { key: "resource_semaphore_id", label: "Semaphore", format: "int" },
+        { key: "resource_semaphore_id", label: "Semaphore", format: "semaphore" },
         { key: "target_memory_mb", label: "Target MB", format: "mb" },
-        { key: "granted_memory_mb", label: "Granted MB", format: "mb" },
-        { key: "available_memory_mb", label: "Available MB", format: "mb" },
+        { key: "granted_memory_mb", label: "Granted MB", format: "mbfit" },
+        { key: "available_memory_mb", label: "Available MB", format: "mbfit" },
         { key: "grantee_count", label: "Grantees", format: "int" },
         { key: "waiter_count", label: "Waiters", format: "int" },
       ],
@@ -215,9 +263,9 @@ export const READ_FIELDS = {
       emptyText: "No memory grant samples in this window.",
       columns: [
         { key: "collection_time", label: "Time", format: "time" },
-        { key: "granted_memory_mb", label: "Granted MB", format: "mb" },
-        { key: "used_memory_mb", label: "Used MB", format: "mb" },
-        { key: "available_memory_mb", label: "Available MB", format: "mb" },
+        { key: "granted_memory_mb", label: "Granted MB", format: "mbfit" },
+        { key: "used_memory_mb", label: "Used MB", format: "mbfit" },
+        { key: "available_memory_mb", label: "Available MB", format: "mbfit" },
         { key: "grantee_count", label: "Grantees", format: "int" },
         { key: "waiter_count", label: "Waiters", format: "int" },
       ],
@@ -238,6 +286,23 @@ export const READ_FIELDS = {
       format: "num1",
       emptyText: "No samples of this wait in this window.",
       series: [{ key: "wait_time_ms_per_second", label: "Wait ms/s" }],
+    },
+  },
+  get_pg_top_queries: {
+    table: {
+      rowsKey: "queries",
+      emptyText: "No query shapes in this window. pg_stat_statements needs at least two collections to difference.",
+      noteKey: "truncation_note",
+      columns: [
+        { key: "database_name", label: "Database", name: true },
+        { key: "query_text", label: "Query", wrap: true },
+        { key: "calls", label: "Calls", format: "int" },
+        { key: "total_exec_time_ms", label: "Total Time", format: "ms" },
+        { key: "avg_exec_time_ms", label: "Avg Time", format: "ms" },
+        { key: "max_exec_time_ms", label: "Max Time", format: "ms" },
+        { key: "pct_of_total_time", label: "% of Total", format: "num1" },
+        { key: "rows_returned", label: "Rows", format: "int" },
+      ],
     },
   },
   get_pg_wraparound_risk: {
@@ -333,7 +398,7 @@ export const READ_FIELDS = {
       columns: [
         { key: "event_time", label: "Time", format: "time" },
         { key: "statement", label: "Statement", wrap: true, valueList: false },
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "duration_ms", label: "Duration", format: "ms" },
         { key: "cpu_ms", label: "CPU", format: "ms" },
         { key: "row_count", label: "Rows", format: "int" },
@@ -348,7 +413,7 @@ export const READ_FIELDS = {
       columns: [
         { key: "collection_time", label: "Collected", format: "time" },
         { key: "query_text", label: "Query", wrap: true },
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "query_id", label: "Query ID", format: "int" },
         { key: "recommendation_state", label: "State" },
         { key: "recommendation_reason", label: "Reason", wrap: true },
@@ -367,6 +432,7 @@ export const READ_FIELDS = {
         { key: "duration_ms", label: "Total", format: "ms" },
         { key: "rows_collected", label: "Rows", format: "int" },
         { key: "error_message", label: "Error", wrap: true, localizeText: true, plain: "counts" },
+        { key: "run_note", label: "Run note", wrap: true, localizeText: true, plain: "counts", hideWhenEmpty: true },
         { key: "read_source", label: "Read source", wrap: true, hideWhenEmpty: true },
       ],
     },
@@ -376,7 +442,7 @@ export const READ_FIELDS = {
       rowsKey: "jobs",
       emptyText: "No SQL Agent jobs were running at the last collection.",
       columns: [
-        { key: "job_name", label: "Job" },
+        { key: "job_name", label: "Job", name: true },
         { key: "start_time", label: "Started", format: "time" },
         { key: "current_duration_formatted", label: "Running for" },
         { key: "avg_duration_formatted", label: "Average" },
@@ -415,10 +481,10 @@ export const READ_FIELDS = {
       emptyText: "No tempdb samples in this window.",
       columns: [
         { key: "time", label: "Time", format: "time" },
-        { key: "total_reserved_mb", label: "Reserved", format: "mb" },
-        { key: "user_objects_mb", label: "User objects", format: "mb" },
-        { key: "internal_objects_mb", label: "Internal objects", format: "mb" },
-        { key: "version_store_mb", label: "Version store", format: "mb" },
+        { key: "total_reserved_mb", label: "Reserved", format: "mbfit" },
+        { key: "user_objects_mb", label: "User objects", format: "mbfit" },
+        { key: "internal_objects_mb", label: "Internal objects", format: "mbfit" },
+        { key: "version_store_mb", label: "Version store", format: "mbfit" },
       ],
     },
     line: {
@@ -440,9 +506,9 @@ export const READ_FIELDS = {
       emptyText: "No database sizes in the latest snapshot.",
       noteKey: "note",
       columns: [
-        { key: "database_name", label: "Database" },
-        { key: "total_size_mb", label: "Total", format: "mb" },
-        { key: "used_size_mb", label: "Used", format: "mb" },
+        { key: "database_name", label: "Database", name: true },
+        { key: "total_size_mb", label: "Total", format: "mbfit" },
+        { key: "used_size_mb", label: "Used", format: "mbfit" },
         /* size_note: the read's own sentence for the row another database on an Azure SQL Database server gets (its log
            size is not reported). Only that row has the key, so the column is left out unless a row fills it. */
         { key: "size_note", label: "Note", wrap: true, hideWhenEmpty: true },
@@ -454,15 +520,15 @@ export const READ_FIELDS = {
       rowsKey: "files",
       emptyText: "No file I/O rows in the latest snapshot.",
       columns: [
-        { key: "database_name", label: "Database" },
-        { key: "file_name", label: "File" },
+        { key: "database_name", label: "Database", name: true },
+        { key: "file_name", label: "File", name: true },
         { key: "file_type", label: "Type" },
-        { key: "size_mb", label: "Size", format: "mb", nullKey: "size_note" },
-        { key: "avg_read_latency_ms", label: "Read latency", format: "num1" },
-        { key: "avg_write_latency_ms", label: "Write latency", format: "num1" },
+        { key: "size_mb", label: "Size", format: "mbfit", nullKey: "size_note" },
+        { key: "avg_read_latency_ms", label: "Read latency (ms)", format: "num1" },
+        { key: "avg_write_latency_ms", label: "Write latency (ms)", format: "num1" },
         { key: "delta_reads", label: "Reads", format: "int" },
         { key: "delta_writes", label: "Writes", format: "int" },
-        { key: "physical_name", label: "Path", wrap: true },
+        { key: "physical_name", label: "Path", name: true, path: true },
       ],
     },
   },
@@ -472,13 +538,13 @@ export const READ_FIELDS = {
       emptyText:
         "No PVS rows. The collector reads a SQL Server 2019+ DMV, and a server with Accelerated Database Recovery off has nothing to report.",
       columns: [
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "is_adr_on", label: "ADR", format: "bool" },
-        { key: "pvs_size_mb", label: "PVS size", format: "mb" },
+        { key: "pvs_size_mb", label: "PVS size", format: "mbfit" },
         { key: "pct_of_database", label: "% of DB", format: "num1" },
-        { key: "database_data_size_mb", label: "Data size", format: "mb" },
+        { key: "database_data_size_mb", label: "Data size", format: "mbfit" },
         { key: "aborted_transaction_count", label: "Aborted txns", format: "int" },
-        { key: "oldest_active_transaction_id", label: "Oldest active txn" },
+        { key: "oldest_active_transaction_id", label: "Oldest active txn", format: "int" },
       ],
     },
   },
@@ -490,12 +556,12 @@ export const READ_FIELDS = {
         { key: "event_time", label: "Time", format: "time" },
         { key: "category", label: "Category" },
         { key: "event_name", label: "Event" },
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "object_name", label: "Object" },
         { key: "login_name", label: "Login" },
         { key: "application_name", label: "Application" },
         { key: "duration_ms", label: "Duration", format: "ms" },
-        { key: "growth_mb", label: "Growth", format: "mb" },
+        { key: "growth_mb", label: "Growth", format: "mbfit" },
         { key: "error_number", label: "Error", format: "int" },
         { key: "text_data", label: "Detail", wrap: true },
       ],
@@ -582,8 +648,10 @@ export const READ_FIELDS = {
         { key: "alert_time", label: "Time", format: "time" },
         { key: "server_name", label: "Server" },
         { key: "metric_name", label: "Metric" },
-        { key: "current_value", label: "Value", format: "num2" },
-        { key: "threshold_value", label: "Threshold", format: "num2" },
+        /* stateZeroDash: a state-only row's stored 0 (the row's state_only: a resolution, Database State, Agent Not Running) is not a
+           reading and shows as the dash Alert History shows, not 0.00; a measured row keeps its number. */
+        { key: "current_value", label: "Value", format: "num2", stateZeroDash: true },
+        { key: "threshold_value", label: "Threshold", format: "num2", stateZeroDash: true },
         { key: "notification_type", label: "Notification" },
         { key: "muted", label: "Muted", format: "bool" },
         { key: "detail_text", label: "Detail", wrap: true, localizeAlertDetail: true },
@@ -696,7 +764,7 @@ export const READ_FIELDS = {
       rowsKey: "regressions",
       emptyText: "No Query Store regressions in this window.",
       columns: [
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "query_id", label: "Query id" },
         { key: "severity", label: "Severity" },
         { key: "baseline_cpu_ms", label: "Baseline CPU", format: "ms" },
@@ -777,7 +845,7 @@ export const READ_FIELDS = {
       emptyText: "No findings in this window.",
       columns: [
         { key: "last_seen", label: "Last seen", format: "time" },
-        { key: "category", label: "Category" },
+        { key: "category_name", label: "Category" },
         { key: "story_path", label: "Story", wrap: true },
         { key: "severity", label: "Severity", format: "num2" },
         { key: "confidence", label: "Confidence", format: "num2" },
@@ -794,7 +862,9 @@ export const READ_FIELDS = {
       columns: [
         { key: "opened_at", label: "Opened", format: "time" },
         { key: "state", label: "State" },
-        { key: "server_name", label: "Server" },
+        /* #8578: the registry's display name, which every row carries (it falls back to the name the request was opened with). server_name is the
+           label the opening alert or finding carried, so requests opened before that was one name show one server under two. */
+        { key: "display_name", label: "Server" },
         { key: "first_metric", label: "Metric" },
         { key: "family", label: "Family" },
         { key: "alert_count", label: "Alerts", format: "int" },
@@ -820,13 +890,44 @@ export const READ_FIELDS = {
 };
 
 /**
+ * #7670: a table cell that carries its own columns (a Custom View built from a sample read keeps only key, label and format) still says its
+ * collector notes in the words the catalog's column for the same read and key uses ("shred gated: 1", not "shred_gated=1"). `plain` and
+ * `localizeText` come across only for a column that sets neither and has no format. `stateZeroDash` (#8492: an alert-history value column
+ * whose stored 0 on a state-only row is not a reading) comes across to a column of the same key whatever its format, so a saved view's
+ * Value and Threshold columns show the dash Alert History shows rather than 0.00. A cell that is not a table, or has no columns of its
+ * own, comes back as it is.
+ */
+export function withCatalogWords(cell) {
+  if (!cell || cell.viz !== "table" || !(Array.isArray(cell.columns) && cell.columns.length)) return cell;
+  const entry = READ_FIELDS[cell.read];
+  const known = entry ? [...((entry.table && entry.table.columns) || []), ...((entry.tableFleet && entry.tableFleet.columns) || [])] : [];
+  if (!known.length) return cell;
+  let changed = false;
+  const columns = cell.columns.map((c) => {
+    if (!c) return c;
+    let next = c;
+    if (!c.format && c.plain === undefined && c.localizeText === undefined) {
+      const words = known.find((k) => k.key === c.key && k.plain);
+      if (words) next = { ...next, plain: words.plain, localizeText: words.localizeText };
+    }
+    if (c.stateZeroDash === undefined && known.some((k) => k.key === c.key && k.stateZeroDash === true)) {
+      next = { ...next, stateZeroDash: true };
+    }
+    if (next !== c) changed = true;
+    return next;
+  });
+  return changed ? { ...cell, columns } : cell;
+}
+
+/**
  * The cell with the fields its viz needs filled in from READ_FIELDS. A cell that already carries its own field
  * array, a viz the catalog has no part for, and a read with no entry come back as they were.
  */
 export function resolveReadTable(cell) {
   if (!cell) return cell;
   const field = cell.viz === "line" ? "series" : cell.viz === "stat" ? "stats" : cell.viz === "table" ? "columns" : null;
-  if (!field || (Array.isArray(cell[field]) && cell[field].length)) return cell;
+  if (!field) return cell;
+  if (Array.isArray(cell[field]) && cell[field].length) return withCatalogWords(cell);
   const entry = READ_FIELDS[cell.read];
   const fleet = cell.viz === "table" && entry && entry.tableFleet && !(cell.params && cell.params.collector_name);
   const part = entry && (fleet ? entry.tableFleet : entry[cell.viz]);

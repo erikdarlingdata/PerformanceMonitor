@@ -169,7 +169,8 @@ public sealed class TopProceduresGridDroppedDatabaseTests : IDisposable
     public void Banner_WithRows_NamesTheDatabasesAndCarriesTheSharedNote()
     {
         var text = DatabasesLeftOut.ProcedureBanner(new[] { "A", "B" }, 5, null, 24);
-        Assert.Equal(DatabasesLeftOut.Note(new[] { "A", "B" }) + " Left out: A, B.", text);
+        Assert.Equal("2 databases were left out because the server no longer lists them. They were dropped or detached: A, B.", text);
+        Assert.DoesNotContain("database_name", text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -180,7 +181,8 @@ public sealed class TopProceduresGridDroppedDatabaseTests : IDisposable
 
         Assert.StartsWith("No procedure ran in the last 24h in a database this server still has", text, StringComparison.Ordinal);
         Assert.DoesNotContain("databases_left_out", text, StringComparison.Ordinal);
-        Assert.EndsWith("Left out: GoneDb.", text, StringComparison.Ordinal);
+        Assert.EndsWith("1 database was left out because the server no longer lists it. It was dropped or detached: GoneDb.", text, StringComparison.Ordinal);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(text!, "left out"));
     }
 
     [Fact]
@@ -189,7 +191,7 @@ public sealed class TopProceduresGridDroppedDatabaseTests : IDisposable
         var many = Enumerable.Range(0, DatabasesLeftOut.MaxNamed + 5).Select(i => "Db" + i.ToString("D3", System.Globalization.CultureInfo.InvariantCulture)).ToArray();
         var text = DatabasesLeftOut.ProcedureBanner(many, 3, null, 24);
 
-        Assert.EndsWith(" and 5 more.", text, StringComparison.Ordinal);
+        Assert.EndsWith(", and 5 more.", text, StringComparison.Ordinal);
         Assert.DoesNotContain(many[^1], text, StringComparison.Ordinal);
     }
 }

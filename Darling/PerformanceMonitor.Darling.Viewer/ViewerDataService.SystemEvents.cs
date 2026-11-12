@@ -102,24 +102,24 @@ public sealed class MemoryConditionsRow(MemoryConditionsRecord record)
     public bool? IsAnyPoolOutOfMemory => record.IsAnyPoolOutOfMemory;
     public long? ProcessOutOfMemoryPeriod => record.ProcessOutOfMemoryPeriod;
     public string? Name => record.Name;
-    public long? AvailablePhysicalMemoryGb => record.AvailablePhysicalMemoryGb;
-    public long? AvailableVirtualMemoryGb => record.AvailableVirtualMemoryGb;
-    public long? AvailablePagingFileGb => record.AvailablePagingFileGb;
-    public long? WorkingSetGb => record.WorkingSetGb;
+    public decimal? AvailablePhysicalMemoryGb => record.AvailablePhysicalMemoryGb;
+    public decimal? AvailableVirtualMemoryGb => record.AvailableVirtualMemoryGb;
+    public decimal? AvailablePagingFileGb => record.AvailablePagingFileGb;
+    public decimal? WorkingSetGb => record.WorkingSetGb;
     public long? PercentOfCommittedMemoryInWs => record.PercentOfCommittedMemoryInWs;
     public long? PageFaults => record.PageFaults;
     public long? SystemPhysicalMemoryHigh => record.SystemPhysicalMemoryHigh;
     public long? SystemPhysicalMemoryLow => record.SystemPhysicalMemoryLow;
     public long? ProcessPhysicalMemoryLow => record.ProcessPhysicalMemoryLow;
     public long? ProcessVirtualMemoryLow => record.ProcessVirtualMemoryLow;
-    public long? VmReservedGb => record.VmReservedGb;
-    public long? VmCommittedGb => record.VmCommittedGb;
+    public decimal? VmReservedGb => record.VmReservedGb;
+    public decimal? VmCommittedGb => record.VmCommittedGb;
     public long? LockedPagesAllocated => record.LockedPagesAllocated;
     public long? LargePagesAllocated => record.LargePagesAllocated;
-    public long? EmergencyMemoryGb => record.EmergencyMemoryGb;
-    public long? EmergencyMemoryInUseGb => record.EmergencyMemoryInUseGb;
-    public long? TargetCommittedGb => record.TargetCommittedGb;
-    public long? CurrentCommittedGb => record.CurrentCommittedGb;
+    public decimal? EmergencyMemoryGb => record.EmergencyMemoryGb;
+    public decimal? EmergencyMemoryInUseGb => record.EmergencyMemoryInUseGb;
+    public decimal? TargetCommittedGb => record.TargetCommittedGb;
+    public decimal? CurrentCommittedGb => record.CurrentCommittedGb;
     public long? PagesAllocated => record.PagesAllocated;
     public long? PagesReserved => record.PagesReserved;
     public long? PagesFree => record.PagesFree;
@@ -130,7 +130,7 @@ public sealed class MemoryConditionsRow(MemoryConditionsRecord record)
     public long? LastOsError => record.LastOsError;
 }
 
-/// <summary>One RESOURCE_MEMPHYSICAL_LOW memory-broker ratio change (Memory Broker sub-tab). Mirrors <c>*_MemoryBroker</c>.</summary>
+/// <summary>One SHRINK memory-broker ratio change (Memory Broker sub-tab). Mirrors <c>*_MemoryBroker</c>.</summary>
 public sealed class MemoryBrokerRow(MemoryBrokerRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
@@ -363,13 +363,17 @@ public sealed partial class ViewerDataService
     {
         var xmls = await ReadSystemHealthEventXmlAsync(
             serverId, startUtc, endUtc, SystemHealthParser.SchedulerMonitorEvent, cancellationToken);
+        /* #7688: SQL Server on Linux reports idle as 0, so Other-Process CPU (100 - SQL - idle) would read 100 minus the SQL figure
+           on every minute and pass the significance test. Both figures are cleared before the test and the grid shows a blank. */
+        var hostOs = await GetHostOsVersionAsync(serverId, cancellationToken);
 
         return await Task.Run(() =>
         {
             var rows = new List<SchedulerIssueRow>();
             foreach (var xml in xmls)
             {
-                var record = SystemHealthParser.ParseSchedulerIssue(xml);
+                var parsed = SystemHealthParser.ParseSchedulerIssue(xml);
+                var record = parsed is null ? null : SystemHealthHostCpu.Apply(parsed, hostOs);
                 if (record != null && SystemEventSignificance.IsSignificant(record))
                     rows.Add(new SchedulerIssueRow(record));
             }
@@ -449,24 +453,16 @@ public sealed partial class ViewerDataService
 
     // ── Memory Broker ──
 
-    /// <summary>Significant memory-broker ratio changes (RESOURCE_MEMPHYSICAL_LOW) for the window, newest first.</summary>
+    /// <summary>Significant memory-broker ratio changes (SHRINK, #7466) for the window, newest first.</summary>
     public async Task<List<MemoryBrokerRow>> GetMemoryBrokerAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
         var xmls = await ReadSystemHealthEventXmlAsync(
             serverId, startUtc, endUtc, SystemHealthParser.MemoryBrokerEvent, cancellationToken);
 
-        return await Task.Run(() =>
-        {
-            var rows = new List<MemoryBrokerRow>();
-            foreach (var xml in xmls)
-            {
-                var record = SystemHealthParser.ParseMemoryBroker(xml);
-                if (record != null && SystemEventSignificance.IsSignificant(record))
-                    rows.Add(new MemoryBrokerRow(record));
-            }
-            return rows;
-        }, cancellationToken);
+        return await Task.Run(
+            () => SystemEventSignificance.SignificantBrokerRecords(xmls).Select(r => new MemoryBrokerRow(r)).ToList(),
+            cancellationToken);
     }
 
     // ── Memory Node OOM ──
@@ -588,7 +584,7 @@ public sealed partial class ViewerDataService
         var xmls = await ReadSystemHealthEventXmlAsync(
             serverId, startUtc, endUtc, SystemHealthParser.SpServerDiagnosticsEvent, cancellationToken);
 
-        return await Task.Run(() =>
+        var rows = await Task.Run(() =>
         {
             var records = new List<SystemHealthRecord>();
             foreach (var xml in xmls)
@@ -601,7 +597,29 @@ public sealed partial class ViewerDataService
             records.Sort((a, b) => Nullable.Compare(a.EventTime, b.EventTime));
             return records;
         }, cancellationToken);
+
+        /* #7416 item 1: SQL Server on Linux reports no usable host CPU, so System CPU is null there rather than a flat 100. */
+        return SystemHealthHostCpu.Apply(rows, await GetHostOsVersionAsync(serverId, cancellationToken));
     }
+
+    /// <summary>The newest stored host platform for the server, or null when none was ever stored (#7416 item 1). Twin of
+    /// <c>DarlingSystemHealthReader.HostOsVersionSql</c> and Lite's <c>GetHostOsVersionAsync</c>.</summary>
+    public async Task<string?> GetHostOsVersionAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(HostOsVersionSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter { Value = serverId });
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
+    private const string HostOsVersionSql = """
+        SELECT host_os_version
+        FROM server_properties
+        WHERE server_id = $1
+        AND   host_os_version IS NOT NULL
+        ORDER BY collection_time DESC
+        LIMIT 1
+        """;
 
     // ── Default Trace (always-on server events; the Default Trace sub-tab) ──
 

@@ -41,6 +41,10 @@ public sealed class TopRankingNoticeBehaviourTests
             "query_stats", ComposeRoute.Raw, now.AddDays(-7), now, RollupAvailability.All, RollupCoverage.Unknown)!;
     }
 
+    /// <summary>#7416: the service writes "partial window:" in lowercase for an MCP client, and a page draws it capitalised (<c>noticeStrip</c>).</summary>
+    private static string ShownOnThePage(string notice) =>
+        notice.StartsWith("partial window:", StringComparison.Ordinal) ? "P" + notice[1..] : notice;
+
     private static JsonElement Run(string scenario)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
@@ -94,13 +98,26 @@ public sealed class TopRankingNoticeBehaviourTests
         var run = Run("both");
         foreach (var card in Cards)
         {
-            Assert.Equal([RetentionNotice()], NoticesOf(run, card));
+            Assert.Equal([ShownOnThePage(RetentionNotice())], NoticesOf(run, card));
             Assert.EndsWith("by Reads", run.GetProperty("cards").GetProperty(card).GetProperty("title").GetString());
         }
 
         var asks = run.GetProperty("asks").EnumerateArray().Select(e => e.GetString()!).ToList();
         Assert.True(asks.Count(a => a == "get_top_queries_by_cpu:reads") >= 2, "both Top Queries cards ask for the reads ranking: " + string.Join(", ", asks));
         Assert.True(asks.Count(a => a == "get_top_procedures_by_cpu:reads") >= 2, "both Top Procedures cards ask for the reads ranking: " + string.Join(", ", asks));
+    }
+
+    /// <summary>#7538, #7651: a read that left databases out draws the page's own sentence, naming them, once on each of the four cards: the CPU tab's two plain
+    /// grids, the Queries tab's Top Procedures grid and its Top Queries composite. The tool's note, which points at a <c>database_name</c> argument the page does
+    /// not have, is not drawn.</summary>
+    [Fact]
+    public void ALeftOutReply_NamesTheDatabasesOnce_OnEveryRankedCard()
+    {
+        var run = Run("leftOut");
+        foreach (var card in Cards)
+        {
+            Assert.Equal(["2 databases were left out because the server no longer lists them. They were dropped or detached: a_old, b_old."], NoticesOf(run, card));
+        }
     }
 
     /// <summary>An answer with only the window floor's note (a store with no rollups, or a server monitored for less time than the window) still draws that one note.</summary>
@@ -121,7 +138,7 @@ public sealed class TopRankingNoticeBehaviourTests
         var run = Run("retentionOnly");
         foreach (var card in Cards)
         {
-            Assert.Equal([RetentionNotice()], NoticesOf(run, card));
+            Assert.Equal([ShownOnThePage(RetentionNotice())], NoticesOf(run, card));
         }
     }
 

@@ -1348,11 +1348,28 @@ public static class DarlingFileSecurity
     /// <para>Returns false when the DACL itself cannot be read — the harden attempt the caller just made
     /// already logs loudly on failure, and a Critical raised on an unreadable DACL would be noise, not signal.</para>
     /// </summary>
-    public static bool IsReadableByOrdinaryUsers(string path)
+    public static bool IsReadableByOrdinaryUsers(string path) =>
+        /* On a directory the same bit is ListDirectory, and everything created in it inherits the grant. */
+        GrantsOrdinaryUsers(path, FileSystemRights.ReadData);
+
+    /// <summary>
+    /// Can an ordinary local user CHANGE this file (#8006 review)? True when the effective DACL carries an Allow ACE
+    /// granting <c>Users</c>, <c>Authenticated Users</c>, <c>Everyone</c> or <c>INTERACTIVE</c> any of
+    /// <see cref="FileSystemRights.WriteData"/>, <see cref="FileSystemRights.AppendData"/>,
+    /// <see cref="FileSystemRights.ChangePermissions"/> or <see cref="FileSystemRights.TakeOwnership"/>: each lets that
+    /// user put other contents in place, directly or by granting itself the write. The same denylist and the same
+    /// "false when the DACL cannot be read" as <see cref="IsReadableByOrdinaryUsers"/>.
+    /// </summary>
+    public static bool IsWritableByOrdinaryUsers(string path) =>
+        GrantsOrdinaryUsers(
+            path,
+            FileSystemRights.WriteData | FileSystemRights.AppendData | FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership);
+
+    /// <summary>True when an Allow ACE grants one of the ordinary-user groups any of <paramref name="anyOf"/>.</summary>
+    private static bool GrantsOrdinaryUsers(string path, FileSystemRights anyOf)
     {
         try
         {
-            /* On a directory the same bit is ListDirectory, and everything created in it inherits the grant. */
             var rules = SecurityOf(path)
                 .GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier));
 
@@ -1360,7 +1377,7 @@ public static class DarlingFileSecurity
             foreach (FileSystemAccessRule rule in rules)
             {
                 if (rule.AccessControlType != AccessControlType.Allow
-                    || (rule.FileSystemRights & FileSystemRights.ReadData) != FileSystemRights.ReadData
+                    || (rule.FileSystemRights & anyOf) == 0
                     || rule.IdentityReference is not SecurityIdentifier sid)
                 {
                     continue;

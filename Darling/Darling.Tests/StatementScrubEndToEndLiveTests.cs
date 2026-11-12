@@ -49,6 +49,10 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class StatementScrubEndToEndLiveTests
 {
+    /// <summary>Runs the statement filter's start-up warm-up first, as the service does: the first plan or JSON judged in a
+    /// fresh test process would otherwise pay for cold code inside the 1.5 s read budget (#7134).</summary>
+    public StatementScrubEndToEndLiveTests() => StatementFilterWarmUp.Ensure();
+
     private const string SkipReason = "Set DARLING_TEST_PG to a Postgres connection string to run the statement filter end-to-end tests.";
     private const string Db = "SsfE2eDb";
     private static readonly DateTime Anchor = new(2031, 6, 10, 12, 0, 0, DateTimeKind.Unspecified);

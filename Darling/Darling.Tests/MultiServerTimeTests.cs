@@ -139,4 +139,29 @@ public sealed class MultiServerTimeTests : IDisposable
         var zone = TimeZoneInfo.CreateCustomTimeZone("t", TimeSpan.FromMinutes(minutes), "t", "t");
         Assert.Equal(expected, "UTC" + DisplayZone.UtcOffsetText(At(12, 0), zone));
     }
+
+    /// <summary>The one rule for a view of several servers as a zone: the zone its picker reads typed text in and its notes are worded in,
+    /// which is the zone <see cref="MultiServerTime.EffectiveMode"/> draws its rows in.</summary>
+    [Theory]
+    [InlineData(TimeDisplayMode.ServerTime, false)]
+    [InlineData(TimeDisplayMode.LocalTime, false)]
+    [InlineData(TimeDisplayMode.UTC, true)]
+    public void MixedZone_IsUtcInUtcMode_AndThisMachinesZoneOtherwise(TimeDisplayMode mode, bool utc)
+    {
+        var machine = TimeZoneInfo.CreateCustomTimeZone("machine", TimeSpan.FromHours(-7), "machine", "machine");
+
+        Assert.Same(utc ? TimeZoneInfo.Utc : machine, MultiServerTime.MixedZone(mode, machine));
+        Assert.Same(utc ? TimeZoneInfo.Utc : TimeZoneInfo.Local, MultiServerTime.MixedZone(mode));
+    }
+
+    [Theory]
+    [InlineData(TimeDisplayMode.ServerTime, "local")]
+    [InlineData(TimeDisplayMode.LocalTime, "local")]
+    [InlineData(TimeDisplayMode.UTC, "UTC")]
+    public void MixedZoneWord_NeverSaysServer_AndSpellsTheHeadersWord(TimeDisplayMode mode, string expected)
+    {
+        Assert.Equal(expected, MultiServerTime.MixedZoneWord(mode));
+        Assert.Equal("Time (" + expected + ")", TimeColumnTitle.For("Time", mode, mixedServers: true));
+        Assert.Equal("server", MultiServerTime.ZoneWord(TimeDisplayMode.ServerTime));
+    }
 }

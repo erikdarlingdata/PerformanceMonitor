@@ -237,8 +237,10 @@ public sealed class McpZeroIsAMeasurementTests
            which takes the view), so the three trends are two statements in this file, and each divides its
            bucket's work by its rated seconds, NULL for an unrated collection. */
         var liteQueryStats = ReadRepoFile("Lite", "Services", "LocalDataService.QueryStats.cs");
-        Assert.Equal(2, Regex.Matches(liteQueryStats, @"CASE WHEN MAX\(sample_interval_seconds\) IS NULL").Count);
-        Assert.Equal(2, Regex.Matches(liteQueryStats, @"ELSE NULLIF\(MAX\(sample_interval_seconds\), 0\)").Count);
+        /* #7161: the query grain rates over its gap to the previous collection, no longer the MAX of the stored intervals: the one
+           shared fragment (QueryCollectionsSql) keeps a restart's stored 0 unrated and uses the stored interval only for the store's first collection. */
+        Assert.Single(Regex.Matches(liteQueryStats, @"WHEN stored_interval = 0 THEN NULL"));
+        Assert.Single(Regex.Matches(liteQueryStats, @"ELSE NULLIF\(stored_interval, 0\)"));
         Assert.Equal(2, Regex.Matches(liteQueryStats, @"CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds").Count);
         Assert.DoesNotMatch(new Regex(@"\)\)\) AS interval_seconds"), liteQueryStats);
         /* The wrong spelling, in its SQL shape (a COALESCE whose fallback is the LAG derivation): it would fall
@@ -251,8 +253,7 @@ public sealed class McpZeroIsAMeasurementTests
         /* #3897: the bucketed duration pair shares ONE read over both relations, and it takes the same
            three-state interval — never the LAG-only shape, never the COALESCE that fabricates a restart's. */
         var liteBuckets = ReadRepoFile("Lite", "Services", "LocalDataService.TrendBuckets.cs");
-        Assert.Single(Regex.Matches(liteBuckets, @"CASE WHEN MAX\(sample_interval_seconds\) IS NULL"));
-        Assert.Single(Regex.Matches(liteBuckets, @"ELSE NULLIF\(MAX\(sample_interval_seconds\), 0\)"));
+        /* #7161: the query duration pair reads QueryCollectionsSql now; the MAX that remains in this file is the wait/perfmon grain's. */
         Assert.DoesNotMatch(new Regex(@"\)\)\) AS interval_seconds"), liteBuckets);
         Assert.DoesNotMatch(new Regex(@"COALESCE\(NULLIF\(sample_interval_seconds, 0\),\s*(CAST\()?extract"), liteBuckets);
 
@@ -399,7 +400,7 @@ public sealed class McpZeroIsAMeasurementTests
     public void ThePvsReason_IsNullOnlyWhenTheShareIsDefined_IncludingADefinedZero()
     {
         Assert.Null(DarlingMcpPvsTools.PctReason(pvsMeasured: true, databaseDataSizeMb: 1280));
-        Assert.Contains("unknown — not zero", DarlingMcpPvsTools.PctReason(pvsMeasured: false, databaseDataSizeMb: 1280), StringComparison.Ordinal);
+        Assert.Contains("unknown, not zero", DarlingMcpPvsTools.PctReason(pvsMeasured: false, databaseDataSizeMb: 1280), StringComparison.Ordinal);
         Assert.Contains("no denominator", DarlingMcpPvsTools.PctReason(pvsMeasured: true, databaseDataSizeMb: null), StringComparison.Ordinal);
         Assert.Contains("no denominator", DarlingMcpPvsTools.PctReason(pvsMeasured: true, databaseDataSizeMb: 0), StringComparison.Ordinal);
     }
@@ -416,8 +417,12 @@ public sealed class McpZeroIsAMeasurementTests
 
         var darling = DarlingObjectStatsReader.ObjectSizeGrowthSql;
         Assert.DoesNotMatch(FoldedBaseline, darling);
-        Assert.Contains("MAX(collection_time) FILTER (WHERE collection_time <= $2) AS snapshot_7d_time", darling, StringComparison.Ordinal);
-        Assert.Contains("MAX(collection_time) FILTER (WHERE collection_time <= $3) AS snapshot_30d_time", darling, StringComparison.Ordinal);
+        /* Each baseline is the snapshot NEAREST its cutoff within a day either side, the storage-growth read's rule (the later
+           one on a tie), never the newest at or before the cutoff however far before: one missed daily run at the mark then
+           resolves to the snapshot a day inside it rather than a day outside. */
+        Assert.Contains("WHEN after_7d - $2::timestamp <= $2::timestamp - before_7d THEN after_7d", darling, StringComparison.Ordinal);
+        Assert.Contains("WHEN after_30d - $3::timestamp <= $3::timestamp - before_30d THEN after_30d", darling, StringComparison.Ordinal);
+        Assert.DoesNotContain("FILTER (WHERE collection_time <= $2) AS snapshot_7d_time", darling, StringComparison.Ordinal);
         foreach (var column in new[] { "reserved_mb_7d_ago", "reserved_mb_30d_ago", "reserved_mb_oldest", "b.snapshot_7d_time", "b.snapshot_30d_time", "b.earliest_time", "b.latest_time", "b.days_of_data" })
         {
             Assert.Contains(column, darling, StringComparison.Ordinal);
@@ -428,13 +433,14 @@ public sealed class McpZeroIsAMeasurementTests
         var read = lite[lite.IndexOf("GetObjectSizeGrowthAsync(", StringComparison.Ordinal)..];
         read = read[..read.IndexOf("return items;", StringComparison.Ordinal)];
         Assert.DoesNotMatch(FoldedBaseline, read);
-        Assert.Contains("MAX(collection_time) FILTER (WHERE collection_time <= $2) AS snapshot_7d_time", read, StringComparison.Ordinal);
+        Assert.Contains("WHEN epoch(after_7d) - epoch(CAST($2 AS TIMESTAMP)) <= epoch(CAST($2 AS TIMESTAMP)) - epoch(before_7d) THEN after_7d", read, StringComparison.Ordinal);
+        Assert.DoesNotContain("FILTER (WHERE collection_time <= $2) AS snapshot_7d_time", read, StringComparison.Ordinal);
         Assert.Contains("ReservedMb30dAgo = reader.IsDBNull(8) ? null", read, StringComparison.Ordinal);
 
         foreach (var file in new[] { DarlingMcp + "/DarlingMcpObjectStatsTools.cs", LiteMcp + "/McpObjectStatsTools.cs" })
         {
             var body = Strip(ToolBody(ReadRepoFile(file.Split('/')), "get_table_index_sizes"));
-            foreach (var key in new[] { "history_days_available", "covers_7d", "covers_30d", "growth_over_available_history_mb", "growth_over_available_history_pct", "growth_window_days", "growth_note = GrowthNote(r)", "tables_returned = page.Count", "truncated," })
+            foreach (var key in new[] { "history_days_available", "covers_7d", "covers_30d", "growth_over_available_history_mb", "growth_over_available_history_pct", "growth_window_days", "growth_note = GrowthNote(r)", "tables_returned = kept", "truncated = truncated || kept < page.Count," })
             {
                 Assert.Contains(key, body, StringComparison.Ordinal);
             }
@@ -652,7 +658,7 @@ public sealed class McpZeroIsAMeasurementLivePostgresTests
             var clear = JsonDocument.Parse(await DarlingMcpPgXminTools.GetPgXminHorizon(postgres, ServerName, hours_back: 4)).RootElement;
             Assert.Equal("empty", clear.GetProperty("status").GetString());
             Assert.Equal(6, clear.GetProperty("captures_in_window").GetInt32());
-            Assert.Contains("captured 6 time(s)", clear.GetProperty("finding").GetString()!, StringComparison.Ordinal);
+            Assert.Contains("captured 6 times", clear.GetProperty("finding").GetString()!, StringComparison.Ordinal);
 
             await SeedHolderAsync(connection, ct, MinutesAgo(20), "session", 80_000_000, "104", "state=idle in transaction", isWinner: true);
             await SeedHolderAsync(connection, ct, MinutesAgo(10), "session", 81_000_000, "104", "state=idle in transaction", isWinner: true);
@@ -800,7 +806,7 @@ public sealed class McpZeroIsAMeasurementLivePostgresTests
             Assert.Equal(3, history.GetProperty("history_days_available").GetInt32());
             Assert.False(history.GetProperty("covers_7d").GetBoolean());
             Assert.False(history.GetProperty("covers_30d").GetBoolean());
-            Assert.Contains("3 day(s) of index snapshots", history.GetProperty("note").GetString()!, StringComparison.Ordinal);
+            Assert.Contains("3 days of index snapshots", history.GetProperty("note").GetString()!, StringComparison.Ordinal);
             Assert.Equal(2, root.GetProperty("tables_returned").GetInt32());
             Assert.False(root.GetProperty("truncated").GetBoolean());
 

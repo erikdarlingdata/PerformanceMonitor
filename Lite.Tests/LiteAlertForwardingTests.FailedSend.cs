@@ -98,7 +98,7 @@ public partial class LiteAlertForwardingTests
         var (deliverer, toasts, sends) = BuildReportingDeliverer(() => answer);
         var engine = h.Build(deliverer);
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(sends);
         Assert.Single(toasts);
 
@@ -125,10 +125,10 @@ public partial class LiteAlertForwardingTests
         Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
         Assert.Equal(3, toasts.Count);
 
-        /* A delivered fire waits the whole cooldown, as it always did. */
+        /* A delivered incident is held open and sends no reminder (#7085), cooldown or no cooldown. */
         Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(61)));
         Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(238)));
-        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(600)));
     }
 
     [Fact]
@@ -142,7 +142,7 @@ public partial class LiteAlertForwardingTests
         var (deliverer, toasts, sends) = BuildReportingDeliverer(FailedByEmailButDeliveredByWebhook);
         var engine = h.Build(deliverer);
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(sends);
 
         async Task<int> SweepAfterAsync(TimeSpan wait)
@@ -154,8 +154,8 @@ public partial class LiteAlertForwardingTests
 
         Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(61)));
         Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(238)));
-        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(1)));
-        Assert.Equal(2, toasts.Count);
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(1)));
+        Assert.Single(toasts);
     }
 
     [Fact]
@@ -169,7 +169,7 @@ public partial class LiteAlertForwardingTests
         var (deliverer, toasts, sends) = BuildReportingDeliverer(NoExternalChannelConfigured);
         var engine = h.Build(deliverer);
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(sends);
         Assert.Single(toasts);
 
@@ -182,8 +182,8 @@ public partial class LiteAlertForwardingTests
 
         Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(61)));
         Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(238)));
-        Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(1)));
-        Assert.Equal(2, toasts.Count);
+        Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(1)));
+        Assert.Single(toasts);
     }
 
     [Fact]
@@ -255,10 +255,11 @@ public partial class LiteAlertForwardingTests
     }
 
     [Fact]
-    public async Task Deliverer_ASendThatFailsOnItsOwn_IsUnreported_NotAStop()
+    public async Task Deliverer_ASendThatFailsOnItsOwn_IsReportedAsFailed_NotAStop()
     {
         /* A cancel the caller did not ask for (an HTTP client's own timeout surfacing as a cancellation) and any
-           other exception stay what they were: logged, swallowed, and answered as "unreported". */
+           other exception are logged and swallowed, and answered as every channel failed (#8246): nothing is known to
+           have reached anyone, so the engine tries the alert again instead of reading the throw as delivered. */
         var deliverer = new LiteAlertDeliverer(
             (_, _, _, _, _) => { },
             (_, _, _, _, _, _, _, _, _, _, _, _) => throw new OperationCanceledException("the send's own timeout"),
@@ -268,7 +269,14 @@ public partial class LiteAlertForwardingTests
             (_, _, _, _, _, _, _, _, _, _, _, _) => throw new InvalidOperationException("boom"),
             _ => null);
 
-        Assert.Null(await deliverer.DeliverAndReportAsync(Outcome("High CPU")));
-        Assert.Null(await broken.DeliverAndReportAsync(Outcome("High CPU")));
+        var timedOut = await deliverer.DeliverAndReportAsync(Outcome("High CPU"));
+        Assert.NotNull(timedOut);
+        Assert.True(FailedSendBackoff.EveryChannelFailed(timedOut));
+        Assert.Equal("the send's own timeout", timedOut!.SendError);
+
+        var thrown = await broken.DeliverAndReportAsync(Outcome("High CPU"));
+        Assert.NotNull(thrown);
+        Assert.True(FailedSendBackoff.EveryChannelFailed(thrown));
+        Assert.Equal("boom", thrown!.SendError);
     }
 }

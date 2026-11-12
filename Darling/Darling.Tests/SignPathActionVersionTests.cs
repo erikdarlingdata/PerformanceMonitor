@@ -18,21 +18,22 @@ namespace Darling.Tests;
 /// Every SignPath signing step in the release workflow submits through
 /// <c>signpath/github-action-submit-signing-request@v3</c> (#4218).
 ///
-/// <para><b>Why v3, and why all six together.</b> v2 still works, but v3 is the current version of the
+/// <para><b>Why v3, and why all seven together.</b> v2 still works, but v3 is the current version of the
 /// action: it sends signing requests to SignPath's Pipeline Connector instead of the connector v2 used.
 /// The only functional difference is the default <c>connector-url</c>. PerformanceStudio moved first
 /// (erikdarlingdata/PerformanceStudio#538) and its v1.27.0 release then failed to sign
 /// (erikdarlingdata/PerformanceStudio#569): the Pipeline Connector needs the SignPath GitHub App
 /// installed on the repository, which v2's connector did not need, and the app was not installed yet.
 /// That app has been installed on this repository since 2026-09-24 (#4218), so the same move here does
-/// not hit that failure. Six separate steps submit a signing request in <c>build.yml</c> — Lite,
-/// Darling, Lite (Velopack), Darling Viewer (Velopack), the executables Velopack generates, and the
-/// Darling MSI (#6480, added after #4218) — and #4218 asks that all of them move together, so a release never sends some requests through the old
+/// not hit that failure. Seven separate steps submit a signing request in <c>build.yml</c> — Lite,
+/// Darling, Lite (Velopack), Darling Viewer (Velopack), the executables Velopack generates, the
+/// Darling MSI (#6480, added after #4218), and the Darling export tool (#7581, added with the tool's
+/// <c>Exporter/</c> folder) — and #4218 asks that all of them move together, so a release never sends some requests through the old
 /// connector and others through the new one.</para>
 ///
 /// <para><b>Why this reads <c>name:</c> and not just counts <c>uses:</c> lines.</b> Asserting a count
-/// alone would pass just as well if two of the six steps were accidentally duplicated and the other
-/// four deleted. Naming the six steps the issue and #6480 name means a renamed or removed signing step fails
+/// alone would pass just as well if two of the seven steps were accidentally duplicated and the other
+/// five deleted. Naming the seven steps that #4218, #6480 and #7581 add means a renamed or removed signing step fails
 /// this test with a message that says which one, not just a wrong total.</para>
 /// </summary>
 public sealed class SignPathActionVersionTests
@@ -49,10 +50,11 @@ public sealed class SignPathActionVersionTests
         "Sign Darling Viewer (Velopack)",
         "Sign the executables Velopack generates",
         "Sign Darling MSI",
+        "Sign Darling Export",
     ];
 
     [Fact]
-    public void ExactlyTheSixDocumentedSteps_SubmitASigningRequest()
+    public void ExactlyTheSevenDocumentedSteps_SubmitASigningRequest()
     {
         var steps = SigningSteps();
 
@@ -61,7 +63,7 @@ public sealed class SignPathActionVersionTests
 
         Assert.True(
             names.SequenceEqual(expected, StringComparer.Ordinal),
-            "the SignPath signing steps in build.yml no longer match the six documented names (#4218, #6480):\n"
+            "the SignPath signing steps in build.yml no longer match the seven documented names (#4218, #6480, #7581):\n"
             + $"  found:    {string.Join(", ", names)}\n"
             + $"  expected: {string.Join(", ", expected)}");
     }

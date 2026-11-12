@@ -17,11 +17,12 @@ namespace PerformanceMonitorLite.Tests;
 /// (run + persist on the independent AnalysisIntervalMinutes cadence) and is independent
 /// of App.AnalysisNotificationsEnabled, which gates notification *delivery* only.
 ///
-/// Note: App.* are process-wide mutable statics that other parallel test classes also
-/// touch. This test asserts the AnalysisEnabled default once and otherwise only reads it,
-/// to avoid flaking sibling classes — matching the discipline documented in
-/// AppAlertSettingsTests.
+/// Note: App.* are process-wide mutable statics. Both tests set App.AlertsEnabled or
+/// App.AnalysisEnabled and restore the shipped default when they finish, so the class runs in
+/// the app-alert-statics collection with the other classes that set the alert settings (#8164):
+/// it runs alone, after the parallel classes, and no sibling reads a setting mid-swap.
 /// </summary>
+[Collection("app-alert-statics")]
 public class AnalysisEnabledSettingTests
 {
     [Fact]

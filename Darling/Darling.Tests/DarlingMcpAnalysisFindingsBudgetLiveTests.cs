@@ -86,7 +86,7 @@ public sealed class DarlingMcpAnalysisFindingsBudgetLiveTests
                         FactKey: "DB_CONFIG",
                         Action: "set",
                         Targets: [],
-                        ServerConfigTargets: [new ServerConfigTarget(ServerConfigSetting.Maxdop, 0, 8)])),
+                        DbConfigTargets: [new DbConfigTarget("Sales", DbConfigSetting.AutoShrinkOff)])),
                     1 => AlertContextSerializer.SerializeAction(new RemediationAction(
                         FactKey: "MISSING_INDEX",
                         Action: "set",
@@ -150,6 +150,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             Assert.All(findings.EnumerateArray(), f =>
             {
                 Assert.True(f.GetProperty("confidence_basis_truncated").GetBoolean());
+                Assert.Equal("waits", f.GetProperty("category").GetString());
+                Assert.Equal("Waits", f.GetProperty("category_name").GetString());
                 Assert.True(f.GetProperty("confidence_basis").GetString()!.Length < 200);
             });
 

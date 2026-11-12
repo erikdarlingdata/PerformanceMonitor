@@ -30,6 +30,52 @@ public sealed class ServerHealthClassifierTests
     public void ClassifyFreshness_NoCollection_IsNeverCollected() =>
         Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, Now));
 
+    /// <summary>#8464: with no successful collection, the log's failed rows decide. A server any collector has run against is Offline
+    /// whatever its registration's age; one with no row at all keeps the registration rule, so a server that has not been tried stays
+    /// awaiting its first collection and one whose history retention dropped reads Offline from its registration.</summary>
+    [Fact]
+    public void ClassifyFreshness_NoSuccess_AttemptedIsOffline_NoRowKeepsTheRegistrationRule()
+    {
+        var horizon = Now.AddDays(-30);
+        var inside = Now.AddMinutes(-31);
+        var before = horizon.AddDays(-1);
+
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, inside, horizon, Now, attempted: true));
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, Now, horizon, Now, attempted: true));
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, null, horizon, Now, attempted: true));
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, before, horizon, Now, attempted: true));
+
+        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, inside, horizon, Now, attempted: false));
+        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, null, horizon, Now, attempted: false));
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, before, horizon, Now, attempted: false));
+    }
+
+    /// <summary>#8464: a newest collection bands on the ladder whatever the flag says, so the flag changes nothing for a server that
+    /// has collected; and the connect-state overload folds the flag in under the failed-connect rule, which still wins.</summary>
+    [Theory]
+    [InlineData(30, ServerFreshness.Fresh)]
+    [InlineData(600, ServerFreshness.Stale)]
+    [InlineData(3600, ServerFreshness.Offline)]
+    public void ClassifyFreshness_WithACollection_IgnoresTheAttemptedFlag(int ageSeconds, ServerFreshness expected)
+    {
+        var horizon = Now.AddDays(-30);
+        var last = Now.AddSeconds(-ageSeconds);
+        Assert.Equal(expected, ServerHealthClassifier.ClassifyFreshness(last, Now.AddDays(-1), horizon, Now, attempted: true));
+        Assert.Equal(expected, ServerHealthClassifier.ClassifyFreshness(last, Now.AddDays(-1), horizon, Now, attempted: false));
+        Assert.Equal(expected, ServerHealthClassifier.ClassifyFreshness(last, Now.AddDays(-1), horizon, Now, connectDownSinceUtc: null, attempted: true));
+    }
+
+    [Fact]
+    public void ClassifyFreshness_ConnectStateOverload_CarriesTheAttemptedFlag()
+    {
+        var horizon = Now.AddDays(-30);
+        var inside = Now.AddMinutes(-31);
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, inside, horizon, Now, connectDownSinceUtc: null, attempted: true));
+        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, inside, horizon, Now, connectDownSinceUtc: null, attempted: false));
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, inside, horizon, Now, connectDownSinceUtc: Now.AddMinutes(-5), attempted: false));
+        Assert.Equal(ServerFreshness.Fresh, ServerHealthClassifier.ClassifyFreshness(Now.AddSeconds(-30), inside, horizon, Now, connectDownSinceUtc: Now.AddMinutes(-5), attempted: true));
+    }
+
     [Theory]
     [InlineData(0, ServerFreshness.Fresh)]
     [InlineData(120, ServerFreshness.Fresh)]     // exactly 2x cadence — still fresh
@@ -162,6 +208,66 @@ public sealed class ServerHealthClassifierTests
 
         Assert.Equal(1.0, ServerHealthClassifier.BlockingRatePerHour(24, Day));
         Assert.Equal(ServerHealthThresholds.DeadlockRateMinimumWindow, ServerHealthThresholds.BlockingRateMinimumWindow);
+    }
+
+    /// <summary>
+    /// #7028: the snapshot arm reads the Blocking Wait Time alert's measure. It runs only when the caller carries a
+    /// value and a tier is above 0 (0 = off), and it is a Critical or Warning floor like the wait arms: it never
+    /// lowers a band the count or wait arms set.
+    /// </summary>
+    [Fact]
+    public void BlockingSeverity_TheSnapshotArm_RunsOnlyWithAValueAndATierAboveZero()
+    {
+        var tiers = new BlockingBandThresholds(5, 20, 10, 60, WarnSnapshotWaitSecondsRaw: 30, CriticalSnapshotWaitSecondsRaw: 120);
+        var off = BlockingBandThresholds.Default;
+
+        // No value: the arm is silent, however low the tiers sit. One wait in an hour is Healthy.
+        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.BlockingSeverity(1, 0.0, Hour, tiers, null));
+        // Tiers at 0 (the default): a huge snapshot total changes nothing.
+        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.BlockingSeverity(1, 0.0, Hour, off, 86_400.0));
+        Assert.Equal(0.0, off.WarnSnapshotWaitSeconds);
+        Assert.Equal(0.0, off.CriticalSnapshotWaitSeconds);
+        // Below the warn bar, at it, between the bars, at the critical bar.
+        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.BlockingSeverity(1, 0.0, Hour, tiers, 29.9));
+        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(1, 0.0, Hour, tiers, 30.0));
+        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(1, 0.0, Hour, tiers, 119.9));
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.BlockingSeverity(1, 0.0, Hour, tiers, 120.0));
+        // Warn only: the critical tier stays off, so a large total is a Warning and never a Critical.
+        var warnOnly = new BlockingBandThresholds(5, 20, 10, 60, WarnSnapshotWaitSecondsRaw: 30);
+        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(1, 0.0, Hour, warnOnly, 5_000.0));
+        // Critical only: the warn tier stays off.
+        var criticalOnly = new BlockingBandThresholds(5, 20, 10, 60, CriticalSnapshotWaitSecondsRaw: 120);
+        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.BlockingSeverity(1, 0.0, Hour, criticalOnly, 119.9));
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.BlockingSeverity(1, 0.0, Hour, criticalOnly, 120.0));
+        // The arm never lowers what the other arms set.
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.BlockingSeverity(20, 0.0, Hour, tiers, 1.0));
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.BlockingSeverity(1, 60.0, Hour, tiers, 1.0));
+        // The arm needs no rate: a sub-hour window still bands on it, and with no count the arm is the only reader.
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.BlockingSeverity(1, 0.0, TimeSpan.FromMinutes(15), tiers, 120.0));
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.BlockingSeverity(0, 0.0, Hour, tiers, 120.0));
+        // An unmeasured count stays Unknown: the arm does not rescue a path that measured no blocking at all.
+        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.BlockingSeverity(null, 0.0, Hour, tiers, 500.0));
+    }
+
+    /// <summary>#7028: a snapshot tier is 0 (off) or the value clamped to 1 through 86400, each tier on its own.</summary>
+    [Theory]
+    [InlineData(0.0, 0.0)]
+    [InlineData(-5.0, 0.0)]
+    [InlineData(double.NaN, 0.0)]
+    [InlineData(0.4, 1.0)]
+    [InlineData(1.0, 1.0)]
+    [InlineData(45.0, 45.0)]
+    [InlineData(86400.0, 86400.0)]
+    [InlineData(1_000_000.0, 86400.0)]
+    public void BlockingBandThresholds_TheSnapshotAccessors_AreZeroOrClamped(double raw, double expected)
+    {
+        var warn = new BlockingBandThresholds(5, 20, 10, 60, WarnSnapshotWaitSecondsRaw: raw);
+        Assert.Equal(expected, warn.WarnSnapshotWaitSeconds);
+        Assert.Equal(0.0, warn.CriticalSnapshotWaitSeconds);
+
+        var critical = new BlockingBandThresholds(5, 20, 10, 60, CriticalSnapshotWaitSecondsRaw: raw);
+        Assert.Equal(expected, critical.CriticalSnapshotWaitSeconds);
+        Assert.Equal(0.0, critical.WarnSnapshotWaitSeconds);
     }
 
     /// <summary>

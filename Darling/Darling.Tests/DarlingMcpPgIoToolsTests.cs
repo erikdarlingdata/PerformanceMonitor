@@ -118,6 +118,33 @@ public class DarlingMcpPgIoToolsTests
     }
 
     /// <summary>
+    /// #7409: when no combination read anything, nothing is busiest. The first row of an all-zero window is only the
+    /// first of a tie ("autovacuum worker" on a server whose client backends did four times the buffer hits), so the
+    /// name is null and the page draws a dash. A window with reads still names one, and says which ranking decided
+    /// when the read COUNT had to (timing off, or every measured time zero).
+    /// </summary>
+    [Fact]
+    public void NothingRead_NamesNoBusiest_AndAWindowWithReadsSaysWhichRankingDecided()
+    {
+        var idle = Rows(timed: false).Select(r => r with { Reads = 0, ReadTimeMs = 0 }).ToList();
+        foreach (var timing in new bool?[] { false, true, null })
+        {
+            var root = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Page(idle), 20, timingSetting: timing));
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("busiest_by_read_time").ValueKind);
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("busiest_rank_note").ValueKind);
+            Assert.Equal(0, root.GetProperty("total_reads").GetInt64());
+        }
+
+        var byCount = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Page(Rows(timed: false)), 20, timingSetting: false));
+        Assert.Equal("client backend/relation/normal", byCount.GetProperty("busiest_by_read_time").GetString());
+        Assert.Equal("(by reads)", byCount.GetProperty("busiest_rank_note").GetString());
+
+        var byTime = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Page(Rows(timed: true)), 20, timingSetting: true));
+        Assert.Equal("client backend/relation/normal", byTime.GetProperty("busiest_by_read_time").GetString());
+        Assert.Equal(JsonValueKind.Null, byTime.GetProperty("busiest_rank_note").ValueKind);
+    }
+
+    /// <summary>
     /// With timing tracked the measured figures flow through unchanged — the untracked arm must not cost
     /// the measuring server anything: per-read latency is time over reads, the shares add up, and the
     /// window total is the sum of the rows.

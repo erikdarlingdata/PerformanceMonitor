@@ -31,6 +31,7 @@ public sealed class DarlingMcpPgSourceTests
     public static IEnumerable<object[]> WebListed() =>
         [["get_pg_top_queries"], ["get_pg_database_stats"], ["get_pg_io_stats"], ["get_pg_plans"],
          ["get_pg_blocking"], ["get_pg_session_states"], ["get_pg_replication_stats"],
+         ["get_pg_autovacuum_health"], ["get_pg_replication_slots"], ["get_pg_wraparound_risk"],
          ["get_pg_wait_stats"], ["get_pg_wait_sampling"], ["get_pg_kernel_stats"], ["get_pg_lock_stats"], ["get_pg_predicate_stats"],
          ["get_pg_server_config_changes"], ["get_pg_xmin_horizon"]];
 
@@ -114,6 +115,12 @@ public sealed class DarlingMcpPgWindowD8aLiveTests
             async (c, n, at) => await Exec(c,
                 "INSERT INTO pg_plan_capture (collection_id, collection_time, server_id, server_name, query_id, plan_hash, duration_ms, node_count, top_node_type, plan_json) VALUES ($1, $2, $3, $4, 7, 'h1', 1200.0, 3, 'Seeded', '{\"Plan\":{\"Node Type\":\"Seq Scan\"}}')",
                 CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), Id(n), n)),
+        /* #7010: one row per database every collection, so the table's own first row is the start (not run-probed). */
+        new("get_pg_wraparound_risk", "pg_wraparound_stats", "pg_wraparound_stats",
+            (ds, n, h, end) => DarlingMcpPgWraparoundTools.GetPgWraparoundRisk(ds, n, h, AsOf(end)),
+            async (c, n, at) => await Exec(c,
+                "INSERT INTO pg_wraparound_stats (collection_id, collection_time, server_id, server_name, database_name, frozen_xid_age, min_multixid_age, autovacuum_freeze_max_age, autovacuum_multixact_freeze_max_age, pct_toward_emergency_vacuum, pct_toward_wraparound, pct_toward_multixact_emergency, pct_toward_multixact_wraparound, xids_remaining, multixids_remaining, allows_connections) VALUES ($1, $2, $3, $4, 'appdb', 1000, 1000, 200000000, 400000000, 0, 0, 0, 0, 2147482648, 2147482648, TRUE)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), Id(n), n)),
         new("get_pg_cpu_utilization", "pg_cpu_utilization", "pg_cpu_utilization",
             (ds, n, h, end) => DarlingMcpPgCpuUtilizationTools.GetPgCpuUtilization(ds, n, h, AsOf(end)),
             async (c, n, at) => await Exec(c,
@@ -132,6 +139,17 @@ public sealed class DarlingMcpPgWindowD8aLiveTests
     private static Task SeedServerAsync(NpgsqlConnection c, Tool t, string name, DateTime created, DateTime? runsFrom, DateTime end) =>
         WindowFloorLiveHarness.SeedServerAsync(c, name, created, t.Collector, runsFrom, 30, end, [t.Table], TestContext.Current.CancellationToken);
 
+    /// <summary>
+    /// #7878, #7910: stores the row, then makes the run that wrote it the collector's newest, because the four state reads call a row
+    /// current only when it came from the newest successful run. The fixture's synthetic runs reach the window end and store nothing,
+    /// which is a collector that looked later and found the row's state gone.
+    /// </summary>
+    private static async Task SeedRowAsync(Tool t, NpgsqlConnection c, string name, DateTime at)
+    {
+        await t.SeedRow(c, name, at);
+        await WindowFloorLiveHarness.MakeRowCurrentAsync(c, name, t.Collector, at, TestContext.Current.CancellationToken);
+    }
+
     private static Task SetEngineAsync(NpgsqlConnection c, string name, int edition, string? kind) =>
         Exec(c, "UPDATE servers SET sql_engine_edition = $2, engine_kind = $3 WHERE server_id = $1", Id(name), edition, kind);
 
@@ -145,8 +163,8 @@ public sealed class DarlingMcpPgWindowD8aLiveTests
             var added = end.AddDays(-2);
             await SeedServerAsync(c, t, name, added, added, end);
             /* A dense collector's edge is its oldest row, so the first row lands at the start of collection. */
-            await t.SeedRow(c, name, added);
-            await t.SeedRow(c, name, end.AddDays(-1));
+            await SeedRowAsync(t, c, name, added);
+            await SeedRowAsync(t, c, name, end.AddDays(-1));
 
             var root = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 168, end));
 
@@ -168,8 +186,8 @@ public sealed class DarlingMcpPgWindowD8aLiveTests
         await RunAsync(t, "quiet", async (c, ds, end, name) =>
         {
             await SeedServerAsync(c, t, name, end.AddDays(-30), end.AddDays(-9), end);
-            await t.SeedRow(c, name, end.AddDays(-8));
-            await t.SeedRow(c, name, end.AddDays(-5));
+            await SeedRowAsync(t, c, name, end.AddDays(-8));
+            await SeedRowAsync(t, c, name, end.AddDays(-5));
 
             var root = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 168, end));
 
@@ -186,7 +204,7 @@ public sealed class DarlingMcpPgWindowD8aLiveTests
         await RunAsync(t, "short", async (c, ds, end, name) =>
         {
             await SeedServerAsync(c, t, name, end.AddDays(-30), end.AddDays(-2), end);
-            await t.SeedRow(c, name, end.AddMinutes(-40));
+            await SeedRowAsync(t, c, name, end.AddMinutes(-40));
             var calls = 0;
             DarlingMcpWindowNotice.TestOnlyProbe = () => { calls++; return Task.FromResult<DateTime?>(null); };
 
@@ -205,7 +223,7 @@ public sealed class DarlingMcpPgWindowD8aLiveTests
         await RunAsync(t, "probefail", async (c, ds, end, name) =>
         {
             await SeedServerAsync(c, t, name, end.AddDays(-2), end.AddDays(-2), end);
-            await t.SeedRow(c, name, end.AddDays(-1));
+            await SeedRowAsync(t, c, name, end.AddDays(-1));
             DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
 
             var root = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 168, end));
@@ -262,6 +280,24 @@ public sealed class DarlingMcpPgWindowD8aLiveTests
             Assert.True(hints.GetProperty("window_truncated").GetBoolean());
             Assert.Equal(JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
             Assert.Contains("no collection of " + t.Table, hints.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>#7459: no row and no run in the window is the unavailable word, and its hints must not call the window covered beside it.</summary>
+    [Fact]
+    public async Task AnIoStatsUnavailableAnswer_WithNoRowAndNoRun_DoesNotClaimTheWindowWasCovered_AgainstDevPostgres()
+    {
+        var t = Of("get_pg_io_stats");
+        await RunAsync(t, "unavailable", async (c, ds, end, name) =>
+        {
+            await SeedServerAsync(c, t, name, end.AddDays(-30), null, end);
+
+            var root = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 1, end));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            var hints = root.GetProperty("hints");
+            Assert.True(hints.GetProperty("window_truncated").GetBoolean(), root.ToString());
+            Assert.Equal(JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
         });
     }
 

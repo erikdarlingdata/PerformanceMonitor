@@ -73,12 +73,6 @@ const dropOlderDetached = () => {
   }
 };
 
-/** Forgets every open panel. Tests only; the page never needs it. */
-export function resetQueryStoreHistory() {
-  openHistories.clear();
-  views.clear();
-}
-
 /** The keys of the open panels, for tests. */
 export function openQueryStoreHistoryKeys() {
   return [...openHistories.keys()];
@@ -183,10 +177,21 @@ function planTable(server, data, scope) {
 /* The chart's id is built from the panel's own key, so two panels of one query (two grid rows) never share a chart's zoom or
    its hidden series. The chart keeps both under this id and the scope. */
 function chartFor(key, data, hours, axis) {
-  const points = (data.points || []).map((p) => ({ collection_time: p.collection_time, ["p" + p.plan_id]: p.avg_duration_ms }));
+  /* #7920: the read answers one point per (snapshot, plan). The chart's hover reads every series from the one entry nearest the pointer, so the
+     plans of a snapshot are folded into one entry keyed by its time, with a column per plan; the read's order is by time, so the fold keeps it. */
+  const byTime = new Map();
+  for (const p of data.points || []) {
+    let point = byTime.get(p.collection_time);
+    if (!point) {
+      point = { collection_time: p.collection_time };
+      byTime.set(p.collection_time, point);
+    }
+    point["p" + p.plan_id] = p.avg_duration_ms;
+  }
+  const points = [...byTime.values()];
   const series = data.plans.map((p, i) => ({ key: "p" + p.plan_id, label: "Plan " + p.plan_id, color: SERIES_COLORS[i % SERIES_COLORS.length] }));
   return zoomableLineChart(
-    { points, xKey: "collection_time", series, formatValue: fmtMs, unit: "ms", ...(axis || {}) },
+    { points, xKey: "collection_time", series, formatValue: fmtMs, sizeUnit: "ms", ...(axis || {}) },
     "qs-history|" + key,
     chartZoomScope(hours)
   );
@@ -241,7 +246,7 @@ export function queryStoreHistoryColumn(server, w) {
         const isOpen = openHistories.has(key);
         const button = el("button", {
           type: "button",
-          class: "grid-tool",
+          class: "btn grid-tool",
           text: isOpen ? "Hide history" : "History",
           "aria-expanded": isOpen ? "true" : "false",
           title: "Show this query's history, plan by plan",

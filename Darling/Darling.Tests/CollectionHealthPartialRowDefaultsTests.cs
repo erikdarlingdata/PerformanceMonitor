@@ -64,6 +64,23 @@ public class CollectionHealthPartialRowDefaultsTests
         }
     }
 
+    /// <summary>
+    /// A partial row writes its times to the whole second, in the round-trip form with its kind suffix and without the seven
+    /// fraction digits: on the worst case, where every collector is a partial row with two or three times, the fractions cost about
+    /// 800 B of the response budget and say nothing a health read needs. full_detail=true keeps the full precision.
+    /// </summary>
+    [Fact]
+    public void APartialRowWritesItsTimesToTheWholeSecond()
+    {
+        var at = new DateTime(2026, 10, 13, 8, 0, 5, DateTimeKind.Utc).AddTicks(1_234_567);
+        var local = DateTime.SpecifyKind(at, DateTimeKind.Unspecified);
+        var row = Partial(new CollectorHealth { CollectorName = "wait_stats", LastSuccessTime = at, LastErrorTime = local, LastDeniedTime = at });
+
+        Assert.Equal("2026-10-13T08:00:05Z", row["last_success"]);
+        Assert.Equal("2026-10-13T08:00:05", row["last_error_at"]);
+        Assert.Equal("2026-10-13T08:00:05Z", row["last_denied_at"]);
+    }
+
     [Fact]
     public void ALongErrorCarriesTheTruncatedFlagAndAShortOneDoesNot()
     {

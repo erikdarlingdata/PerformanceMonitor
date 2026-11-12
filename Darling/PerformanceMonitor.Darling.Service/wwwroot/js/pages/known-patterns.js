@@ -20,7 +20,7 @@
  * KnownPatternsPageBehaviourTests. All entry text, the note above all, reaches the DOM through el()/textContent.
  */
 
-import { storeHeaders, el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, reportSessionExpired } from "../util.js";
+import { storeHeaders, el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, localTime, parseUtc, reportSessionExpired, networkErrorText, browserZoneOrBlank } from "../util.js";
 import * as api from "../alerts-api.js";
 
 /** The most characters a note holds (KnownPatternMatcher.MaxNoteLength). The server refuses more; the counter only warns early. */
@@ -29,15 +29,6 @@ export const MAX_NOTE = 500;
 export const MAX_WINDOW = 720;
 /** The window the server fills in when none is sent (KnownPatternMatcher.DefaultWindowMinutes). */
 export const DEFAULT_WINDOW = 30;
-
-/** The browser's IANA zone, or "" when it cannot say. */
-export function browserZone() {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
-  } catch {
-    return "";
-  }
-}
 
 /** A datetime-local value ("2026-08-01T10:30", local clock) to an ISO UTC string, or null when blank or unparseable. */
 export function localInputToIso(v) {
@@ -48,10 +39,8 @@ export function localInputToIso(v) {
 
 /** An ISO timestamp (the store returns UTC with or without a zone suffix) to a datetime-local value on the local clock, or "". */
 export function isoToLocalInput(iso) {
-  if (!iso) return "";
-  const hasZone = /[zZ]$|[+\-]\d\d:?\d\d$/.test(iso);
-  const d = new Date(hasZone ? iso : iso + "Z");
-  if (Number.isNaN(d.getTime())) return "";
+  const d = parseUtc(iso);
+  if (!d) return "";
   const p = (n) => String(n).padStart(2, "0");
   return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "T" + p(d.getHours()) + ":" + p(d.getMinutes());
 }
@@ -65,7 +54,7 @@ export function formToBody(values, zoneFallback) {
   const server = text("server_id");
   const windowText = text("window_minutes");
   return {
-    server_id: /^\d+$/.test(server) ? Number(server) : null,
+    server_id: /^-?\d+$/.test(server) ? Number(server) : null,
     metric_name: text("metric_name") || null,
     time_of_day: time || null,
     time_zone: time ? zone || zoneFallback || null : null,
@@ -109,10 +98,8 @@ export function interpretWrite(status, body) {
 /** Whether an entry's expiry has passed. */
 export function isExpired(e, now) {
   if (e.expired === true) return true;
-  const iso = e.expires_at_utc;
-  if (!iso) return false;
-  const d = new Date(/[zZ]$|[+\-]\d\d:?\d\d$/.test(iso) ? iso : iso + "Z");
-  return !Number.isNaN(d.getTime()) && d.getTime() <= (now || Date.now());
+  const d = parseUtc(e.expires_at_utc);
+  return !!d && d.getTime() <= (now || Date.now());
 }
 
 /** One line for the Scope column. */
@@ -135,7 +122,7 @@ async function send(method, path, body) {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (e) {
-    return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
+    return { kind: "error", message: networkErrorText(e) };
   }
   let parsed = null;
   try {
@@ -161,6 +148,11 @@ export const deleteEntry = (id) => send("DELETE", "/api/known-patterns/" + encod
 /* Module scope: survives the 60 s re-render. `live` is the mounted page; `form` is the open form's state. */
 let live = null;
 let form = null;
+/* #7958: true while a save is out. A second click on Save does nothing until the answer arrives, and the Save button is disabled for
+   the write, so a double click on a new entry creates one entry, not two. */
+let busy = false;
+/* The open form's Save button, disabled while a save is out. */
+let saveButton = null;
 /* The registered servers, {id, label}, for the picker and the Scope column. */
 let servers = [];
 
@@ -197,7 +189,7 @@ export async function renderKnownPatterns(main) {
   const listBox = el("div", {});
   mount(main, [headEl, formBox, listBox]);
   live = { main, headEl, formBox, listBox, canEdit, entries: [] };
-  if (newBtn) newBtn.addEventListener("click", () => openForm({ mode: "create", values: { time_zone: browserZone() } }));
+  if (newBtn) newBtn.addEventListener("click", () => openForm({ mode: "create", values: { time_zone: browserZoneOrBlank() } }));
   if (form) drawForm();
   mount(listBox, loadingStrip("Loading known patterns…"));
   await loadServers();
@@ -206,10 +198,13 @@ export async function renderKnownPatterns(main) {
 
 async function refreshList(state) {
   const res = await readTool("get_known_patterns", { include_expired: true });
+  /* #7959: a 401 has put the shell's sign-in strip up, and an aborted read is a route change. The list is left as it is rather than drawn
+     as empty, which would say no pattern is recorded. */
+  if (res.kind === "aborted" || res.kind === "auth") return;
   if (res.kind === "error") return mount(state.listBox, errorStrip(res.message));
   if (res.kind === "empty") {
     state.entries = [];
-    return mount(state.listBox, emptyStrip(res.message || "No known patterns are recorded."));
+    return mount(state.listBox, res.message ? plainEmptyStrip(res, "No known patterns are recorded.") : emptyStrip("No known patterns are recorded."));
   }
   state.entries = (res.data && res.data.known_patterns) || [];
   drawList(state);
@@ -220,9 +215,13 @@ function drawList(state) {
   const head = ["Status", "Scope", "Note", "Expires", "Added by", state.canEdit ? "" : null]
     .filter((h) => h !== null)
     .map((h) => el("th", { text: h }));
-  mount(state.listBox, el("table", { class: "data known-patterns" }, [
-    el("thead", {}, [el("tr", {}, head)]),
-    el("tbody", {}, state.entries.map((e) => entryRow(e, state.canEdit))),
+  /* #8082: #main clips sideways and the page never scrolls, so a bare table with a long Scope or Note cell runs past the right edge with Expires, Added by
+     and the action cell out of reach. In a .table-wrap it scrolls inside its own box, as every other grid does. */
+  mount(state.listBox, el("div", { class: "table-wrap" }, [
+    el("table", { class: "data known-patterns" }, [
+      el("thead", {}, [el("tr", {}, head)]),
+      el("tbody", {}, state.entries.map((e) => entryRow(e, state.canEdit))),
+    ]),
   ]));
 }
 
@@ -239,7 +238,7 @@ function entryRow(e, canEdit) {
   ];
   if (canEdit) {
     cells.push(el("td", { class: "mute-actions" }, [
-      el("button", { class: "btn", type: "button", text: "Edit", onClick: () => openForm({ mode: "edit", id: e.id, values: valuesOf(e, browserZone()) }) }),
+      el("button", { class: "btn", type: "button", text: "Edit", onClick: () => openForm({ mode: "edit", id: e.id, values: valuesOf(e, browserZoneOrBlank()) }) }),
       el("button", { class: "btn", type: "button", text: "Delete", onClick: () => remove(e) }),
     ]));
   }
@@ -306,6 +305,8 @@ function formNode() {
     counter.textContent = c.text;
     counter.className = c.over ? "mute-rules-field-error" : "meta";
   });
+  saveButton = el("button", { class: "btn primary", type: "button", text: "Save", onClick: submit });
+  saveButton.disabled = busy;
   return el("div", { class: "card mute-form" }, [
     el("h3", { text: form.mode === "create" ? "New known pattern" : "Edit known pattern" }),
     el("div", { class: "meta", text: "An alert that matches ALL filled fields shows this note. Blank fields match anything." }),
@@ -313,25 +314,38 @@ function formNode() {
     labelled("Server", serverSelect()),
     labelled("Metric (blank = any alert)", textInput("metric_name", "Metric", "text")),
     labelled("Time of day (24-hour, blank = any time)", textInput("time_of_day", "Time of day", "time")),
-    labelled("Time zone (IANA id)", textInput("time_zone", "Time zone", "text", { placeholder: browserZone() })),
+    labelled("Time zone (IANA id)", textInput("time_zone", "Time zone", "text", { placeholder: browserZoneOrBlank() })),
     labelled("Window, minutes either side (0 to " + MAX_WINDOW + ", blank = " + DEFAULT_WINDOW + ")", textInput("window_minutes", "Window minutes", "number", { min: "0", max: String(MAX_WINDOW) })),
     labelled("Note (required, " + MAX_NOTE + " characters at most)", note, counter),
     labelled("Expires (local time; blank = never)", textInput("expires_at_utc", "Expires", "datetime-local")),
     el("div", { class: "form-actions" }, [
-      el("button", { class: "btn primary", type: "button", text: "Save", onClick: submit }),
+      saveButton,
       el("button", { class: "btn", type: "button", text: "Cancel", onClick: closeForm }),
     ]),
   ]);
 }
 
 async function submit() {
-  form.banner = null;
-  const body = formToBody(form.values, browserZone());
-  const res = form.mode === "create" ? await createEntry(body) : await replaceEntry(form.id, body);
+  if (busy || !form) return;
+  const f = form;
+  busy = true;
+  if (saveButton) saveButton.disabled = true;
+  let res;
+  try {
+    f.banner = null;
+    const body = formToBody(f.values, browserZoneOrBlank());
+    res = f.mode === "create" ? await createEntry(body) : await replaceEntry(f.id, body);
+  } finally {
+    busy = false;
+    if (saveButton) saveButton.disabled = false;
+  }
+  /* #7989: the answer belongs to the form it was sent from. When that form was cancelled while the save was out, the form open now, if
+     any, is left as it is: a success still re-reads the list, and a refusal is dropped with the form it was for. */
   if (res.kind === "ok") {
-    closeForm();
+    if (form === f) closeForm();
     return refreshList(live);
   }
-  form.banner = res.message;
+  if (form !== f) return;
+  f.banner = res.message;
   drawForm();
 }

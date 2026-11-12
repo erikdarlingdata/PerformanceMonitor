@@ -78,7 +78,7 @@ public partial class FinOpsTab : UserControl
 
     private async void StorageGrowthGrid_DoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (StorageGrowthDataGrid.SelectedItem is StorageGrowthRow row)
+        if (DataGridRowHit.IsOnRow(e.OriginalSource) && StorageGrowthDataGrid.SelectedItem is StorageGrowthRow row)
             await DrillToObjectsAsync(row.DatabaseName);
     }
 
@@ -90,7 +90,7 @@ public partial class FinOpsTab : UserControl
 
     private async void ObjectGrowthGrid_DoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (ObjectGrowthDetailGrid.SelectedItem is ObjectSizeGrowthRow row)
+        if (DataGridRowHit.IsOnRow(e.OriginalSource) && ObjectGrowthDetailGrid.SelectedItem is ObjectSizeGrowthRow row)
             await DrillToIndexesAsync(row.DatabaseName, row.SchemaName, row.TableName);
     }
 
@@ -140,7 +140,9 @@ public partial class FinOpsTab : UserControl
         try
         {
             var days = GetObjectHeatmapDaysBack();
-            var (objects, samples) = await Task.Run(() => _dataService.GetObjectGrowthHeatmapDataAsync(serverId, databaseName, days));
+            /* The heatmap's columns are days of the selected time display on the selected server's clock, the days the FinOps day tables count. */
+            var dayZone = await SelectedServerDayZoneAsync(serverId);
+            var (objects, samples) = await Task.Run(() => _dataService.GetObjectGrowthHeatmapDataAsync(serverId, databaseName, days, dayZone: dayZone));
             if (_loads.Superseded(nameof(LoadObjectGrowthAsync), gen)) return;
 
             // One canonical, deterministic top-of-chart-first ranking drives BOTH the companion grid and
@@ -151,7 +153,7 @@ public partial class FinOpsTab : UserControl
             var orderedObjects = orderedKeys.Select(k => byKey[k]).ToList();
 
             ObjectGrowthDetailGrid.ItemsSource = orderedObjects;
-            StorageGrowthCountIndicator.Text = orderedObjects.Count > 0 ? $"{orderedObjects.Count} object(s)" : "";
+            StorageGrowthCountIndicator.Text = orderedObjects.Count > 0 ? CountText.Plural(orderedObjects.Count, "object") : "";
             ObjectGrowthNoDataMessage.Visibility = orderedObjects.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
             // Heatmap rows are bottom-to-top: the renderer flips vertically (row 0 = bottom), so reverse
@@ -162,13 +164,15 @@ public partial class FinOpsTab : UserControl
                 ObjectGrowthHeatmapChart,
                 _objHeatmapMatrix,
                 "Reserved (MB)",
-                $"{databaseName} — Object Reserved Footprint",
+                $"{databaseName}: Object Reserved Footprint",
                 _objHeatmapHandle);
             _objHeatmapPlottable = _objHeatmapHandle.Plottable;
+            /* The hover reads the matrix the chart drew, whose columns include the days with no sample. */
+            _objHeatmapMatrix = _objHeatmapHandle.Matrix ?? _objHeatmapMatrix;
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load object growth heatmap: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load object growth heatmap: {ex.Message}", ex);
         }
     }
 
@@ -183,12 +187,12 @@ public partial class FinOpsTab : UserControl
             var data = await Task.Run(() => _dataService.GetObjectIndexDetailAsync(serverId, databaseName, schemaName, tableName));
             if (_loads.Superseded(nameof(LoadObjectIndexDetailAsync), gen)) return;
             ObjectIndexDetailGrid.ItemsSource = data;
-            StorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} index(es)" : "";
+            StorageGrowthCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "index", "indexes") : "";
             ObjectIndexNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load object index detail: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load object index detail: {ex.Message}", ex);
         }
     }
 
@@ -255,15 +259,24 @@ public partial class FinOpsTab : UserControl
         }
 
         double mb = _objHeatmapMatrix.Intensities[row, col];
+        var day = _objHeatmapMatrix.Days[col];
         if (mb <= 0)
         {
-            _objHeatmapPopup.IsOpen = false;
-            return;
-        }
+            /* A blank cell on a day some object has a sample for says nothing. A day with no sample for any object is a
+               collection gap, and the popup says so. */
+            if (!FinOpsHeatmapBuilder.IsGapDay(_objHeatmapMatrix, col))
+            {
+                _objHeatmapPopup.IsOpen = false;
+                return;
+            }
 
-        var label = row < _objHeatmapMatrix.RowLabels.Length ? _objHeatmapMatrix.RowLabels[row] : "?";
-        var day = _objHeatmapMatrix.Days[col];
-        _objHeatmapPopupText.Text = $"{label}  |  {day:M/d}  |  {mb:N1} MB reserved";
+            _objHeatmapPopupText.Text = $"{day:M/d}  |  no sample collected";
+        }
+        else
+        {
+            var label = row < _objHeatmapMatrix.RowLabels.Length ? _objHeatmapMatrix.RowLabels[row] : "?";
+            _objHeatmapPopupText.Text = $"{label}  |  {day:M/d}  |  {mb:N1} MB reserved";
+        }
 
         _objHeatmapPopup.HorizontalOffset = pos.X + 15;
         _objHeatmapPopup.VerticalOffset = pos.Y + 15;

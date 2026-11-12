@@ -118,11 +118,7 @@ public sealed class QueryStoreForcedPlansCollector : CollectorDefinitionBase<Que
 
     /// <summary>Query Store is 2016 (v13) and later; Azure SQL DB and Managed Instance are never version-gated; unknown (0) is assumed newest.</summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-        target is null
-        || target.SqlMajorVersion == 0
-        || target.SqlMajorVersion >= 13
-        || target.IsAzureSqlDb
-        || target.IsAzureManagedInstance;
+        target is null || target.MeetsMinimumVersion(13, unknownIsNewest: true);
 
     /// <summary>Azure SQL DB rejects three-part names, so the host connects per database there instead.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target is not null && target.IsAzureSqlDb;
@@ -191,7 +187,7 @@ OPTION(RECOMPILE);" + NoDatabaseAccessNote.ScopeResults;
             : Convert.ToInt32(context.EnumerationProbeResult, CultureInfo.InvariantCulture);
         var hasForcingType = productVersion > 13 || context.Target.IsAzureSqlDb || context.Target.IsAzureManagedInstance;
         var forcingTypeColumn = hasForcingType
-            ? "plan_forcing_type = qsp.plan_forcing_type_desc,"
+            ? "plan_forcing_type = PerformanceMonitorLite.plan_forcing_type_desc,"
             : "plan_forcing_type = CONVERT(nvarchar(60), NULL),";
 
         return $@"
@@ -201,7 +197,7 @@ IF NOT EXISTS
 (
     SELECT
         1
-    FROM sys.database_query_store_options
+    FROM sys.database_query_store_options AS PerformanceMonitorLite
     WHERE actual_state IN (1, 2, 4)
     AND   readonly_reason & 8 = 0
 )
@@ -212,29 +208,29 @@ END;
 DROP TABLE IF EXISTS #pm_forced_plans;
 
 SELECT TOP ({MaxRowsPerDatabase})
-    plan_id = qsp.plan_id,
-    query_id = qsp.query_id,
+    plan_id = PerformanceMonitorLite.plan_id,
+    query_id = PerformanceMonitorLite.query_id,
     object_id = CONVERT(bigint, NULL),
-    query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),
+    query_plan_hash = CONVERT(varchar(64), PerformanceMonitorLite.query_plan_hash, 1),
     {forcingTypeColumn}
-    force_failure_count = CONVERT(bigint, qsp.force_failure_count),
-    last_force_failure_reason = NULLIF(qsp.last_force_failure_reason_desc, N'NONE'),
-    last_execution_time = CONVERT(datetime2, qsp.last_execution_time AT TIME ZONE 'UTC'),
-    last_compile_start_time = CONVERT(datetime2, qsp.last_compile_start_time AT TIME ZONE 'UTC')
+    force_failure_count = CONVERT(bigint, PerformanceMonitorLite.force_failure_count),
+    last_force_failure_reason = NULLIF(PerformanceMonitorLite.last_force_failure_reason_desc, N'NONE'),
+    last_execution_time = CONVERT(datetime2, PerformanceMonitorLite.last_execution_time AT TIME ZONE 'UTC'),
+    last_compile_start_time = CONVERT(datetime2, PerformanceMonitorLite.last_compile_start_time AT TIME ZONE 'UTC')
 INTO #pm_forced_plans
-FROM sys.query_store_plan AS qsp
-WHERE qsp.is_forced_plan = 1
-ORDER BY qsp.plan_id
+FROM sys.query_store_plan AS PerformanceMonitorLite
+WHERE PerformanceMonitorLite.is_forced_plan = 1
+ORDER BY PerformanceMonitorLite.plan_id
 OPTION(RECOMPILE);
 
 /* #6221: the object id comes from sys.query_store_query in a SECOND statement, joined to the few forced rows in the temp table. On a
    primary, joining the two Query Store views in one statement took 20 s for 162 forced plans in one database (the same rows in
    0.6 s for the whole body when split), and a read-only replica does not show it, because it has no in-memory Query Store data. */
 UPDATE f
-SET f.object_id = CONVERT(bigint, qsq.object_id)
+SET f.object_id = CONVERT(bigint, PerformanceMonitorLite.object_id)
 FROM #pm_forced_plans AS f
-JOIN sys.query_store_query AS qsq
-    ON qsq.query_id = f.query_id
+JOIN sys.query_store_query AS PerformanceMonitorLite
+    ON PerformanceMonitorLite.query_id = f.query_id
 OPTION(RECOMPILE);
 
 SELECT /* PerformanceMonitorLite */
@@ -268,17 +264,17 @@ FROM #pm_forced_plans AS f
 OUTER APPLY
 (
     SELECT TOP (1)
-        plan_guide_name = pg.name,
-        plan_guide_enabled = CONVERT(bit, CASE WHEN pg.is_disabled = 1 THEN 0 ELSE 1 END),
-        plan_guide_scope = pg.scope_type_desc
-    FROM sys.plan_guides AS pg
-    WHERE pg.scope_type_desc = N'OBJECT'
+        plan_guide_name = PerformanceMonitorLite.name,
+        plan_guide_enabled = CONVERT(bit, CASE WHEN PerformanceMonitorLite.is_disabled = 1 THEN 0 ELSE 1 END),
+        plan_guide_scope = PerformanceMonitorLite.scope_type_desc
+    FROM sys.plan_guides AS PerformanceMonitorLite
+    WHERE PerformanceMonitorLite.scope_type_desc = N'OBJECT'
     AND   f.object_id <> 0
-    AND   pg.scope_object_id = f.object_id
-    AND   pg.hints LIKE N'%USE PLAN%'
+    AND   PerformanceMonitorLite.scope_object_id = f.object_id
+    AND   PerformanceMonitorLite.hints LIKE N'%USE PLAN%'
     ORDER BY
-        CASE WHEN pg.is_disabled = 0 THEN 0 ELSE 1 END,
-        pg.name
+        CASE WHEN PerformanceMonitorLite.is_disabled = 0 THEN 0 ELSE 1 END,
+        PerformanceMonitorLite.name
 ) AS g
 ORDER BY
     plan_id

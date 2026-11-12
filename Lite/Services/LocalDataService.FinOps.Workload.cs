@@ -15,15 +15,43 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    private static readonly string[] WorkloadAndIoTables = ["query_stats", "file_io_stats"];
+
+    /// <summary>#7725: marks each row whose database is in <paramref name="dropped"/> (null, unknown, marks none), the one rule the FinOps grids share.</summary>
+    internal static void MarkDropped<T>(IEnumerable<T> rows, IReadOnlyList<string>? dropped, Func<T, string> databaseOf, Action<T, bool> mark)
+    {
+        if (dropped is null || dropped.Count == 0)
+        {
+            return;
+        }
+
+        var set = new HashSet<string>(dropped, StringComparer.Ordinal);
+        foreach (var row in rows)
+        {
+            mark(row, set.Contains(databaseOf(row)));
+        }
+    }
+
     /// <summary>
     /// Computes per-database resource usage from query_stats + file_io_stats deltas.
     /// </summary>
     public async Task<List<DatabaseResourceUsageRow>> GetDatabaseResourceUsageAsync(int serverId, int hoursBack = 24)
     {
+        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+
+        /* #7256: a table whose archive holds nothing at or after the cutoff is read as the hot table alone, each of the two on its own. A view opens every Parquet file of its archive (one per day) however short the window is. */
+        var usage = await ReadWindowSkippingEmptyArchivesAsync(WorkloadAndIoTables, "collection_time", cutoff, ReadAsync, CancellationToken.None);
+
+        /* #7725: a database the server no longer lists keeps its row and is marked, the rule the Viewer's grid and the web page use. */
+        var dropped = await GetDroppedDatabasesAsync(serverId, windowStartUtc: cutoff);
+        MarkDropped(usage, dropped, row => row.DatabaseName, (row, flag) => row.MarkDropped(flag));
+        return usage;
+
+        async Task<List<DatabaseResourceUsageRow>> ReadAsync(Func<string, string> relationFor)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
         command.CommandText = @"
 WITH workload AS (
@@ -88,6 +116,7 @@ FROM combined c
 CROSS JOIN totals t
 WHERE c.database_name IS NOT NULL
 ORDER BY c.cpu_time_ms DESC";
+        command.CommandText = SwapViews(command.CommandText, WorkloadAndIoTables, relationFor);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
@@ -113,6 +142,7 @@ ORDER BY c.cpu_time_ms DESC";
         }
 
         return items;
+        }
     }
 
     /// <summary>
@@ -201,10 +231,22 @@ ORDER BY max_connections DESC";
     /// </summary>
     public async Task<(List<TopResourceConsumerRow> ByTotal, List<TopResourceConsumerRow> ByAvg)> GetTopResourceConsumersAsync(int serverId, int hoursBack = 24, int topN = 5)
     {
+        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+
+        /* #7256: a table whose archive holds nothing at or after the cutoff is read as the hot table alone, each of the two on its own. A view opens every Parquet file of its archive (one per day) however short the window is. */
+        var consumers = await ReadWindowSkippingEmptyArchivesAsync(WorkloadAndIoTables, "collection_time", cutoff, ReadAsync, CancellationToken.None);
+
+        /* #7725: a database the server no longer lists keeps its row in both grids and is marked. */
+        var dropped = await GetDroppedDatabasesAsync(serverId, windowStartUtc: cutoff);
+        MarkDropped(consumers.ByTotal, dropped, row => row.DatabaseName, (row, flag) => row.MarkDropped(flag));
+        MarkDropped(consumers.ByAvg, dropped, row => row.DatabaseName, (row, flag) => row.MarkDropped(flag));
+        return consumers;
+
+        async Task<(List<TopResourceConsumerRow> ByTotal, List<TopResourceConsumerRow> ByAvg)> ReadAsync(Func<string, string> relationFor)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
         command.CommandText = @"
 WITH workload AS (
@@ -254,7 +296,8 @@ SELECT
     CASE WHEN c.execution_count > 0 THEN CAST(c.io_total_mb * 1.0 / c.execution_count AS DECIMAL(19,4)) END
 FROM combined c
 CROSS JOIN totals t
-ORDER BY c.database_name";
+ORDER BY lower(c.database_name), c.database_name";
+        command.CommandText = SwapViews(command.CommandText, WorkloadAndIoTables, relationFor);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
@@ -312,6 +355,7 @@ ORDER BY c.database_name";
         var byAvg = avgCandidates.OrderByDescending(r => r.AvgCpuMs).Take(topN).ToList();
 
         return (byTotal, byAvg);
+        }
     }
 
     /// <summary>
@@ -335,6 +379,8 @@ WITH categorized AS (
             WHEN wait_type IN ('RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE', 'CMEMTHREAD') THEN 'Memory'
             WHEN wait_type = 'ASYNC_NETWORK_IO' THEN 'Network'
             WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
+            WHEN wait_type ILIKE 'LATCH_%'
+            OR   wait_type ILIKE 'PAGELATCH_%' THEN 'Latches'
             ELSE 'Other'
         END AS category,
         rtrim(wait_type) AS wait_type,
@@ -354,6 +400,8 @@ WITH categorized AS (
             WHEN wait_type IN ('RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE', 'CMEMTHREAD') THEN 'Memory'
             WHEN wait_type = 'ASYNC_NETWORK_IO' THEN 'Network'
             WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
+            WHEN wait_type ILIKE 'LATCH_%'
+            OR   wait_type ILIKE 'PAGELATCH_%' THEN 'Latches'
             ELSE 'Other'
         END,
         rtrim(wait_type)
@@ -414,10 +462,16 @@ ORDER BY bc.total_wait_time_ms DESC";
     /// </summary>
     public async Task<List<ExpensiveQueryRow>> GetExpensiveQueriesAsync(int serverId, int hoursBack = 24, int topN = 20)
     {
+        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+
+        /* #7256: a window that starts after the newest archived row of query_stats reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", cutoff, ReadAsync, CancellationToken.None);
+
+        async Task<List<ExpensiveQueryRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
         command.CommandText = @"
 SELECT
@@ -440,6 +494,7 @@ GROUP BY
     query_text
 ORDER BY SUM(delta_worker_time) DESC, database_name, sql_handle, query_text
 LIMIT $3";
+        command.CommandText = command.CommandText.Replace("v_query_stats", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
@@ -462,56 +517,146 @@ LIMIT $3";
             });
         }
         return items;
+        }
     }
 
+    /// <summary>The scorer's per-measure keep count for the high-impact read: the top ten on each of its six measures.</summary>
+    private const int HighImpactTopN = 10;
+
     /// <summary>
-    /// Fetches high-impact queries — 80/20 analysis across CPU, duration, reads, writes, memory, executions.
-    /// Aggregates to query_hash level from DuckDB, then scores in C#.
+    /// High-impact queries: 80/20 analysis across CPU/duration/reads/writes/memory/executions. Aggregates to query_hash
+    /// level, keeps the hashes the scorer can keep (the top $3 on each of its six measures), looks up the sample text
+    /// for those alone, and ships them to <see cref="HighImpactScorer"/> (#8117, the shape Darling's
+    /// HighImpactQueriesSql took in #8084 and #6803). $1 server_id, $2 cutoff, $3 the scorer's per-measure keep count.
+    /// Names <c>v_query_stats</c> wherever it reads the window, so the archive relation swap finds every read.
     /// </summary>
-    public async Task<List<HighImpactQueryRow>> GetHighImpactQueriesAsync(int serverId, int hoursBack = 24)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
-
-        command.CommandText = @"
+    internal const string HighImpactQueriesSql = @"
+WITH per_database AS
+(
+    -- One group per (hash, database): its CPU subtotal picks the hash's database (#7695).
+    SELECT query_hash, database_name,
+           SUM(delta_execution_count) AS executions,
+           SUM(delta_worker_time) AS worker_time,
+           SUM(delta_elapsed_time) AS elapsed_time,
+           SUM(delta_logical_reads) AS logical_reads,
+           SUM(delta_logical_writes) AS logical_writes
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   query_hash IS NOT NULL AND query_hash != ''
+    AND   delta_execution_count > 0
+    GROUP BY query_hash, database_name
+),
+per_hash AS
+(
+    SELECT
+        query_hash,
+        -- #7695: the database that did the most CPU for the hash in the window, not the alphabetically first one. The
+        -- name breaks a tie, case-insensitively and then exactly, so a tie picks the same database every read.
+        (ARRAY_AGG(database_name ORDER BY worker_time DESC NULLS LAST, LOWER(database_name), database_name)
+            FILTER (WHERE database_name IS NOT NULL))[1] AS database_name,
+        SUM(executions) AS total_executions,
+        SUM(worker_time) AS total_worker_time,
+        SUM(elapsed_time) AS total_elapsed_time,
+        SUM(logical_reads) AS total_reads,
+        SUM(logical_writes) AS total_writes,
+        COUNT(DISTINCT database_name) AS database_count
+    FROM per_database
+    GROUP BY query_hash
+    HAVING SUM(executions) > 0
+),
+ranked AS
+(
+    -- The scorer keeps the top $3 hashes on each of its six measures and scores that union. Each rank breaks a tie the
+    -- way the scorer's stable sort over this statement's final order does: more CPU first, then query_hash. A NULL
+    -- measure ranks as the 0 the reader maps it to.
+    SELECT h.*, COALESCE(g.max_grant_kb, 0) AS peak_grant_kb,
+           ROW_NUMBER() OVER (ORDER BY COALESCE(h.total_worker_time, 0) DESC, h.total_worker_time DESC, h.query_hash) AS cpu_rank,
+           ROW_NUMBER() OVER (ORDER BY COALESCE(h.total_elapsed_time, 0) DESC, h.total_worker_time DESC, h.query_hash) AS duration_rank,
+           ROW_NUMBER() OVER (ORDER BY COALESCE(h.total_reads, 0) DESC, h.total_worker_time DESC, h.query_hash) AS reads_rank,
+           ROW_NUMBER() OVER (ORDER BY COALESCE(h.total_writes, 0) DESC, h.total_worker_time DESC, h.query_hash) AS writes_rank,
+           ROW_NUMBER() OVER (ORDER BY COALESCE(g.max_grant_kb, 0) DESC, h.total_worker_time DESC, h.query_hash) AS memory_rank,
+           ROW_NUMBER() OVER (ORDER BY h.total_executions DESC, h.total_worker_time DESC, h.query_hash) AS executions_rank
+    FROM per_hash AS h
+    -- #7166: max_grant_kb is a per-plan high-water mark since that plan was cached, so MAX across a hash's plans is
+    -- the largest grant any plan ever had (the max_dop trap, #3648). The reading is the hash's newest row's, the same
+    -- choice max_dop makes: newest collection first, newest plan first within it. Explicit NULLS LAST: DuckDB and
+    -- Postgres default DESC null placement differently.
+    LEFT JOIN LATERAL
+    (
+        SELECT qs.max_grant_kb
+        FROM v_query_stats AS qs
+        WHERE qs.server_id = $1
+        AND   qs.query_hash = h.query_hash
+        AND   qs.collection_time >= $2
+        AND   qs.delta_execution_count > 0
+        ORDER BY qs.collection_time DESC, qs.creation_time DESC NULLS LAST, qs.delta_worker_time DESC NULLS LAST
+        LIMIT 1
+    ) AS g ON true
+),
+kept AS
+(
+    SELECT *
+    FROM ranked
+    WHERE cpu_rank <= $3 OR duration_rank <= $3 OR reads_rank <= $3
+    OR    writes_rank <= $3 OR memory_rank <= $3 OR executions_rank <= $3
+)
 SELECT
-    query_hash,
-    MIN(database_name) AS database_name,
-    SUM(delta_execution_count) AS total_executions,
-    SUM(delta_worker_time) / 1000.0 AS total_cpu_ms,
-    SUM(delta_elapsed_time) / 1000.0 AS total_duration_ms,
-    SUM(delta_logical_reads) AS total_reads,
-    SUM(delta_logical_writes) AS total_writes,
-    SUM(COALESCE(max_grant_kb, 0)) / 1024.0 AS total_memory_mb,
+    k.query_hash,
+    k.database_name,
+    k.total_executions,
+    k.total_worker_time / 1000.0 AS total_cpu_ms,
+    k.total_elapsed_time / 1000.0 AS total_duration_ms,
+    k.total_reads,
+    k.total_writes,
+    k.peak_grant_kb / 1024.0 AS peak_memory_mb,
+    k.database_count,
+    -- The sample text for the kept hashes only (#6803), from each hash's busiest row in the window.
     (SELECT LEFT(qs2.query_text, 200) FROM v_query_stats qs2
-     WHERE qs2.query_hash = qs.query_hash
+     WHERE qs2.query_hash = k.query_hash
      AND qs2.server_id = $1
      AND qs2.collection_time >= $2
      AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
      ORDER BY qs2.delta_execution_count DESC NULLS LAST
      LIMIT 1) AS sample_query_text,
     (SELECT qs2.query_text FROM v_query_stats qs2
-     WHERE qs2.query_hash = qs.query_hash
+     WHERE qs2.query_hash = k.query_hash
      AND qs2.server_id = $1
      AND qs2.collection_time >= $2
      AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
      ORDER BY qs2.delta_execution_count DESC NULLS LAST
      LIMIT 1) AS full_query_text
-FROM v_query_stats AS qs
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   query_hash IS NOT NULL AND query_hash != ''
-AND   delta_execution_count > 0
-GROUP BY query_hash
-HAVING SUM(delta_execution_count) > 0
-ORDER BY SUM(delta_worker_time) DESC";
+FROM kept AS k
+ORDER BY k.total_worker_time DESC, k.query_hash";
+
+    /// <summary>
+    /// Fetches high-impact queries — 80/20 analysis across CPU, duration, reads, writes, memory, executions.
+    /// Aggregates to query_hash level from DuckDB, keeps the hashes the scorer can keep, then scores in C#.
+    /// </summary>
+    public async Task<List<HighImpactQueryRow>> GetHighImpactQueriesAsync(int serverId, int hoursBack = 24)
+    {
+        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+
+        /* #7256: a window that starts after the newest archived row of query_stats reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
+        var impact = await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", cutoff, ReadAsync, CancellationToken.None);
+
+        /* #7725: a row whose named database the server no longer lists is marked. */
+        var dropped = await GetDroppedDatabasesAsync(serverId, windowStartUtc: cutoff);
+        MarkDropped(impact, dropped, row => row.DatabaseName, (row, flag) => row.MarkDropped(flag));
+        return impact;
+
+        async Task<List<HighImpactQueryRow>> ReadAsync(string relation)
+        {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = HighImpactQueriesSql.Replace("v_query_stats", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
+        command.Parameters.Add(new DuckDBParameter { Value = HighImpactTopN });
 
-        // Step 1: Read aggregated data
+        // Step 1: Read the hashes the scorer can keep
         var allRows = new List<HighImpactQueryRow>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -525,12 +670,14 @@ ORDER BY SUM(delta_worker_time) DESC";
                 TotalDurationMs = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
                 TotalReads = reader.IsDBNull(5) ? 0 : ToInt64(reader.GetValue(5)),
                 TotalWrites = reader.IsDBNull(6) ? 0 : ToInt64(reader.GetValue(6)),
-                TotalMemoryMb = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),
-                SampleQueryText = reader.IsDBNull(8) ? "" : reader.GetString(8),
-                FullQueryText = reader.IsDBNull(9) ? "" : reader.GetString(9)
+                PeakMemoryMb = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),
+                SampleQueryText = reader.IsDBNull(9) ? "" : reader.GetString(9),
+                FullQueryText = reader.IsDBNull(10) ? "" : reader.GetString(10),
+                DatabaseCount = reader.IsDBNull(8) ? 1 : Convert.ToInt32(reader.GetValue(8))
             });
         }
 
-        return HighImpactScorer.Score(allRows);
+        return HighImpactScorer.Score(allRows, HighImpactTopN);
+        }
     }
 }

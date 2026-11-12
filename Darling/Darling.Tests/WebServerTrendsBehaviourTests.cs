@@ -67,7 +67,7 @@ public sealed class WebServerTrendsBehaviourTests
     };
 
     [Fact]
-    public void TheCpuSchedulerTrend_DrawsRunnableBlockedAndQueued_FromOneAbortableRead_WithTheDiscontinuityNotice()
+    public void TheCpuSchedulerTrend_DrawsRunnableBlockedAndQueued_FromOneAbortableRead_WithNoRestartNoticeForALevel()
     {
         var r = Run("cpu");
         Assert.Equal(new[] { "Runnable Tasks", "Blocked Tasks", "Queued Requests" }, Strings(r.GetProperty("chart").GetProperty("labels")));
@@ -76,7 +76,8 @@ public sealed class WebServerTrendsBehaviourTests
         Assert.Equal("cpu_scheduler", read.GetProperty("metric").GetString());
         Assert.Equal("24", read.GetProperty("hours").GetString());
         Assert.True(r.GetProperty("signals")[0].GetBoolean());
-        Assert.Contains("baseline discontinuity at", Strings(r.GetProperty("notices")).Single());
+        // #7416: scheduler task counts are levels, so a restart in the window draws no restart notice on them.
+        Assert.Empty(Strings(r.GetProperty("notices")));
     }
 
     [Fact]
@@ -160,5 +161,18 @@ public sealed class WebServerTrendsBehaviourTests
         var r = Run("noClerks");
         Assert.Empty(r.GetProperty("reads").EnumerateArray());
         Assert.Single(Strings(r.GetProperty("empties")));
+    }
+
+    /// <summary>#7941: the Queries tab's chart fan-out and the Top card's slicer strip both read the duration trend. One paint sends the
+    /// tool one request, plot-sized (#7661), which the two share, instead of a plot-sized one for the chart and a second, unsized one for
+    /// the strip. The procedure trend and its strip are the same shape.</summary>
+    [Fact]
+    public void TheQueriesTab_ReadsEachDurationTrendOnce_TheStripSharingTheChartsRequest()
+    {
+        var r = Run("queriesTabReads");
+        var query = Assert.Single(Strings(r.GetProperty("queryDurationReads")));
+        Assert.Contains("points=", query);
+        var procedure = Assert.Single(Strings(r.GetProperty("procedureDurationReads")));
+        Assert.Contains("points=", procedure);
     }
 }

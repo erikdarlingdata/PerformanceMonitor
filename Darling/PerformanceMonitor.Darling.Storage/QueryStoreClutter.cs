@@ -93,8 +93,54 @@ public static class QueryStoreClutter
     public const string ReasonStorageNearCap = "storage_near_cap";
     public const string ReasonQueryStoreReadOnly = "qs_read_only";
     public const string ReasonQueryStoreOff = "qs_off";
+
+    /// <summary>#7675: the store stopped on an internal error. A reason with no band, as <see cref="ReasonQueryStoreOff"/> is: its
+    /// rows have stopped changing, so a clutter grade from them would describe a store that is no longer recording.</summary>
+    public const string ReasonQueryStoreError = "qs_error";
+
+    /// <summary>#7454: READ_ONLY because the database is in a state Query Store cannot record in (read-only,
+    /// single-user, emergency). A reason with no band, as <see cref="ReasonQueryStoreOff"/> is.</summary>
+    public const string ReasonReadOnlyDatabaseState = "qs_read_only_state";
+
+    /// <summary>The readonly_reason bits that name a database state (1 read-only, 2 single-user, 4 emergency).
+    /// A READ_ONLY store with none of them set has no documented cause (#7454).</summary>
+    private const int DocumentedStateBits = 1 | 2 | 4;
+
+    /// <summary>#7454: READ_ONLY with no reason bit while desired_state is READ_ONLY, which is an operator's own
+    /// <c>OPERATION_MODE = READ_ONLY</c>. A reason with no band.</summary>
+    public const string ReasonReadOnlyOperator = "qs_read_only_operator";
     public const string ReasonReplica = "qs_read_only_replica";
     public const string ReasonNotMeasured = "not_measured";
+
+    /// <summary>
+    /// A reason token in words for a person (#7416): <c>qs_off</c> reads "Query Store off". The MCP payload keeps the tokens, which a
+    /// client branches on. A token outside the closed set above is printed as it is. A band of Unknown is "not graded" (nothing was
+    /// judged: Query Store is off, the database is a read-only replica, or the window held nothing), and the row's text says so.
+    /// </summary>
+    public static string ReasonText(string token) => token switch
+    {
+        ReasonReadCostDominant => "Read cost dominates",
+        ReasonPlanChurnHigh => "High plan churn",
+        ReasonOneShotPlans => "Mostly one-shot plans",
+        ReasonPlansAtCap => "Plans per query at the cap",
+        ReasonStorageNearCap => "Storage near the cap",
+        ReasonQueryStoreReadOnly => "Query Store read-only",
+        ReasonQueryStoreOff => "Query Store off",
+        ReasonQueryStoreError => "Query Store stopped on an error",
+        ReasonReadOnlyDatabaseState => "Query Store read-only (database state)",
+        ReasonReadOnlyOperator => "Query Store read-only (set by an operator)",
+        ReasonReplica => "Query Store read-only (replica)",
+        ReasonNotMeasured => "Nothing measured in this window",
+        _ => token,
+    };
+
+    /// <summary>The reasons of a row as one line: the words, and "not graded" after them when the band is Unknown.</summary>
+    public static string ReasonsLine(HealthSeverity verdict, IEnumerable<string> reasons)
+    {
+        var words = string.Join(", ", reasons.Select(ReasonText));
+        if (verdict != HealthSeverity.Unknown) return words;
+        return words.Length == 0 ? "Not graded" : words + " (not graded)";
+    }
 
     /// <summary>The <c>actual_state</c> token for a Query Store that is not recording at all.</summary>
     private const string StateOff = "OFF";
@@ -170,6 +216,13 @@ public static class QueryStoreClutter
             return (HealthSeverity.Unknown, [ReasonReplica]);
         }
 
+        /* #7675: an ERROR store is not recording, so the rows the other two arms read are old and stop changing. State it as a
+           reason with no band and grade nothing, the way a replica is handled above. */
+        if (config is not null && QueryStoreReadonlyReason.IsErrorState(config.ActualState))
+        {
+            return (HealthSeverity.Unknown, [ReasonQueryStoreError]);
+        }
+
         var reasons = new List<string>();
         var band = HealthSeverity.Unknown;
         var measured = false;
@@ -187,10 +240,26 @@ public static class QueryStoreClutter
                 measured = true;
                 if (string.Equals(config.ActualState, StateReadOnly, StringComparison.OrdinalIgnoreCase))
                 {
-                    /* An operator-set or cap-driven READ_ONLY (the replica bit was handled above). The cap
-                       case IS clutter at its terminal state: the store filled up and stopped. */
-                    reasons.Add(ReasonQueryStoreReadOnly);
-                    band = Max(band, HealthSeverity.Critical);
+                    /* The replica bit was handled above. A capacity bit is clutter at its terminal state: the
+                       store filled up and stopped, and it decides even when a state bit is set too. Any other
+                       READ_ONLY is not clutter (#7454): the database is in a state Query Store cannot record
+                       in, or an operator set OPERATION_MODE = READ_ONLY on purpose (reason 0, desired state
+                       READ_ONLY). Those are stated as a reason with no band, as qs_off is, and leave the
+                       config arm unmeasured unless the storage check below grades it. */
+                    if (QueryStoreReadonlyReason.HasCapacityBit(config.ReadonlyReason))
+                    {
+                        reasons.Add(ReasonQueryStoreReadOnly);
+                        band = Max(band, HealthSeverity.Critical);
+                    }
+                    else
+                    {
+                        measured = false;
+                        reasons.Add(
+                            config.ReadonlyReason == 0
+                            && string.Equals(config.DesiredState, StateReadOnly, StringComparison.OrdinalIgnoreCase)
+                                ? ReasonReadOnlyOperator
+                                : ReasonReadOnlyDatabaseState);
+                    }
                 }
 
                 var pctOfCap = PctOfCap(config);
@@ -198,6 +267,7 @@ public static class QueryStoreClutter
                 {
                     reasons.Add(ReasonStorageNearCap);
                     band = Max(band, HealthSeverity.Warning);
+                    measured = true;
                 }
             }
         }
@@ -445,7 +515,7 @@ public static class QueryStoreClutter
                     break;
                 case ReasonReadCostDominant when row.ReadCost is { } a:
                     lines.Add(
-                        $"This database was the slowest item on {RunsSlowestPct(a).ToString("0.#", culture)}% of the query_store collector's fan-out runs and held a median {a.SlowestSharePctP50.ToString("0.#", culture)}% of the pass when it was — one database owning the read, not a wide fan-out. The levers are the collector's, not the engine's: a per-database schedule override or a stagger on the query_store collector (get_collection_health's fanout block is the same evidence), and its Query Store catalog size (current_storage_size_mb, beside the plan count) says how much the read has to walk.");
+                        $"This database was the slowest item on {RunsSlowestPct(a).ToString("0.#", culture)}% of the query_store collector's fan-out runs and held a median {a.SlowestSharePctP50.ToString("0.#", culture)}% of the pass when it was. One database owning the read, not a wide fan-out. The levers are the collector's, not the engine's: a per-database schedule override or a stagger on the query_store collector (get_collection_health's fanout block is the same evidence), and its Query Store catalog size (current_storage_size_mb, beside the plan count) says how much the read has to walk.");
                     break;
                 case ReasonPlanChurnHigh when row.PlanChurn is { } b:
                     lines.Add(
@@ -455,7 +525,7 @@ public static class QueryStoreClutter
                     break;
                 case ReasonOneShotPlans when row.PlanChurn is { } b:
                     lines.Add(
-                        $"{(NeverSeenTwiceFraction(b) is { } f ? (100 * f).ToString("0.#", culture) : "?")}% of the plans observed in the window were seen under exactly one collection — plans that ran once and never again, the ad-hoc signature QUERY_CAPTURE_MODE = AUTO exists to keep out of the store. QUERY_CAPTURE_MODE: " + CaptureModeClause(row.Config));
+                        $"{(NeverSeenTwiceFraction(b) is { } f ? (100 * f).ToString("0.#", culture) : "?")}% of the plans observed in the window were seen under exactly one collection. Plans that ran once and never again, the ad-hoc signature QUERY_CAPTURE_MODE = AUTO exists to keep out of the store. QUERY_CAPTURE_MODE: " + CaptureModeClause(row.Config));
                     break;
                 case ReasonPlansAtCap when row.PlanChurn is { } b && row.Config is { } c2:
                     lines.Add(
@@ -467,10 +537,32 @@ public static class QueryStoreClutter
                     break;
                 case ReasonQueryStoreReadOnly when row.Config is { } c4:
                     lines.Add(
-                        $"Query Store is READ_ONLY (readonly_reason {c4.ReadonlyReason.ToString(culture)}: {QueryStoreReadonlyReason.Decode(c4.ReadonlyReason)}) while desired_state is {c4.DesiredState}. New runtime statistics are being dropped. get_query_store_health has the decode and the remedy; if the reason is the storage cap, this database's clutter reached its terminal state.");
+                        $"Query Store is READ_ONLY because it reached a limit of its own (readonly_reason {c4.ReadonlyReason.ToString(culture)}: {QueryStoreReadonlyReason.Decode(c4.ReadonlyReason)}) while desired_state is {c4.DesiredState}. New runtime statistics are being dropped, and this database's clutter reached its terminal state. get_query_store_health has the decode and the remedy.");
+                    break;
+                case ReasonReadOnlyDatabaseState when row.Config is { } c5:
+                    // Reason 0, or bits that are none of the three documented state bits (1, 2, 4), carries no
+                    // recorded cause. With desired_state READ_WRITE that is get_query_store_health's "classic
+                    // silent failure", so it must not be worded as the database's benign state (#7454).
+                    if ((c5.ReadonlyReason & DocumentedStateBits) == 0)
+                    {
+                        lines.Add(
+                            $"Query Store is READ_ONLY (readonly_reason {c5.ReadonlyReason.ToString(culture)}: {(c5.ReadonlyReason == 0 ? "no reason bit set" : QueryStoreReadonlyReason.Decode(c5.ReadonlyReason))}) while desired_state is {c5.DesiredState}. No documented reason is recorded for it, so the cause is not recorded: this view does not grade it as clutter, but do not treat it as benign. Read get_query_store_health and the SQL Server error log for the cause before deciding.");
+                    }
+                    else
+                    {
+                        lines.Add(
+                            $"Query Store is READ_ONLY (readonly_reason {c5.ReadonlyReason.ToString(culture)}: {QueryStoreReadonlyReason.Decode(c5.ReadonlyReason)}) while desired_state is {c5.DesiredState}. Query Store cannot record while the database is in that state, so runtime statistics are not being collected. This is the database's state, not clutter, and this view does not grade it. get_query_store_health has the decode.");
+                    }
+                    break;
+                case ReasonReadOnlyOperator when row.Config is { } c6:
+                    lines.Add(
+                        $"Query Store is READ_ONLY because its operation mode was set to READ_ONLY (readonly_reason {c6.ReadonlyReason.ToString(culture)}, desired_state {c6.DesiredState}). New runtime statistics are not being collected, as chosen. This is not clutter, and this view does not grade the choice.");
                     break;
                 case ReasonQueryStoreOff:
                     lines.Add("Query Store is OFF on this database: there is nothing here to be cluttered, and this view does not grade the choice.");
+                    break;
+                case ReasonQueryStoreError:
+                    lines.Add("Query Store is in the ERROR state on this database: " + QueryStoreReadonlyReason.ErrorStateNote + " The rows it holds are old, so this view does not grade them.");
                     break;
                 case ReasonNotMeasured:
                     lines.Add("No query_store_stats rows, no fan-out run naming this database, and no configuration capture inside the window: nothing was measured. Widen hours_back before reading this as quiet.");
@@ -491,21 +583,21 @@ public static class QueryStoreClutter
     {
         if (config is null)
         {
-            return "no query_store_health capture for this database inside the window, so the mode is unread here — get_query_store_health carries it.";
+            return "no query_store_health capture for this database inside the window, so the mode is unread here: get_query_store_health carries it.";
         }
 
         if (config.QueryCaptureMode is not { Length: > 0 } mode)
         {
-            return "the newest health capture for this database predates the V137 rung (#3796) that added the column, so the mode was never asked — it lands on the next hourly capture. Until then, read it on the target.";
+            return "the newest health capture for this database predates the V137 rung (#3796) that added the column, so the mode was never asked. It lands on the next hourly capture. Until then, read it on the target.";
         }
 
         return mode.ToUpperInvariant() switch
         {
-            "ALL" => "it is ALL, which captures every query the engine compiles — one-off ad hoc statements included — so on an ad hoc workload the churn above is the capture mode manufacturing it. AUTO is the fix (it was the engine default from SQL Server 2019 and on Azure SQL Database, and skips queries under the engine's own significance thresholds).",
+            "ALL" => "it is ALL, which captures every query the engine compiles (one-off ad hoc statements included), so on an ad hoc workload the churn above is the capture mode manufacturing it. AUTO is the fix (it was the engine default from SQL Server 2019 and on Azure SQL Database, and skips queries under the engine's own significance thresholds).",
             "AUTO" => "it is already AUTO, so the engine is already skipping insignificant queries and the churn above is the WORKLOAD: unique plans are arriving faster than the store forgets them. The levers left are the plan cap, the stale-query threshold, and the queries themselves.",
-            "CUSTOM" => "it is CUSTOM — AUTO with operator-set thresholds (the 2019+ capture_policy_* knobs, which this row does not collect, so CUSTOM says the thresholds were tuned and not to what). Read the policy on the target before blaming the workload.",
+            "CUSTOM" => "it is CUSTOM, which is AUTO with operator-set thresholds (the 2019+ capture_policy_* knobs, which this row does not collect, so CUSTOM says the thresholds were tuned and not to what). Read the policy on the target before blaming the workload.",
             "NONE" => "it is NONE, so no NEW query is being captured at all: the churn above is inside the queries the store already holds, and tightening the capture mode further cannot reduce it.",
-            _ => $"it is {mode}, which is not one of the four modes this view knows (ALL / AUTO / CUSTOM / NONE) — read it on the target rather than acting on this row.",
+            _ => $"it is {mode}, which is not one of the four modes this view knows (ALL / AUTO / CUSTOM / NONE). Read it on the target rather than acting on this row.",
         };
     }
 

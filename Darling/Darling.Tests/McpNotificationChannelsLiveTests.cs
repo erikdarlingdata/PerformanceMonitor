@@ -237,7 +237,7 @@ public sealed class McpNotificationChannelsLiveTests
             }
 
             await using (var plain = mcp.CreateCommand(
-                "SELECT * FROM config.set_notification_channels(ARRAY['teams_url'], NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'https://teams.example.test/plain', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"))
+                "SELECT * FROM config.set_notification_channels(ARRAY['teams_url'], NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'https://teams.example.test/plain', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"))
             {
                 var refusedPlain = await Assert.ThrowsAsync<PostgresException>(() => plain.ExecuteNonQueryAsync(ct));
                 Assert.Equal("DL400", refusedPlain.SqlState);
@@ -270,7 +270,7 @@ public sealed class McpNotificationChannelsLiveTests
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
             {
-                await using var drop = new NpgsqlCommand("DROP OWNED BY admin, viewer, mcp; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS mcp", cleanup);
+                await using var drop = new NpgsqlCommand($"{LiveCleanupBatch.DropOwnedByExistingProductRolesSql} DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS web; DROP ROLE IF EXISTS mcp", cleanup);
                 await drop.ExecuteNonQueryAsync(cleanupCt);
             });
         }

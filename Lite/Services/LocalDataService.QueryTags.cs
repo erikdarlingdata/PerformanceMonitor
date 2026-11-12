@@ -183,11 +183,12 @@ ORDER BY priority, id";
         {
             insert.CommandText = @"
 INSERT INTO query_tags (id, name, parent_id, sort_order, colour, created_at)
-SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
+SELECT $1, $2, $3, 0, $4, $5";
             insert.Parameters.Add(new DuckDBParameter { Value = id });
             insert.Parameters.Add(new DuckDBParameter { Value = cleanName });
             insert.Parameters.Add(new DuckDBParameter { Value = (object?)parentId ?? DBNull.Value });
             insert.Parameters.Add(new DuckDBParameter { Value = (object?)cleanColour ?? TagColours.ForTagId(id) });
+            insert.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
             await insert.ExecuteNonQueryAsync();
         }
 
@@ -307,7 +308,7 @@ AND   COALESCE(object_name, '') = COALESCE($6, '')";
             insert.CommandText = @"
 INSERT INTO query_tag_assignments
     (id, tag_id, kind, server_id, query_hash, database_name, schema_name, object_name, query_id, created_at, created_by)
-SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, now()::TIMESTAMP, $10";
+SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $11, $10";
             insert.Parameters.Add(new DuckDBParameter { Value = id });
             insert.Parameters.Add(new DuckDBParameter { Value = input.TagId });
             insert.Parameters.Add(new DuckDBParameter { Value = kind });
@@ -318,6 +319,7 @@ SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, now()::TIMESTAMP, $10";
             insert.Parameters.Add(new DuckDBParameter { Value = (object?)name ?? DBNull.Value });
             insert.Parameters.Add(new DuckDBParameter { Value = (object?)input.QueryId ?? DBNull.Value });
             insert.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(input.CreatedBy) ? "lite" : input.CreatedBy });
+            insert.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
             await insert.ExecuteNonQueryAsync();
         }
 
@@ -361,7 +363,7 @@ SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, now()::TIMESTAMP, $10";
         {
             insert.CommandText = @"
 INSERT INTO query_tag_rules (id, tag_id, priority, enabled, server_id, match_field, pattern, created_at, created_by)
-SELECT $1, $2, $3, $4, $5, $6, $7, now()::TIMESTAMP, $8";
+SELECT $1, $2, $3, $4, $5, $6, $7, $9, $8";
             insert.Parameters.Add(new DuckDBParameter { Value = id });
             insert.Parameters.Add(new DuckDBParameter { Value = (object?)input.TagId ?? DBNull.Value });
             insert.Parameters.Add(new DuckDBParameter { Value = input.Priority });
@@ -370,6 +372,7 @@ SELECT $1, $2, $3, $4, $5, $6, $7, now()::TIMESTAMP, $8";
             insert.Parameters.Add(new DuckDBParameter { Value = QueryTagFieldText(input.Field) });
             insert.Parameters.Add(new DuckDBParameter { Value = StoredRulePattern(input) });
             insert.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(input.CreatedBy) ? "lite" : input.CreatedBy });
+            insert.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
             await insert.ExecuteNonQueryAsync();
         }
 
@@ -600,8 +603,9 @@ WHERE id = $1";
         using var command = connection.CreateCommand();
         command.CommandText = @"
 INSERT INTO query_tag_state (id, rules_version, built_version, updated_at)
-VALUES (1, 2, 0, now()::TIMESTAMP)
-ON CONFLICT (id) DO UPDATE SET rules_version = query_tag_state.rules_version + 1, updated_at = now()::TIMESTAMP";
+VALUES (1, 2, 0, $1)
+ON CONFLICT (id) DO UPDATE SET rules_version = query_tag_state.rules_version + 1, updated_at = excluded.updated_at";
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
         await command.ExecuteNonQueryAsync();
     }
 

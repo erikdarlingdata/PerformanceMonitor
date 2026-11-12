@@ -14,13 +14,13 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 
 ## Limits
 
-- The page matches the `dev` branch at the commit that added it, with the store at schema version 221. The `tools/list` call on a running server gives the full list for that build.
+- The page matches the `dev` branch at the commit that last changed it, with the store at schema version 232. The `tools/list` call on a running server gives the full list for that build.
 - A tool that has no row here was added after this page. A changed tool can read other tables than the ones shown here.
 - Which tools a server serves depends on the `mcp` switches. See [MCP configuration](configuration-mcp.md#mcp).
 - The page was made by reading each tool's code down to the SQL that runs. It was not made from a store trace.
 
 
-## Tools that read collected data (147)
+## Tools that read collected data (154)
 
 | Tool | Store objects |
 |---|---|
@@ -32,6 +32,8 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `backtest_custom_alert_rule` | The table that the rule's measure names. Also its hourly or daily aggregate, when the window uses one.<br>`config.custom_alert_rules` (when rule_id given)<br>`config.server_tags`<br>`config.server_tag_map`<br>`config.config_collector_schedules` |
 | `compare_analysis` | *SQL Server targets:*<br>`collect.wait_stats`<br>`collect.deadlocks`<br>`collect.blocked_process_reports`<br>`collect.dmv_blocking_snapshots`<br>`collect.query_stats`<br>`collect.query_store_stats`<br>`collect.query_store_interval_wide`<br>`collect.query_store_interval_latest`<br>`collect.query_store_text`<br>`collect.query_store_plan_map`<br>`collect.query_plan_dim`<br>`collect.query_text_dim`<br>`collect.plan_regression_daily`<br>`collect.procedure_stats`<br>`collect.plan_cache_stats`<br>`collect.query_snapshots`<br>`collect.running_jobs`<br>`collect.session_stats`<br>`collect.cpu_utilization_stats`<br>`collect.memory_stats`<br>`collect.memory_grant_stats`<br>`collect.memory_clerks`<br>`collect.memory_pressure_events`<br>`collect.perfmon_stats`<br>`collect.file_io_stats`<br>`collect.tempdb_stats`<br>`collect.database_size_stats`<br>`collect.database_config`<br>`collect.server_config`<br>`collect.server_properties`<br>`collect.trace_flags`<br>`collect.index_object_stats`<br>`collect.default_trace_events`<br>`collect.collection_log`<br>`collect.ag_replica_states`<br>`collect.ag_database_replica_states`<br>`collect.v_wait_stats`<br>`collect.v_deadlocks`<br>`collect.v_blocked_process_reports`<br>`collect.v_dmv_blocking_snapshots`<br>`collect.v_query_stats`<br>`collect.v_query_store_stats`<br>`collect.v_query_snapshots`<br>`collect.v_session_stats`<br>`collect.v_cpu_utilization_stats`<br>`collect.v_memory_stats`<br>`collect.v_memory_grant_stats`<br>`collect.v_perfmon_stats`<br>`collect.v_file_io_stats`<br>`collect.v_tempdb_stats`<br>`collect.v_database_size_stats`<br>`collect.v_database_config`<br>`collect.v_index_object_stats`<br>*Anomaly baselines:*<br>`collect.wait_stats` (through the continuous aggregate `collect.wait_stats_interval_baseline`)<br>`collect.wait_stats_baseline` (a retired continuous aggregate)<br>`collect.perfmon_stats` (through the continuous aggregate `collect.perfmon_interval_baseline`)<br>`collect.perfmon_baseline` (a retired continuous aggregate)<br>`collect.session_stats` (through the continuous aggregate `collect.session_stats_baseline`)<br>`collect.query_stats` (through the continuous aggregate `collect.query_stats_baseline`)<br>`collect.memory_stats` (through the continuous aggregate `collect.memory_baseline`)<br>`collect.blocked_process_reports` (through the continuous aggregate `collect.blocked_process_baseline`)<br>`collect.deadlock_baseline`<br>`collect.cpu_utilization_stats`<br>`collect.file_io_stats`<br>*PostgreSQL targets:*<br>`collect.pg_server_config`<br>`collect.pg_statement_stats`<br>`collect.pg_statement_text`<br>`collect.pg_database_stats`<br>`collect.pg_database_size_stats`<br>`collect.pg_wait_stats`<br>`collect.pg_wait_sampling`<br>`collect.pg_cpu_utilization`<br>`collect.pg_session_states`<br>`collect.pg_write_stats`<br>`collect.pg_extension_availability`<br>`collect.pg_plan_capture`<br>`collect.pg_plan_capture_readiness`<br>`collect.pg_io_stats`<br>`collect.pg_replication_stats`<br>`collect.pg_replication_slot_stats`<br>`collect.pg_log_events`<br>`collect.pg_kernel_stats`<br>`collect.pg_buffer_usage`<br>`collect.pg_blocking_edges`<br>`collect.pg_xmin_horizon`<br>`collect.pg_wraparound_stats`<br>`collect.pg_table_bloat_stats`<br>`collect.pg_index_bloat`<br>`collect.pg_predicate_stats`<br>`collect.pg_deadlocks`<br>`collect.pg_column_stats`<br>`collect.pg_autovacuum_stats` |
 | `find_database` | `collect.database_states`<br>`collect.servers` |
+| `find_queries_by_text` | `collect.query_store_text`<br>`collect.query_stats`<br>`collect.query_text_dim`<br>`collect.servers` |
+| `find_schema_objects` | `collect.schema_objects`<br>`collect.schema_columns`<br>`collect.schema_constraints`<br>`collect.schema_indexes`<br>`collect.schema_capture_state`<br>`collect.ag_database_replica_states`<br>`collect.servers` |
 | `get_active_queries` | `collect.query_snapshots`<br>`config.query_tag_map` (only when tag given)<br>`config.query_tags` (only when tag given) |
 | `get_active_query_plan_xml` | `collect.query_snapshots` |
 | `get_agent_alerts` | `collect.agent_alerts`<br>`collect.servers`<br>`collect.collection_log` |
@@ -50,6 +52,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_cpu_scheduler_pressure` | `collect.cpu_scheduler_stats` (through the view `collect.v_cpu_scheduler_stats`) |
 | `get_cpu_utilization` | `collect.cpu_utilization_stats` |
 | `get_current_waits_trend` | `collect.waiting_tasks` |
+| `get_daily_health_report` | `collect.servers`<br>`collect.cpu_utilization_stats`<br>`collect.pg_cpu_utilization`<br>`collect.memory_stats`<br>`collect.memory_grant_stats`<br>`collect.cpu_scheduler_stats`<br>`collect.blocked_process_reports` (through a view)<br>`collect.dmv_blocking_snapshots` (through a view)<br>`collect.deadlocks` (through a view)<br>`collect.pg_database_stats`<br>`collect.collection_log`<br>`collect.collection_log` (through the continuous aggregate `collect.collection_health_hourly`)<br>`config.config_mute_rules`<br>`config.config_alert_settings`<br>`config.server_tags`<br>`config.server_tag_map`<br>`config.config_service`<br>`config.config_command`<br>`collect.v_cpu_utilization_stats`<br>`collect.v_memory_stats`<br>`collect.v_memory_grant_stats`<br>`collect.v_cpu_scheduler_stats`<br>`collect.v_collection_log`<br>`config.config_alert_log`<br>`collect.job_history`<br>`collect.server_properties`<br>`collect.agent_status`<br>`collect.database_size_stats` |
 | `get_daily_summary` | `collect.wait_stats` (through the view `collect.v_wait_stats`)<br>`collect.query_stats` (through the view `collect.v_query_stats`)<br>`collect.deadlocks` (through the view `collect.v_deadlocks`)<br>`collect.blocked_process_reports` (through the view `collect.v_blocked_process_reports`)<br>`collect.dmv_blocking_snapshots` (through the view `collect.v_dmv_blocking_snapshots`)<br>`collect.cpu_utilization_stats` (through the view `collect.v_cpu_utilization_stats`)<br>`collect.collection_log` (through the view `collect.v_collection_log`)<br>`collect.memory_pressure_events` (through the view `collect.v_memory_pressure_events`)<br>`config.config_alert_log`<br>`config.config_alert_settings`<br>`config.config_collector_schedules`<br>`collect.query_stats_hourly`<br>`collect.query_stats_interval_hourly`<br>`collect.query_stats_daily` |
 | `get_daily_summary_range` | `collect.wait_stats` (through the view `collect.v_wait_stats`)<br>`collect.query_stats` (through the view `collect.v_query_stats`)<br>`collect.deadlocks` (through the view `collect.v_deadlocks`)<br>`collect.blocked_process_reports` (through the view `collect.v_blocked_process_reports`)<br>`collect.dmv_blocking_snapshots` (through the view `collect.v_dmv_blocking_snapshots`)<br>`collect.cpu_utilization_stats` (through the view `collect.v_cpu_utilization_stats`)<br>`collect.collection_log` (through the view `collect.v_collection_log`)<br>`collect.memory_pressure_events` (through the view `collect.v_memory_pressure_events`)<br>`config.config_alert_log`<br>`config.config_alert_settings`<br>`config.config_collector_schedules`<br>`collect.query_stats_hourly`<br>`collect.query_stats_interval_hourly`<br>`collect.query_stats_daily` |
 | `get_database_config` | `collect.database_config`<br>`collect.v_database_config` |
@@ -91,6 +94,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_memory_pressure_events` | `collect.memory_pressure_events` (through the view `collect.v_memory_pressure_events`) |
 | `get_memory_stats` | `collect.memory_stats`<br>`collect.v_memory_stats` |
 | `get_memory_trend` | `collect.memory_stats`<br>`collect.memory_grant_stats`<br>`collect.v_memory_stats`<br>`collect.v_memory_grant_stats` |
+| `get_object_definition` | `collect.schema_objects`<br>`collect.schema_columns`<br>`collect.schema_indexes`<br>`collect.schema_constraints`<br>`collect.schema_triggers`<br>`collect.schema_capture_state`<br>`collect.ag_database_replica_states`<br>`collect.servers` |
 | `get_object_locking` | `collect.index_object_stats` (through the view `collect.v_index_object_stats`)<br>`collect.database_config` |
 | `get_perfmon_stats` | `collect.perfmon_stats`<br>`collect.v_perfmon_stats` |
 | `get_perfmon_trend` | `collect.perfmon_stats`<br>`collect.v_perfmon_stats` |
@@ -125,7 +129,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_pg_top_queries` | `collect.pg_statement_stats`<br>`collect.pg_statement_text`<br>`collect.pg_server_config`<br>`collect.collection_log`<br>`collect.v_collection_log` |
 | `get_pg_wait_sampling` | `collect.pg_wait_sampling`<br>`collect.collector_state` |
 | `get_pg_wait_stats` | `collect.pg_wait_stats` |
-| `get_pg_wait_trend` | `collect.pg_wait_sampling` |
+| `get_pg_wait_trend` | `collect.pg_wait_sampling`<br>`collect.pg_wait_stats`<br>`collect.collector_state` |
 | `get_pg_wraparound_risk` | `collect.pg_wraparound_stats` |
 | `get_pg_write_stats` | `collect.pg_write_stats` |
 | `get_pg_xmin_horizon` | `collect.pg_xmin_horizon`<br>`collect.collection_log` |
@@ -137,6 +141,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_procedure_plan_xml` | `collect.procedure_stats`<br>`collect.query_plan_dim` |
 | `get_pvs_stats` | `collect.pvs_stats` (through the view `collect.v_pvs_stats`) |
 | `get_query_duration_trend` | `collect.query_stats`<br>`collect.query_stats` (through the continuous aggregate `collect.query_stats_hourly`)<br>`collect.query_stats` (through the continuous aggregate `collect.query_stats_interval_hourly`)<br>`collect.query_stats` (through the continuous aggregate `collect.query_stats_daily`)<br>`collect.query_stats_interval_daily` (continuous aggregate) |
+| `get_query_fleet_summary` | `collect.servers`<br>`collect.query_stats`<br>`collect.query_stats` (through the continuous aggregate `collect.query_stats_hourly`)<br>`collect.query_stats` (through the continuous aggregate `collect.query_stats_interval_hourly`)<br>`collect.query_stats` (through the continuous aggregate `collect.query_stats_daily`)<br>`collect.query_store_stats`<br>`collect.query_store_stats` (through the continuous aggregate `collect.query_store_stats_corrected_hourly`) |
 | `get_query_heatmap` | `collect.query_stats`<br>`collect.query_text_dim` |
 | `get_query_pileups` | `collect.query_snapshots`<br>`collect.dmv_blocking_snapshots` |
 | `get_query_repro_script` | `collect.query_stats` (through the view `collect.v_query_stats`)<br>`collect.query_store_text`<br>`collect.query_store_stats`<br>`collect.query_snapshots`<br>`collect.query_plan_dim`<br>`collect.server_properties`<br>`collect.server_config`<br>`collect.database_config` |
@@ -153,6 +158,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_resource_semaphore` | `collect.memory_grant_stats` (through the view `collect.v_memory_grant_stats`) |
 | `get_resource_use_by_tag` | `config.query_tags`<br>`config.query_tag_map`<br>`collect.query_stats`<br>`collect.query_stats` (through the continuous aggregate `collect.query_stats_io_hourly`)<br>`collect.query_store_interval_wide`<br>`collect.query_store_hash_hourly`<br>`collect.query_store_hash_daily`<br>`collect.procedure_stats`<br>`collect.procedure_stats` (through the continuous aggregate `collect.procedure_stats_io_hourly`)<br>`collect.blocked_process_reports`<br>`collect.dmv_blocking_snapshots`<br>`collect.deadlocks` |
 | `get_running_jobs` | `collect.running_jobs` (through the view `collect.v_running_jobs`)<br>`collect.collection_log` (through the view `collect.v_collection_log`) |
+| `get_schema_changes` | `collect.schema_objects`<br>`collect.schema_columns`<br>`collect.schema_indexes`<br>`collect.schema_constraints`<br>`collect.schema_triggers`<br>`collect.schema_capture_state`<br>`collect.ag_database_replica_states`<br>`collect.servers` |
 | `get_server_config` | `collect.server_config`<br>`collect.v_server_config` |
 | `get_server_config_changes` | `collect.server_config`<br>`collect.v_server_config` |
 | `get_server_properties` | `collect.server_properties` |
@@ -199,6 +205,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_mute_rules` | `config.config_mute_rules` |
 | `get_notification_routes` | `config.config_notification_routes`<br>`config.investigation_requests`<br>`config.config_monitored_servers`<br>`config.server_tags`<br>`config.server_tag_map` |
 | `get_oversized_plan_backlog` | `collect.oversized_plan_backlog`<br>`collect.servers` |
+| `get_people` | `config.person`<br>`config.person_identity`<br>`config.person_grant`<br>`config.config_monitored_servers`<br>`config.server_tags` |
 | `get_read_latency` | `collect.read_latency` |
 | `get_server_actions` | `config.config_monitored_servers`<br>`config.config_server_actions`<br>`collect.servers` |
 | `get_server_settings` | `config.config_monitored_servers` |
@@ -220,7 +227,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `validate_custom_view` | None. It checks the definition that you pass in. |
 | `wait_for_investigation_requests` | `config.investigation_journal`<br>`config.investigation_requests`<br>`config.investigation_request_alerts`<br>`collect.servers` |
 
-## Tools that change something (86)
+## Tools that change something (87)
 
 | Tool | Store objects |
 |---|---|
@@ -276,6 +283,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `resume_collection` | `config.config_command`<br>`config.config_service` |
 | `run_collectors_now` | `config.config_command` |
 | `save_environment_profile` | `config.agent_environment_profiles` (upsert/delete)<br>`config.server_tags` (tag exists check)<br>`config.config_monitored_servers` (server exists check)<br>`config.investigation_journal` |
+| `send_daily_health_report_now` | `config.config_alert_log` (insert, the alert history row)<br>`config.config_alert_settings` (read)<br>`config.config_notification_routes` (read)<br>`config.config_mute_rules` (read)<br>The objects that `get_daily_health_report` reads. |
 | `set_agent_actions_enabled` | `config.config_service` |
 | `set_alert_threshold_override` | `config.config_threshold_overrides` |
 | `set_collector_databases` | `config.config_collector_schedules` |
@@ -289,6 +297,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `set_quiet_window` | `config.config_mute_rules` (insert) |
 | `set_server_action` | `config.config_server_actions` (insert/update)<br>`config.config_monitored_servers`<br>`collect.servers` |
 | `set_server_excluded_databases` | `config.config_monitored_servers` |
+| `set_server_xe_session_databases` | `config.config_monitored_servers` |
 | `start_practice_request` | `config.investigation_requests` (insert)<br>`config.investigation_request_alerts` (copy/insert)<br>`config.investigation_reports` (read source verdicts)<br>`config.investigation_feedback` (read) |
 | `submit_investigation_report` | `config.investigation_reports` (insert)<br>`config.investigation_requests` (update state)<br>`config.investigation_journal` (insert)<br>`config.investigation_notes` (insert)<br>`config.investigation_requests` (family check) |
 | `test_connection` | `config.config_command`<br>`config.request_mcp_command` |

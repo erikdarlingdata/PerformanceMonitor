@@ -101,8 +101,8 @@ public sealed partial class PgTargetFactCollector
     /// <c>session_settable</c> (1 when the context is <c>user</c> / <c>superuser</c> / <c>backend</c>, i.e. a
     /// per-session <c>SET</c> can override the server default — true of <c>synchronous_commit</c>, false of
     /// the other two, which are <c>sighup</c>: <c>ALTER SYSTEM</c> plus <c>pg_reload_conf()</c>, no restart);
-    /// <c>pending_restart</c>; <c>is_default</c> (PostgreSQL's own <c>source = 'default'</c> verdict, for the
-    /// reader's reason — never a text comparison against <c>boot_val</c>); <c>snapshot_age_minutes</c> against
+    /// <c>pending_restart</c>; <c>is_default</c> (PostgreSQL's own <c>source = 'default'</c> verdict, whether
+    /// somebody set it, which is narrower than the reader's <c>is_default</c> since #7409); <c>snapshot_age_minutes</c> against
     /// the window end, never the wall clock.</para>
     ///
     /// <para><b>What it does not do.</b> No fact when the snapshot has no row for a setting (a pre-V102 store,

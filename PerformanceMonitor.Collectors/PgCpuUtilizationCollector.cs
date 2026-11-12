@@ -173,13 +173,13 @@ public sealed class PgCpuUtilizationCollector : PostgresCollectorDefinitionBase<
 
     public override CollectorQuery BuildQuery(CollectorContext context) =>
         throw new System.NotSupportedException(
-            $"{Name} has no SQL route — it is always dispatched through the RDS/Performance Insights "
+            $"{Name} has no SQL route. It is always dispatched through the RDS/Performance Insights "
             + "ingestor (DarlingCollectorRunner.IngestPgCpuAsync). This method exists only to satisfy "
             + "ICollectorDefinition<TRow> and PgSchemaGenerator's DDL generation.");
 
     public override ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken) =>
         throw new System.NotSupportedException(
-            $"{Name} has no SQL route — see {nameof(BuildQuery)}.");
+            $"{Name} has no SQL route. See {nameof(BuildQuery)}.");
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {

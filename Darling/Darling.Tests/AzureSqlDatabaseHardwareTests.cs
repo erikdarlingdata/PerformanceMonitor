@@ -138,8 +138,9 @@ public sealed class AzureSqlDatabaseHardwareTests
 
         Assert.Contains("{ key: \"vcore_count\", label: \"vCores\", format: \"int\", showWhen: AZURE_SQL_DATABASE }", list, StringComparison.Ordinal);
         var objective = list.Split('\n').Single(l => l.Contains("key: \"service_objective\"", StringComparison.Ordinal));
+        /* #7416: the service objective is an Azure SQL Database notion (a tier such as GP_Gen5_2), so its tile is drawn on edition 5 only. */
+        Assert.Contains("showWhen: AZURE_SQL_DATABASE", objective, StringComparison.Ordinal);
         Assert.DoesNotContain("hideWhen", objective, StringComparison.Ordinal);
-        Assert.DoesNotContain("showWhen", objective, StringComparison.Ordinal);
     }
 
     [Fact]

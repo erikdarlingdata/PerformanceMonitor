@@ -219,27 +219,28 @@ VALUES ($1, 702, 'S702', $2, 1, 1, TRUE, 'tray')";
     [Fact]
     public void JobHistoryZone_IsTheZoneTheGridWordsItsRowsIn_SoYesterdayMeansTheGridsYesterday()
     {
-        /* #5562 M1: all servers are worded in UTC, one server in its own clock (its last read's, else its open tab's, else the machine's). */
+        /* #5562 M1: all servers are worded on the one clock a mixed list reads on (UTC in UTC mode), one server in Server time in its
+           own clock (its last read's, else its open tab's, else the machine's). */
         var eastern = ServerClock.Resolve("Eastern Standard Time", -300);
         var now = new DateTime(2026, 10, 8, 2, 0, 0, DateTimeKind.Unspecified);
         var yesterday = TimeRangeSpec.ForPeriod(CalendarPeriod.Yesterday);
 
-        var allServers = JobHistoryTab.JobHistoryZone(null, new Dictionary<int, ServerClock> { [7] = eastern }, null);
+        var allServers = JobHistoryTab.JobHistoryZone(null, TimeDisplayMode.UTC, new Dictionary<int, ServerClock> { [7] = eastern }, null);
         Assert.Equal(TimeZoneInfo.Utc, allServers);
         Assert.True(yesterday.TryResolve(now, allServers, out var inUtc, out _));
         Assert.Equal(new DateTime(2026, 10, 7, 0, 0, 0), inUtc!.StartUtc);
         Assert.Equal(new DateTime(2026, 10, 8, 0, 0, 0), inUtc.EndUtc);
 
-        var oneServer = JobHistoryTab.JobHistoryZone(7, new Dictionary<int, ServerClock> { [7] = eastern }, null);
+        var oneServer = JobHistoryTab.JobHistoryZone(7, TimeDisplayMode.ServerTime, new Dictionary<int, ServerClock> { [7] = eastern }, null);
         Assert.True(yesterday.TryResolve(now, oneServer, out var inEastern, out _));
         Assert.Equal(new DateTime(2026, 10, 6, 4, 0, 0), inEastern!.StartUtc);
         Assert.Equal(new DateTime(2026, 10, 7, 4, 0, 0), inEastern.EndUtc);
 
         /* No read yet for this server: its open tab's clock, then the machine's. */
-        var viaTab = JobHistoryTab.JobHistoryZone(7, new Dictionary<int, ServerClock>(), new Dictionary<int, ServerClock> { [7] = eastern });
+        var viaTab = JobHistoryTab.JobHistoryZone(7, TimeDisplayMode.ServerTime, new Dictionary<int, ServerClock>(), new Dictionary<int, ServerClock> { [7] = eastern });
         Assert.True(yesterday.TryResolve(now, viaTab, out var viaTabRange, out _));
         Assert.Equal(inEastern.StartUtc, viaTabRange!.StartUtc);
-        Assert.Equal(TimeZoneInfo.Local, JobHistoryTab.JobHistoryZone(7, null, null));
+        Assert.Equal(TimeZoneInfo.Local, JobHistoryTab.JobHistoryZone(7, TimeDisplayMode.ServerTime, null, null));
     }
 
     [Fact]
@@ -274,6 +275,9 @@ VALUES ($1, 702, 'S702', $2, 1, 1, TRUE, 'tray')";
     [InlineData("Queries", "Query Store by Duration", "query_store")]
     [InlineData("Memory", "Memory Clerks", "memory_clerks")]
     [InlineData("Memory", "Memory Grants", "memory_grant_stats")]
+    [InlineData("Memory", "Plan Cache", "plan_cache_stats")]
+    [InlineData("CPU", "CPU Scheduler", "cpu_scheduler_stats")]
+    [InlineData("CPU", "CPU Utilization", "cpu_utilization")]
     [InlineData("Blocking", "Current Waits", "waiting_tasks")]
     [InlineData("Blocking", "Deadlocks", "deadlocks")]
     [InlineData("System Events", "Default Trace", "default_trace_events")]
@@ -330,14 +334,17 @@ VALUES ($1, 702, 'S702', $2, 1, 1, TRUE, 'tray')";
     [Fact]
     public void EveryBannerSite_FeedsThePickersDataStart()
     {
-        /* The call sites of ApplyWindowFloorToBanner outside its definition, by file. A new site must either feed the picker
-           (ServerTab.FeedDataStart / the Job History tab's onFloor) or be added here with the reason it cannot. */
+        /* The call sites of ApplyWindowFloorToBanner outside its definition, by file. A new site must either feed its own
+           note (the Overview lanes' onStartChosen) or be added here with the reason it does not. No site feeds a picker: a
+           picker's note names the oldest data the store holds for its tab's scope (ServerTab.OldestRetainedUtc, the Job History
+           tab's LocalDataService.GetOldestJobHistoryAsync), which a window-floor probe, bounded to the window it was asked about,
+           cannot give. */
         var expected = new[]
         {
-            ("Controls/JobHistoryTab.xaml.cs", 1, "onFloor?.Invoke(floor)"),                       /* the tab's own picker */
-            ("Controls/LiteBlockingLaneDataStart.cs", 1, "onStartChosen?.Invoke(start)"),          /* Overview lanes, fed by the tab */
-            ("Controls/ServerTab.BlockingChartsDataStart.cs", 1, "FeedDataStart("),
-            ("Controls/ServerTab.Refresh.cs", 1, "FeedDataStart(LiteTimeRange.CollectorOfRelation(relation), floor)"),
+            ("Controls/JobHistoryTab.xaml.cs", 1, null),                                           /* the tab's picker: see above */
+            ("Controls/LiteBlockingLaneDataStart.cs", 1, "onStartChosen?.Invoke(start)"),          /* Overview lanes' own note */
+            ("Controls/ServerTab.BlockingChartsDataStart.cs", 1, null),                            /* the server tab: see above */
+            ("Controls/ServerTab.Refresh.cs", 1, null),                                            /* the server tab: see above */
             ("Windows/CollectionLogWindow.xaml.cs", 1, null),                                      /* its own window: no picker */
         };
 
@@ -361,11 +368,15 @@ VALUES ($1, 702, 'S702', $2, 1, 1, TRUE, 'tray')";
             }
         }
 
-        /* The central funnel feeds for every relation, and the tab points the picker at the page on screen. */
+        /* The Job History tab's picker takes its note from the tab's own oldest-retained read, never from the probe's floor. */
+        var jobHistory = LiteFile(Path.Combine("Controls", "JobHistoryTab.xaml.cs"));
+        Assert.Contains("GetOldestJobHistoryAsync(", jobHistory, StringComparison.Ordinal);
+        Assert.DoesNotContain("onFloor", jobHistory, StringComparison.Ordinal);
+
+        /* No banner site writes the server tab's picker note directly. */
         var refresh = LiteFile(Path.Combine("Controls", "ServerTab.Refresh.cs"));
         Assert.DoesNotContain("if (relation == QueryWindowRelation.QueryStats)\n        {\n            RangePicker.DataStartUtc", refresh, StringComparison.Ordinal);
         Assert.Contains("RangePicker.SetLongestChoice(LiteTimeRange.AlertHistoryLongestChoice, ", LiteFile(Path.Combine("Controls", "AlertsHistoryTab.xaml.cs")), StringComparison.Ordinal);
-        Assert.Contains("CorrelatedLanes.DataStartFound +=", LiteFile(Path.Combine("Controls", "ServerTab.xaml.cs")), StringComparison.Ordinal);
     }
 
     private static string ThisFile([CallerFilePath] string path = "") => path;

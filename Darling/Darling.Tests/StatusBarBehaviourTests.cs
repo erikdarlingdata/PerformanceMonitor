@@ -64,13 +64,25 @@ public sealed class StatusBarBehaviourTests
         r.GetProperty("items").EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!).ToArray();
 
     [Theory]
-    [InlineData("seatWrite", "Seat: read-write")]
-    [InlineData("seatRead", "Seat: read-only")]
-    [InlineData("seatProbeFailed", "Seat: not connected")]
+    [InlineData("seatWrite", "Access: read-write")]
+    [InlineData("seatRead", "Access: read-only")]
+    [InlineData("seatProbeFailed", "Access: not connected")]
     public void TheSeatLabel_FollowsTheSessionProbe_InTheViewersWording(string scenario, string expected)
     {
         if (!TryRun(scenario, out var r)) return;
         Assert.Contains(expected, Items(r));
+    }
+
+    /// <summary>#7416: the access entry says on hover what the word means, which is what this browser's token may change.</summary>
+    [Theory]
+    [InlineData("seatWrite", "Read-write: it can change the monitoring store")]
+    [InlineData("seatRead", "Read-only: it can read everything but change nothing")]
+    public void TheAccessEntry_ExplainsItselfOnHover(string scenario, string expected)
+    {
+        if (!TryRun(scenario, out var r)) return;
+        var title = r.GetProperty("accessTitle").GetString();
+        Assert.Contains("what this browser's token may change", title, System.StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(expected, title, System.StringComparison.Ordinal);
     }
 
     [Fact]
@@ -147,7 +159,7 @@ public sealed class StatusBarBehaviourTests
         if (!TryRun("storeFails", out var r)) return;
         Assert.True(r.GetProperty("hasBar").GetBoolean());
         Assert.DoesNotContain(Items(r), i => i.StartsWith("Database", StringComparison.Ordinal));
-        Assert.Contains("Seat: read-write", Items(r));
+        Assert.Contains("Access: read-write", Items(r));
 
         if (!TryRun("storeFailsAfterGood", out var stale)) return;
         Assert.Contains("Database: 5.0 GB (stale)", Items(stale));

@@ -26,7 +26,7 @@ class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = 
 globalThis.Node = FakeNode;
 const body = new FakeNode("body");
 let downloads = [];
-globalThis.document = { activeElement: null, body, createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
+globalThis.document = { activeElement: null, body, createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t), querySelectorAll: () => [] /* keepScroll lists the page's grids; this fake page draws none */ };
 const origCreate = URL.createObjectURL;
 URL.createObjectURL = (blob) => { downloads.push({ blob }); return "blob:fake"; };
 URL.revokeObjectURL = () => {};

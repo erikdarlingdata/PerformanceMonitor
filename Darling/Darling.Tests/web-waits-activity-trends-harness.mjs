@@ -151,8 +151,8 @@ const LATCHES = ["LATCH_A", "LATCH_B", "LATCH_C", "LATCH_D", "LATCH_E", "LATCH_F
 const SPINS = ["SPIN_A", "SPIN_B", "SPIN_C"];
 /* #6359: the MCP callers' notes as TrendBuckets.AggregateNote / LevelNote write them (field names, bucket_minutes advice). The page
    must not print them, so the harness serves them and the tests read what the panel drew instead. */
-const MCP_SUMMED = "Each point summarizes the collections in one 1-hour bucket and is stamped at the bucket's start. Counts are summed across the bucket, and rates are recomputed from those sums, so a bucket the window cuts short holds smaller counts but a true rate. peak_* and worst_* are the single most extreme collection inside the bucket. The width was chosen to keep this answer near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.";
-const MCP_LEVEL = "Each point averages the samples in one 1-hour bucket and is stamped at the bucket's start. A level is averaged, never summed, and peak_* is the highest single sample inside the bucket. The width was chosen to keep this answer near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.";
+const MCP_SUMMED = "Each point summarizes the collections in one 1-hour bucket and is stamped at the bucket's start. Counts are summed across the bucket, and rates are recomputed from those sums, so a bucket the window cuts short holds smaller counts but a true rate. peak_* and worst_* are the single most extreme collection inside the bucket. The width was chosen to keep this answer near 1,500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.";
+const MCP_LEVEL = "Each point averages the samples in one 1-hour bucket and is stamped at the bucket's start. A level is averaged, never summed, and peak_* is the highest single sample inside the bucket. The width was chosen to keep this answer near 1,500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.";
 const pts = (f) => [{ time: ago(10), ...f(1) }, { time: ago(5), ...f(2) }];
 let mode = "data";
 let missing = null;
@@ -248,6 +248,25 @@ const scenarios = {
     mode = "empty";
     const root = await build("session");
     return { chart: chartInfo(), empties: texts(root, "strip empty") };
+  },
+  /* #7416: a range wider than the reads take (a Custom range of 300 hours) is narrowed ONCE to the widest window they do take, and the
+     panel says so, on all three trend panels. A read that went around readToolWithinKeptHistory would draw the "pick a shorter range"
+     notice and no chart instead. */
+  tooWide: async () => {
+    const inner = answer;
+    answer = (url) =>
+      Number(url.searchParams.get("hours")) > 168
+        ? { status: 400, body: { status: "invalid", message: "hours_back value '" + url.searchParams.get("hours") + "' exceeds maximum of 168 hours (7 days). Use a smaller value." } }
+        : inner(url);
+    ctx.hours = 300;
+    const out = {};
+    for (const kind of ["latch", "spinlock", "session"]) {
+      modules.charts.chartCalls.length = 0;
+      const root = await build(kind);
+      out[kind] = { notices: texts(root, "notice"), errors: texts(root, "strip error"), chart: chartInfo(), hours: trendReads().map((r) => r.hours) };
+      fetches.length = 0;
+    }
+    return out;
   },
   noOptions: async () => {
     mode = "noOptions";

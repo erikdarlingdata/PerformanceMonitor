@@ -105,9 +105,14 @@
                         <TextBlock Text="Store Duration" FontWeight="Bold"/>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding MessageFormatted}" Width="*">
+                <DataGridTextColumn Binding="{Binding ErrorFormatted}" Width="*">
                     <DataGridTextColumn.Header>
                         <TextBlock Text="Error Message" FontWeight="Bold"/>
+                    </DataGridTextColumn.Header>
+                </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding NoteFormatted}" Width="*">
+                    <DataGridTextColumn.Header>
+                        <TextBlock Text="Run Note" FontWeight="Bold"/>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
             </DataGrid.Columns>

@@ -48,6 +48,11 @@ public sealed partial class ViewerDataService
     public static string TopResourceConsumersSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) =>
         DarlingFinOpsDatabaseResourcesReader.TopResourceConsumersSqlFor(tier, coverage, windowStartUtc);
 
+    /// <summary>#7725: the databases the server no longer lists (the #5633 source), for the FinOps grids that keep a dropped database's row and mark it.
+    /// Null is unknown (no recent snapshot), which marks nothing.</summary>
+    private Task<IReadOnlySet<string>?> ReadDroppedForFinOpsAsync(int serverId, DateTime windowStartUtc, CancellationToken cancellationToken) =>
+        CurrentDatabaseScope.ReadDroppedAsync(_dataSource, serverId, windowStartUtc: windowStartUtc, logger: ViewerStoreLogger.Instance, cancellationToken: cancellationToken);
+
     /* The window start is taken BEFORE the rollup probe; the reader resolves the tier AFTER it (its own clock read), as before the move. */
     public async Task<List<DatabaseResourceUsageRow>> GetDatabaseResourceUsageAsync(int serverId, int hoursBack = 24, CancellationToken cancellationToken = default)
     {
@@ -55,7 +60,16 @@ public sealed partial class ViewerDataService
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var items = await DarlingFinOpsDatabaseResourcesReader.GetDatabaseResourceUsageAsync(
             _dataSource, serverId, rollups, coverage, cutoff, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
-        return items.ConvertAll(DatabaseResourceUsageRow.From);
+        /* #7725: a database the server no longer lists keeps its row and is marked, the rule the web page and get_finops_database_resources
+           use (the one "still listed" source #5633 uses). An unknown set (no recent snapshot) marks nothing. */
+        var dropped = await ReadDroppedForFinOpsAsync(serverId, cutoff, cancellationToken);
+        var rows = items.ConvertAll(DatabaseResourceUsageRow.From);
+        foreach (var row in rows)
+        {
+            row.MarkDropped(dropped is not null && dropped.Contains(row.DatabaseName));
+        }
+
+        return rows;
     }
 
     /// <summary>
@@ -97,7 +111,15 @@ public sealed partial class ViewerDataService
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var (byTotal, byAvg) = await DarlingFinOpsDatabaseResourcesReader.GetTopResourceConsumersAsync(
             _dataSource, serverId, rollups, coverage, cutoff, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, topN, cancellationToken);
-        return (byTotal.Select(TopResourceConsumerRow.From).ToList(), byAvg.Select(TopResourceConsumerRow.From).ToList());
+        var dropped = await ReadDroppedForFinOpsAsync(serverId, cutoff, cancellationToken);
+        var totalRows = byTotal.Select(TopResourceConsumerRow.From).ToList();
+        var avgRows = byAvg.Select(TopResourceConsumerRow.From).ToList();
+        foreach (var row in totalRows.Concat(avgRows))
+        {
+            row.MarkDropped(dropped is not null && dropped.Contains(row.DatabaseName));
+        }
+
+        return (totalRows, avgRows);
     }
 
     /// <summary>The wait-category summary's SQL; lives in <see cref="DarlingFinOpsOptimizationReader"/>.</summary>
@@ -135,8 +157,16 @@ public sealed partial class ViewerDataService
 
     public async Task<List<HighImpactQueryRow>> GetHighImpactQueriesAsync(int serverId, int hoursBack = 24, CancellationToken cancellationToken = default)
     {
+        var windowStart = DateTime.UtcNow.AddHours(-hoursBack);
         var rows = await DarlingFinOpsHighImpactReader.ReadAsync(
             _dataSource, serverId, hoursBack, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
-        return rows.Select(HighImpactQueryRow.From).ToList();
+        var dropped = await ReadDroppedForFinOpsAsync(serverId, windowStart, cancellationToken);
+        var result = rows.Select(HighImpactQueryRow.From).ToList();
+        foreach (var row in result)
+        {
+            row.MarkDropped(dropped is not null && dropped.Contains(row.DatabaseName));
+        }
+
+        return result;
     }
 }

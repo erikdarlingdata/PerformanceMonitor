@@ -272,7 +272,7 @@ public sealed class LocalClockBucketKeyTests
 
         var bareKey = new Regex(@"EXTRACT\s*\(\s*(HOUR|DOW)\s+FROM\s+collection_time\s*\)", RegexOptions.IgnoreCase);
         var bareDate = new Regex(@"(?<![\w.])collection_time::DATE", RegexOptions.IgnoreCase);
-        var ownExtract = new HashSet<string>(StringComparer.Ordinal) { MetricNames.Blocking, MetricNames.Deadlock };
+        var ownExtract = new HashSet<string>(StringComparer.Ordinal) { MetricNames.Blocking, MetricNames.BlockingSnapshot, MetricNames.Deadlock };
         var unkeyedParameters = new SortedSet<int> { 1, 2, 3, 4, 5, 6 };
         var keyedParameters = new SortedSet<int> { 1, 2, 3, 4, 5, 6, 7 };
 
@@ -564,7 +564,7 @@ public sealed class LocalClockBucketKeyLiveTests
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
             {
                 await CleanupAsync(cleanup, serverId, cleanupCt);
-                foreach (var (_, view) in TimescaleSupport.BaselineAggregates)
+                foreach (var (_, view) in TimescaleSupport.BaselineAggregates.Concat(TimescaleSupport.PlainBaselineViews))
                 {
                     using var drop = new NpgsqlCommand(TimescaleSupport.DropBaselineFallbackViewSql(view), cleanup);
                     await drop.ExecuteNonQueryAsync(cleanupCt);

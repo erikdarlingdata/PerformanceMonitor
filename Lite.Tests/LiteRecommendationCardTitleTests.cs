@@ -13,7 +13,7 @@ using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
 
-/// <summary>#6159: a recommendation card that is the only finding in its section does not repeat the title its expander header already shows.</summary>
+/// <summary>#6159: a recommendation card does not repeat the title its section header already shows; a card whose finding differs keeps its own.</summary>
 public sealed class LiteRecommendationCardTitleTests
 {
     private static readonly ServerClock Eastern = ServerClock.Resolve("Eastern Standard Time", -240);
@@ -38,10 +38,12 @@ public sealed class LiteRecommendationCardTitleTests
     }
 
     [Fact]
-    public void AnIncidentOfTwoFindings_KeepsEachCardTitle()
+    public void AnIncidentOfTwoFindings_NamesThePrimaryInTheHeader_AndKeepsTheOtherCardsTitle()
     {
         var vm = LiteRecommendationsViewModel.FromItems(new[] { Finding("High CPU", "inc-1"), Finding("Blocking", "inc-1") }, Eastern);
 
-        Assert.All(Assert.Single(vm.Sections).Cards, c => Assert.True(c.ShowTitle));
+        var cards = Assert.Single(vm.Sections).Cards;
+        Assert.False(cards[0].ShowTitle);
+        Assert.True(cards[1].ShowTitle);
     }
 }

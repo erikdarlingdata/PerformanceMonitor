@@ -4,7 +4,7 @@
 .DESCRIPTION
   Unpacks the runtime zip into RigDir, runs initdb on RigDir\data with the settings CI's darling-pg job uses plus
   UTC time zones, starts the server on Port, and appends one line to C:\GitHub\worktrees\.rig-registry.tsv so
-  rig-sweep.ps1 can stop it once its owner is gone. Stop it with rig-stop.ps1 -DataDir <RigDir>\data.
+  rig-sweep.ps1 can stop it once its owner is gone. -RegistryPath points it at another registry file. Stop it with rig-stop.ps1 -DataDir <RigDir>\data.
 .EXAMPLE
   pwsh -NoProfile -File C:\GitHub\PerformanceMonitor\.claude\skills\lane-orders\rig-start.ps1 -Port 55611 `
     -RigDir C:\Users\edarl\AppData\Local\Temp\claude\<session>\scratchpad\fix-123-thing\rig -Owner C:\GitHub\PerformanceMonitor\.claude\worktrees\agent-x
@@ -16,12 +16,15 @@ param(
     # The worktree path that uses the rig, or an agent id when there is none. The sweep stops the rig once a
     # worktree-path owner no longer exists.
     [Parameter(Mandatory)][string]$Owner,
-    [string]$Zip = 'C:\GitHub\PerformanceMonitor\Darling\artifacts\pg-runtime.zip'
+    [string]$Zip = 'C:\GitHub\PerformanceMonitor\Darling\artifacts\pg-runtime.zip',
+    # The registry file. Defaults to the one every lane shares; a test passes a scratch file so it never touches it.
+    [string]$RegistryPath = ''
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rig-common.ps1')
+if ($RegistryPath) { $script:RigRegistryPath = $RegistryPath }
 
 $rig = ConvertTo-RigPath $RigDir
 $data = Join-Path $rig 'data'
@@ -45,13 +48,18 @@ try {
     $initOut = & (Join-Path $bin 'initdb.exe') -D $data -U darling -A trust --encoding=UTF8 2>&1
     if ($LASTEXITCODE -ne 0) { throw "initdb failed ($LASTEXITCODE): $(($initOut | Select-Object -Last 5) -join ' ')" }
 
-    # The darling-pg job's settings in .github/workflows/build.yml, plus UTC: CI's runners run in UTC.
+    # The darling-pg job's settings in .github/workflows/build.yml, plus UTC (CI's runners run in UTC) and no durability
+    # (fsync, full_page_writes off, as .github/scripts/start-test-pg.ps1 does, #6972): a rig holds
+    # throwaway test data and is commit-bound. Commit stays synchronous (#7012): an unflushed
+    # commit leaves the committed hint bits unset, so VACUUM cannot mark pages all-visible and index scans see stale rows.
     Add-Content -LiteralPath (Join-Path $data 'postgresql.conf') -Encoding utf8NoBOM -Value @(
         "shared_preload_libraries = 'timescaledb,pg_stat_statements'",
         "port = $Port",
         "listen_addresses = '127.0.0.1'",
         "timescaledb.max_background_workers = 74",
         "max_worker_processes = 85",
+        "fsync = off",
+        "full_page_writes = off",
         "log_line_prefix = '%m [%p] %c '",
         "timezone = 'UTC'",
         "log_timezone = 'UTC'"

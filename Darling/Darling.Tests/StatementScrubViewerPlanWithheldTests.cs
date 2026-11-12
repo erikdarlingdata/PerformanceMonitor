@@ -48,7 +48,7 @@ public sealed class StatementScrubViewerPlanWithheldTests
 
                 StaTestThread.Step("reading the empty-state title and visibilities");
                 var title = (TextBlock)control.FindName("EmptyStateTitle");
-                Assert.Equal("This plan was withheld by the statement filter (#4348).", title.Text);
+                Assert.Equal("This plan was withheld by the statement filter.", title.Text);
                 Assert.DoesNotContain("could not be read", title.Text, StringComparison.Ordinal);
                 Assert.Equal(Visibility.Visible, ((UIElement)control.FindName("EmptyState")).Visibility);
                 Assert.Equal(Visibility.Collapsed, ((UIElement)control.FindName("EmptyStateDetail")).Visibility);
@@ -115,8 +115,8 @@ public sealed class StatementScrubViewerPlanWithheldTests
             }
         }
 
-        /* The three history windows, the shared SavePlanFile helper and the plan control's own Save button. */
-        Assert.True(sites >= 5, "expected at least 5 plan save sites, found " + sites);
+        /* The shared SavePlanFile helper (the three history windows go through it, #7228) and the plan control's own Save button. */
+        Assert.True(sites >= 2, "expected at least 2 plan save sites, found " + sites);
         Assert.Empty(problems);
     }
 
@@ -127,9 +127,9 @@ public sealed class StatementScrubViewerPlanWithheldTests
     [Fact]
     public void TheWithheldSentence_NamesWhatIsSaved_AndThePlanSentenceIsUnchanged()
     {
-        Assert.Equal("This plan was withheld by the statement filter (#4348).", WithheldPlanGuard.WithheldSentenceFor("plan"));
+        Assert.Equal("This plan was withheld by the statement filter.", WithheldPlanGuard.WithheldSentenceFor("plan"));
         Assert.Equal(SensitiveStatements.WithheldPlanSentence, WithheldPlanGuard.WithheldSentenceFor("plan"));
-        Assert.Equal("This deadlock graph was withheld by the statement filter (#4348).", WithheldPlanGuard.WithheldSentenceFor("deadlock graph"));
-        Assert.Equal("This blocked process report was withheld by the statement filter (#4348).", WithheldPlanGuard.WithheldSentenceFor("blocked process report"));
+        Assert.Equal("This deadlock graph was withheld by the statement filter.", WithheldPlanGuard.WithheldSentenceFor("deadlock graph"));
+        Assert.Equal("This blocked process report was withheld by the statement filter.", WithheldPlanGuard.WithheldSentenceFor("blocked process report"));
     }
 }

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -44,7 +45,7 @@ public sealed class AttentionPlainTableTests
         /* Every opt-out is a table that is NOT in the hypertable grid. The list is exact, so the exception cannot spread
            silently: a second entry reddens here, and its author has to argue the grid decision again. */
         var optedOut = CollectorCatalog.All.Where(c => c.StaysPlainTable).Select(c => c.TargetTable).ToArray();
-        Assert.Equal(new[] { "attention_events", "query_store_forced_plans", "query_store_hints", "database_protection", "agent_alerts", "identity_capacity" }, optedOut);
+        Assert.Equal(new[] { "attention_events", "query_store_forced_plans", "query_store_hints", "database_protection", "agent_alerts", "identity_capacity", "schema_capture_passes" }, optedOut);
 
         Assert.DoesNotContain(TimescaleSupport.HypertableTables, t => t.StaysPlainTable);
         Assert.DoesNotContain(TimescaleSupport.HypertableTables, t => t.TargetTable == "attention_events");
@@ -119,7 +120,7 @@ public sealed class AttentionPlainTableTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V179 rung's live pin (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -180,7 +181,7 @@ public sealed class AttentionPlainTableTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the attention plain-table live pin (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -210,11 +211,15 @@ public sealed class AttentionPlainTableTests
                     "SELECT count(*) FROM pg_indexes WHERE schemaname = 'collect' AND tablename = 'attention_events' AND indexname = 'idx_attention_events_time'", ct));
             }
 
-            /* Rows: 45 and 31 days old (past the horizon), 29 days, 1 day and now (inside it). */
+            /* Rows: 45 and 31 days old (past the horizon), 29 days, 1 day and now (inside it). One clock, read once here,
+               both seeds the rows and measures their ages below: a run that crosses midnight UTC between the seed and the
+               read would otherwise find every row a day older than it was seeded. The purge measures from its own clock a
+               few seconds later, and every row sits a full day or more from its 30-day horizon. */
+            var seedTime = "TIMESTAMP '" + DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + "'";
             await ExecAsync(connection, "DELETE FROM collect.attention_events WHERE server_id = " + TestServerId, ct);
             await ExecAsync(connection,
                 "INSERT INTO collect.attention_events (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count) "
-                + "SELECT 700000 + d, (now() AT TIME ZONE 'UTC') - make_interval(days => d), " + TestServerId + ", 'plain-table-test', 'count', 1 "
+                + "SELECT 700000 + d, " + seedTime + " - make_interval(days => d), " + TestServerId + ", 'plain-table-test', 'count', 1 "
                 + "FROM unnest(ARRAY[45, 31, 29, 1, 0]) AS d", ct);
 
             var log = new CapturingTestLogger();
@@ -222,7 +227,7 @@ public sealed class AttentionPlainTableTests
             await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: timescale, log, ct);
 
             Assert.Equal("0,1,29", await ScalarAsync(connection,
-                "SELECT string_agg(d::text, ',' ORDER BY d) FROM (SELECT ((now() AT TIME ZONE 'UTC')::date - collection_time::date) AS d "
+                "SELECT string_agg(d::text, ',' ORDER BY d) FROM (SELECT ((" + seedTime + ")::date - collection_time::date) AS d "
                 + "FROM collect.attention_events WHERE server_id = " + TestServerId + ") AS x", ct));
 
             /* No drop_chunks attempt on the plain table, so no "failed" warning for it. */
@@ -242,7 +247,7 @@ public sealed class AttentionPlainTableTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the attention count-row live pin (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -292,6 +297,81 @@ public sealed class AttentionPlainTableTests
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
         }
+    }
+
+    [Fact]
+    public async Task TheServerIndexedPurge_DeletesExactlyTheRowsThePlainTimeSlicedPurgeDeletes_AndEndsOnAnEmptySlice()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the attention purge live pin (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var cutoff = new DateTime(2026, 10, 13, 12, 0, 0, DateTimeKind.Unspecified);
+            var serverIndexed = DarlingRetention.DeleteSqlFor(AttentionCollector.Instance);
+            var plain = DarlingRetention.TimeSlicedDeleteSql("attention_events", "collection_time");
+            Assert.NotEqual(plain, serverIndexed);
+
+            /* An empty table: the first slice finds no oldest time, deletes nothing, and the drain ends. */
+            Assert.Equal(0, await DrainAsync(connection, serverIndexed, cutoff, ct));
+
+            /* Server ids with gaps and a negative one, a busy server, and the oldest expired row on the LAST server id
+               (the loose index scan must reach it). Six day slices are expired, two are live; the insert order is shuffled
+               so heap order is not time order. */
+            await ExecAsync(connection,
+                "INSERT INTO collect.attention_events (attention_event_id, collection_time, server_id, server_name, event_kind) "
+                + "SELECT g, timestamp '2026-10-05 00:00:00' + (g * 7919 % 14400) * interval '1 minute', "
+                + "       CASE WHEN g % 10 < 5 THEN 3 WHEN g % 10 = 5 THEN -4 WHEN g % 10 = 6 THEN 17 WHEN g % 10 = 7 THEN 4242 WHEN g % 10 = 8 THEN 90001 ELSE 7 END, "
+                + "       'srv', 'sample' "
+                + "FROM generate_series(1, 6000) AS g ORDER BY md5(g::text)", ct);
+            await ExecAsync(connection,
+                "INSERT INTO collect.attention_events (attention_event_id, collection_time, server_id, server_name, event_kind) "
+                + "VALUES (100001, timestamp '2026-10-01 03:00:00', 90002, 'srv', 'sample'), (100002, timestamp '2026-10-13 12:00:00', 3, 'srv', 'sample')", ct);
+            await ExecAsync(connection, "ANALYZE collect.attention_events", ct);
+
+            var expired = (long)(await ScalarAsync(connection, $"SELECT count(*) FROM collect.attention_events WHERE collection_time < timestamp '{cutoff:yyyy-MM-dd HH:mm:ss}'", ct))!;
+            var live = (long)(await ScalarAsync(connection, "SELECT count(*) FROM collect.attention_events", ct))! - expired;
+            Assert.True(expired > 5000 && live > 500, $"expired {expired}, live {live}");
+
+            /* Each shape runs in a transaction that is rolled back, so both see the same rows. */
+            var survivors = new List<string>();
+            foreach (var sql in new[] { plain, serverIndexed })
+            {
+                await ExecAsync(connection, "BEGIN", ct);
+                var deleted = await DrainAsync(connection, sql, cutoff, ct);
+                survivors.Add((string)(await ScalarAsync(connection, "SELECT coalesce(string_agg(attention_event_id::text, ',' ORDER BY attention_event_id), '') FROM collect.attention_events", ct))!);
+                await ExecAsync(connection, "ROLLBACK", ct);
+                Assert.Equal(expired, deleted);
+            }
+
+            Assert.Equal(survivors[0], survivors[1]);
+            Assert.Equal(live, survivors[1].Split(',').Length);
+
+            /* Live (committed) run of the shipped statement: the oldest row on the last server id goes too. */
+            Assert.Equal((int)expired, await DrainAsync(connection, serverIndexed, cutoff, ct));
+            Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM collect.attention_events WHERE attention_event_id = 100001", ct));
+            Assert.Equal(live, (long)(await ScalarAsync(connection, "SELECT count(*) FROM collect.attention_events", ct))!);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /* The production drain loop (one oldest day per execution, ended by a slice that deletes nothing). */
+    private static async Task<int> DrainAsync(NpgsqlConnection connection, string sql, DateTime cutoff, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
+        command.Parameters.AddWithValue(cutoff);
+        return await DarlingRetention.DrainBatchesAsync(async token => (await command.ExecuteNonQueryAsync(token), 1), ct);
     }
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)

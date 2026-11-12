@@ -60,47 +60,10 @@ public class CollectorSchedule
     public string? RunAt { get; set; }
 
     /// <summary>
-    /// The last time this collector was run successfully.
-    /// </summary>
-    [JsonIgnore]
-    public DateTime? LastRunTime { get; set; }
-
-    /// <summary>
-    /// The next scheduled run time for this collector.
-    /// </summary>
-    [JsonIgnore]
-    public DateTime? NextRunTime { get; set; }
-
-    /// <summary>
     /// Whether this collector is scheduled (vs on-load only).
     /// </summary>
     [JsonIgnore]
     public bool IsScheduled => FrequencyMinutes > 0;
-
-    /// <summary>
-    /// Whether this collector is due to run.
-    /// </summary>
-    [JsonIgnore]
-    public bool IsDue
-    {
-        get
-        {
-            if (!Enabled || !IsScheduled)
-            {
-                return false;
-            }
-
-            // First run - never been executed
-            if (!LastRunTime.HasValue)
-            {
-                return true;
-            }
-
-            // Check if enough time has elapsed
-            var elapsed = DateTime.UtcNow - LastRunTime.Value;
-            return elapsed.TotalMinutes >= FrequencyMinutes;
-        }
-    }
 
     /// <summary>
     /// Gets a display-friendly frequency string.

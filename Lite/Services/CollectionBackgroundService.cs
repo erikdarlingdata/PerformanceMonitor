@@ -43,7 +43,7 @@ public class CollectionBackgroundService : BackgroundService
     private readonly ILogger<CollectionBackgroundService>? _logger;
 
     private static readonly TimeSpan CollectionInterval = TimeSpan.FromMinutes(1);
-    /* Start at UtcNow so maintenance tasks don't all fire on the very first cycle. */
+    /* Archival starts at UtcNow so it does not fire on the very first cycle. */
     private DateTime _lastArchiveTime = DateTime.UtcNow;
 
     /* #2058: the Query Store backfill tick — one byte-budgeted slice per server per due-tick, on
@@ -54,10 +54,16 @@ public class CollectionBackgroundService : BackgroundService
        once per idle tick. Starts true to match the setting's default — a deployment that never touches the
        switch therefore logs nothing about it. */
     private bool _queryStoreBackfillWasEnabled = true;
-    private DateTime _lastRetentionTime = DateTime.UtcNow;
     private DateTime _lastAnalysisTime = DateTime.UtcNow;
-    private DateTime _lastFindingsCleanupTime = DateTime.UtcNow;
-    private DateTime _lastDismissedAlertsCleanupTime = DateTime.UtcNow;
+
+    /* The three daily cleanups start at MinValue, so each runs on the first housekeeping tick (one HousekeepingInterval
+       after the first collection round) and daily from there. The stamps live only in memory, and a desktop session is
+       usually shorter than the 24-hour interval, so a stamp seeded with the launch time leaves the findings table and
+       the dismissed-alert sidecar growing until the size-triggered reset wipes them. Each step is a bounded parquet-file
+       sweep or a few DELETEs, cheap enough to run that soon after startup. */
+    private DateTime _lastRetentionTime = DateTime.MinValue;
+    private DateTime _lastFindingsCleanupTime = DateTime.MinValue;
+    private DateTime _lastDismissedAlertsCleanupTime = DateTime.MinValue;
 
     /* Server IDs whose scheduled analysis is currently running — prevents relaunching
        analysis for a server whose previous (possibly hung) pass has not finished. The value
@@ -164,7 +170,32 @@ public class CollectionBackgroundService : BackgroundService
 
     public bool IsPaused { get; set; }
     public DateTime? LastCollectionTime { get; private set; }
-    public bool IsCollecting { get; private set; }
+
+    /// <summary>
+    /// #8533: raised on the loop's own thread when a cycle starts and when it ends, after <see cref="IsCollecting"/> has changed
+    /// and, for a cycle that finished, after <see cref="LastCollectionTime"/> has. The status bar repaints its collection label
+    /// from it. A listener that throws is logged and does not reach the loop.
+    /// </summary>
+    public event Action? CycleStateChanged;
+
+    private volatile bool _isCollecting;
+
+    public bool IsCollecting
+    {
+        get => _isCollecting;
+        private set
+        {
+            _isCollecting = value;
+            try
+            {
+                CycleStateChanged?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "A cycle-state listener failed");
+            }
+        }
+    }
 
     public CollectionBackgroundService(
         RemoteCollectorService collectorService,
@@ -184,6 +215,26 @@ public class CollectionBackgroundService : BackgroundService
         _retentionService = retentionService;
         _notificationService = notificationService;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// #8533: one cycle's collector pass, between its two cycle signals. <see cref="IsCollecting"/> is true while
+    /// <paramref name="collect"/> runs. A pass that finishes sets <see cref="LastCollectionTime"/> before it clears
+    /// <see cref="IsCollecting"/>, so a listener to the cycle-end signal reads the new time. A pass that fails or is cancelled
+    /// clears <see cref="IsCollecting"/>, leaves the time as it was, and throws to the loop.
+    /// </summary>
+    internal async Task RunCollectorPassAsync(Func<Task> collect)
+    {
+        try
+        {
+            IsCollecting = true;
+            await collect();
+            LastCollectionTime = DateTime.UtcNow;
+        }
+        finally
+        {
+            IsCollecting = false;
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -266,9 +317,7 @@ public class CollectionBackgroundService : BackgroundService
 
                 try
                 {
-                    IsCollecting = true;
-                    await _collectorService.RunDueCollectorsAsync(cycleStart, stoppingToken);
-                    LastCollectionTime = DateTime.UtcNow;
+                    await RunCollectorPassAsync(() => _collectorService.RunDueCollectorsAsync(cycleStart, stoppingToken));
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
@@ -277,10 +326,6 @@ public class CollectionBackgroundService : BackgroundService
                 catch (Exception ex)
                 {
                     _logger?.LogError(ex, "Collection cycle failed");
-                }
-                finally
-                {
-                    IsCollecting = false;
                 }
 
                 Lap("collectors");

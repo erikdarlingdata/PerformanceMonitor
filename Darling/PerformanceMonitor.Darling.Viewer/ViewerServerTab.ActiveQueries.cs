@@ -64,8 +64,9 @@ public partial class ViewerServerTab
 
     /// <summary>Loads the Active Queries sub-tab: every stored snapshot over the window (newest first)
     /// plus the hourly slicer. Mirrors Lite's Queries sub-tab-1 refresh.</summary>
-    private async Task LoadActiveQueriesAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadActiveQueriesAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
+        timer?.Surface = "Queries > Active Queries";
         /* Deep-link shield (aggregate-tab "Open in Active Queries"): opening this server tab triggers the
            tab-activation refresh, which lands here over the toolbar window and would clobber the targeted
            read. Honor a pending deep-link window instead so a concurrent activation load uses the SAME
@@ -75,15 +76,17 @@ public partial class ViewerServerTab
         {
             _pendingActiveQueriesWindow = null;
             var pendingDataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, pending.FromUtc, pending.ToUtc);
-            var pendingReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, pending.FromUtc, pending.ToUtc, databaseNames: SelectedDatabaseFilter);
+            var pendingReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, pending.FromUtc, pending.ToUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
+            _ = timer?.Track("snapshot read", pendingReadTask);
+            _ = timer?.Track("snapshot data start read", pendingDataStartTask);
             await AwaitReadWatchingProbeAsync(pendingReadTask, pendingDataStartTask, "Active Queries");
             var (pendingTotalCount, pendingSnapshots) = pendingReadTask.Result;
             _querySnapshotsFilterMgr!.UpdateData(pendingSnapshots);
             LatestSnapshotIndicator.Text = pendingSnapshots.Count < pendingTotalCount
-                ? $"{pending.Indicator} — Showing the newest 1,000 of {pendingTotalCount:N0}"
+                ? $"{pending.Indicator}: Showing the newest 1,000 of {pendingTotalCount:N0}"
                 : pending.Indicator;
             UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(pendingDataStartTask, "Active Queries"), pending.FromUtc);
-            await LoadActiveQueriesSlicerAsync(pending.FromUtc.AddHours(-1), pending.ToUtc.AddHours(1));
+            await LoadActiveQueriesSlicerAsync(pending.FromUtc.AddHours(-1), pending.ToUtc.AddHours(1), timer);
             return;
         }
 
@@ -91,24 +94,26 @@ public partial class ViewerServerTab
            since: say where coverage starts (the Queries tab's "Showing since" banner) rather than draw a shorter
            range as if it were the whole. */
         var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
+        _ = timer?.Track("snapshot read", dataReadTask);
+        _ = timer?.Track("snapshot data start read", dataStartTask);
         await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Active Queries");
         var (totalCount, snapshots) = dataReadTask.Result;
-        _querySnapshotsFilterMgr!.UpdateData(snapshots);
+        ClientStep(timer, "snapshot grid bind", () => _querySnapshotsFilterMgr!.UpdateData(snapshots));
         LatestSnapshotIndicator.Text = snapshots.Count < totalCount ? $"Showing the newest 1,000 of {totalCount:N0}" : "";
         UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(dataStartTask, "Active Queries"), startUtc);
-        await LoadActiveQueriesSlicerAsync(startUtc, endUtc);
+        await LoadActiveQueriesSlicerAsync(startUtc, endUtc, timer);
     }
 
-    private async Task LoadActiveQueriesSlicerAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadActiveQueriesSlicerAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
-        var data = await _dataService.GetActiveQuerySlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var data = await Timed(timer, "slicer read", _dataService.GetActiveQuerySlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor));
         _activeQueriesSlicerData = data;
         _activeQueriesSlicerMetric = "Sessions";
         if (data.Count == 0)
             ActiveQueriesSlicer.ShowEmpty("No active query samples in the selected time window.");
         else
-            ActiveQueriesSlicer.LoadData(data, "Sessions", startUtc, endUtc);
+            ActiveQueriesSlicer.LoadData(data, "Sessions", startUtc, endUtc, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(startUtc, endUtc));
     }
 
     private async void OnActiveQueriesSlicerChanged(object? sender, SlicerRangeEventArgs e)
@@ -116,7 +121,7 @@ public partial class ViewerServerTab
         try
         {
             var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
             await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Active Queries");
             var (totalCount, snapshots) = dataReadTask.Result;
             _querySnapshotsFilterMgr!.UpdateData(snapshots);
@@ -186,11 +191,11 @@ public partial class ViewerServerTab
                     var result = await _dataService.RequestSnapshotNowAsync(_server.ServerId);
                     if (result is null)
                     {
-                        StatusChanged?.Invoke("snapshot: still running — showing the latest stored capture");
+                        StatusChanged?.Invoke("snapshot: still running, showing the latest stored capture");
                     }
                     else if (result.Status != ViewerDataService.StatusSucceeded)
                     {
-                        StatusChanged?.Invoke($"snapshot: the service reported {result.ResultStatus} — showing the latest stored capture");
+                        StatusChanged?.Invoke($"snapshot: the service reported {result.ResultStatus}, showing the latest stored capture");
                     }
                 }
                 catch (ViewerReadOnlyException)
@@ -200,7 +205,7 @@ public partial class ViewerServerTab
             }
 
             LatestSnapshotIndicator.Text = "Loading...";
-            var (batchTime, rows) = await _dataService.GetLatestQuerySnapshotBatchAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
+            var (batchTime, rows) = await _dataService.GetLatestQuerySnapshotBatchAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
             _querySnapshotsFilterMgr!.UpdateData(rows);
             /* #4953: the grid now holds the newest stored batch, not the range the "Showing since" banner described, so the
                banner comes down (collapsed, text cleared). The next range read raises it again through UpdateTruncationBanner.
@@ -281,7 +286,7 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task OpenSnapshotPlanAsync(bool live, ViewerQuerySnapshotRow row)
     {
-        var label = $"{(live ? "Live" : "Estimated")} Plan — Session {row.SessionId}";
+        var label = ViewerActiveQueriesText.PlanTabLabel(live, row.SessionId);
         var planXml = live ? row.LiveQueryPlan : row.QueryPlan;
 
         if (string.IsNullOrEmpty(planXml))
@@ -310,12 +315,9 @@ public partial class ViewerServerTab
             if (string.IsNullOrEmpty(planXml))
             {
                 HidePlanLoading();
-                MessageBox.Show(
-                    "No execution plan was captured for this row. The plan may not have been collected yet, " +
-                    "or it aged out of the store's retention window.",
-                    "No Plan Available",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Information);
+                InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
+                "No execution plan was captured for this row. The plan may not have been collected yet, " +
+                    "or it aged out of the store's retention window.");
                 return;
             }
         }
@@ -377,12 +379,12 @@ public partial class ViewerServerTab
            rows read, and set the banner once they are bound, as the deep-link branch of LoadActiveQueriesAsync does for
            the same window (a deep link reaches both, and the two writes agree). */
         var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, fromUtc, toUtc);
-        var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, fromUtc, toUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, fromUtc, toUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
         await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Active Queries");
         var (totalCount, snapshots) = dataReadTask.Result;
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
         LatestSnapshotIndicator.Text = snapshots.Count < totalCount
-            ? $"{indicator} — Showing the newest 1,000 of {totalCount:N0}"
+            ? $"{indicator}: Showing the newest 1,000 of {totalCount:N0}"
             : indicator;
         UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(dataStartTask, "Active Queries"), fromUtc);
 

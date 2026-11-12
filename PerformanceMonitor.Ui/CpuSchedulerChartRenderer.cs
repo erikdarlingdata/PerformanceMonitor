@@ -85,6 +85,7 @@ internal sealed class CpuSchedulerChartRenderer
         chart.Plot.Axes.SetLimitsX(xMin, xMax);
         ChartStyle.ReapplyAxisColors(chart);
         chart.Plot.YLabel("Task Count");
+        ChartStyle.UseCountAxis(chart); // #7606: a count, whole-number ticks
         ChartStyle.SetChartYLimitsWithLegendPadding(chart, 0, globalMax > 0 ? globalMax : 5);
         _chartHelper.ShowChartLegend(chart);
         chart.Refresh();

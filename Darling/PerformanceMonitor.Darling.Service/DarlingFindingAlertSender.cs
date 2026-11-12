@@ -113,7 +113,7 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
         }
         catch (Exception ex)
         {
-            _logger.LogError("Finding summary delivery failed for {Count} pages: {Message}", named.Count, ex.Message);
+            _logger.LogError(ex, "Finding summary delivery failed for {Count} pages: {Message}", named.Count, ex.Message);
             return null;
         }
     }
@@ -216,7 +216,7 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
         }
         catch (Exception ex)
         {
-            _logger.LogError("Finding alert delivery failed for {Metric} on {Server}: {Message}",
+            _logger.LogError(ex, "Finding alert delivery failed for {Metric} on {Server}: {Message}",
                 alert.MetricName, alert.ServerName, ex.Message);
             return null;
         }

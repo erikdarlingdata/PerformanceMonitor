@@ -10,5 +10,5 @@
   <data name="currently_allocated"><value>1000000</value></data>
   <data name="previously_allocated"><value>1100000</value></data>
   <data name="broker"><value>MEMORYBROKER_FOR_CACHE</value></data>
-  <data name="notification"><value>RESOURCE_MEMPHYSICAL_HIGH</value></data>
+  <data name="notification"><value>STABLE</value></data>
 </event>

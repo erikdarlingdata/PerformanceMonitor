@@ -83,7 +83,7 @@ internal static class DarlingCollectionCaveatReader
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
         {
             warn("get_collection_health: the MCP role cannot read collect.analysis_collection_caveats (42501), so collection caveats are not shown. "
-                + "Re-run provision-roles.sql to grant it SELECT.");
+                + "Run " + DarlingManagedRoles.ProvisionRolesScriptPath + " on the store to grant it SELECT.");
             return Array.Empty<Caveat>();
         }
     }

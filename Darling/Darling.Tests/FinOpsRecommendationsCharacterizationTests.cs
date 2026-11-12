@@ -94,7 +94,7 @@ public sealed class FinOpsRecommendationsCharacterizationTests
 
             var secondary = ViewerDataService.BuildEditionAuditRecommendations(Enterprise, 16, 16, none, monthly, "Secondary", true);
             AssertRow(Assert.Single(secondary), "Licensing", "Low", "High",
-                "Enterprise Edition \u2014 Availability Group secondary replica", SecondaryDetail, null);
+                "Enterprise Edition: Availability Group secondary replica", SecondaryDetail, null);
 
             var modern = ViewerDataService.BuildEditionAuditRecommendations(Enterprise, 15, 16, none, monthly, "Standalone", false);
             AssertRow(Assert.Single(modern), "Licensing", "High", "Medium",
@@ -110,11 +110,11 @@ public sealed class FinOpsRecommendationsCharacterizationTests
 
             var prePrimary = ViewerDataService.BuildEditionAuditRecommendations(Enterprise, 13, 16, none, monthly, "Primary", true);
             AssertRow(Assert.Single(prePrimary), "Licensing", "High", "Medium",
-                "Enterprise Edition \u2014 review Availability Group requirements before downgrading", PreTdeDetail + AgCaveat, forty);
+                "Enterprise Edition: review Availability Group requirements before downgrading", PreTdeDetail + AgCaveat, forty);
 
             var preTde = ViewerDataService.BuildEditionAuditRecommendations(Enterprise, 13, 16, new[] { "app_tde_a", "app_tde_b" }, monthly, "Standalone", false);
             Assert.Equal(2, preTde.Count);
-            AssertRow(preTde[0], "Licensing", "Low", "High", "TDE in use \u2014 Enterprise Edition downgrade blocker",
+            AssertRow(preTde[0], "Licensing", "Low", "High", "TDE in use: Enterprise Edition downgrade blocker",
                 "The following databases use Transparent Data Encryption: app_tde_a, app_tde_b. TDE must be removed before downgrading to Standard Edition.", null);
             AssertRow(preTde[1], "Licensing", "Low", "Low", "Enterprise to Standard would save ~$6,667/mo at list pricing (16 cores)",
                 CoreMathDetail, "6666.6666666666666666666666667");
@@ -130,7 +130,7 @@ public sealed class FinOpsRecommendationsCharacterizationTests
             var recs = ViewerDataService.BuildEditionAuditRecommendations(Enterprise, 13, 16, names, 1000m, "Standalone", false);
 
             Assert.Equal(2, recs.Count);
-            AssertRow(recs[0], "Licensing", "Low", "High", "TDE in use \u2014 Enterprise Edition downgrade blocker",
+            AssertRow(recs[0], "Licensing", "Low", "High", "TDE in use: Enterprise Edition downgrade blocker",
                 "The following databases use Transparent Data Encryption: " + string.Join(", ", names.Take(20)) +
                 " and 1 more. TDE must be removed before downgrading to Standard Edition.", null);
             AssertRow(recs[1], "Licensing", "Low", "Low", "Enterprise to Standard would save ~$6,667/mo at list pricing (16 cores)",
@@ -145,7 +145,7 @@ public sealed class FinOpsRecommendationsCharacterizationTests
         {
             var recs = ViewerDataService.BuildEditionAuditRecommendations(Enterprise, 13, 0, new[] { "app_tde_a" }, 1000m, "Standalone", false);
 
-            AssertRow(Assert.Single(recs), "Licensing", "Low", "High", "TDE in use \u2014 Enterprise Edition downgrade blocker",
+            AssertRow(Assert.Single(recs), "Licensing", "Low", "High", "TDE in use: Enterprise Edition downgrade blocker",
                 "The following databases use Transparent Data Encryption: app_tde_a. TDE must be removed before downgrading to Standard Edition.", null);
         });
     }
@@ -194,7 +194,7 @@ public sealed class FinOpsRecommendationsCharacterizationTests
 
             Assert.NotNull(rec);
             AssertRow(rec!, "Storage", "Medium", "High",
-                "7 uncompressed object(s) >= 1GB (17.5GB total)",
+                "7 uncompressed objects over 1 GB (17.5 GB total)",
                 "Large uncompressed tables/indexes: dbo.t_big_b (5.0GB); dbo.t_top_h (4.0GB); dbo.t_mid_d (3.0GB); dbo.t_low_i (2.0GB); dbo.t_half_j (1.5GB) and 2 more" +
                 ". Consider PAGE or ROW compression to reduce storage and improve I/O.", null);
         });
@@ -215,7 +215,7 @@ public sealed class FinOpsRecommendationsCharacterizationTests
             Assert.Equal("Storage", rec!.Category);
             Assert.Equal(severity, rec.Severity);
             Assert.Equal("High", rec.Confidence);
-            Assert.Equal($"1 uncompressed object(s) >= 1GB ({totalGb}GB total)", rec.Finding);
+            Assert.Equal($"1 uncompressed object over 1 GB ({totalGb} GB total)", rec.Finding);
             Assert.Equal($"Large uncompressed tables/indexes: dbo.t_edge_a ({totalGb}GB). Consider PAGE or ROW compression to reduce storage and improve I/O.", rec.Detail);
             Assert.Null(rec.EstMonthlySavings);
         });

@@ -49,6 +49,9 @@ internal static class DarlingProcessServices
     /* #5632 step 7: the worker's store owner data source, published for the one MCP tool that reads a remediation slot. */
     services.AddSingleton<StoreOwnerSource>();
 
+    /* #7041: the worker publishes its alert evaluator here for the MCP host's send_daily_health_report_now. */
+    services.AddSingleton<DailyHealthReportHub>();
+
     /* #6066: the store's pseudonym key, read once over the owner connection the worker publishes above and kept in memory. Taken by the MCP
        host (its data-detail filter and the brief composer) and the worker (the webhook dispatcher); no MCP tool method takes it. */
     services.AddSingleton<PseudonymKeySource>(provider => new PseudonymKeySource(
@@ -84,6 +87,11 @@ internal static class DarlingProcessServices
        is migrated. */
     services.AddSingleton<SlowReadLog>();
 
+    /* #8184: the opt-in health port (/livez, /readyz). Registered BEFORE the worker on purpose: hosted services start in order, so it
+       listens before migrations and before #8141's ownership check can stop the start, and a probe sees `starting` or `stopped`
+       rather than a refused connection. Self-gating on darling.json's health.enabled (default OFF). */
+    services.AddHostedService<PerformanceMonitor.Darling.Service.Hosting.DarlingHealthHostService>();
+
     services.AddHostedService<DarlingWorker>();
 
     /* AN4: the analysis MCP tools over Streamable HTTP — registered always, self-gating on
@@ -93,6 +101,11 @@ internal static class DarlingProcessServices
     /* #1562: the read-only web dashboard on its own port — registered always, self-gating on
        darling.json's web.enabled (default OFF), same config-free posture as the worker and MCP host. */
     services.AddHostedService<DarlingWebHostService>();
+
+    /* #7657: the Slack Socket Mode listener. Registered always and self-gating on the opened app-level token the worker publishes:
+       a token set means listen, blank means off. The state is the seam the worker publishes the token and route readers through. */
+    services.AddSingleton<PerformanceMonitor.Darling.Service.Chat.SlackListenerRuntimeState>();
+    services.AddHostedService<PerformanceMonitor.Darling.Service.Chat.SlackSocketModeHostService>();
 
     /* #6840: the front door. The directory, its secrets and the hosted service that refreshes it are registered always and
        cost nothing unless darling.json's frontDoor.enabled is set (the service gates itself, like the hosts above). The block

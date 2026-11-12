@@ -452,6 +452,21 @@ public class DarlingPgSessionStatesReaderTests
     }
 
     /// <summary>
+    /// #8572: the brief-holder sentence says "1 transaction's row versions" for an age of one and "5 transactions' row versions" for
+    /// any other, not "1 transactions'".
+    /// </summary>
+    [Theory]
+    [InlineData(1, "at most 1 transaction's row versions")]
+    [InlineData(5, "at most 5 transactions' row versions")]
+    public void ABriefHolder_SaysItsAgeInTheRightNumber(long age, string expected)
+    {
+        var finding = DarlingMcpPgSessionStatesTools.HorizonFinding(
+            Row(sampleCount: 10, horizonHolderSamples: 9, idleInTransactionSamples: 10, peakHorizonAge: age));
+
+        Assert.Contains(expected, finding, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// One sighting in ten is NOT a finding. Every write transaction is briefly the oldest holder — that is
     /// what a transaction is — so a tool that reported every one of them as pinning the horizon would raise
     /// an alarm on ordinary traffic and be ignored within a day.
@@ -465,6 +480,64 @@ public class DarlingPgSessionStatesReaderTests
         Assert.Contains("passing sighting", finding, StringComparison.Ordinal);
         Assert.DoesNotContain("PINS THE XMIN HORIZON", finding, StringComparison.Ordinal);
         Assert.NotEqual("Critical", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
+    }
+
+    /// <summary>
+    /// #7381: a session seen once is not a sustained holder, and a session whose horizon age never rose above
+    /// 0 held nothing back however often it was the oldest. The monitor's own wait sampler stored as exactly
+    /// this shape (1 of 1, age 0), and rows like it are still in stores until retention removes them.
+    /// </summary>
+    [Theory]
+    [InlineData(1, 1, 0L)]
+    [InlineData(5, 5, 0L)]
+    [InlineData(1, 1, 5_000_000L)]
+    public void ASingleSightingOrAnAgeOfZeroIsNeverCritical(int sampleCount, int holderSamples, long peakHorizonAge)
+    {
+        var row = Row(sampleCount: sampleCount, horizonHolderSamples: holderSamples, peakHorizonAge: peakHorizonAge);
+        var finding = DarlingMcpPgSessionStatesTools.HorizonFinding(row);
+
+        Assert.Equal("Healthy", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
+        Assert.DoesNotContain("PINS THE XMIN HORIZON", finding, StringComparison.Ordinal);
+        Assert.DoesNotContain("terminating the backend", finding, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnAgeOfZeroIsToldNothingWaitedBehindIt()
+    {
+        var finding = DarlingMcpPgSessionStatesTools.HorizonFinding(
+            Row(sampleCount: 5, horizonHolderSamples: 5, peakHorizonAge: 0));
+
+        Assert.Contains("never rose above 0", finding, StringComparison.Ordinal);
+        Assert.DoesNotContain("passing sighting", finding, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #7381: a forgotten idle-in-transaction writer on a quiet target is the oldest holder at age 0, and
+    /// the severity band says Warning for it. The text must say the same thing in the same row rather than
+    /// "VACUUM lost nothing" alone.
+    /// </summary>
+    [Fact]
+    public void AnAgeOfZeroThatIsAlsoLongIdleInTransactionIsToldSoAndAgreesWithSeverity()
+    {
+        var row = Row(sampleCount: 10, horizonHolderSamples: 10, idleInTransactionSamples: 10,
+            peakHorizonAge: 0, peakStateDurationMs: 600_000);
+        var finding = DarlingMcpPgSessionStatesTools.HorizonFinding(row);
+
+        Assert.Equal("Warning", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
+        Assert.Contains("never rose above 0", finding, StringComparison.Ordinal);
+        Assert.Contains("idle inside a transaction", finding, StringComparison.Ordinal);
+        Assert.Contains("OTHER axis", finding, StringComparison.Ordinal);
+        Assert.DoesNotContain("PINS THE XMIN HORIZON", finding, StringComparison.Ordinal);
+    }
+
+    /// <summary>The floor is 2 holder samples, so 2 of 2 with a real age is still Critical.</summary>
+    [Fact]
+    public void TwoHolderSamplesWithARealAgeAreStillCritical()
+    {
+        var row = Row(sampleCount: 2, horizonHolderSamples: 2, peakHorizonAge: 40_000);
+
+        Assert.Equal("Critical", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
+        Assert.Contains("PINS THE XMIN HORIZON", DarlingMcpPgSessionStatesTools.HorizonFinding(row), StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -108,6 +109,7 @@ AND   a.alert_time <= $2
 AND   a.server_id = $3
 AND   (a.dismissed = FALSE OR $5)
 AND   ($6::text IS NULL OR lower(a.metric_name) = lower($6))
+AND   ($7::integer[] IS NULL OR a.server_id = ANY($7))
 AND   TRUE /* family */
 ORDER BY a.alert_time DESC
 LIMIT $4";
@@ -122,6 +124,7 @@ WHERE a.alert_time >= $1
 AND   a.alert_time <= $2
 AND   (a.dismissed = FALSE OR $4)
 AND   ($5::text IS NULL OR lower(a.metric_name) = lower($5))
+AND   ($6::integer[] IS NULL OR a.server_id = ANY($6))
 AND   TRUE /* family */
 ORDER BY a.alert_time DESC
 LIMIT $3";
@@ -138,6 +141,7 @@ AND   alert_time <= $2
 AND   server_id = $3
 AND   dismissed = TRUE
 AND   ($4::text IS NULL OR lower(metric_name) = lower($4))
+AND   ($5::integer[] IS NULL OR server_id = ANY($5))
 AND   TRUE /* family */";
 
     /// <summary>The fleet-wide twin of <see cref="DismissedAlertCountSql"/>. $1 window start, $2 window end.</summary>
@@ -148,7 +152,55 @@ WHERE alert_time >= $1
 AND   alert_time <= $2
 AND   dismissed = TRUE
 AND   ($3::text IS NULL OR lower(metric_name) = lower($3))
+AND   ($4::integer[] IS NULL OR server_id = ANY($4))
 AND   TRUE /* family */";
+
+    /// <summary>#8551: what the web sidebar's alert badge needs, grouped in the store: the actionable rows (not muted, not
+    /// dismissed) of the window, one group per server, metric and fired tier, with the group's size and newest time. $1 window
+    /// start, $2 window end (naive UTC), $3 the caller's server grant (null = every server). No row cap, so a window busier than
+    /// any page still counts every actionable row, and no detail_text or context_json leaves the store. The tier is read off the
+    /// stored context's own <c>Severity</c> member (the serializer writes it compact and as a name, and no nested member is
+    /// called that, so the text only matches the member itself); a row with none is decided by its metric name, as
+    /// <see cref="PerformanceMonitor.Alerting.AlertHistoryRowSeverity.DescribeFired"/> does. Negative server ids are real ids and are kept.</summary>
+    public const string AlertBadgeGroupsSql = @"
+SELECT a.server_id,
+       a.metric_name,
+       CASE WHEN a.context_json LIKE '%""Severity"":""Critical""%' THEN 2
+            WHEN a.context_json LIKE '%""Severity"":""Warning""%' THEN 1
+            ELSE 0 END AS fired_tier,
+       COUNT(*) AS alert_count,
+       MAX(a.alert_time) AS latest_alert_time
+FROM config_alert_log a
+WHERE a.alert_time >= $1
+AND   a.alert_time <= $2
+AND   a.muted = FALSE
+AND   a.dismissed = FALSE
+AND   ($3::integer[] IS NULL OR a.server_id = ANY($3))
+GROUP BY a.server_id, a.metric_name, 3";
+
+    /// <summary>One group of <see cref="AlertBadgeGroupsSql"/>: <see cref="FiredTier"/> is 2 (fired Critical), 1 (fired Warning) or 0 (the row stored none).</summary>
+    public sealed record AlertBadgeGroup(int ServerId, string MetricName, int FiredTier, long Count, DateTime LatestAlertTime);
+
+    /// <summary>#8551: the groups of <see cref="AlertBadgeGroupsSql"/> for the window, limited to <paramref name="allowedServerIds"/>
+    /// when the caller holds a grant (the same ids <c>get_alert_history</c> binds), every server otherwise.</summary>
+    public static async Task<List<AlertBadgeGroup>> GetAlertBadgeGroupsAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, IReadOnlyList<int>? allowedServerIds, CancellationToken cancellationToken = default)
+    {
+        var groups = new List<AlertBadgeGroup>();
+        await using var command = postgres.CreateCommand(AlertBadgeGroupsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddTimestamp(command, sinceUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, untilUtc);
+        command.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Integer, (object?)allowedServerIds?.ToArray() ?? DBNull.Value);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            groups.Add(new AlertBadgeGroup(reader.GetInt32(0), reader.GetString(1), reader.GetInt32(2), reader.GetInt64(3), reader.GetDateTime(4)));
+        }
+
+        return groups;
+    }
 
     /// <summary>
     /// Recent alerts newest first, excluding dismissed rows — the Alert History read. With no
@@ -168,6 +220,11 @@ AND   TRUE /* family */";
     public sealed record AlertHistoryFilter(string? MetricName, string? Family)
     {
         public static readonly AlertHistoryFilter None = new(null, null);
+        internal IReadOnlyList<int>? AllowedServerIds { get; init; }
+
+        internal void BindServerScope(NpgsqlCommand command) =>
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer,
+                (object?)AllowedServerIds?.ToArray() ?? DBNull.Value);
 
         public bool IsSet => MetricName is not null || Family is not null;
 
@@ -202,6 +259,7 @@ AND   TRUE /* family */";
            `(dismissed = FALSE OR $N)` and an untyped parameter there is a runtime type error, not a compile one. */
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = includeDismissed });
         DarlingMcpReadParameters.AddNullableText(command, filter.MetricName);
+        filter.BindServerScope(command);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -234,7 +292,8 @@ AND   a.alert_time <= $4";
         if (firing.Count == 0) return streaks;
 
         var pairs = firing.Select(r => (r.ServerId, r.MetricName)).Distinct().ToList();
-        var since = firing.Min(r => r.AlertTime).AddDays(-InvestigationAlertRecurrence.Days);
+        /* One day more than the look-back, so a fire a DST change moved an hour past it is read; DaysAgo applies the exact bound. */
+        var since = firing.Min(r => r.AlertTime).AddDays(-(InvestigationAlertRecurrence.Days + 1));
         var until = firing.Max(r => r.AlertTime);
 
         var fires = new Dictionary<(int, string), List<DateTime>>();
@@ -254,11 +313,15 @@ AND   a.alert_time <= $4";
             }
         }
 
+        /* Each server's own clock, so a schedule kept in its local time keeps its streak across a DST change; a server with no
+           stored clock is read in UTC. */
+        var clocks = await DarlingServerClocksReader.GetAsync(postgres, null, McpCommandDeadlines.ReadSeconds, cancellationToken);
+
         for (var i = 0; i < page.Count; i++)
         {
             if (AlertMetricClassifier.IsResolution(page[i].MetricName)) continue;
             streaks[i] = fires.TryGetValue((page[i].ServerId, page[i].MetricName), out var list)
-                ? InvestigationAlertStreak.ForAlert(page[i].AlertTime, list)
+                ? InvestigationAlertStreak.ForAlert(page[i].AlertTime, list, DarlingServerClocksReader.ClockFor(clocks, page[i].ServerId).AsTimeZone())
                 : 0;
         }
 
@@ -292,6 +355,46 @@ LIMIT 1";
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) ? reader.GetString(0) : null;
+    }
+
+    /// <summary>One analysis finding held because an engine alert was open (#7084 part 4): its own row's time and metric,
+    /// and the routing reason it carries.</summary>
+    public sealed record AttachedFindingRead(DateTime AlertTimeUtc, string MetricName, string? Reason);
+
+    /// <summary>
+    /// The findings attached to one engine alert, oldest first (#7084 part 4). Read when the alert's detail opens, by the
+    /// alert's own identity (<paramref name="serverId"/>, <paramref name="metricName"/>, <paramref name="alertTimeUtc"/>): a
+    /// finding is a digest row on the same server inside the window after the fire, whose stored context names that metric
+    /// and time (<see cref="OpenEngineAlerts.Names"/>). Empty for a metric no finding attaches to, with no read.
+    /// </summary>
+    public static async Task<List<AttachedFindingRead>> GetAttachedFindingsAsync(
+        NpgsqlDataSource postgres, int serverId, string metricName, DateTime alertTimeUtc, CancellationToken cancellationToken = default)
+    {
+        var found = new List<AttachedFindingRead>();
+        if (!OpenEngineAlerts.IsAttachable(metricName))
+        {
+            return found;
+        }
+
+        await using var command = postgres.CreateCommand(OpenEngineAlerts.AttachedFindingsSql("config_alert_log"));
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddTimestamp(command, alertTimeUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, OpenEngineAlerts.AttachedUntil(alertTimeUtc));
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var contextJson = reader.IsDBNull(2) ? null : reader.GetString(2);
+            if (OpenEngineAlerts.Names(AlertContextSerializer.TryReadAttachedTo(contextJson), metricName, alertTimeUtc))
+            {
+                found.Add(new AttachedFindingRead(
+                    DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc), reader.GetString(1),
+                    AlertContextSerializer.TryReadRouting(contextJson)?.Reason));
+            }
+        }
+
+        return found;
     }
 
     /// <summary>One <see cref="AlertHistoryReadRow"/> from a reader positioned on a row of
@@ -393,6 +496,45 @@ LIMIT 1";
         string firingMetricName, DateTime? matchedAlertTimeUtc, CancellationToken cancellationToken = default) =>
         ReadFirstAlertAfterAsync(postgres, anchorUtc, untilUtc, serverId, new[] { firingMetricName }, matchedAlertTimeUtc, cancellationToken);
 
+    /// <summary>The "newest firing at or before an alert" read (#8095): the LATEST row no later than the anchor ($1) whose stored
+    /// <c>metric_name</c> is exactly $2, dismissed rows included, then <c>server_id = $3</c> when the server is known. The notebook
+    /// reads it for a row that is itself a resolution, to name the firing that row closed.</summary>
+    private const string NewestFiringAtOrBeforeHead = @"
+SELECT" + AlertHistorySelectColumns + @"
+FROM config_alert_log a
+LEFT JOIN servers s ON s.server_id = a.server_id
+WHERE a.alert_time <= $1
+AND   a.metric_name = $2";
+
+    private const string NewestFiringAtOrBeforeTail = @"
+ORDER BY alert_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// The NEWEST firing of a metric at or before an alert (#8095): the latest row no later than <paramref name="anchorUtc"/> whose
+    /// stored name is exactly <paramref name="firingMetricName"/>, dismissed rows included, scoped to <paramref name="serverId"/> only
+    /// when it is known. Null when there is none. The notebook's status reads it for a row that is itself a resolution ("Blocking
+    /// Cleared", "Server Restored"), whose only row of interest is the firing it closed.
+    /// </summary>
+    public static async Task<AlertHistoryReadRow?> GetNewestFiringAtOrBeforeAsync(
+        NpgsqlDataSource postgres, DateTime anchorUtc, int? serverId, string firingMetricName, CancellationToken cancellationToken = default)
+    {
+        var sql = serverId.HasValue
+            ? NewestFiringAtOrBeforeHead + "\nAND   a.server_id = $3" + NewestFiringAtOrBeforeTail
+            : NewestFiringAtOrBeforeHead + NewestFiringAtOrBeforeTail;
+        await using var command = postgres.CreateCommand(sql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddTimestamp(command, anchorUtc);
+        DarlingMcpReadParameters.AddNullableText(command, firingMetricName);
+        if (serverId.HasValue)
+        {
+            DarlingMcpReadParameters.AddInt(command, serverId.Value);
+        }
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadHistoryRow(reader) : null;
+    }
+
     private static async Task<AlertHistoryReadRow?> ReadFirstAlertAfterAsync(
         NpgsqlDataSource postgres, DateTime anchorUtc, DateTime untilUtc, int? serverId,
         IReadOnlyList<string> metricNames, DateTime? excludedAlertTimeUtc, CancellationToken cancellationToken)
@@ -442,6 +584,7 @@ LIMIT 1";
             DarlingMcpReadParameters.AddInt(command, serverId.Value);
         }
         DarlingMcpReadParameters.AddNullableText(command, filter.MetricName);
+        filter.BindServerScope(command);
 
         var count = await command.ExecuteScalarAsync(cancellationToken);
         return count is long l ? l : Convert.ToInt64(count, System.Globalization.CultureInfo.InvariantCulture);
@@ -543,11 +686,23 @@ LIMIT 1";
         bool IdentityCapacityEnabled,
         int IdentityCapacityWarningPercent,
         int IdentityCapacityCriticalPercent,
-        /* #6927 (V228): the four blocking band tiers (double precision NOT NULL, 5, 20 reports per hour and 10, 60 seconds). */
+        /* #6927 (V228): the four blocking band tiers (double precision NOT NULL, 5, 20 waits per hour and 10, 60 seconds). */
         double BlockingWarnPerHour,
         double BlockingCriticalPerHour,
         double BlockingWarnWaitSeconds,
-        double BlockingCriticalWaitSeconds);
+        double BlockingCriticalWaitSeconds,
+        /* #7028 (V230): the two blocking band snapshot wait tiers (double precision NOT NULL, 0 means the tier is off). */
+        double BlockingWarnSnapshotWaitSeconds,
+        double BlockingCriticalSnapshotWaitSeconds,
+        /* #7041 (V232): the Daily Health Report's switch (boolean NOT NULL, default off), send time (time NOT NULL, 07:00, carried as HH:mm), zone (text, NULL = the service host's zone) and title (text, NULL = the shipped title). */
+        bool DailyReportEnabled,
+        string DailyReportSendAt,
+        string? DailyReportTimeZone,
+        string? DailyReportTitle,
+        /* #7611 (V245): the three Database Protection ages (integer NOT NULL: 168 hours, 60 minutes, 336 hours). APPENDED, same reason. */
+        int BackupOverdueThresholdHours,
+        int LogBackupOverdueThresholdMinutes,
+        int CheckDbOverdueThresholdHours);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -588,7 +743,10 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        client_timeouts_warning_multiple, client_timeouts_critical_multiple,
        agent_alert_gaps_enabled, backup_overdue_enabled, log_backup_overdue_enabled, checkdb_overdue_enabled,
        identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent,
-       blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds
+       blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds,
+       blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds,
+       daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title,
+       backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -661,7 +819,16 @@ WHERE id = 1";
             /* #6875 (V224): the Identity Capacity switch and bars at 83-85. */
             reader.GetBoolean(83), reader.GetInt32(84), reader.GetInt32(85),
             /* #6927 (V228): the four blocking band tiers at 86-89. */
-            reader.GetDouble(86), reader.GetDouble(87), reader.GetDouble(88), reader.GetDouble(89));
+            reader.GetDouble(86), reader.GetDouble(87), reader.GetDouble(88), reader.GetDouble(89),
+            /* #7028 (V230): the two blocking band snapshot wait tiers at 90-91. */
+            reader.GetDouble(90), reader.GetDouble(91),
+            /* #7041 (V232): the Daily Health Report switch, send time, zone and title at 92-95. */
+            reader.GetBoolean(92),
+            PerformanceMonitor.Darling.Service.Reports.DailyHealthReportSettings.FormatSendAt(TimeOnly.FromTimeSpan(reader.GetTimeSpan(93))),
+            reader.IsDBNull(94) ? null : reader.GetString(94),
+            reader.IsDBNull(95) ? null : reader.GetString(95),
+            /* #7611 (V245): the three Database Protection ages at 96-98. */
+            reader.GetInt32(96), reader.GetInt32(97), reader.GetInt32(98));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

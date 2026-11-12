@@ -11,7 +11,7 @@ namespace PerformanceMonitorLite.Mcp;
 public sealed class McpIoTools
 {
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
-    [McpServerTool(Name = "get_file_io_stats"), Description("Gets the latest per-database-file I/O stats: read/write counts, bytes, stall times, calculated latency. LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected, and the deltas cover the sample_interval_seconds ending there. It takes no as_of or hours_back. For latency at a past time use get_file_io_trend (as_of, hours_back). sample_interval_seconds 0 means no delta was knowable for that file (first sighting, counter reset, a gap) and that row's latencies are null, not 0. <<GUIDE>> Gets the latest file I/O statistics per database file: read/write counts, bytes, stall times, and calculated latency. High read latency (>20ms) or write latency (>10ms for data, >2ms for log) often indicates storage bottlenecks. Each row carries sample_interval_seconds, the measured seconds its deltas accrued over; a 0 means no delta was knowable for that file at this collection (first sighting, counter reset, or a gap past the delta policy — typically a restart) and its latencies are null rather than 0. LATEST IS A TIME: this reads the newest file-I/O snapshot, not a window, and captured_at is the instant it was collected; the deltas cover the sample_interval_seconds ending there.")]
+    [McpServerTool(Name = "get_file_io_stats"), Description("Gets the latest per-database-file I/O stats: read/write counts, bytes, stall times, calculated latency. LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected, and the deltas cover the sample_interval_seconds ending there. It takes no as_of or hours_back. For latency at a past time use get_file_io_trend (as_of, hours_back). sample_interval_seconds 0 means no delta was knowable for that file (first sighting, counter reset, a gap) and that row's latencies are null, not 0. <<GUIDE>> Gets the latest file I/O statistics per database file: read/write counts, bytes, stall times, and calculated latency. High read latency (>20ms) or write latency (>10ms for data, >2ms for log) often indicates storage bottlenecks. Each row carries sample_interval_seconds, the measured seconds its deltas accrued over; a 0 means no delta was knowable for that file at this collection (first sighting, counter reset, or a gap past the delta policy, typically a restart) and its latencies are null rather than 0. LATEST IS A TIME: this reads the newest file-I/O snapshot, not a window, and captured_at is the instant it was collected; the deltas cover the sample_interval_seconds ending there.")]
     public static async Task<string> GetFileIoStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -88,7 +88,7 @@ public sealed class McpIoTools
         }
     }
 
-    [McpServerTool(Name = "get_file_io_trend"), Description("Gets file I/O read and write latency over time per database, data and log files pooled, heaviest I/O stall first; past the top five the rest fold into one (other) line. database_name charts one database per file. Useful for spotting degradation in storage performance." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_file_io_trend"), Description("Gets file I/O read and write latency over time per database, data and log files pooled, heaviest I/O stall first; past the top five the rest fold into one (other) line. database_name charts one database per file. Useful for spotting degradation in storage performance." + McpHelpers.UtcStampsDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetFileIoTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -140,19 +140,23 @@ public sealed class McpIoTools
                 /* A scoped read that found nothing is first a question about the NAME — Darling's twin's rule. */
                 if (scope is not null && everCollected)
                 {
-                    return McpHelpers.StatusForDatabase("empty", TrendPayloads.FileIoScopeEmptyMessage(resolved.DisplayName, scope, hours_back), scope);
+                    /* #7005: the window notice rides every empty answer below. */
+                    return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                        McpHelpers.StatusForDatabase("empty", TrendPayloads.FileIoScopeEmptyMessage(resolved.DisplayName, scope, hours_back), scope),
+                        dataService, QueryWindowRelation.FileIoStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "file_io_stats");
                 }
 
-                return everCollected
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(everCollected
                     ? McpHelpers.StatusForDatabase(
                         "empty",
-                        $"No file I/O samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken — widen hours_back, or read it as no measurable read or write activity on any file in this window.", scope)
+                        await McpQueryTools.QuietWindowMessageAsync(dataService, QueryWindowRelation.FileIoStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "file_io_stats", $"No file I/O samples recorded for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}", ". This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken: widen hours_back, or read it as no measurable read or write activity on any file in this window."), scope)
                     : McpHelpers.StatusForDatabase(
                         "unavailable",
-                        $"No file I/O stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.", scope);
+                        $"No file I/O stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window: the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.", scope),
+                    dataService, QueryWindowRelation.FileIoStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "file_io_stats");
             }
 
-            var budget = TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints);
+            var budget = TrendBudget.Mcp(TrendBuckets.FileIoMcpAutoPoints, TrendBuckets.FileIoMaxPoints);
             var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, TrendPayloads.LinesFor(series.Count), budget, out var bucketMinutes);
             if (bucketError != null) return bucketError;
 
@@ -162,9 +166,10 @@ public sealed class McpIoTools
             var discontinuities = await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             /* One builder for both SKUs' envelope (TrendPayloads), so the keys and sentences cannot drift. */
-            return TrendPayloads.FileIoTrend(
+            return await McpQueryTools.WithDataWindowNoticeAsync(TrendPayloads.FileIoTrend(
                 resolved.DisplayName, hours_back, scope, series, points, bucketMinutes, bucket_minutes is not null,
-                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities)),
+                dataService, QueryWindowRelation.FileIoStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "file_io_stats");
         }
         catch (Exception ex)
         {

@@ -108,7 +108,7 @@ public partial class LocalDataService
         /* BucketIsServerLocal says which clock BucketStart and FirstSampleTime are in. The server-local frame cuts
            every bucket on sample_time, so it is always true and the statement does not return it; the UTC frame
            returns it as a sixth column, false for a bucket of rows that had a sample_time_utc. */
-        var rows = new List<(DateTime BucketStart, int SqlCpu, int OtherCpu, DateTime FirstSampleTime, long SampleCount, bool BucketIsServerLocal)>();
+        var rows = new List<(DateTime BucketStart, int SqlCpu, int? OtherCpu, int? TotalCpu, DateTime FirstSampleTime, long SampleCount, bool BucketIsServerLocal)>();
         var everyBucketSingleton = true;
 
         using var reader = await command.ExecuteReaderAsync();
@@ -123,7 +123,8 @@ public partial class LocalDataService
             rows.Add((
                 reader.GetDateTime(0),
                 reader.GetInt32(1),
-                reader.GetInt32(2),
+                reader.IsDBNull(2) ? null : reader.GetInt32(2),
+                reader.IsDBNull(utcFrame ? 6 : 5) ? null : reader.GetInt32(utcFrame ? 6 : 5),
                 reader.GetDateTime(3),
                 sampleCount,
                 !utcFrame || reader.GetBoolean(5)));
@@ -140,7 +141,8 @@ public partial class LocalDataService
             var item = new CpuUtilizationRow
             {
                 SqlServerCpu = row.SqlCpu,
-                OtherProcessCpu = row.OtherCpu
+                OtherProcessCpu = row.OtherCpu,
+                TotalCpu = row.TotalCpu
             };
 
             if (utcFrame)
@@ -233,9 +235,10 @@ WITH raw AS
 SELECT
     {bucket} AS bucket_start,
     CAST(ROUND(AVG(COALESCE(sqlserver_cpu_utilization, 0))) AS INTEGER) AS sql_server_cpu,
-    CAST(ROUND(AVG(COALESCE(other_process_cpu_utilization, 0))) AS INTEGER) AS other_process_cpu,
+    CAST(ROUND(AVG(other_process_cpu_utilization)) AS INTEGER) AS other_process_cpu,
     {firstSample} AS first_sample_time,
-    COUNT(*) AS sample_count{bucketIsServerLocal}
+    COUNT(*) AS sample_count{bucketIsServerLocal},
+    CAST(ROUND(AVG(CASE WHEN other_process_cpu_utilization IS NOT NULL THEN COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization END)) AS INTEGER) AS total_cpu
 FROM raw
 GROUP BY {groupBy}
 ORDER BY {groupBy}";
@@ -347,7 +350,18 @@ public class CpuUtilizationRow
     public bool SampleTimeNamesTwoInstants { get; set; }
 
     public int SqlServerCpu { get; set; }
-    public int OtherProcessCpu { get; set; }
-    public int TotalCpu => SqlServerCpu + OtherProcessCpu;
-    public int IdleCpu => Math.Max(0, 100 - TotalCpu);
+
+    /// <summary>
+    /// Other-process CPU, null for a bucket whose samples all lack it (SQL Server on Linux before 2025 CU1 cannot
+    /// report host CPU, #1048, #7682). A missing figure is not zero: reading it as 0 drew the host as idle.
+    /// </summary>
+    public int? OtherProcessCpu { get; set; }
+
+    /// <summary>
+    /// Total non-idle CPU, null when the host's share is unknown. A bucket that mixes samples with and without
+    /// other-process CPU averages only the samples that have it (#7682).
+    /// </summary>
+    public int? TotalCpu { get; set; }
+
+    public int? IdleCpu => TotalCpu.HasValue ? Math.Max(0, 100 - TotalCpu.Value) : null;
 }

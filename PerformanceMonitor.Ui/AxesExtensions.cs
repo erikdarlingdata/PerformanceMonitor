@@ -33,7 +33,19 @@ internal static class AxesExtensions
     {
         axes.DateTimeTicksBottom();
         axes.Bottom.TickGenerator = new DisplayZoneTickGenerator(zone);
+        axes.Right.MinimumSize = RightEdgePad;
     }
+
+    /// <summary>
+    /// #7606: room kept to the right of a time chart's plot. A tick sitting on the window's end (a 24 hour window ending on a whole
+    /// hour has one) is labelled centred on the plot's right edge, so half the label ("18:00") fell outside the chart and was cut
+    /// off. About half the widest label at the 13 px tick font, plus a little air.
+    /// </summary>
+    internal const float RightEdgePad = 24f;
+
+    /// <summary>The right gutter <paramref name="plot"/> keeps: <see cref="RightEdgePad"/> when its bottom axis is a time axis, else none.</summary>
+    internal static float RightEdgePadFor(ScottPlot.Plot plot)
+        => plot.Axes.Bottom.TickGenerator is ScottPlot.TickGenerators.IDateTimeTickGenerator ? RightEdgePad : 0f;
 
     /// <summary>
     /// The bottom axis a shared chart renderer uses: the UTC-instant axis when the caller passed a display zone
@@ -55,13 +67,15 @@ internal static class AxesExtensions
     /// <summary>
     /// Like <c>DateTimeTicksBottom()</c>, but prints the date line on only the first tick
     /// and on ticks where the date component changes. All other ticks show time-only.
-    /// Date and time formats follow the current culture, and the label converts through
+    /// The date line follows the current culture and the time is the 24-hour "HH:mm" the hover, the crosshair and the Viewer's
+    /// axis print (#8154), and the label converts through
     /// <see cref="UiTimeContext.ConvertForDisplay"/> so the axis honors the app's Local/Server/UTC
     /// display mode (#1831).
     /// </summary>
     public static void DateTimeTicksBottomDateChange(this ScottPlot.AxisManager axes)
     {
         axes.DateTimeTicksBottom();
+        axes.Right.MinimumSize = RightEdgePad; // #7606
         if (axes.Bottom.TickGenerator is ScottPlot.TickGenerators.DateTimeAutomatic gen)
         {
             DateTime? lastDate = null;
@@ -95,7 +109,8 @@ internal static class AxesExtensions
                     lastDate = null;
                 prevTick = dt;
 
-                var time = dt.ToString("t", culture);
+                /* "HH:mm": the hover and the crosshair print HH:mm:ss and the Viewer's DisplayZoneTickGenerator prints HH:mm, so one chart reads on one clock. */
+                var time = dt.ToString("HH:mm", CultureInfo.InvariantCulture);
                 if (lastDate is null || dt.Date != lastDate.Value)
                 {
                     lastDate = dt.Date;

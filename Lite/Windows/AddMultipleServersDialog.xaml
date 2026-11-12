@@ -26,7 +26,7 @@
         <!-- Format hint -->
         <TextBlock Grid.Row="1" TextWrapping="Wrap" FontSize="11" Margin="0,0,0,10"
                    Foreground="{DynamicResource ForegroundMutedBrush}"
-                   Text="Paste one server per line as: server[, display name][, database]. A non-default port rides the server name SQL Server style — sql01,2433 — and is told apart from a display name by being a pure number. Fields separate on a comma, or on a tab for spreadsheet pastes (a display name with a comma, or one that is only digits, needs the tab form). Blank lines and lines starting with # are ignored. All servers share the authentication and encryption settings below — SQL / service-principal credentials are entered once as a single shared credential profile. Duplicates of servers you already monitor are skipped."/>
+                   Text="Paste one server per line as: server[, display name][, database]. A non-default port rides the server name SQL Server style (sql01,2433) and is told apart from a display name by being a pure number. Fields separate on a comma, or on a tab for spreadsheet pastes (a display name with a comma, or one that is only digits, needs the tab form). Blank lines and lines starting with # are ignored. All servers share the authentication and encryption settings below. SQL / service-principal credentials are entered once as a single shared credential profile. Duplicates of servers you already monitor are skipped."/>
 
         <!-- Paste box -->
         <TextBlock Grid.Row="2" Text="Servers" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
@@ -68,10 +68,10 @@
                              IsChecked="True" Checked="AuthMode_Changed" Margin="0,0,0,4"/>
                 <RadioButton x:Name="SqlAuthRadio" Content="S_QL Server Authentication" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,0,0,4"/>
-                <RadioButton x:Name="ServicePrincipalAuthRadio" Content="Azure — Service _Principal" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="ServicePrincipalAuthRadio" Content="Azure: Service _Principal" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,0,0,4"
                              ToolTip="Non-interactive Azure SQL auth using an Entra app registration (client id + secret)."/>
-                <RadioButton x:Name="ManagedIdentityAuthRadio" Content="Azure — _Managed Identity" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="ManagedIdentityAuthRadio" Content="Azure: _Managed Identity" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed"
                              ToolTip="Non-interactive Azure SQL auth using the managed identity of the Azure resource running Lite."/>
             </StackPanel>
@@ -125,8 +125,9 @@
 
         <!-- Preview / results grid. NOTE: a plain read-only DataGrid — the ServerTab capability pin forbids
              DataGridFilterManager in this dialog. -->
-        <DataGrid Grid.Row="5" x:Name="PreviewGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                  CanUserAddRows="False" HeadersVisibility="Column" SelectionMode="Single" Margin="0,0,0,8">
+        <Grid Grid.Row="5" Margin="0,0,0,8">
+        <DataGrid x:Name="PreviewGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                  CanUserAddRows="False" HeadersVisibility="Column" SelectionMode="Single">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Line" Binding="{Binding LineNumber}" Width="50"/>
                 <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="*"/>
@@ -135,6 +136,11 @@
                 <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="2*"/>
             </DataGrid.Columns>
         </DataGrid>
+        <!-- #8645: an empty grid says what fills it, as Credential Profiles does. -->
+        <TextBlock x:Name="NoRowsMessage" Style="{DynamicResource EmptyHint}" Margin="12,30,12,0" VerticalAlignment="Top"
+                   Visibility="Visible"
+                   Text="Nothing to list yet. Paste one server per line in the box above and each one is listed here."/>
+        </Grid>
 
         <!-- Status -->
         <TextBlock Grid.Row="6" x:Name="StatusText" Foreground="{DynamicResource ForegroundMutedBrush}"
@@ -143,7 +149,7 @@
         <!-- Buttons -->
         <StackPanel Grid.Row="7" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button x:Name="TestAllButton" Content="_Test All" Height="30" MinWidth="90" Click="TestAllButton_Click" Margin="0,0,8,0"
-                    ToolTip="Ask each server to answer a connection probe with the shared credentials. Informational only — no server is added."/>
+                    ToolTip="Ask each server to answer a connection probe with the shared credentials. Informational only. No server is added."/>
             <Button x:Name="CancelTestButton" Content="Cancel Te_st" Height="30" MinWidth="90" Click="CancelTestButton_Click"
                     Visibility="Collapsed" Margin="0,0,8,0"/>
             <Button x:Name="AddButton" Content="_Add" Width="90" Height="30" Click="AddButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>

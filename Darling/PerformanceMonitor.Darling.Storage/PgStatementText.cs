@@ -7,7 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Text;
+using System.Text.Json;
 using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -107,6 +110,121 @@ public static class PgStatementText
 CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen ON collect.pg_statement_text(last_seen);";
 
     /// <summary>
+    /// V242 (#7567): the column holding which <c>{"u": user_id, "d": database_id}</c> entries of the queryid are the service's own
+    /// (<see cref="PgOwnStatement"/>). Not in <see cref="CreateTableSql"/>, which is V73's rung; the migration adds it.
+    /// </summary>
+    public const string AddOwnEntriesColumnSql =
+        "ALTER TABLE collect.pg_statement_text ADD COLUMN IF NOT EXISTS own_entries jsonb;";
+
+    /// <summary>
+    /// The window aggregate both fetches use to collect the service's own entries of a queryid (#7567): a JSON array of
+    /// <c>{"u": userid, "d": dbid}</c> pairs over the entries whose text ends with <see cref="PgOwnStatement.Marker"/>, NULL when
+    /// none does. A window, not a GROUP BY, so the DISTINCT ON below still picks the costliest entry's text.
+    /// </summary>
+    private static readonly string OwnEntriesWindow =
+        "jsonb_agg(jsonb_build_object('u', s.userid::bigint, 'd', s.dbid::bigint)) FILTER (WHERE " + PgOwnStatement.IsOwnSql("s.query")
+        + ") OVER (PARTITION BY s.queryid) AS own_entries";
+
+    /// <summary>
+    /// The window aggregate that carries the entries the marker cannot name (#7681): a JSON array of <c>{"u": userid, "d": dbid,
+    /// "t": text}</c> over the entries of the fetching session's OWN role whose text does not end with the marker, NULL when there
+    /// is none. <c>pg_stat_statements</c> keeps the text of the call that created an entry, so an entry created by the service's
+    /// old, unmarked statement never gets the marker; <see cref="WithMatchedEntries"/> matches these texts against the
+    /// statements the service sends. The role test keeps the application's entries under other logins out of the array, and
+    /// out of the transfer when the service has a login of its own. A sensitive statement (<see cref="PgSensitiveStatementFilter"/>)
+    /// is never one of the service's, so it is not a candidate either: its raw text would otherwise cross the wire outside the
+    /// filter that redacts <c>query_text</c> on the target.
+    /// </summary>
+    private static readonly string CandidateEntriesWindow =
+        "jsonb_agg(jsonb_build_object('u', s.userid::bigint, 'd', s.dbid::bigint, 't', s.query)) FILTER (WHERE s.userid = "
+        + "(SELECT r.oid FROM pg_catalog.pg_roles AS r WHERE r.rolname = current_user) AND NOT " + PgOwnStatement.IsOwnSql("s.query")
+        + " AND NOT (s.query ~* " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.SensitiveStatementPattern) + ")"
+        + ") OVER (PARTITION BY s.queryid) AS candidate_entries";
+
+    /// <summary>
+    /// The own entries of a queryid after the shape match (#7681): <paramref name="markedEntries"/>, the entries whose text carries
+    /// the marker, plus every entry of <paramref name="candidateEntries"/> (<see cref="CandidateEntriesWindow"/>) whose text has
+    /// the shape of a statement this process has marked (<see cref="PgOwnStatement.IsServiceStatementText"/>). Returns
+    /// <paramref name="markedEntries"/> as it came when nothing is added, NULL included, so a queryid with no own entry keeps
+    /// <c>own_entries</c> NULL. The result is the JSON text <see cref="UpsertSql"/> binds.
+    /// </summary>
+    public static string? WithMatchedEntries(string? markedEntries, string? candidateEntries)
+    {
+        if (string.IsNullOrEmpty(candidateEntries))
+        {
+            return markedEntries;
+        }
+
+        var pairs = new List<(long User, long Database)>();
+        if (!string.IsNullOrEmpty(markedEntries))
+        {
+            using var marked = JsonDocument.Parse(markedEntries);
+            foreach (var entry in marked.RootElement.EnumerateArray())
+            {
+                pairs.Add((entry.GetProperty("u").GetInt64(), entry.GetProperty("d").GetInt64()));
+            }
+        }
+
+        var added = false;
+        using var candidates = JsonDocument.Parse(candidateEntries);
+        foreach (var entry in candidates.RootElement.EnumerateArray())
+        {
+            if (!entry.TryGetProperty("t", out var text) || !PgOwnStatement.IsServiceStatementText(text.GetString()))
+            {
+                continue;
+            }
+
+            var pair = (entry.GetProperty("u").GetInt64(), entry.GetProperty("d").GetInt64());
+            if (!pairs.Contains(pair))
+            {
+                pairs.Add(pair);
+                added = true;
+            }
+        }
+
+        if (!added)
+        {
+            return markedEntries;
+        }
+
+        var json = new StringBuilder("[");
+        for (var i = 0; i < pairs.Count; i++)
+        {
+            json.Append(i == 0 ? "" : ",")
+                .Append("{\"u\":").Append(pairs[i].User.ToString(CultureInfo.InvariantCulture))
+                .Append(",\"d\":").Append(pairs[i].Database.ToString(CultureInfo.InvariantCulture)).Append('}');
+        }
+
+        return json.Append(']').ToString();
+    }
+
+    /// <summary>
+    /// The <c>{"u", "d"}</c> pairs of <paramref name="candidateEntries"/> (<see cref="CandidateEntriesWindow"/>), without their
+    /// text, as the JSON <see cref="UpsertSql"/> binds as <c>$6</c> (#7681): the entries of the login that are still in
+    /// <c>pg_stat_statements</c> unmarked, whether or not their text matched. NULL when there are none.
+    /// </summary>
+    public static string? CandidatePairs(string? candidateEntries)
+    {
+        if (string.IsNullOrEmpty(candidateEntries))
+        {
+            return null;
+        }
+
+        using var candidates = JsonDocument.Parse(candidateEntries);
+        var json = new StringBuilder("[");
+        var first = true;
+        foreach (var entry in candidates.RootElement.EnumerateArray())
+        {
+            json.Append(first ? "" : ",")
+                .Append("{\"u\":").Append(entry.GetProperty("u").GetInt64().ToString(CultureInfo.InvariantCulture))
+                .Append(",\"d\":").Append(entry.GetProperty("d").GetInt64().ToString(CultureInfo.InvariantCulture)).Append('}');
+            first = false;
+        }
+
+        return first ? null : json.Append(']').ToString();
+    }
+
+    /// <summary>
     /// The text fetch, against the monitored PostgreSQL server. <c>$1</c> caps the rows.
     ///
     /// <para><c>showtext = true</c> is the entire point of this query and the reason it is separate from
@@ -134,24 +252,31 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen ON collect.pg_stateme
     public static readonly string AuroraFetchSql = @"
 SELECT
     queryid,
-    " + SensitiveTextCase + @"
+    " + SensitiveTextCase + @",
+    own_entries,
+    candidate_entries
 FROM
 (
-    /* DISTINCT ON, and it is not tidiness - see VanillaFetchSql for the full reasoning. One queryid comes
+    " + /* DISTINCT ON, and it is not tidiness - see VanillaFetchSql for the full reasoning. One queryid comes
        back once per user and database that ran it, the upsert keys on (server_id, queryid), and it meets
        those duplicates as '21000: ON CONFLICT DO UPDATE command cannot affect row a second time'.
 
        That error aborts the STATEMENT, so the batch's non-duplicate rows are lost with it - a single
-       repeated queryid stores nothing at all, not merely one row fewer. Measured on the pgmon fleet before
-       this fix: 50 of 50 Aurora servers failing, zero succeeding, get_pg_top_queries returning
+       repeated queryid stores nothing at all, not merely one row fewer. Measured on a test fleet of Aurora
+       servers before this fix: every server failing, none succeeding, get_pg_top_queries returning
        query_text: null on every row.
 
        Any of the duplicates would do - the text is the normalized statement and is identical across them -
-       so the costliest is taken, which is the same thing the outer ORDER BY is choosing for. */
+       so the costliest is taken, which is the same thing the outer ORDER BY is choosing for.
+
+       #8665: this comment is a C# comment between two string pieces, not part of the SQL, because the SQL goes to
+       every monitored server with each fetch and is kept in its statement statistics. */ @"
     SELECT DISTINCT ON (s.queryid)
         s.queryid AS queryid,
         s.query AS query_text,
-        s.total_exec_time AS total_exec_time
+        s.total_exec_time AS total_exec_time,
+        " + OwnEntriesWindow + @",
+        " + CandidateEntriesWindow + @"
     FROM {AURORA_SCHEMA}.aurora_stat_statements(true) AS s
     WHERE s.queryid IS NOT NULL
     AND   s.query IS NOT NULL
@@ -176,10 +301,12 @@ LIMIT $1";
     public static readonly string VanillaFetchSql = @"
 SELECT
     queryid,
-    " + SensitiveTextCase + @"
+    " + SensitiveTextCase + @",
+    own_entries,
+    candidate_entries
 FROM
 (
-    /* DISTINCT ON, and it is not tidiness. pg_stat_statements keys on
+    " + /* DISTINCT ON, and it is not tidiness. pg_stat_statements keys on
        (queryid, userid, dbid, toplevel), so ONE queryid comes back once per user and database that ran
        it - and the upsert below keys on (server_id, queryid), which meets those duplicates as
        '21000: ON CONFLICT DO UPDATE command cannot affect row a second time' and abandons the whole
@@ -188,11 +315,16 @@ FROM
        deliberately treats a text-refresh error as non-fatal.
 
        Any of the duplicates would do - the text is the normalized statement and is identical across
-       them - so the costliest is taken, which is the same thing the outer ORDER BY is choosing for. */
+       them - so the costliest is taken, which is the same thing the outer ORDER BY is choosing for.
+
+       #8665: this comment is a C# comment between two string pieces, not part of the SQL, because the SQL goes to
+       every monitored server with each fetch and is kept in its statement statistics. */ @"
     SELECT DISTINCT ON (s.queryid)
         s.queryid AS queryid,
         s.query AS query_text,
-        s.{TOTAL_TIME} AS total_exec_time
+        s.{TOTAL_TIME} AS total_exec_time,
+        " + OwnEntriesWindow + @",
+        " + CandidateEntriesWindow + @"
     FROM {STATEMENTS_SCHEMA}.pg_stat_statements AS s
     WHERE s.queryid IS NOT NULL
     AND   s.query IS NOT NULL
@@ -255,6 +387,12 @@ LIMIT $1";
     /// first seen on this server, which is the one fact that survives a major-version re-key and cannot be
     /// recovered afterwards; overwriting it would quietly turn every row's age into "since the last fetch".
     ///
+    /// <para><c>own_entries</c> (#7567) is the fetched list (<c>$5</c>, the JSON text of the list, or NULL) plus every pair already
+    /// stored that is still among this fetch's unmarked entries of the login (<c>$6</c>, <see cref="CandidatePairs"/>) (#7681). The
+    /// service's shape registry is in process memory, so the first fetch after a restart cannot match the statement of a collector
+    /// that has not run yet, and writing the fetched list alone would erase a pair an earlier fetch learned (and with it, past
+    /// windows' own-statement filtering). A pair whose entry is gone (a reset) drops out at the next fetch, as before.</para>
+    ///
     /// <para><c>query_text</c> IS advanced on conflict. A <c>queryid</c> is derived from the parse tree so its
     /// text is stable in practice, but not by guarantee across versions — and if it ever differs, the newer text
     /// is the one that matches the stats being collected now.</para>
@@ -264,13 +402,21 @@ LIMIT $1";
     /// across a fleet. Cheap to keep, expensive to rediscover.</para>
     /// </summary>
     public const string UpsertSql = @"INSERT INTO collect.pg_statement_text
-    (server_id, queryid, query_text, first_seen, last_seen)
-SELECT server_id, queryid, query_text, stamped, stamped
-FROM unnest($1::integer[], $2::bigint[], $3::text[], $4::timestamp[])
-     AS batch(server_id, queryid, query_text, stamped)
+    (server_id, queryid, query_text, first_seen, last_seen, own_entries)
+SELECT batch.server_id, batch.queryid, batch.query_text, batch.stamped, batch.stamped,
+       (SELECT jsonb_agg(DISTINCT e.entry)
+        FROM (SELECT jsonb_array_elements(batch.own_entries::jsonb) AS entry
+              UNION ALL
+              SELECT k.entry FROM jsonb_array_elements(stored.own_entries) AS k(entry)
+              WHERE batch.candidates::jsonb @> jsonb_build_array(k.entry)) AS e)
+FROM unnest($1::integer[], $2::bigint[], $3::text[], $4::timestamp[], $5::text[], $6::text[])
+     AS batch(server_id, queryid, query_text, stamped, own_entries, candidates)
+LEFT JOIN collect.pg_statement_text AS stored
+       ON stored.server_id = batch.server_id AND stored.queryid = batch.queryid
 ORDER BY server_id, queryid
 ON CONFLICT (server_id, queryid) DO UPDATE SET
     query_text = EXCLUDED.query_text,
+    own_entries = EXCLUDED.own_entries,
     last_seen = EXCLUDED.last_seen
 WHERE EXCLUDED.last_seen >= pg_statement_text.last_seen";
 
@@ -291,6 +437,17 @@ WHERE EXCLUDED.last_seen >= pg_statement_text.last_seen";
     /// whole table exists to prevent.
     /// </summary>
     public const int PruneMarginDays = 2;
+
+    /// <summary>
+    /// The collectors whose fact rows carry a <c>queryid</c> this table resolves to text: the store readers join each of their
+    /// tables to this one. The prune horizon is the widest effective retention among them
+    /// (<c>DarlingRetention.WidestEffectiveRetentionDays</c>), so a retention raised on any one of them keeps the text its
+    /// facts point at for as long as those facts live.
+    /// </summary>
+    public static readonly IReadOnlyList<string> ReferencingCollectors = new[]
+    {
+        "pg_statement_stats", "pg_kernel_stats", "pg_plan_capture", "pg_predicate_stats", "pg_session_states", "pg_wait_sampling",
+    };
 
     /// <summary>
     /// Retires text whose statements have all aged out: an index range scan on <see cref="LastSeenColumn"/>,

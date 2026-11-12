@@ -17,7 +17,7 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>
-/// The Window picker on the FinOps Optimization and High Impact tabs, run from the shipped
+/// The Window picker on the FinOps Optimization, High Impact and Database Resources tabs, run from the shipped
 /// page scripts under Node (<c>finops-window-picker-harness.mjs</c>): the first build reads 24 hours, a pick re-reads
 /// with the chosen hours, a rebuild for the same server (the 60 s poll) keeps the pick, and another server starts at
 /// 24 hours again. Node is skipped when it is not installed.
@@ -61,6 +61,7 @@ public sealed class FinOpsWindowPickerBehaviourTests
     [Theory]
     [InlineData("optimization")]
     [InlineData("high-impact")]
+    [InlineData("database-resources")]
     public void ThePickKeepsAcrossARebuildForTheSameServerAndResetsForAnother(string tab)
     {
         var t = Run().GetProperty(tab);
@@ -108,12 +109,29 @@ public sealed class FinOpsWindowPickerBehaviourTests
     }
 
     [Fact]
+    public void TheHighImpactDatabaseCellNamesTheBusiestDatabaseAndCountsTheOthersWhenTheFiguresSpanSeveral()
+    {
+        var c = Run().GetProperty("highImpactDatabases");
+        var text = c.GetProperty("text").GetString()!;
+        Assert.Contains("Zeta + 1 more", text);
+        Assert.DoesNotContain("Solo + ", text);
+        Assert.DoesNotContain("Old + ", text);
+        var titles = c.GetProperty("titles").EnumerateArray().Select(t => t.GetString()!).ToList();
+        Assert.Contains(titles, t => t.Contains("summed across 2 databases", StringComparison.Ordinal));
+        Assert.Single(titles, t => t.Contains("summed across", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void TheIndexAnalysisCollectedTimeIsSetOnlyForANameOneDatabaseOwns_AndTheCompareIsCaseSensitive()
     {
         var c = Run().GetProperty("indexCollected");
         var text = c.GetProperty("text").GetString()!;
-        var marker = "Original DefinitionScriptCollected";
-        var rec = text[(text.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..];
+        // The roll-up grid comes first and now prints its own Collected cell next to each Database (#7701), so Shared's two times are in the
+        // page text legitimately. Only the recommendations grid, which starts at its Action header, borrows a roll-up time by name.
+        var marker = "ActionResult KindRuleDatabaseCollected";
+        var at = text.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(at >= 0, "the recommendations grid header was not found in: " + text);
+        var rec = text[(at + marker.Length)..];
 
         // Two ids share "Shared": neither roll-up time is borrowed. "Solo" and "solo" differ by case: each gets its own.
         Assert.DoesNotContain(c.GetProperty("shared1").GetString()!, rec);

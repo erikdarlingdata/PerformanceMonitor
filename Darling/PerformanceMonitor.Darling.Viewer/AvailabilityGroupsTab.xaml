@@ -8,6 +8,8 @@
              d:DesignHeight="450" d:DesignWidth="900">
     <UserControl.Resources>
         <local:SeverityBrushConverter x:Key="SeverityBrush"/>
+        <!-- #8221: the per-database grid hides when the group has none. A Style with BasedOn on the DataGrid style was looked up once at load and kept the theme it loaded under. -->
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
     </UserControl.Resources>
     <!-- Fleet-wide Availability Group topology (#991) — the desktop twin of the web dashboard's
          Availability Groups page, rewired to Postgres via ViewerDataService.GetAvailabilityGroupsAsync.
@@ -104,7 +106,7 @@
                                                              server, which is what makes the per-perspective
                                                              model legible. Blank when unknown. -->
                                                         <TextBlock Text="{Binding LocalDisplay}" FontSize="10"
-                                                                   Margin="6,0,0,0" FontStyle="Italic"
+                                                                   Margin="6,0,0,0"
                                                                    Foreground="{DynamicResource ForegroundDimBrush}"/>
                                                     </StackPanel>
                                                     <TextBlock Text="{Binding NameDisplay}" FontSize="13" FontWeight="SemiBold"
@@ -124,16 +126,8 @@
                                 <DataGrid ItemsSource="{Binding Databases}" Margin="18,0,0,0"
                                           AutoGenerateColumns="False" IsReadOnly="True"
                                           HeadersVisibility="Column" GridLinesVisibility="Horizontal"
-                                          CanUserAddRows="False" MaxHeight="260">
-                                    <DataGrid.Style>
-                                        <Style TargetType="DataGrid" BasedOn="{StaticResource {x:Type DataGrid}}">
-                                            <Style.Triggers>
-                                                <DataTrigger Binding="{Binding HasDatabases}" Value="False">
-                                                    <Setter Property="Visibility" Value="Collapsed"/>
-                                                </DataTrigger>
-                                            </Style.Triggers>
-                                        </Style>
-                                    </DataGrid.Style>
+                                          CanUserAddRows="False" MaxHeight="260"
+                                          Visibility="{Binding HasDatabases, Converter={StaticResource BoolToVisibility}}">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Header="Database" Binding="{Binding DatabaseDisplay}" Width="Auto"/>
                                         <DataGridTextColumn Header="Replica" Binding="{Binding ReplicaDisplay}" Width="Auto"/>

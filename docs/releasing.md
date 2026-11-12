@@ -28,8 +28,9 @@ dotnet run -p:StorageProject=/tmp/pm-vX.Y.Z/Darling/PerformanceMonitor.Darling.S
   -- ../../Darling.Tests/Fixtures/migration-ladder-vX.Y.Z.sql
 ```
 
-then point `MigrationUpgradeLadderLiveTests.FixtureRelativePath` at the new file and retire the old
-one (keeping more than one previous release is fine too — each is one more `[Fact]`).
+then keep the file beside the older ones. `MigrationUpgradeLadderLiveTests` runs every
+`migration-ladder-v*.sql` file in that folder as one test case, so no edit to the test is needed.
+Do not retire the old files: an older file replays more rungs, and it finds more defects.
 
 ## 2. Cut time: previous release image, same volume (the literal operator path)
 
@@ -42,9 +43,12 @@ docker volume create pm-upgrade-check
 docker run -d --name pm-old -v pm-upgrade-check:/var/lib/darling ghcr.io/erikdarlingdata/performancemonitor-darling:<prev>
 # wait for "store ready", stop:
 docker rm -f pm-old
+docker run --rm --user 0 --entrypoint chown -v pm-upgrade-check:/var/lib/darling ghcr.io/erikdarlingdata/performancemonitor-darling:<rc> -R 1654:1654 /var/lib/darling
 docker run -d --name pm-new -v pm-upgrade-check:/var/lib/darling ghcr.io/erikdarlingdata/performancemonitor-darling:<rc>
 docker logs -f pm-new   # must reach "store ready (schema vNN, M migration(s) applied)" with M > 0
 ```
+
+The `chown` is there because the `<prev>` releases ran as root, so their volume is root-owned and the new image would stop collection on it.
 
 `M > 0` is the point: zero applied means the ladder never ran and the check validated nothing.
 Windows/Velopack releases ride the same store code, so the container check covers the ladder for

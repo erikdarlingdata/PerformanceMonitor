@@ -330,4 +330,113 @@ public sealed class WebChartLegendIsolateBehaviourTests
         Assert.Empty(Off(shrunk));
         Assert.False(shrunk.GetProperty("showAll").GetBoolean());
     }
+
+    [Fact]
+    public void TheSeriesPalette_HasTenDistinctColors_AndEveryChartKindUsesTheSameList()
+    {
+        var palette = S(Run(), "palette");
+        var series = palette.GetProperty("series").EnumerateArray().Select(e => e.GetString()!.ToLowerInvariant()).ToArray();
+        Assert.True(series.Length >= 10, "the palette has " + series.Length + " colors");
+        Assert.Equal(series.Length, series.Distinct().Count());
+        Assert.Equal(series, palette.GetProperty("categorical").EnumerateArray().Select(e => e.GetString()!.ToLowerInvariant()).ToArray());
+    }
+
+    [Fact]
+    public void ASixSeriesChart_GivesEverySeriesItsOwnColor()
+    {
+        var six = S(Run(), "six");
+        var colors = six.GetProperty("lines").EnumerateArray().Select(e => e.GetString()!.Split('|')[0]).ToArray();
+        Assert.Equal(6, colors.Length);
+        Assert.Equal(6, colors.Distinct().Count());
+        Assert.All(six.GetProperty("lines").EnumerateArray(), e => Assert.EndsWith("|", e.GetString()!));
+    }
+
+    [Fact]
+    public void ATwelveSeriesChart_GivesNoTwoLegendEntriesTheSameLook_AndEachLineMatchesItsEntry()
+    {
+        var twelve = S(Run(), "twelve");
+        var legend = twelve.GetProperty("legend").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        var lines = twelve.GetProperty("lines").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal(12, legend.Length);
+        Assert.Equal(12, legend.Distinct().Count());
+        Assert.Equal(12, lines.Distinct().Count());
+        // Every repeated color is dashed, in the legend swatch as well as on the line, so the key says which line is which.
+        for (var i = 0; i < 12; i++)
+        {
+            var dashed = lines[i].EndsWith('|') == false;
+            Assert.Equal(dashed, legend[i].Contains("repeating-linear-gradient"));
+        }
+        Assert.Equal(2, lines.Count(l => !l.EndsWith('|')));
+    }
+
+    /* A swatch shows a dash only when the plot draws one: stacked bands and bars have no stroke, and a lone dot cannot be dashed. */
+    [Theory]
+    [InlineData("sameStackedBar")]
+    [InlineData("sameStacked")]
+    [InlineData("sameLoneDot")]
+    public void ASeriesSharingAColor_IsSolidInTheLegend_WhenThePlotDrawsItSolid(string scenario)
+    {
+        var look = S(Run(), scenario);
+        var legend = look.GetProperty("legend").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal(2, legend.Length);
+        Assert.All(legend, l => Assert.DoesNotContain("repeating-linear-gradient", l, StringComparison.Ordinal));
+        Assert.All(look.GetProperty("lines").EnumerateArray(), l => Assert.Equal("", l.GetString()));
+        Assert.True(look.GetProperty("marks").GetInt32() > 0);
+    }
+
+    [Fact]
+    public void TwoLinesSharingAColor_StillDashTheSecond_InTheLegendAndOnTheLine()
+    {
+        var look = S(Run(), "sameLines");
+        var legend = look.GetProperty("legend").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        var lines = look.GetProperty("lines").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.DoesNotContain("repeating-linear-gradient", legend[0], StringComparison.Ordinal);
+        Assert.Contains("repeating-linear-gradient", legend[1], StringComparison.Ordinal);
+        Assert.Equal(new[] { "", "6 3" }, lines);
+    }
+
+    /// <summary>
+    /// #7668: a Custom View panel with a second axis named both its lines wrongly: the first carried the whole panel's title and the second its
+    /// measure key with capitals. Each line is now named from its measure's catalog display name (the key humanized when the catalog gave none), the second
+    /// says it is read on the right axis, and a panel with one line keeps its title.
+    /// </summary>
+    [Fact]
+    public void APanelWithASecondAxis_NamesEachLineFromItsMeasure_AndAOneLinePanelKeepsItsTitle()
+    {
+        var r = Run().GetProperty("overlayLegend");
+        string[] Labels(string key) => r.GetProperty(key).EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+        Assert.Equal(new[] { "TempDB Reserved MB", "TempDB Version Store MB (right axis)" }, Labels("catalog"));
+        Assert.Equal(new[] { "Tempdb Reserved Mb", "Tempdb Version Store Mb (right axis)" }, Labels("noCatalog"));
+        Assert.Equal(new[] { "TempDB: reserved vs version store" }, Labels("oneLine"));
+    }
+
+    /// <summary>
+    /// #7668: the second line's dash (6 on, 3 off) turned into a hatched block over the first line at about three points per pixel. A run whose
+    /// points sit closer together than one dash period is drawn solid; a sparse one keeps its dash.
+    /// </summary>
+    [Fact]
+    public void TheSecondAxisLine_IsSolidWhenItsPointsAreDense_AndDashedWhenSparse()
+    {
+        var r = Run();
+        Assert.True(r.GetProperty("overlayDense").GetProperty("drawn").GetBoolean());
+        Assert.Contains("stroke-dasharray:none", r.GetProperty("overlayDense").GetProperty("style").GetString(), StringComparison.Ordinal);
+        Assert.True(r.GetProperty("overlaySparse").GetProperty("drawn").GetBoolean());
+        Assert.Equal("", r.GetProperty("overlaySparse").GetProperty("style").GetString());
+    }
+
+    /// <summary>
+    /// #7668: a panel saved before #7565 charts a /sec counter as its running total, and the reply that runs it now carries the service's
+    /// warning. The page draws it as a note on the panel; a reply with no warnings, or only blank ones, draws none.
+    /// </summary>
+    [Fact]
+    public void ARunReplyWithWarnings_DrawsThemAsANoteOnThePanel()
+    {
+        var r = Run().GetProperty("runWarnings");
+        var with = r.GetProperty("with").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Single(with);
+        Assert.Contains("running total since startup", with[0], StringComparison.Ordinal);
+        Assert.Empty(r.GetProperty("without").EnumerateArray());
+        Assert.Empty(r.GetProperty("blank").EnumerateArray());
+    }
 }

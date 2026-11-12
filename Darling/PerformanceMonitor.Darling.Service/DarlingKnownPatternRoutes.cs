@@ -153,7 +153,7 @@ internal static class DarlingKnownPatternRoutes
         {
             if (buffer.Length + read > MaxBodyBytes)
             {
-                return (null, "Request body is too large.");
+                return (null, DarlingWebEndpoints.BodyTooLargeText(MaxBodyBytes));
             }
 
             buffer.Write(chunk, 0, read);

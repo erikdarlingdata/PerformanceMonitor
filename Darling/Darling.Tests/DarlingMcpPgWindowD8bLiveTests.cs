@@ -67,6 +67,17 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
             async (c, n, at) => await Exec(c,
                 "INSERT INTO pg_replication_stats (collection_id, collection_time, server_id, server_name, application_name, client_addr, state, sync_state, sync_priority, sent_bytes_behind, write_bytes_behind, flush_bytes_behind, replay_bytes_behind, write_lag_ms, flush_lag_ms, replay_lag_ms, backend_start) VALUES ($1, $2, $3, $4, 'replica1', '10.0.0.2', 'streaming', 'async', 0, 0, 0, 0, 0, 1.0, 1.0, 1.0, $2)",
                 CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), Id(n), n)),
+        /* #7010: a table is stored only while it has pending work, and a slot only while it exists: both probe the collector's runs. */
+        new("get_pg_autovacuum_health", "pg_autovacuum_stats", "pg_autovacuum_stats", true,
+            (ds, n, h, end) => DarlingMcpPgAutovacuumTools.GetPgAutovacuumHealth(ds, n, h, as_of: AsOf(end)),
+            async (c, n, at) => await Exec(c,
+                "INSERT INTO pg_autovacuum_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, table_name, live_tuples, dead_tuples, vacuum_threshold, mods_since_analyze, analyze_threshold, inserts_since_vacuum, insert_vacuum_threshold, autovacuum_disabled, total_bytes, autovacuum_count) VALUES ($1, $2, $3, $4, 'appdb', 'public', 't', 10000, 5000, 1000, 0, 500, 0, 1000, FALSE, 1000000, 1)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), Id(n), n)),
+        new("get_pg_replication_slots", "pg_replication_slot_stats", "pg_replication_slots", true,
+            (ds, n, h, end) => DarlingMcpPgSlotTools.GetPgReplicationSlots(ds, n, h, as_of: AsOf(end)),
+            async (c, n, at) => await Exec(c,
+                "INSERT INTO pg_replication_slot_stats (collection_id, collection_time, server_id, server_name, slot_name, slot_type, plugin, database_name, is_active, active_pid, is_temporary, two_phase, wal_status, safe_wal_size_bytes, retained_wal_bytes, xmin_age, catalog_xmin_age, inactive_since, invalidation_reason, conflicting) VALUES ($1, $2, $3, $4, 's1', 'logical', 'pgoutput', 'appdb', FALSE, NULL, FALSE, FALSE, 'reserved', -1, 1000, NULL, NULL, NULL, NULL, FALSE)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), Id(n), n)),
         new("get_pg_xmin_horizon", "pg_xmin_horizon", "pg_xmin_horizon", false,
             (ds, n, h, end) => DarlingMcpPgXminTools.GetPgXminHorizon(ds, n, h, as_of: AsOf(end)),
             async (c, n, at) => await Exec(c,
@@ -85,6 +96,17 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
     private static Task SeedServerAsync(NpgsqlConnection c, Tool t, string name, DateTime created, DateTime? runsFrom, DateTime end) =>
         WindowFloorLiveHarness.SeedServerAsync(c, name, created, t.Collector, runsFrom, 30, end, [t.Table], TestContext.Current.CancellationToken);
 
+    /// <summary>
+    /// #7878, #7910: stores the row, then makes the run that wrote it the collector's newest, because the four state reads call a row
+    /// current only when it came from the newest successful run. The fixture's synthetic runs reach the window end and store nothing,
+    /// which is a collector that looked later and found the row's state gone.
+    /// </summary>
+    private static async Task SeedRowAsync(Tool t, NpgsqlConnection c, string name, DateTime at)
+    {
+        await t.SeedRow(c, name, at);
+        await WindowFloorLiveHarness.MakeRowCurrentAsync(c, name, t.Collector, at, TestContext.Current.CancellationToken);
+    }
+
     [Theory]
     [MemberData(nameof(ToolNames))]
     public async Task ADataAnswer_ForAServerAddedTwoDaysAgo_NamesWhereCoverageStarts_RightAfterHoursBack_AgainstDevPostgres(string read)
@@ -94,7 +116,7 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
         {
             var added = end.AddDays(-2);
             await SeedServerAsync(c, t, name, added, added, end);
-            await t.SeedRow(c, name, end.AddDays(-1));
+            await SeedRowAsync(t, c, name, end.AddDays(-1));
 
             var root = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 168, end));
 
@@ -116,7 +138,7 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
         await RunAsync(t, "quiet", async (c, ds, end, name) =>
         {
             await SeedServerAsync(c, t, name, end.AddDays(-30), end.AddDays(-9), end);
-            await t.SeedRow(c, name, end.AddDays(-1));
+            await SeedRowAsync(t, c, name, end.AddDays(-1));
 
             var root = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 168, end));
 
@@ -133,7 +155,7 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
         await RunAsync(t, "short", async (c, ds, end, name) =>
         {
             await SeedServerAsync(c, t, name, end.AddDays(-30), end.AddDays(-2), end);
-            await t.SeedRow(c, name, end.AddMinutes(-40));
+            await SeedRowAsync(t, c, name, end.AddMinutes(-40));
             var calls = 0;
             DarlingMcpWindowNotice.TestOnlyProbe = () => { calls++; return Task.FromResult<DateTime?>(null); };
 
@@ -152,7 +174,7 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
         await RunAsync(t, "probefail", async (c, ds, end, name) =>
         {
             await SeedServerAsync(c, t, name, end.AddDays(-2), end.AddDays(-2), end);
-            await t.SeedRow(c, name, end.AddDays(-1));
+            await SeedRowAsync(t, c, name, end.AddDays(-1));
             DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
 
             var root = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 168, end));
@@ -161,7 +183,7 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
             Assert.False(root.TryGetProperty("effective_start", out _));
             Assert.False(root.TryGetProperty("window_truncated", out _));
             Assert.False(root.TryGetProperty("truncation_note", out _));
-            Assert.True(root.TryGetProperty("replicas", out _) || root.GetProperty("status").GetString() is "blocking_sampled" or "session_states" or "holder_present", root.ToString());
+            Assert.True(root.TryGetProperty("replicas", out _) || root.GetProperty("status").GetString() is "blocking_sampled" or "session_states" or "holder_present" or "tables_with_pending_maintenance" or "slots_present", root.ToString());
         });
     }
 
@@ -191,6 +213,8 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
     [InlineData("get_pg_replication_stats", "that is the expected answer", false)]
     [InlineData("get_pg_xmin_horizon", "Vacuum is free to reclaim dead rows", true)]
     [InlineData("get_pg_session_states", "a real all-clear rather than missing data", false)]
+    [InlineData("get_pg_autovacuum_health", "the healthy case rather than missing data", true)]
+    [InlineData("get_pg_replication_slots", "so it is not itself retaining WAL", true)]
     public async Task AnAllClear_ClaimsQuiet_OnlyOverACoveredWindow_AgainstDevPostgres(string read, string coveredClaim, bool inFinding)
     {
         var t = Of(read);

@@ -58,6 +58,16 @@ public sealed class PgPlanViewerBehaviourTests
     private static string Str(JsonElement r, string name) => r.GetProperty(name).GetString()!;
 
     [Fact]
+    public void TheGridButtons_CarryTheAppButtonLook_NotTheBrowsersDefault()
+    {
+        // #7540: grid-tool alone only styles inside a .grid-tools row; the Plan button in a cell, and Copy and Download in the open panel, need btn.
+        var r = Run("open");
+        Assert.Equal("btn grid-tool", Str(r, "planButtonClass"));
+        Assert.Equal("btn grid-tool", Str(r, "copyButtonClass"));
+        Assert.Equal("btn grid-tool", Str(r, "downloadButtonClass"));
+    }
+
+    [Fact]
     public void ThePlanButton_OpensTheRowsOwnJson_IndentedAndWithoutARead()
     {
         var r = Run("open");

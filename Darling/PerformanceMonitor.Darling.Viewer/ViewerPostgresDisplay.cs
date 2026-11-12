@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Common;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -133,9 +134,22 @@ internal static class PgDisplay
             return NotApplicableText;
         }
 
-        return ms < 1000
-            ? $"{ms:N0} ms"
-            : TimeSpan.FromMilliseconds(ms).ToString(ms < 3_600_000 ? @"mm\:ss" : @"d\.hh\:mm\:ss", CultureInfo.CurrentCulture);
+        if (ms < 1000)
+        {
+            return $"{ms:N0} ms";
+        }
+
+        /* #8564: ONE labelled format from a second to many days, the one the Running Jobs tab speaks ("2m 5s", "1h 5m"). The
+           clock-style text this replaced ("02:05", "1.08:23:10") put "41 ms" and a bare time in one column, and "02:05" read as
+           hours and minutes as easily as minutes and seconds. */
+        var span = TimeSpan.FromMilliseconds(ms);
+        return span.TotalDays >= 1
+            ? string.Create(CultureInfo.CurrentCulture, $"{(long)span.TotalDays}d {span.Hours}h {span.Minutes}m")
+            : span.TotalHours >= 1
+                ? string.Create(CultureInfo.CurrentCulture, $"{span.Hours}h {span.Minutes}m")
+                : span.TotalMinutes >= 1
+                    ? string.Create(CultureInfo.CurrentCulture, $"{span.Minutes}m {span.Seconds}s")
+                    : string.Create(CultureInfo.CurrentCulture, $"{span.Seconds}s");
     }
 
     internal static string Timestamp(DateTime? utc) =>
@@ -172,25 +186,32 @@ internal static class PgDisplay
         public double? WinnerShareSort { get; init; }
     }
 
-    internal static XminRow Xmin(DarlingPgXminReader.PgXminRow row) => new()
+    /// <param name="row">One source's current holder and its window figures.</param>
+    /// <param name="capturesInWindow">Every successful pg_xmin_horizon capture in the window (<c>DarlingPgXminReader.GetXminCapturesInWindowAsync</c>), not this
+    /// source's own row count (#8014). The collector stores nothing on an unheld capture, so a source's own count is only the captures in which it was a
+    /// holder: a session that won both of its 2 rows out of 288 captures is not a standing holder.</param>
+    internal static XminRow Xmin(DarlingPgXminReader.PgXminRow row, long capturesInWindow) => new()
     {
         Source = row.Source,
         IsWinnerText = row.IsWinner ? "yes" : "",
         XminAge = Count(row.XminAge),
         PeakXminAge = Count(row.PeakXminAge),
-        /* The share, not the raw count. A slot that won 58 of 60 samples is a standing problem someone
+        /* The share, not the raw count. A slot that won 58 of 60 captures is a standing problem someone
            needs to own; a session that won twice is a query that ran long and finished. Reporting only the
-           current holder makes those two look the same. */
-        WinnerShare = row.Samples <= 0
+           current holder makes those two look the same. Over EVERY capture in the window, the denominator
+           get_pg_xmin_horizon's pct_of_window_winning uses (#3541 A12, #8014): the source's own row count
+           made 2 wins in 2 rows out of 60 captures read "2 of 2". Unclamped, as there: an undercounting log
+           shows a share above 100 rather than being rounded into a lie. */
+        WinnerShare = capturesInWindow <= 0
             ? NotApplicableText
-            : string.Create(CultureInfo.CurrentCulture, $"{row.SamplesAsWinner:N0} of {row.Samples:N0} samples"),
+            : string.Create(CultureInfo.CurrentCulture, $"{row.SamplesAsWinner:N0} of {capturesInWindow:N0} captures"),
         MeasuredAt = Timestamp(row.MeasuredAt),
         MeasuredAtUtc = row.MeasuredAt,
         Holder = row.Holder ?? "",
         Detail = row.Detail ?? "",
         XminAgeSort = Raw(row.XminAge),
         PeakXminAgeSort = Raw(row.PeakXminAge),
-        WinnerShareSort = row.Samples <= 0 ? null : row.SamplesAsWinner / (double)row.Samples,
+        WinnerShareSort = capturesInWindow <= 0 ? null : row.SamplesAsWinner / (double)capturesInWindow,
     };
 
     internal sealed class AutovacuumRow
@@ -779,8 +800,6 @@ internal static class PgDisplay
         public string QueryText { get; init; } = "";
         /// <summary>The number <see cref="QueryId"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
         public long? QueryIdSort { get; init; }
-        /// <summary>The number <see cref="DatabaseId"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
-        public long? DatabaseIdSort { get; init; }
         /// <summary>The number <see cref="Calls"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
         public long? CallsSort { get; init; }
         /// <summary>The number <see cref="TotalExecTimeMs"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
@@ -804,7 +823,8 @@ internal static class PgDisplay
     internal static StatementRow Statement(DarlingPgStatementReader.PgStatementRow row) => new()
     {
         QueryId = row.QueryId.ToString(CultureInfo.InvariantCulture),
-        DatabaseId = row.DatabaseId.ToString("N0", CultureInfo.CurrentCulture),
+        /* #7731: the name, else "database <id>" with no thousands separator on the id (an oid is an identifier, not a count). */
+        DatabaseId = row.DatabaseName ?? string.Create(CultureInfo.InvariantCulture, $"database {row.DatabaseId}"),
         Calls = Count(row.Calls),
         TotalExecTimeMs = Count(row.TotalExecTimeMs),
         AvgExecTimeMs = row.Calls <= 0
@@ -834,9 +854,10 @@ internal static class PgDisplay
         WalWritten = row.WalBytes is { } wal ? Bytes(wal) : NotApplicableText,
         /* Null is "no text captured for this queryid yet" — text refreshes hourly, and a major-version
            upgrade re-keys every queryid — which is a different statement from an empty query. */
-        QueryText = row.QueryText ?? "(statement text not captured yet)",
+        QueryText = row.IsServiceStatement
+            ? "[Performance Monitor's own statement] " + row.QueryText
+            : row.QueryText ?? "(statement text not captured yet)",
         QueryIdSort = row.QueryId,
-        DatabaseIdSort = row.DatabaseId,
         CallsSort = Raw(row.Calls),
         TotalExecTimeMsSort = Raw(row.TotalExecTimeMs),
         AvgExecTimeMsSort = row.Calls <= 0 ? null : row.TotalExecTimeMs / (double)row.Calls,
@@ -999,11 +1020,13 @@ internal static class PgDisplay
             ? "no column statistics - check the monitoring login can SELECT this table"
             : row.LiveTuples < 0
                 ? "never analyzed - no row count to compare against"
-                : suppressed
-                    ? "statistics stale - ANALYZE this table, then re-read"
-                    : row.PgstattupleAvailable
-                        ? "estimate; confirm exactly with pgstattuple"
-                        : "estimate; pgstattuple is not installed here";
+                : row.LastAnalyzed is null
+                    ? "no record of the last ANALYZE - ANALYZE this table, then re-read"
+                    : suppressed
+                        ? "statistics stale - ANALYZE this table, then re-read"
+                        : row.PgstattupleAvailable
+                            ? "estimate; confirm exactly with pgstattuple"
+                            : "estimate; pgstattuple is not installed here";
 
         return new TableBloatRow
         {
@@ -1137,26 +1160,10 @@ internal static class PgDisplay
     // ── Session states ───────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// The share of the samples that saw a session in which it must have been the oldest xmin holder
-    /// before the grid paints it as one.
-    ///
-    /// <para>Half, and it is a COPY of <c>DarlingMcpPgSessionStatesTools.SustainedHolderSampleShare</c>
-    /// rather than a reference to it: the viewer does not reference the service project, so the constant
-    /// cannot be reached from here. The duplication is deliberate and pinned —
-    /// <c>ViewerPostgresTabsTests</c> asserts this projection's flags agree with the MCP's own severity
-    /// band on the same row, in the one assembly that references both — because the alternative is two
-    /// surfaces quietly disagreeing about whether a session is starving vacuum.</para>
-    ///
-    /// <para>The threshold itself is the argument from the read: every write transaction is momentarily
-    /// the oldest holder, so a single sighting proves only that the instance does writes. Sustained
-    /// holding is the finding.</para>
-    /// </summary>
-    internal const double SustainedHolderSampleShare = 0.5;
-
-    /// <summary>
     /// How long a session must have sat idle in transaction, while pinning NOTHING, before the grid says
     /// anything about it. Five minutes, the copy of
-    /// <c>DarlingMcpPgSessionStatesTools.IdleWithoutHorizonAttentionMs</c> — see above for why it is a copy.
+    /// <c>DarlingMcpPgSessionStatesTools.IdleWithoutHorizonAttentionMs</c>. The viewer does not reference the
+    /// service project, so it is a copy, and a test keeps the two equal.
     /// <para>It costs vacuum nothing, so the amber is not the vacuum argument: at five minutes it is holding
     /// a connection and whatever locks the transaction already took, which is a forgotten commit.</para>
     /// </summary>
@@ -1193,6 +1200,9 @@ internal static class PgDisplay
         /// rather than 0 when absent — PostgreSQL 13 has no such column, and on 14+ it is NULL whenever
         /// compute_query_id is off, neither of which is a query whose id happens to be zero.</summary>
         public string LastQueryId { get; init; } = "";
+
+        /// <summary>#7428: the captured statement text for the Statement column, or "(statement text not captured yet)" until the hourly capture reaches the id. Empty for id 0 and for a null id, which name no statement. Derived, so it is not the reader's LastQueryText column.</summary>
+        public string StatementText { get; init; } = "";
 
         /// <summary><b>The column this panel exists for.</b> An age in transactions, and the words in
         /// <see cref="PinsNothingText"/> when the session held neither a snapshot nor a transaction id in
@@ -1236,8 +1246,9 @@ internal static class PgDisplay
         public string Caveats { get; init; } = "";
 
         /// <summary>Sustained holder: the red. Only ever true for a session seen holding the oldest xmin
-        /// across at least <see cref="SustainedHolderSampleShare"/> of the samples that saw it, so a passing
-        /// sighting — which every write transaction produces — is not painted as a cause.</summary>
+        /// across at least <see cref="DarlingPgSessionStatesReader.SustainedHolderSampleShare"/> of the samples that saw it, at a peak
+        /// horizon age of at least <see cref="DarlingPgSessionStatesReader.MinSustainedHolderHorizonAge"/>, so a passing
+        /// sighting — which every write transaction produces — and a short writer caught at each sample are not painted as a cause.</summary>
         public bool IsSustainedHorizonHolder { get; init; }
 
         /// <summary>Idle in transaction past the attention threshold: the amber. A different finding from
@@ -1295,9 +1306,7 @@ internal static class PgDisplay
            derived from them would report an absent GRANT as an observation about the workload. */
         var unknown = r.StateWasRedacted;
 
-        var sustained = !unknown
-            && r.SampleCount > 0
-            && r.HorizonHolderSamples >= Math.Max(1, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
+        var sustained = !unknown && DarlingPgSessionStatesReader.IsSustainedHolder(r);
 
         /* Deliberately NOT gated on PeakHorizonAge < 0, and the gate that used to be here was a real
            cross-surface bug. is_horizon_holder means "the OLDEST holder on the instance", not "holds
@@ -1313,7 +1322,7 @@ internal static class PgDisplay
         var caveats = new List<string>();
         if (r.StateWasRedacted)
         {
-            caveats.Add("state columns REDACTED — the monitoring login lacks pg_monitor here");
+            caveats.Add("state columns REDACTED: the monitoring login lacks pg_monitor here");
         }
 
         if (r.CaptureWasTruncated)
@@ -1338,12 +1347,14 @@ internal static class PgDisplay
             LastState = r.LastState ?? "",
             LastWait = wait,
             LastCommandTag = r.LastCommandTag ?? "",
+            /* #7428: "no statement" for 0 and the dash for a null id, like every other PostgreSQL query id cell. */
             LastQueryId = r.LastQueryId is { } queryId
-                ? queryId.ToString("N0", CultureInfo.CurrentCulture)
-                : string.Empty,
+                ? (queryId == 0 ? "no statement" : queryId.ToString("N0", CultureInfo.CurrentCulture))
+                : "—",
+            StatementText = r.LastQueryId is null or 0 ? "" : r.LastQueryText ?? "(statement text not captured yet)",
             PeakHorizonAge = r.PeakHorizonAge < 0
                 ? PinsNothingText
-                : string.Create(CultureInfo.CurrentCulture, $"{r.PeakHorizonAge:N0} transactions"),
+                : CountText.Plural(r.PeakHorizonAge, "transaction"),
             /* These two keep the ordinary dash. They are the components of the horizon age above, and an
                absent one is the narrower statement "this session held no snapshot" / "no transaction id" —
                which the horizon column has already said in words. */
@@ -1463,10 +1474,10 @@ internal static class PgDisplay
                 "Cleaning rounds that stopped early because bgwriter_lru_maxpages was reached. Sustained "
                 + "non-zero means the background writer is CAPPED rather than idle."),
             Metric("Background Writer", "Buffers Allocated", row.BuffersAlloc,
-                "Buffers handed out — the denominator for how hard the pool is being churned."),
+                "Buffers handed out: the denominator for how hard the pool is being churned."),
             Metric("Background Writer", "Buffers Written By Backends", row.BuffersBackend,
                 "Queries writing their own buffers because nothing else kept up. Blank on PostgreSQL 17+, "
-                + "which moved this to pg_stat_io — see the grid above, not a zero here."),
+                + "which moved this to pg_stat_io; see the grid above, not a zero here."),
             Metric("Background Writer", "Backend fsyncs", row.BuffersBackendFsync,
                 "Blank on PostgreSQL 17+ for the same reason."),
             Metric("WAL", "Records", row.WalRecords, "WAL records generated."),
@@ -1572,6 +1583,10 @@ internal static class PgDisplay
         public string? Event { get; init; }
         /// <summary>Null is a target that does not report a query id (#6836): the grid shows the not-applicable dash, never 0.</summary>
         public long? QueryId { get; init; }
+        /// <summary>#7428: what the Query ID cell shows: "no statement" for 0, the dash for null, else the id. The column sorts by <see cref="QueryId"/>, the number.</summary>
+        public string QueryIdText { get; init; } = "";
+        /// <summary>#7428: the captured statement text for the Statement column, or "(statement text not captured yet)" until the hourly capture reaches the id. Empty for 0 and for a null id, which name no statement. Derived, so it is not the reader's QueryText column.</summary>
+        public string StatementText { get; init; } = "";
         public long SampleCount { get; init; }
         public long EstimatedWaitMs { get; init; }
         public int BackendCount { get; init; }
@@ -1580,6 +1595,11 @@ internal static class PgDisplay
         /// <summary>The UTC instant <see cref="CaptureTime"/> is formatted from. The column sorts by it, not by that text.</summary>
         public DateTime CaptureTimeUtc { get; init; }
     }
+
+    /// <summary>#7428: the Query ID cell of a PostgreSQL grid. 0 is work belonging to no statement and reads "no statement", a bare 0 beside a real
+    /// 19-digit id would read as an id. Null is a target that does not report an id and reads as the dash. The number stays on the row for sorting.</summary>
+    internal static string QueryIdText(long? queryId) =>
+        queryId is null ? "—" : queryId == 0 ? "no statement" : queryId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     internal static List<WaitSamplingRow> WaitSamplingRows(IReadOnlyList<DarlingPgWaitSamplingReader.PgWaitSamplingRow> rows)
     {
@@ -1593,6 +1613,8 @@ internal static class PgDisplay
         EventType = row.EventType,
         Event = row.Event,
         QueryId = row.QueryId,
+        QueryIdText = QueryIdText(row.QueryId),
+        StatementText = row.QueryId is null or 0 ? "" : row.QueryText ?? "(statement text not captured yet)",
         SampleCount = row.SampleCount,
         EstimatedWaitMs = row.EstimatedWaitMs,
         BackendCount = row.BackendCount,
@@ -1600,6 +1622,10 @@ internal static class PgDisplay
         CaptureTime = Timestamp(row.CaptureTime),
         CaptureTimeUtc = row.CaptureTime,
     };
+
+    /// <summary>The lead of the predicate statistics note: the predicate count and the sample rate the rows were taken at.</summary>
+    internal static string PredicateStatsSummary(int predicates, double sampled) =>
+        string.Create(CultureInfo.InvariantCulture, $"{CountText.Plural(predicates, "predicate")}, sampled at {sampled * 100:N2}% of executions");
 
     /// <summary>How many wait rows are attributed to a statement. A null query id is a target that does not report
     /// one (#6836) and 0 is work belonging to no statement, so neither counts: a lifted <c>null != 0</c> is true
@@ -1620,12 +1646,14 @@ internal static class PgDisplay
     {
         ArgumentNullException.ThrowIfNull(rows);
 
-        return $"{rows.Count:N0} wait event(s), {WaitSamplingAttributedCount(rows):N0} attributed to a query. "
+        return string.Create(CultureInfo.InvariantCulture, $"{CountText.Plural(rows.Count, "wait event")}, {WaitSamplingAttributedCount(rows):N0} attributed to a query. ")
             + (serviceTier
                 ? $"Instrument: SERVICE SAMPLER, the service polling pg_stat_activity {cadence}. "
                   + PgWaitInstrument.ServiceSampledCaveat + " "
+                  + PgWaitInstrument.ServiceBackendsMeaning + " "
                 : instrumentKnown
                     ? "Instrument: pg_wait_sampling extension (10 ms in-engine profiler). "
+                      + PgWaitInstrument.ExtensionBackendsMeaning + " "
                     : string.Empty)
             + "Est. Wait is samples multiplied by the profile period, an estimate from a sampling "
             + "profiler and not a measured duration, so treat it as a ranking rather than a stopwatch. "
@@ -1877,8 +1905,9 @@ internal static class PgDisplay
         ChangedAt = SnapshotTime(row.ChangedAtUtc),
         ChangedAtUtc = row.ChangedAtUtc,
         Name = row.Name,
-        OldValue = row.OldValue,
-        NewValue = row.NewValue,
+        /* #7416 item 3: a pair that differs only in whitespace (log_line_prefix) shows it. */
+        OldValue = ConfigValueText.Shown(row.OldValue, row.NewValue),
+        NewValue = ConfigValueText.Shown(row.NewValue, row.OldValue),
         Unit = row.Unit,
         Scope = ConfigChangeScope(row),
         Kind = row.ChangeKind,
@@ -1914,6 +1943,35 @@ internal static class PgDisplay
         public string PendingRestart { get; init; } = "";
     }
 
+    /* #8664: the audit's wording is shared with the MCP reply, which names its own tools and fields. The Viewer has none of
+       those, so each is swapped for the tab or column that shows the same thing. The settings grid sits above the audit on
+       the same Overview tab. */
+    private static readonly (string Tool, string Place)[] s_viewerPlaces =
+    [
+        ("get_pg_server_config's pending_restart_settings", "the settings grid above"),
+        ("get_pg_server_config", "the settings grid above"),
+        ("get_pg_plan_capture_readiness", "Vacuum panel 5"),
+        ("get_pg_top_queries", "Activity > Query Shapes"),
+        ("get_pg_blocking", "Activity > Blocking"),
+        ("get_pg_write_stats", "the I/O tab"),
+        ("get_pg_database_stats", "the per-database counters on Activity > Query Shapes"),
+        ("get_pg_database_trend", "Activity > Trends"),
+        ("get_pg_autovacuum_health", "Vacuum panel 3"),
+        ("get_pg_log_events", "the log events read"),
+        ("cost_note", "the Cost column"),
+    ];
+
+    /// <summary>The audit's text as the Viewer shows it: the MCP tool and field names it carries become the Viewer's own places.</summary>
+    internal static string ViewerWording(string text)
+    {
+        foreach (var (tool, place) in s_viewerPlaces)
+        {
+            text = text.Replace(tool, place, StringComparison.Ordinal);
+        }
+
+        return text;
+    }
+
     internal static LoggingAuditRow LoggingAudit(DarlingPgLoggingAudit.Facet f) => new()
     {
         Setting = f.Setting,
@@ -1922,11 +1980,11 @@ internal static class PgDisplay
         Unit = f.Unit,
         Source = f.Source,
         ChangeNeeds = f.ChangeNeeds,
-        Unlocks = f.Unlocks,
-        Recommended = f.Recommended,
-        CostNote = f.CostNote,
-        Remedy = f.Remedy,
-        PendingRestart = f.PendingRestart ? (f.RestartNote ?? "yes") : string.Empty,
+        Unlocks = ViewerWording(f.Unlocks),
+        Recommended = ViewerWording(f.Recommended),
+        CostNote = ViewerWording(f.CostNote),
+        Remedy = ViewerWording(f.Remedy),
+        PendingRestart = f.PendingRestart ? ViewerWording(f.RestartNote ?? "yes") : string.Empty,
     };
 
     /// <summary>One relation of the Buffer Usage grid. All rows are one collection, so the time is the same on each.</summary>
@@ -1949,7 +2007,8 @@ internal static class PgDisplay
     internal static BufferUsageRow BufferUsage(DarlingPgBufferUsageReader.PgBufferUsageRow row) => new()
     {
         DatabaseName = row.DatabaseName,
-        RelationName = row.RelationName,
+        /* #7455: a word for the rows that have no name (another database, the shared catalogs), never a blank. */
+        RelationName = row.RelationName ?? row.NameLabel,
         Buffers = row.Buffers,
         PctOfPool = Math.Round(row.PctOfPool, 1),
         DirtyBuffers = row.DirtyBuffers,
@@ -1974,6 +2033,10 @@ internal static class PgDisplay
         public double WorstEstimateErrorRatio { get; init; }
         public double SampleRate { get; init; }
         public long QueryId { get; init; }
+        /// <summary>#7428: what the Query ID cell shows: "no statement" for 0, else the id. The column sorts by <see cref="QueryId"/>, the number.</summary>
+        public string QueryIdText { get; init; } = "";
+        /// <summary>#7428: the captured statement text for the Statement column, or "(statement text not captured yet)" until the hourly capture reaches the id. Empty for 0, which names no statement. Derived, so it is not the reader's QueryText column.</summary>
+        public string StatementText { get; init; } = "";
         public string CaptureTime { get; init; } = "";
         /// <summary>The UTC instant <see cref="CaptureTime"/> is formatted from. The column sorts by it, not by that text.</summary>
         public DateTime CaptureTimeUtc { get; init; }
@@ -1992,6 +2055,8 @@ internal static class PgDisplay
         WorstEstimateErrorRatio = row.WorstEstimateErrorRatio,
         SampleRate = row.SampleRate,
         QueryId = row.QueryId,
+        QueryIdText = QueryIdText(row.QueryId),
+        StatementText = row.QueryId == 0 ? "" : row.QueryText ?? "(statement text not captured yet)",
         CaptureTime = SnapshotTime(row.CaptureTime),
         CaptureTimeUtc = row.CaptureTime,
         Source = row,
@@ -2000,7 +2065,10 @@ internal static class PgDisplay
     /// <summary>One facet of the Plan-capture readiness grid: the check's answer as words, with the time it was last observed.</summary>
     internal sealed class PlanCaptureRow
     {
+        /// <summary>#7410: the plain label for the step ("Auto_explain loaded at server start"), not the raw facet name.</summary>
         public string Facet { get; init; } = "";
+        /// <summary>The facet's raw name (<c>library_loaded</c>), shown as the Facet cell's tooltip.</summary>
+        public string FacetName { get; init; } = "";
         /* Words, not a checkbox or a bare bool: "False" beside a remedy sentence reads as a failure rather than as a
            step not yet taken. */
         public string Satisfied { get; init; } = "";
@@ -2013,7 +2081,8 @@ internal static class PgDisplay
 
     internal static PlanCaptureRow PlanCapture(DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessRow row) => new()
     {
-        Facet = row.Facet,
+        Facet = ViewerServerTab.PlanCaptureFacetLabel(row.Facet, capitalize: true),
+        FacetName = row.Facet,
         Satisfied = row.IsSatisfied ? "yes" : "no",
         Observed = row.Observed ?? "(not reported)",
         Detail = row.Detail ?? string.Empty,
@@ -2031,6 +2100,10 @@ internal static class PgDisplay
     {
         public string DatabaseName { get; init; } = "";
         public long QueryId { get; init; }
+        /// <summary>#7428: what the Query ID cell shows: "no statement" for 0, else the id. The column sorts by <see cref="QueryId"/>, the number.</summary>
+        public string QueryIdText { get; init; } = "";
+        /// <summary>#7428: the captured statement text for the Statement column, or "(statement text not captured yet)" until the hourly capture reaches the id. Empty for 0, which names no statement. Derived, so it is not the reader's QueryText column.</summary>
+        public string StatementText { get; init; } = "";
         public double TotalCpuMs { get; init; }
         public double ExecUserTimeMs { get; init; }
         public double ExecSystemTimeMs { get; init; }
@@ -2048,6 +2121,8 @@ internal static class PgDisplay
     {
         DatabaseName = row.DatabaseName ?? "",
         QueryId = row.QueryId,
+        QueryIdText = QueryIdText(row.QueryId),
+        StatementText = row.QueryId == 0 ? "" : row.QueryText ?? "(statement text not captured yet)",
         TotalCpuMs = Math.Round(row.TotalCpuMs, 1),
         ExecUserTimeMs = Math.Round(row.ExecUserTimeMs, 1),
         ExecSystemTimeMs = Math.Round(row.ExecSystemTimeMs, 1),
@@ -2063,6 +2138,10 @@ internal static class PgDisplay
     internal sealed class CapturedPlanRow
     {
         public long QueryId { get; init; }
+        /// <summary>#7428: what the Query ID cell shows: "no statement" for 0, else the id. The column sorts by <see cref="QueryId"/>, the number.</summary>
+        public string QueryIdText { get; init; } = "";
+        /// <summary>#7428: the captured statement text for the Statement column, or "(statement text not captured yet)" until the hourly capture reaches the id. Empty for 0, which names no statement. Derived, so it is not the reader's QueryText column.</summary>
+        public string StatementText { get; init; } = "";
         public string TopNodeType { get; init; } = "";
         public int NodeCount { get; init; }
         public double TotalDurationMs { get; init; }
@@ -2075,6 +2154,8 @@ internal static class PgDisplay
     internal static CapturedPlanRow CapturedPlan(DarlingPgPlanCaptureReader.PgPlanCaptureRow row) => new()
     {
         QueryId = row.QueryId,
+        QueryIdText = QueryIdText(row.QueryId),
+        StatementText = row.QueryId == 0 ? "" : row.QueryText ?? "(statement text not captured yet)",
         TopNodeType = row.TopNodeType ?? "",
         NodeCount = row.NodeCount,
         TotalDurationMs = Math.Round(row.TotalDurationMs, 1),

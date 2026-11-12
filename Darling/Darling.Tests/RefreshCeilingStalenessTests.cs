@@ -929,6 +929,6 @@ public sealed class RefreshCeilingStalenessTests
             $"{file} was not found at '{path}'. This guard parses the REAL file (resolved from "
             + "[CallerFilePath], so there is no copy to go stale); restore the path rather than pointing it "
             + "at a fixture.");
-        return File.ReadAllText(path);
+        return RepoFile.ReadRepoFile(path);
     }
 }

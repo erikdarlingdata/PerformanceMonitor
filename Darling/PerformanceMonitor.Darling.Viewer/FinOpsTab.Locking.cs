@@ -15,6 +15,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -33,16 +34,28 @@ public partial class FinOpsTab
     private bool _suppressFinOpsLockingDbChange;
 
     /// <summary>Entry point (refresh / sub-tab activate): reset to the grid, repopulate the DB selector, load.</summary>
-    private async Task LoadFinOpsIndexLockingAsync()
+    private async Task LoadFinOpsIndexLockingAsync() => await LoadFinOpsIndexLockingAsync(null);
+
+    /// <summary>#8549: the selector's database list and the grid's reads do not depend on each other here, because this entry point resets the
+    /// selector to "All databases", so the grid reads every database whatever the list holds. They ran one after another (the list, then the grid,
+    /// then the two notes one by one); now all four start together, and each is booked on the load's clock by name.</summary>
+    private async Task LoadFinOpsIndexLockingAsync(ViewerLoadTimer? timer)
     {
         ShowFinOpsLockingView(FinOpsLockingLevel.Parent);
-        await PopulateFinOpsLockingDbSelectorAsync();
-        await LoadFinOpsIndexLockingGridAsync();
+        using var readFanOut = ViewerReadFanOut.Of(4);
+        var databasesRead = ViewerServerTab.Timed(timer, "locking databases read", _dataService.GetIndexLockingDatabasesAsync(_server.ServerId, SelectedDatabaseFilter));
+        var gridLoad = LoadFinOpsIndexLockingGridAsync(timer, db: null);
+        await Task.WhenAll(PopulateFinOpsLockingDbSelectorAsync(databasesRead, timer), gridLoad);
     }
 
-    private async Task PopulateFinOpsLockingDbSelectorAsync()
+    private async Task PopulateFinOpsLockingDbSelectorAsync(Task<List<string>> databasesRead, ViewerLoadTimer? timer)
     {
-        var dbs = await _dataService.GetIndexLockingDatabasesAsync(_server.ServerId, SelectedDatabaseFilter);
+        var dbs = await databasesRead;
+        ViewerServerTab.ClientStep(timer, "locking database selector bind", () => BindFinOpsLockingDbSelector(dbs));
+    }
+
+    private void BindFinOpsLockingDbSelector(List<string> dbs)
+    {
         var items = new List<string> { "All databases" };
         items.AddRange(dbs);
 
@@ -55,22 +68,41 @@ public partial class FinOpsTab
     private string? SelectedFinOpsLockingDb()
         => FinOpsLockingDbSelector.SelectedIndex <= 0 ? null : FinOpsLockingDbSelector.SelectedItem as string;
 
+    /// <summary>The grid's own reload (a database pick, the Refresh button). It declares its own fan-out; the entry point, which starts the
+    /// selector's list beside the grid, declares one for all four reads and calls <see cref="LoadFinOpsIndexLockingGridAsync(ViewerLoadTimer?, string?)"/> directly.</summary>
     private async Task LoadFinOpsIndexLockingGridAsync()
     {
-        var db = SelectedFinOpsLockingDb();
-        var data = await _dataService.GetIndexLockingAsync(_server.ServerId, 200, db, SelectedDatabaseFilter);
-        ApplyFinOpsLockingHeat(data);
-        _finopsIndexLockingFilterMgr!.UpdateData(data);
-        FinOpsNoIndexLockingMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsIndexLockingCountIndicator.Text = data.Count > 0 ? $"{data.Count} index(es)" : "";
+        using var readFanOut = ViewerReadFanOut.Of(3);
+        await LoadFinOpsIndexLockingGridAsync(null, SelectedFinOpsLockingDb());
+    }
 
+    /// <summary>#8549: the grid's read and the two notes' reads do not depend on each other, so they start together; each is booked by name. The grid
+    /// is bound as soon as its own read is in. The caller picks <paramref name="db"/> and declares the fan-out.</summary>
+    private async Task LoadFinOpsIndexLockingGridAsync(ViewerLoadTimer? timer, string? db)
+    {
+        var gridRead = ViewerServerTab.Timed(timer, "index locking read", _dataService.GetIndexLockingAsync(_server.ServerId, 200, db, SelectedDatabaseFilter));
         /* Writers on an optimized-locking database wait on transaction-ID locks the grid's counters do not count. */
-        var optimizedLockingNote = await _dataService.GetOptimizedLockingNoteAsync(_server.ServerId, SelectedDatabaseFilter);
+        var noteRead = ViewerServerTab.Timed(timer, "optimized locking note read", _dataService.GetOptimizedLockingNoteAsync(_server.ServerId, SelectedDatabaseFilter));
+        /* #4925: a master target keeps its separately monitored databases' rows here; one line says why. */
+        var separatelyMonitoredRead = ViewerServerTab.Timed(timer, "separately monitored read", _dataService.GetSeparatelyMonitoredAsync(_server.ServerId));
+
+        var data = await gridRead;
+        ViewerServerTab.ClientStep(timer, "index locking bind", () =>
+        {
+            ApplyFinOpsLockingHeat(data);
+            _finopsIndexLockingFilterMgr!.UpdateData(data);
+            /* The grid's columns are wider than its page, so while it holds no rows a horizontal scroll bar would scroll a header row
+               over nothing: the bar shows only while there are rows to scroll. */
+            FinOpsIndexLockingDataGrid.HorizontalScrollBarVisibility = data.Count > 0 ? System.Windows.Controls.ScrollBarVisibility.Auto : System.Windows.Controls.ScrollBarVisibility.Hidden;
+            FinOpsNoIndexLockingMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            FinOpsIndexLockingCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "index", "indexes") : "";
+        });
+
+        var optimizedLockingNote = await noteRead;
         FinOpsOptimizedLockingNote.Text = optimizedLockingNote ?? "";
         FinOpsOptimizedLockingNote.Visibility = optimizedLockingNote is null ? Visibility.Collapsed : Visibility.Visible;
 
-        /* #4925: a master target keeps its separately monitored databases' rows here; one line says why. */
-        var separatelyMonitoredNote = ViewerDataService.SeparatelyMonitoredListNoteFor(await _dataService.GetSeparatelyMonitoredAsync(_server.ServerId));
+        var separatelyMonitoredNote = ViewerDataService.SeparatelyMonitoredListNoteFor(await separatelyMonitoredRead);
         FinOpsSeparatelyMonitoredNote.Text = separatelyMonitoredNote ?? "";
         FinOpsSeparatelyMonitoredNote.Visibility = separatelyMonitoredNote is null ? Visibility.Collapsed : Visibility.Visible;
     }
@@ -103,7 +135,7 @@ public partial class FinOpsTab
 
     private void FinOpsIndexLockingGrid_DoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (FinOpsIndexLockingDataGrid.SelectedItem is IndexLockingRow row)
+        if (DataGridRowHit.IsOnRow(e.OriginalSource) && FinOpsIndexLockingDataGrid.SelectedItem is IndexLockingRow row)
             ShowFinOpsLockingDetail(row);
     }
 
@@ -159,15 +191,16 @@ public partial class FinOpsTab
         var labelBlock = new TextBlock
         {
             Text = label,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = (Brush)FindResource("ForegroundMutedBrush")
+            FontWeight = FontWeights.SemiBold
         };
         var valueBlock = new TextBlock
         {
             Text = value,
-            Foreground = (Brush)FindResource("ForegroundBrush"),
             HorizontalAlignment = HorizontalAlignment.Right
         };
+        // Resource references, so the row's text follows a theme changed while the detail view is open (#8540).
+        labelBlock.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundMutedBrush");
+        valueBlock.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundBrush");
         Grid.SetColumn(labelBlock, 0);
         Grid.SetColumn(valueBlock, 1);
         grid.Children.Add(labelBlock);

@@ -103,15 +103,14 @@ public static class ColumnFilterMatcher
         if (rawValue == null)
             return comparison(0, 1); // null is "less than" any value
 
-        var stringValue = rawValue.ToString() ?? string.Empty;
-
         // Try numeric comparison first
-        if (TryParseNumeric(stringValue, out var numericValue) && TryParseNumeric(filterValue, out var filterNumeric))
+        if (TryGetNumeric(rawValue, out var numericValue) && TryParseNumeric(filterValue, out var filterNumeric))
         {
             return comparison(numericValue.CompareTo(filterNumeric), 0);
         }
 
         // Fall back to string comparison
+        var stringValue = rawValue.ToString() ?? string.Empty;
         return comparison(string.Compare(stringValue, filterValue, StringComparison.OrdinalIgnoreCase), 0);
     }
 
@@ -120,33 +119,126 @@ public static class ColumnFilterMatcher
         if (rawValue == null)
             return false;
 
-        var stringValue = rawValue.ToString() ?? string.Empty;
-
-        // Try to parse both values as decimals
-        if (TryParseNumeric(stringValue, out var numericValue) && TryParseNumeric(filterValue, out var filterNumeric))
+        // Compare both values as decimals
+        if (TryGetNumeric(rawValue, out var numericValue) && TryParseNumeric(filterValue, out var filterNumeric))
         {
             return comparison(numericValue, filterNumeric);
         }
 
-        // If we can't parse both as numbers, the filter doesn't match
+        // If we can't read both as numbers, the filter doesn't match
         return false;
     }
 
+    /// <summary>
+    /// The number a cell holds. A numeric cell is read as its value, with no round trip through text: a text rendering
+    /// follows the thread culture, and a comma-decimal culture would turn 1.5 into "1,5" and then into 15. A cell of any
+    /// other type is read as its text, the same way the typed value is.
+    /// </summary>
+    private static bool TryGetNumeric(object rawValue, out decimal result)
+    {
+        switch (rawValue)
+        {
+            case decimal d:
+                result = d;
+                return true;
+            case double d:
+                return TryFromDouble(d, out result);
+            case float f:
+                return TryFromDouble(f, out result);
+            case byte or sbyte or short or ushort or int or uint or long or ulong:
+                result = Convert.ToDecimal(rawValue, CultureInfo.InvariantCulture);
+                return true;
+            default:
+                return TryParseNumeric(rawValue.ToString() ?? string.Empty, out result);
+        }
+    }
+
+    private static bool TryFromDouble(double value, out decimal result)
+    {
+        if (double.IsFinite(value) && Math.Abs(value) < (double)decimal.MaxValue)
+        {
+            result = (decimal)value;
+            return true;
+        }
+
+        result = 0;
+        return false;
+    }
+
+    /// <summary>
+    /// The number a typed value, or a text cell, means. The grids format every number in en-US whatever the machine's culture,
+    /// and a user types or pastes what they see, so the separators the text carries decide before the culture does. When both
+    /// "," and "." appear, the one that appears last is the decimal separator and the other groups thousands: "1,234.5" and
+    /// "1.234,5" are both 1234.5. When only one kind appears, exactly once, and not before a run of exactly three digits, it is
+    /// the decimal separator in any culture: "1.5", "1,5", "0,25" and "12.3456". Otherwise (one kind repeated, or once before
+    /// exactly three digits) the text is read in the thread culture with that culture's own group separator dropped, and as
+    /// invariant when the culture cannot read it, so a de-DE text cell of "1.234" or "1.234.567" is its thousands and an en-US
+    /// "1,234" is too. That last shape is the one the text cannot settle on its own. The percent sign, dollar sign and white
+    /// space are dropped first.
+    /// </summary>
     private static bool TryParseNumeric(string value, out decimal result)
     {
-        if (string.IsNullOrWhiteSpace(value))
+        var cleanValue = StripFormatting(value);
+        if (cleanValue.Length == 0)
         {
             result = 0;
             return false;
         }
 
-        // Remove common formatting characters (commas, percent signs, currency symbols)
-        var cleanValue = value.Trim()
-            .Replace(",", "")
-            .Replace("%", "")
-            .Replace("$", "")
-            .Replace(" ", "");
+        if (SeparatorsDecide(cleanValue, out var normalized))
+            return decimal.TryParse(normalized, NumberStyles.Any, CultureInfo.InvariantCulture, out result);
 
-        return decimal.TryParse(cleanValue, NumberStyles.Any, CultureInfo.InvariantCulture, out result);
+        return TryParseInCulture(cleanValue, CultureInfo.CurrentCulture, out result)
+            || TryParseInCulture(cleanValue, CultureInfo.InvariantCulture, out result);
+    }
+
+    /// <summary>The text with the percent sign, the dollar sign and every white space character removed.</summary>
+    private static string StripFormatting(string value) =>
+        string.Concat(value.Where(c => c != '%' && c != '$' && !char.IsWhiteSpace(c)));
+
+    /// <summary>
+    /// Whether the separators in <paramref name="value"/> settle its reading on their own, and if so the text with the group
+    /// separator removed and the decimal separator written as ".", ready for an invariant parse. False when the text has no
+    /// separator, one kind repeated, or one kind once before exactly three digits: those are the culture's to read.
+    /// </summary>
+    private static bool SeparatorsDecide(string value, out string normalized)
+    {
+        var lastComma = value.LastIndexOf(',');
+        var lastPoint = value.LastIndexOf('.');
+
+        if (lastComma >= 0 && lastPoint >= 0)
+        {
+            var decimalSeparator = lastPoint > lastComma ? '.' : ',';
+            var groupSeparator = decimalSeparator == '.' ? ',' : '.';
+            normalized = value.Replace(groupSeparator.ToString(), "").Replace(decimalSeparator, '.');
+            return true;
+        }
+
+        var last = Math.Max(lastComma, lastPoint);
+        if (last >= 0 && value.IndexOf(value[last]) == last && !HasRunOfExactlyThreeDigits(value, last + 1))
+        {
+            normalized = value.Replace(value[last], '.');
+            return true;
+        }
+
+        normalized = value;
+        return false;
+    }
+
+    /// <summary>Whether <paramref name="value"/> at <paramref name="start"/> begins with a run of exactly three ASCII digits.</summary>
+    private static bool HasRunOfExactlyThreeDigits(string value, int start)
+    {
+        var digits = 0;
+        while (start + digits < value.Length && char.IsAsciiDigit(value[start + digits]))
+            digits++;
+        return digits == 3;
+    }
+
+    /// <summary>The text read in <paramref name="culture"/>, with that culture's own group separator dropped first.</summary>
+    private static bool TryParseInCulture(string value, CultureInfo culture, out decimal result)
+    {
+        var groupSeparator = culture.NumberFormat.NumberGroupSeparator;
+        var cleanValue = groupSeparator.Length > 0 ? value.Replace(groupSeparator, "") : value;
+        return decimal.TryParse(cleanValue, NumberStyles.Any, culture, out result);
     }
 }

@@ -59,6 +59,35 @@ public sealed class MemoryGrantsCollectorDefinitionTests
             interval.Type);
     }
 
+    /// <summary>#7676: one pool has two semaphores, id 0 with a max target and id 1 (small query) with a NULL max target. Both rows
+    /// come back from the read and both are written, and the NULL stays NULL in the payload, not a 0 that reads as a zero ceiling.
+    /// The query's WHERE clause runs on the server, so no stand-in reader covers it: this covers what the collector does with
+    /// the rows it is given.</summary>
+    [Fact]
+    public async Task BothSemaphoresOfOnePoolAreRead_AndWritten_WithTheSmallQueryMaxTargetKeptNull()
+    {
+        using var reader = new FakeCollectorDataReader(
+            new object[] { (short)0, 2, 8000m, 12000m, 8000m, 80m, 100m, 40m, 3, 1, 5L, 2L },
+            new object[] { (short)1, 2, 700m, System.DBNull.Value, 700m, 20m, 7m, 6m, 1, 5, 0L, 0L });
+        var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
+
+        var rows = await MemoryGrantsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(new short[] { 0, 1 }, rows.Select(r => r.ResourceSemaphoreId).ToArray());
+        Assert.Equal(12000m, rows[0].MaxTargetMb);
+        Assert.Null(rows[1].MaxTargetMb);
+
+        var writers = rows.Select(r =>
+        {
+            var w = new RecordingCollectorRowWriter();
+            MemoryGrantsCollector.Instance.WritePayload(r, w, context);
+            return w;
+        }).ToArray();
+        Assert.Equal(12000m, writers[0].Values[3]);
+        Assert.Null(writers[1].Values[3]);
+        Assert.Equal((short)1, writers[1].Values[0]);
+    }
+
     [Fact]
     public void NameAndTable_MatchTheDispatchAndSchema()
     {

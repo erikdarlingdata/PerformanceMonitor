@@ -601,6 +601,198 @@ ALTER TABLE config.config_threshold_overrides DROP COLUMN IF EXISTS scope_tag_id
             @"ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS severities;
 ALTER TABLE IF EXISTS config.external_alert_state DROP COLUMN IF EXISTS fired_severities;
 ALTER TABLE IF EXISTS config.investigation_request_alerts DROP COLUMN IF EXISTS severity;"),
+        // V230 (#7028): the two snapshot wait tiers of the blocking band on the alert settings row. The warn tier column is the probe's newest
+        // sentinel. The rewind drops both, so a re-run of V230 adds them again. Safe on a store that never had them.
+        new(230, "hasBlockingSnapshotBands",
+            @"ALTER TABLE config.config_alert_settings
+    DROP COLUMN IF EXISTS blocking_warn_snapshot_wait_seconds,
+    DROP COLUMN IF EXISTS blocking_critical_snapshot_wait_seconds;"),
+        // V231 (#7040): the recurring schedule on the mute rules. The start time column is the probe's newest sentinel. The rewind drops all
+        // four columns, so a re-run of V231 adds them again. Safe on a store that never had them.
+        new(231, "hasMuteRecurrence",
+            @"ALTER TABLE config.config_mute_rules
+    DROP COLUMN IF EXISTS recur_days,
+    DROP COLUMN IF EXISTS recur_start_time,
+    DROP COLUMN IF EXISTS recur_end_time,
+    DROP COLUMN IF EXISTS recur_time_zone;"),
+        // V232 (#7041): the Daily Health Report columns on the alert settings row. The enabled column is the probe's newest sentinel. The rewind
+        // drops all four, so a re-run of V232 adds them again. Safe on a store that never had them.
+        new(232, "hasDailyReportSettings",
+            @"ALTER TABLE config.config_alert_settings
+    DROP COLUMN IF EXISTS daily_report_enabled,
+    DROP COLUMN IF EXISTS daily_report_send_at,
+    DROP COLUMN IF EXISTS daily_report_time_zone,
+    DROP COLUMN IF EXISTS daily_report_title;"),
+        // V233 (#6979): the report notice setting on the notification routes. The column is the probe's newest sentinel. The rewind drops the
+        // column (its CHECK goes with it), so a re-run of V233 does everything again. Safe on a store that never had it.
+        new(233, "hasReportNotice",
+            @"ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS report_notice;"),
+        // V234 (#7076): the exact alert key on the alert log. The column is the probe's newest sentinel. The rewind drops it, so a re-run of
+        // V234 adds it again. Safe on a store that never had it.
+        new(234, "hasAlertLogKey",
+            @"ALTER TABLE IF EXISTS config.config_alert_log DROP COLUMN IF EXISTS alert_key;"),
+        // V235 (#7083): the blocking bars' column defaults are 3, 60 and 3, the probe's newest sentinel (the count bar's default). The rewind sets the
+        // defaults back to V1's 1, V40's 0 and V122's 1, so a re-run of V235 sets them again. The row's values are left as they are. Guarded, so it is
+        // safe on a store whose V122 column is already gone.
+        new(235, "hasBlockingBarsOnWaitTime",
+            @"
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'pg_blocking_count_threshold' AND NOT attisdropped) THEN
+        ALTER TABLE config.config_alert_settings
+            ALTER COLUMN blocking_count_threshold SET DEFAULT 1,
+            ALTER COLUMN blocking_wait_seconds_threshold SET DEFAULT 0,
+            ALTER COLUMN pg_blocking_count_threshold SET DEFAULT 1;
+    END IF;
+END $$;"),
+        // V236 (#7083): the action on the mute rules. The column is the probe's newest sentinel. The rewind drops it (its CHECK goes with it), so a
+        // re-run of V236 adds it again. Safe on a store that never had it.
+        new(236, "hasMuteRuleAction",
+            @"ALTER TABLE IF EXISTS config.config_mute_rules DROP COLUMN IF EXISTS action;"),
+        // V237 (#7107): the people, identity and grant tables. The grant table is the probe's newest sentinel. The rewind drops all three
+        // (the two child tables first), so a re-run of V237 creates them again. Safe on a store that never had them.
+        new(237, "hasPeopleGrants",
+            @"DROP TABLE IF EXISTS config.person_grant;
+DROP TABLE IF EXISTS config.person_identity;
+DROP TABLE IF EXISTS config.person;"),
+        // V238 (#7109): the action proposals table and the two route approval columns. The table is the probe's newest sentinel. The rewind
+        // drops all three, so a re-run of V238 adds them again (and runs the backfill again, on a store whose column is gone). Safe on a store
+        // that never had them.
+        new(238, "hasActionProposals",
+            @"DROP TABLE IF EXISTS config.agent_action_proposals;
+ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS action_approval, DROP COLUMN IF EXISTS approval_single_person;"),
+        // V239 (#7146): the fleet rollup of the Query Store compose stamp. The table is the probe's newest sentinel. The rewind drops it and
+        // the ledger column, so a re-run of V239 creates them again. Safe on a store that never had them.
+        new(239, "hasComposeFleet",
+            @"DROP TABLE IF EXISTS collect.query_store_compose_fleet;
+ALTER TABLE IF EXISTS collect.query_store_compose_stamp_built DROP COLUMN IF EXISTS fleet_built_seq;"),
+        // V240 (#7169): the execution-weighted sums on the Query Store daily summary. The last column is the probe's newest sentinel. The
+        // rewind drops all six, so a re-run of V240 adds them again. Safe on a store that never had them.
+        new(240, "hasQueryStoreTopDailyWsum",
+            @"ALTER TABLE IF EXISTS collect.query_store_top_daily
+    DROP COLUMN IF EXISTS avg_duration_us_wsum, DROP COLUMN IF EXISTS avg_cpu_time_us_wsum, DROP COLUMN IF EXISTS avg_logical_io_reads_wsum,
+    DROP COLUMN IF EXISTS avg_logical_io_writes_wsum, DROP COLUMN IF EXISTS avg_physical_io_reads_wsum, DROP COLUMN IF EXISTS avg_rowcount_wsum;"),
+        // V241 (#7497): the blocking process's open transaction count on the blocked process reports. The last column is the probe's newest
+        // sentinel. The rung re-expands the SELECT * view over it, so the rewind (V199's shape) drops the view, drops the column and creates
+        // the view again over the older shape, then a re-run of V241 adds the column and re-expands the view. Safe on a store that never had it.
+        new(241, "hasBlockingOpenTranCount",
+            @"DROP VIEW IF EXISTS collect.v_blocked_process_reports;
+ALTER TABLE IF EXISTS collect.blocked_process_reports DROP COLUMN IF EXISTS blocking_open_transaction_count;
+CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collect.blocked_process_reports;"),
+
+        // V242 (#7567): the service-own entry list on the statement text lookup. The last column is the probe's newest sentinel, so the
+        // rewind drops it and a re-run of V242 adds it again. Safe on a store that never had it.
+        new(242, "hasStatementTextOwnEntries",
+            @"ALTER TABLE IF EXISTS collect.pg_statement_text DROP COLUMN IF EXISTS own_entries;"),
+        // V243 (#7573): the session's program name on the waiting tasks. A plain nullable column with no view over it, so the rewind is the drop
+        // alone, and the re-run of V243 adds it back. Safe on a store that never had it.
+        new(243, "hasWaitingTasksProgramName",
+            @"ALTER TABLE IF EXISTS collect.waiting_tasks DROP COLUMN IF EXISTS program_name;"),
+        // V244 (#7590): the connect-failure state on the server registry. The last column is the probe's newest sentinel. The rewind drops the three
+        // columns so a re-run of V244 adds them again. Safe on a store that never had them.
+        new(244, "hasServerConnectDownState",
+            @"ALTER TABLE IF EXISTS collect.servers DROP COLUMN IF EXISTS connect_down_since, DROP COLUMN IF EXISTS last_connect_error, DROP COLUMN IF EXISTS next_connect_attempt;"),
+        // V245 (#7611): the three Database Protection thresholds on the alert settings. Plain NOT NULL DEFAULT columns, so the rewind drops all three
+        // (the probe's sentinel is the CHECKDB one) and the re-run of V245 adds them back with their defaults. Safe on a store that never had them.
+        new(245, "hasProtectionThresholds",
+            @"ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS backup_overdue_threshold_hours, DROP COLUMN IF EXISTS log_backup_overdue_threshold_minutes, DROP COLUMN IF EXISTS checkdb_overdue_threshold_hours;"),
+        // V246 (#7609): the (query_hash, bucket DESC) index on the corrected hourly Query Store rollup's materialization. The rewind drops it by name,
+        // found by catalog (it lives in the materialization's schema), and a no-op without it; the re-run of V246 builds it again.
+        new(246, "hasQueryStoreHashIndex",
+            @"DO $$ DECLARE v regclass; BEGIN SELECT c.oid::regclass INTO v FROM pg_class c WHERE c.relkind = 'i' AND c.relname = 'ix_qs_corrected_hourly_hash_bucket'; IF v IS NOT NULL THEN EXECUTE format('DROP INDEX %s', v); END IF; END $$;"),
+        // V247 (#7639): the per-server list of databases that get Extended Events sessions on the server registry. The column is the probe's newest
+        // sentinel, so the rewind drops it and the re-run of V247 adds it back empty. Safe on a store that never had it.
+        new(247, "hasXeSessionDatabases",
+            @"ALTER TABLE IF EXISTS config.config_monitored_servers DROP COLUMN IF EXISTS xe_session_databases;"),
+        // V248 (#7730): the key trigger also recognizes the old statements, and the state row is deleted so the backfill runs again. The rewind puts
+        // V219's marker-only function back (the probe's sentinel is the digest test in the function's source), so a re-run of V248 replaces it
+        // again. The state row is left as it is: the re-run deletes it.
+        new(248, "hasSelfKeysOldStatements", PerformanceMonitor.Darling.Storage.QueryStoreSelfKeys.MarkerOnlyTriggerSql),
+        // V249 (#7731): the database name on the statement stats. A plain nullable column with no view over it, so the rewind is the drop alone, and the
+        // re-run of V249 adds it back. Safe on a store that never had it.
+        new(249, "hasStatementStatsDatabaseName",
+            @"ALTER TABLE IF EXISTS collect.pg_statement_stats DROP COLUMN IF EXISTS database_name;"),
+        // V250 (#7691): the memory node on the memory pressure events. The column is the probe's newest sentinel, so the rewind drops the view,
+        // drops the column and creates the view again over the older shape (V199's shape); the re-run of V250 adds the column and re-expands the
+        // view. Safe on a store that never had it.
+        new(250, "hasMemoryPressureNode",
+            @"DROP VIEW IF EXISTS collect.v_memory_pressure_events;
+ALTER TABLE IF EXISTS collect.memory_pressure_events DROP COLUMN IF EXISTS memory_node_id;
+CREATE OR REPLACE VIEW collect.v_memory_pressure_events AS SELECT * FROM collect.memory_pressure_events;"),
+        // V251 (#7762): the compose rollup's row trigger marks from the hour of the writer's clock. The rewind puts V173's function and triggers back (the
+        // probe's sentinel is the one-hour subtraction in the function's source), so a re-run of V251 replaces them again. V173's text is idempotent.
+        new(251, "hasComposeStampLateMarkOffsetZero", PerformanceMonitor.Darling.Storage.QueryStoreComposeStamp.CreateSql),
+        // V252 (#7656): the Slack bot's route channel and its stamp with the stamp's trigger, the sealed tokens on the notification settings row
+        // and the request thread table. The probe's sentinel is the thread table, so the rewind drops it, the trigger and its function, and the
+        // four columns, and a re-run of V252 adds them back. Safe on a store that never had them.
+        new(252, "hasSlackBotThreads",
+            @"DROP TABLE IF EXISTS config.investigation_request_threads;
+DROP TRIGGER IF EXISTS trg_notification_routes_slack_bot_channel_stamp ON config.config_notification_routes;
+DROP FUNCTION IF EXISTS config.notification_routes_stamp_slack_bot_channel();
+ALTER TABLE IF EXISTS config.config_notification_routes DROP COLUMN IF EXISTS slack_bot_channel;
+ALTER TABLE IF EXISTS config.config_notification_routes DROP COLUMN IF EXISTS slack_bot_channel_set_at;
+ALTER TABLE IF EXISTS config.config_notification DROP COLUMN IF EXISTS slack_bot_token;
+ALTER TABLE IF EXISTS config.config_notification DROP COLUMN IF EXISTS slack_app_token;"),
+        // V253 (#7658): the Slack card table. The probe's sentinel is the table, so the rewind drops it and a re-run of V253 makes it again. Safe on a
+        // store that never had it.
+        new(253, "hasSlackCards",
+            @"DROP TABLE IF EXISTS config.investigation_slack_posts;"),
+        // V254 (#7659): the chat requests. The probe's sentinel is the message table, so the rewind drops it, the asker table, the thread reverse index
+        // and the link column (with its index), and a re-run of V254 makes them again. Safe on a store that never had them.
+        new(254, "hasChatRequests",
+            @"DROP TABLE IF EXISTS config.investigation_person_messages;
+DROP TABLE IF EXISTS config.investigation_request_askers;
+DROP INDEX IF EXISTS config.ix_investigation_request_threads_channel_ts;
+ALTER TABLE IF EXISTS config.investigation_requests DROP COLUMN IF EXISTS chat_thread_of;"),
+        // V255 (#8106): the cadence wait baseline supply. The probe's sentinel is the relation itself, a continuous aggregate or the plain
+        // fallback view, so the rewind drops whichever shape stands (the product's own discriminating drop), and a re-run of V255 or the
+        // ensure sweep creates it again. Safe on a store that never had it.
+        new(255, "hasWaitStatsCadenceBaseline", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.WaitStatsCadenceBaselineView)),
+        // V256 (#7643): the schema tracking tables. The probe's sentinel is the object table, so the rewind drops all seven (the four child tables
+        // reference it, so they go first) and a re-run of V256 makes them again. Safe on a store that never had them.
+        new(256, "hasSchemaTracking",
+            @"DROP TABLE IF EXISTS collect.schema_triggers;
+DROP TABLE IF EXISTS collect.schema_constraints;
+DROP TABLE IF EXISTS collect.schema_indexes;
+DROP TABLE IF EXISTS collect.schema_columns;
+DROP TABLE IF EXISTS collect.schema_objects;
+DROP TABLE IF EXISTS collect.schema_capture_state;
+DROP TABLE IF EXISTS collect.schema_capture_passes;"),
+        // V257 (#8464): the status-leading collection_log index. The probe's sentinel is the index itself, so the rewind drops it and a re-run
+        // of V257 makes it again. Safe on a store that never had it.
+        new(257, "hasCollectionLogStatusTimeIndex", "DROP INDEX IF EXISTS collect.idx_collection_log_status_time;"),
+        // V258 (#8567): the oversized-plan backlog's dropped-row index. The probe's sentinel is the index itself, so the rewind drops it and a
+        // re-run of V258 makes it again. Safe on a store that never had it.
+        new(258, "hasOversizedPlanBacklogDroppedIndex", "DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_dropped;"),
+        // V259 (#8549): the daily wait totals. The probe's sentinel is the relation itself, a continuous aggregate or the plain view, so the
+        // rewind drops whichever shape stands (the product's own discriminating drop), and a re-run of V259 or the ensure sweep makes it
+        // again. Safe on a store that never had it.
+        new(259, "hasWaitStatsDaily", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.WaitStatsDailyView)),
+        // V260 (#8570): the oversized-plan backlog's two median indexes. The probe's sentinel is the first of them, so the rewind drops both and
+        // a re-run of V260 makes them again. Safe on a store that never had them.
+        new(260, "hasOversizedPlanBacklogMedianIndexes", "DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_server_bytes; DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_collector_bytes;"),
+        new(261, "hasWebAccessGroups", """
+            DROP TRIGGER IF EXISTS web_access_tag_deleted ON config.server_tags;
+            DROP TABLE IF EXISTS config.web_access_group_tags, config.web_access_group_events, config.web_access_groups CASCADE;
+            DROP FUNCTION IF EXISTS config.manage_web_access_group(text,uuid,bigint,text,text,integer[],uuid,text,boolean,text);
+            DROP FUNCTION IF EXISTS config.activate_web_access_group(uuid,bigint,uuid,text);
+            DROP FUNCTION IF EXISTS config.web_access_snapshot(uuid);
+            DROP FUNCTION IF EXISTS config.web_access_tag_deleted();
+            DROP FUNCTION IF EXISTS config.web_access_owner_guard();
+            DROP FUNCTION IF EXISTS config.harden_web_access_groups();
+            """),
+        new(262, "hasAdvancedWebAccess", """
+            DROP FUNCTION IF EXISTS config.set_web_access_advanced(boolean);
+            DROP FUNCTION IF EXISTS config.harden_web_access_advanced();
+            DROP TABLE IF EXISTS config.web_access_advanced;
+            """),
+        // V263 (#8549): the oldest-run rollup under the Job History note. The probe's sentinel is the relation itself, so the rewind drops whichever shape stands and a re-run of V263 or the ensure sweep makes it again. Safe on a store that never had it.
+        new(263, "hasJobHistoryOldestDaily", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.JobHistoryOldestDailyView)),
+        // V264 (#8691): the per-hour drop counts of the oversized-plan backlog. A new table; the rewind drops it and a re-run of V264 makes it again.
+        new(264, "hasOversizedPlanBacklogDropCounts", "DROP TABLE IF EXISTS collect.oversized_plan_backlog_drops;"),
+        // V265 (#8549): the hourly summary of job_history's categories and its coverage table. Two new tables; the rewind drops both and a re-run of V265 makes them again.
+        new(265, "hasJobHistoryCategoryHourly", "DROP TABLE IF EXISTS collect.job_history_category_hourly; DROP TABLE IF EXISTS collect.job_history_category_coverage;"),
+        // V266 (#8716): fillfactor 80 on collect.query_tag_sightings. The rewind resets it and a re-run of V266 sets it again.
+        new(266, "hasQueryTagSightingsFillfactor", "ALTER TABLE collect.query_tag_sightings RESET (fillfactor);"),
     ];
 
     /// <summary>

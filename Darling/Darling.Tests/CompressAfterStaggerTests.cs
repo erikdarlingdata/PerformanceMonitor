@@ -134,18 +134,22 @@ public sealed class CompressAfterStaggerTests
     }
 
     /// <summary>
-    /// The phase minutes stay where they were: another reader relies on compression starting no earlier
-    /// than :36 past the hour. This change alters WHICH HOUR a heavy table becomes eligible, never which
-    /// minute its policy starts on.
+    /// The phase minutes stay where the refresh grid puts them: no compression policy starts before the
+    /// compression band opens, which is the minute the heaviest refresh's window closes
+    /// (<see cref="TimescaleSupport.HeaviestRefreshStartMinute"/> plus
+    /// <see cref="TimescaleSupport.HeaviestRefreshWindowMinutes"/>, :35 on the shipped grid). This change
+    /// alters WHICH HOUR a heavy table becomes eligible, never which minute its policy starts on.
     /// </summary>
     [Fact]
     public void EveryCompressionJob_PhaseMinuteAtLeast36()
     {
+        var bandOpens = TimescaleSupport.HeaviestRefreshStartMinute + TimescaleSupport.HeaviestRefreshWindowMinutes;
+        Assert.Equal(35, bandOpens);
         foreach (var table in TimescaleSupport.CompressionPhaseOrder)
         {
             if (TimescaleSupport.TryCompressionPhaseMinutesFor(table, out var minute))
             {
-                Assert.True(minute >= 36, $"{table}'s compression phase minute ({minute}) must stay >= 36.");
+                Assert.True(minute >= bandOpens, $"{table}'s compression phase minute ({minute}) must stay >= {bandOpens}, the band's first minute.");
             }
         }
     }

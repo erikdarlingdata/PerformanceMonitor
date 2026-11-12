@@ -99,8 +99,43 @@ SELECT /* PerformanceMonitorLite */
                  N'database: ' + COALESCE(DB_NAME(resparse.resource_database_id), DB_NAME(der_b.database_id), N'unknown')
             ELSE der_b.wait_resource
         END,
-    blocked_sql_text = dest_b.text,
-    blocking_sql_text = dest_k.text,
+    /* #7083: sys.dm_exec_sql_text returns the WHOLE batch or module the request runs, so a statement inside a
+       procedure came out as the procedure's CREATE PROCEDURE definition. A running request carries the offsets of
+       the statement it is on (statement_start_offset / statement_end_offset, byte offsets into that text, end -1 for
+       the rest of the text), so cut the text to them. The blocked side is always a running request. The blocking side
+       is one only when der_k has a sql_handle: a sleeping head blocker (idle in an open transaction) has no request,
+       so no offsets, and only the last batch it ran is known (con_k.most_recent_sql_handle). That text is labelled
+       as such rather than shown as if it were the running statement. */
+    blocked_sql_text =
+        CASE
+            WHEN der_b.sql_handle IS NOT NULL AND dest_b.text IS NOT NULL
+            THEN SUBSTRING
+                 (
+                     dest_b.text,
+                     (der_b.statement_start_offset / 2) + 1,
+                     (
+                         (CASE der_b.statement_end_offset WHEN -1 THEN DATALENGTH(dest_b.text) ELSE der_b.statement_end_offset END
+                          - der_b.statement_start_offset) / 2
+                     ) + 1
+                 )
+            ELSE dest_b.text
+        END,
+    blocking_sql_text =
+        CASE
+            WHEN der_k.sql_handle IS NOT NULL AND dest_k.text IS NOT NULL
+            THEN SUBSTRING
+                 (
+                     dest_k.text,
+                     (der_k.statement_start_offset / 2) + 1,
+                     (
+                         (CASE der_k.statement_end_offset WHEN -1 THEN DATALENGTH(dest_k.text) ELSE der_k.statement_end_offset END
+                          - der_k.statement_start_offset) / 2
+                     ) + 1
+                 )
+            WHEN dest_k.text IS NOT NULL
+            THEN N'[no running statement, last batch or module text] ' + dest_k.text
+            ELSE dest_k.text
+        END,
     blocked_login_name = ses_b.login_name,
     blocked_host_name = ses_b.host_name,
     blocked_client_app = ses_b.program_name,

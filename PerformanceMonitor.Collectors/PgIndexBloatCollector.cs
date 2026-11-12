@@ -298,7 +298,7 @@ SELECT
     CASE
         WHEN f.is_partial
             THEN 'partial index: the model scales the parent reltuples, but the index holds only the rows '
-                 || 'matching its predicate, which measured -56 percent on the #2561 rig. Run pgstatindex '
+                 || 'matching its predicate, so the estimate can come out far too low or even negative. Run pgstatindex '
                  || 'on this index for an exact answer.'
         WHEN f.table_rows < 0
             THEN 'the parent table has never been analyzed (reltuples = -1), so there is no row count to '

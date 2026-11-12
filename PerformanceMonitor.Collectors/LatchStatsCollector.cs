@@ -86,8 +86,12 @@ OPTION(RECOMPILE);";
                 MaxWaitTimeMs: reader.GetInt64(3)));
         }
 
-        return rows;
+        return DeltaBaselineRollbackRows.Capture(rows, context, BaselineGroups, r => r.LatchClass);
     }
+
+    /* The delta groups WritePayload advances for each row, captured at the end of the read so a write that fails
+       before the rows are stored can hand them back (DeltaBaselineRollbackRows). */
+    private static readonly string[] BaselineGroups = { "latch_stats_waiting_requests", "latch_stats_wait_time", "latch_stats_max_wait" };
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {

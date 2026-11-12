@@ -16,6 +16,7 @@ using System.Windows.Controls;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -137,6 +138,80 @@ public partial class ViewerServerTab
         return EmptyNote(gap, _pgOffline, rowCount, healthyEmptyText);
     }
 
+    /// <summary>
+    /// #7410: <see cref="PanelNote"/> for a panel whose empty state has a long explanation. <paramref name="shortText"/> is the plain sentence
+    /// the panel shows; <paramref name="fullText"/> is the explanation that used to be the panel's whole note, kept one hover away.
+    /// </summary>
+    private PanelNoteText PanelNoteParts(string collectorName, int rowCount, string shortText, string fullText, ClearedRows? cleared = null)
+    {
+        var gap = CollectorEngineCapability.NotCollectedMessage(
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None);
+
+        return EmptyNoteParts(gap, _pgOffline, rowCount, shortText, fullText, cleared);
+    }
+
+    /// <summary>The note a panel shows (<see cref="Text"/>) and the longer explanation behind a hover (<see cref="Detail"/>, null when there is none).</summary>
+    internal readonly record struct PanelNoteText(string Text, string? Detail);
+
+    /// <summary>
+    /// The pure half of <see cref="PanelNoteParts"/>: <see cref="EmptyNote"/>'s rules, with the healthy sentence split into a short line and
+    /// its full explanation. An engine gap, an offline server and a panel with rows say what <see cref="EmptyNote"/> says and carry no detail.
+    /// The detail is dropped when it adds nothing to the short line.
+    /// </summary>
+    internal static PanelNoteText EmptyNoteParts(
+        string? gap, bool offline, int rowCount, string shortText, string fullText, ClearedRows? cleared = null)
+    {
+        /* #7878, #7910: the grid lists current rows only, so rows that cleared or were dropped earlier in the window are counted here
+           instead. With none current, the healthy sentence ("nothing in this window") would be false, so the panel says what the newest
+           capture holds and how many earlier ones it left out. An engine gap and an offline server keep their own sentences. */
+        if (cleared is { Count: > 0 } && gap is null && !(offline && rowCount == 0))
+        {
+            return new PanelNoteText(rowCount == 0 ? cleared.Value.NothingNow + " " + cleared.Value.Sentence : cleared.Value.Sentence, null);
+        }
+
+        var text = EmptyNote(gap, offline, rowCount, shortText);
+        var healthy = gap is null && rowCount == 0 && !(offline && shortText.Length > 0);
+        return healthy && fullText.Length > 0 && fullText != text ? new PanelNoteText(text, fullText) : new PanelNoteText(text, null);
+    }
+
+    /// <summary>
+    /// The rows a panel left out because they are not in the collector's newest capture (#7878, #7910): <see cref="Count"/> of them, called
+    /// <see cref="Noun"/> in the sentence. <see cref="NothingNow"/> is what the panel says when no current row is left. <see cref="AtLeast"/>
+    /// marks a count read from a full page, which may not have reached every cleared row.
+    /// </summary>
+    internal readonly record struct ClearedRows(int Count, string Noun, string NothingNow, bool AtLeast = false)
+    {
+        /// <summary>The count, as the note says it.</summary>
+        internal string Sentence =>
+            $"{(AtLeast ? "At least " : string.Empty)}{Count} {Noun}{(Count == 1 ? string.Empty : "s")} from earlier in this window "
+            + $"{(Count == 1 && !AtLeast ? "is" : "are")} not in the newest capture, so {(Count == 1 && !AtLeast ? "it is" : "they are")} not listed here.";
+
+        internal static ClearedRows Xmin(int count) => new(count, "xmin holder", "Nothing holds the xmin horizon back in the newest capture.");
+
+        internal static ClearedRows Autovacuum(int count, bool atLeast = false) =>
+            new(count, "table", "No table reports an autovacuum backlog in the newest capture.", atLeast);
+
+        internal static ClearedRows Wraparound(int count) => new(count, "database", "No per-database freeze headroom was collected in the newest capture.");
+
+        internal static ClearedRows Slot(int count) => new(count, "replication slot", "The newest capture has no replication slots.");
+    }
+
+    /// <summary>Shows a note on a panel's TextBlock: the short line, and the full explanation as its tooltip (cleared when there is none).</summary>
+    private static void ShowNote(TextBlock block, PanelNoteText note, string suffix = "")
+    {
+        block.Text = note.Text + suffix;
+        if (note.Detail is null)
+        {
+            block.ToolTip = null;
+            block.Cursor = null;
+            return;
+        }
+
+        block.ToolTip = new TextBlock { Text = note.Detail, TextWrapping = TextWrapping.Wrap, MaxWidth = 520 };
+        System.Windows.Controls.ToolTipService.SetShowDuration(block, 120000);
+        block.Cursor = System.Windows.Input.Cursors.Help;
+    }
+
     /// <summary>The words a panel with no rows shows when the shared Overview card calls this server Offline (#6155).</summary>
     internal const string OfflineEmptyText =
         "This server is offline: nothing has been collected from it recently, so an empty panel here may be missing data, not a healthy answer.";
@@ -170,10 +245,11 @@ public partial class ViewerServerTab
     {
         try
         {
-            var freshness = await _dataService.GetServerFreshnessAsync();
+            var freshness = await _dataService.GetServerCollectionStateAsync();
+            var found = freshness.TryGetValue(_server.ServerId, out var state);
             _pgOffline = ServerSummaryItem.ClassifyFreshness(
-                freshness.TryGetValue(_server.ServerId, out var lastUtc) ? lastUtc : null,
-                _server.RegisteredAt, DateTime.UtcNow) == ServerFreshness.Offline;
+                found ? state.LastCollectionUtc : null,
+                _server.RegisteredAt, DateTime.UtcNow, _server.ConnectDownSince, found ? state.Attempted : _server.Attempted) == ServerFreshness.Offline;
         }
         catch
         {
@@ -287,14 +363,14 @@ public partial class ViewerServerTab
             + $"{CollectorCadenceText.Span(extensionMinutes)} has nothing here yet.")
             + (rows.Count == 0
                 ? string.Empty
-                : $"  {actionable} extension(s) this product can use are available on this server and NOT "
-                  + "installed — each is one CREATE EXTENSION away."
+                : $"  {CountText.Plural(actionable, "extension")} this product can use {(actionable == 1 ? "is" : "are")} available on this server and NOT "
+                  + "installed; each is one CREATE EXTENSION away."
                   + (outdated > 0
-                      ? $"  {outdated} are installed but behind the version the server offers, which is worth "
+                      ? $"  {outdated} {(outdated == 1 ? "is" : "are")} installed but behind the version the server offers, which is worth "
                         + "fixing with ALTER EXTENSION … UPDATE: a stale extension can be missing columns a "
                         + "collector reads, and that surfaces as a confusing error rather than as a gap."
                       : string.Empty)
-                  + "  \u201cInstalled\u201d is scoped to the database this server entry connects to — "
+                  + "  \u201cInstalled\u201d is scoped to the database this server entry connects to: "
                   + "pg_extension is per-database while the server's offer is cluster-wide.");
     }
 
@@ -309,7 +385,7 @@ public partial class ViewerServerTab
         PgExtensionCensusNote.Text = rows.Count == 0
             ? "Extension Install Census: nothing is created on this server beyond what PostgreSQL installs itself, or the inventory has not been collected yet. "
               + "This census counts only extensions somebody created; the available-but-absent ones are the actionable rows in the grid above."
-            : $"Extension Install Census: {rows.Count} extension(s) created on this server, one row each, counted across all {census[0].DatabasesTotal:N0} database(s). "
+            : $"Extension Install Census: {CountText.Plural(rows.Count, "extension")} created on this server, one row each, counted across all {CountText.Plural(census[0].DatabasesTotal, "database")}. "
               + "No row limit touches it.";
     }
 
@@ -324,7 +400,7 @@ public partial class ViewerServerTab
         if (PgCollectorIsGatedOff("pg_server_config"))
         {
             PgConfigChangesGrid.ItemsSource = null;
-            PgConfigChangesNote.Text = PanelNote("pg_server_config", 0, string.Empty);
+            ShowNote(PgConfigChangesNote, PanelNoteParts("pg_server_config", 0, string.Empty, string.Empty));
             PgConfigChangesDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
@@ -346,10 +422,11 @@ public partial class ViewerServerTab
             rows.Select(r => (DateTime?)r.ChangedAtUtc), bannerRowCap);
 
         var configMinutes = await EffectiveCollectorMinutesAsync("pg_server_config", 60);
-        PgConfigChangesNote.Text = PanelNote("pg_server_config", rows.Count,
+        ShowNote(PgConfigChangesNote, PanelNoteParts("pg_server_config", rows.Count,
+            "No setting changed value in this window.",
             "No configuration parameter changed value in this window. This compares consecutive snapshots, so an "
-            + "unchanged server is legitimately empty here: it is a finding, not missing data.")
-            + (rows.Count == 0
+            + "unchanged server is legitimately empty here: it is a finding, not missing data."),
+            rows.Count == 0
                 ? string.Empty
                 : $"Configuration changes, newest first. The collector runs {CollectorCadenceText.Every(configMinutes)}, so a change happened in the "
                   + $"{CollectorCadenceText.Span(configMinutes)} before it was seen."
@@ -404,12 +481,14 @@ public partial class ViewerServerTab
 
         var off = audit.Facets.Where(f => f.Verdict == DarlingPgLoggingAudit.Off).Select(f => f.Setting).ToList();
         var unknown = audit.Facets.Where(f => f.Verdict == DarlingPgLoggingAudit.Unknown).Select(f => f.Setting).ToList();
+        var instrumented = audit.Facets.Count(f => f.Verdict == DarlingPgLoggingAudit.Instrumented);
+        var partial = audit.Facets.Count(f => f.Verdict == DarlingPgLoggingAudit.Partial);
         PgLoggingAuditNote.Text =
             $"From the newest configuration snapshot ({PgDisplay.SnapshotTime(audit.CapturedAt)}), not the live server. "
-            + $"{audit.Facets.Count(f => f.Verdict == DarlingPgLoggingAudit.Instrumented)} setting(s) write every line "
-            + $"they can, {audit.Facets.Count(f => f.Verdict == DarlingPgLoggingAudit.Partial)} are partial (a threshold "
+            + $"{CountText.Plural(instrumented, "setting")} {(instrumented == 1 ? "writes" : "write")} every line "
+            + $"{(instrumented == 1 ? "it" : "they")} can, {partial} {(partial == 1 ? "is" : "are")} partial (a threshold "
             + "is filtering, which is the recommended posture for log_min_duration_statement), "
-            + $"{off.Count} are off and {unknown.Count} are not in the snapshot."
+            + $"{off.Count} {(off.Count == 1 ? "is" : "are")} off and {unknown.Count} {(unknown.Count == 1 ? "is" : "are")} not in the snapshot."
             + (off.Count > 0 ? "  Off: " + string.Join(", ", off) + "." : string.Empty)
             + (unknown.Count > 0 ? "  Not in the snapshot: " + string.Join(", ", unknown) + "." : string.Empty);
     }
@@ -421,7 +500,7 @@ public partial class ViewerServerTab
     /// </summary>
     private async void PgDeadlocksGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if (PgDeadlocksGrid.SelectedItem is not DarlingPgDeadlockReader.PgDeadlockRow row)
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource) || PgDeadlocksGrid.SelectedItem is not DarlingPgDeadlockReader.PgDeadlockRow row)
         {
             return;
         }
@@ -432,7 +511,7 @@ public partial class ViewerServerTab
             var text = detail.Count == 0
                 ? "No wait graph is stored for this deadlock any more: a report can age out of retention while its row is still on screen."
                 : $"Deadlock at {PgDisplay.SnapshotTime(detail[0].OccurredAtUtc)}, victim PID {detail[0].VictimPid}, "
-                  + $"{detail[0].ParticipantCount} session(s)\n\n{detail[0].GraphText}";
+                  + $"{CountText.Plural(detail[0].ParticipantCount, "session")}\n\n{detail[0].GraphText}";
 
             var window = new Window
             {
@@ -495,12 +574,12 @@ public partial class ViewerServerTab
             "This collector runs HOURLY, so a server added in the last hour has nothing here yet.")
             + (chosen.Count == 0
                 ? string.Empty
-                : $"  {chosen.Count} setting(s) differ from the compiled-in default; the rest are omitted "
+                : $"  {CountText.Plural(chosen.Count, "setting")} {(chosen.Count == 1 ? "differs" : "differ")} from the compiled-in default; the rest are omitted "
                   + "rather than truncated.")
             + (pendingRestart.Count > 0
-                ? $"  {pendingRestart.Count} setting(s) are PENDING RESTART — "
+                ? $"  {CountText.Plural(pendingRestart.Count, "setting")} {(pendingRestart.Count == 1 ? "is" : "are")} PENDING RESTART: "
                   + string.Join(", ", pendingRestart)
-                  + " — meaning the configuration file has been changed and reloaded but the running "
+                  + ", meaning the configuration file has been changed and reloaded but the running "
                   + "server is still using the previous value. The file and the server disagree until the "
                   + "next restart, at which point behaviour changes with no deployment to explain it."
                 : string.Empty);
@@ -612,7 +691,7 @@ public partial class ViewerServerTab
                   + "nothing about whether anything blocked. Check the Overview tab for the pg_blocking "
                   + "collector's status."
                 : $"{counts.CapturesWithBlocking:N0} of {counts.CapturesTotal:N0} captures in this window "
-                  + $"saw blocking{(chains.Count == 0 && cycles.Count == 0 ? " — and none of them produced a chain or a cycle in view" : "")}.";
+                  + $"saw blocking{(chains.Count == 0 && cycles.Count == 0 ? ", and none of them produced a chain or a cycle in view" : "")}.";
 
         PgTopQueriesGrid.ItemsSource = statementsTask.Result.Select(PgDisplay.Statement).ToList();
         PgStatementsNote.Text = PanelNote("pg_statement_stats", statementsTask.Result.Count,
@@ -650,7 +729,7 @@ public partial class ViewerServerTab
         if (PgCollectorIsGatedOff("pg_log_events"))
         {
             PgLogEventsGrid.ItemsSource = null;
-            PgLogEventsNote.Text = PanelNote("pg_log_events", 0, string.Empty);
+            ShowNote(PgLogEventsNote, PanelNoteParts("pg_log_events", 0, string.Empty, string.Empty));
             PgLogEventsDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
@@ -666,14 +745,15 @@ public partial class ViewerServerTab
         await ShowEventDataStartAsync(PgLogEventsDataStartBanner, dataStartTask, "PostgreSQL Log Events", startUtc,
             page.Rows.Select(r => (DateTime?)r.OccurredAtUtc), ViewerDataService.PgLogEventsRowCap);
 
-        PgLogEventsNote.Text = PanelNote("pg_log_events", page.Rows.Count,
+        ShowNote(PgLogEventsNote, PanelNoteParts("pg_log_events", page.Rows.Count,
+            "No log event was stored in this window.",
             "No classified log event was stored in this window. That is the healthy answer for the error "
             + "and lock-wait families, and it is also what a target with the relevant settings off looks "
             + "like: connection lines need log_connections / log_disconnections, lock waits need "
             + "log_lock_waits, spills need log_temp_files, autovacuum runs need log_autovacuum_min_duration. "
             + "It is also what an unreadable log, a log_timezone that is neither UTC nor a named zone, or a non-English lc_messages looks "
-            + "like — the Vacuum tab's plan-capture readiness panel reads the same file and reports those.")
-            + (page.Rows.Count == 0
+            + "like. The Vacuum tab's plan-capture readiness panel reads the same file and reports those."),
+            page.Rows.Count == 0
                 ? string.Empty
                 : $"  Showing {page.Rows.Count} of {page.WindowTotal} distinct entries in the window, newest "
                   + "first; messages are as PostgreSQL wrote them with the SQL in them normalized, and the "
@@ -699,7 +779,7 @@ public partial class ViewerServerTab
         if (PgCollectorIsGatedOff("pg_lock_stats"))
         {
             PgLockStatsGrid.ItemsSource = null;
-            PgLockStatsNote.Text = PanelNote("pg_lock_stats", 0, string.Empty);
+            ShowNote(PgLockStatsNote, PanelNoteParts("pg_lock_stats", 0, string.Empty, string.Empty));
             PgLockStatsDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
@@ -719,18 +799,35 @@ public partial class ViewerServerTab
         var queued = rows.Where(r => !r.Granted).ToList();
         var totalCaptures = rows.Count == 0 ? 0 : rows[0].TotalCaptures;
 
-        PgLockStatsNote.Text = rows.Count == 0
-            ? PanelNote("pg_lock_stats", 0,
+        ShowNote(PgLockStatsNote, rows.Count == 0
+            ? PanelNoteParts("pg_lock_stats", 0,
+                "No lock sample was taken for this server in this window.",
                 "No lock sample was taken for this server in this window, so an empty grid says nothing "
                 + "about whether anything contended. Check the pg_lock_stats collector on the Overview tab.")
-            : queued.Count == 0
-                ? $"No lock was waiting in any of {totalCaptures:N0} captures — every lock held in this "
-                  + "window was granted, which is the healthy answer rather than a missing read."
-                : $"{queued.Count:N0} lock queue(s) across {totalCaptures:N0} captures. These are SAMPLES, "
-                  + "so the capture columns are the denominator: a queue seen once in 60 captures is a blip, "
-                  + "and one seen in 55 is a standing problem. The Mode column decides the remedy — an "
-                  + "ungranted AccessExclusiveLock is a DDL everything else is queued behind. A blank "
-                  + "Relation with an OID is a lock in a different database, not a missing name.";
+            : LockStatsRowsNote(queued.Count, totalCaptures));
+    }
+
+    /// <summary>
+    /// #7410: the note over a Lock Stats grid that has rows. One plain line says how many lock queues were seen in how many captures;
+    /// how to read the capture columns and the Mode column is kept as the hover text.
+    /// </summary>
+    internal static PanelNoteText LockStatsRowsNote(int queuedCount, long totalCaptures)
+    {
+        if (queuedCount == 0)
+        {
+            return new PanelNoteText(
+                $"No lock was waiting in any of {CountText.Plural(totalCaptures, "capture")}. Every lock held in this window was granted.",
+                $"No lock was waiting in any of {CountText.Plural(totalCaptures, "capture")}: every lock held in this "
+                + "window was granted, which is the healthy answer rather than a missing read.");
+        }
+
+        return new PanelNoteText(
+            $"{CountText.Plural(queuedCount, "lock queue")} across {CountText.Plural(totalCaptures, "capture")}.",
+            $"{CountText.Plural(queuedCount, "lock queue")} across {CountText.Plural(totalCaptures, "capture")}. These are SAMPLES, "
+            + "so the capture columns are the denominator: a queue seen once in 60 captures is a blip, "
+            + "and one seen in 55 is a standing problem. The Mode column decides the remedy: an "
+            + "ungranted AccessExclusiveLock is a DDL everything else is queued behind. A blank "
+            + "Relation with an OID is a lock in a different database, not a missing name.");
     }
 
     /// <summary>
@@ -746,7 +843,7 @@ public partial class ViewerServerTab
         if (PgCollectorIsGatedOff("pg_wait_sampling"))
         {
             PgWaitSamplingGrid.ItemsSource = null;
-            PgWaitSamplingNote.Text = PanelNote("pg_wait_sampling", 0, string.Empty);
+            ShowNote(PgWaitSamplingNote, PanelNoteParts("pg_wait_sampling", 0, string.Empty, string.Empty));
             PgWaitSamplingDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
@@ -769,19 +866,25 @@ public partial class ViewerServerTab
 
         var reset = rows.Any(r => r.CounterReset);
 
-        PgWaitSamplingNote.Text = rows.Count == 0
-            ? PanelNote("pg_wait_sampling", 0,
-                serviceTier
+        var waitSamplingEmptyShort = "No wait samples were taken for this server in this window.";
+        var waitSamplingEmptyFull = serviceTier
                     ? "No wait samples for this server in this window. This server is on the service-sampled "
                       + "tier (pg_wait_sampling is not installed), so the service polled pg_stat_activity once a "
                       + "second for a 30-second window each cycle and found nothing worth counting, the healthy "
                       + "answer at that grain. " + PgWaitInstrument.ServiceSampledCaveat
                     : "No wait samples for this server in this window. The usual cause is that "
-                      + "pg_wait_sampling is not in shared_preload_libraries — check the Extensions panel, "
+                      + "pg_wait_sampling is not in shared_preload_libraries. Check the Extensions panel, "
                       + "which says whether it is installed, available or absent. If it IS loaded, an empty "
-                      + "grid means the server waited on nothing worth sampling, which is the healthy answer.")
-            : PgDisplay.WaitSamplingSummary(rows, serviceTier, instrument is not null,
-                CollectorCadenceText.Every(waitMinutes), reset);
+                      + "grid means the server waited on nothing worth sampling, which is the healthy answer.";
+        if (rows.Count == 0)
+        {
+            ShowNote(PgWaitSamplingNote, PanelNoteParts("pg_wait_sampling", 0, waitSamplingEmptyShort, waitSamplingEmptyFull));
+        }
+        else
+        {
+            ShowNote(PgWaitSamplingNote, new PanelNoteText(PgDisplay.WaitSamplingSummary(rows, serviceTier, instrument is not null,
+                CollectorCadenceText.Every(waitMinutes), reset), null));
+        }
     }
 
     /// <summary>
@@ -796,7 +899,7 @@ public partial class ViewerServerTab
         if (PgCollectorIsGatedOff("pg_kernel_stats"))
         {
             PgKernelStatsGrid.ItemsSource = null;
-            PgKernelStatsNote.Text = PanelNote("pg_kernel_stats", 0, string.Empty);
+            ShowNote(PgKernelStatsNote, PanelNoteParts("pg_kernel_stats", 0, string.Empty, string.Empty));
             PgKernelStatsDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
@@ -813,19 +916,20 @@ public partial class ViewerServerTab
 
         var reset = rows.Any(r => r.CounterReset);
 
-        PgKernelStatsNote.Text = rows.Count == 0
-            ? PanelNote("pg_kernel_stats", 0,
+        ShowNote(PgKernelStatsNote, rows.Count == 0
+            ? PanelNoteParts("pg_kernel_stats", 0,
+                "No OS CPU figures were collected for this server in this window.",
                 "No kernel statistics for this server in this window. The usual cause is that "
                 + "pg_stat_kcache is not installed - the Extensions panel says whether it is available "
                 + "here. Where it IS installed, this separates a query that was WAITING from one that "
                 + "was burning processor, which elapsed time alone cannot do.")
-            : $"{rows.Count:N0} statement(s) by OS CPU. Read bytes are I/O that reached the DEVICE, so "
+            : new PanelNoteText($"{CountText.Plural(rows.Count, "statement")} by OS CPU. Read bytes are I/O that reached the DEVICE, so "
               + "zero with high CPU is a cached workload behaving well rather than a missing "
               + "measurement. Query ID joins the statement grid above."
               + (reset
                   ? " One or more counters RESET inside this window, so those rows cover only the "
                     + "time since the reset."
-                  : string.Empty);
+                  : string.Empty), null));
     }
 
     /// <summary>
@@ -840,7 +944,7 @@ public partial class ViewerServerTab
         if (PgCollectorIsGatedOff("pg_predicate_stats"))
         {
             PgPredicateStatsGrid.ItemsSource = null;
-            PgPredicateStatsNote.Text = PanelNote("pg_predicate_stats", 0, string.Empty);
+            ShowNote(PgPredicateStatsNote, PanelNoteParts("pg_predicate_stats", 0, string.Empty, string.Empty));
             return;
         }
 
@@ -851,18 +955,19 @@ public partial class ViewerServerTab
         var sampled = rows.Count == 0 ? 1.0 : rows[0].SampleRate;
         var misestimated = rows.Count(r => r.WorstEstimateErrorRatio >= 10);
 
-        PgPredicateStatsNote.Text = rows.Count == 0
-            ? PanelNote("pg_predicate_stats", 0,
+        ShowNote(PgPredicateStatsNote, rows.Count == 0
+            ? PanelNoteParts("pg_predicate_stats", 0,
+                "No predicate statistics were collected for this server in this window.",
                 "No predicate statistics for this server in this window. pg_qualstats is created PER "
                 + "DATABASE, so it may be installed in one database and not another - the Extensions "
                 + "panel says which. Note also that its sample_rate defaults to 1/max_connections, so a "
                 + "lightly-used database can genuinely record nothing.")
-            : $"{rows.Count:N0} predicate(s), sampled at {sampled:P2} of executions - these counts are a "
+            : new PanelNoteText(PgDisplay.PredicateStatsSummary(rows.Count, sampled) + " - these counts are a "
               + "SAMPLE, so a small number means the sampler fired rarely rather than the predicate "
               + "being rare. Filtered % with no supporting index is the index candidate. "
-              + $"{misestimated:N0} predicate(s) show an estimate error of 10x or worse, which is a "
+              + $"{CountText.Plural(misestimated, "predicate")} {(misestimated == 1 ? "shows" : "show")} an estimate error of 10x or worse, which is a "
               + "different problem: the planner does not understand that column, and an index will not "
-              + "fix a plan built on a wrong row count.";
+              + "fix a plan built on a wrong row count.", null));
     }
 
     /// <summary>
@@ -877,7 +982,7 @@ public partial class ViewerServerTab
         if (PgCollectorIsGatedOff("pg_plan_capture"))
         {
             PgCapturedPlansGrid.ItemsSource = null;
-            PgCapturedPlansNote.Text = PanelNote("pg_plan_capture", 0, string.Empty);
+            ShowNote(PgCapturedPlansNote, PanelNoteParts("pg_plan_capture", 0, string.Empty, string.Empty));
             PgCapturedPlansDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
@@ -894,21 +999,22 @@ public partial class ViewerServerTab
 
         var orphans = rows.Count(r => r.QueryId == 0);
 
-        PgCapturedPlansNote.Text = rows.Count == 0
-            ? PanelNote("pg_plan_capture", 0,
+        ShowNote(PgCapturedPlansNote, rows.Count == 0
+            ? PanelNoteParts("pg_plan_capture", 0,
+                "No plans have been captured. The Plan Capture Readiness panel says what is missing.",
                 "No captured plans. The Plan Capture Readiness panel says which precondition is missing - "
                 + "usually auto_explain is not loaded, or the monitoring login cannot read the server log. "
                 + "That read needs pg_read_server_files AND an explicit GRANT EXECUTE on pg_read_file; the "
                 + "role alone does not carry it. On Aurora and RDS there is no filesystem to read, so this "
                 + "panel stays empty by design.")
-            : $"{rows.Count:N0} plan shape(s), ranked by TOTAL time - a plan that takes 40ms constantly "
+            : new PanelNoteText($"{CountText.Plural(rows.Count, "plan shape")}, ranked by TOTAL time - a plan that takes 40ms constantly "
               + "costs more than one that took 900ms once. Captures counts how often the collector SAW "
               + "the plan, not how often it ran. Plan JSON is redacted at collection: query text is "
               + "dropped and literals are replaced, so nothing here carries customer values."
               + (orphans > 0
-                  ? $" {orphans:N0} plan(s) have no query id, which means log_line_prefix lacks %Q - they "
-                    + "cannot be joined to a statement until that is fixed."
-                  : string.Empty);
+                  ? $" {CountText.Plural(orphans, "plan")} {(orphans == 1 ? "has" : "have")} no query id, so {(orphans == 1 ? "it" : "they")} cannot be joined to a statement. A zero id means "
+                    + "compute_query_id is off, or the target logs to csvlog on PostgreSQL 13, whose csvlog has no query_id column."
+                  : string.Empty), null));
     }
 
     /// <summary>
@@ -932,7 +1038,7 @@ public partial class ViewerServerTab
         if (PgCollectorIsGatedOff("pg_deadlocks"))
         {
             PgDeadlocksGrid.ItemsSource = null;
-            PgDeadlocksNote.Text = PanelNote("pg_deadlocks", 0, string.Empty);
+            ShowNote(PgDeadlocksNote, PanelNoteParts("pg_deadlocks", 0, string.Empty, string.Empty));
             PgDeadlocksDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
@@ -948,13 +1054,14 @@ public partial class ViewerServerTab
         await ShowEventDataStartAsync(PgDeadlocksDataStartBanner, dataStartTask, "PostgreSQL Deadlocks", startUtc,
             rows.Select(r => (DateTime?)r.OccurredAtUtc), ViewerDataService.PgDeadlocksRowCap);
 
-        PgDeadlocksNote.Text = PanelNote("pg_deadlocks", rows.Count,
+        ShowNote(PgDeadlocksNote, PanelNoteParts("pg_deadlocks", rows.Count,
+            "No deadlock was reported in this window.",
             "No deadlock was reported in this window. That is the healthy answer, and it is also what an "
-            + "unreadable server log looks like — or one PostgreSQL wrote in another language, since this "
+            + "unreadable server log looks like, or one PostgreSQL wrote in another language, since this "
             + "grid is filled by matching English message text. The Vacuum tab's plan-capture readiness "
             + "panel reads the same file and reports both: whether it can be read, and whether "
-            + "lc_messages leaves the messages in English.")
-            + (rows.Count == 0
+            + "lc_messages leaves the messages in English."),
+            rows.Count == 0
                 ? string.Empty
                 : "  Sightings counts how often the collector saw the SAME report while it stayed inside "
                   + "the log tail it re-reads; a deadlock that genuinely recurred is its own row, because "
@@ -1013,33 +1120,44 @@ public partial class ViewerServerTab
             ? PanelNote("pg_session_states", 0, string.Empty)
             : sessionsTask.Result.Count == 0
                 ? "No session held a transaction open past the collector's floor in this window. Zero rows "
-                  + "is the HEALTHY answer here rather than a missing read — the collector stores nothing "
+                  + "is the HEALTHY answer here rather than a missing read: the collector stores nothing "
                   + "when every transaction is short. It is also a SAMPLE taken once per collection cycle, "
                   + "not an event log: PostgreSQL records nothing about session state unless something "
                   + "asks, so a transaction that opened and closed between two captures is genuinely "
                   + "invisible here."
-                : "Duration is NOT evidence that a session is starving vacuum — read the Pinned Horizon "
+                : "Duration is NOT evidence that a session is starving vacuum. Read the Pinned Horizon "
                   + "column, where \"" + PgDisplay.PinsNothingText + "\" means the session held neither a "
                   + "snapshot nor a transaction id in any sample and terminating it would not reclaim one "
                   + "dead row. This is a SAMPLE at the collection interval, so a transaction that opened "
                   + "and closed between two captures never appears, and a grey row is one PostgreSQL "
                   + "redacted because the monitoring login lacks pg_monitor.";
 
-        PgXminHorizonGrid.ItemsSource = xminTask.Result.Select(PgDisplay.Xmin).ToList();
-        PgXminNote.Text = PanelNote("pg_xmin_horizon", xminTask.Result.Count,
-            "Nothing held the xmin horizon back in this window — no long-running transaction, replication "
+        /* #7878, #7910: the reads return the rows that cleared too (includeCleared), and each grid shows only the current ones. */
+        var (xminRows, xminCapturesInWindow) = xminTask.Result;
+        var xminCurrent = xminRows.Where(r => r.IsCurrent).ToList();
+        PgXminHorizonGrid.ItemsSource = xminCurrent.Select(r => PgDisplay.Xmin(r, xminCapturesInWindow)).ToList();
+        ShowNote(PgXminNote, PanelNoteParts("pg_xmin_horizon", xminCurrent.Count,
+            "Nothing held the xmin horizon back in this window.",
+            "Nothing held the xmin horizon back in this window: no long-running transaction, replication "
             + "slot, standby feedback or prepared transaction pinned an old xmin. Zero rows is the healthy "
-            + "answer here, not a missing read.");
+            + "answer here, not a missing read.",
+            ClearedRows.Xmin(xminRows.Count - xminCurrent.Count)));
 
-        PgAutovacuumGrid.ItemsSource = autovacuumTask.Result.Select(PgDisplay.Autovacuum).ToList();
-        PgAutovacuumNote.Text = PanelNote("pg_autovacuum_stats", autovacuumTask.Result.Count,
+        var autovacuumCurrent = autovacuumTask.Result.Where(r => r.IsCurrent).ToList();
+        PgAutovacuumGrid.ItemsSource = autovacuumCurrent.Select(PgDisplay.Autovacuum).ToList();
+        ShowNote(PgAutovacuumNote, PanelNoteParts("pg_autovacuum_stats", autovacuumCurrent.Count,
+            "No table reported an autovacuum backlog in this window.",
             "No table reported an autovacuum backlog in this window. This collector runs on the WRITER "
-            + "only — pg_stat_user_tables reports zeros on a replica — so an empty grid on a reader is "
-            + "expected rather than informative.");
+            + "only (pg_stat_user_tables reports zeros on a replica), so an empty grid on a reader is "
+            + "expected rather than informative.",
+            /* Current tables sort first, so a full page may have stopped before every cleared one: the count is then a floor. */
+            ClearedRows.Autovacuum(autovacuumTask.Result.Count - autovacuumCurrent.Count, autovacuumTask.Result.Count >= PgGridRowLimit)));
 
-        PgWraparoundGrid.ItemsSource = wraparoundTask.Result.Select(PgDisplay.Wraparound).ToList();
-        PgWraparoundNote.Text = PanelNote("pg_wraparound_stats", wraparoundTask.Result.Count,
-            "No per-database freeze headroom has been collected in this window.");
+        var wraparoundCurrent = wraparoundTask.Result.Where(r => r.IsCurrent).ToList();
+        PgWraparoundGrid.ItemsSource = wraparoundCurrent.Select(PgDisplay.Wraparound).ToList();
+        ShowNote(PgWraparoundNote, PanelNoteParts("pg_wraparound_stats", wraparoundCurrent.Count,
+            "No per-database freeze headroom has been collected in this window.", string.Empty,
+            ClearedRows.Wraparound(wraparoundTask.Result.Count - wraparoundCurrent.Count)));
 
         PgPlanCaptureGrid.ItemsSource = planCaptureTask.Result.Select(PgDisplay.PlanCapture).ToList();
 
@@ -1049,29 +1167,67 @@ public partial class ViewerServerTab
            and "not ready" look identical. And when rows exist the panel says whether every facet is
            satisfied, because the useful summary is the AND of them: one unsatisfied facet is enough to mean
            no plans. */
-        PgPlanCaptureNote.Text = PgCollectorIsGatedOff("pg_plan_capture_readiness")
-            ? PanelNote("pg_plan_capture_readiness", 0, string.Empty)
-            : planCaptureTask.Result.Count == 0
-                ? "Plan-capture readiness has not been collected for this server yet. This is an hourly "
-                  + "collector, so a server added in the last hour has nothing here — it does NOT mean plan "
-                  + "capture is unavailable."
-                : planCaptureTask.Result.All(r => r.IsSatisfied)
-                    ? "Every precondition for auto_explain capture is satisfied on this server, and a "
-                      + "captured plan carries the query id that joins it back to pg_stat_statements. That "
-                      + "means plans CAN be captured — not that this product is reading them, which is a "
-                      + "separate thing: auto_explain writes to the server log, which a SQL connection "
-                      + "cannot read."
-                    : "At least one precondition is unmet, so either no execution plans are being captured "
-                      + "by auto_explain here or the ones that are cannot be attributed. Read the rows in "
-                      + "order — extension_available, library_loaded, capture_threshold, plan_text_setting, "
-                      + "plan_attribution, message_locale — each names the specific step and, on Aurora/RDS, "
-                      + "whether it needs a parameter-group change and a reboot rather than a SET. "
-                      + "plan_attribution is the one that is easy to miss: auto_explain puts no query id in "
-                      + "the plan itself, so without %Q in log_line_prefix every captured plan is an orphan. "
-                      + "message_locale is the one that reaches further than this panel: it reports whether "
-                      + "the target writes its log messages in English, which every log read here matches, "
-                      + "so an unmet one also means the Blocking sub-tab's deadlock grid cannot be trusted "
-                      + "to be empty for the healthy reason.";
+        ShowNote(PgPlanCaptureNote, PgCollectorIsGatedOff("pg_plan_capture_readiness")
+            ? PanelNoteParts("pg_plan_capture_readiness", 0, string.Empty, string.Empty)
+            : PlanCaptureReadinessNote(planCaptureTask.Result.Select(r => (r.Facet, r.IsSatisfied)).ToList()));
+    }
+
+    /// <summary>The plain name of a plan-capture readiness facet, for the one-line note. A facet this build does not know keeps its own name.</summary>
+    internal static string PlanCaptureFacetLabel(string facet, bool capitalize = false)
+    {
+        var label = PlanCaptureFacetLabelLower(facet);
+        return capitalize && label.Length > 0 && label != facet ? char.ToUpperInvariant(label[0]) + label[1..] : label;
+    }
+
+    private static string PlanCaptureFacetLabelLower(string facet) => facet switch
+    {
+        "extension_available" => "the auto_explain extension",
+        "library_loaded" => "the auto_explain library loaded at server start",
+        "capture_threshold" => "a plan capture threshold",
+        "plan_text_setting" => "plan text logging",
+        "plan_attribution" => "query ids in the log",
+        "message_locale" => "English log messages",
+        _ => facet,
+    };
+
+    /// <summary>
+    /// #7410: the note over Plan Capture Readiness. One plain line says whether capture is ready and, when it is not, which preconditions are
+    /// unmet, built from the facet rows. The long explanation that used to be the whole note is kept as the hover text.
+    /// </summary>
+    internal static PanelNoteText PlanCaptureReadinessNote(IReadOnlyList<(string Facet, bool IsSatisfied)> facets)
+    {
+        if (facets.Count == 0)
+        {
+            return new PanelNoteText(
+                "Plan capture readiness has not been collected for this server yet.",
+                "Plan-capture readiness has not been collected for this server yet. This is an hourly collector, so a "
+                + "server added in the last hour has nothing here. It does NOT mean plan capture is unavailable.");
+        }
+
+        var unmet = facets.Where(f => !f.IsSatisfied).Select(f => PlanCaptureFacetLabel(f.Facet)).ToList();
+        if (unmet.Count == 0)
+        {
+            return new PanelNoteText(
+                "Every precondition for plan capture is met on this server.",
+                "Every precondition for auto_explain capture is satisfied on this server, and a captured plan carries "
+                + "the query id that joins it back to pg_stat_statements. That means plans CAN be captured, not that "
+                + "this product is reading them, which is a separate thing: auto_explain writes to the server log, "
+                + "which a SQL connection cannot read.");
+        }
+
+        return new PanelNoteText(
+            "Plan capture is not ready on this server. Not met: " + string.Join(", ", unmet) + ".",
+            "At least one precondition is unmet, so either no execution plans are being captured by auto_explain "
+                + "here or the ones that are cannot be attributed. Read the rows in order: extension_available, "
+                + "library_loaded, capture_threshold, plan_text_setting, plan_attribution, message_locale. Each names "
+                + "the specific step and, on Aurora/RDS, whether it needs a parameter-group change and a reboot rather "
+                + "than a SET. plan_attribution is the one that is easy to miss: auto_explain puts no query id in the "
+                + "plan itself, so on a server that logs to stderr, without %Q directly after [%p] in log_line_prefix "
+                + "no plan is stored at all. A target that logs to csvlog takes the id from the log's own query_id "
+                + "column on PostgreSQL 14 or later, and has none before it. A target that logs only to jsonlog stores "
+                + "no plan. message_locale is the one that reaches further than this panel: it reports whether the "
+                + "target writes its log messages in English, which every log read here matches, so an unmet one also "
+                + "means the Blocking sub-tab's deadlock grid cannot be trusted to be empty for the healthy reason.");
     }
 
     /// <summary>
@@ -1126,10 +1282,11 @@ public partial class ViewerServerTab
 
         PgIoStatsGrid.ItemsSource = PgDisplay.IoRows(rows);
         UpdateTruncationBanner(PgIoStatsDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL I/O Stats"), startUtc);
-        PgIoNote.Text = PanelNote("pg_io_stats", rows.Count,
+        ShowNote(PgIoNote, PanelNoteParts("pg_io_stats", rows.Count,
+            "No I/O was recorded in this window.",
             "No backend / object / context combination did any I/O in this window. This view needs "
             + "PostgreSQL 16 or newer, where pg_stat_io exists; below that the collector does not run and "
-            + "the Overview tab says so.");
+            + "the Overview tab says so."));
 
         await LoadPgWriteStatsAsync(startUtc, endUtc);
         await LoadPgBufferUsageAsync(startUtc, endUtc);
@@ -1161,14 +1318,20 @@ public partial class ViewerServerTab
         var used = rows.Count == 0 ? 0L : rows[0].PoolBuffersUsed;
 
         PgBufferUsageNote.Text = rows.Count == 0
-            ? "Nothing recorded. This panel needs the pg_buffercache extension — without it the collector "
+            ? "Nothing recorded. This panel needs the pg_buffercache extension: without it the collector "
               + "reports the object as missing rather than failing, and the Overview tab's extension panel "
               + "says whether it is available on this server and one CREATE EXTENSION away."
-            : $"Latest snapshot: {used:N0} of {total:N0} buffers in use "
+            : (rows[0].RelationsInSnapshot > rows.Count
+                  ? $"Showing the largest {rows.Count:N0} of {rows[0].RelationsInSnapshot:N0} relations in the snapshot. "
+                  : string.Empty)
+              + $"Latest snapshot: {used:N0} of {total:N0} buffers in use "
               + $"({(total == 0 ? 0 : 100.0 * used / total):N1}% of the pool). Residency is a LEVEL, so this "
-              + "is the newest sample rather than a window average — averaging what was resident over a day "
-              + "answers nothing. A blank Relation is another database's table or a shared catalog, not a "
-              + "missing name: the pool is cluster-wide while pg_class is per-database. Avg Usage near 0 "
+              + "is the newest sample rather than a window average. Averaging what was resident over a day "
+              + "answers nothing. A Relation shown as " + DarlingPgBufferUsageReader.NotResolvedLabel + " or "
+              + DarlingPgBufferUsageReader.SharedOrDroppedLabel + " is not a missing name: the pool is cluster-wide "
+              + "while pg_class is per-database, and the collector names a relation only in the database it is "
+              + "connected to. The first is usually a buffer in another database, but it also covers a relation in "
+              + "the connected database that did not resolve. Avg Usage near 0 "
               + "means a relation is holding memory it is not earning.";
     }
 
@@ -1204,7 +1367,7 @@ public partial class ViewerServerTab
               + "which would show zeroes."
             : (row.ResetDuringWindow
                 ? "At least one statistics family was RESET inside this window, so its counters went "
-                  + "backwards. Those metrics are left blank rather than differenced across the reset — a "
+                  + "backwards. Those metrics are left blank rather than differenced across the reset: a "
                   + "difference taken across one reports an enormous number that looks like a catastrophe "
                   + "and means nothing. The families reset independently, so the untouched ones below are "
                   + "still accurate."
@@ -1227,10 +1390,13 @@ public partial class ViewerServerTab
 
         var rows = await _dataService.GetPgSlotsAsync(_server.ServerId, startUtc, endUtc);
 
-        PgReplicationSlotsGrid.ItemsSource = rows.Select(PgDisplay.Slot).ToList();
-        PgReplicationNote.Text = PanelNote("pg_replication_slots", rows.Count,
+        var current = rows.Where(r => r.IsCurrent).ToList();
+        PgReplicationSlotsGrid.ItemsSource = current.Select(PgDisplay.Slot).ToList();
+        ShowNote(PgReplicationNote, PanelNoteParts("pg_replication_slots", current.Count,
+            "This server has no replication slots.",
             "This server has no replication slots, so nothing is retaining WAL or pinning an xmin on their "
-            + "account. Zero rows is the healthy answer here, not a missing read.");
+            + "account. Zero rows is the healthy answer here, not a missing read.",
+            ClearedRows.Slot(rows.Count - current.Count)));
 
         await LoadPgReplicationStatsAsync(startUtc, endUtc);
     }
@@ -1272,18 +1438,18 @@ public partial class ViewerServerTab
 
         PgReplicationStatsNote.Text = rows.Count == 0
             ? "No standby was streaming from this server in this window. On a REPLICA that is the expected "
-              + "answer — pg_stat_replication is the primary-side view and reports nothing unless this "
+              + "answer: pg_stat_replication is the primary-side view and reports nothing unless this "
               + "server is cascading to a downstream of its own. On a primary it means nothing is "
               + "replicating from it, which is either correct or the finding."
-            : $"{rows.Count:N0} standby connection(s). The worst any of them fell behind in this window was "
-              + $"{worst:N0} bytes of unapplied WAL — that column, not the current one, is what catches a "
+            : $"{CountText.Plural(rows.Count, "standby connection")}. The worst {(rows.Count == 1 ? "it" : "any of them")} fell behind in this window was "
+              + $"{PgDisplay.Bytes(worst)} of unapplied WAL - that column, not the current one, is what catches a "
               + "replica that drifts far behind and recovers before anybody looks. Rank on BYTES rather than "
               + "the lag columns: measured against a stalled standby, the time lag read 2.8 seconds for a "
               + "33.7 MB backlog, because it times the round trip of the last replayed record rather than "
               + "sizing the backlog."
               + (flapping > 0
-                  ? $"  {flapping:N0} standby(s) appeared in fewer samples than were taken, which means they "
-                    + "have been DISCONNECTING — every other column shows that as healthy."
+                  ? $"  {CountText.Plural(flapping, "standby")} appeared in fewer samples than were taken, which means {(flapping == 1 ? "it has" : "they have")} "
+                    + "been DISCONNECTING: every other column shows that as healthy."
                   : string.Empty);
     }
 
@@ -1345,7 +1511,7 @@ public partial class ViewerServerTab
                     ? "Bloat figures are ESTIMATES computed from column-width statistics - the table itself "
                       + "is never read. Confirm one with pgstattuple before rewriting anything."
                     : $"Bloat figures are ESTIMATES computed from column-width statistics. {suppressed} of "
-                      + $"{bloatRows.Count} row(s) have NO publishable estimate and show a dash rather than "
+                      + $"{CountText.Plural(bloatRows.Count, "row")} {(suppressed == 1 ? "has" : "have")} NO publishable estimate and {(suppressed == 1 ? "shows" : "show")} a dash rather than "
                       + "a number - see the Confidence column. If most of them say 'no column statistics', "
                       + "the monitoring login cannot SELECT these tables: pg_stats is filtered by SELECT "
                       + "privilege and pg_monitor does not grant it, so granting pg_read_all_data "
@@ -1479,7 +1645,7 @@ public partial class ViewerServerTab
               + "covered, and when this does record it records EVERY btree at any size, which is why its "
               + "index count exceeds the usage panel's. " + coverage.Message
             : $"ESTIMATED from catalog statistics - no index page is read. About "
-              + $"{page.ReclaimableBytesShown:N0} bytes look reclaimable across {rows.Count:N0} index(es), "
+              + $"{PgDisplay.Bytes(page.ReclaimableBytesShown)} looks reclaimable across {CountText.Plural(rows.Count, "index", "indexes")}, "
               + "and the answered rows are ranked by that figure: a percentage ranks the wrong thing, "
               + "since a tiny index at 20% is worth kilobytes next to a large one at 70%. Measured against "
               + "pgstatindex ground truth, median absolute error is 2.79 percentage points and p90 is 6.63 "
@@ -1487,7 +1653,7 @@ public partial class ViewerServerTab
               + "its own. The Exact Measurement column carries the pgstatindex call for that; it walks "
               + "every page, so run it on the one index concerned rather than on a schedule."
               + (exactly > 0
-                  ? $"  {exactly:N0} row(s) are older EXACT measurements still inside retention rather "
+                  ? $"  {CountText.Plural(exactly, "row")} {(exactly == 1 ? "is an older EXACT measurement" : "are older EXACT measurements")} still inside retention rather "
                     + "than estimates - the Kind column says which, and Leaf Density is populated only on "
                     + "those. A blank density on an estimated row means the index was never walked, which "
                     + "is not the same as a walk that found no leaf pages."
@@ -1541,11 +1707,11 @@ public partial class ViewerServerTab
         PgColumnStatsNote.Text = rows.Count == 0
             ? "No column statistics were collected. That is NOT the same as clean statistics. "
               + coverage.Message
-            : $"Ranked by suspicion, not alphabetically. {skewed:N0} column(s) have a single value covering "
+            : $"Ranked by suspicion, not alphabetically. {CountText.Plural(skewed, "column")} {(skewed == 1 ? "has" : "have")} a single value covering "
               + "a quarter or more of the table, which is the PostgreSQL analogue of parameter sniffing: a "
               + "plan that suits most values is catastrophic for that one. Low correlation on a wide column "
               + "is the other shape, and it is why an index scan was rejected on a column that obviously "
-              + "has an index. Distinct is NEGATIVE when it is a ratio of row count — -1 means nearly every "
+              + "has an index. Distinct is NEGATIVE when it is a ratio of row count: -1 means nearly every "
               + "row is unique, not minus one value. Most-common VALUES and histogram bounds are "
               + "deliberately not collected: they hold raw column data. "
               /* On the POPULATED path too. A grid that ranks the columns of four tables while sixteen more
@@ -1557,38 +1723,10 @@ public partial class ViewerServerTab
     /// <summary>
     /// #6133: the Vacuum tab (and, since #6387, the Overview tab, which reuses this handler) scrolls as a page and each of its grids scrolls inside. A DataGrid marks the
     /// mouse wheel handled even when it has nothing left to scroll, so over a grid the page would not move.
-    /// Pass the wheel to the page unless the grid under the pointer can still scroll that way itself.
+    /// Pass the wheel to the page unless the grid under the pointer can still scroll that way itself (PageScroll.ForwardWheel, shared with the FinOps pages).
     /// </summary>
-    private void PgVacuumScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
-    {
-        if (sender is not ScrollViewer page || e.Handled)
-        {
-            return;
-        }
+    private void PgVacuumScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e) => PageScroll.ForwardWheel(sender, e);
 
-        ScrollViewer? inner = null;
-        for (DependencyObject? d = e.OriginalSource as DependencyObject;
-             d != null && !ReferenceEquals(d, page);
-             d = System.Windows.Media.VisualTreeHelper.GetParent(d))
-        {
-            if (d is ScrollViewer sv)
-            {
-                inner = sv;
-                break;
-            }
-        }
-
-        if (inner != null && inner.ScrollableHeight > 0)
-        {
-            bool atTop = inner.VerticalOffset <= 0;
-            bool atBottom = inner.VerticalOffset >= inner.ScrollableHeight;
-            if ((e.Delta > 0 && !atTop) || (e.Delta < 0 && !atBottom))
-            {
-                return;
-            }
-        }
-
-        page.ScrollToVerticalOffset(page.VerticalOffset - e.Delta);
-        e.Handled = true;
-    }
+    /// <summary>#8663: the Storage page scrolls as one, like Vacuum: a wheel over a grid at its end moves the page.</summary>
+    private void PgStorageScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e) => PageScroll.ForwardWheel(sender, e);
 }

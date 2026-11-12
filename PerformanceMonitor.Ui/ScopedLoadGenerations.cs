@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace PerformanceMonitor.Ui;
 
@@ -60,6 +61,28 @@ internal sealed class ScopedLoadGenerations
         var next = (_generations.TryGetValue(surface, out var current) ? current : 0) + 1;
         _generations[surface] = next;
         return next;
+    }
+
+    private readonly Dictionary<string, CancellationTokenSource> _sources = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// <see cref="Claim"/>, and a token that is cancelled when the next load claims the same surface (#8549). A superseded load's store
+    /// reads take it, so they stop at once and leave the connection pool to the newest load: each read that runs on after its answer can
+    /// no longer be shown holds a pool slot and a share of the store's IO, and on a large store a quick re-pick stacked two multi-second
+    /// reads that ended together. The newest load's token is never cancelled by anything but a later claim.
+    /// </summary>
+    internal (int Generation, CancellationToken Token) ClaimCancelling(string surface)
+    {
+        var generation = Claim(surface);
+        if (_sources.Remove(surface, out var previous))
+        {
+            previous.Cancel();
+            previous.Dispose();
+        }
+
+        var source = new CancellationTokenSource();
+        _sources[surface] = source;
+        return (generation, source.Token);
     }
 
     /// <summary>

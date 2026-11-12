@@ -208,18 +208,18 @@ public sealed class RetentionTierRouterTests
            DAY (#3653: the daily rollup lags a day or two behind the clock, and those days used to print
            unique_queries = 0 beside fresh raw numbers). Exactly one raw read, inside the UNION ALL tail, gated
            on the ceiling; the rollup half stays the routed read for everything the rollup has. */
-        var rawReads = sql.Split("FROM v_query_stats").Length - 1;
-        Assert.Equal(1, rawReads);
+        /* #8651: the raw reads are credited-pairs reads of collect.query_stats now (DailySummarySql.CreditedPairs, index-only), not the passthrough
+           view: one in the tail, and for the daily tier one more for the raw hours its hourly rollup does not hold (#8549). */
+        var rawReads = sql.Split("SELECT p.d, p.query_hash").Length - 1;
+        Assert.Equal(tier == RetentionTier.Daily ? 2 : 1, rawReads);
         var ceilingAt = sql.IndexOf("SELECT date_trunc('day', max(bucket)) AS last_day", StringComparison.Ordinal);
         var rollupReadAt = sql.IndexOf("SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash", StringComparison.Ordinal);
         var unionAt = sql.IndexOf("UNION ALL", StringComparison.Ordinal);
-        var rawReadAt = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
-        var tailGateAt = sql.IndexOf("AND collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)", StringComparison.Ordinal);
+        var rawReadAt = sql.IndexOf("SELECT p.d, p.query_hash", StringComparison.Ordinal);
         Assert.True(ceilingAt >= 0, "the rollup's last materialized day must be read per server");
         Assert.Contains($"FROM collect.{expectedRelation}", sql[ceilingAt..rollupReadAt], StringComparison.Ordinal);
         Assert.True(rollupReadAt > ceilingAt, "the rollup half follows the ceiling CTE");
         Assert.True(unionAt > rollupReadAt && rawReadAt > unionAt, "the raw half is the UNION ALL tail, after the rollup half");
-        Assert.True(tailGateAt > rawReadAt, "the raw half must be gated to the days past the ceiling, or a day gets two rows");
 
         /* #3653 A6: the THIRD member — the days at or below the ceiling the rollup holds no row for while its
            source still holds admitted rows — emits the day with a NULL count, after the raw tail, gated on the
@@ -231,12 +231,15 @@ public sealed class RetentionTierRouterTests
            carries the rest of this member's pins; this one holds the ORDER and the gate. */
         var notCarriedAt = sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal);
         var notCarriedGateAt = sql.IndexOf("AND g.d < COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)", StringComparison.Ordinal);
-        Assert.True(notCarriedAt > tailGateAt, "the not-carried member is the last UNION ALL member, after the raw tail");
+        Assert.True(notCarriedAt > rawReadAt, "the not-carried member is the last UNION ALL member, after the raw tail");
         Assert.True(notCarriedGateAt > notCarriedAt, "the not-carried member is gated to the days at or below the ceiling");
         Assert.Contains($"SELECT 1 FROM collect.{expectedRelation} AS r", sql[notCarriedAt..], StringComparison.Ordinal);
         var expectedSource = tier == RetentionTier.Daily ? TimescaleSupport.QueryStatsHourlyView : "query_stats";
         Assert.Contains($"SELECT 1 FROM collect.{expectedSource} AS s", sql[notCarriedAt..], StringComparison.Ordinal);
-        Assert.Equal(2, sql.Split("UNION ALL").Length - 1);
+        /* #7028: counted inside the queries CTE only (it ends where deadlocks begins): the blocking waits chain that
+           follows (BlockingWaits.HourlyChosenWaitsSql) holds its own NOT EXISTS and UNION ALL. */
+        var queriesCte = sql[sql.IndexOf("queries AS (", StringComparison.Ordinal)..sql.IndexOf("deadlocks AS (", StringComparison.Ordinal)];
+        Assert.Equal(2, queriesCte.Split("UNION ALL").Length - 1);
 
         /* The untouched sources still read raw. */
         foreach (var untouched in new[] { "FROM v_wait_stats", "FROM v_deadlocks", "FROM v_cpu_utilization_stats", "FROM v_collection_log", "FROM v_memory_pressure_events" })

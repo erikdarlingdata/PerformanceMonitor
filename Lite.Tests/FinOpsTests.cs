@@ -332,6 +332,47 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         Assert.True(results[0].CpuShare > 50, $"Top query should have >50% CPU share, got {results[0].CpuShare}");
     }
 
+    /// <summary>#7166: max_grant_kb is a lifetime high-water mark, so a steady 1 GB grant seen in 96 collection
+    /// rows is 1 GB, not 96 GB, and it must rank below a 50 GB grant seen once. Across plans the figure is the newest
+    /// row's reading: an older plan that once took 8 GB does not outrank the 2 GB plan running now.</summary>
+    [Fact]
+    public async Task HighImpact_PeakMemory_IsThePeakGrantNotASumOverCollectionRows()
+    {
+        var results = await RunHighImpactAsync(s => s.SeedQueryStatsGrantHistoryAsync());
+
+        var steady = Assert.Single(results, r => r.QueryHash == "STEADY");
+        var oneOff = Assert.Single(results, r => r.QueryHash == "ONEOFF");
+        var twoPlans = Assert.Single(results, r => r.QueryHash == "TWOPLANS");
+        Assert.Equal(2048m, twoPlans.PeakMemoryMb);
+        Assert.Equal(1024m, steady.PeakMemoryMb);
+        Assert.Equal(51200m, oneOff.PeakMemoryMb);
+        Assert.True(oneOff.MemoryShare > steady.MemoryShare,
+            $"The 50 GB grant must out-share the 1 GB one, got {oneOff.MemoryShare} vs {steady.MemoryShare}");
+    }
+
+    /// <summary>#7695: a hash that ran in two databases is named for the one that did the most CPU, not the alphabetically
+    /// first, and carries how many databases are in the total. A tie goes to the name, ignoring case. A one-database hash
+    /// reports 1.</summary>
+    [Fact]
+    public async Task HighImpact_NamesTheDatabaseWithTheMostCpu_AndCountsTheDatabasesInTheTotal()
+    {
+        var results = await RunHighImpactAsync(s => s.SeedQueryStatsAcrossDatabasesAsync());
+
+        var late = Assert.Single(results, r => r.QueryHash == "LATEWINNER");
+        Assert.Equal("Zulu", late.DatabaseName);
+        Assert.Equal(2, late.DatabaseCount);
+        Assert.Equal(20m, late.TotalExecutions);
+        Assert.Equal(10_000m, late.TotalCpuMs);
+
+        var tied = Assert.Single(results, r => r.QueryHash == "TIED");
+        Assert.Equal("alpha", tied.DatabaseName);
+        Assert.Equal(2, tied.DatabaseCount);
+
+        var solo = Assert.Single(results, r => r.QueryHash == "SOLO");
+        Assert.Equal("Mid", solo.DatabaseName);
+        Assert.Equal(1, solo.DatabaseCount);
+    }
+
     [Fact]
     public async Task HighImpactSkew_DominantQueryHighScore()
     {
@@ -373,9 +414,9 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     {
         var rows = new List<HighImpactQueryRow>
         {
-            new() { QueryHash = "A", TotalCpuMs = 1000, TotalDurationMs = 2000, TotalReads = 500000, TotalWrites = 1000, TotalMemoryMb = 100, TotalExecutions = 100 },
-            new() { QueryHash = "B", TotalCpuMs = 100, TotalDurationMs = 200, TotalReads = 50000, TotalWrites = 100, TotalMemoryMb = 10, TotalExecutions = 1000 },
-            new() { QueryHash = "C", TotalCpuMs = 50, TotalDurationMs = 100, TotalReads = 25000, TotalWrites = 50, TotalMemoryMb = 5, TotalExecutions = 500 },
+            new() { QueryHash = "A", TotalCpuMs = 1000, TotalDurationMs = 2000, TotalReads = 500000, TotalWrites = 1000, PeakMemoryMb = 100, TotalExecutions = 100 },
+            new() { QueryHash = "B", TotalCpuMs = 100, TotalDurationMs = 200, TotalReads = 50000, TotalWrites = 100, PeakMemoryMb = 10, TotalExecutions = 1000 },
+            new() { QueryHash = "C", TotalCpuMs = 50, TotalDurationMs = 100, TotalReads = 25000, TotalWrites = 50, PeakMemoryMb = 5, TotalExecutions = 500 },
         };
 
         var scored = HighImpactScorer.Score(rows, topN: 3);

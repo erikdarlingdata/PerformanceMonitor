@@ -49,6 +49,8 @@ globalThis.document = {
   activeElement: null,
   createElement: (tag) => new FakeNode(tag),
   createTextNode: (text) => new FakeNode("#text", text),
+  /* The list page keeps the reader's scroll position when it draws (refresh-in-place.js), which looks the grids up; there are none here. */
+  querySelectorAll: () => [],
 };
 globalThis.window = globalThis;
 globalThis.location = { hash: "", pathname: "/", search: "", href: "http://localhost/", origin: "http://localhost" };
@@ -165,6 +167,40 @@ try {
     const hostile = new FakeNode("div");
     side.paintViewList(hostile, [v(20, "<img src=x onerror=alert(1)>", { folder: "<b>f</b>" })], { can_edit: false }, null);
     out.hostile = hostile.children.map((n) => n.textContent);
+  } else if (scenario === "readFailed") {
+    // #7929: the shell's 60 s poll: a good list read, then a failed one. The rows of the last good list stay, under a note.
+    const list = new FakeNode("div");
+    local.setStorage(globalThis.localStorage);
+    local.setSessionStorage(globalThis.sessionStorage);
+    const session = { can_edit: true, can_own: true };
+    /* app.js keeps the list through viewListAfterRead. Without it, the shell keeps nothing of a failed read, which is what the
+       asserts refuse: the rows are gone and no note is drawn. */
+    const afterRead = typeof side.viewListAfterRead === "function"
+      ? side.viewListAfterRead
+      : (last, s, res) => ({ session: s, views: res.kind === "data" && Array.isArray(res.data) ? res.data : [] });
+    const paint = (kept) => side.paintViewList(list, kept.views, kept.session, 4, kept.readFailed === true);
+    const lines = () => list.children.map((n) => (n.dataset.viewGroup !== undefined ? "G:" + n.children[1].textContent : n.className.includes("view-item") ? "V:" + n.textContent : "N:" + n.textContent));
+    let kept = afterRead(null, session, { kind: "data", data: as(views, "alice") });
+    paint(kept);
+    out.good = lines();
+    kept = afterRead(kept, session, { kind: "error", message: "Too many requests", status: 429 });
+    paint(kept);
+    out.afterFailure = lines();
+    out.failureText = list.textContent;
+    // a failed read before any list answered: a note alone, never "No views yet"
+    const fresh = new FakeNode("div");
+    const none = afterRead(null, { can_edit: false, can_own: false }, { kind: "error", message: "Fleet unavailable" });
+    side.paintViewList(fresh, none.views, none.session, null, none.readFailed === true);
+    out.noEarlierList = fresh.children.map((n) => n.textContent);
+    // an answered empty list is the one thing that says "No views yet"
+    const empty = new FakeNode("div");
+    const answeredEmpty = afterRead(kept, { can_edit: false, can_own: false }, { kind: "data", data: [] });
+    side.paintViewList(empty, answeredEmpty.views, answeredEmpty.session, null, answeredEmpty.readFailed === true);
+    out.answeredEmpty = empty.children.map((n) => n.textContent);
+    // the next good read clears the note
+    kept = afterRead(kept, session, { kind: "data", data: as(views, "alice") });
+    paint(kept);
+    out.recovered = lines();
   } else if (scenario === "fields") {
     const session = (user) => ({ can_edit: true, can_own: user !== null });
     const build = (view, subject, meta) => fields.buildViewMetaFields({ meta: meta || { folder: view ? view.folder || "" : "", personal: view ? view.personal === true : false }, view: asOne(view, subject), session: session(subject), views, onChange: () => { out.changed = (out.changed || 0) + 1; } });
@@ -178,6 +214,7 @@ try {
         options: all(b.node, (n) => n.tag === "option").map((n) => n.attrs.value),
         listLinked: folder.attrs.list === all(b.node, (n) => n.tag === "datalist")[0].attrs.id,
         maxlength: folder.attrs.maxlength,
+        links: all(b.node, (n) => n.tag === "a").map((n) => n.attrs.href + "|" + n.textContent),
       };
     };
     out.newWithIdentity = inspect(build(null, "alice"));
@@ -246,6 +283,66 @@ try {
     out.keyGone = sdata["darling.local.viewGroups.v1"] === undefined;
     local.reload();
     out.afterReload = local.isViewGroupCollapsed("folder:Secret plans");
+  } else if (scenario === "scope") {
+    // The shipped scope verdict and the shipped route() (app.js), run against stand-ins: only a session that says scoped gates a
+    // route or hides a nav link; no session and a failed probe render the page as before.
+    const vm = await import("node:vm");
+    const full = fs.readFileSync(path.join(jsDir, "app.js"), "utf8").replace(/\r\n/g, "\n");
+    const a = full.indexOf("const scopedRoutes = new Set(");
+    const b = full.indexOf("/* Whether a route targets a specific saved view/notebook", a);
+    if (a < 0 || b < a || full.indexOf("function route(opts)", a) > b) throw new Error("app.js layout changed: scopedRoutes");
+    const shell = { session: null, routeName: "fleet", links: [], mounted: [], rendered: [] };
+    const renderer = (name) => (_main, r) => { shell.rendered.push(name + ":" + r.name); };
+    const ctx = vm.createContext({
+      Set,
+      main: {},
+      document: { querySelectorAll: (selector) => (selector === ".nav a" ? shell.links : []) },
+      isSessionExpired: () => false,
+      beginPageScope: () => {},
+      frontDoor: () => false,
+      gateStore: () => false,
+      currentRoute: () => ({ name: shell.routeName, id: null, param: null }),
+      peekSession: () => shell.session,
+      el: (tag, attrs) => ({ tag, ...attrs }),
+      mount: (_target, node) => { shell.mounted.push(node.text); },
+      resetScrollOnRouteChange: () => {},
+      markPageRenderStart: () => {},
+      setActiveNav: () => {},
+      ROUTE_RENDERERS: { fleet: renderer("fleet"), admin: renderer("admin"), alerts: renderer("alerts") },
+    });
+    vm.runInContext(full.slice(a, b).replace(/^export /gm, "") + "\nthis.scopeVerdict = scopeVerdict; this.route = route;", ctx);
+    // One visit: the nav as the page ships it (every link shown but Availability Groups, which its own probe reveals), then route().
+    const visit = (session, routeName) => {
+      shell.session = session;
+      shell.routeName = routeName;
+      shell.links = ["fleet", "alerts", "admin", "ag"].map((name) => ({ dataset: { route: name }, hidden: name === "ag" }));
+      shell.mounted = [];
+      shell.rendered = [];
+      ctx.route();
+      return { rendered: shell.rendered, mounted: shell.mounted, hidden: shell.links.filter((l) => l.hidden).map((l) => l.dataset.route) };
+    };
+    out.routeProbeFailedFleet = visit({ can_edit: false, probe_failed: true }, "fleet");
+    out.routeProbeFailedAdmin = visit({ can_edit: false, probe_failed: true }, "admin");
+    out.routeNoSessionAdmin = visit(null, "admin");
+    out.routeUnscopedAdmin = visit({ can_edit: true, scoped: false }, "admin");
+    out.routeScopedAdmin = visit({ can_edit: false, scoped: true }, "admin");
+    out.routeScopedFleet = visit({ can_edit: false, scoped: true }, "fleet");
+    // A link a scoped visit hid is shown again by the next visit whose session is not scoped.
+    shell.session = { can_edit: true, scoped: false };
+    shell.rendered = [];
+    shell.mounted = [];
+    ctx.route();
+    out.routeAfterScoped = { rendered: shell.rendered, hidden: shell.links.filter((l) => l.hidden).map((l) => l.dataset.route) };
+    const v = (s, r) => ctx.scopeVerdict(s, r);
+    out.probeFailedFleet = v({ can_edit: false, probe_failed: true }, "fleet").blocked;
+    out.probeFailedAdmin = v({ can_edit: false, probe_failed: true }, "admin").blocked;
+    out.probeFailedNavAdmin = v({ can_edit: false, probe_failed: true }, "fleet").hidesNav("admin");
+    out.noSessionAdmin = v(null, "admin").blocked;
+    out.scopedAdmin = v({ scoped: true }, "admin").blocked;
+    out.scopedFleet = v({ scoped: true }, "fleet").blocked;
+    out.scopedNavAdmin = v({ scoped: true }, "fleet").hidesNav("admin");
+    out.scopedNavFleet = v({ scoped: true }, "fleet").hidesNav("fleet");
+    out.unscopedNavAdmin = v({ scoped: false, can_edit: true }, "fleet").hidesNav("admin");
   } else if (scenario === "expired") {
     // The shipped app.js pieces (the view list, the fleet sidebar and the signed-out takeover), run against stand-ins: once the
     // session is expired, nothing repaints the old session's lists, and the cached list is dropped.
@@ -272,10 +369,12 @@ try {
       isSessionExpired: () => expired,
       frontDoor: () => false, currentStore: () => null,
       getSession: async () => ({ can_edit: true, can_own: true }),
+      peekSession: () => ({ can_edit: true, can_own: true, scoped: false }),
       listViews: () => (release ? new Promise((r) => { release = () => r({ kind: "data", data: as(views, "alice") }); }) : Promise.resolve({ kind: "data", data: as(views, "alice") })),
       currentRoute: () => ({ name: "home", id: null, param: null }),
       isViewItemRoute: () => false,
       paintViewList: (_c, list) => { calls.paintViewList.push(list.filter((x) => x.personal && x.mine).length); },
+      viewListAfterRead: side.viewListAfterRead,
       paintServerList: () => { calls.paintServerList++; },
       updateStatusBar: () => {},
       clearViewGroups: () => { calls.cleared++; },

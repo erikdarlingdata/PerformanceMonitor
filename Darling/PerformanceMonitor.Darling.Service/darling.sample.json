@@ -217,6 +217,12 @@
   // rendering on the same cycle. A file-only knob (not stored in the control plane): edit + restart.
   "procedureStatsPlanCycleInterval": 4,
 
+  // max_events_limit of the ring buffer in the deadlock, blocked-process and long-query Extended Events sessions (#8146).
+  // The engine's own default is 1000, and a session over it evicts its oldest events; a larger limit holds more between
+  // collections. Range 1000 to 10000, clamped (and logged) at start. A session keeps the limit it was created with, so
+  // a changed value applies to sessions created afterwards. A file-only knob: edit + restart.
+  "xeRingBufferMaxEvents": 1000,
+
   // query_stats plan fetching. true (the default) leaves plan XML out of query_stats' main query and renders it in
   // a second query for only the statement plans this service has not already stored; rows for plans it has stored
   // carry the existing digest, so every reader sees the same data. On one large store the inline capture rendered
@@ -247,12 +253,15 @@
     "notifyConnectionChanges": true,
     "cpuThresholdPercent": 80,
     "cpuMode": "total", // "total" (SQL + other processes) or "sql" (SQL process only)
-    // Total blocked wait, in seconds, summed across the LATEST blocking snapshot. 0 = off (the default),
-    // so nothing starts alerting because you took an update. A second gate beside blockingCountThreshold:
-    // a count cannot tell one session blocked for an hour from one blocked for a second. It reports as its
-    // own "Blocking Wait Time" alert and is level-triggered - it re-fires every cooldown while the wait
-    // stays above the threshold, and clears when it drops below. Needs "blockingEnabled" (default true).
-    "blockingWaitSecondsThreshold": 0,
+    // Blocking pages on blocked WAIT TIME, not on one event. "blockingCountThreshold" (default 3) pages when
+    // that many blocked events fall in the last hour AND the worst wait among them is 15 seconds or more
+    // (the 15 is fixed). "blockingWaitSecondsThreshold" (default 60) pages when one blocked event waited
+    // that long, and also gates the second alert below: total blocked wait, in seconds, summed across the
+    // LATEST blocking snapshot, reported as its own level-triggered "Blocking Wait Time" alert (it re-fires
+    // every cooldown while the wait stays above the threshold, and clears when it drops below). 0 turns
+    // the single-event route and that alert off. Needs "blockingEnabled" (default true).
+    "blockingCountThreshold": 3,
+    "blockingWaitSecondsThreshold": 60,
     // How deadlock/blocking alerts are delivered: "Summary" (one batched card per cycle, the default)
     // or "PerEvent" (one notification per distinct incident, so downstream automation can open one
     // ticket per incident). A per-server "alertDeliveryModeOverride" (see servers[]) wins over this.
@@ -399,8 +408,10 @@
   //   "darling": { "type": "http", "url": "http://localhost:5152/", "headers": { "Authorization": "Bearer ${DARLING_MCP_TOKEN}" } }
   // With no token, an enabled MCP server does not start, and the log names these settings. Set
   // "allowTokenlessLoopback": true to serve local clients with no token instead; the write and investigation
-  // tools then stay off, and every start logs a line saying so. The token covers every tool, analyze_server included, which opens live
-  // connections to your monitored servers as the service account.
+  // tools then stay off, and every start logs a line saying so. That setting applies only when no token is configured:
+  // a configured token still gates every request, and one that clears the floor (16 characters, 6 different)
+  // serves the write and investigation tools as their settings say. The token covers every tool,
+  // analyze_server included, which opens live connections to your monitored servers as the service account.
   //
   // OPT-IN NETWORK EXPOSURE for MCP (managed mode only) — omit "listen" for the default (loopback-only HTTP,
   // gated by the token above). When present with a non-loopback "listen", the
@@ -428,16 +439,22 @@
     // Uncomment to serve claim_investigation_request and submit_investigation_report to your own agent (#5632).
     // They write investigation state, need a bearer token (mcp.network.encryptedToken or token), and stay
     // off while "allowWrites" is on: one token cannot tell an agent from a person. Default off. The same
-    // setting serves the 13 Level 2 agent action tools: each call needs an "agent_action" argument and a live
-    // claim, and agent_actions_enabled (default on). The 9 store actions need a Level 2 route. The 4 server
-    // actions (session kill, plan force, unforce and evict) need a Level 3 request, the server's own action
-    // switch (default off) and a remediation login reference.
+    // setting serves the 16 Level 2 agent action tools: each call needs an "agent_action" argument and a live
+    // claim, and agent_actions_enabled (default on). The 9 store actions need a Level 2 route. The 7 server
+    // actions (session kill, plan force, unforce, evict, recompile, plan guide create and drop) need a Level 3
+    // request, the server's own action switch (default off) and a remediation login reference.
     // "allowInvestigations": true,
 
+    // Default on. With "allowInvestigations" on, an agent token can create, change, enable, disable and delete a
+    // mute or digest rule with no claim: a named metric, expiring within 7 days of the rule's creation, with a
+    // reason, each write journaled (#7414). A mute names one server. Only a digest can
+    // cover all servers. Set false to refuse those calls. The claim-based Level 2 and 3 tools are not affected.
+    // "allowAgentMuteRules": false,
+
     // Uncomment to give an operator and your investigation agents their own tokens on one service (#6542).
-    // Each token has a name (1-64 of A-Za-z0-9._:-) and a role, "operator" (the reads and the write tools) or
-    // "agent" (the reads, the investigation tools and the Level 2 action tools). An agent's agent_id must be the
-    // token's name. Each name and each value is used once. Every request, loopback included, must present a token.
+    // Each token has a name (1-64 of A-Za-z0-9._:-) and a role: "operator" (the reads and the write tools, with
+    // "allowWrites" off too), "agent" (the reads, the investigation tools and the Level 2 action tools, with
+    // "allowInvestigations" off too) or "reader" (the reads only). An agent's agent_id must be the token's name. Each name and each value is used once. Every request, loopback included, must present a token.
     // "tokens": [
     //   { "name": "ops-lead",   "encryptedToken": "<from --encrypt-password>", "role": "operator" },
     //   { "name": "triage-bot", "encryptedToken": "<from --encrypt-password>", "role": "agent" }
@@ -474,6 +491,8 @@
     //     // ... OR a PEM pair instead of the two lines above:
     //     // "certPath": "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\mcp.crt",
     //     // "keyPath":  "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\mcp.key"
+    //     // ... OR a Windows certificate store entry (Windows only; the service reads it at start, so restart it after a renewal):
+    //     // "store": { "location": "LocalMachine", "name": "My", "thumbprint": "<40 hex>" }   // or "subject": "<DNS name>" for the newest valid certificate
     //   }
     // }
   },
@@ -525,15 +544,18 @@
     // Uncomment to serve local browsers with no token (see TOKEN above). Default off.
     // "allowTokenlessLoopback": true,
 
-    // On the managed store the dashboard reads as the read-only "viewer" login. A person signed in to the dashboard
+    // On the managed store the dashboard signs in as the least-privilege "web" login. A person signed in to the dashboard
     // as an admin (the shared web token or an OIDC admin) can also make its Admin writes (routes and environment
     // profiles, threshold overrides, report feedback, server actions, note decisions, undoing an agent change and
     // the agent switch, closing a request, writing a note, practice requests, case export), when this is true:
     // it opens a second small connection pool that signs in as the managed "admin" login (the one the Viewer uses).
-    // A darling.json WITHOUT this key keeps it false (the dashboard stays list-only on the managed store), so an
+    // A darling.json WITHOUT this key keeps it false (those Admin writes stay off on the managed store), so an
     // upgrade from 3.11 changes nothing until you set it. The installer and the compose sample write true for a
-    // new install. With OIDC on and no role mapping every signed-in user is an admin, so map roles
-    // (network.oidc.roleClaim, adminRoles, viewerRoles) before you turn this on. Restart to change.
+    // new install. False turns off those Admin writes and nothing else: a sign-in that can edit still adds and
+    // edits monitored servers and writes mute rules, dismissals and custom alert rules.
+    // With OIDC on and no role mapping every signed-in user can edit: each one can add a server whatever this
+    // says, and with this true each one is an admin. Map roles (network.oidc.roleClaim, adminRoles, viewerRoles)
+    // to limit who can edit. Restart to change.
     // A store you bring yourself is not affected.
     "allowAdminWrites": true,
 
@@ -586,6 +608,8 @@
     //     // ... OR a PEM pair instead of the two lines above:
     //     // "certPath": "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\dashboard.crt",
     //     // "keyPath":  "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\dashboard.key"
+    //     // ... OR a Windows certificate store entry (Windows only; the service reads it at start, so restart it after a renewal):
+    //     // "store": { "location": "LocalMachine", "name": "My", "thumbprint": "<40 hex>" }   // or "subject": "<DNS name>" for the newest valid certificate
     //   },
     //
     //   // OPTIONAL per-user OIDC sign-in (#2550) -- omit the whole block to keep the shared token as the only

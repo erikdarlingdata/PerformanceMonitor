@@ -44,6 +44,8 @@ public sealed class QueryStoreTopDailyReadLiveTests
     private static readonly DateTime BuildNow = new(2026, 1, 15, 12, 0, 0, DateTimeKind.Unspecified);
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+    /* Npgsql leaves the password out of the ConnectionString read back from a data source or an opened connection, so what the body opens by connection string comes from the scratch store's own string. */
+    private string _storeConnectionString = "";
 
     [Fact]
     public void TheDailyStatement_SharesTheTableReadsTail_AndItsPredicates()
@@ -89,7 +91,9 @@ public sealed class QueryStoreTopDailyReadLiveTests
     /// <summary>The wide table for server 1 from 2026-01-05 to 2026-01-14 12:00, one row per query per hour for most
     /// hours (a row at every midnight among them), with nulls where the facts need them. 40 queries: query 40 has every
     /// average NULL, queries divisible by 7 have a NULL cpu on odd hours, queries divisible by 4 change module
-    /// between hours, queries divisible by 5 are Aborted, and queries divisible by 6 carry a replica role.</summary>
+    /// between hours, queries divisible by 5 are Aborted, and queries divisible by 6 carry a replica role. #7814: every row's interval start is its collection time, so the table read
+    /// (placed by the interval's start) and the daily summary (built on collection days) place each row in the same window, which the
+    /// bit-for-bit comparisons need; an interval that started before its collection moves a row across an outer window edge in one and not the other.</summary>
     private const string SeedSql = @"
 INSERT INTO collect.query_store_interval_wide
 (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
@@ -107,7 +111,7 @@ SELECT
     CASE WHEN q = 40 THEN NULL ELSE (q + h * 5) % 211 END,
     CASE WHEN q = 40 THEN NULL ELSE 1 + (q * 29 + h * 3) % 1009 END,
     'ph' || (h % 5), CASE WHEN q % 6 = 0 THEN 'PRIMARY' ELSE NULL END,
-    q * 100000 + h, ct - interval '10 minutes'
+    q * 100000 + h, ct
 FROM
 (
     SELECT q, h, TIMESTAMP '2026-01-05 00:00:00' + make_interval(hours => h) AS ct
@@ -126,16 +130,17 @@ FROM
     }
 
     /// <summary>One extra wide-table row for query <paramref name="queryId"/> with a duration large enough to rank first.</summary>
-    private static async Task InsertRowAsync(NpgsqlConnection connection, DateTime collectionTime, long queryId, CancellationToken ct, long duration = 90_000_000, DateTime? firstExecution = null)
+    private static async Task InsertRowAsync(NpgsqlConnection connection, DateTime collectionTime, long queryId, CancellationToken ct, long duration = 90_000_000, DateTime? firstExecution = null, DateTime? intervalStart = null)
     {
         await using var command = new NpgsqlCommand(@"
 INSERT INTO collect.query_store_interval_wide
 (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
  query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
  avg_rowcount, query_plan_hash, runtime_stats_interval_id, interval_start_time_utc)
-VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minutes'), @ct, 'h' || @q, 1000, @dur, 5, 5, 5, 5, 5, 'late', @q, @ct - interval '10 minutes')", connection);
+VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minutes'), @ct, 'h' || @q, 1000, @dur, 5, 5, 5, 5, 5, 'late', @q, COALESCE(@ist, @ct))", connection);
         command.Parameters.Add(new NpgsqlParameter("ct", NpgsqlDbType.Timestamp) { Value = collectionTime });
         command.Parameters.Add(new NpgsqlParameter("fet", NpgsqlDbType.Timestamp) { Value = (object?)firstExecution ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter("ist", NpgsqlDbType.Timestamp) { Value = (object?)intervalStart ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter("q", NpgsqlDbType.Bigint) { Value = queryId });
         command.Parameters.Add(new NpgsqlParameter("dur", NpgsqlDbType.Bigint) { Value = duration });
         await command.ExecuteNonQueryAsync(ct);
@@ -145,14 +150,15 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minu
     {
         var result = await QueryStoreTopDaily.RunTickAsync(source, BuildNow, RetentionDays, NullLogger.Instance, ct);
         Assert.Equal(0, result.Failed);
-        Assert.Equal(7, result.Built);
+        Assert.Equal(10, result.Built);
     }
 
-    private static async Task RunLiveAsync(Func<NpgsqlConnection, NpgsqlDataSource, CancellationToken, Task> body)
+    private async Task RunLiveAsync(Func<NpgsqlConnection, NpgsqlDataSource, CancellationToken, Task> body)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        _storeConnectionString = scratch.ConnectionString;
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -266,6 +272,110 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minu
         });
     }
 
+    /// <summary>One interval row for the skew fixture: <paramref name="executions"/> runs averaging <paramref name="avgDurationUs"/>.</summary>
+    private static async Task InsertSkewRowAsync(NpgsqlConnection connection, DateTime collectionTime, long queryId, long executions, long avgDurationUs, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(@"
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+ query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
+ avg_rowcount, query_plan_hash, runtime_stats_interval_id, interval_start_time_utc)
+VALUES (@ct, 1, 'dbskew', @q, @q, 'Regular', @ct - interval '10 minutes', @ct, 'h' || @q, @ec, @dur, @dur, @dur, 0, 0, 1, 'skew', @q * 1000 + EXTRACT(HOUR FROM @ct)::bigint, @ct)", connection);
+        command.Parameters.Add(new NpgsqlParameter("ct", NpgsqlDbType.Timestamp) { Value = collectionTime });
+        command.Parameters.Add(new NpgsqlParameter("q", NpgsqlDbType.Bigint) { Value = queryId });
+        command.Parameters.Add(new NpgsqlParameter("ec", NpgsqlDbType.Bigint) { Value = executions });
+        command.Parameters.Add(new NpgsqlParameter("dur", NpgsqlDbType.Bigint) { Value = avgDurationUs });
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// #7169: a plan with one 10 s execution in one interval and 10,000 executions of 1 ms in another averages
+    /// (10,000,000 + 10,000 * 1,000) / 10,001 = about 2 ms and totals about 20 s. The old read averaged the two interval
+    /// averages (about 5 s) and ranked on <c>SUM(execution_count) * AVG(avg)</c> (about 50,000 s), so it put this plan
+    /// above a plan that really ran 30 s. The long-window route (built days) and the table read must agree on both the
+    /// average and the order.
+    /// </summary>
+    [Fact]
+    public async Task AveragesAreWeightedByExecutions_AndTheRankIsTotalDuration_InBothTheRouteAndTheTableRead()
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            var day = new DateOnly(2026, 1, 10);
+            var d = day.ToDateTime(TimeOnly.MinValue);
+            /* Query 900: the skew case, total about 20 s. Query 901: 10,000 executions at 3 ms, total 30 s, so it ranks first. */
+            await InsertSkewRowAsync(connection, d.AddHours(3), 900, 1, 10_000_000, ct);
+            await InsertSkewRowAsync(connection, d.AddHours(4), 900, 10_000, 1_000, ct);
+            await InsertSkewRowAsync(connection, d.AddHours(3), 901, 10_000, 3_000, ct);
+            await QueryStoreTopDaily.BuildDayAsync(connection, ServerId, day, 2, BuildNow, ct);
+
+            var start = End.AddHours(-168);
+            var read = await RouteAsync(source, start, End, "dbskew", null, null, ct);
+            Assert.True(read.DailyDaysUsed > 0);
+            var today = (await RunSqlAsync(connection, DarlingDataReader.QueryStoreTopTableSql, read.Table!.Value.ReadStart, End, "dbskew", null, null, null, ct)).Select(ToRow).ToList();
+
+            foreach (var rows in new[] { read.Rows.ToList(), today })
+            {
+                Assert.Equal(new long[] { 901, 900 }, rows.Select(r => r.QueryId).ToArray());
+                var skew = rows.Single(r => r.QueryId == 900);
+                Assert.Equal(10_001, skew.TotalExecutions);
+                Assert.Equal((10_000_000.0 + 10_000.0 * 1_000.0) / 10_001.0 / 1000.0, skew.AvgDurationMs, 6);
+                Assert.Equal(skew.AvgDurationMs, skew.AvgCpuTimeMs, 6);
+                Assert.Equal(skew.AvgDurationMs * 1000.0, skew.AvgLogicalReads, 3);
+                Assert.Equal(3.0, rows.Single(r => r.QueryId == 901).AvgDurationMs, 6);
+            }
+
+            /* The Viewer's grid (its own copy of the statement, built from the same expressions) agrees. */
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(_storeConnectionString);
+            var grid = await viewer.GetQueryStoreTopQueriesAsync(ServerId, start, End, Top, new[] { "dbskew" }, cancellationToken: ct);
+            Assert.Equal(new long[] { 901, 900 }, grid.Select(r => r.QueryId).ToArray());
+            Assert.Equal((10_000_000.0 + 10_000.0 * 1_000.0) / 10_001.0 / 1000.0, grid.Single(r => r.QueryId == 900).AvgDurationMs, 6);
+        });
+    }
+
+    /// <summary>
+    /// #7169: a day built before V240 has NULL <c>*_wsum</c> columns beside a non-NULL <c>execution_count_sum</c>. Read as a
+    /// built day it adds its executions to the divisor and nothing to the numerator, so the average comes out low. The reader
+    /// must treat that day as not built and read it from the wide table. Query 900 on a 72 h window (whole days 12 and 13):
+    /// day 12 is built with weighted sums (2,000 runs at 2 ms and 2,000 at 8 ms, 4,000 runs, 20 s), day 13 is built and then
+    /// has every weighted sum cleared (5,000 runs at 4 ms and 5,000 at 6 ms, 10,000 runs, 50 s) with its raw rows still in
+    /// the wide table. Exact answer: 70 s over 14,000 runs = 5 ms. Day 13 read from the built table would give
+    /// 20 s over 14,000 runs = about 1.43 ms.
+    /// </summary>
+    [Fact]
+    public async Task ABuiltDayWithNullWeightedSums_IsReadFromTheWideTable_SoTheAverageIsExactAcrossOldAndNewDays()
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            var newDay = new DateOnly(2026, 1, 12);
+            var oldDay = new DateOnly(2026, 1, 13);
+            var d12 = newDay.ToDateTime(TimeOnly.MinValue);
+            var d13 = oldDay.ToDateTime(TimeOnly.MinValue);
+            await InsertSkewRowAsync(connection, d12.AddHours(3), 900, 2_000, 2_000, ct);
+            await InsertSkewRowAsync(connection, d12.AddHours(4), 900, 2_000, 8_000, ct);
+            await InsertSkewRowAsync(connection, d13.AddHours(3), 900, 5_000, 4_000, ct);
+            await InsertSkewRowAsync(connection, d13.AddHours(4), 900, 5_000, 6_000, ct);
+            await QueryStoreTopDaily.BuildDayAsync(connection, ServerId, newDay, 2, BuildNow, ct);
+            await QueryStoreTopDaily.BuildDayAsync(connection, ServerId, oldDay, 2, BuildNow, ct);
+
+            /* What a pre-V240 builder wrote: the summary rows and the built row are there, the weighted sums are not. */
+            await ExecAsync(connection, @"
+UPDATE collect.query_store_top_daily
+SET avg_duration_us_wsum = NULL, avg_cpu_time_us_wsum = NULL, avg_logical_io_reads_wsum = NULL,
+    avg_logical_io_writes_wsum = NULL, avg_physical_io_reads_wsum = NULL, avg_rowcount_wsum = NULL
+WHERE server_id = 1 AND day = DATE '2026-01-13'", ct);
+
+            var read = await RouteAsync(source, End.AddHours(-72), End, "dbskew", null, null, ct);
+
+            /* Only day 12 counts as built, so day 13 is not in the summary span. */
+            Assert.Equal(1, read.DailyDaysUsed);
+            Assert.Equal((newDay, oldDay), read.DailySpan);
+            var row = Assert.Single(read.Rows);
+            Assert.Equal(900, row.QueryId);
+            Assert.Equal(14_000, row.TotalExecutions);
+            Assert.Equal(5.0, row.AvgDurationMs);
+        });
+    }
+
     [Fact]
     public async Task AFaultReadingTheBuiltDays_AfterTheGateChoseTheTable_NotesFallbackRaw_AndAnswersFromRaw()
     {
@@ -306,6 +416,63 @@ FROM generate_series(0, 9) AS i", ct);
             Assert.Equal(0, read.DailyDaysUsed);
             Assert.Null(read.DailySpan);
             Assert.Equal(await TodaysReadAsync(connection, read.Table!.Value.ReadStart, End, null, null, null, ct), Format(read.Rows));
+        });
+    }
+
+    private const long FirstOwn = 5000;
+
+    /// <summary>#7736: more of the monitor's own statements than the read has candidates, each ranking above every real query (the
+    /// longest duration), in the unbuilt part of the window, with their text (the marker) in the text table and their keys backfilled.</summary>
+    private static async Task SeedOwnRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var count = TopFill.FinalCandidates(Top) + 20;
+        await ExecAsync(connection, $@"
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+ query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
+ avg_rowcount, query_plan_hash, runtime_stats_interval_id, interval_start_time_utc)
+SELECT TIMESTAMP '2026-01-14 03:00:00', 1, 'db0', q, q, 'Regular', TIMESTAMP '2026-01-14 02:50:00', TIMESTAMP '2026-01-14 03:00:00',
+       'own' || q, 1000, 900000000, 5, 5, 5, 5, 5, 'own', q, TIMESTAMP '2026-01-14 02:50:00'
+FROM generate_series({FirstOwn}, {FirstOwn + count - 1}) AS q;
+INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen)
+SELECT 1, 'db0', q, '(@cutoff_time datetime2(7))SELECT /* {PerformanceMonitor.Collectors.QueryStoreCollector.SelfQueryMarker} */ qsrs.plan_id', TIMESTAMP '2026-01-14 03:00:00'
+FROM generate_series({FirstOwn}, {FirstOwn + count - 1}) AS q;", ct);
+        Assert.NotNull(await QueryStoreSelfKeys.BackfillAsync(connection, ct));
+        Assert.True(await QueryStoreSelfKeys.ReadyAsync(connection, null, 30, ct));
+    }
+
+    /// <summary>
+    /// #7736: the MCP daily read (and, with no built day, the interval-table read) leaves the monitor's own statements out in
+    /// <c>ranked</c>, ahead of its candidate limit. More of them than candidates, ranking first: left to the tail they would use up every
+    /// candidate and the page would come back empty, so a real page here is the proof that the slot is filled and its columns resolve.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task MoreOfTheMonitorsOwnRowsThanCandidates_StillFillTheTablePage_OnTheDailyAndTheIntervalTableRoute(bool daily)
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            if (!daily)
+            {
+                await ExecAsync(connection, "DELETE FROM collect.query_store_top_daily; DELETE FROM collect.query_store_top_daily_built", ct);
+            }
+
+            await SeedOwnRowsAsync(connection, ct);
+
+            /* Not vacuous: with the gate closed the own statements still take every candidate, so the tail leaves the one candidate that is not the monitor's (query 40, whose NULL durations sort first), a short page. */
+            await ExecAsync(connection, QueryStoreSelfKeys.ReopenBackfillSql, ct);
+            var gateClosed = await RouteAsync(source, End.AddHours(-168), End, null, null, null, ct);
+            Assert.NotNull(gateClosed.Table);
+            Assert.Single(gateClosed.Rows);
+            Assert.NotNull(await QueryStoreSelfKeys.BackfillAsync(connection, ct));
+
+            var read = await RouteAsync(source, End.AddHours(-168), End, null, null, null, ct);
+
+            Assert.NotNull(read.Table);
+            Assert.Equal(daily, read.DailyDaysUsed > 0);
+            Assert.Equal(Top, read.Rows.Count);
+            Assert.DoesNotContain(read.Rows, r => r.QueryId >= FirstOwn);
         });
     }
 
@@ -426,6 +593,38 @@ FROM generate_series(0, 9) AS i", ct);
     }
 
     /// <summary>
+    /// #7814: the interval-table read places a window by the interval's start, the daily route by <c>collection_time</c> at its two
+    /// outer edges (a continuous aggregate buckets on the one column it was built on). So over the same window the two disagree
+    /// by the intervals that straddle an outer edge, and by no more: an interval that started before the window and was collected
+    /// inside it is read by the route and not by the table read, and one that started inside the window and was collected after its
+    /// end is read by the table read and not by the route. An interval whose start equals its collection time, as the other cases
+    /// here seed, shows neither.
+    /// </summary>
+    [Fact]
+    public async Task TheOuterEdges_PlaceByCollectionTime_WhereTheTableReadPlacesByTheIntervalStart()
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            var readStart = End.AddHours(-72);
+            /* Collected 10 minutes into the window, started 20 minutes before it. */
+            await InsertRowAsync(connection, readStart.AddMinutes(10), 9201, ct, intervalStart: readStart.AddMinutes(-20));
+            /* Started 20 minutes before the window's end, collected 10 minutes after it. */
+            await InsertRowAsync(connection, End.AddMinutes(10), 9202, ct, firstExecution: End.AddMinutes(-15), intervalStart: End.AddMinutes(-20));
+
+            var route = await RouteAsync(source, readStart, End, null, null, null, ct);
+            Assert.Equal((new DateOnly(2026, 1, 12), new DateOnly(2026, 1, 14)), route.DailySpan);
+            var routeIds = route.Rows.Select(r => r.QueryId).ToHashSet();
+            var table = (await RunSqlAsync(connection, DarlingDataReader.QueryStoreTopTableSql, readStart, End, null, null, null, null, ct))
+                .Select(v => (long)v[1]!).ToHashSet();
+
+            Assert.Contains(9201L, routeIds);
+            Assert.DoesNotContain(9201L, table);
+            Assert.DoesNotContain(9202L, routeIds);
+            Assert.Contains(9202L, table);
+        });
+    }
+
+    /// <summary>
     /// #5882: the daily statement's two edge reads take the narrowed first_execution_time margin (the trailing edge anchors on
     /// <c>$9::date</c>, not on <c>$2</c>). With a built run of whole days, a server of 60-minute intervals (a 3-hour margin)
     /// gets the rows, in the order, the 26-hour statement gets. The edges hold a straddler each (first executed under two hours
@@ -525,7 +724,12 @@ FROM generate_series(0, 9) AS i", ct);
             {
                 Assert.False(module.GetProperty("hints").TryGetProperty("approximate", out _));
                 Assert.False(module.GetProperty("hints").TryGetProperty("approximation_note", out _));
-                Assert.False(outcome.TryGetProperty("hints", out _));
+                /* #7010: the empty answer carries the window notice under hints, but not the approximation flag. */
+                if (outcome.TryGetProperty("hints", out var outcomeHints))
+                {
+                    Assert.False(outcomeHints.TryGetProperty("approximate", out _));
+                    Assert.False(outcomeHints.TryGetProperty("approximation_note", out _));
+                }
             }
             await Task.CompletedTask;
         });

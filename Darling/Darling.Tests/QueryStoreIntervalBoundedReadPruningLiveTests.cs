@@ -214,11 +214,13 @@ public sealed class QueryStoreIntervalBoundedReadPruningLiveTests
             new ReadCase(
                 "viewer grid top read", ViewerDataService.QueryStoreTopTableSql, "integer, timestamp, timestamp, integer, text[], integer",
                 $"1, {f}, {t}, 10, NULL::text[], 50",
-                new[] { new Bounds(from - purge, to + slack) }, new[] { new Bounds(from - purge, null) }),
+                /* #7776: the grid places its window by interval start, so its upper bound is the day-plus-hour margin of the duration trend's start-placed arm. */
+                new[] { new Bounds(from - purge, to + QueryStoreIntervalWide.IntervalStartFirstExecMargin) }, new[] { new Bounds(from - purge, null) }),
             new ReadCase(
                 "MCP top-queries table read", DarlingDataReader.QueryStoreTopTableSql, "integer, timestamp, timestamp, integer, text[], text, text, integer",
                 $"1, {f}, {t}, 10, NULL::text[], NULL::text, NULL::text, 50",
-                new[] { new Bounds(from - purge, to + slack) }),
+                /* #7814: placed by interval start like the grid, so the same day-plus-hour upper margin. */
+                new[] { new Bounds(from - purge, to + QueryStoreIntervalWide.IntervalStartFirstExecMargin) }),
             /* The daily read: the wide table serves the two edges, [$2, $8) and [$9, $3], and the summary serves the days between. */
             new ReadCase(
                 "MCP top-queries daily read", DarlingDataReader.QueryStoreTopDailyTableSql,
@@ -278,7 +280,7 @@ public sealed class QueryStoreIntervalBoundedReadPruningLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await SeedAsync(connection, Wide, ct);
         await AssertReadsPruneAsync(connection, Wide, WideReads(new DateTime(2026, 10, 7), new DateTime(2026, 10, 8), new DateTime(2026, 10, 6)), ct);
@@ -290,7 +292,7 @@ public sealed class QueryStoreIntervalBoundedReadPruningLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await SeedAsync(connection, Latest, ct);
         await AssertReadsPruneAsync(connection, Latest, LatestReads(new DateTime(2026, 10, 6)), ct);
@@ -307,7 +309,7 @@ public sealed class QueryStoreIntervalBoundedReadPruningLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await SeedAsync(connection, Wide, ct);
         await ExecAsync(connection, "SET search_path = collect, config, public", ct);

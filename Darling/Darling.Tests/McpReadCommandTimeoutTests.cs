@@ -160,7 +160,7 @@ public sealed class McpReadCommandTimeoutTests
 
         foreach (var path in ReadSurfaceSources())
         {
-            var text = File.ReadAllText(path);
+            var text = RepoFile.ReadRepoFile(path);
             var code = CSharpSourceWalker.StripCommentsAndStrings(text);
 
             foreach (Match ctor in s_commandCtor.Matches(code))
@@ -212,7 +212,7 @@ public sealed class McpReadCommandTimeoutTests
 
         foreach (var path in ReadSurfaceSources())
         {
-            var text = File.ReadAllText(path);
+            var text = RepoFile.ReadRepoFile(path);
             var code = CSharpSourceWalker.StripCommentsAndStrings(text);
             var opensFromStore = code.Contains("postgres.OpenConnectionAsync", StringComparison.Ordinal);
 
@@ -283,7 +283,7 @@ public sealed class McpReadCommandTimeoutTests
 
         foreach (var path in ReadSurfaceSources())
         {
-            var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
+            var code = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(path));
 
             foreach (Match handoff in s_commandFactoryHandoff.Matches(code))
             {
@@ -312,7 +312,7 @@ public sealed class McpReadCommandTimeoutTests
 
         foreach (var path in ReadSurfaceSources())
         {
-            var text = File.ReadAllText(path);
+            var text = RepoFile.ReadRepoFile(path);
             var code = CSharpSourceWalker.StripCommentsAndStrings(text);
 
             foreach (Match importer in s_binaryImporter.Matches(code))
@@ -421,8 +421,7 @@ public sealed class McpReadCommandTimeoutTests
     public void TheComposedQueryRunner_ResolvesItsDeadlinePerRun()
     {
         var code = CSharpSourceWalker.StripCommentsAndStrings(
-            File.ReadAllText(Path.Combine(
-                RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs")));
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"));
 
         /* #6390 S2c: the run core moved to Storage; it reads the deadline through the host the service builds. */
         var runnerCode = CSharpSourceWalker.StripCommentsAndStrings(

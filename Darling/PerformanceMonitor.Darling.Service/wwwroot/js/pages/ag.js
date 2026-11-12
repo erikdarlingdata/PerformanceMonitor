@@ -52,7 +52,7 @@ const NO_AGS_MESSAGE =
 const SEV_BADGE = { Critical: "CRIT", Warning: "WARN" };
 
 const DATABASE_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "replica_server_name", label: "Replica" },
   { key: "synchronization_state", label: "Sync state", sevKey: "synchronization_state_severity" },
   /* Units go in the header: the DMV reports queues in KB and rates in KB/s, and a bare "6,000" in a cell is
@@ -79,6 +79,10 @@ export async function renderAg(main, opts) {
   const [res, fleet] = await Promise.all([apiGet("/api/ag"), apiGetFleet()]);
   /* A poll that lands after the reader went to another page must not draw the groups over it. */
   if (location.hash !== ourHash) return;
+  /* #7959: a 401 from either read (an expired session, or a front door answering a sign-in page) has put the shell's sign-in strip in
+     main by the time the reads return. Nothing is drawn over it: the "no groups" line would read as a healthy absence under a
+     "Signed out" status bar. An aborted read is a route change, handled the same way. */
+  if (res.kind === "aborted" || res.kind === "auth" || fleet.kind === "aborted" || fleet.kind === "auth") return;
   const fleetCards = fleet.kind === "data" && fleet.data && Array.isArray(fleet.data.cards) ? fleet.data.cards : [];
   if (res.kind === "error") {
     if (!showRefreshError(main, "ag", res.message)) mount(main, [pageHead(null), errorStrip(res.message)]);
@@ -92,7 +96,7 @@ export async function renderAg(main, opts) {
     return;
   }
 
-  showPage(main, "ag", [pageHead(d), truncationNote(d), rollup(d), ...groups.map((g) => agCard(g, fleetCards))]);
+  showPage(main, "ag", [pageHead(d), truncationNote(d), rollup(d), ...groups.map((g) => agCard(g, fleetCards, groups))]);
 }
 
 /* #5042: the tiles count every view in scope, so when a response says it was cut (a limit or a byte cap) the page
@@ -163,7 +167,22 @@ export function countLabel(num, plural) {
   return num === 1 ? plural.replace(/s$/, "") : plural;
 }
 
-function agCard(g, fleetCards) {
+/* #7562: the primary named in a card's header. A card from a secondary's view gets the monitored server's display name, and a card from the primary's view
+   gets the engine's replica name, so one group printed the name in two cases. A name that matches a primary replica row of the same group in any
+   view, ignoring case, is written the way that row spells it. */
+export function primaryText(g, groups) {
+  if (!g.primary_replica) return g.primary_replica;
+  const key = String(g.primary_replica).toLowerCase();
+  const same = (o) => (g.group_id && o.group_id ? g.group_id === o.group_id : g.ag_name === o.ag_name);
+  for (const o of groups || []) {
+    if (!same(o)) continue;
+    const row = (o.replicas || []).find((r) => r.is_primary && r.replica_server_name && String(r.replica_server_name).toLowerCase() === key);
+    if (row) return row.replica_server_name;
+  }
+  return g.primary_replica;
+}
+
+function agCard(g, fleetCards, groups) {
   const cls = bandClass(g.severity);
 
   return el("div", { class: "card ag-card " + cls }, [
@@ -173,7 +192,7 @@ function agCard(g, fleetCards) {
       el("span", { class: "badge " + cls, text: g.severity_label || g.severity }),
       el("div", { class: "spacer" }),
       g.primary_replica
-        ? el("span", { class: "ag-primary-note", text: "Primary: " + g.primary_replica })
+        ? el("span", { class: "ag-primary-note", text: "Primary: " + primaryText(g, groups) })
         : el("span", { class: "ag-primary-note muted", text: primaryNote(g) }),
     ]),
     el("div", { class: "status-line", text: viewSubtitle(g, fleetCards) }),

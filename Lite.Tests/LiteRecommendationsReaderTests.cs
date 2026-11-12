@@ -304,26 +304,6 @@ public class LiteRecommendationsReaderTests
     }
 
     [Fact]
-    public void BuildCopyPasteSql_ServerConfigTargets_RenderSpConfigureViaTheSharedBuilder()
-    {
-        var action = new RemediationAction(
-            "SERVER_CONFIG", "set", Array.Empty<ForcePlanTarget>(),
-            ServerConfigTargets: new[]
-            {
-                new ServerConfigTarget(ServerConfigSetting.Maxdop, 0, 8),
-                new ServerConfigTarget(ServerConfigSetting.MaxServerMemory, 2147483647, 2147483647),
-            });
-
-        var sql = LiteRecommendationsReader.BuildCopyPasteSql(action);
-
-        Assert.Equal(
-            FactRemediation.BuildSpConfigureStatement(ServerConfigSetting.Maxdop, 8) +
-            Environment.NewLine + Environment.NewLine +
-            FactRemediation.BuildSpConfigureStatement(ServerConfigSetting.MaxServerMemory, 2147483647),
-            sql);
-    }
-
-    [Fact]
     public void BuildCopyPasteSql_RcsiTargets_RenderAlterWithTwoSidedDisclosureHeader()
     {
         // RCSI rides a DB_CONFIG action as a per-database RcsiTarget. It is DESTRUCTIVE, so the
@@ -344,32 +324,6 @@ public class LiteRecommendationsReaderTests
             sql!.IndexOf("*/", StringComparison.Ordinal) <
             sql.IndexOf("ALTER DATABASE", StringComparison.Ordinal),
             "the disclosure comment header must precede the ALTER statement");
-    }
-
-    [Fact]
-    public void BuildCopyPasteSql_ClearPlanTargets_RenderResolveAndFreeScriptWithDisclosureHeader()
-    {
-        // Clear-plan is DESTRUCTIVE: live-resolve the currently-cached plan handle(s) for the abnormal
-        // query hash and free each — with the two-sided disclosure header.
-        var action = new RemediationAction(
-            "CLEAR_PLAN", "clear", Array.Empty<ForcePlanTarget>(),
-            ClearPlanTargets: new[]
-            {
-                new ClearPlanTarget(
-                    "StackOverflow", "0xABCDEF0123456789",
-                    CurrentCpuPerExecMs: 45.0, BaselineCpuPerExecMs: 9.0, AnomalyRatio: 5.0),
-            },
-            ClearPlanFigures: new ClearPlanFigures(45.0, 9.0, 5.0, 62, false, false));
-
-        var sql = LiteRecommendationsReader.BuildCopyPasteSql(action);
-
-        Assert.NotNull(sql);
-        Assert.StartsWith("/*", sql, StringComparison.Ordinal);
-        Assert.Contains("Risks of MAKING this change:", sql!, StringComparison.Ordinal);
-        Assert.Contains("Risks of NOT making this change:", sql!, StringComparison.Ordinal);
-        Assert.Contains("sys.dm_exec_query_stats", sql!, StringComparison.Ordinal);
-        Assert.Contains("0xABCDEF0123456789", sql!, StringComparison.Ordinal);
-        Assert.Contains("DBCC FREEPROCCACHE(@plan_handle);", sql!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -491,7 +445,7 @@ public class LiteRecommendationsReaderTests
         /* The card renders it as a status line, prefixed, and hides the line when there is nothing to say. */
         var card = new LiteRecommendationCardViewModel(marked);
         Assert.True(card.ShowNotPaged);
-        Assert.StartsWith("Not paged — ", card.NotPagedText, StringComparison.Ordinal);
+        Assert.StartsWith("Not paged: ", card.NotPagedText, StringComparison.Ordinal);
         var quiet = new LiteRecommendationCardViewModel(LiteRecommendationsReader.MapFinding(chain, ServerName, lens));
         Assert.False(quiet.ShowNotPaged);
         Assert.Equal(string.Empty, quiet.NotPagedText);
@@ -542,7 +496,7 @@ public class LiteRecommendationsReaderTests
             Finding("DEADLOCKS", 1.9, analysisTime: t),            // Critical (higher raw)
         };
 
-        var items = LiteRecommendationsReader.MapFindings(findings, ServerName);
+        var items = LiteRecommendationsReader.MapFindings(findings, ServerName, lens: null, forcePlanStates: null, forcePlanStateUnavailableReason: null);
 
         Assert.Equal(4, items.Count);
         // Critical (1.9) -> Critical (1.6) -> Warning (0.8) -> Info (0.5)
@@ -565,7 +519,7 @@ public class LiteRecommendationsReaderTests
             Finding("BLOCKING_EVENTS", 1.6, analysisTime: older),
         };
 
-        var items = LiteRecommendationsReader.MapFindings(findings, ServerName);
+        var items = LiteRecommendationsReader.MapFindings(findings, ServerName, lens: null, forcePlanStates: null, forcePlanStateUnavailableReason: null);
         Assert.Single(items);
         // RootFactKey is no longer surfaced on the card; verify the newer batch (CPU_SQL_PERCENT)
         // won via its mapped Title (same fallback MapFinding uses: advice headline, else the key).
@@ -577,7 +531,7 @@ public class LiteRecommendationsReaderTests
     [Fact]
     public void MapFindings_Empty_ReturnsEmpty()
     {
-        Assert.Empty(LiteRecommendationsReader.MapFindings(Array.Empty<AnalysisFinding>(), ServerName));
+        Assert.Empty(LiteRecommendationsReader.MapFindings(Array.Empty<AnalysisFinding>(), ServerName, lens: null, forcePlanStates: null, forcePlanStateUnavailableReason: null));
     }
 
     // Correlate-and-focus slice 1 (review §1d): each card's advice gains a "what else fired in this
@@ -590,7 +544,7 @@ public class LiteRecommendationsReaderTests
         {
             Finding("CPU_SQL_PERCENT", 1.6, analysisTime: t),
             Finding("BLOCKING_EVENTS", 1.0, analysisTime: t),
-        }, ServerName);
+        }, ServerName, lens: null, forcePlanStates: null, forcePlanStateUnavailableReason: null);
 
         Assert.Equal(2, items.Count);
         Assert.All(items, i => Assert.Contains("Also surfaced in this analysis window:", i.AdviceText!));
@@ -603,7 +557,7 @@ public class LiteRecommendationsReaderTests
     public void MapFindings_NoCoFiredLine_ForSingleFinding()
     {
         var items = LiteRecommendationsReader.MapFindings(
-            new List<AnalysisFinding> { Finding("CPU_SQL_PERCENT", 1.6) }, ServerName);
+            new List<AnalysisFinding> { Finding("CPU_SQL_PERCENT", 1.6) }, ServerName, lens: null, forcePlanStates: null, forcePlanStateUnavailableReason: null);
 
         Assert.Single(items);
         Assert.DoesNotContain("Also surfaced in this analysis window:", items[0].AdviceText ?? string.Empty);

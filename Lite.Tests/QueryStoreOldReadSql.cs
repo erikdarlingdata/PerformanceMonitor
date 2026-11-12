@@ -13,7 +13,9 @@ namespace Lite.Tests;
 /// verbatim as a test-only ORACLE. <see cref="QueryStoreTextAfterRankingTests"/> runs these beside the shipped reads
 /// to prove the rewrite changes no row, and at a low memory_limit to prove the old shape runs out of memory where the
 /// new one does not. Do not edit these to follow the product SQL: their whole value is that they are the old text.
-/// The optional database / execution-type / module filters are left out (no filter is the case under test);
+/// #7169 changed the averaged columns and the ranking of <see cref="TopQueries"/> to execution-weighted
+/// (<c>SUM(avg * execution_count) / SUM(execution_count)</c>, ranked on <c>SUM(avg_duration_us * execution_count)</c>); this copy
+/// follows that one change so it still proves the text rewrite changes no row. The optional database / execution-type / module filters are left out (no filter is the case under test);
 /// <c>@@CANDIDATES@@</c> stands for the candidate limit the top-queries round was built with.
 /// </summary>
 internal static class QueryStoreOldReadSql
@@ -70,12 +72,12 @@ ranked AS (
            is in the partition, so filtering first cannot change which row wins. */
         execution_type_desc,
         SUM(execution_count) AS total_executions,
-        AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) / 1000.0 AS avg_duration_ms,
-        AVG(CAST(avg_cpu_time_us AS DOUBLE PRECISION)) / 1000.0 AS avg_cpu_time_ms,
-        AVG(CAST(avg_logical_io_reads AS DOUBLE PRECISION)) AS avg_logical_reads,
-        AVG(CAST(avg_logical_io_writes AS DOUBLE PRECISION)) AS avg_logical_writes,
-        AVG(CAST(avg_physical_io_reads AS DOUBLE PRECISION)) AS avg_physical_reads,
-        AVG(CAST(avg_rowcount AS DOUBLE PRECISION)) AS avg_rowcount,
+        SUM(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) / 1000.0 AS avg_duration_ms,
+        SUM(CAST(avg_cpu_time_us AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) / 1000.0 AS avg_cpu_time_ms,
+        SUM(CAST(avg_logical_io_reads AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) AS avg_logical_reads,
+        SUM(CAST(avg_logical_io_writes AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) AS avg_logical_writes,
+        SUM(CAST(avg_physical_io_reads AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) AS avg_physical_reads,
+        SUM(CAST(avg_rowcount AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) AS avg_rowcount,
         MIN(min_dop) AS min_dop,
         MAX(max_dop) AS max_dop,
         MAX(last_execution_time) AS last_execution_time,
@@ -83,9 +85,9 @@ ranked AS (
         MAX(CASE WHEN is_forced_plan THEN TRUE ELSE FALSE END) AS is_forced_plan,
         MAX(plan_forcing_type) AS plan_forcing_type,
         MIN(first_execution_time) AS first_execution_time,
-        AVG(CAST(avg_clr_time_us AS DOUBLE PRECISION)) / 1000.0 AS avg_clr_time_ms,
-        AVG(CAST(avg_tempdb_space_used AS DOUBLE PRECISION)) AS avg_tempdb_space_used,
-        AVG(CAST(avg_log_bytes_used AS DOUBLE PRECISION)) AS avg_log_bytes_used,
+        SUM(CAST(avg_clr_time_us AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) / 1000.0 AS avg_clr_time_ms,
+        SUM(CAST(avg_tempdb_space_used AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) AS avg_tempdb_space_used,
+        SUM(CAST(avg_log_bytes_used AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) AS avg_log_bytes_used,
         MAX(plan_type) AS plan_type,
         MAX(force_failure_count) AS force_failure_count,
         MAX(last_force_failure_reason) AS last_force_failure_reason,
@@ -108,17 +110,17 @@ ranked AS (
         MAX(CAST(max_log_bytes_used AS DOUBLE PRECISION)) AS max_log_bytes_used,
         MIN(CAST(min_tempdb_space_used AS DOUBLE PRECISION)) AS min_tempdb_space_used,
         MAX(CAST(max_tempdb_space_used AS DOUBLE PRECISION)) AS max_tempdb_space_used,
-        AVG(CAST(avg_query_max_used_memory AS DOUBLE PRECISION)) * 8.0 / 1024.0 AS avg_memory_mb,
+        SUM(CAST(avg_query_max_used_memory AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) * 8.0 / 1024.0 AS avg_memory_mb,
         MIN(CAST(min_query_max_used_memory AS DOUBLE PRECISION)) * 8.0 / 1024.0 AS min_memory_mb,
         MAX(CAST(max_query_max_used_memory AS DOUBLE PRECISION)) * 8.0 / 1024.0 AS max_memory_mb,
-        AVG(CAST(avg_num_physical_io_reads AS DOUBLE PRECISION)) AS avg_num_physical_io_reads,
+        SUM(CAST(avg_num_physical_io_reads AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) AS avg_num_physical_io_reads,
         MIN(CAST(min_num_physical_io_reads AS DOUBLE PRECISION)) AS min_num_physical_io_reads,
         MAX(CAST(max_num_physical_io_reads AS DOUBLE PRECISION)) AS max_num_physical_io_reads
     FROM deduped
     WHERE rn = 1
     GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
     /* #5299 round 3 (O16): the ranking ends on the whole group key - see GetTopQueriesByCpuAsync. */
-    ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+    ORDER BY SUM(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
     LIMIT @@CANDIDATES@@
 ),
 page AS (

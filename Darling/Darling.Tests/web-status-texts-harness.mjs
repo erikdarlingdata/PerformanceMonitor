@@ -75,7 +75,7 @@ globalThis.fetch = async (url) => {
     : u.pathname === "/api/active-queries/live/available"
     ? { can_queue: true, can_edit: true, managed_store: false }
     : u.pathname.endsWith("/get_running_jobs")
-    ? { status: "empty", message: "No running SQL Agent jobs found (or the running_jobs collector has not run yet)." }
+    ? { status: "empty", message: "No SQL Agent job is running." }
     : {};
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
 };
@@ -141,6 +141,17 @@ try {
     return { text: bar.textContent, buttons, status: bar.dataset.status || null };
   };
 
+  /* #7573: the live read's rows follow the page's Monitor statements switch: the monitor's own sessions out by default, a similar name and a missing name kept. */
+  const liveSample = {
+    fetchedAtUtc: "2026-11-04T12:00:00Z",
+    rows: [
+      { SessionId: 61, ProgramName: "PerformanceMonitorLite" },
+      { SessionId: 62, ProgramName: "Orders.Api" },
+      { SessionId: 63, ProgramName: null },
+      { SessionId: 64, ProgramName: "MyPerformanceMonitorTool" },
+    ],
+  };
+
   /* The starter dashboard "Server health at a glance": its Overview panel's CPU stat label, as a created view would save it. */
   const starter = templates.DASHBOARD_TEMPLATES.find((t) => t.key === "server-health").make("srv");
   const starterOverview = starter.definition.panels.find((p) => p.read === "get_server_summary");
@@ -162,6 +173,8 @@ try {
       pageJobsOnline: await pageRunningJobsText("page-online"),
       pageJobsFlip: await pageFlipText(),
       liveBar: await liveBarFor(),
+      liveRowsDefault: live.liveRows(liveSample).map((r) => r.session_id),
+      liveRowsIncluded: live.liveRows(liveSample, true).map((r) => r.session_id),
     })
   );
 } finally {

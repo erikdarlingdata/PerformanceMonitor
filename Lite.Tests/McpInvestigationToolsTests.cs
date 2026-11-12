@@ -89,6 +89,26 @@ public sealed class McpInvestigationToolsTests : IDisposable
     private void Lapse(string id) =>
         Exec($"UPDATE investigation_requests SET lease_until = TIMESTAMP '2000-01-01 00:00:00' WHERE request_id = '{id}'");
 
+    /// <summary>#8611: Lite journals its own refusals under invalid and unclaimed (and Darling its no-claim writes under legacy-token), so a claim as any of the three would make the claim's rows read
+    /// as a refusal's. Darling refuses both (case-insensitively); so does Lite, and no claim is made.</summary>
+    [Theory]
+    [InlineData("invalid")]
+    [InlineData("unclaimed")]
+    [InlineData("Invalid")]
+    [InlineData("UNCLAIMED")]
+    [InlineData("legacy-token")]
+    [InlineData("Legacy-Token")]
+    public async Task Claim_AsAReservedAgentName_IsRefused_AndMakesNoClaim(string agentId)
+    {
+        var openedId = (await _store.OpenOrJoinAsync(Alert(), Ct)).RequestId!.Value;
+
+        var answer = Root(await McpInvestigationTools.ClaimAsync(_store, Composer(), openedId.ToString(), agentId, null, null, Ct));
+
+        Assert.NotEqual("claimed", answer.GetProperty("status").GetString());
+        Assert.Equal("agent_id_is_named_token", answer.GetProperty("status").GetString());
+        Assert.Equal("", Scalar($"SELECT coalesce(CAST(claim_id AS VARCHAR), '') FROM investigation_requests WHERE request_id = '{openedId}'"));
+    }
+
     [Fact]
     public async Task Claim_ComposesTheBrief_StoresItUnderTheClaim_AndReturnsIt()
     {
@@ -354,16 +374,23 @@ FROM generate_series(1, {InvestigationToolCore.MaxLimit + 1}) AS t(i)");
     public void LitesInvestigationTools_KeepTheSharedContractWithDarling() =>
         Assert.Empty(Darling.Tests.InvestigationToolContract.Differences(typeof(McpInvestigationTools)));
 
+    /// <summary>#8461: of the four tools the class declares, the gate serves the two that change investigation state, and the two
+    /// reads are on the read-only list and served in every configuration, as Darling serves them.</summary>
     [Fact]
-    public void TheFourToolNames_AreTheOnesTheGateServes()
+    public void TheDeclaredStateChangingTools_AreTheOnesTheGateServes_AndTheDeclaredReads_AreOnTheReadOnlyList()
     {
         var declared = typeof(McpInvestigationTools).GetMethods()
             .Select(m => m.GetCustomAttributes(typeof(ModelContextProtocol.Server.McpServerToolAttribute), false)
                 .Cast<ModelContextProtocol.Server.McpServerToolAttribute>().SingleOrDefault()?.Name)
             .Where(n => n is not null)
+            .Select(n => n!)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
+        var reads = declared.Where(McpToolClassification.ReadOnlyTools.Contains).ToArray();
+        var stateChanging = declared.Except(reads).ToArray();
 
-        Assert.Equal(McpInvestigationPolicy.InvestigationTools.OrderBy(n => n, StringComparer.Ordinal), declared);
+        Assert.Equal(new[] { "get_investigation_reports", "list_investigation_requests" }, reads);
+        Assert.Equal(new[] { "claim_investigation_request", "submit_investigation_report" }, stateChanging);
+        Assert.Equal(stateChanging, McpInvestigationPolicy.InvestigationTools.OrderBy(n => n, StringComparer.Ordinal));
     }
 }

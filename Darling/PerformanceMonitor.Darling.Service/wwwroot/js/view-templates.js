@@ -185,7 +185,7 @@ export const DASHBOARD_TEMPLATES = [
             viz: "line",
             rowsKey: "trend",
             xKey: "time",
-            emptyText: "No blocked process reports in this window — an empty trend here means none were captured, not that nothing was collected.",
+            emptyText: "No blocked process reports in this window: an empty trend here means none were captured, not that nothing was collected.",
             series: [{ key: "count", label: "Reports or snapshot rows" }],
             format: "int",
             unit: "reports or snapshot rows",
@@ -216,7 +216,6 @@ export const DASHBOARD_TEMPLATES = [
             columns: [
               { key: "deadlock_time", label: "Deadlock Time", format: "time" },
               { key: "victim_sql_text", label: "Victim SQL", wrap: true },
-              { key: "victim_process_id", label: "Victim" },
               { key: "process_summary", label: "Processes", wrap: true },
             ],
           },
@@ -246,8 +245,8 @@ export const DASHBOARD_TEMPLATES = [
                  out in each tile because this file is a literal that the template tests read without running it. */
               { key: "total_physical_memory_mb", label: "Physical", format: "mb", hideWhen: { key: "engine_edition", equals: 5 } },
               { key: "total_physical_memory_mb", label: "Memory limit", format: "mb", showWhen: { key: "engine_edition", equals: 5 } },
-              { key: "available_physical_memory_mb", label: "Available", format: "mb", hideWhen: { key: "engine_edition", equals: 5 } },
-              { key: "available_physical_memory_mb", label: "Available under limit", format: "mb", showWhen: { key: "engine_edition", equals: 5 } },
+              { key: "available_physical_memory_mb", label: "Available", format: "mbfit", hideWhen: { key: "engine_edition", equals: 5 } },
+              { key: "available_physical_memory_mb", label: "Available under limit", format: "mbfit", showWhen: { key: "engine_edition", equals: 5 } },
               { key: "memory_utilization_pct", label: "Utilization", format: "pct" },
               { key: "total_server_memory_mb", label: "Total server", format: "mb" },
               { key: "target_server_memory_mb", label: "Target server", format: "mb" },
@@ -279,10 +278,10 @@ export const DASHBOARD_TEMPLATES = [
             params: { server },
             viz: "table",
             rowsKey: "clerks",
-            emptyText: "No memory clerks in the latest snapshot — the clerk collector may not have run yet.",
+            emptyText: "No memory clerks in the latest snapshot: the clerk collector may not have run yet.",
             columns: [
               { key: "clerk_type", label: "Clerk" },
-              { key: "memory_mb", label: "Memory", format: "mb" },
+              { key: "memory_mb", label: "Memory", format: "mbfit" },
             ],
           },
           {
@@ -311,6 +310,7 @@ export const DASHBOARD_TEMPLATES = [
               { key: "summary.total_plans", label: "Plans", format: "int" },
               { key: "summary.single_use_plans", label: "Single-use", format: "int" },
               { key: "summary.single_use_percent", label: "Single-use %", format: "num1" },
+              { key: "summary.compiled_single_use_percent", label: "Compiled single-use %", format: "num1" },
               { key: "summary.total_size_mb", label: "Cache size", format: "mb" },
               { key: "summary.wasted_percent", label: "Wasted %", format: "num1" },
             ],
@@ -388,7 +388,7 @@ export const DASHBOARD_TEMPLATES = [
             rowsKey: "trace_flags",
             emptyText: "No trace flags are enabled on this server.",
             columns: [
-              { key: "trace_flag", label: "Flag", format: "int" },
+              { key: "trace_flag", label: "Flag", format: "id" },
               { key: "enabled", label: "Enabled", format: "bool" },
               { key: "is_global", label: "Global", format: "bool" },
             ],
@@ -402,7 +402,7 @@ export const DASHBOARD_TEMPLATES = [
             rowsKey: "changes",
             emptyText: "No server configuration changed in the last week.",
             columns: [
-              { key: "change_time", label: "Changed", format: "time" },
+              { key: "change_time", label: "First seen", format: "time" },
               { key: "configuration_name", label: "Setting" },
               { key: "old_value_configured", label: "Old" },
               { key: "new_value_configured", label: "New" },

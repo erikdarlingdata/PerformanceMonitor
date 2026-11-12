@@ -174,7 +174,7 @@ function metricsLine(d) {
   const queries = d.unique_queries == null ? "not materialized at this tier" : numberText(d.unique_queries);
   return (
     "Top wait: " + wait + "   High-CPU samples: " + numberText(d.high_cpu_events ?? 0) +
-    "   Total wait: " + numberText(d.total_wait_time_sec ?? 0) + " s   Unique queries: " + queries
+    "   Total wait: " + numberText(d.total_wait_time_sec ?? 0) + " s   Queries stored: " + queries
   );
 }
 
@@ -264,8 +264,9 @@ export function dailyHealthCalendar({ server, initial, read, renderTable, openDa
     if (mine !== generation || selected !== iso || res.kind === "aborted") return;
     if (res.kind === "error") return swap(detail, title, errorStrip(res.message));
     if (res.kind === "empty") {
-      /* No row, or a purged day: said in the page's words for the first, the service's for the second (it names the horizon). */
-      const purged = res.status === "unavailable";
+      /* A gap day (#7193) and a purged day both answer status "unavailable", so the status cannot tell them apart. Only the purged answer
+         carries hints.data_state "purged": it gets the service's sentence (it names the horizon), a gap day the page's own words. */
+      const purged = !!(res.hints && res.hints.data_state === "purged");
       return swap(detail, title, el("div", { class: "daycal-band band-NoData", text: "No Data" }), emptyStrip(purged ? res.message : "No collection this day."));
     }
     const d = res.data || {};

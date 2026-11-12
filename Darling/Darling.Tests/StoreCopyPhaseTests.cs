@@ -393,8 +393,17 @@ public class StoreCopyPhaseTests
 
         foreach (var file in sources)
         {
+            /* #7025: the runner is split into DarlingCollectorRunner.<Area>.cs files; the sweep reads them as the one
+               file the expected list below names, so its partials are not swept on their own. */
+            var fileName = Path.GetFileName(file);
+            if (fileName.StartsWith("DarlingCollectorRunner.", StringComparison.Ordinal) && fileName != "DarlingCollectorRunner.cs")
+            {
+                continue;
+            }
+
             var code = CSharpSourceWalker.StripCommentsAndStrings(
-                File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal));
+                (fileName == "DarlingCollectorRunner.cs" ? RepoFile.ReadRepoFile(file) : File.ReadAllText(file))
+                    .Replace("\r\n", "\n", StringComparison.Ordinal));
 
             if (code.Contains("BeginBinaryImportAsync(", StringComparison.Ordinal))
             {
@@ -419,12 +428,9 @@ public class StoreCopyPhaseTests
             new[]
             {
                 "DarlingCollectorRunner.cs",
-                "RdsCpuIngestor.cs",
-                "RdsDeadlockIngestor.cs",
-                /* #3601: the log-event pipeline's managed transport — the deadlock ingestor's write over a
-                   different definition, stamping the phase the same way. */
-                "RdsLogEventIngestor.cs",
-                "RdsPlanIngestor.cs",
+                /* #7222: the one write the four RDS ingestors (log events, plans, deadlocks, CPU) share; each used
+                   to carry its own copy of it and stamp the phase the same way. */
+                "RdsCopyWriter.cs",
             },
             copySites.Keys.ToArray());
 

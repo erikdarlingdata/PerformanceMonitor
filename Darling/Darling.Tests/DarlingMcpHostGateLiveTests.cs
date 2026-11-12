@@ -575,7 +575,7 @@ public sealed class DarlingMcpHostGateLiveTests
         Assert.True(resolved.Refuse);
         Assert.Equal("", resolved.Token);
         Assert.Contains(log.Lines, l => l.Contains("MCP network token", StringComparison.Ordinal)
-            && l.Contains("refusing to serve", StringComparison.Ordinal));
+            && l.Contains("MCP server is not started", StringComparison.Ordinal));
         Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
     }
 

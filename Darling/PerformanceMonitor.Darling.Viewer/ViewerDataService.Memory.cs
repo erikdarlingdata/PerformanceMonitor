@@ -94,7 +94,8 @@ public sealed record MemoryPressureEventRow(
     DateTime SampleTime,
     string MemoryNotification,
     int MemoryIndicatorsProcess,
-    int MemoryIndicatorsSystem);
+    int MemoryIndicatorsSystem,
+    int? MemoryNodeId = null);
 
 /// <summary>
 /// The Memory inner tab's reads (W1j viewer copy-parity), ported from Lite's
@@ -225,7 +226,8 @@ public sealed partial class ViewerDataService
             sample_time,
             memory_notification,
             memory_indicators_process,
-            memory_indicators_system
+            memory_indicators_system,
+            memory_node_id
         FROM v_memory_pressure_events
         WHERE server_id = $1
         AND   sample_time >= $2
@@ -531,7 +533,8 @@ public sealed partial class ViewerDataService
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                reader.IsDBNull(3) ? 0 : reader.GetInt32(3)));
+                reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                reader.IsDBNull(4) ? null : reader.GetInt32(4)));
         }
 
         return items;

@@ -64,12 +64,17 @@ internal static class DarlingHealthReader
     /// <summary>Latest SQL-process CPU for one server (newest ring-buffer sample). $1 server_id.
     /// Same shape and same reasoning as <c>DarlingWorker.LatestCpuSql</c>: ordered on the hypertable's
     /// <c>collection_time</c> partition column so ordered ChunkAppend stops at the newest chunk, with
-    /// <c>sample_time</c> as the within-batch tiebreak, and no time predicate because <c>sample_time</c> is
-    /// the monitored server's local wall clock.</summary>
-    public const string ServerSummaryCpuSql = @"
+    /// <c>sample_time</c> as the within-batch tiebreak, and no predicate on <c>sample_time</c>, because it is
+    /// the monitored server's local wall clock. $2 now (naive UTC), $3 the freshness floor in minutes: the read
+    /// is cut off on <c>collection_time</c> at now minus the larger of the floor and twice this server's
+    /// <c>cpu_utilization</c> interval (<see cref="CpuReadingFreshnessSql"/>), so a collector that stopped days ago
+    /// answers with no CPU figure, as the fleet card does (#7196). The answer still carries the reading's own
+    /// <c>collection_time</c> when there is one.</summary>
+    public static readonly string ServerSummaryCpuSql = $@"
 SELECT sqlserver_cpu_utilization, collection_time
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
+AND   collection_time >= {CpuReadingFreshnessSql.Cutoff("$1", "$2", "$3")}
 ORDER BY collection_time DESC, sample_time DESC
 LIMIT 1";
 
@@ -107,7 +112,10 @@ SELECT
 SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2 AND collection_time >= $3";
 
     /// <summary>
-    /// Newest collection time across all collectors for one server. $1 server_id.
+    /// Newest successful collection time across all collectors for one server. $1 server_id. #8464: only a
+    /// <c>SUCCESS</c> row counts (<see cref="CollectionRunSql.SuccessfulCollectorRun"/>). Every attempt writes a row, a failed
+    /// one included, so a read over every row moved <c>last_collection</c> forward on each failed attempt, and a dark server
+    /// read fresh.
     ///
     /// <para><b>#3976: <c>ORDER BY collection_time DESC LIMIT 1</c>, not <c>MAX(collection_time)</c>.</b> Same
     /// answer — <c>ExecuteScalarAsync</c> reads null identically whether MAX found no matching row or LIMIT 1
@@ -120,7 +128,7 @@ SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2 AN
     /// plan built to prove a MAX over the whole retained history cannot do regardless of any WHERE clause.</para>
     /// </summary>
     public const string ServerSummaryLastCollectionSql = $@"
-SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {CollectionCycleRow.NotCycleRowSql} ORDER BY collection_time DESC LIMIT 1";
+SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {CollectionRunSql.SuccessfulCollectorRun} ORDER BY collection_time DESC LIMIT 1";
 
     /// <summary>The span the blocking and deadlock counts cover, ending at the read's clock — Lite's window.
     /// Published by the tool so "recent" has a number.</summary>
@@ -161,6 +169,8 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(now, DateTimeKind.Unspecified));
+            command.Parameters.AddWithValue(CpuReadingFreshnessSql.FloorMinutes);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
@@ -307,11 +317,11 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
         /// from a day the purge has not reached.</summary>
         public int SignalSourcesPresent { get; init; }
 
-        /// <summary>The blocked-process report rows behind <see cref="BlockingEvents"/> (#5644), from the aggregate's
-        /// trailing <c>blocking_reports</c> column. <see cref="BlockingEvents"/> counts WAITS and is what every
-        /// payload shows; the band's count tiers were measured in reports, so the band reads this. <c>null</c> on a
-        /// hand-built row, which bands its <see cref="BlockingEvents"/>.</summary>
-        public long? BlockingReports { get; init; }
+        /// <summary>#7028: the day's blocking band snapshot arm, in milliseconds: the largest total blocked wait of one
+        /// DMV snapshot after the Blocking Wait Time alert's persistence gate, from the aggregate's trailing
+        /// <c>peak_snapshot_wait_ms</c> column. <see cref="BlockingEvents"/> counts WAITS and is what the band's count
+        /// arm reads. <c>null</c> on a hand-built row, which carries no snapshot arm.</summary>
+        public long? PeakSnapshotWaitMs { get; init; }
 
         public DailyHealthSignals ToSignals() => new()
         {
@@ -326,10 +336,10 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
             CollectionRuns = CollectionRuns,
             HighCpuEvents = HighCpuEvents,
             BlockingEvents = BlockingEvents,
-            BlockingReports = BlockingReports,
             /* #3539 A2: the day bands blocking through the card's BlockingSeverity, whose wait arm reads the
                longest block — so the peak travels in the signals rather than only into the reasons line. */
             PeakBlockWaitMs = MaxBlockDurationMs,
+            PeakSnapshotWaitMs = PeakSnapshotWaitMs,
             MemoryPressureEvents = MemoryPressureEvents,
             MemoryCriticalEvents = MemoryCriticalEvents,
             AlertCount = AlertCount,
@@ -438,8 +448,9 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
     /// <summary>#4232: ONE cache for every store this reader serves — <c>get_daily_summary_range</c> shares it
     /// between the web viewer's <c>/api/read</c> mirror and MCP clients, because both paths call this same
     /// method. Keyed inside <see cref="DailySummaryRangeCache{TRow}"/> by (store, server, range, routed
-    /// statement); <see cref="NpgsqlDataSource"/> has no value-equality override, so distinct stores — including
-    /// a live test's own <c>ScratchPostgres</c> database — never collide on one store's cached block.</summary>
+    /// statement), where the store is <see cref="DailySummaryRangeCache.StoreKeyFor"/>: the host, port and database
+    /// a data source reaches, compared by value. Two pools over one store share a block, and distinct stores
+    /// (including a live test's own <c>ScratchPostgres</c> database) never collide, because they name another database.</summary>
     internal static DailySummaryRangeCache<DailySummaryReadRow> RangeCache { get; private set; } = new();
 
     /// <summary>#4232: test-only reset for <see cref="RangeCache"/>. This cache is by design stale for a closed day -- a row that lands late for
@@ -455,6 +466,13 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
     /// so a live test can move time past the sub-horizon bound without a sleep. <see cref="ResetRangeCacheForTests"/>
     /// puts the wall clock back.</summary>
     internal static void UseRangeCacheClockForTests(Func<DateTime> clock) => RangeCache = new(clock);
+
+    /// <summary>Test-only. The clock behind the reader's own wall-clock reads: the retention horizon and the default
+    /// summary date. Null reads <see cref="DateTime.UtcNow"/>. A live test that seeds from one instant sets this to that
+    /// instant, so a midnight between its seeding and the read cannot move the horizon or today's row by a day.</summary>
+    internal static Func<DateTime>? ClockForTests { get; set; }
+
+    private static DateTime ReaderUtcNow() => ClockForTests?.Invoke() ?? DateTime.UtcNow;
 
     /// <summary>One <see cref="DailySummaryReadRow"/> per collected day in the half-open [fromDate, toDate)
     /// window (the viewer's <c>GetDailySummaryRangeAsync</c>).
@@ -510,7 +528,11 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
            horizon is a property of the store. DailySummaryRetention.HorizonFor documents the date arithmetic. */
         var fleetOverrides = await ReadFleetRetentionOverridesAsync(postgres, cancellationToken);
         var shortestRetentionDays = ShortestSignalRetentionDays(fleetOverrides);
-        var horizon = DailySummaryRetention.HorizonFor(DateTime.UtcNow, shortestRetentionDays);
+        /* The default arm is the viewer calendar's exact HorizonFor(DateTime.UtcNow, ...) call, which
+           ViewerCalendarRetentionPortTests reads in both readers, so the test clock stands beside it, not inside it. */
+        var horizon = ClockForTests is { } clock
+            ? DailySummaryRetention.HorizonFor(clock(), shortestRetentionDays)
+            : DailySummaryRetention.HorizonFor(DateTime.UtcNow, shortestRetentionDays);
 
         /* #3653 (Q12): tier over the legacy pair above; the hourly RELATION by the supply rule — the
            interval-honest successor where it reaches as far back as the legacy for this window. The viewer's
@@ -557,7 +579,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
            statement itself returns spans more than one day, but these post-read judgments do move between
            refreshes, so they are re-applied after the join every time). */
         Task<List<DailySummaryReadRow>> ReadRawAsync(string sql, IReadOnlyList<string>? scope) => RangeCache.GetRangeAsync(
-            storeKey: postgres,
+            storeKey: DailySummaryRangeCache.StoreKeyFor(postgres), // #8451: the store, not this host's pool: the warmer builds through another
             serverId: serverId,
             fromDate: fromDate,
             toDate: toDate,
@@ -713,7 +735,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
         NpgsqlDataSource postgres, int serverId, DateTime? summaryDate = null,
         IReadOnlyList<string>? separatelyMonitored = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
-        var targetDate = summaryDate?.Date ?? DateTime.UtcNow.Date;
+        var targetDate = summaryDate?.Date ?? ReaderUtcNow().Date;
         var range = await GetDailySummaryRangeAsync(
             postgres, serverId, targetDate, targetDate.AddDays(1), cancellationToken: cancellationToken,
             separatelyMonitored: separatelyMonitored, logger: logger);
@@ -751,7 +773,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
         CollectionRuns = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
         /* #3541 A9: the signal-presence count, after collection_runs. */
         SignalSourcesPresent = reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),
-        /* #5644: the report count the band reads, after signal_sources_present. */
-        BlockingReports = reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
+        /* #7028: the snapshot arm the band reads, after signal_sources_present. */
+        PeakSnapshotWaitMs = reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
     };
 }

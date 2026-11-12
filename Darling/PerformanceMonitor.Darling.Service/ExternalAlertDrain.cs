@@ -277,14 +277,28 @@ public sealed class ExternalAlertDrain
         var muted = _isMuted(new AlertMuteContext
         {
             ServerName = fired.ServerName,
-            /* A registered server's key is its id (Identify); an unregistered name's key carries a prefix and is no number. */
-            ServerId = int.TryParse(fired.ServerKey, NumberStyles.None, CultureInfo.InvariantCulture, out var keptId) ? keptId : null,
+            /* A registered server's key is its id (Identify), a 32-bit hash that is negative for about half the servers, so the
+               key can open with a minus sign; an unregistered name's key carries a prefix and is no number. */
+            ServerId = int.TryParse(fired.ServerKey, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var keptId) ? keptId : null,
             MetricName = metric,
             /* A mute rule can name the source (#5654): it silences this source's alerts and no other source's. */
             ExternalSource = row.SourceName,
         });
 
-        var context = new AlertContext { External = new AlertExternalOrigin(row.SourceName, row.AlertKey, row.PendingId) };
+        /* #7158: a firing alert that rises to Critical goes through the delivery cooldowns: the email and webhook cooldowns key
+           on server and metric, not severity, so without the bypass a Critical that follows a Warning inside the cooldown is held
+           back and the operator never hears it. The rule is the previous confirmed severity, not the engine's tier rise (#5641,
+           TierEscalation: a tier higher than the highest delivered for the incident). So Critical, then a confirmed Warning (sent,
+           muted, or with no channel set up), then Critical bypasses here on the second Critical, where the engine holds it. A
+           Warning the cooldown held back is never confirmed, so the second Critical still sees critical as the previous severity
+           and is held here too. The cooldown survives a resolve, so a new episode's opening Warning can be held back inside the
+           old window and stay unconfirmed: the Critical after it has a null previous severity and still bypasses. */
+        var context = new AlertContext
+        {
+            External = new AlertExternalOrigin(row.SourceName, row.AlertKey, row.PendingId),
+            EscalationBypassesCooldown = wasFiring && severity == AlertSeverityLevel.Critical
+                && !string.Equals(previousSeverity, "critical", StringComparison.OrdinalIgnoreCase),
+        };
         var currentText = row.Value is { } value
             ? value.ToString("0.###", CultureInfo.InvariantCulture)
             : row.Severity;
@@ -319,11 +333,12 @@ public sealed class ExternalAlertDrain
 
         if (FailedSendBackoff.EveryChannelFailed(delivery))
         {
-            /* Delivery is at least once: a fire every channel refused goes back for another attempt. The answer cannot show
+            /* Delivery is at least once: a fire every channel refused, or whose deliverer threw outside its channels and so
+               wrote no history row (AlertDelivery.DelivererFailed), goes back for another attempt. The answer cannot show
                that no request left the process (a webhook that timed out after its request was sent reads the same as a
                refused connection), so a repeat can post twice. PagerDuty drops a repeat trigger that carries the same dedup
                key, and the key is derived from the server and the metric name, so every attempt of this row sends the same one. */
-            var result = await RetryOrFailAsync(row, "every channel failed; the alert history row has the error");
+            var result = await RetryOrFailAsync(row, "every channel failed, or the deliverer threw; the alert history row has the error when one was written");
             if (result == ExternalAlertOutcome.Failed)
             {
                 await TryAbandonFireAsync(row, server.StateLabel);
@@ -332,7 +347,14 @@ public sealed class ExternalAlertDrain
             return result;
         }
 
-        await TryConfirmFireAsync(row, server.StateLabel);
+        /* #7158: a send the delivery cooldown held back told the operator nothing, so its severity is not recorded as the one
+           they were told about: a Critical held back stays unconfirmed and the next repeat fire is still a rise. */
+        var throttled = !delivery.Sent && string.Equals(delivery.Channel, AlertDelivery.ChannelThrottled, StringComparison.Ordinal);
+        if (!throttled)
+        {
+            await TryConfirmFireAsync(row, server.StateLabel);
+        }
+
         if (delivery.Sent)
         {
             await TryMarkAsync(row.PendingId, ExternalAlertOutcome.Delivered,

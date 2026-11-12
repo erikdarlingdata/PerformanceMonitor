@@ -8,14 +8,49 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /// <summary>True when the hot table (not its archive view) holds a row for the server. <paramref name="table"/> is a literal from this file, never user text.</summary>
+    private static async Task<bool> HotTableHasServerAsync(LockedConnection connection, string table, int serverId)
+    {
+        using var probe = connection.CreateCommand();
+        probe.CommandText = "SELECT EXISTS (SELECT 1 FROM " + table + " WHERE server_id = $1)";
+        probe.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return Convert.ToBoolean(await probe.ExecuteScalarAsync());
+    }
+
+    /// <summary>#7216: the relation that answers "the newest server_properties row that carries a utc_offset_minutes". Archival moves
+    /// only OLDER rows out, so when the hot table holds a non-NULL offset for the server, the newest such row is in it and the view
+    /// need not be read. Otherwise (a pre-v42 store whose rows predate the column, or a server whose rows are all archived) the view
+    /// answers, as before. A bare hot-row probe would not decide this: a hot row with a NULL offset says nothing about the archive.</summary>
+    internal static string ServerPropertiesWithOffsetRelation(bool hotHasOffset) => hotHasOffset ? "server_properties" : "v_server_properties";
+
+    private static Task<string> ServerPropertiesWithOffsetRelationAsync(LockedConnection connection, int serverId)
+        => ServerPropertiesWithOffsetRelationAsync(connection.CreateCommand(), serverId);
+
+    internal static Task<string> ServerPropertiesWithOffsetRelationAsync(DuckDBConnection connection, int serverId)
+        => ServerPropertiesWithOffsetRelationAsync(connection.CreateCommand(), serverId);
+
+    private static async Task<string> ServerPropertiesWithOffsetRelationAsync(DuckDBCommand probe, int serverId)
+    {
+        using (probe)
+        {
+            probe.CommandText = "SELECT EXISTS (SELECT 1 FROM server_properties WHERE server_id = $1 AND utc_offset_minutes IS NOT NULL)";
+            probe.Parameters.Add(new DuckDBParameter { Value = serverId });
+            return ServerPropertiesWithOffsetRelation(Convert.ToBoolean(await probe.ExecuteScalarAsync()));
+        }
+    }
+
     /// <summary>
     /// Computes utilization efficiency from cpu_utilization_stats + memory_stats (last 24 hours).
     /// </summary>
@@ -26,6 +61,14 @@ public partial class LocalDataService
         using var command = connection.CreateCommand();
 
         var cutoff = DateTime.UtcNow.AddHours(-24);
+
+        /* #7000: the two "newest row" lookups below have no time bound, so through the v_ view they scanned every archived row of
+           memory_stats and server_properties (96 rows with one archived day, 768 with eight, on a field-shaped store: it grows with
+           the archive, not the window). The hot table holds the newest row of any server that is still being collected, so the
+           view is read only for a server with no hot row (collection stopped and archival moved every row out), which still shows
+           the last values it had. */
+        var memoryRelation = await HotTableHasServerAsync(connection, "memory_stats", serverId) ? "memory_stats" : "v_memory_stats";
+        var propertiesRelation = await HotTableHasServerAsync(connection, "server_properties", serverId) ? "server_properties" : "v_server_properties";
 
         command.CommandText = @"
 WITH cpu_stats AS (
@@ -47,7 +90,7 @@ mem_latest AS (
         max_workers_count,
         current_workers_count,
         CAST(total_server_memory_mb AS DECIMAL(10,2)) / NULLIF(target_server_memory_mb, 0) AS memory_ratio
-    FROM v_memory_stats
+    FROM " + memoryRelation + @"
     WHERE server_id = $1
     ORDER BY collection_time DESC
     LIMIT 1
@@ -57,8 +100,8 @@ mem_latest AS (
    is the vcore_count parsed from the service objective, and NULL for an objective that names no vCores (a DTU-model objective
    or an elastic pool): never the scheduler count. Every other edition reads as it always did. The same CASE is in the Darling read. */
 server_info AS (
-    SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition, edition
-    FROM v_server_properties
+    SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition, edition, ag_replica_role
+    FROM " + propertiesRelation + @"
     WHERE server_id = $1
     ORDER BY collection_time DESC
     LIMIT 1
@@ -75,6 +118,7 @@ grants AS (
         MAX(100.0 * granted_memory_mb / NULLIF(target_memory_mb, 0)) AS grant_utilization_pct
     FROM v_memory_grant_stats
     WHERE server_id = $1
+    AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before the small-query row (id 1) was collected */
     AND   collection_time >= $2
 )
 SELECT
@@ -90,12 +134,15 @@ SELECT
     m.max_workers_count,
     m.current_workers_count,
     s.cpu_count,
-    COALESCE(g.max_grant_waiters, 0),
-    COALESCE(g.grant_timeouts, 0),
-    COALESCE(g.forced_grants, 0),
-    COALESCE(g.grant_utilization_pct, 0),
+    /* #7906: NULL when the window holds no grant sample, so a server whose grant collector is off, gated or not yet run does not read as
+       0 waiters and 0% utilization. */
+    g.max_grant_waiters,
+    g.grant_timeouts,
+    g.forced_grants,
+    g.grant_utilization_pct,
     s.engine_edition,
-    s.edition
+    s.edition,
+    s.ag_replica_role
 FROM cpu_stats c
 CROSS JOIN mem_latest m
 LEFT JOIN server_info s ON true
@@ -122,6 +169,8 @@ LEFT JOIN grants g ON true";
 
            A window with no CPU sample at all has no verdict: its NULL average read as 0% CPU would call the
            server OVER_PROVISIONED. The row's empty status is its no-verdict value; the tab shows "No Data". */
+        /* #7705: a secondary replica's own load does not size it, so it gets the not-judged verdict whatever it measured. */
+        var isAgSecondary = ProvisioningVerdict.IsSecondaryReplicaRole(reader.IsDBNull(18) ? null : reader.GetString(18));
         var status = reader.IsDBNull(0) ? "" : ProvisioningVerdict.Evaluate(
             avgCpu, maxCpu, p95Cpu,
             maxGrantWaiters: reader.IsDBNull(12) ? 0L : ToInt64(reader.GetValue(12)),
@@ -134,7 +183,8 @@ LEFT JOIN grants g ON true";
             edition: reader.IsDBNull(17) ? null : reader.GetString(17),
             cpuSamples: reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3)),
             stolenMemoryPercent: ProvisioningVerdict.StolenMemoryPercent(
-                reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)), reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7))));
+                reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)), reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7))),
+            isAgSecondary: isAgSecondary);
 
         return new UtilizationEfficiencyRow
         {
@@ -148,66 +198,117 @@ LEFT JOIN grants g ON true";
             BufferPoolMb = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
             MemoryRatio = memRatio,
             ProvisioningStatus = status,
-            MaxGrantWaiters = reader.IsDBNull(12) ? 0L : ToInt64(reader.GetValue(12)),
-            GrantTimeouts = reader.IsDBNull(13) ? 0L : ToInt64(reader.GetValue(13)),
-            ForcedGrants = reader.IsDBNull(14) ? 0L : ToInt64(reader.GetValue(14)),
-            GrantUtilizationPct = reader.IsDBNull(15) ? 0m : Convert.ToDecimal(reader.GetValue(15)),
+            /* #7906: null with no grant sample in the window; the verdict above reads the same absence as no grant pressure. */
+            MaxGrantWaiters = reader.IsDBNull(12) ? null : ToInt64(reader.GetValue(12)),
+            GrantTimeouts = reader.IsDBNull(13) ? null : ToInt64(reader.GetValue(13)),
+            ForcedGrants = reader.IsDBNull(14) ? null : ToInt64(reader.GetValue(14)),
+            GrantUtilizationPct = reader.IsDBNull(15) ? null : Convert.ToDecimal(reader.GetValue(15)),
             MaxWorkersCount = maxWorkers,
             CurrentWorkersCount = currentWorkers,
             CpuCount = reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetValue(11)),
-            EngineEdition = reader.IsDBNull(16) ? 0 : Convert.ToInt32(reader.GetValue(16))
+            EngineEdition = reader.IsDBNull(16) ? 0 : Convert.ToInt32(reader.GetValue(16)),
+            IsAgSecondary = isAgSecondary
         };
     }
 
     /// <summary>
-    /// Gets 7-day daily provisioning classification trend.
+    /// Gets 7-day daily provisioning classification trend. Each row is one day as <paramref name="dayZone"/> counts days (see
+    /// <see cref="DisplayDays"/>): the selected time display's zone from the tab, UTC when null. The Day the row carries is that
+    /// zone's calendar day, so its label reads in the same clock as every other time on the page. The days are the seven of
+    /// <see cref="ProvisioningTrendWindow"/>: the six whole days before today and today so far, whose row is marked partial.
     /// </summary>
-    public async Task<List<ProvisioningTrendRow>> GetProvisioningTrendAsync(int serverId)
+    public async Task<List<ProvisioningTrendRow>> GetProvisioningTrendAsync(int serverId, TimeZoneInfo? dayZone = null)
     {
         using var connection = await OpenConnectionAsync();
+
+        var nowUtc = DateTime.UtcNow;
+        var zone = dayZone ?? TimeZoneInfo.Utc;
+        var cutoff = DisplayZone.ToUtcBound(ProvisioningTrendWindow.FirstDay(DisplayZone.ToDisplay(nowUtc, zone)), zone, BoundSide.From);
+
+        /* The window's newest CPU sample, read first so the days table runs through it (#8503): the collector can stamp a sample after
+           this read took its clock, and a sample at or after the last day's end would otherwise match no day and leave the table. The
+           trend's rows come from the CPU samples, so with none in the window there is no row to return. */
+        DateTime? latestTime;
+        using (var newestCommand = connection.CreateCommand())
+        {
+            newestCommand.CommandText = @"
+SELECT MAX(collection_time)
+FROM v_cpu_utilization_stats
+WHERE server_id = $1
+AND   collection_time >= $2";
+            newestCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
+            newestCommand.Parameters.Add(new DuckDBParameter { Value = cutoff });
+            latestTime = await newestCommand.ExecuteScalarAsync() is DateTime latest ? latest : null;
+        }
+
+        if (latestTime is not DateTime newest)
+        {
+            return [];
+        }
+
+        var daysEnd = newest > nowUtc ? newest : nowUtc;
+
+        /* Never more than the trend's seven days: a sample stamped past today's end adds a day, and the oldest then leaves. */
+        var days = DisplayDays(cutoff, daysEnd, zone);
+        if (days.Count > ProvisioningTrendWindow.Days)
+        {
+            days = days.GetRange(days.Count - ProvisioningTrendWindow.Days, ProvisioningTrendWindow.Days);
+        }
+        var dayEnds = days.ToDictionary(d => d.Day, d => d.EndUtc);
+
         using var command = connection.CreateCommand();
-
-        var cutoff = DateTime.UtcNow.AddDays(-7);
-
-        command.CommandText = @"
-WITH daily_cpu AS (
+        command.CommandText = $@"
+WITH days(day, start_utc, end_utc) AS (
+    VALUES {DayBucketValues(days)}
+),
+daily_cpu AS (
     SELECT
-        CAST(collection_time AS DATE) AS day,
+        d.day,
         AVG(CAST(sqlserver_cpu_utilization AS DECIMAL(5,2))) AS avg_cpu_pct,
         MAX(sqlserver_cpu_utilization) AS max_cpu_pct,
         PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu_pct,
         COUNT(*) AS cpu_samples
     FROM v_cpu_utilization_stats
+    JOIN days d
+      ON collection_time >= d.start_utc
+     AND collection_time < d.end_utc
     WHERE server_id = $1
     AND   collection_time >= $2
-    GROUP BY CAST(collection_time AS DATE)
+    GROUP BY d.day
 ),
 daily_mem AS (
     SELECT
-        CAST(collection_time AS DATE) AS day,
+        d.day,
         AVG(total_server_memory_mb) AS avg_total_mb,
         AVG(buffer_pool_mb) AS avg_buffer_pool_mb,
         AVG(CAST(total_server_memory_mb AS DECIMAL(10,2)) / NULLIF(target_server_memory_mb, 0)) AS avg_memory_ratio,
         MAX(max_workers_count) AS max_workers_count,
         MAX(current_workers_count) AS current_workers_count
     FROM v_memory_stats
+    JOIN days d
+      ON collection_time >= d.start_utc
+     AND collection_time < d.end_utc
     WHERE server_id = $1
     AND   collection_time >= $2
-    GROUP BY CAST(collection_time AS DATE)
+    GROUP BY d.day
 ),
 /* Same pressure signals as the point-in-time read, per day, so a day cannot be classified by a rule the
    current verdict does not use (#2246). */
 daily_grants AS (
     SELECT
-        CAST(collection_time AS DATE) AS day,
+        d.day,
         MAX(waiter_count) AS max_grant_waiters,
         SUM(COALESCE(timeout_error_count_delta, 0)) AS grant_timeouts,
         SUM(COALESCE(forced_grant_count_delta, 0)) AS forced_grants,
         MAX(100.0 * granted_memory_mb / NULLIF(target_memory_mb, 0)) AS grant_utilization_pct
     FROM v_memory_grant_stats
+    JOIN days d
+      ON collection_time >= d.start_utc
+     AND collection_time < d.end_utc
     WHERE server_id = $1
+    AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before the small-query row (id 1) was collected */
     AND   collection_time >= $2
-    GROUP BY CAST(collection_time AS DATE)
+    GROUP BY d.day
 )
 SELECT
     c.day,
@@ -215,22 +316,23 @@ SELECT
     c.max_cpu_pct,
     c.p95_cpu_pct,
     COALESCE(m.avg_memory_ratio, 0),
-    COALESCE(g.max_grant_waiters, 0),
-    COALESCE(g.grant_timeouts, 0),
-    COALESCE(g.forced_grants, 0),
-    COALESCE(g.grant_utilization_pct, 0),
+    g.max_grant_waiters,
+    g.grant_timeouts,
+    g.forced_grants,
+    g.grant_utilization_pct,
     COALESCE(m.max_workers_count, 0),
     m.current_workers_count,
     sp.engine_edition,
     sp.edition,
     c.cpu_samples,
     m.avg_total_mb,
-    m.avg_buffer_pool_mb
+    m.avg_buffer_pool_mb,
+    sp.ag_replica_role
 FROM daily_cpu c
 LEFT JOIN daily_mem m ON m.day = c.day
 LEFT JOIN daily_grants g ON g.day = c.day
 LEFT JOIN (
-    SELECT engine_edition, edition
+    SELECT engine_edition, edition, ag_replica_role
     FROM v_server_properties
     WHERE server_id = $1
     ORDER BY collection_time DESC
@@ -250,6 +352,15 @@ ORDER BY c.day";
             var p95Cpu = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3));
             var memRatio = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4));
 
+            var maxGrantWaiters = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+            var grantTimeouts = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
+            var forcedGrants = reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7));
+            var maxWorkers = reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9));
+            var currentWorkers = reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10));
+            var engineEdition = reader.IsDBNull(11) ? (int?)null : Convert.ToInt32(reader.GetValue(11));
+            decimal? stolenMemoryPercent = reader.IsDBNull(14) || reader.IsDBNull(15)
+                ? null
+                : ProvisioningVerdict.StolenMemoryPercent(Convert.ToDouble(reader.GetValue(14)), Convert.ToDouble(reader.GetValue(15)));
             var status = ProvisioningVerdict.Evaluate(
                 avgCpu, maxCpu, p95Cpu,
                 maxGrantWaiters: reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5)),
@@ -263,16 +374,25 @@ ORDER BY c.day";
                 cpuSamples: ToInt64(reader.GetValue(13)),
                 stolenMemoryPercent: reader.IsDBNull(14) || reader.IsDBNull(15)
                     ? null
-                    : ProvisioningVerdict.StolenMemoryPercent(Convert.ToDouble(reader.GetValue(14)), Convert.ToDouble(reader.GetValue(15))));
+                    : ProvisioningVerdict.StolenMemoryPercent(Convert.ToDouble(reader.GetValue(14)), Convert.ToDouble(reader.GetValue(15))),
+                isAgSecondary: ProvisioningVerdict.IsSecondaryReplicaRole(reader.IsDBNull(16) ? null : reader.GetString(16)));
 
+            var day = reader.GetDateTime(0);
             items.Add(new ProvisioningTrendRow
             {
-                Day = reader.GetDateTime(0),
+                Day = day,
+                /* A day that has not ended is judged on the hours collected so far, and its row says so. */
+                IsPartial = dayEnds.TryGetValue(day, out var dayEnd) && dayEnd > nowUtc,
                 AvgCpuPct = avgCpu,
                 MaxCpuPct = maxCpu,
                 P95CpuPct = p95Cpu,
                 MemoryRatio = memRatio,
-                Status = status
+                Status = status,
+                StolenMemoryPct = stolenMemoryPercent,
+                /* The reason comes from the same place as the verdict, as the badge's does. */
+                StatusReason = status == ProvisioningVerdict.UnderProvisioned
+                    ? ProvisioningVerdict.UnderProvisionedReason(p95Cpu, maxGrantWaiters, grantTimeouts, forcedGrants, maxWorkers, currentWorkers, stolenMemoryPercent, engineEdition)
+                    : null
             });
         }
         return items;
@@ -280,18 +400,46 @@ ORDER BY c.day";
 
     /// <summary>
     /// Gets memory grant efficiency stats for the Optimization tab.
-    /// Shows pool-level grant vs used efficiency from resource semaphore snapshots.
+    /// Shows pool-level grant vs used efficiency from resource semaphore snapshots. Each row is one day as
+    /// <paramref name="dayZone"/> counts days (see <see cref="DisplayDays"/>): the selected time display's zone from the tab,
+    /// UTC when null.
     /// </summary>
-    public async Task<List<MemoryGrantEfficiencyRow>> GetMemoryGrantEfficiencyAsync(int serverId, int hoursBack = 24)
+    public async Task<List<MemoryGrantEfficiencyRow>> GetMemoryGrantEfficiencyAsync(int serverId, int hoursBack = 24, TimeZoneInfo? dayZone = null)
     {
         using var connection = await OpenConnectionAsync();
+
+        var nowUtc = DateTime.UtcNow;
+        var cutoff = nowUtc.AddHours(-hoursBack);
+
+        /* The window's newest grant sample, read first so the days table runs through it (#8503), as the provisioning trend does. */
+        DateTime? latestTime;
+        using (var newestCommand = connection.CreateCommand())
+        {
+            newestCommand.CommandText = @"
+SELECT MAX(collection_time)
+FROM v_memory_grant_stats
+WHERE server_id = $1
+AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before the small-query row (id 1) was collected */
+AND   collection_time >= $2";
+            newestCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
+            newestCommand.Parameters.Add(new DuckDBParameter { Value = cutoff });
+            latestTime = await newestCommand.ExecuteScalarAsync() is DateTime latest ? latest : null;
+        }
+
+        if (latestTime is not DateTime newest)
+        {
+            return [];
+        }
+
+        var daysEnd = newest > nowUtc ? newest : nowUtc;
+
         using var command = connection.CreateCommand();
-
-        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
-
-        command.CommandText = @"
+        command.CommandText = $@"
+WITH days(day, start_utc, end_utc) AS (
+    VALUES {DayBucketValues(DisplayDays(cutoff, daysEnd, dayZone))}
+)
 SELECT
-    CAST(collection_time AS DATE) AS day,
+    d.day,
     AVG(granted_memory_mb) AS avg_granted_mb,
     AVG(used_memory_mb) AS avg_used_mb,
     CAST(AVG(used_memory_mb) * 100.0 / NULLIF(AVG(granted_memory_mb), 0) AS DECIMAL(5,1)) AS efficiency_pct,
@@ -301,10 +449,14 @@ SELECT
     SUM(timeout_error_count_delta) AS timeout_errors,
     SUM(forced_grant_count_delta) AS forced_grants
 FROM v_memory_grant_stats
+JOIN days d
+  ON collection_time >= d.start_utc
+ AND collection_time < d.end_utc
 WHERE server_id = $1
+AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before the small-query row (id 1) was collected */
 AND   collection_time >= $2
-GROUP BY CAST(collection_time AS DATE)
-ORDER BY CAST(collection_time AS DATE)";
+GROUP BY d.day
+ORDER BY d.day";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
@@ -328,4 +480,29 @@ ORDER BY CAST(collection_time AS DATE)";
         }
         return items;
     }
+
+    /// <summary>
+    /// The days of [<paramref name="fromUtc"/>, <paramref name="toUtc"/>] as <paramref name="zone"/> counts them: one row per
+    /// wall-clock day of the zone, with the UTC instants its midnights fall on. Null, like UTC, gives UTC days. Adjacent days share
+    /// a bound, so every instant lands in exactly one day, on the clock-change days too. The day reads above bucket by these rows,
+    /// so a row labelled "Sun 11/08" holds the selected display's Sunday rather than UTC's, which runs to 16:00 on the US west coast.
+    /// </summary>
+    internal static List<(DateTime Day, DateTime StartUtc, DateTime EndUtc)> DisplayDays(DateTime fromUtc, DateTime toUtc, TimeZoneInfo? zone)
+    {
+        zone ??= TimeZoneInfo.Utc;
+        var days = new List<(DateTime Day, DateTime StartUtc, DateTime EndUtc)>();
+        var last = DisplayZone.ToDisplay(fromUtc <= toUtc ? toUtc : fromUtc, zone).Date;
+        for (var day = DisplayZone.ToDisplay(fromUtc <= toUtc ? fromUtc : toUtc, zone).Date; day <= last; day = day.AddDays(1))
+        {
+            days.Add((day, DisplayZone.ToUtcBound(day, zone, BoundSide.From), DisplayZone.ToUtcBound(day.AddDays(1), zone, BoundSide.From)));
+        }
+        return days;
+    }
+
+    /// <summary>The rows of a <c>days(day, start_utc, end_utc)</c> VALUES list: literal dates and timestamps this class formats, never user text.</summary>
+    internal static string DayBucketValues(IEnumerable<(DateTime Day, DateTime StartUtc, DateTime EndUtc)> days) =>
+        string.Join(",\n           ", days.Select(d =>
+            $"(DATE '{d.Day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}', " +
+            $"TIMESTAMP '{d.StartUtc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)}', " +
+            $"TIMESTAMP '{d.EndUtc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)}')"));
 }

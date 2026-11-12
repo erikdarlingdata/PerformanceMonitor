@@ -71,6 +71,30 @@ public sealed class WebChartAxisBehaviourTests
         Assert.Equal(new[] { "0.0", "0.2", "0.4", "0.6", "0.8", "1.0" }, Strings(r.GetProperty("plainAxis")));
     }
 
+    /// <summary>#7586: the FinOps Version Store (PVS) size trend, drawn by the shipped tab (version-store.js) from a stand-in read. A range
+    /// under 0.01 MB reads one decimal finer than the step needs, so every tick is its own value. #7702: a large range, whose step is a whole
+    /// number, prints no decimals (2,000, not 2,000.00), as the other size axes do.</summary>
+    [Fact]
+    public void ThePvsSizeAxis_GrowsDecimalsWithItsStep_AndPrintsNoneOnAWholeNumberStep()
+    {
+        var r = Run();
+        var small = Strings(r.GetProperty("pvsSmall"));
+        Assert.Equal(new[] { "0.000", "0.002", "0.004", "0.006", "0.008", "0.010" }, small);
+        Assert.Equal(small.Length, small.Distinct().Count());
+        Assert.Equal(new[] { "0", "2,000", "4,000", "6,000", "8,000", "10,000" }, Strings(r.GetProperty("pvsLarge")));
+    }
+
+    /// <summary>#7670: the Collector Duration Trends chart, drawn by the shipped panel (shared.js) from a stand-in read. A longest run of 78 s
+    /// reads in minutes, and its ticks are picked in minutes: 0, 0.5, 1.0, 1.5 min, not 20 s steps that printed as 0.3 and 0.7 min. A run under a
+    /// minute keeps its seconds.</summary>
+    [Fact]
+    public void TheCollectorDurationAxis_PicksItsTicksInTheUnitItPrints()
+    {
+        var r = Run();
+        Assert.Equal(new[] { "0 min", "0.5 min", "1.0 min", "1.5 min" }, Strings(r.GetProperty("collectorDurationMinutes")));
+        Assert.Equal(new[] { "0 s", "10 s", "20 s", "30 s", "40 s" }, Strings(r.GetProperty("collectorDurationSeconds")));
+    }
+
     /// <summary>A range that was already whole reads exactly as before, and a formatter that ignores the step still draws no
     /// repeated label: the repeat is left blank.</summary>
     [Fact]
@@ -78,11 +102,50 @@ public sealed class WebChartAxisBehaviourTests
     {
         var r = Run();
         Assert.Equal(new[] { "0%", "20%", "40%", "60%", "80%", "100%" }, Strings(r.GetProperty("wholePct")));
-        Assert.Equal(new[] { "0 ms", "200 ms", "400 ms", "600 ms", "800 ms", "1.0 s" }, Strings(r.GetProperty("wholeMs")));
+        // #7586: one unit per axis, from the largest tick: the 1,000 ms top reads in seconds, so no "800 ms, 1.0 s" on one axis.
+        Assert.Equal(new[] { "0 s", "0.2 s", "0.4 s", "0.6 s", "0.8 s", "1.0 s" }, Strings(r.GetProperty("wholeMs")));
         var labels = Strings(r.GetProperty("roundingAxis")).Where(l => l.Length > 0).ToArray();
         Assert.Equal(labels.Length, labels.Distinct().Count());
         Assert.Contains("0 ms", labels);
         Assert.Contains("1 ms", labels);
+    }
+
+    /// <summary>#7587: the issue's rate axis. Gridlines 0, 0.002 ... 0.01 read 0, 0, 0, 0.01, 0.01, 0.01, so the 0.006 gridline carried the "0.01"
+    /// label. Each now reads its own value. A formatter a decimal short grows decimals on a second pass with a finer step instead of blanking,
+    /// and one that ignores the step altogether still never repeats a label.</summary>
+    [Fact]
+    public void ASmallRateAxis_LabelsEachGridlineWithItsOwnValue()
+    {
+        var r = Run().GetProperty("smallRate");
+        var expected = new[] { "0 MB/s", "0.002 MB/s", "0.004 MB/s", "0.006 MB/s", "0.008 MB/s", "0.01 MB/s" };
+        Assert.Equal(expected, Strings(r.GetProperty("labels")));
+        Assert.Equal(new[] { "0", "0.002", "0.004", "0.006", "0.008", "0.01" },
+            r.GetProperty("scale").GetProperty("ticks").EnumerateArray().Select(t => t.GetDouble().ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)));
+        // the drawn chart: 0.0042 MB/s peaks are not rounded into 0.01 steps
+        var drawn = Strings(r.GetProperty("drawn")).Where(l => l.Length > 0).ToArray();
+        Assert.Equal(drawn.Length, drawn.Distinct().Count());
+        Assert.DoesNotContain("0.01 MB/s", drawn.Take(drawn.Length - 1));
+        // a tooltip (no step) keeps two places, but a small rate keeps two significant digits and never reads 0
+        Assert.Equal(new[] { "0.0042", "1,234.57", "0" }, Strings(r.GetProperty("tooltip")));
+        var oneShort = Strings(r.GetProperty("oneShort"));
+        Assert.Equal(new[] { "0.000", "0.002", "0.004", "0.006", "0.008", "0.010" }, oneShort);
+        var blind = Strings(r.GetProperty("blind")).Where(l => l.Length > 0).ToArray();
+        Assert.Equal(blind.Length, blind.Distinct().Count());
+    }
+
+    /// <summary>#7586: the per-query history chart for a 30 s query read "0 ms ... 80,000 ms". A duration axis prints one unit from its largest
+    /// tick, and its ticks sit on round numbers of that unit.</summary>
+    [Fact]
+    public void ADurationAxis_PrintsOneUnit_FromTheLargestTick()
+    {
+        var r = Run().GetProperty("durationAxis");
+        Assert.Equal(new[] { "s" }, Strings(r.GetProperty("s30Units")));
+        Assert.Equal(new[] { "0 s", "10 s", "20 s", "30 s", "40 s" }, Strings(r.GetProperty("s30")));
+        Assert.Equal(new[] { "min" }, Strings(r.GetProperty("m5Units")));
+        Assert.All(Strings(r.GetProperty("m5")), l => Assert.EndsWith("min", l));
+        Assert.All(Strings(r.GetProperty("small")), l => Assert.EndsWith(" ms", l));
+        // a grid cell or tooltip (no axis) still picks its unit from its own value
+        Assert.Equal(new[] { "999 ms", "1.5 s", "1.5 min", "1.5 h" }, Strings(r.GetProperty("cell")));
     }
 
     /// <summary>Across 495 maxima (0.0001 to 9.9 million) and the five formatters the panels use, no two ticks of an axis
@@ -95,6 +158,110 @@ public sealed class WebChartAxisBehaviourTests
         Assert.True(sweep.GetProperty("repeatCount").GetInt32() == 0, sweep.GetProperty("repeats").ToString());
     }
 
+    /// <summary>A chart of counts keeps every gridline on a whole number, so a small-count axis reads 0, 1, 2 and never "1 1 1 0 0 0".
+    /// (This replaces a source-text pin of niceScale's signature in ChartIntegerTicksPinTests, #5833.)</summary>
+    [Fact]
+    public void ACountAxis_KeepsWholeNumberTicks_WhereTheSameRangeOtherwiseStepsByFractions()
+    {
+        var a = Run().GetProperty("integerAxis");
+        foreach (var c in a.GetProperty("withOption").EnumerateArray())
+        {
+            var max = c.GetProperty("max").GetDouble();
+            var ticks = c.GetProperty("ticks").EnumerateArray().Select(t => t.GetDouble()).ToArray();
+            Assert.All(ticks, t => Assert.Equal(Math.Round(t), t));
+            Assert.Equal(ticks.Length, ticks.Distinct().Count());
+            Assert.True(ticks[^1] >= max);
+        }
+
+        Assert.Contains(a.GetProperty("without").EnumerateArray().Select(t => t.GetDouble()), t => t != Math.Round(t));
+        var drawn = Strings(a.GetProperty("drawn")).Where(l => l.Length > 0).ToArray();
+        Assert.Equal(drawn.Length, drawn.Distinct().Count());
+    }
+
+    /// <summary>#7488: a size axis whose labels step up to GB puts its ticks on whole GB (20, 40, 60), not on whole MB that read 19.5 / 39.1 / 58.6.
+    /// A chart whose largest value stays under 1,024 MB keeps the ticks it had. The expected words are built in Node with the page's own number
+    /// formatter, so the test holds in any locale.</summary>
+    [Fact]
+    public void ASizeAxis_ThatStepsUpToGb_PicksItsTicksInGb_AndASmallOneKeepsItsMbTicks()
+    {
+        var a = Run().GetProperty("sizeAxis");
+        Assert.Equal(Strings(a.GetProperty("bigExpected")), Strings(a.GetProperty("big")));
+        Assert.NotEqual(Strings(a.GetProperty("bigWithout")), Strings(a.GetProperty("big")));
+
+        // Composed panels: both the left axis and the overlay axis on the right.
+        Assert.Equal(Strings(a.GetProperty("composedLeftExpected")), Strings(a.GetProperty("composedLeft")));
+        Assert.Equal(Strings(a.GetProperty("composedRightExpected")), Strings(a.GetProperty("composedRight")));
+
+        // Under 1,024 MB the axis is exactly the one it drew without the size unit.
+        Assert.Equal(Strings(a.GetProperty("smallWithout")), Strings(a.GetProperty("small")));
+        Assert.All(Strings(a.GetProperty("small")), l => Assert.EndsWith("MB", l, StringComparison.Ordinal));
+    }
+
+    /// <summary>#7555: a gridline's label states the value the line is drawn at. A size axis whose data max sits just under a unit step (1,023 MB
+    /// rounds up to a 1,500 MB top tick, which labels in GB) used to pick its ticks in MB and print them in GB, so the 1,000 MB line read "1.0 GB"
+    /// (1,024 MB) while the 1,023 MB peak was drawn above it. Each gridline's value is read from where the line is drawn, scaled by a dot drawn at a
+    /// known value, and must equal its label's number times its unit. The ticks are round numbers of the unit they print in (0.2, 0.4 ... 1.0 GB), so a label is exact, and the
+    /// bound is only float noise: a 500 MB line labelled "0.5 GB" (512 MB) is off by 2% of the axis and fails. Left axis and right axis, in MB and in bytes.</summary>
+    [Fact]
+    public void ASizeAxis_JustUnderAUnitStep_LabelsEveryGridlineWithTheValueItIsDrawnAt()
+    {
+        var a = Run().GetProperty("gridAxis");
+        foreach (var name in new[] { "mb1023", "mb1010", "mb386", "bytes1030000", "right386", "right1023" })
+        {
+            var lines = a.GetProperty(name).EnumerateArray().ToArray();
+            Assert.True(lines.Length >= 3, name + " drew fewer than three labelled gridlines");
+            var top = lines.Max(x => Math.Abs(x.GetProperty("tick").GetDouble()));
+            foreach (var l in lines)
+            {
+                var tick = l.GetProperty("tick").GetDouble();
+                var said = l.GetProperty("said").GetDouble();
+                Assert.True(Math.Abs(tick - said) <= top * 1e-4,
+                    $"{name}: the gridline drawn at {tick} is labelled \"{l.GetProperty("label").GetString()}\", which says {said}");
+            }
+        }
+    }
+
+    /// <summary>#7515: the panels pass the size unit themselves. A composed panel (renderComposedResult, left axis and overlay axis) and a
+    /// "format: mb" panel (VIZ.line, the public way into vizLine) are drawn with a series near 60,000 MB and nothing sets sizeUnit by hand,
+    /// so a panel that stops passing it reads 19.5, 39.1, 58.6 GB again. A small "mb" panel keeps its MB ticks.</summary>
+    [Fact]
+    public void ThePanels_PassTheSizeUnit_SoABigSizeAxisReadsInGb()
+    {
+        var a = Run().GetProperty("panelAxis");
+        var left = Strings(a.GetProperty("expectedLeft"));
+        var right = Strings(a.GetProperty("expectedRight"));
+        Assert.Equal(left, Strings(a.GetProperty("composedLeft")));
+        Assert.Equal(left, Strings(a.GetProperty("composedOverlayLeft")));
+        Assert.Equal(right, Strings(a.GetProperty("composedOverlayRight")));
+        Assert.Equal(left, Strings(a.GetProperty("mbPanel")));
+        Assert.Equal(Strings(a.GetProperty("mbPanelSmallWithout")), Strings(a.GetProperty("mbPanelSmall")));
+    }
+
+    /// <summary>#7555: a "format: bytes" panel (I/O Read Bytes per Second, Database Temp Bytes) picks its ticks in the unit its labels print, so a
+    /// series near 60,000 B reads 20, 40, 60 KB and not 19.5, 39.1, 58.6 KB; a series near 60 MB reads 20, 40, 60 MB. A small one stays in bytes.
+    /// A cell or tooltip (no axis) still picks a unit by its own value.</summary>
+    [Fact]
+    public void ABytesAxis_PicksItsTicksInThePrintedUnit()
+    {
+        var a = Run().GetProperty("byteAxis");
+        Assert.Equal(Strings(a.GetProperty("kbExpected")), Strings(a.GetProperty("kb")));
+        Assert.Equal(Strings(a.GetProperty("mbExpected")), Strings(a.GetProperty("mb")));
+        Assert.All(Strings(a.GetProperty("small")), l => Assert.EndsWith(" B", l, StringComparison.Ordinal));
+        Assert.Equal(new[] { "0 B", "900 B", "1.5 KB", "2.0 MB", "3.0 GB" }, Strings(a.GetProperty("cell")));
+        Assert.Equal(new[] { "900 B", "2.0 KB" }, Strings(a.GetProperty("mapIndex")));
+    }
+
+    /// <summary>#7555: every tick of a size axis prints in the unit of its largest tick. A Memory Trend near 2 GB read 0 MB, 512 MB, 1.0 GB, 1.5 GB;
+    /// it now reads 0 GB, 0.5 GB, 1.0 GB, 1.5 GB, 2.0 GB. A tooltip or grid cell keeps the unit that fits its own value.</summary>
+    [Fact]
+    public void ASizeAxis_PrintsEveryTickInTheUnitOfItsLargest()
+    {
+        var a = Run().GetProperty("memoryAxis");
+        Assert.Equal(new[] { "GB" }, Strings(a.GetProperty("units")));
+        Assert.Equal(Strings(a.GetProperty("expected")), Strings(a.GetProperty("labels")).Take(4).ToArray());
+        Assert.Equal(new[] { "512 MB", "1.5 GB" }, Strings(a.GetProperty("tooltipCell")));
+    }
+
     /// <summary>The Custom View chart: 80,000 MB reads "78.1 GB" and the axis margins are as wide as the widest label, left and
     /// right, so no digit is cut. A chart with small numbers keeps its 58 px left margin and 56 px right gutter.</summary>
     [Fact]
@@ -102,8 +269,8 @@ public sealed class WebChartAxisBehaviourTests
     {
         var r = Run();
         var big = r.GetProperty("bigAxis");
-        Assert.Equal(new[] { "0 MB", "19.5 GB", "39.1 GB", "58.6 GB", "78.1 GB" }, Strings(big.GetProperty("left")));
-        Assert.Equal("80,000.0", Strings(big.GetProperty("right")).Last());
+        Assert.Equal(new[] { "0 GB", "19.5 GB", "39.1 GB", "58.6 GB", "78.1 GB" }, Strings(big.GetProperty("left")));
+        Assert.Equal("80,000", Strings(big.GetProperty("right")).Last()); // #7552: a 20,000 step needs no decimal
         Assert.True(big.GetProperty("leftRoom").GetDouble() >= big.GetProperty("leftNeed").GetDouble());
         Assert.True(big.GetProperty("rightRoom").GetDouble() >= big.GetProperty("rightNeed").GetDouble());
 
@@ -134,12 +301,77 @@ public sealed class WebChartAxisBehaviourTests
     public void AFormatterWithoutAStep_ReadsAsBefore()
     {
         var f = Run().GetProperty("formatters");
-        Assert.Equal(new[] { "0 ms", "2 ms", "999 ms", "1.5 s" }, Strings(f.GetProperty("msNoStep")));
-        Assert.Equal("1%", f.GetProperty("pctNoStep").GetString());
+        Assert.Equal(new[] { "400 µs", "2 ms", "999 ms", "1.5 s" }, Strings(f.GetProperty("msNoStep")));
+        Assert.Equal("0.6%", f.GetProperty("pctNoStep").GetString());
         Assert.Equal(new[] { "5 ms", "7 ms" }, Strings(f.GetProperty("mapIndex")));
         Assert.Equal(new[] { "200 MB", "1,023 MB", "1.0 GB", "2.0 GB" }, Strings(f.GetProperty("mb")));
         Assert.Equal(new[] { "0.0 ms", "0.2 ms", "0.4 ms" }, Strings(f.GetProperty("msStep")));
         Assert.Equal(new[] { "1.00 s", "1.05 s", "1.10 s" }, Strings(f.GetProperty("msSeconds")));
+    }
+
+    /// <summary>#7945: a cell or tooltip value that rounds up to the next unit's base reads in that unit (999.6 ms is 1.0 s, not 1,000 ms;
+    /// 1,023.6 MB is 1.0 GB), while a value that rounds short of it stays put. A percent under 1 keeps one significant digit, so 0.46% reads
+    /// 0.5% and not 0%; a true 0 reads 0%.</summary>
+    [Fact]
+    public void ACellAtAUnitEdge_StepsUpAUnit_AndASmallPercentKeepsADigit()
+    {
+        var f = Run().GetProperty("formatters");
+        Assert.Equal(new[] { "1.0 s", "1.0 min", "1.0 h", "999 ms" }, Strings(f.GetProperty("msEdge")));
+        Assert.Equal(new[] { "1.0 GB", "1,023 MB" }, Strings(f.GetProperty("mbEdge")));
+        Assert.Equal(new[] { "1.0 KB", "1.0 MB", "1.0 GB", "1,023 B" }, Strings(f.GetProperty("bytesEdge")));
+        Assert.Equal(new[] { "0.5%", "0.04%", "0%", "13%", "-0.5%" }, Strings(f.GetProperty("pctSmall")));
+    }
+
+    /// <summary>#7726: Top Queries printed "0 ms" for an average of 0.03 ms over 1.5 million runs. A positive figure under 1 ms in a
+    /// cell is now whole microseconds, exactly zero stays "0 ms", and a trace flag prints with no thousands separator.</summary>
+    [Fact]
+    public void ASubMillisecondCell_PrintsMicroseconds_AndATraceFlagHasNoSeparator()
+    {
+        var f = Run().GetProperty("formatters");
+        Assert.Equal(new[] { "32 µs", "25 µs", "1 µs", "500 µs", "1 ms", "0 ms" }, Strings(f.GetProperty("msMicro")));
+        Assert.Equal(new[] { "3895", "1117", "12345" }, Strings(f.GetProperty("traceFlag")));
+    }
+
+    /// <summary>#7726: the unreachable-since sentence has no seconds and printed UTC on the page; it is now rewritten to local time like the
+    /// retry time beside it (a stamp with no seconds and no zone is left alone), and a backtick span in advice text is drawn as a code element
+    /// whose content stays text.</summary>
+    [Fact]
+    public void TheUnreachableSentenceIsLocal_AndAdviceBackticksBecomeCode()
+    {
+        var f = Run().GetProperty("formatters");
+        var expected = Strings(f.GetProperty("localExpected"));
+        // Opted in, no instant from the reply: the minute prints as the minute, never with an invented ":00".
+        Assert.Equal($"Server unreachable since {expected[0]}: refused. Next retry at {expected[1]}.", f.GetProperty("localSentence").GetString());
+        // Opted in with the reply's own since in the same minute: the sentence prints the tile's time, seconds included.
+        Assert.Equal($"Server unreachable since {expected[2]}: refused.", f.GetProperty("localWithSince").GetString());
+        // A since in another minute is not the sentence's instant: the sentence keeps its own minute.
+        Assert.Equal($"Server unreachable since {expected[0]}: refused.", f.GetProperty("localOtherMinute").GetString());
+        // Every caller that did not opt in keeps the server's own UTC text for the no-seconds stamp.
+        Assert.Equal($"{f.GetProperty("unreachable").GetString()!.Replace("2026-11-05 17:51:35 UTC", expected[1])}", f.GetProperty("localDefault").GetString());
+        Assert.Equal("saw 2026-11-05 16:52 here and 2026-11-05T16:52 there", f.GetProperty("noZoneKept").GetString());
+        Assert.Equal(
+            new[] { "t:Set ", "code:max server memory", "t: (see ", "code:sp_configure 'max server memory (MB)', 1000", "t:) and a stray ` tick <b>x</b>." },
+            Strings(f.GetProperty("adviceSpans")));
+    }
+
+    /// <summary>#7726: the real Server Connection descriptor (<c>sinceKey</c> and <c>localizeMinutes</c>) and the real server head
+    /// (<c>connect_down_since</c>) print the sentence's instant as the tile's local time, seconds included, and fall back to the local
+    /// minute when the reply carries no instant. A descriptor or head that dropped its wiring prints the bare minute and fails here.</summary>
+    [Fact]
+    public void TheServerConnectionPanelAndTheServerHead_PrintTheLocalTimeOfTheTile()
+    {
+        var all = Run();
+        var expected = Strings(all.GetProperty("formatters").GetProperty("localExpected"));
+        var w = all.GetProperty("wiring");
+        var withSeconds = $"Server unreachable since {expected[2]}: refused.";
+        var minuteOnly = $"Server unreachable since {expected[0]}: refused.";
+
+        Assert.Equal(withSeconds, w.GetProperty("panelSentence").GetString());
+        Assert.Equal(minuteOnly, w.GetProperty("panelSentenceNoSince").GetString());
+        Assert.Equal(withSeconds, w.GetProperty("head").GetProperty("badgeTitle").GetString());
+        Assert.Equal(withSeconds, w.GetProperty("head").GetProperty("reason").GetString());
+        Assert.Equal(minuteOnly, w.GetProperty("headNoSince").GetProperty("badgeTitle").GetString());
+        Assert.Equal(minuteOnly, w.GetProperty("headNoSince").GetProperty("reason").GetString());
     }
 
     private static SystemHealthRecord Snapshot(DateTime at, long system, long sql) =>
@@ -189,5 +421,95 @@ public sealed class WebChartAxisBehaviourTests
         Assert.Equal(3, buckets[0].Snapshots);
         Assert.Equal(t.AddMinutes(30), buckets[1].Start);
         Assert.Null(DarlingMcpHealthParserTools.BucketCpu(new[] { new SystemHealthRecord { EventTime = t, SqlCpuUtilization = 1 } }, 10)[0].SystemCpu);
+    }
+
+    /// <summary>#7578: a chart says its unit once. Ticks that carry the unit (200 ms, 0.3 MB/s) draw no caption over the axis, bare ticks keep it.</summary>
+    [Fact]
+    public void AUnit_IsPrintedOnTheTicksOrInTheCaption_NeverBoth()
+    {
+        var c = Run().GetProperty("unitCaptions");
+        Assert.Empty(Strings(c.GetProperty("ticksWithUnit")));
+        Assert.Empty(Strings(c.GetProperty("ticksWithRateUnit")));
+        Assert.Empty(Strings(c.GetProperty("stackedSecondsTicks")));
+        Assert.Equal(new[] { "MB" }, Strings(c.GetProperty("bareTicks")));
+        Assert.Equal(new[] { "n" }, Strings(c.GetProperty("secondAxisWithUnit")));
+    }
+
+    private static (string Text, double X, string Anchor, double Left, double Right)[] Captions(JsonElement chart) =>
+        chart.GetProperty("caps").EnumerateArray()
+            .Select(e => (e.GetProperty("text").GetString()!, e.GetProperty("x").GetDouble(), e.GetProperty("anchor").GetString()!, e.GetProperty("left").GetDouble(), e.GetProperty("right").GetDouble()))
+            .ToArray();
+
+    /// <summary>#7856: a unit caption wider than the room beside its axis ("snapshot rows" at the 58 px left margin) lost its first letters
+    /// off the chart's left edge. Every caption now sits inside the chart, on the left axis, the right axis and the scatter's two captions.</summary>
+    [Fact]
+    public void ALongUnitCaption_StaysInsideTheChart_OnEveryCaptionSite()
+    {
+        var e = Run().GetProperty("captionEdges");
+        foreach (var name in new[] { "lineLong", "lineRightLong", "scatterLong" })
+        {
+            var chart = e.GetProperty(name);
+            var width = chart.GetProperty("width").GetDouble();
+            var caps = Captions(chart);
+            Assert.NotEmpty(caps);
+            foreach (var c in caps)
+            {
+                Assert.True(c.Left >= 0, $"{name}: caption '{c.Text}' starts at {c.Left}, left of the chart");
+                Assert.True(c.Right <= width, $"{name}: caption '{c.Text}' ends at {c.Right}, right of the {width} px chart");
+            }
+        }
+    }
+
+    /// <summary>#7856: a caption that already fit keeps the placement it had: right-aligned to the axis on the left, left-aligned on the
+    /// right axis, right-aligned at the plot's edge for the scatter's x unit.</summary>
+    [Fact]
+    public void AShortUnitCaption_KeepsItsPlacement()
+    {
+        var e = Run().GetProperty("captionEdges");
+        var line = Captions(e.GetProperty("lineShort")).Single();
+        Assert.Equal(("ms", 50d, "end"), (line.Text, line.X, line.Anchor));
+        var dual = Captions(e.GetProperty("lineRightShort"));
+        Assert.Contains(dual, c => c.Text == "ms" && c.Anchor == "start");
+        Assert.Contains(dual, c => c.Text == "n" && c.X == 50 && c.Anchor == "end");
+        var scatter = Captions(e.GetProperty("scatterShort"));
+        Assert.Contains(scatter, c => c.Text == "ms" && c.X == 50 && c.Anchor == "end");
+        Assert.Contains(scatter, c => c.Text == "MB" && c.Anchor == "end" && c.X > 100);
+    }
+
+    /// <summary>#7863: the chart's menu button sits over the top-right corner. Measured in a browser it is 24 px wide at right 4 px, so its left
+    /// edge is 28 px in from the chart's right edge. A long right-axis caption used to end at the chart's edge, under the button.</summary>
+    private const double MenuButtonLeftFromRight = 28;
+
+    [Fact]
+    public void ALongRightAxisCaption_EndsLeftOfTheMenuButton()
+    {
+        var e = Run().GetProperty("captionEdges");
+        foreach (var name in new[] { "lineRightLong", "lineRightMenuLong" })
+        {
+            var chart = e.GetProperty(name);
+            var buttonLeft = chart.GetProperty("width").GetDouble() - MenuButtonLeftFromRight;
+            var right = Captions(chart).Single(c => c.Anchor != "end" || c.X > 100);
+            Assert.True(right.Right <= buttonLeft, $"{name}: right-axis caption '{right.Text}' ends at {right.Right}, under the menu button that starts at {buttonLeft}");
+        }
+    }
+
+    /// <summary>#7863: a right-axis caption that already clears the button stays where it was: left-aligned at the tick labels' x.</summary>
+    [Fact]
+    public void AShortRightAxisCaption_ThatClearsTheMenuButton_KeepsItsX()
+    {
+        var chart = Run().GetProperty("captionEdges").GetProperty("lineRightShort");
+        var right = Captions(chart).Single(c => c.Text == "ms");
+        Assert.Equal("start", right.Anchor);
+        Assert.Equal(chart.GetProperty("rightTickX").GetDouble(), right.X);
+        Assert.True(right.Right <= chart.GetProperty("width").GetDouble() - MenuButtonLeftFromRight);
+    }
+
+    /// <summary>#7863: with no menu button the long caption keeps ending 2 px inside the chart's right edge.</summary>
+    [Fact]
+    public void ALongCaption_WithNoMenuButton_StillEndsAtTheChartEdge()
+    {
+        var c = Run().GetProperty("noMenuCaption");
+        Assert.Equal(998d, c.GetProperty("x").GetDouble());
+        Assert.Equal("end", c.GetProperty("anchor").GetString());
     }
 }

@@ -94,6 +94,7 @@ public sealed class ComposeQueryStoreStampPlanLiveTests
         var bodySucceeded = false;
         try
         {
+            await ComposeStampLiveSupport.UnbuildNewestTwoAsync(connection, hourNow, ct);
             await ComposeStampLiveSupport.ExecAsync(connection, "ANALYZE collect.query_store_interval_wide; ANALYZE collect.query_store_compose_stamp; ANALYZE collect.query_store_compose_stamp_built; ANALYZE collect.query_store_compose_stamp_hours; ANALYZE collect.servers", ct);
             Assert.True(await ComposeStampLiveSupport.CountAsync(connection, "SELECT count(*) FROM collect.query_store_compose_stamp_hours", ct) >= 10, "the seed has 10 or more built hours");
             var start = hourNow.AddHours(-28).AddMinutes(17);
@@ -150,7 +151,7 @@ public sealed class ComposeQueryStoreStampPlanLiveTests
     }
 
     [Fact]
-    public async Task TheStaleArm_ProbesTheWideTableOncePerStalePairInScope_NotOncePerPair()
+    public async Task TheStaleArm_ProbesTheWideTableOncePerStaleHourInScope_NotOncePerPair()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);
         var ct = TestContext.Current.CancellationToken;
@@ -158,15 +159,18 @@ public sealed class ComposeQueryStoreStampPlanLiveTests
         var bodySucceeded = false;
         try
         {
-            /* Two pairs turn stale after the lookup: server 1 ten hours ago, server 3 fifteen hours ago. */
+            await ComposeStampLiveSupport.UnbuildNewestTwoAsync(connection, hourNow, ct);
+            /* Three pairs turn stale after the lookup, in two hours (#7762: the arm reads each stale hour once with server_id = ANY(...)):
+               servers 1 and 2 ten hours ago, server 3 fifteen hours ago. */
             await ComposeStampLiveSupport.InsertRowAsync(connection, 1, hourNow.AddHours(-10).AddMinutes(55), 9_000_001, ct);
+            await ComposeStampLiveSupport.InsertRowAsync(connection, 2, hourNow.AddHours(-10).AddMinutes(50), 9_000_003, ct);
             await ComposeStampLiveSupport.InsertRowAsync(connection, 3, hourNow.AddHours(-15).AddMinutes(55), 9_000_002, ct);
             await ComposeStampLiveSupport.ExecAsync(connection, "ANALYZE collect.query_store_interval_wide; ANALYZE collect.query_store_compose_stamp; ANALYZE collect.query_store_compose_stamp_built; ANALYZE collect.servers", ct);
             var start = hourNow.AddHours(-28).AddMinutes(17);
             var end = hourNow.AddMinutes(-40);
             var through = hourNow.AddHours(-2);
 
-            foreach (var (scope, expectedProbes) in new[] { ((IReadOnlyList<string>?)null, 2L), (new[] { "srv1" }, 1L), (new[] { "srv2" }, 0L) })
+            foreach (var (scope, expectedProbes) in new[] { ((IReadOnlyList<string>?)null, 2L), (new[] { "srv1" }, 1L), (new[] { "srv2" }, 1L), (new[] { "srv3" }, 1L) })
             {
                 var context = QueryStoreRankedHarness.WideContext(start, end, scope) with { QueryStoreStampThrough = through };
                 var (_, nodes) = await ExplainAsync(connection, Panel, context, ct);

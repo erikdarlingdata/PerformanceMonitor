@@ -71,14 +71,21 @@ public partial class InvestigationsWindow : Window
             }
 
             RequestsGrid.ItemsSource = requests;
+            NoRequestsMessage.Visibility = requests.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             StatusText.Text = requests.Count == 0
                 ? "No investigation requests."
                 : requests.Count + " requests shown" + (truncated ? "; older ones are not listed. Narrow the state or family." : "");
+            /* #8007: the new list clears the pick. InvestigationPanelRequest is a record, so a new list that holds an equal request
+               keeps it selected unless the pick is cleared here; a null pick starts no detail read. A detail read still out is then
+               for a request the window no longer has picked, and maybe no longer lists. Its answer is discarded, or it would draw
+               that request's pane under a cleared grid. */
+            RequestsGrid.SelectedItem = null;
+            ++_detailSeq;
             ClearDetail("Pick a request to see its reports and journal.");
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Investigations", $"Could not read the investigation requests: {ex.Message}");
+            AppLogger.Error("Investigations", $"Could not read the investigation requests: {ex.Message}", ex);
             if (seq == _listSeq)
             {
                 StatusText.Text = "Could not read the investigation requests: " + ex.Message;
@@ -108,7 +115,7 @@ public partial class InvestigationsWindow : Window
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Investigations", $"Could not read investigation request {requestId}: {ex.Message}");
+            AppLogger.Error("Investigations", $"Could not read investigation request {requestId}: {ex.Message}", ex);
             if (seq == _detailSeq)
             {
                 ClearDetail("Could not read this request: " + ex.Message);
@@ -134,6 +141,7 @@ public partial class InvestigationsWindow : Window
         BriefBox.Text = detail.Brief ?? "";
         JournalGrid.ItemsSource = detail.Journal;
         JournalNote.Visibility = detail.JournalTruncated ? Visibility.Visible : Visibility.Collapsed;
+        NoJournalMessage.Visibility = detail.Journal.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void ClearDetail(string head)
@@ -144,6 +152,7 @@ public partial class InvestigationsWindow : Window
         BriefHead.Visibility = BriefBox.Visibility = Visibility.Collapsed;
         JournalGrid.ItemsSource = Array.Empty<InvestigationPanelJournalRow>();
         JournalNote.Visibility = Visibility.Collapsed;
+        NoJournalMessage.Visibility = Visibility.Collapsed;
     }
 
     private async void Filter_SelectionChanged(object sender, SelectionChangedEventArgs e)

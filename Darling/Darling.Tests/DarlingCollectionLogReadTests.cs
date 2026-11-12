@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -121,7 +122,17 @@ public sealed class DarlingCollectionLogReadTests
                answer says so instead of "genuinely quiet". */
             Assert.True(quietDoc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
             Assert.Equal(JsonValueKind.Null, quietDoc.RootElement.GetProperty("hints").GetProperty("effective_start").ValueKind);
-            Assert.Equal($"No collector runs recorded for {ServerName} in the last 1 hour(s). {McpHelpers.CutWindowNothingReadMessage}", quietText);
+            Assert.Equal($"No collector runs recorded for {ServerName} in the last 1 hour. {McpHelpers.CutWindowNothingReadMessage}", quietText);
+
+            /* #8572: a read anchored at as_of names the window it really looked at, not "the last hour" (which would be the
+               hour ending now). */
+            var anchor = DateTime.UtcNow.AddHours(-2);
+            var anchored = await DarlingMcpDataTools.GetCollectionLog(
+                dataSource, ServerName, 1, 200, as_of: anchor.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture));
+            var anchoredText = JsonDocument.Parse(anchored).RootElement.GetProperty("message").GetString()!;
+            Assert.StartsWith(
+                $"No collector runs recorded for {ServerName} in the 1 hour ending at {anchor:yyyy-MM-dd HH:mm} UTC", anchoredText, StringComparison.Ordinal);
+            Assert.DoesNotContain("in the last", anchoredText, StringComparison.Ordinal);
 
             /* ── 3. rows in the window: the data path, and the split that makes the log worth reading ── */
             await SeedAsync(connection, ct, "query_store", MinutesAgo(10));
@@ -173,6 +184,149 @@ public sealed class DarlingCollectionLogReadTests
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
+    }
+
+    /// <summary>
+    /// #8571 item 1: a page cut by the row limit named its own size in runs_total ("truncated: true" beside "runs_total: 58" when 58 was
+    /// the limit), so a caller could not tell 58 matching runs from 58,000. runs_total is now the count of the runs that matched the
+    /// filters in the window, beside runs_returned, and equals it when nothing was cut.
+    /// </summary>
+    [Fact]
+    public async Task RunsTotal_IsTheMatchedCount_NotThePageSize_WhenTheLimitCutsThePage_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live collection-log read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            for (var i = 1; i <= 3; i++)
+            {
+                await SeedAsync(connection, ct, "query_store", DateTime.UtcNow.AddMinutes(-10 * i));
+            }
+
+            for (var i = 1; i <= 2; i++)
+            {
+                await SeedAsync(connection, ct, "deadlocks", DateTime.UtcNow.AddMinutes(-5 * i));
+            }
+
+            var cut = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionLog(dataSource, ServerName, 24, 2)).RootElement;
+            Assert.True(cut.GetProperty("truncated").GetBoolean());
+            Assert.Equal(2, cut.GetProperty("runs_returned").GetInt32());
+            Assert.Equal(5, cut.GetProperty("runs_total").GetInt32());
+
+            var filtered = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionLog(dataSource, ServerName, 24, 1, collector_name: "query_store")).RootElement;
+            Assert.True(filtered.GetProperty("truncated").GetBoolean());
+            Assert.Equal(1, filtered.GetProperty("runs_returned").GetInt32());
+            Assert.Equal(3, filtered.GetProperty("runs_total").GetInt32());
+
+            var whole = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionLog(dataSource, ServerName, 24, 200)).RootElement;
+            Assert.False(whole.GetProperty("truncated").GetBoolean());
+            Assert.Equal(5, whole.GetProperty("runs_returned").GetInt32());
+            Assert.Equal(5, whole.GetProperty("runs_total").GetInt32());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #8571 item 1, the fleet form: the same defect as the per-server page, one tool over. A fleet page cut by the row limit named the
+    /// over-fetched page in runs_total, so "truncated: true" sat beside the page size. runs_total is now the count of the runs that matched
+    /// the filters in the window across the enabled servers, and a disabled server's runs stay out of it, as they stay out of the page.
+    /// The collector names are this test's own, so rows another class leaves in the shared store cannot move the counts.
+    /// </summary>
+    [Fact]
+    public async Task FleetRunsTotal_IsTheMatchedCountAcrossEnabledServers_WhenTheLimitCutsThePage_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live collection-log read test.");
+
+        const int disabledServerId = -949554;
+        const string probe = "fleet_total_probe";
+        const string other = "fleet_total_other";
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await DeleteFilterRowsAsync(connection, ct);
+        await DeleteDisabledFleetRowsAsync(connection, disabledServerId, ct);
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, FilterServerId, FilterServerName, ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, disabledServerId, "collection-log-disabled", ct);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET is_enabled = FALSE WHERE server_id = $1", disabledServerId);
+
+            /* Two servers, five probe runs and two other runs in all: more matches than the limit, split across both servers. */
+            await SeedAsync(connection, ct, probe, DateTime.UtcNow.AddMinutes(-10));
+            await SeedAsync(connection, ct, probe, DateTime.UtcNow.AddMinutes(-20));
+            await SeedAsync(connection, ct, other, DateTime.UtcNow.AddMinutes(-30));
+            await SeedFilterAsync(connection, ct, probe, DateTime.UtcNow.AddMinutes(-15), 100);
+            await SeedFilterAsync(connection, ct, probe, DateTime.UtcNow.AddMinutes(-25), 100);
+            await SeedFilterAsync(connection, ct, probe, DateTime.UtcNow.AddMinutes(-35), 100);
+            await SeedFilterAsync(connection, ct, other, DateTime.UtcNow.AddMinutes(-40), 100);
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collection_log
+    (log_id, server_id, server_name, collector_name, collection_time,
+     duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                CollectionIdGenerator.Next(), disabledServerId, "collection-log-disabled", probe,
+                DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-5)), 100, "SUCCESS", null, 10, 80, 20);
+
+            var cut = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionLog(dataSource, null, 24, 2, collector_name: probe)).RootElement;
+            Assert.Equal("fleet", cut.GetProperty("scope").GetString());
+            Assert.True(cut.GetProperty("truncated").GetBoolean());
+            Assert.Equal(2, cut.GetProperty("runs_returned").GetInt32());
+            Assert.Equal(5, cut.GetProperty("runs_total").GetInt32());
+
+            var smaller = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionLog(dataSource, null, 24, 1, collector_name: other)).RootElement;
+            Assert.True(smaller.GetProperty("truncated").GetBoolean());
+            Assert.Equal(1, smaller.GetProperty("runs_returned").GetInt32());
+            Assert.Equal(2, smaller.GetProperty("runs_total").GetInt32());
+
+            var whole = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionLog(dataSource, null, 24, 50, collector_name: probe)).RootElement;
+            Assert.False(whole.GetProperty("truncated").GetBoolean());
+            Assert.Equal(5, whole.GetProperty("runs_returned").GetInt32());
+            Assert.Equal(5, whole.GetProperty("runs_total").GetInt32());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteRowsAsync(cleanup, cleanupCt);
+                await DeleteFilterRowsAsync(cleanup, cleanupCt);
+                await DeleteDisabledFleetRowsAsync(cleanup, disabledServerId, cleanupCt);
+            });
+        }
+    }
+
+    private static async Task DeleteDisabledFleetRowsAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
+    {
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", serverId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", serverId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", serverId);
     }
 
     /// <summary>

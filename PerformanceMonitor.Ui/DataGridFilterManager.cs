@@ -64,6 +64,12 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
 
     public bool AnyFilterActive => HasActiveFilters();
 
+    /// <summary>Every row the grid was last given through <see cref="UpdateData"/>, before any filter; null before the first load.</summary>
+    public IReadOnlyList<T>? UnfilteredRows => _unfilteredData;
+
+    /// <summary>Whether an active filter is set on the named column.</summary>
+    public bool HasActiveFilterOn(string columnName) => _filters.TryGetValue(columnName, out var filter) && filter.IsActive;
+
     /// <summary>The server scope the stored filters were last loaded for; null until the first scoped refresh.</summary>
     private string? _loadedScope;
 
@@ -81,12 +87,20 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
 
         if (!HasActiveFilters())
         {
+            ShowFilteredOutState(false);
             SetItemsSourcePreservingSort(newData);
             return;
         }
 
         ApplyFilters();
     }
+
+    /// <summary>
+    /// #8187: filters that hide every row the grid has say so, with a link that clears them, instead of leaving a bare header row
+    /// whose only hint is the funnel icon. A filter kept from an earlier session (#5565) applies on the first refresh, so this is what
+    /// a server whose rows no longer match it shows.
+    /// </summary>
+    private void ShowFilteredOutState(bool allHidden) => EmptyState.ShowFilteredOut(_dataGrid, allHidden, ClearAllFilters);
 
     /// <summary>
     /// Applies or removes a filter and re-filters the data.
@@ -125,6 +139,7 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
         }
 
         _filters.Clear();
+        ShowFilteredOutState(false);
 
         if (_unfilteredData is not null)
         {
@@ -254,6 +269,7 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
 
         if (!HasActiveFilters())
         {
+            ShowFilteredOutState(false);
             SetItemsSourcePreservingSort(_unfilteredData);
             return;
         }
@@ -268,14 +284,69 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
             return true;
         }).ToList();
 
+        ShowFilteredOutState(_unfilteredData.Count > 0 && filteredData.Count == 0);
         SetItemsSourcePreservingSort(filteredData);
+    }
+
+    /// <summary>The property each bound column shows, by its binding path, read once per path.</summary>
+    private readonly Dictionary<string, System.Reflection.PropertyInfo?[]> _columnProperties = new();
+
+    /// <summary>
+    /// The values the grid's bound columns show for <paramref name="row"/>, or null when no column is bound. A refresh hands the grid new
+    /// row objects, so the row the user selected is found again by what it shows: the new row with the same value in every bound column is
+    /// the same row to the person reading it. Dotted paths are followed; a path the row type does not have reads as null.
+    /// </summary>
+    private object?[]? RowKey(T row)
+    {
+        var key = new List<object?>();
+        foreach (var column in _dataGrid.Columns)
+        {
+            if (column is not DataGridBoundColumn { Binding: Binding { Path.Path: { Length: > 0 } path } })
+                continue;
+
+            if (!_columnProperties.TryGetValue(path, out var chain))
+            {
+                var parts = path.Split('.');
+                chain = new System.Reflection.PropertyInfo?[parts.Length];
+                Type? type = typeof(T);
+                for (var i = 0; i < parts.Length && type is not null; i++)
+                {
+                    chain[i] = type.GetProperty(parts[i]);
+                    type = chain[i]?.PropertyType;
+                }
+                _columnProperties[path] = chain;
+            }
+
+            object? value = row;
+            foreach (var property in chain)
+            {
+                value = value is null || property is null ? null : property.GetValue(value);
+            }
+            key.Add(value);
+        }
+
+        return key.Count == 0 ? null : key.ToArray();
     }
 
     private void SetItemsSourcePreservingSort(System.Collections.IEnumerable? newSource)
     {
         var savedSorts = _dataGrid.Items.SortDescriptions.ToList();
+        var selectedKey = _dataGrid.SelectedItem is T selected ? RowKey(selected) : null;
 
         _dataGrid.ItemsSource = newSource;
+
+        /* The selected row survives the swap as the new row that shows the same values; the scroll position is the grid's own. */
+        if (selectedKey is not null && newSource is not null)
+        {
+            foreach (var item in newSource)
+            {
+                if (item is T row && RowKey(row) is { } key && key.SequenceEqual(selectedKey))
+                {
+                    _dataGrid.SelectedItem = row;
+                    break;
+                }
+            }
+        }
 
         if (savedSorts.Count > 0)
         {

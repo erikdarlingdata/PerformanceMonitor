@@ -205,7 +205,7 @@ IF EXISTS
 (
     SELECT
         1
-    FROM sys.database_query_store_options
+    FROM sys.database_query_store_options AS PerformanceMonitorLite
     WHERE readonly_reason & 8 = 8
 )
 BEGIN
@@ -229,23 +229,23 @@ SELECT /* PerformanceMonitorLite */
     valid_since = dtr.valid_since,
     last_refresh = dtr.last_refresh,
     score = dtr.score,
-    query_id = pfd.query_id,
-    regressed_plan_id = pfd.regressed_plan_id,
-    last_good_plan_id = pfd.last_good_plan_id,
-    regressed_plan_execution_count = pfd.regressed_plan_execution_count,
-    regressed_plan_cpu_time_average_ms = pfd.regressed_plan_cpu_time_average / 1000.0,
-    regressed_plan_error_count = pfd.regressed_plan_error_count,
-    last_good_plan_execution_count = pfd.last_good_plan_execution_count,
-    last_good_plan_cpu_time_average_ms = pfd.last_good_plan_cpu_time_average / 1000.0,
-    last_good_plan_error_count = pfd.last_good_plan_error_count,
+    query_id = PerformanceMonitorLite.query_id,
+    regressed_plan_id = PerformanceMonitorLite.regressed_plan_id,
+    last_good_plan_id = PerformanceMonitorLite.last_good_plan_id,
+    regressed_plan_execution_count = PerformanceMonitorLite.regressed_plan_execution_count,
+    regressed_plan_cpu_time_average_ms = PerformanceMonitorLite.regressed_plan_cpu_time_average / 1000.0,
+    regressed_plan_error_count = PerformanceMonitorLite.regressed_plan_error_count,
+    last_good_plan_execution_count = PerformanceMonitorLite.last_good_plan_execution_count,
+    last_good_plan_cpu_time_average_ms = PerformanceMonitorLite.last_good_plan_cpu_time_average / 1000.0,
+    last_good_plan_error_count = PerformanceMonitorLite.last_good_plan_error_count,
     /*Microsoft's own Estimated Gain (sec) formula from the MS Learn automatic-tuning shredding
       examples: BOTH plans' execution counts are summed deliberately (total executions at the
       regressed rate minus the same total at the good rate). Live-captured data reproduces the
       engine's number exactly (64.84s on the repro). Computed here off the raw microsecond averages
       so the arithmetic is unchanged by the /1000 the ms columns carry.*/
     estimated_gain_seconds =
-        (pfd.regressed_plan_execution_count + pfd.last_good_plan_execution_count)
-        * (pfd.regressed_plan_cpu_time_average - pfd.last_good_plan_cpu_time_average)
+        (PerformanceMonitorLite.regressed_plan_execution_count + PerformanceMonitorLite.last_good_plan_execution_count)
+        * (PerformanceMonitorLite.regressed_plan_cpu_time_average - PerformanceMonitorLite.last_good_plan_cpu_time_average)
         / 1000000.0,
     is_executable_action = dtr.is_executable_action,
     is_revertable_action = dtr.is_revertable_action,
@@ -292,7 +292,7 @@ CROSS APPLY
                 TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanAbortedCount') AS bigint),
                 TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanErrorCount') AS bigint)
             )
-) AS pfd
+) AS PerformanceMonitorLite
 OPTION(RECOMPILE);
 
 /*Stage the Query Store side too (#2764, the rest of the sp_QuickieStore rule). Each temp pulls only
@@ -312,9 +312,9 @@ WHERE EXISTS
 (
     SELECT
         1/0
-    FROM #pm_plan_correction_recs AS r
-    WHERE r.query_id = qsp.query_id
-    AND   r.last_good_plan_id = qsp.plan_id
+    FROM #pm_plan_correction_recs AS PerformanceMonitorLite
+    WHERE PerformanceMonitorLite.query_id = qsp.query_id
+    AND   PerformanceMonitorLite.last_good_plan_id = qsp.plan_id
 );
 
 SELECT /* PerformanceMonitorLite */
@@ -326,8 +326,8 @@ WHERE EXISTS
 (
     SELECT
         1/0
-    FROM #pm_plan_correction_recs AS r
-    WHERE r.query_id = qsq.query_id
+    FROM #pm_plan_correction_recs AS PerformanceMonitorLite
+    WHERE PerformanceMonitorLite.query_id = qsq.query_id
 );
 
 SELECT /* PerformanceMonitorLite */
@@ -339,8 +339,8 @@ WHERE EXISTS
 (
     SELECT
         1/0
-    FROM #pm_plan_correction_queries AS q
-    WHERE q.query_text_id = qsqt.query_text_id
+    FROM #pm_plan_correction_queries AS PerformanceMonitorLite
+    WHERE PerformanceMonitorLite.query_text_id = qsqt.query_text_id
 );
 
 SELECT /* PerformanceMonitorLite */
@@ -404,9 +404,9 @@ OUTER APPLY
 OUTER APPLY
 (
     SELECT TOP (1)
-        ci.actual_state_desc
-    FROM sys.database_automatic_tuning_options AS ci
-    WHERE ci.name = N'CREATE_INDEX'
+        PerformanceMonitorLite.actual_state_desc
+    FROM sys.database_automatic_tuning_options AS PerformanceMonitorLite
+    WHERE PerformanceMonitorLite.name = N'CREATE_INDEX'
 ) AS create_index
 OUTER APPLY
 (
@@ -482,11 +482,22 @@ OPTION(RECOMPILE);" + NoDatabaseAccessNote.ScopeResults;
     /// enumeration query re-checks PRODUCTVERSION on the server for exactly that case.
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-        target is null
-        || target.SqlMajorVersion == 0
-        || target.SqlMajorVersion >= 14
-        || target.IsAzureSqlDb
-        || target.IsAzureManagedInstance;
+        target is null || target.MeetsMinimumVersion(14, unknownIsNewest: true);
+
+    /// <summary>
+    /// #7813: the empty answer of get_plan_corrections on a server with no plan correction rows, in the one sentence that fits. A
+    /// version below SQL Server 2017 has no automatic tuning at all (the same gate <see cref="AppliesTo"/> applies, so Azure SQL
+    /// Database and Managed Instance are never taken for an old version and an unknown version is assumed newest), which is a fact
+    /// about the version, not about collection. On any other version an empty store means no successful cycle has been stored: every
+    /// cycle writes an enablement row for every database it reads, Query Store on or off (the one-row anchor in
+    /// <see cref="PayloadBodyText"/>), so a cycle that ran and found no recommendation still leaves rows. The sentence therefore points
+    /// at collection health and claims nothing about Query Store or about what the engine has recommended. Both products' tools say it
+    /// through here, and the web page prints the sentence as it is, so it names no store column, system view or tool.
+    /// </summary>
+    public static string NoRowsMessage(CollectorTargetInfo target) =>
+        Instance.AppliesTo(target)
+            ? "No plan correction data collected for this server yet: its plan correction collector has not stored a cycle, so nothing here says what has been recommended. Collection health shows whether it has run."
+            : "This SQL Server version has no automatic tuning (it arrived in SQL Server 2017), so there is nothing to collect.";
 
     /// <summary>Azure SQL DB rejects three-part names, so the host connects per database there instead.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target is not null && target.IsAzureSqlDb;

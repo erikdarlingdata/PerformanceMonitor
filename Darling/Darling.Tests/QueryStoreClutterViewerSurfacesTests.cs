@@ -89,7 +89,13 @@ public sealed class QueryStoreClutterViewerSurfacesTests
         var block = Between(js, "const QS_CLUTTER_COLUMNS = [", "];");
 
         Assert.Contains("key: \"verdict\", label: \"Verdict\", sevKey: \"verdict\"", block, StringComparison.Ordinal);
-        Assert.Contains("r.verdict_reasons", block, StringComparison.Ordinal);
+        /* #7416: the row draws the reasons in words ("Query Store off (not graded)", see the qsReasonsText behaviour check),
+           not as the raw tokens. The MCP payload keeps the tokens, which a client branches on. */
+        Assert.Contains("key: \"verdict_reasons\", label: \"Reasons\"", block, StringComparison.Ordinal);
+        Assert.Contains("qsReasonsText(r)", block, StringComparison.Ordinal);
+        Assert.Equal("qs_off", PerformanceMonitor.Darling.Storage.QueryStoreClutter.ReasonQueryStoreOff);
+        Assert.Equal("qs_read_only_replica", PerformanceMonitor.Darling.Storage.QueryStoreClutter.ReasonReplica);
+        Assert.Equal("Query Store off", PerformanceMonitor.Darling.Storage.QueryStoreClutter.ReasonText("qs_off"));
         Assert.Contains("key: \"excluded_reason\"", block, StringComparison.Ordinal);
         Assert.Contains("key: \"config.query_capture_mode\"", block, StringComparison.Ordinal);
         Assert.Contains("r.recommendations", block, StringComparison.Ordinal);

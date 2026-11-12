@@ -88,7 +88,9 @@ public sealed class DarlingMcpAgentRouteTagGuardLiveTests
 
     private static NpgsqlDataSource LoginAs(string connectionString, string role)
     {
-        var builder = new NpgsqlDataSourceBuilder(connectionString);
+        /* Unpooled: the initializer runs once per physical connection, and Npgsql resets a pooled connection's session
+           authorization when it is returned, so a later lease of the same physical connection would be the login again. */
+        var builder = new NpgsqlDataSourceBuilder(new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString);
         builder.UsePhysicalConnectionInitializer(
             connection =>
             {

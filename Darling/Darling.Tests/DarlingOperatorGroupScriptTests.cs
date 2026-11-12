@@ -559,6 +559,165 @@ public sealed class DarlingOperatorGroupScriptTests
         }
     }
 
+    private const string OperatorGroupStandIn = "Performance Log Users";
+
+    /// <summary>The comment the installer gives the group it makes, read from the installer's own group function, so a change to
+    /// it there cannot leave the uninstall comparing against a different text.</summary>
+    private static string InstallGroupComment()
+    {
+        var match = Regex.Match(
+            ExtractFunction(Script("install-darling.ps1"), "Initialize-DarlingOperatorGroup", "install-darling.ps1"),
+            @"\$comment = '([^']+)'");
+        Assert.True(match.Success, "install-darling.ps1 no longer gives the group a comment in a single-quoted string");
+        return match.Groups[1].Value;
+    }
+
+    /// <summary>The stand-ins shared by the group-removal cases: the machine name is BUILTIN so Performance Log Users (a group
+    /// on every machine) is found as the operator group, the group's comment, the domain-controller check and net.exe are
+    /// stubs, and every net.exe call and printed line goes to a log. Nothing on this machine is created or deleted.</summary>
+    private static string GroupRemovalStandIns(string comment, bool domainController, int netExit) => string.Join(
+        "\n",
+        "$env:COMPUTERNAME = 'BUILTIN'",
+        "$script:log = New-Object System.Collections.ArrayList",
+        "function Write-Host { param($Object, $ForegroundColor) [void]$script:log.Add([string]$Object) }",
+        $"function Test-DarlingDomainController {{ ${(domainController ? "true" : "false")} }}",
+        $"function Get-DarlingLocalGroupComment {{ param($groupName) '{comment}' }}",
+        $"function net.exe {{ [void]$script:log.Add('NET ' + ($args -join ' ')); $global:LASTEXITCODE = {netExit}; if ({netExit} -ne 0) {{ 'The group could not be deleted.' }} }}");
+
+    /// <summary>Runs <c>Remove-DarlingOperatorGroup</c> from the uninstall script against the stand-ins and returns its log.</summary>
+    private static List<string> RunGroupRemoval(string comment, bool domainController = false, int netExit = 0, string groupName = OperatorGroupStandIn)
+    {
+        const string scriptName = "uninstall-darling.ps1";
+        var script = Script(scriptName);
+        return RunWindowsPowerShell(string.Join(
+            "\n",
+            GroupRemovalStandIns(comment, domainController, netExit),
+            ExtractFunction(script, "Get-DarlingNativeText", scriptName),
+            ExtractFunction(script, "Remove-DarlingOperatorGroup", scriptName),
+            $"Remove-DarlingOperatorGroup '{groupName}'",
+            "$script:log"));
+    }
+
+    /// <summary>A group that still has the installer's comment was made by the install, so the purge deletes it with net.exe and
+    /// says so.</summary>
+    [Fact]
+    public void PurgeRemovesTheGroupTheInstallMade()
+    {
+        var lines = RunGroupRemoval(InstallGroupComment());
+
+        Assert.Equal(new[] { $"NET localgroup {OperatorGroupStandIn} /delete" }, lines.Where(line => line.StartsWith("NET ", StringComparison.Ordinal)).ToArray());
+        Assert.Contains(lines, line => line.StartsWith("Removed the local group", StringComparison.Ordinal));
+    }
+
+    /// <summary>A group with any other comment, or none, was made by an administrator and is kept. The line says why and gives
+    /// the command to remove it by hand.</summary>
+    [Theory]
+    [InlineData("Our own operators")]
+    [InlineData("")]
+    public void PurgeKeepsAGroupTheInstallDidNotMake(string comment)
+    {
+        var lines = RunGroupRemoval(comment);
+
+        Assert.DoesNotContain(lines, line => line.StartsWith("NET ", StringComparison.Ordinal));
+        Assert.Contains(lines, line => line.Contains("install did not create it", StringComparison.Ordinal) && line.Contains("net localgroup \"" + OperatorGroupStandIn + "\" /delete", StringComparison.Ordinal));
+    }
+
+    /// <summary>On a domain controller nothing is looked up or deleted: a group of that name there is a domain group.</summary>
+    [Fact]
+    public void PurgeNeverActsOnADomainController()
+    {
+        var lines = RunGroupRemoval(InstallGroupComment(), domainController: true);
+
+        Assert.DoesNotContain(lines, line => line.StartsWith("NET ", StringComparison.Ordinal));
+        Assert.Contains(lines, line => line.Contains("domain controller", StringComparison.Ordinal));
+    }
+
+    /// <summary>A group that is not on the machine (an earlier purge, or an install that never made it) is not an error and
+    /// prints nothing.</summary>
+    [Fact]
+    public void PurgeDoesNothingWhenTheGroupIsAlreadyGone()
+    {
+        var lines = RunGroupRemoval(InstallGroupComment(), groupName: "No Such Operator Group 6953");
+
+        Assert.Empty(lines);
+    }
+
+    /// <summary>When net.exe fails the function reports it with the command to run by hand and does not throw, so the rest of
+    /// the purge goes on.</summary>
+    [Fact]
+    public void AFailureToRemoveTheGroupIsReported_AndDoesNotThrow()
+    {
+        var lines = RunGroupRemoval(InstallGroupComment(), netExit: 2);
+
+        Assert.Contains(lines, line => line.StartsWith("Could not remove the local group", StringComparison.Ordinal) && line.Contains("net exit 2", StringComparison.Ordinal) && line.Contains("The group could not be deleted.", StringComparison.Ordinal));
+    }
+
+    /// <summary>Runs the script's own <c>if ($PurgeData) { ... }</c> block with the stand-ins and a temp folder as the store, so
+    /// the choice between a plain uninstall, a purge and a purge that was not confirmed is the shipped one.</summary>
+    private static List<string> RunPurgeBlock(bool purgeData, bool confirmPurge)
+    {
+        const string scriptName = "uninstall-darling.ps1";
+        var script = Script(scriptName);
+        var folder = Directory.CreateTempSubdirectory("darling-uninstall-6953-").FullName;
+        try
+        {
+            var start = script.IndexOf("if ($PurgeData) {", StringComparison.Ordinal);
+            Assert.True(start >= 0, $"{scriptName} no longer has the -PurgeData block");
+            var block = ExtractFunction(script.Substring(start).Replace("if ($PurgeData) {", "function Invoke-PurgeBlock {", StringComparison.Ordinal), "Invoke-PurgeBlock", scriptName);
+
+            return RunWindowsPowerShell(string.Join(
+                "\n",
+                GroupRemovalStandIns(InstallGroupComment(), domainController: false, netExit: 0),
+                $"$PurgeData = ${(purgeData ? "true" : "false")}",
+                $"$ConfirmPurge = ${(confirmPurge ? "true" : "false")}",
+                "$MsiUninstall = $true",
+                $"$dataRoot = '{folder}'",
+                $"$operatorGroupName = '{OperatorGroupStandIn}'",
+                ExtractFunction(script, "Get-DarlingNativeText", scriptName),
+                ExtractFunction(script, "Test-DarlingPurgeConfirmed", scriptName),
+                ExtractFunction(script, "Remove-DarlingOperatorGroup", scriptName),
+                block,
+                "if ($PurgeData) { Invoke-PurgeBlock }",
+                "$script:log"));
+        }
+        finally
+        {
+            if (Directory.Exists(folder))
+            {
+                Directory.Delete(folder, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>A plain uninstall keeps the group, so a reinstall gets back the same members.</summary>
+    [Fact]
+    public void APlainUninstallKeepsTheGroup()
+    {
+        var lines = RunPurgeBlock(purgeData: false, confirmPurge: true);
+
+        Assert.DoesNotContain(lines, line => line.StartsWith("NET ", StringComparison.Ordinal));
+    }
+
+    /// <summary>A confirmed purge deletes the store and then the group.</summary>
+    [Fact]
+    public void AConfirmedPurgeRemovesTheStoreAndTheGroup()
+    {
+        var lines = RunPurgeBlock(purgeData: true, confirmPurge: true);
+
+        Assert.Contains("Store, credentials, and logs deleted.", lines);
+        Assert.Contains($"NET localgroup {OperatorGroupStandIn} /delete", lines);
+    }
+
+    /// <summary>A purge that was not confirmed leaves the store, so it leaves the group too.</summary>
+    [Fact]
+    public void APurgeThatIsNotConfirmedKeepsTheGroup()
+    {
+        var lines = RunPurgeBlock(purgeData: true, confirmPurge: false);
+
+        Assert.Contains("Purge NOT confirmed - data left in place.", lines);
+        Assert.DoesNotContain(lines, line => line.StartsWith("NET ", StringComparison.Ordinal));
+    }
+
     /// <summary>Returns the full <c>function NAME(...) { ... }</c> definition text from the script, signature
     /// included, so the extracted copy takes its parameters the way the shipped one does.</summary>
     private static string ExtractFunction(string script, string name, string scriptName)

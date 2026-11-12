@@ -68,7 +68,7 @@ public sealed class McpHealthParserTools
             requestedStart, windowEnd, SystemHealthTable, emptyAnswer: emptyAnswer);
     }
 
-    [McpServerTool(Name = "get_health_parser_system_health"), Description("Gets parsed system_health health indicators (the sp_server_diagnostics component results) over an event_time window ending at as_of, newest first. Ungated: every parsed event is returned. An empty answer with status empty is a real result: nothing of this kind was recorded in this window. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets parsed system_health extended event data: overall health indicators (spinlock backoffs, sick spinlocks, latch warnings, dump requests, non-yielding tasks, SQL vs system CPU, bad pages) captured by sp_server_diagnostics. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_system_health"), Description("Gets parsed system_health health indicators (the sp_server_diagnostics component results) over an event_time window ending at as_of, newest first. Ungated: every parsed event is returned. An empty answer with status empty is a real result: nothing of this kind was recorded in this window. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets parsed system_health extended event data: overall health indicators (spinlock backoffs, sick spinlocks, latch warnings, dump requests, non-yielding tasks, SQL vs system CPU, bad pages) captured by sp_server_diagnostics. On SQL Server on Linux, system_cpu_utilization is null and system_cpu_note says why, because the host figure is not reported there. " + McpHelpers.UtcStampsDescription + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSystemHealth(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -88,8 +88,8 @@ public sealed class McpHealthParserTools
             var rows = await dataService.GetSystemHealthAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
-                    "none carried a SYSTEM component result with a timestamp (the other four sp_server_diagnostics components feed the sibling reads)", capturedInWindow: null, lastCapturedAt);
+                return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
+                    "none carried a SYSTEM component result with a timestamp (the other four sp_server_diagnostics components feed the sibling reads)", capturedInWindow: null, lastCapturedAt), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -102,6 +102,8 @@ public sealed class McpHealthParserTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #7416 item 1: SQL Server on Linux reports no usable host CPU, so System CPU is null and this says why. */
+                system_cpu_note = SystemHealthHostCpu.NoteFor(await dataService.GetHostOsVersionAsync(resolved.ServerId)),
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 total_entries = rows.Count,
@@ -130,7 +132,7 @@ public sealed class McpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_system_health", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_severe_errors"), Description("Gets severe errors from system_health over an event_time window ending at as_of, newest first. Gated: severity 19 or higher only, benign connection-reset error numbers excluded, so a lower-severity error is never listed. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets severe errors from system_health (severity >= 19, benign connection-reset numbers excluded): error number, severity, state, database, and message. These are critical SQL Server events (stack dumps, fatal errors). " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_severe_errors"), Description("Gets severe errors from system_health over an event_time window ending at as_of, newest first. Gated: severity 19 or higher only, benign connection-reset error numbers excluded, so a lower-severity error is never listed. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets severe errors from system_health (severity >= 19, benign connection-reset numbers excluded): error number, severity, state, database, and message. These are critical SQL Server events (stack dumps, fatal errors). " + McpHelpers.UtcStampsDescription + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSevereErrors(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -156,9 +158,9 @@ public sealed class McpHealthParserTools
                 resolved.ServerId, hours_back, databaseNames: database is null ? null : new[] { database }, asOfUtc: windowEnd);
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.WithDatabase(await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.ErrorReportedEvent,
+                return McpHelpers.WithDatabase(await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.ErrorReportedEvent,
                     $"none was a significant severe error (severity {SystemHealthSignificance.SevereErrorMinSeverity}+ and off the benign connection-reset list)"
-                        + McpDatabaseSelection.ForChosen(database is null ? null : new[] { database }), capturedInWindow: null, lastCapturedAt), database)!;
+                        + McpDatabaseSelection.ForChosen(database is null ? null : new[] { database }), capturedInWindow: null, lastCapturedAt), windowEnd.AddHours(-hours_back)), database)!;
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -191,7 +193,7 @@ public sealed class McpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_severe_errors", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_io_issues"), Description("Gets I/O issues from system_health (IO_SUBSYSTEM component results) over an event_time window ending at as_of, newest first. Gated: WARNING-state results only. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets I/O-related issues from system_health (IO_SUBSYSTEM component): 15-second I/O warnings, long I/O request counts, and the longest pending request duration with its file path. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_io_issues"), Description("Gets I/O issues from system_health (IO_SUBSYSTEM component results) over an event_time window ending at as_of, newest first. Gated: WARNING-state results only. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets I/O-related issues from system_health (IO_SUBSYSTEM component): 15-second I/O warnings, long I/O request counts, and the longest pending request duration with its file path. " + McpHelpers.UtcStampsDescription + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetIOIssues(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -211,8 +213,8 @@ public sealed class McpHealthParserTools
             var rows = await dataService.GetIoIssuesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
-                    "none was an IO_SUBSYSTEM component result in the WARNING state", capturedInWindow: null, lastCapturedAt);
+                return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
+                    "none was an IO_SUBSYSTEM component result in the WARNING state", capturedInWindow: null, lastCapturedAt), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -244,7 +246,7 @@ public sealed class McpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_io_issues", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_scheduler_issues"), Description("Gets scheduler-monitor utilization samples from system_health over an event_time window ending at as_of, newest first. Gated: only samples where SQL Server's own CPU is pinned, other processes are using half the box or more, or memory utilization has dropped to half or below. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets scheduler-monitor utilization samples from system_health: SQL Server CPU percent, other-process CPU percent, idle CPU percent, memory utilization percent, page faults, and working-set change in MB. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_scheduler_issues"), Description("Gets scheduler-monitor utilization samples from system_health over an event_time window ending at as_of, newest first. Gated: only samples where SQL Server's own CPU is pinned, other processes are using half the box or more, or memory utilization has dropped to half or below. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets scheduler-monitor utilization samples from system_health: SQL Server CPU percent, other-process CPU percent, idle CPU percent, memory utilization percent, page faults, and working-set change in MB. " + McpHelpers.UtcStampsDescription + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSchedulerIssues(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -263,9 +265,11 @@ public sealed class McpHealthParserTools
 
             var rows = await dataService.GetSchedulerIssuesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
+            /* #7688: on SQL Server on Linux the read clears Other-Process CPU and Idle (idle reads 0), and the answer says why. */
+            var hostOs = await dataService.GetHostOsVersionAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SchedulerMonitorEvent,
-                    "none was a significant scheduler-monitor sample (SQL CPU, other-process CPU, or memory utilization outside the warning thresholds)", capturedInWindow: null, lastCapturedAt);
+                return SystemHealthHostCpu.WithNote(await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SchedulerMonitorEvent,
+                    "none was a significant scheduler-monitor sample (SQL CPU, other-process CPU, or memory utilization outside the warning thresholds)", capturedInWindow: null, lastCapturedAt), windowEnd.AddHours(-hours_back)), hostOs)!;
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -279,6 +283,7 @@ public sealed class McpHealthParserTools
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
                 source_observed = true,
+                system_cpu_note = SystemHealthHostCpu.SchedulerNoteFor(hostOs),
                 last_captured_at = Stamp(lastCapturedAt),
                 issue_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
@@ -297,7 +302,7 @@ public sealed class McpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_scheduler_issues", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_memory_conditions"), Description("Gets memory-condition snapshots from system_health over an event_time window ending at as_of, newest first. Gated: only snapshots whose last notification is RESOURCE_MEMPHYSICAL_LOW. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets memory condition snapshots from system_health (RESOURCE_MEMPHYSICAL_LOW): low-memory notifications, out-of-memory exceptions, and the memory-manager report (available physical/virtual/paging memory, working set, VM reserved/committed, pages, and the physical/virtual memory-low flags). " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_memory_conditions"), Description("Gets memory-condition snapshots from system_health over an event_time window ending at as_of, newest first. Gated: only snapshots whose last notification is RESOURCE_MEMPHYSICAL_LOW. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets memory condition snapshots from system_health (RESOURCE_MEMPHYSICAL_LOW): low-memory notifications, out-of-memory exceptions, and the memory-manager report (available physical/virtual/paging memory, working set, VM reserved/committed, pages, and the physical/virtual memory-low flags). " + McpHelpers.UtcStampsDescription + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetMemoryConditions(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -317,8 +322,8 @@ public sealed class McpHealthParserTools
             var rows = await dataService.GetMemoryConditionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
-                    "none was a RESOURCE component result carrying a low-memory (RESOURCE_MEMPHYSICAL_LOW) notification", capturedInWindow: null, lastCapturedAt);
+                return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
+                    "none was a RESOURCE component result carrying a low-memory (RESOURCE_MEMPHYSICAL_LOW) notification", capturedInWindow: null, lastCapturedAt), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -375,7 +380,7 @@ public sealed class McpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_memory_conditions", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_cpu_tasks"), Description("Gets CPU task results from system_health (QUERY_PROCESSING component) over an event_time window ending at as_of, newest first. Gated: WARNING-state results with at least 10 pending tasks only. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets CPU task events from system_health (QUERY_PROCESSING component): worker thread counts (max/created/idle), tasks completed within the interval, pending tasks and oldest pending task wait time, plus deadlock/blocking flags. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_cpu_tasks"), Description("Gets CPU task results from system_health (QUERY_PROCESSING component) over an event_time window ending at as_of, newest first. Gated: WARNING-state results with at least 10 pending tasks only. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets CPU task events from system_health (QUERY_PROCESSING component): worker thread counts (max/created/idle), tasks completed within the interval, pending tasks and oldest pending task wait time, plus deadlock/blocking flags. " + McpHelpers.UtcStampsDescription + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetCPUTasks(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -395,8 +400,8 @@ public sealed class McpHealthParserTools
             var rows = await dataService.GetCpuTasksAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
-                    $"none was a QUERY_PROCESSING component result in the WARNING state with at least {SystemHealthSignificance.CpuTaskMinPendingTasks} pending tasks", capturedInWindow: null, lastCapturedAt);
+                return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
+                    $"none was a QUERY_PROCESSING component result in the WARNING state with at least {SystemHealthSignificance.CpuTaskMinPendingTasks} pending tasks", capturedInWindow: null, lastCapturedAt), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -432,7 +437,7 @@ public sealed class McpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_cpu_tasks", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_memory_broker"), Description("Gets memory broker notifications from system_health over an event_time window ending at as_of, newest first. Gated: RESOURCE_MEMPHYSICAL_LOW notifications only. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets memory broker events from system_health: broker ratio changes and target adjustments (currently predicated / allocated / previously allocated), the broker name, and the notification (RESOURCE_MEMPHYSICAL_LOW; the gate returns no other). " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_memory_broker"), Description("Gets memory broker notifications from system_health over an event_time window ending at as_of, newest first. Gated: SHRINK notifications only. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets memory broker events from system_health: broker ratio changes and target adjustments (currently predicated / allocated / previously allocated), the broker name, and the notification (SHRINK; the gate returns no other). The broker carries STABLE, GROW or SHRINK, and a shrink is not always an incident, since a broker lowers its target under ordinary workload shifts too. notification_counts splits events_in_window by notification value (for example GROW 12, SHRINK 0, STABLE 40), so a window with no SHRINK still shows what the broker did. " + McpHelpers.UtcStampsDescription + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetMemoryBroker(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -449,11 +454,11 @@ public sealed class McpHealthParserTools
             var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetMemoryBrokerAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            var (rows, notificationCounts, rawEventCount) = await dataService.GetMemoryBrokerWithCountsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.MemoryBrokerEvent,
-                    "none carried a low-memory notification (broker adjustments that are not a shrink under pressure are routine)", capturedInWindow: null, lastCapturedAt);
+                return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.MemoryBrokerEvent,
+                    "none carried a SHRINK notification (STABLE and GROW broker adjustments are routine; notification_counts shows what the window held)", capturedInWindow: null, lastCapturedAt, notificationCounts), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -469,6 +474,9 @@ public sealed class McpHealthParserTools
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 event_count = rows.Count,
+                /* #7466: every broker event the window held (the same raw count the empty reply gives) and its split by notification value, so a reader sees what the SHRINK gate filtered out. */
+                events_in_window = rawEventCount,
+                notification_counts = notificationCounts,
                 shown = Math.Min(rows.Count, limit),
                 events = rows.Take(limit).Select(r => new
                 {
@@ -491,7 +499,7 @@ public sealed class McpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_memory_broker", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_memory_node_oom"), Description("Gets memory-node out-of-memory events from system_health over an event_time window ending at as_of, newest first. Ungated: every recorded OOM is returned. An empty answer with status empty is a real result: nothing of this kind was recorded in this window. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets memory node OOM events from system_health: out-of-memory conditions on specific NUMA nodes, with the node's physical/virtual/page-file memory, target/reserved/committed KB, the failure type, and the memory-low flags. Never gated — every recorded OOM is returned. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_memory_node_oom"), Description("Gets memory-node out-of-memory events from system_health over an event_time window ending at as_of, newest first. Ungated: every recorded OOM is returned. An empty answer with status empty is a real result: nothing of this kind was recorded in this window. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets memory node OOM events from system_health: out-of-memory conditions on specific NUMA nodes, with the node's physical/virtual/page-file memory, target/reserved/committed KB, the failure type, and the memory-low flags. Never gated: every recorded OOM is returned. " + McpHelpers.UtcStampsDescription + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetMemoryNodeOOM(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -511,8 +519,8 @@ public sealed class McpHealthParserTools
             var rows = await dataService.GetMemoryNodeOomAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.MemoryNodeOomEvent,
-                    "none shredded to a memory-node OOM record (this category is ungated, so a captured OOM event that parsed would be here)", capturedInWindow: null, lastCapturedAt);
+                return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.MemoryNodeOomEvent,
+                    "none shredded to a memory-node OOM record (this category is ungated, so a captured OOM event that parsed would be here)", capturedInWindow: null, lastCapturedAt), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -565,7 +573,7 @@ public sealed class McpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_memory_node_oom", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_significant_waits"), Description("Gets individual waits from system_health, one row per wait_info event with the waiting statement's SQL text, over an event_time window ending at as_of, newest first. Floors: a real session, a non-BACKUP statement, at least 500 ms, and a wait type off the idle/background list; shorter waits are never listed. get_wait_stats has the instance-wide totals. An empty answer with status empty is a real result: nothing in this window passed the floors, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets significant individual waits from system_health: one row per wait_info event where a real session's non-BACKUP statement waited at least 500 ms on a wait type that is not idle/background - the wait type, total and signal duration, the wait resource, the session id and the waiting statement. get_wait_stats gives the instance-wide totals and can never name the statement that paid them; this is the individual waits, with their SQL text. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_significant_waits"), Description("Gets individual waits from system_health, one row per wait_info event with the waiting statement's SQL text, over an event_time window ending at as_of, newest first. Floors: a real session, a non-BACKUP statement, at least 500 ms, and a wait type off the idle/background list; shorter waits are never listed. get_wait_stats has the instance-wide totals. An empty answer with status empty is a real result: nothing in this window passed the floors, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets significant individual waits from system_health: one row per wait_info event where a real session's non-BACKUP statement waited at least 500 ms on a wait type that is not idle/background - the wait type, total and signal duration, the wait resource, the session id and the waiting statement. get_wait_stats gives the instance-wide totals and can never name the statement that paid them; this is the individual waits, with their SQL text. " + McpHelpers.UtcStampsDescription + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSignificantWaits(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -597,9 +605,9 @@ public sealed class McpHealthParserTools
                     (the four conditions) is this tool's to word. Darling's twin climbs the same ladder in the
                     same words.
                 */
-                return await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.WaitInfoEvent,
+                return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.WaitInfoEvent,
                     $"none was significant (needs a real session, a non-BACKUP statement, at least {SystemHealthSignificance.SignificantWaitMinDurationMs} ms, and a wait type off the idle list)",
-                    capturedInWindow: captured, lastCapturedAt);
+                    capturedInWindow: captured, lastCapturedAt), windowEnd.AddHours(-hours_back));
             }
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
@@ -669,10 +677,14 @@ public sealed class McpHealthParserTools
     /// beside <c>status</c> — the trend family's precedent (#3541 A2): a caller reads the witness without
     /// first checking which branch answered. Darling's <c>DarlingMcpHealthParserTools.EmptyAsync</c> is the
     /// twin, sentence for sentence; <c>McpMissMessageParityPinTests</c> holds the shared ones.</para>
+    ///
+    /// <para>#7167: this ladder answers <c>empty</c> as a true negative only while the server is being collected, so each of the nine
+    /// reads wraps its call in <c>McpQueryTools.OfflineInsteadOfEmptyAsync</c>, which turns an <c>empty</c> from an offline server into <c>unavailable</c>.
+    /// The wrap sits at the call sites so the capability question stays inside this method, where the wiring scan reads it.</para>
     /// </summary>
     private static async Task<string> EmptyAsync(
         LocalDataService dataService, int serverId, string serverName, int hoursBack, DateTime windowEnd, string eventType,
-        string noneQualifiedBecause, int? capturedInWindow, DateTime? lastCapturedAt)
+        string noneQualifiedBecause, int? capturedInWindow, DateTime? lastCapturedAt, IReadOnlyDictionary<string, int>? notificationCounts = null)
     {
         var captured = capturedInWindow
             ?? await dataService.CountSystemHealthEventsAsync(serverId, eventType, hoursBack, asOfUtc: windowEnd);
@@ -691,7 +703,7 @@ public sealed class McpHealthParserTools
             return WitnessStatus(
                 "unavailable",
                 RingBufferTruncationNote.HealthParserMessage(eventType, serverName, hoursBack, truncation, truncatedRuns, captured, noneQualifiedBecause),
-                sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: captured);
+                sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: captured, notificationCounts: notificationCounts);
         }
 
         if (captured > 0)
@@ -701,10 +713,10 @@ public sealed class McpHealthParserTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"{captured} {eventType} event(s) were captured for {serverName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}",
+                    factual: $"{CountText.Plural(captured, $"{eventType} event")} {(captured == 1 ? "was" : "were")} captured for {serverName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))} and {noneQualifiedBecause}",
                     coveredClaim: ". Events ARE being captured, so this is the healthy answer for this read rather than missing data."),
                 sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: captured,
-                hints: notice.AsHints());
+                hints: notice.AsHints(), notificationCounts: notificationCounts);
         }
 
         if (lastOfType is DateTime seen)
@@ -714,8 +726,8 @@ public sealed class McpHealthParserTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"No {eventType} events were captured for {serverName} in the last {hoursBack} hour(s). This server HAS captured them before (the newest was stored at {Stamp(seen)})",
-                    coveredClaim: ", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events."),
+                    factual: $"No {eventType} events were captured for {serverName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}. This server has captured them before (the newest was stored at {Stamp(seen)})",
+                    coveredClaim: ", so nothing happened in this window: widen hours_back to reach the most recent events."),
                 sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0,
                 hints: notice.AsHints());
         }
@@ -724,7 +736,7 @@ public sealed class McpHealthParserTools
         {
             return WitnessStatus(
                 "empty",
-                $"No {eventType} events have been captured for {serverName} at any time, but its system_health session IS being read — the collector last stored an event of another type at {Stamp(alive)} — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
+                $"No {eventType} events have been captured for {serverName} at any time, but its system_health session is being read (the collector last stored an event of another type at {Stamp(alive)}), so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
                 sourceObserved: true, alive, lastCapturedOfTypeAt: null, eventsInWindow: 0,
                 hints: (await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true)).AsHints());
         }
@@ -748,10 +760,15 @@ public sealed class McpHealthParserTools
                 hints: (await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true)).AsHints());
         }
 
+        /* #7005: a server whose collector has never run at all answers bare (the never-captured rule, which keeps it apart from a quiet one); one
+           whose collector ran but stored no event also says whether the store holds the window, as every other rung above does. */
+        var ranBefore = await dataService.HasCollectorRunAsync(serverId, SystemHealthCollectorName);
+        var ranNotice = await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true);
         return WitnessStatus(
                 "unavailable",
-                $"No system_health events of ANY type have EVER been captured for {serverName}, so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
-                sourceObserved: false, lastCapturedAt: null, lastCapturedOfTypeAt: null, eventsInWindow: 0);
+                $"No system_health events of ANY type have EVER been captured for {serverName}, so this is NOT an all-clear: there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
+                sourceObserved: false, lastCapturedAt: null, lastCapturedOfTypeAt: null, eventsInWindow: 0,
+                hints: ranBefore ? ranNotice.AsHints() : null);
     }
 
     /// <summary>
@@ -763,7 +780,7 @@ public sealed class McpHealthParserTools
     /// </summary>
     private static string WitnessStatus(
         string status, string message, bool sourceObserved, DateTime? lastCapturedAt, DateTime? lastCapturedOfTypeAt, int eventsInWindow,
-        object? hints = null)
+        object? hints = null, IReadOnlyDictionary<string, int>? notificationCounts = null)
     {
         /* The serializer writes a null member, so hints is added only when there is one: the unavailable rung keeps its shape. */
         var answer = new Dictionary<string, object?>
@@ -775,6 +792,8 @@ public sealed class McpHealthParserTools
             ["last_captured_of_type_at"] = Stamp(lastCapturedOfTypeAt),
             ["events_in_window"] = eventsInWindow,
         };
+        /* #7466: only the memory-broker read passes counts. */
+        if (notificationCounts is not null) answer["notification_counts"] = notificationCounts;
         if (hints is not null) answer["hints"] = hints;
         return JsonSerializer.Serialize(answer, McpHelpers.JsonOptions);
     }

@@ -19,9 +19,10 @@ namespace PerformanceMonitorLite.Mcp;
 /// The Level 1 investigation tools on Lite (#5820): the twin of Darling's <c>DarlingMcpInvestigationTools</c>, with the same
 /// names, parameters, status words and answers. An agent lists the requests alerts opened, claims one (the brief is
 /// composed and stored at claim time), and returns one report under its claim; a person reads the requests, reports and
-/// journal back. The four are served only with <c>mcp_allow_investigations</c> on and the write tools off
-/// (<see cref="McpInvestigationPolicy"/>, by tool name). The shared <see cref="InvestigationToolCore"/> does the work; these
-/// are thin wrappers over the registered <see cref="IInvestigationRequestStore"/> (Lite's DuckDB store).
+/// journal back. The two that claim and report are served only with <c>mcp_allow_investigations</c> on and the write tools off
+/// (<see cref="McpInvestigationPolicy"/>, by tool name); the two reads are served in every configuration (#8461). The shared
+/// <see cref="InvestigationToolCore"/> does the work; these are thin wrappers over the registered
+/// <see cref="IInvestigationRequestStore"/> (Lite's DuckDB store).
 /// </summary>
 [McpServerToolType]
 public sealed class McpInvestigationTools
@@ -32,7 +33,7 @@ public sealed class McpInvestigationTools
     [McpServerTool(Name = "list_investigation_requests"), Description(
         "Lists the investigation requests alerts opened for your agent, newest first, with state, lease and expiry. Writes " +
         "nothing. status ok or empty. Claim one with claim_investigation_request. <<GUIDE>> " +
-        "Each row: id, server, family, first metric, alert count, state, lease and expiry. The state is computed from the " +
+        "Each row: id, server (server_name is the label the opening alert carried, kept for the request's life, so two requests for one server can carry two labels; instance_name is the server list's current name for server_id and display_name its display name, read when served, so group requests by server_id or instance_name), family, first metric, alert count, state, lease and expiry. The state is computed from the " +
         "lease and expiry at read time (a lapsed lease reads open), and the read writes nothing. " +
         "A request is opened when an alert matches a notification route whose agent_level is 1 (get_notification_routes), " +
         "within the route's hourly and daily limits; alerts of one server and family join one request while they keep firing (each within 30 minutes of the request's latest alert, up to 4 hours after its first). " +
@@ -107,6 +108,9 @@ public sealed class McpInvestigationTools
         CancellationToken cancellationToken = default) =>
         ClaimAsync(store, composer, request_id, agent_id, claim_id, brief_format, cancellationToken);
 
+    /// <summary>The status of a claim refused for a reserved agent_id (#8611). It is Darling's status for the same refusal, so a client reads one word.</summary>
+    internal const string AgentIdReserved = "agent_id_is_named_token";
+
     /// <summary>The claim over a given store and composer, so a test can drive a composer that fails. The brief is composed
     /// UNLOCKED, between the claim and storing it; a compose failure releases the claim (it stays counted).</summary>
     internal static async Task<string> ClaimAsync(IInvestigationRequestStore store, InvestigationBriefComposer composer,
@@ -117,6 +121,15 @@ public sealed class McpInvestigationTools
 
         try
         {
+            /* #8611: Lite journals its own refusals under invalid and unclaimed, so a claim as either name would make the claim's rows read as a
+               refusal's. Refused as Darling's claim refuses it for a legacy token, and journaled under no agent's name. */
+            if (InvestigationToolCore.IsReservedAgentId(agent_id))
+            {
+                await store.RecordRefusalAsync(requestId, InvestigationRules.InvalidAgentId, "claim", AgentIdReserved, null, cancellationToken);
+                return InvestigationToolCore.Status(AgentIdReserved,
+                    $"agent_id {agent_id} is a reserved name the journal uses when no agent made a call. Use a different agent_id on this token.");
+            }
+
             /* An agent id is a name, not text, so it cannot pose as another journal line. */
             if (!InvestigationRules.IsValidAgentId(agent_id))
             {
@@ -402,7 +415,7 @@ public sealed class McpInvestigationTools
             {
                 return requestId is not null
                     ? InvestigationToolCore.Status("not_found", $"No investigation request has id {requestId}.")
-                    : InvestigationToolCore.Status("empty", $"No investigation request opened in the last {hours_back} hours.");
+                    : InvestigationToolCore.Status("empty", $"No investigation request opened {McpHelpers.InTheLast($"{hours_back} hours")}.");
             }
 
             return InvestigationToolCore.ReportsAnswer(read, requestId is null ? hours_back : null, mode, key);

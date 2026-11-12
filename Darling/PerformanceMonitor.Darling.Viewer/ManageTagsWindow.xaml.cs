@@ -117,7 +117,7 @@ public partial class ManageTagsWindow : Window
            content tree), so it cannot drift as buttons are added. */
         if (dataService.IsReadOnly)
         {
-            Title += " — read-only seat (tag editing needs the admin connection)";
+            Title += ", read-only seat (tag editing needs the admin connection)";
             if (Content is FrameworkElement root)
             {
                 root.IsEnabled = false;
@@ -569,8 +569,8 @@ public partial class ManageTagsWindow : Window
 
         var descendants = CountDescendants(_selectedNode);
         var assignments = CountAssignedServers(_selectedNode);
-        var childNote = descendants > 0 ? $" and its {descendants} child tag(s)" : string.Empty;
-        var assignNote = assignments > 0 ? $" This removes {assignments} server assignment(s)." : string.Empty;
+        var childNote = descendants > 0 ? $" and its {PerformanceMonitor.Common.CountText.Plural(descendants, "child tag")}" : string.Empty;
+        var assignNote = assignments > 0 ? $" This removes {PerformanceMonitor.Common.CountText.Plural(assignments, "server assignment")}." : string.Empty;
 
         string ruleNote;
         try

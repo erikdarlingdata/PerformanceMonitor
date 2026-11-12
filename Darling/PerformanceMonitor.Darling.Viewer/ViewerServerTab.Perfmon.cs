@@ -51,14 +51,16 @@ public partial class ViewerServerTab
     /// redraw. The hover helper is created lazily on first load so the picker's chart carries the same
     /// tooltip behavior Lite's does.
     /// </summary>
-    private async Task LoadPerfmonAsync()
+    private async Task LoadPerfmonAsync(ViewerLoadTimer? timer = null)
     {
         _perfmonHover ??= new ChartHoverHelper(PerfmonChart, "", displayZone: ViewerTimeHelper.CurrentDisplayZone);
 
         var (startUtc, endUtc) = GetWindowUtc();
-        var counters = await _dataService.GetDistinctPerfmonCountersAsync(_server.ServerId, startUtc, endUtc);
-        PopulatePerfmonPicker(counters);
-        await UpdatePerfmonChartFromPickerAsync();
+        /* #8549: the counter list read, the picker build and the chart's own read are each named, so a slow Perfmon says which step it was. */
+        var counters = await Timed(timer, "counter list read", _dataService.GetDistinctPerfmonCountersAsync(_server.ServerId, startUtc, endUtc));
+        ClientStep(timer, "counter picker build", () => PopulatePerfmonPicker(counters));
+        /* One step that reads the picked counters' series and then draws them: its own method answers both, so the line names the pair. */
+        await Timed(timer, "chart read and draw", UpdatePerfmonChartFromPickerAsync());
     }
 
     private void PopulatePerfmonPicker(List<string> counters)
@@ -272,7 +274,7 @@ public partial class ViewerServerTab
             PerfmonChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             var rangeStart = startUtc;
             var rangeEnd = endUtc;
-            PerfmonChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+            PerfmonChart.Plot.Axes.SetLimitsX(ChartXStart(PerfmonChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(PerfmonChart);
             PerfmonChart.Plot.YLabel(DeltaSeriesShaping.YAxisLabel(plottedBases));
             SetChartYLimitsWithLegendPadding(PerfmonChart, 0, globalMax > 0 ? globalMax : 100);
@@ -293,9 +295,12 @@ public partial class ViewerServerTab
 
             PerfmonChart.Refresh();
         }
-        catch
+        catch (Exception ex)
         {
-            /* Ignore chart update errors */
+            /* The chart was cleared above, so a failed read reaches the status line, as a slicer's does; a superseded run says nothing. */
+            var status = PickerChartReadFailure.StatusText("perfmon", ex, gen, _perfmonPickerGen);
+            if (status is not null)
+                StatusChanged?.Invoke(status);
         }
     }
 

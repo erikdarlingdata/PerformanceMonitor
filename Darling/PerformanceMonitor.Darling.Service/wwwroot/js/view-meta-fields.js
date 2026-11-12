@@ -77,7 +77,10 @@ export function buildViewMetaFields({ meta, view, session, views, onChange }) {
       el("div", { class: "editor-field field-enabled" }, [
         el("label", { class: "editor-check-row" }, [personalBox, el("span", { text: " Personal (listed only for you)" })]),
         el("div", { class: "muted view-meta-note", text: "Personal views are listed only for you, but anyone who can sign in can still open one by its number, and MCP lists it." }),
-        choice.disabled && !access.readOnly ? el("div", { class: "muted view-meta-note", text: choice.reason }) : null,
+        choice.disabled && !access.readOnly
+          ? el("div", { class: "muted view-meta-note", ...(choice.signOut ? {} : { text: choice.reason }) },
+            choice.signOut ? [choice.reason, el("a", { href: "/auth/logout", text: "sign out" }), " and sign in again."] : [])
+          : null,
       ]),
     ]),
     folderNote,

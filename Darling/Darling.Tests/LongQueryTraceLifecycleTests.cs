@@ -1538,6 +1538,43 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         Assert.Equal(ThreeDatabases.Length, rig.Records.Rows.Count);
     }
 
+    /* #7639: "Databases that get Extended Events sessions" narrows the per-install creates only. The ownerless legacy session holds an
+       Azure session slot that nothing owns, so its drop still reaches the databases left off the list. */
+    [Fact]
+    public async Task Azure_TheXeSessionDatabaseList_NarrowsTheCreates_ButTheLegacyDropStillReachesTheDatabasesLeftOff()
+    {
+        var rig = BuildRig();
+        rig.Config.XeSessionDatabases = new List<string> { "alpha" };
+        rig.LegacySessions.UnionWith(new[] { "alpha", "beta" });
+
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Equal(new[] { "alpha" }, rig.Created);
+        Assert.Contains("legacy:beta", rig.Events);
+        Assert.DoesNotContain("beta", rig.LegacySessions);
+        Assert.DoesNotContain(rig.Calls, call => call.Database == "beta");
+    }
+
+    /* #7639: a list that names no database the server has creates nothing and refuses nothing. The long query run's note says so instead of
+       the run recording SUCCESS with no rows and no reason. A list that names a live database carries no such note. */
+    [Fact]
+    public async Task Azure_AnXeSessionDatabaseList_MatchingNoDatabase_PutsANoteOnTheRun_AndAMatchingListDoesNot()
+    {
+        var rig = BuildRig();
+        rig.Config.XeSessionDatabases = new List<string> { "dropped_last_week" };
+
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Empty(rig.Created);
+        Assert.Contains("matches no database on this server", rig.State.LongQueryTracePartialNote ?? string.Empty, StringComparison.Ordinal);
+
+        rig.Config.XeSessionDatabases = new List<string> { "alpha" };
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Equal(new[] { "alpha" }, rig.Created);
+        Assert.Null(rig.State.LongQueryTracePartialNote);
+    }
+
     [Fact]
     public async Task Legacy_ARecordThatCannotBeRead_SkipsTheLegacyStep_NeverDropsTwice_AndTriesAgainOnTheNextPass()
     {

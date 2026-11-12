@@ -153,24 +153,24 @@ public class SystemHealthParserTests
     {
         var r = SystemHealthParser.ParseMemoryConditions(LoadFixture("sp_server_diagnostics_resource.xml"))!;
 
-        Assert.Equal(8L, r.AvailablePhysicalMemoryGb);   // 8589934592 B / 1024^3
-        Assert.Equal(16L, r.AvailableVirtualMemoryGb);   // 17179869184 B / 1024^3
-        Assert.Equal(4L, r.AvailablePagingFileGb);       // 4294967296 B / 1024^3
-        Assert.Equal(2L, r.WorkingSetGb);                // 2147483648 B / 1024^3
+        Assert.Equal(8m, r.AvailablePhysicalMemoryGb);   // 8589934592 B / 1024^3
+        Assert.Equal(16m, r.AvailableVirtualMemoryGb);   // 17179869184 B / 1024^3
+        Assert.Equal(4m, r.AvailablePagingFileGb);       // 4294967296 B / 1024^3
+        Assert.Equal(2m, r.WorkingSetGb);                // 2147483648 B / 1024^3
     }
 
     [Fact]
-    public void MemoryConditions_KbEntries_DivideBy1024Squared_Truncating()
+    public void MemoryConditions_KbEntries_DivideBy1024Squared_TwoDecimals()
     {
         var r = SystemHealthParser.ParseMemoryConditions(LoadFixture("sp_server_diagnostics_resource.xml"))!;
 
-        Assert.Equal(8L, r.VmReservedGb);                // 8388608 KB / 1024^2
-        Assert.Equal(4L, r.VmCommittedGb);               // 4194304 KB / 1024^2
-        Assert.Equal(6L, r.TargetCommittedGb);           // 6291456 KB / 1024^2
-        Assert.Equal(4L, r.CurrentCommittedGb);          // 4194304 KB / 1024^2
-        // Sub-GB KB values truncate to 0, exactly like sp_HealthParser's bigint integer division.
-        Assert.Equal(0L, r.EmergencyMemoryGb);           // 1024 KB / 1024^2 -> 0
-        Assert.Equal(0L, r.EmergencyMemoryInUseGb);      // 16 KB / 1024^2 -> 0
+        Assert.Equal(8m, r.VmReservedGb);                // 8388608 KB / 1024^2
+        Assert.Equal(4m, r.VmCommittedGb);               // 4194304 KB / 1024^2
+        Assert.Equal(6m, r.TargetCommittedGb);           // 6291456 KB / 1024^2
+        Assert.Equal(4m, r.CurrentCommittedGb);          // 4194304 KB / 1024^2
+        // Sub-GB KB values keep 2 decimals (#7465), so these tiny ones round to 0.00.
+        Assert.Equal(0m, r.EmergencyMemoryGb);           // 1024 KB / 1024^2 = 0.001, rounds to 0.00
+        Assert.Equal(0m, r.EmergencyMemoryInUseGb);      // 16 KB / 1024^2 rounds to 0.00
     }
 
     [Fact]
@@ -226,7 +226,7 @@ public class SystemHealthParserTests
         Assert.Equal(1000000L, r.CurrentlyAllocated);
         Assert.Equal(1100000L, r.PreviouslyAllocated);
         Assert.Equal("MEMORYBROKER_FOR_CACHE", r.Broker);
-        Assert.Equal("RESOURCE_MEMPHYSICAL_HIGH", r.Notification);
+        Assert.Equal("STABLE", r.Notification);
     }
 
     // ── MemoryNodeOOM (memory_node_oom_ring_buffer_recorded) ──

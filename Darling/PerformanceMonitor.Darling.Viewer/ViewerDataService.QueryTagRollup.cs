@@ -122,8 +122,7 @@ public sealed partial class ViewerDataService
 
             if (qs.Allowed.Count == 0)
             {
-                unavailable[QueryTagRollupSection.QueryStore.Name] = "Query Store is read from the composed interval table only, and it is not readable here: "
-                    + (qs.Refused.Count == 0 ? "no server was read" : string.Join("; ", qs.Refused.Values.Distinct())) + ".";
+                unavailable[QueryTagRollupSection.QueryStore.Name] = QueryTagUsageNotes.QueryStoreNotReadable(qs.Refused.Values);
             }
         }
 
@@ -160,5 +159,109 @@ public sealed partial class ViewerDataService
         }
 
         return new QueryTagRollupData(tags, sections, deadlocks, scanTruncated, unavailable, qs.Refused, notes);
+    }
+
+    /// <summary>
+    /// #7376: the servers whose Query Store section reads not_collected because each is a readable secondary Darling does not collect Query Store
+    /// from, with the reason <c>get_query_store_top</c> gives (<see cref="DarlingQueryStoreReadableSecondary"/>, the one source of the wording). It is
+    /// asked AFTER the read, and only of a server the Query Store gate refused that holds no Query Store rows and is not already in
+    /// <paramref name="skip"/> (a server that reads not_collected in every section): a server with Query Store rows keeps them. One small read
+    /// per such server, and none when the gate refused nobody.
+    /// </summary>
+    public async Task<Dictionary<int, string>> GetQueryStoreNotCollectedAsync(
+        QueryTagRollupData data, IEnumerable<DarlingServer> servers, IReadOnlyDictionary<int, string> skip, CancellationToken cancellationToken = default)
+    {
+        var reasons = new Dictionary<int, string>();
+        if (data.Refused.Count == 0)
+        {
+            return reasons;
+        }
+
+        var withRows = data.Sections.GetValueOrDefault(QueryTagRollupSection.QueryStore.Name)?.Select(f => f.ServerId).ToHashSet() ?? [];
+        IReadOnlyList<CollectorScheduleRow>? scheduleRows = null;
+
+        foreach (var server in servers)
+        {
+            if (!data.Refused.ContainsKey(server.ServerId) || withRows.Contains(server.ServerId) || skip.ContainsKey(server.ServerId))
+            {
+                continue;
+            }
+
+            /* #8402: the same judgment the MCP roll-up and the scheduler's gate apply, with the query_store_health collector's effective
+               schedule read from the store's rows, so the window and the tools agree on which server is a readable secondary. */
+            scheduleRows ??= await ReadScheduleOverridesForHealthAsync(cancellationToken);
+            if (await DarlingQueryStoreReadableSecondary.MessageAsync(
+                    _dataSource, server.ServerId, server.DisplayName, QueryStoreHealthCaptureRefreshes(scheduleRows, server.ServerId),
+                    ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken) is { } reason)
+            {
+                reasons[server.ServerId] = reason;
+            }
+        }
+
+        return reasons;
+    }
+
+    /// <summary>
+    /// Whether the <c>query_store_health</c> collector's effective schedule lets it refresh its capture on the server: the service's
+    /// own selection of the server's row over the fleet row, and the collector's default when neither row says.
+    /// </summary>
+    private static bool QueryStoreHealthCaptureRefreshes(IReadOnlyList<CollectorScheduleRow> rows, int serverId)
+    {
+        var name = PerformanceMonitor.Collectors.QueryStoreHealthCollector.Instance.Name;
+        var (perServer, fleet) = PerformanceMonitor.Collectors.CollectorScheduleDefaults.SelectScheduleOverrides(name, serverId, rows);
+        return perServer?.Enabled ?? fleet?.Enabled ?? PerformanceMonitor.Collectors.CollectorScheduleDefaults.All[name].DefaultEnabled;
+    }
+
+    /// <summary>The server's newest <c>query_store_health</c> capture time beside the store's own clock, both UTC. $1 server_id.</summary>
+    private const string NewestQueryStoreHealthCaptureSql =
+        "SELECT (SELECT MAX(h.capture_time) FROM v_query_store_health AS h WHERE h.server_id = $1), (now() AT TIME ZONE 'UTC')";
+
+    /// <summary>
+    /// #8541: why a Query Store read on this server has no rows, for the Query Store panel's empty window. A server that is a readable
+    /// secondary Darling does not collect Query Store from answers <paramref name="ReadableSecondary"/>, the sentence the MCP reads
+    /// give (<see cref="DarlingQueryStoreReadableSecondary"/>, with the <c>query_store_health</c> collector's effective schedule read
+    /// from the store's rows). Otherwise a server whose newest <c>query_store_health</c> capture is older than
+    /// <see cref="PerformanceMonitor.Common.QueryStoreSnapshotStaleness.Threshold"/> on the store's clock answers
+    /// <paramref name="StaleCapture"/>, which says whether that collector's schedule still takes a capture and at what cadence. Both are null when the
+    /// store has no reason to give, and when a read fails: the panel has already said its window is empty.
+    /// </summary>
+    public async Task<(string? ReadableSecondary, string? StaleCapture)> GetQueryStoreEmptyReasonAsync(
+        int serverId, string displayName, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var healthCollector = PerformanceMonitor.Collectors.QueryStoreHealthCollector.Instance.Name;
+            var scheduleRows = await ReadScheduleOverridesForHealthAsync(cancellationToken);
+            var healthCaptureRefreshes = QueryStoreHealthCaptureRefreshes(scheduleRows, serverId);
+            if (await DarlingQueryStoreReadableSecondary.MessageAsync(
+                    _dataSource, serverId, displayName, healthCaptureRefreshes,
+                    ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken) is { } secondary)
+            {
+                return (secondary, null);
+            }
+
+            await using var command = _dataSource.CreateCommand(NewestQueryStoreHealthCaptureSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
+            {
+                return (null, null);
+            }
+
+            return (null, PerformanceMonitor.Common.QueryStoreSnapshotStaleness.PanelNote(
+                DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+                DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc),
+                healthCollector,
+                healthCaptureRefreshes,
+                /* The interval the health reads judge the collector by: the server's row, else the fleet row, else the shipped one. */
+                PerformanceMonitor.Collectors.CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes(healthCollector, serverId, scheduleRows) is int minutes and > 0
+                    ? minutes
+                    : PerformanceMonitor.Collectors.CollectorScheduleDefaults.All[healthCollector].FrequencyMinutes));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return (null, null);
+        }
     }
 }

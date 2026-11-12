@@ -40,11 +40,23 @@ internal sealed record LockWaitPoint(DateTime BucketStart, double WaitTimeMsPerS
 /// rated collections covered, and the worst single collection's wait rate.</summary>
 internal sealed record WaitBucketPoint(DateTime BucketStart, double WaitTimeMsPerSecond, double SignalWaitTimeMsPerSecond, double? PeakWaitTimeMsPerSecond);
 
+/// <summary>One bucket of one wait type on <c>get_current_waits_trend</c> (#7877, #7904, #7974): the wait type's total wait across its
+/// waiting tasks in ONE collection, averaged over EVERY collection that ran in the bucket (a collection in which it was not waiting
+/// counts 0), the largest single collection, and how many collections ran (<paramref name="CollectionCount"/>, the same for every series
+/// of the bucket).</summary>
+internal sealed record CurrentWaitsWaitPoint(DateTime BucketStart, string WaitType, long AvgWaitMs, long PeakWaitMs, long CollectionCount);
+
+/// <summary>One bucket of one database's blocked sessions on <c>get_current_waits_trend</c> (#7877, #7904, #7974): the distinct blocked
+/// sessions in ONE collection, averaged over EVERY collection that ran in the bucket (a collection with none blocked counts 0), the most
+/// any one of them saw, and how many collections ran (<paramref name="CollectionCount"/>).</summary>
+internal sealed record CurrentWaitsBlockedPoint(DateTime BucketStart, string DatabaseName, double AvgBlockedCount, long PeakBlockedCount, long CollectionCount);
+
 /// <summary>One bucket of CPU samples (#3960): each percentage averaged over the samples in the bucket, the busiest
-/// single sample's SQL and total CPU, and how many samples the bucket held.</summary>
+/// single sample's SQL and total CPU, and how many samples the bucket held. The other, total, idle and peak-total figures are
+/// null for a bucket whose samples all lack an other-process reading (#7682: SQL Server on Linux before 2025 CU1 cannot report host CPU).</summary>
 internal sealed record CpuBucketPoint(
-    DateTime BucketStart, double SqlServerCpu, double OtherProcessCpu, double TotalCpu, double IdleCpu,
-    int PeakSqlServerCpu, int PeakTotalCpu, long Samples);
+    DateTime BucketStart, double SqlServerCpu, double? OtherProcessCpu, double? TotalCpu, double? IdleCpu,
+    int PeakSqlServerCpu, int? PeakTotalCpu, long Samples);
 
 /// <summary>One bucket of tempdb samples (#3960): each space figure averaged, the fullest collection's reserved and
 /// version-store space, and the most sessions and the single largest consumer any collection in it saw.</summary>
@@ -187,7 +199,7 @@ internal static class TrendPayloads
             ? "Each line is one file of the requested database"
             : "Each line is one database's data or log files, pooled (file_type ROWS or LOG); pass database_name to chart one database per file";
         var fold = folded > 0
-            ? $" The {charted.ToString(CultureInfo.InvariantCulture)} with the most I/O stall in the window (read + write ms) have their own line; the other {folded.ToString(CultureInfo.InvariantCulture)} are folded into one '{OtherLabel}' line, pooled collection by collection, so its latency is theirs combined."
+            ? $" The {charted.ToString(CultureInfo.InvariantCulture)} with the most I/O stall in the window (read + write ms) {(charted == 1 ? "has its" : "have their")} own line; the other {folded.ToString(CultureInfo.InvariantCulture)} {(folded == 1 ? "is" : "are")} folded into one '{OtherLabel}' line, pooled collection by collection, so its latency is theirs combined."
             : " Every line that did I/O in the window is shown, heaviest stall first.";
         return grain + "." + fold;
     }
@@ -239,7 +251,7 @@ internal static class TrendPayloads
     /// misspelt database and an idle one both land here and only a list of the real names tells them apart.
     /// </summary>
     public static string FileIoScopeEmptyMessage(string serverName, string scope, int hoursBack) =>
-        $"No read or write activity was recorded for database '{scope}' on {serverName} in the last {hoursBack} hour(s). The name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
+        $"No read or write activity was recorded for database '{scope}' on {serverName} in the last {CountText.Plural(hoursBack, "hour")}. The name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
 
     /// <summary>
     /// <c>get_lock_wait_trend</c>'s data envelope: the family's bucketed rate, and the per-type legend that says
@@ -291,8 +303,9 @@ internal static class TrendPayloads
     /// <summary>
     /// <c>get_wait_trend</c>'s answer when the asked wait type has no rows in the window (#6446), both SKUs. The caller has
     /// already ruled out an engine that does not collect wait stats, and passes what the window did collect. A wait type
-    /// the collector never stores (<paramref name="ignoredWaitTypes"/>, the benign list it skips; matched the way the
-    /// collector matches it, trailing space trimmed and case ignored) is <c>not_collected</c>: that gap is permanent. Any
+    /// on the ignored list (<paramref name="ignoredWaitTypes"/>, the benign list the collector skips; matched the way the
+    /// collector matches it, trailing space trimmed and case ignored) is <c>not_collected</c>: the collector skips it, and
+    /// rows stored for it before it was ignored are hidden at read time, so the gap is permanent (#7880). Any
     /// other wait type is one the collector WOULD store, so no rows means we looked and nothing waited: <c>empty</c>
     /// (a misspelled name reads the same, which is what the <c>collected_wait_types</c> hint is for). Nothing collected
     /// at all stays <c>unavailable</c>.
@@ -312,7 +325,8 @@ internal static class TrendPayloads
         {
             return McpHelpers.Status(
                 "not_collected",
-                $"No trend data for wait type '{waitType}'. It is on the ignored (benign) wait list, so the collector never stores it. " +
+                $"No trend data for wait type '{waitType}'. It is on the ignored (benign) wait list, so it is not shown: the collector skips it, " +
+                "and rows stored for it before it was ignored are left out of this answer. " +
                 $"See hints.collected_wait_types for the {collectedWaitTypes.Count} that have data.",
                 new { collected_wait_types = collectedWaitTypes });
         }
@@ -344,9 +358,10 @@ internal static class TrendPayloads
             ["trend"] = points.Select(p => new
             {
                 time = Stamp(p.BucketStart),
-                wait_time_ms_per_second = p.WaitTimeMsPerSecond,
-                signal_wait_time_ms_per_second = p.SignalWaitTimeMsPerSecond,
-                peak_wait_time_ms_per_second = p.PeakWaitTimeMsPerSecond,
+                /* #8572: the same three places the wait-stats rate above carries, where the reply is built (257.70384995064165 otherwise). */
+                wait_time_ms_per_second = Math.Round(p.WaitTimeMsPerSecond, 3),
+                signal_wait_time_ms_per_second = Math.Round(p.SignalWaitTimeMsPerSecond, 3),
+                peak_wait_time_ms_per_second = McpHelpers.RoundTo(p.PeakWaitTimeMsPerSecond, 3),
             }),
             /* #3653 A5: trailing, after the points, on the data envelope only. */
             ["discontinuities"] = discontinuities,
@@ -359,6 +374,10 @@ internal static class TrendPayloads
     /// the bucket disclosure: the one place both SKUs spell it.</summary>
     public const string CpuCadenceNote =
         "Source cadence: one RING_BUFFER_SCHEDULER_MONITOR record per minute on-prem, Managed Instance and RDS; one sys.dm_db_resource_stats row per 15 seconds on Azure SQL DB. samples_in_bucket is the measured count per bucket.";
+
+    /// <summary>Said on <c>get_cpu_utilization</c> when any bucket has no host figure (#7682): the null fields are not zeros.</summary>
+    public const string HostCpuUnavailableNote =
+        "other_process_cpu, total_cpu, idle_cpu and peak_total_cpu are null for buckets where the server cannot report host CPU (SQL Server on Linux before 2025 CU1). Only sql_server_cpu is measured there; null is not 0.";
 
     /// <summary>
     /// <c>get_cpu_utilization</c>'s data envelope (#3960), both SKUs. The percentages are the bucket's averages,
@@ -380,14 +399,18 @@ internal static class TrendPayloads
             {
                 sample_time = Stamp(p.BucketStart),
                 sql_server_cpu = (int)Math.Round(p.SqlServerCpu),
-                other_process_cpu = (int)Math.Round(p.OtherProcessCpu),
-                total_cpu = (int)Math.Round(p.TotalCpu),
-                idle_cpu = (int)Math.Round(p.IdleCpu),
+                other_process_cpu = p.OtherProcessCpu is { } other ? (int)Math.Round(other) : (int?)null,
+                total_cpu = p.TotalCpu is { } total ? (int)Math.Round(total) : (int?)null,
+                idle_cpu = p.IdleCpu is { } idle ? (int)Math.Round(idle) : (int?)null,
                 peak_sql_server_cpu = p.PeakSqlServerCpu,
                 peak_total_cpu = p.PeakTotalCpu,
                 samples_in_bucket = p.Samples,
             }),
         };
+        if (points.Any(p => p.OtherProcessCpu is null))
+        {
+            envelope["host_cpu_note"] = HostCpuUnavailableNote;
+        }
 
         return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
     }
@@ -596,6 +619,42 @@ internal static class TrendPayloads
     }
 
     /// <summary>
+    /// <c>get_perfmon_stats</c>' answer when the <c>counter_name</c> / <c>instance_name</c> filter matches nothing in the latest
+    /// snapshot (#8090), both SKUs. The caller has already ruled out an engine that does not collect counters and an empty
+    /// snapshot, so <c>counters: []</c> with no word would read as "nothing to report". A counter name no counter carries is
+    /// <c>not_collected</c> and lists the snapshot's counters, the word <c>get_perfmon_trend</c> answers for the same name; a
+    /// known counter whose <paramref name="counterInstances"/> hold no match for the instance filter is <c>empty</c> and lists
+    /// them. <c>captured_at</c> rides in the hints so the answer still says when the snapshot was taken.
+    /// </summary>
+    public static string PerfmonLatestMiss(
+        string? counterName, string? instanceName, string capturedAt, IReadOnlyList<string> collectedCounters, IReadOnlyList<string> counterInstances)
+    {
+        if (counterInstances.Count == 0)
+        {
+            return McpHelpers.Status(
+                "not_collected",
+                $"No counter named '{counterName}' is in the latest snapshot. It may not be a counter this server collects: hints.collected_counters lists {HintCount(collectedCounters)}.",
+                new { captured_at = capturedAt, collected_counters = collectedCounters.Take(PerfmonMissHintNames), collected_counters_total = collectedCounters.Count });
+        }
+
+        var scope = counterName is null ? "No counter in the latest snapshot has" : $"Counter '{counterName}' has no";
+        return McpHelpers.Status(
+            "empty",
+            $"{scope} an instance named '{instanceName}': hints.instance_names lists {HintCount(counterInstances)}.",
+            new { captured_at = capturedAt, instance_names = counterInstances.Take(PerfmonMissHintNames), instance_names_total = counterInstances.Count });
+    }
+
+    /// <summary>
+    /// How many names a <see cref="PerfmonLatestMiss"/> hint list carries (#8090). A busy instance holds hundreds of counters and, with
+    /// <c>instance_name</c> set and no <c>counter_name</c>, every instance of every counter, which would put the miss envelope over the
+    /// response target <see cref="PerfmonLatestReply"/> keeps (#6180). The list is cut here and its <c>*_total</c> says how many there are.
+    /// </summary>
+    public const int PerfmonMissHintNames = 100;
+
+    private static string HintCount(IReadOnlyList<string> names) =>
+        names.Count > PerfmonMissHintNames ? $"the first {PerfmonMissHintNames} of the {names.Count} there are" : $"the {names.Count} there are";
+
+    /// <summary>
     /// One row of <c>get_perfmon_stats</c>' latest snapshot, both SKUs. <c>value</c> is the stored counter (a rate
     /// counter's running total, a gauge's reading), <c>delta_value</c> its change over the last collection interval
     /// (null on a gauge, which stores none), and <c>counter_kind</c> the stored type's word
@@ -607,7 +666,7 @@ internal static class TrendPayloads
     /// takes a gauge's null for an unknown rate.
     /// </summary>
     public static Dictionary<string, object?> PerfmonLatestRow(
-        string counterName, string instanceName, long value, long? deltaValue, long? sampleIntervalSeconds, int? cntrType)
+        string counterName, string instanceName, long value, long? deltaValue, long? sampleIntervalSeconds, int? cntrType, string? objectName = null)
     {
         var row = new Dictionary<string, object?>
         {
@@ -626,6 +685,10 @@ internal static class TrendPayloads
                 : null;
         }
 
+        /* #7416: the perfmon object the counter belongs to, added last so every key published before keeps its place. The same counter and
+           instance can come from two objects (Transaction Delay, _Total), and without this the two rows read alike. */
+        row["object_name"] = objectName;
+
         return row;
     }
 
@@ -637,16 +700,19 @@ internal static class TrendPayloads
     /// <see cref="PerfmonLatestRow"/> publish is rounded here, so Lite and Darling publish the same number for the same
     /// count over the same span.
     /// </summary>
-    internal static double RoundRate(double rate)
+    internal static double RoundRate(double rate, int minDecimals = 4)
     {
         if (rate == 0 || !double.IsFinite(rate))
         {
             return rate;
         }
 
-        var decimals = Math.Clamp(1 - (int)Math.Floor(Math.Log10(Math.Abs(rate))), 4, 15);
+        var decimals = Math.Clamp(1 - (int)Math.Floor(Math.Log10(Math.Abs(rate))), minDecimals, 15);
         return Math.Round(rate, decimals);
     }
+
+    /// <summary><see cref="RoundRate(double, int)"/> for a rate that may be absent: null stays null (#8572).</summary>
+    internal static double? RoundRate(double? rate, int minDecimals = 4) => rate is { } r ? RoundRate(r, minDecimals) : null;
 
     /// <summary>A cumulative counter's delta and the seconds it accrued over, one class at a time: the rated
     /// collections' where any exist; else the unknowable ones' with an interval of 0, the marker a caller must not
@@ -656,6 +722,51 @@ internal static class TrendPayloads
         p.RatedSeconds is > 0 ? (p.RatedDelta, p.RatedSeconds)
         : p.UnknowableCollections > 0 ? (p.UnknowableDelta, 0)
         : (p.UnrecordedDelta, null);
+
+    /// <summary>What a <c>get_current_waits_trend</c> point means (#7877, #7904), said once in the payload because the same keys meant
+    /// "one collection" before the read was bucketed.</summary>
+    public const string CurrentWaitsFiguresNote =
+        "total_wait_ms is the wait type's total across its waiting tasks in ONE collection, averaged over EVERY collection that ran in the bucket; "
+        + "blocked_count is the distinct blocked sessions of a database in ONE collection, averaged the same way. "
+        + "A collection in which a wait type or database had nothing waiting or blocked writes no row but still counts as 0, so a series seen in 1 of 60 collections reads about 1/60 of one seen in all 60 (blocked_count is given to three decimals so that stays visible). "
+        + "peak_wait_ms and peak_blocked_count are the largest single collection in the bucket, so a spike survives the rollup, and collection_count is how many collections ran in the bucket, the divisor of the average. "
+        + "A bucket that holds one collection is that collection's own figure.";
+
+    /// <summary>
+    /// <c>get_current_waits_trend</c>'s data envelope (#7877, #7904), both SKUs: the waiting-task series per wait type and the
+    /// blocked-session series per database, each point one bucket stamped at the bucket's start under the existing
+    /// <c>collection_time</c> key. <paramref name="head"/> carries the keys the product puts first (its window notice fields,
+    /// the database echo); the bucket width, the figures note and the two series follow it.
+    /// </summary>
+    public static string CurrentWaitsTrend(
+        Dictionary<string, object?> head, IReadOnlyList<CurrentWaitsWaitPoint> waits, IReadOnlyList<CurrentWaitsBlockedPoint> blocked,
+        int bucketMinutes, bool requested, int autoBudget, int? pointsOverTarget = null)
+    {
+        head["bucket"] = TrendBuckets.Word(bucketMinutes);
+        head["bucket_minutes"] = bucketMinutes;
+        head["aggregate_note"] = TrendBuckets.Sizing(requested, autoBudget, pointsOverTarget);
+        head["note"] = $"Each point is one {TrendBuckets.Adjective(bucketMinutes)} bucket stamped at the bucket's start (the first point at the window's start). {CurrentWaitsFiguresNote}";
+        /* Two series in one payload because they are read together: a wait-type spike with no blocked sessions is a resource wait,
+           and the same spike WITH them is contention. */
+        head["waiting_tasks"] = waits.Select(w => new
+        {
+            collection_time = Stamp(w.BucketStart),
+            wait_type = w.WaitType,
+            total_wait_ms = w.AvgWaitMs,
+            peak_wait_ms = w.PeakWaitMs,
+            collection_count = w.CollectionCount,
+        });
+        head["blocked_sessions"] = blocked.Select(b => new
+        {
+            collection_time = Stamp(b.BucketStart),
+            database_name = b.DatabaseName,
+            /* #7974: a bucket mean over every collection that ran, so 1 of 60 is 0.017; one decimal would print it as 0. */
+            blocked_count = Math.Round(b.AvgBlockedCount, 3),
+            peak_blocked_count = b.PeakBlockedCount,
+            collection_count = b.CollectionCount,
+        });
+        return JsonSerializer.Serialize(head, McpHelpers.JsonOptions);
+    }
 
     /// <summary>A point's stamp in the store's own frame (naive UTC, printed like every collection time).</summary>
     private static string Stamp(DateTime value) =>

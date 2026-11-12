@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -77,9 +78,9 @@ public static class BenefitScorer
 
             var msg = new System.Text.StringBuilder();
             msg.Append(wait.WaitType);
-            msg.Append(" Observed ").Append(wait.WaitTimeMs.ToString("N0")).Append(" ms");
+            msg.Append(" Observed ").Append(wait.WaitTimeMs.ToString("N0", CultureInfo.InvariantCulture)).Append(" ms");
             if (wait.WaitCount > 0)
-                msg.Append(" across ").Append(wait.WaitCount.ToString("N0")).Append(" wait").Append(wait.WaitCount == 1 ? "" : "s");
+                msg.Append(" across ").Append(wait.WaitCount.ToString("N0", CultureInfo.InvariantCulture)).Append(" wait").Append(wait.WaitCount == 1 ? "" : "s");
             msg.Append('.');
 
             if (WaitStatsConfig.ShowAverageWaitTime(wait.WaitType) && wait.WaitCount > 0)
@@ -114,10 +115,10 @@ public static class BenefitScorer
 
     private static string FormatWaitLatency(double ms)
     {
-        if (ms >= 1000) return $"{ms / 1000:N2} s";
-        if (ms >= 10) return $"{ms:N0} ms";
-        if (ms >= 1) return $"{ms:N1} ms";
-        return $"{ms * 1000:N0} \u00b5s";
+        if (ms >= 1000) return string.Create(CultureInfo.InvariantCulture, $"{ms / 1000:N2} s");
+        if (ms >= 10) return string.Create(CultureInfo.InvariantCulture, $"{ms:N0} ms");
+        if (ms >= 1) return string.Create(CultureInfo.InvariantCulture, $"{ms:N1} ms");
+        return string.Create(CultureInfo.InvariantCulture, $"{ms * 1000:N0} \u00b5s");
     }
 
     private static void ScoreStatementWarnings(PlanStatement stmt)
@@ -144,7 +145,9 @@ public static class BenefitScorer
                     }
                     break;
 
-                case "Memory Grant": // Rule 9
+                // #7899: keyed on the analyzer's wait warning. The parser's separate "Memory Grant" warning
+                // (the engine's own grant note) says nothing about time waited, so it gets no benefit.
+                case "Memory Grant Wait": // Rule 9
                     // Grant wait is the only part that affects this query's elapsed time
                     if (elapsedMs > 0 && stmt.MemoryGrant?.GrantWaitTimeMs > 0)
                     {
@@ -536,16 +539,21 @@ public static class BenefitScorer
                 // CXPACKET/CXCONSUMER/CXSYNC: benefit is the parallelism efficiency gap,
                 // not the raw wait time. Threads waiting for other threads is a symptom
                 // of imperfect parallelism, not directly addressable time.
+                /* #7888: the gap is bounded by the wait's own share of elapsed time. Wait time is
+                   summed across threads, so the share is a loose ceiling, but it keeps a few
+                   milliseconds of CXCONSUMER on an I/O-bound plan from scoring as the whole gap. */
+                var ownSharePct = (double)wait.WaitTimeMs / elapsedMs * 100;
                 var cpu = stmt.QueryTimeStats!.CpuTimeMs;
                 var dop = stmt.DegreeOfParallelism;
                 if (cpu > 0 && dop > 1)
                 {
                     var idealElapsed = (double)cpu / dop;
-                    benefitPct = Math.Max(0, (elapsedMs - idealElapsed) / elapsedMs * 100);
+                    var gapPct = Math.Max(0, (elapsedMs - idealElapsed) / elapsedMs * 100);
+                    benefitPct = Math.Min(gapPct, ownSharePct);
                 }
                 else
                 {
-                    benefitPct = (double)wait.WaitTimeMs / elapsedMs * 100;
+                    benefitPct = ownSharePct;
                 }
             }
             else if (!isParallel || operatorProfiles.Count == 0)

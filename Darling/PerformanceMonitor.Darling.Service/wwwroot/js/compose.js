@@ -20,10 +20,11 @@
  * inert. The chart SVG lives entirely in charts.js (one SVG_NS occurrence, the air-gap allowlist); this file has no SVG.
  */
 
-import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, fmtSize, tickDecimals, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
+import { el, mount, pinRangeLabel, loadingStrip, waitingStrip, retryButton, retryOnceWhenBusy, busyRetryStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtMs, fmtNum, fmtSize, tickDecimals, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
 import { renderLineChart, zoomChip, getChartHidden, setChartHidden, nextHiddenKeys, chartZoomScope, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
 import { navigateServer, gridTable } from "./panels.js";
 import { getCatalog } from "./views-api.js";
+import { savedViewWarnings } from "./view-save-warnings.js";
 
 /** The most series a time chart draws before pooling the rest into a "+N more" note (readability + palette size). */
 const MAX_SERIES = 8;
@@ -40,13 +41,13 @@ const OTHER_SERIES_LABEL = "(other)";
  * shape (title + span-2 + a body that shows a loading strip, then the chart / a state). `scope` is the view-level
  * run context {server, hours, variables, values}; flipping it and re-rendering re-scopes every panel at once.
  */
-export function renderComposedPanelCard(panelSpec, scope, onSettled, slot = null) {
-  const body = el("div", { class: "panel-body" }, [loadingStrip()]);
+export function renderComposedPanelCard(panelSpec, scope, onSettled, slot = null, gate = null) {
+  const body = el("div", { class: "panel-body" }, [gate ? waitingStrip() : loadingStrip()]);
   const panel = el("div", { class: "panel card" + (panelSpec.span === 2 ? " span-2" : "") }, [
     el("h3", {}, [panelSpec.title || measureLabel(panelSpec), pinBadge(panelSpec)]),
     body,
   ]);
-  driveComposedPanel(body, panelSpec, scope, onSettled, slot);
+  driveComposedPanel(body, panelSpec, scope, onSettled, slot, gate);
   return panel;
 }
 
@@ -168,28 +169,38 @@ function pinBadge(panelSpec) {
   });
 }
 
-/** A normalized pin's display label ("last 2 days" / "8/21/26, 12:00 AM → 8/22/26, 12:00 AM") — shared with
- *  the notebook editor's pin strip so the two surfaces describe a pin identically. */
-export function pinRangeLabel(range) {
-  return range.windowStart ? pinWindowLabel(range.windowStart, range.windowEnd) : "last " + pinHoursLabel(range.hours);
+/* The pin label helpers live in util.js (#8577) so panels.js can name a read's pinned window with the same text; re-exported for notebook.js. */
+export { pinRangeLabel };
+
+/* The drill and zoom each composed panel holds (#7923), at MODULE scope so the poll's rebuild of the grid draws them again.
+   Keyed by composedPanelId (slot, title or id, server), so each server's panel has its own entry. Each entry remembers the
+   scope (page address + preset range + the view's variable values) it was made under, and a lookup under any other scope
+   drops it. So the first visit to another server starts unzoomed and undrilled, a return to an earlier server under the same
+   range and variables brings back what was held there, and a range or variable change drops it. The reader's own clear
+   (the chip's ×) sets null and removes the entry. */
+const composedViews = new Map();
+
+/** The view's variable values as one stable string: the same values in another key order are the same scope. */
+function variableScope(values) {
+  if (!values || typeof values !== "object") return "";
+  return JSON.stringify(Object.keys(values).sort().map((k) => [k, values[k]]));
 }
 
-/** The badge's window text for an absolute pin — compact local date+time, "start → end". */
-function pinWindowLabel(startIso, endIso) {
-  const from = new Date(startIso);
-  const to = new Date(endIso);
-  if (isNaN(from.getTime()) || isNaN(to.getTime())) return "custom window";
-  const opts = { dateStyle: "short", timeStyle: "short" };
-  return from.toLocaleString(undefined, opts) + " → " + to.toLocaleString(undefined, opts);
-}
-
-/** The badge's window text for a relative pin (whole days render as days, mirroring the range picker's labels). */
-function pinHoursLabel(hours) {
-  if (hours % 24 === 0 && hours >= 24) {
-    const d = hours / 24;
-    return d + (d === 1 ? " day" : " days");
+/** The { drill, zoom } held for composed panel `id` under `scope`, or null. A different scope drops the entry. */
+export function getComposedView(id, scope) {
+  const h = composedViews.get(id);
+  if (!h) return null;
+  if (h.scope !== scope) {
+    composedViews.delete(id);
+    return null;
   }
-  return hours + (hours === 1 ? " hour" : " hours");
+  return h;
+}
+
+/** Hold the drill and zoom for composed panel `id` under `scope`; both null removes the entry. */
+export function setComposedView(id, scope, drill, zoom) {
+  if (!drill && !zoom) composedViews.delete(id);
+  else composedViews.set(id, { scope, drill, zoom });
 }
 
 /**
@@ -198,28 +209,51 @@ function pinHoursLabel(hours) {
  * never persisted (the stored definition renders verbatim), and a "clear" chip pops back to the base spec. Each new
  * selection REPLACES the drill (a simple "you are viewing X" model), so drilling never stacks into a dead end.
  */
-function driveComposedPanel(body, panelSpec, scope, onSettled, slot = null) {
-  let drill = null; // { keys: [{dimension, value}] } or null
-  let zoom = null; // { startIso, endIso } or null (#1606 brush-zoom — view-state only, like the drill)
+function driveComposedPanel(body, panelSpec, scope, onSettled, slot = null, gate = null) {
+  /* #7923: the drill and the brush-zoom are held at module scope under the panel's identity and the page's scope, like the
+     legend's hidden series, so the poll's staged rebuild of this panel draws what the reader set instead of a full-window
+     chart. A panel with no slot (the editor preview) has no stable identity, so it holds nothing. */
+  const holdId = slot != null ? composedPanelId(panelSpec, scope, slot) : null;
+  /* The view's variable values are part of the hold scope: a variable edit rebuilds every panel and must drop a drill that
+     the variable may filter on, as it did before the hold (legend hiding keeps its own scope below). */
+  const holdScope = chartZoomScope(scope ? scope.hours : null) + "|" + variableScope(scope ? scope.values : null);
+  const held = holdId != null ? getComposedView(holdId, holdScope) : null;
+  let drill = held ? held.drill : null; // { keys: [{dimension, value}] } or null
+  let zoom = held ? held.zoom : null; // { startIso, endIso } or null (#1606 brush-zoom — view-state only, like the drill)
   let firstRun = true; // onSettled (#4222) fires once, for the initial load only — a later drill/zoom re-run is
                         // user-driven and already past whatever concurrency budget gated the first load.
+  function hold() {
+    if (holdId != null) setComposedView(holdId, holdScope, drill, zoom);
+  }
   function onDrill(next) {
     drill = next && Array.isArray(next.keys) && next.keys.length ? next : null;
+    hold();
     run();
   }
   function onZoomChange(next) {
     zoom = next && next.startIso && next.endIso ? next : null;
+    hold();
     run();
   }
   function run() {
     const spec = drill ? withDrillFilters(panelSpec, drill) : panelSpec;
     const done = firstRun ? onSettled : null;
     firstRun = false;
-    renderComposedInto(body, spec, scope, { drill, onDrill, zoom, onZoomChange, panelSlot: slot }).finally(() => {
+    return renderComposedInto(body, spec, scope, { drill, onDrill, zoom, onZoomChange, panelSlot: slot, onRetry: retry }).finally(() => {
       if (done) done();
     });
   }
-  run();
+  /* #7257: the Retry button on a failed read runs this panel again through the page's gate, like its first load. */
+  function retry() {
+    if (!gate) {
+      run();
+      return;
+    }
+    mount(body, waitingStrip());
+    gate(run, true);
+  }
+  if (gate) gate(run);
+  else run();
 }
 
 /** A base panel spec + the drill's pinned filters (design D6): each key becomes an `eq` filter appended to the
@@ -255,11 +289,13 @@ export function composedNoticeText(data) {
  *  preview. `opts` (design D5/D6): {drill, onDrill} drive the transient drill-down chip + mark clicks. */
 export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
   mount(body, loadingStrip());
-  const res = await runCompose(panelSpec, scope, opts.zoom);
+  /* #7257: a read the service refuses busy (429) is sent once more after its Retry-After, as the by-tag page does (#6800). */
+  const res = await retryOnceWhenBusy(() => runCompose(panelSpec, scope, opts.zoom), (seconds) => mount(body, busyRetryStrip(seconds)));
   if (res.kind === "error") {
     /* Keep the drill AND zoom chips (with their clears) above a failed run so the viewer can always pop
        back — a historical zoom can legitimately land on a window this store can't serve. */
     const nodes = [errorStrip(res.message || "Could not run this panel.")];
+    if (opts.onRetry) nodes.push(retryButton(opts.onRetry));
     if (opts.zoom && opts.onZoomChange) nodes.unshift(zoomChip(opts.zoom, opts.onZoomChange));
     if (opts.drill && opts.onDrill) nodes.unshift(drillChip(opts.drill, opts.onDrill));
     mount(body, nodes);
@@ -272,16 +308,24 @@ export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
   if (isTimeSeriesViz(panelSpec.viz) && Array.isArray(data.annotations) && data.annotations.length) {
     annotationMeta = await annotationMetaMap().catch(() => null);
   }
+  /* #7668: a panel with a second line names each line from its measure's catalog display name, so it needs the catalog's names. */
+  let measureNames = null;
+  if (isTimeSeriesViz(panelSpec.viz) && panelSpec.overlay) {
+    measureNames = await measureNameMap().catch(() => null);
+  }
   try {
     /* #2802: resolve the panel's x-axis DOMAIN window from the SAME inputs buildRunBody used (zoom → pin →
        scope), so the drawn axis matches the window the rows were fetched over. renderComposedResult has no
        `scope`, so it is resolved here (where scope + zoom both live) and threaded through opts. */
     const chartWindow = resolveChartWindow(panelSpec, scope, opts.zoom);
-    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta, chartWindow, scope })];
+    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta, measureNames, chartWindow, scope })];
     /* The run endpoint's partial-window notice (#1665, #4953): a caveat that the panel did not cover the whole
        requested window. The chosen tier's retention could not cover it, OR the panel's own data starts after
        the window does, OR the row cap truncated the result. Good data, honestly caveated, above the chart.
        No notice means the window was served whole. */
+    /* #7668: the validator's warnings for this panel (a /sec perfmon counter charted as its running total), the same sentences a save shows (#7565). They
+       are advice about the definition, drawn as a note on the panel; the stored definition is never changed. A panel with none draws nothing extra. */
+    for (const warning of savedViewWarnings(data).reverse()) nodes.unshift(noticeStrip(warning));
     if (typeof data.notice === "string" && data.notice) nodes.unshift(noticeStrip(composedNoticeText(data)));
     mount(body, nodes);
   } catch (e) {
@@ -403,11 +447,13 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
     panelSpec.overlay && !groupDims.length && (panelSpec.viz === "line" || panelSpec.viz === "area")
       ? {
           key: "value2",
-          label: humanize(panelSpec.overlay.measure || "overlay"),
+          /* #7668: the measure's display name, and which axis it is read on (the right axis carries the line's colour). */
+          label: measureName(panelSpec.overlay.measure || "overlay", opts.measureNames) + " (right axis)",
           color: OVERLAY_COLOR,
           formatValue: (v, o) => formatComposedValue(v, panelSpec.overlay.unit || "", o),
           unit: axisUnit(panelSpec.overlay.unit || ""),
           integerTicks: panelSpec.overlay.unit === "count",
+          sizeUnit: panelSpec.overlay.unit || null,
         }
       : null;
 
@@ -421,7 +467,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
          host_name), so a plain grouped panel may legitimately hold a row whose value IS "(other)" — sniffing the
          string alone would strip that real member's drill and hold it out of the series cap. */
       const hasResidual = isRankedTimeSeries(panelSpec) && panelSpec.includeOther === true;
-      const { points, series, hidden } = pivotTimeSeries(rows, groupDims, measureLabel(panelSpec), hasResidual);
+      const { points, series, hidden } = pivotTimeSeries(rows, groupDims, overlaySeries ? measureName(panelSpec.ratio || panelSpec.measure, opts.measureNames) : measureLabel(panelSpec), hasResidual);
       /* #5247: the legend hide/isolate state is held under the panel's identity and the page address + range, like the
          zoom of a built-in chart, so it survives the poll's rebuild. A panel with no slot (the editor preview) has no
          stable identity, so it gets no switch rather than a key that might collide. */
@@ -440,6 +486,8 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           /* A count measure prints through fmtInt, so its gridlines sit on whole numbers: a fractional step on a
              small domain would repeat one label down the axis. */
           integerTicks: unit === "count",
+          /* #7488: a kb / mb / gb / tb measure picks its ticks in the unit its labels step up to; any other unit is ignored by the chart. */
+          sizeUnit: unit,
           mode: panelSpec.viz,
           thresholds,
           annotations: annotationLayers(result.annotations, opts.annotationMeta),
@@ -497,6 +545,8 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           formatY: (v, o) => formatComposedValue(v, overlayUnit, o),
           unitX: axisUnit(unit),
           unitY: axisUnit(overlayUnit),
+          sizeUnitX: unit,
+          sizeUnitY: overlayUnit,
           onSelect,
           widthKey: widthId,
         })
@@ -536,7 +586,7 @@ export function pivotTimeSeries(rows, groupDims, label, hasResidual = false) {
   const labels = new Map(); // seriesKey -> display label
   const drills = new Map(); // seriesKey -> drill keys [{dimension, value}] (design D6)
   const byBucket = new Map(); // bucket -> point object
-  const order = []; // seriesKey first-seen order (stable colors)
+  const order = []; // seriesKey first-seen order; only the input to the ranking below, never the color order (#7563)
   const residual = new Set(); // seriesKeys that are the #2734 synthetic "(other)" fold
 
   for (const r of rows) {
@@ -575,19 +625,23 @@ export function pivotTimeSeries(rows, groupDims, label, hasResidual = false) {
      bucket. It is held out of the competition instead: real members fill the cap on their own merits, and the
      residual rides along in its own slot (it is what keeps the visible buckets summing to the window total, so
      dropping it would make a partial chart look complete). */
-  const residualKeys = order.filter((k) => residual.has(k));
-  const realKeys = order.filter((k) => !residual.has(k));
+  /* #7563: the rows arrive in no set order (the statement ends ORDER BY bucket, so rows inside one bucket have none, and the oldest
+     bucket moves with the window), so a color given by first-seen order moved when the page loaded again. The series are ranked
+     by what the rows hold instead: largest total first, the name as the tie-break, and the colors follow that rank. The same
+     ranking picks the MAX_SERIES that stay, so a tie at the cut also falls by name and not by arrival. */
+  const byRank = (a, b) => totals.get(b) - totals.get(a) || compareText(labels.get(a), labels.get(b)) || compareText(a, b);
+  const residualKeys = order.filter((k) => residual.has(k)).sort(byRank);
+  const realKeys = order.filter((k) => !residual.has(k)).sort(byRank);
 
   let keptReal = realKeys;
   let hidden = 0;
   if (realKeys.length > MAX_SERIES) {
-    keptReal = [...realKeys].sort((a, b) => totals.get(b) - totals.get(a)).slice(0, MAX_SERIES);
+    keptReal = realKeys.slice(0, MAX_SERIES);
     hidden = realKeys.length - keptReal.length;
   }
 
-  /* Preserve first-seen order for stable colors, then append the residual last (it reads as the backdrop). */
-  const keptSet = new Set(keptReal);
-  const keptKeys = order.filter((k) => keptSet.has(k)).concat(residualKeys);
+  /* The residual goes last, so it reads as the backdrop. */
+  const keptKeys = keptReal.concat(residualKeys);
 
   const series = keptKeys.map((key, i) => ({
     key,
@@ -596,6 +650,11 @@ export function pivotTimeSeries(rows, groupDims, label, hasResidual = false) {
     drill: drills.get(key),
   }));
   return { points: [...byBucket.values()], series, hidden };
+}
+
+/** Code-unit order, the same on every machine (localeCompare follows the browser's locale, which would let two readers see two color orders). */
+function compareText(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /** Whether a panel spec is the #2734 rank-then-bucket mode (both keys set) — the server's own rule. */
@@ -719,6 +778,7 @@ export function formatComposedValue(v, unit, o) {
   /* The second argument is the axis tick step the chart passes (#6158): enough decimals that no two ticks read alike. */
   if (unit === "percent") return fmtNum(n, tickPlaces(o, 1)) + "%";
   if (unit === "count") return fmtInt(n, o);
+  if (unit === "ms") return fmtMs(n, o);
   if (unit === "ratio") return fmtNum(n, tickPlaces(o, 3));
   if (unit === "bytes" || unit === "pages") return fmtInt(n, o) + " " + unit;
   /* kb / mb / gb / tb read "MB" and step up to "GB" past 1,024, as the rest of the web writes sizes (fmtMb). */
@@ -728,15 +788,16 @@ export function formatComposedValue(v, unit, o) {
   return fmtNum(n, tickPlaces(o, 1));
 }
 
+/* #7552: an axis tick keeps only the decimals its step needs (a 200 step reads 800 s, not 800.0 s); a tooltip or table cell (no step) keeps `min`. */
 function tickPlaces(o, min) {
-  return o && typeof o === "object" && o.step > 0 ? Math.max(min, tickDecimals(o.step)) : min;
+  return o && typeof o === "object" && o.step > 0 ? tickDecimals(o.step) : min;
 }
 
 /** The short y-axis unit caption: "%" for percent, the bare unit for a real unit, null for count/ratio (unitless-ish). */
 function axisUnit(unit) {
   if (unit === "percent") return "%";
   /* A size's tick labels carry their own unit ("512 MB", "78.1 GB"), and one caption cannot name both. */
-  if (!unit || unit === "count" || unit === "ratio" || fmtSize(0, unit) != null) return null;
+  if (!unit || unit === "count" || unit === "ratio" || unit === "ms" || fmtSize(0, unit) != null) return null;
   return unit;
 }
 
@@ -745,6 +806,12 @@ function axisUnit(unit) {
 /** The measure/ratio's catalog key as a fallback panel title (the composer usually sets a real title). */
 function measureLabel(panelSpec) {
   return panelSpec.title || panelSpec.measure || panelSpec.ratio || "Metric";
+}
+
+/** #7668: a measure's display name from the catalog map (key -> name), else its key humanized. A panel with ONE line keeps the panel's title (measureLabel);
+ *  a panel with a second line names each line, since the title belongs to neither. */
+function measureName(key, names) {
+  return (names && names.get(key)) || humanize(key);
 }
 
 /** snake_case -> Title Case, mirroring derive.js's humanizeKey (kept local so this module imports nothing DOM-y). */
@@ -816,12 +883,27 @@ function annotationMetaMap() {
   return _annotationMetaPromise;
 }
 
+/** A cached key -> display name map of the catalog's measures and ratios (#7668), for the legend of a panel with a second line. */
+let _measureNamesPromise = null;
+function measureNameMap() {
+  if (!_measureNamesPromise) {
+    _measureNamesPromise = getCatalog().then((cat) => {
+      const map = new Map();
+      for (const m of ((cat && cat.compose) || {}).measures || []) {
+        if (m && m.key && m.displayName) map.set(m.key, m.displayName);
+      }
+      return map;
+    });
+  }
+  return _measureNamesPromise;
+}
+
 /**
  * The transient drill-down chip (design D6): the pinned filter(s) as text, a "clear" that pops back to the base
  * spec, and — when a pinned dimension is `server` — a jump to that server's existing detail page. Every value is
  * textContent (R4/XSS); the chip is view-state only (the stored definition is never touched).
  */
-/** The dual-axis overlay's FIXED series color (#1606) — the tail of CATEGORICAL_COLORS, so it can never
+/** The dual-axis overlay's FIXED series color (#1606) — a purple outside CATEGORICAL_COLORS (#7401), so it can never
  *  collide with the primary series' CATEGORICAL_COLORS[0] on an ungrouped chart. */
 const OVERLAY_COLOR = "#ba68c8";
 

@@ -290,7 +290,9 @@ public sealed class DarlingHeartbeatTests
         var offenders = Directory.EnumerateFiles(serviceDir, "*.cs", SearchOption.AllDirectories)
             .Where(f => !f.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal)
                         && !f.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-            .Where(f => !allowed.Contains(Path.GetFileName(f)))
+            .Where(f => !allowed.Contains(Path.GetFileName(f))
+                        /* #7024: DarlingWorker is split into DarlingWorker.<Area>.cs files; they are the worker. */
+                        && !Path.GetFileName(f).StartsWith("DarlingWorker.", StringComparison.Ordinal))
             .Where(f => System.Text.RegularExpressions.Regex.IsMatch(File.ReadAllText(f), @"HeartbeatConfig|DarlingHeartbeat|\.Heartbeat\b|""heartbeat"""))
             .Select(Path.GetFileName)
             .ToList();

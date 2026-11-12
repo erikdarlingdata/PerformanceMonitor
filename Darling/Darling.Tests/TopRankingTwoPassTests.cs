@@ -158,9 +158,20 @@ public sealed class TopRankingTwoPassTests
         })
         {
             var text = filter.Replace("{TimescaleSupport.IntervalHonestSourceFilter}", "sample_interval_seconds IS DISTINCT FROM 0", StringComparison.Ordinal);
-            /* once per pass; the queries' one latest-text lookup (#5309) scopes by server and reads the window too */
+            /* once per pass; the queries' one latest-text lookup (#5309) scopes by server and reads the window too, and for
+               TopQueriesSql that read is now the orphan fallback (#8139: the lookup itself reads the ranked rows and the dimension) */
             var lookup = name != "TopProceduresSql" && (filter == "server_id = $1" || filter.StartsWith("collection_time", StringComparison.Ordinal));
-            Assert.Equal(lookup ? 3 : 2, Regex.Matches(sql, Regex.Escape(text)).Count);
+            if ((name is "TopQueriesSql" or "TopQueriesByHostObjectSql") && filter.StartsWith("{TimescaleSupport", StringComparison.Ordinal))
+            {
+                /* #8139, #8138: TopQueriesSql's and TopQueriesByHostObjectSql's pass 2 carry the interval filter on each measure aggregate, not on the pass, so a plain count is one per pass plus one per measure; at least one per pass is the exact part. */
+                Assert.True(Regex.Matches(sql, Regex.Escape(text)).Count >= 2, $"{name}: the interval filter is not in both passes");
+                continue;
+            }
+
+            /* #8570: TopQueriesSql's pass 2 reads the window as two arms (the winners' hashes, then the NULL-hash rows), each
+               carrying the same window and list predicates, so the filters it counts are one more than the other statements'. */
+            var arms = name == "TopQueriesSql" ? 1 : 0;
+            Assert.Equal((lookup ? 3 : 2) + arms, Regex.Matches(sql, Regex.Escape(text)).Count);
         }
 
         var p2 = sql[sql.IndexOf("JOIN winners AS w", StringComparison.Ordinal)..];
@@ -176,7 +187,12 @@ public sealed class TopRankingTwoPassTests
         }
 
         Assert.DoesNotMatch(@"=\s*w\.win_", p2);   /* a plain equality drops the NULL-keyed groups */
-        Assert.DoesNotMatch(@"\bIN \(SELECT", sql);
+        if (name != "TopQueriesSql")
+        {
+            /* #8570: TopQueriesSql narrows pass 2 with an IN semi-join on the hash and reads the NULL-hash rows in an arm of
+               its own; the join above stays the NULL-safe match. The other statements have no such narrowing. */
+            Assert.DoesNotMatch(@"\bIN \(SELECT", sql);
+        }
     }
 
     [Theory]

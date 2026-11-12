@@ -11,7 +11,7 @@
  * (not the FinOps Recommendations tab). One read, get_analysis_findings, for the server the page is on: the
  * persisted findings grouped by incident (incident_id; a finding with none is its own group), each group headed
  * by its highest-severity finding, each card showing a severity badge, the advice text, the fix script in a
- * <pre> with a Copy button, and, for an incident finding, a link to that server's Queries tab.
+ * <pre> with a Copy button, and, for an incident finding whose fact family has a tab, a link to that tab (#7677).
  *
  * Advise-only: nothing here runs a fix or mutes. Two actions reach the service (#6389), both the desktop's: "Generate now" queues an
  * analyze_now command (POST /api/analyze-now) and re-reads the findings when the service finishes it, and "Ask AI" copies the
@@ -19,8 +19,10 @@
  * cannot drift). Neither holds a key or calls a model.
  *
  * Which findings are "incidents" follows the desktop: a finding that carries a structured_remediation is a
- * standing config fix and gets no Active Queries link; every other finding with a time_range does. The link
- * opens the server's Queries tab, which has no from/to deep link on the web, so it carries the server only.
+ * standing config fix and gets no tab link, and neither does a standing state (a setting, a volume's free space: standing_state
+ * on the read, #7416). Every other finding with a time_range and a tab of its own gets one (#7677: Wait Stats for a wait card, Blocking
+ * for blocking and deadlocks, and so on, from the one FAMILY_TABS map below). The server tabs have no from/to deep link on the web, so the
+ * link carries the server only and names the tab ("Open Wait Stats tab"), not a sub-tab it cannot reach.
  *
  * State: which groups the reader has opened or closed lives in module scope (`openState`, keyed by server then
  * by group key), because the server page rebuilds this tab on every 60 s poll and on every Range change.
@@ -28,7 +30,7 @@
  * R4 (XSS): every value, the fix script included, reaches the DOM through el()'s text path.
  */
 
-import { getSession } from "../views-api.js";
+import { getSession, peekSession } from "../views-api.js";
 import { el, apiGet, apiWrite, listOnlyNote, readToolWithinKeptHistory, keptWindowStrip, noticeStrip, readErrorStrip, emptyStrip, loadingStrip, localTime, bandClass, dbScopeChip, storeHash } from "../util.js";
 
 /** The desktop's severity cutoffs: >= 1.5 Critical, >= 0.75 Warning, else Info. */
@@ -44,9 +46,221 @@ function badgeClass(label) {
   return "badge " + bandClass(label === "Info" ? "Unknown" : label);
 }
 
-/** An incident finding: not a standing config fix (the read's is_config_fix, the desktop's rule; force-plan stays an incident), with a time window to point at. */
-export function showsActiveQueriesLink(f) {
-  return !f.is_config_fix && !!(f.time_range && f.time_range.start && f.time_range.end);
+/**
+ * A finding a server tab can explain (#7416): not a standing config fix (the read's is_config_fix, the desktop's rule;
+ * force-plan stays an incident), not a standing state (the read's standing_state: a setting or the free space of a volume, true at
+ * every hour whatever is running), and with a time window to point at.
+ */
+export function isIncidentFinding(f) {
+  return !f.is_config_fix && !f.standing_state && !!(f.time_range && f.time_range.start && f.time_range.end);
+}
+
+/* #7677: the one map from a card's fact family (the finding's category) to the server tab that holds its evidence, [tab id, tab label].
+   The ids and labels are the ones SERVER_TABS and POSTGRES_TABS register in server-tabs.js. They are copied, not read from the registry,
+   because server-tabs.js imports this module and a lookup back would be a circular import. AnalysisFindingsTabTests compares every
+   label here with the registry's, so a relabel there fails a test until this map follows. A family left out has no tab that shows its
+   evidence, and its card gets no button: absolution (no problem found), coverage (it says data is missing, so no tab has it to show),
+   disk (volume free space is on no tab) and pg_memory (arithmetic over settings against host memory, shown by no panel). */
+export const FAMILY_TABS = {
+  waits: ["waits", "Wait Stats"],
+  blocking: ["blocking", "Blocking"], // deadlocks are facts of the blocking family
+  cpu: ["cpu", "CPU"],
+  memory: ["memory", "Memory"],
+  io: ["io", "File I/O"],
+  tempdb: ["io", "File I/O"], // the tempdb trend chart sits on the File I/O tab
+  queries: ["queries", "Queries"],
+  bad_actor: ["queries", "Queries"],
+  config: ["config", "Configuration"],
+  database_config: ["config", "Configuration"],
+  jobs: ["activity", "Activity"],
+  sessions: ["activity", "Activity"],
+  pg_waits: ["waits", "Waits"],
+  pg_kernel: ["waits", "Waits"],
+  pg_io: ["io", "I/O"],
+  pg_buffer: ["io", "I/O"],
+  pg_write: ["io", "I/O"],
+  pg_blocking: ["activity", "Activity"],
+  pg_queries: ["activity", "Activity"],
+  pg_plans: ["activity", "Activity"],
+  pg_database: ["activity", "Activity"],
+  pg_temp: ["activity", "Activity"], // the database temp bytes and files charts sit on the Activity tab
+  pg_cpu: ["overview", "Overview"],
+  pg_replication: ["replication", "Replication"],
+  pg_bloat: ["storage", "Storage"],
+  pg_growth: ["storage", "Storage"],
+  pg_vacuum: ["vacuum", "Vacuum"],
+  pg_sessions: ["vacuum", "Vacuum"], // the session-state panel is on the Vacuum tab
+  pg_config: ["config", "Configuration"],
+  pg_posture: ["config", "Configuration"],
+};
+
+/* An anomaly finding's category is just "anomaly"; its root fact key (the read's root_fact.key, else the first step of story_path)
+   says which family it belongs to. First match wins, so the PostgreSQL prefixes are tried before the SQL Server ones. */
+const ANOMALY_FAMILIES = [
+  ["ANOMALY_PG_DEADLOCK", "pg_blocking"], ["ANOMALY_PG_BLOCKING", "pg_blocking"],
+  ["ANOMALY_PG_WAIT_PROFILE", "pg_waits"], ["ANOMALY_PG_SAMPLED_WAIT_PROFILE", "pg_waits"],
+  ["ANOMALY_PG_IO_LATENCY", "pg_io"], ["ANOMALY_PG_REPLICATION_LAG", "pg_replication"],
+  ["ANOMALY_PG_DATABASE_GROWTH", "pg_growth"],
+  ["ANOMALY_BLOCKING", "blocking"], ["ANOMALY_DEADLOCK", "blocking"],
+  ["ANOMALY_WAIT", "waits"],
+  ["ANOMALY_CPU", "cpu"],
+  ["ANOMALY_MEMORY", "memory"],
+  ["ANOMALY_READ_LATENCY", "io"], ["ANOMALY_WRITE_LATENCY", "io"],
+  ["ANOMALY_QUERY_DURATION", "queries"],
+];
+
+function familyOf(f) {
+  const category = String(f.category || "").toLowerCase();
+  if (category !== "anomaly") return category;
+  const root = (rootKeyOf(f) || String(f.story_path || "").split("→")[0]).trim().toUpperCase();
+  const match = ANOMALY_FAMILIES.find(([prefix]) => root.startsWith(prefix));
+  return match ? match[1] : "";
+}
+
+/** The tab an incident card opens, as { id, label }, or null when the card has no tab of its own (and so no button). */
+export function findingTab(f) {
+  if (!isIncidentFinding(f)) return null;
+  const family = familyOf(f);
+  const tab = Object.prototype.hasOwnProperty.call(FAMILY_TABS, family) ? FAMILY_TABS[family] : null;
+  return tab ? { id: tab[0], label: tab[1] } : null;
+}
+
+/** The root fact a finding hangs from: two chains that start at the same root are one cause seen two ways. */
+function rootKeyOf(f) {
+  return (f.root_fact && f.root_fact.key) || "";
+}
+
+/** A finite number, or null. A missing score is not 0: a row with none keeps showing none. */
+function finiteOrNull(v) {
+  const n = v == null || v === "" ? NaN : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function instantOf(v) {
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? t : null;
+}
+
+/** The worst score a row ever reached: its newest occurrence's severity or its peak, whichever is higher. */
+function worstScore(f) {
+  const a = finiteOrNull(f.severity);
+  const b = finiteOrNull(f.peak_severity);
+  return a == null ? b : b == null ? a : Math.max(a, b);
+}
+
+/**
+ * A fact key: upper case with underscores, starting with a letter (LATCH_EX, PG_WAIT_LOCK, BAD_ACTOR_0x1A2B). A story path can also carry
+ * a segment that is not a fact: a same-statement pileup's path is "SAME_STATEMENT_PILEUP → <statement hash>" (#7582), and the hash starts
+ * with a digit (a surrogate identity starts with "text:"). The stored row has no typed keys (#3859), so the shape is the test.
+ */
+const FACT_KEY = /^[A-Z][A-Za-z0-9_]*$/;
+
+function pathSegments(f) {
+  return String(f.story_path || "").split("→").map((s) => s.trim()).filter(Boolean);
+}
+
+/** The path segments that name something other than a fact (a statement's hash), joined: "" for an ordinary chain. */
+function identityOf(f) {
+  return pathSegments(f).filter((s) => !FACT_KEY.test(s)).join("|");
+}
+
+/** A chain's facts in the order they happened, in words: "Latch ex, then Cxpacket". Never the raw arrows or the hash. */
+export function plainChain(f) {
+  const steps = pathSegments(f).filter((s) => FACT_KEY.test(s)).map((s) => readableStory(s)).filter(Boolean);
+  return steps.length ? steps.join(", then ") : readableStory(rootKeyOf(f)) || findingTitle(f);
+}
+
+/** One line for a chain of a merged row: its facts in words, its own severity and its own occurrences. */
+export function chainLine(c) {
+  const n = Number(c.occurrences) || 0;
+  return c.path + " · " + c.label + " · " + n + (n === 1 ? " occurrence" : " occurrences");
+}
+
+/**
+ * Root facts whose headline is the only place that names what they are about: ANOMALY_OBJECT_GROWTH and ANOMALY_OBJECT_CONTENTION print the
+ * table or index ("dbo.Orders grew 900 MB day-over-day") and their key is the bare fact key. These keep the headline in the merge key, so
+ * two tables stay two rows (#7696).
+ */
+const SUBJECT_IN_TITLE_ROOTS = new Set(["ANOMALY_OBJECT_GROWTH", "ANOMALY_OBJECT_CONTENTION"]);
+
+/**
+ * What makes two rows one (#7696): the root fact and the statement identity, not the headline. An anomaly headline prints the observed
+ * figure ("Write latency spiked to 2300 ms"), and the figure is the window's peak at the time of each analysis pass, so one condition
+ * read on two incidents prints two sentences. A row with no root key, or a root whose headline names its subject, still keys on the headline.
+ */
+function mergeKeyOf(f) {
+  const root = rootKeyOf(f);
+  const byRoot = root && !SUBJECT_IN_TITLE_ROOTS.has(root);
+  return (byRoot ? "root:" + root : "title:" + findingTitle(f) + "\u0000" + root) + "\u0000" + identityOf(f);
+}
+
+/**
+ * #7582, #7696: one row per root fact. The read keeps one entry per chain and incident, and chains that start at the same fact print the same
+ * headline, so the page showed one sentence on two or three rows with nothing to tell them apart. Rows with the same root fact (#7696: not the same headline, which prints the observed figure) become
+ * one: the worst severity any of them reached (counting each row's peak, so a row whose newest occurrence is Info but whose peak was
+ * Warning reads Warning), the earliest first seen, the latest last seen and the occurrences added up. The newest row speaks for the
+ * rest (its advice, its incident, its figures). `chains` lists what the row covers, one entry per distinct chain, worst first, for the
+ * detail. The grid and the Recommendations tab both call this, so they cannot disagree. Nothing in the input is changed.
+ * One exception: a path that names a statement (a same-statement pileup's hash) keeps the statement in the merge key, so two pileups
+ * on different statements with the same headline stay two rows, each with its own advice and remediation. The same statement on two
+ * incidents still merges. This is the one place rows fold: groupFindings takes the merged rows as they are, so a row never hides
+ * another row's remediation, and two pileups or two tables in one incident are two cards.
+ */
+export function mergeBySentence(findings) {
+  const order = [];
+  const buckets = new Map();
+  for (const f of findings || []) {
+    const key = mergeKeyOf(f);
+    if (!buckets.has(key)) {
+      buckets.set(key, { rows: [] });
+      order.push(key);
+    }
+    buckets.get(key).rows.push(f);
+  }
+  return order.map((key) => {
+    const { rows } = buckets.get(key);
+    let newest = rows[0];
+    let first = null;
+    let last = null;
+    let start = null;
+    let end = null;
+    let worst = null;
+    let occurrences = 0;
+    const byPath = new Map();
+    for (const f of rows) {
+      if ((instantOf(f.last_seen) ?? -Infinity) > (instantOf(newest.last_seen) ?? -Infinity)) newest = f;
+      const fs = instantOf(f.first_seen);
+      const ls = instantOf(f.last_seen);
+      if (fs != null && (first == null || fs < instantOf(first))) first = f.first_seen;
+      if (ls != null && (last == null || ls > instantOf(last))) last = f.last_seen;
+      const range = f.time_range || {};
+      if (instantOf(range.start) != null && (start == null || instantOf(range.start) < instantOf(start))) start = range.start;
+      if (instantOf(range.end) != null && (end == null || instantOf(range.end) > instantOf(end))) end = range.end;
+      const score = worstScore(f);
+      if (score != null && (worst == null || score > worst)) worst = score;
+      const n = Number(f.occurrences) || 0;
+      occurrences += n;
+      const path = plainChain(f);
+      const chain = byPath.get(path) || { path, score: null, occurrences: 0 };
+      chain.occurrences += n;
+      if (score != null && (chain.score == null || score > chain.score)) chain.score = score;
+      byPath.set(path, chain);
+    }
+    const chains = [...byPath.values()]
+      .sort((a, b) => (b.score ?? -1) - (a.score ?? -1) || b.occurrences - a.occurrences)
+      .map((c) => ({ path: c.path, severity: c.score, label: severityLabel(c.score), occurrences: c.occurrences }));
+    return {
+      ...newest,
+      finding_title: findingTitle(newest),
+      severity: worst,
+      peak_severity: worst,
+      occurrences,
+      first_seen: first ?? newest.first_seen,
+      last_seen: last ?? newest.last_seen,
+      time_range: newest.time_range ? { ...newest.time_range, start: start ?? newest.time_range.start, end: end ?? newest.time_range.end } : newest.time_range,
+      chains,
+    };
+  });
 }
 
 /**
@@ -57,7 +271,7 @@ export function groupFindings(findings) {
   const order = [];
   const buckets = new Map();
   let solo = 0;
-  for (const f of findings || []) {
+  for (const f of mergeBySentence(findings)) {
     const key = f.incident_id ? "i:" + f.incident_id : "s:" + solo++;
     if (!buckets.has(key)) {
       buckets.set(key, []);
@@ -88,7 +302,7 @@ export function readableStory(key) {
 
 /** The finding's own headline; a story key in words when it has none. Never the raw key. */
 export function findingTitle(f) {
-  return (f.advice && f.advice.headline) || readableStory(f.story_path) || f.category || "Finding";
+  return (f.advice && f.advice.headline) || readableStory(f.story_path) || f.category_name || f.category || "Finding";
 }
 
 /* ─────────────────────────── state ─────────────────────────── */
@@ -268,6 +482,13 @@ function severityText(severity) {
   return Number.isFinite(n) ? " (score " + n.toFixed(2) + ")" : "";
 }
 
+/* #7726: the advice text writes code in backticks (a setting, a statement). The page draws each backtick span as <code>, built as an element with the
+   text set as text, so the span's content is escaped as it was; an unpaired backtick stays a character. */
+export function adviceNodes(text) {
+  /* split with one capture group: the even entries are plain text, the odd ones the text between a pair of backticks. */
+  return String(text).split(/`([^`]+)`/).map((part, i) => (i % 2 === 1 ? el("code", { text: part }) : part)).filter((n) => n !== "");
+}
+
 /* #6159: a lone finding's title is already on its group's summary line directly above, so its card does not repeat it as a heading. */
 function card(server, f, showTitle) {
   const label = severityLabel(f.severity);
@@ -275,21 +496,26 @@ function card(server, f, showTitle) {
   const kids = [
     el("div", { class: "reco-head" }, [
       el("span", { class: badgeClass(label), text: label.toUpperCase() + severityText(f.severity) }),
-      f.category ? el("span", { class: "muted", text: " · " + f.category }) : null,
+      f.category ? el("span", { class: "muted", text: " · " + (f.category_name || f.category) }) : null,
     ]),
     showTitle ? el("h4", { text: findingTitle(f) }) : null,
-    advice.investigation ? el("p", { class: "reco-advice", text: advice.investigation }) : null,
-    advice.remediation ? el("p", { class: "reco-advice", text: advice.remediation }) : null,
+    advice.investigation ? el("p", { class: "reco-advice" }, adviceNodes(advice.investigation)) : null,
+    advice.remediation ? el("p", { class: "reco-advice" }, adviceNodes(advice.remediation)) : null,
     el("div", { class: "muted", text: "Seen " + f.occurrences + "× · last " + localTime(f.last_seen) + (f.recurring_at_this_hour ? " · recurs at this hour" : "") }),
   ];
+  if (f.chains && f.chains.length > 1) {
+    kids.push(el("div", { class: "muted", text: "Seen as " + f.chains.length + " chains: " + f.chains.map(chainLine).join("; ") }));
+  }
   if (f.remediation_command) {
     kids.push(el("pre", { class: "reco-fix", text: f.remediation_command }));
   }
   const actions = [];
   if (f.remediation_command) actions.push(copyButton(f.remediation_command));
-  actions.push(askAiButton(server, f));
-  if (showsActiveQueriesLink(f)) {
-    actions.push(el("a", { class: "btn small", href: storeHash("#/server/") + encodeURIComponent(server) + "/queries", text: "Open in Active Queries" }));
+  /* A scoped session gets no Ask AI button: the prompt read behind it is not one a scoped token is served. */
+  if (!peekSession()?.scoped) actions.push(askAiButton(server, f));
+  const tab = findingTab(f);
+  if (tab) {
+    actions.push(el("a", { class: "btn small", href: storeHash("#/server/") + encodeURIComponent(server) + "/" + tab.id, text: "Open " + tab.label + " tab" }));
   }
   if (actions.length) kids.push(el("div", { class: "reco-actions" }, actions));
   return el("div", { class: "card reco-card" }, kids);
@@ -334,7 +560,9 @@ export const analysisFindingsTab = {
     const body = el("div", { class: "panel-body" }, [loadingStrip()]);
     const load = async () => {
       const res = await readToolWithinKeptHistory("get_analysis_findings", { server, hours: ctx.hours, limit: 50, full_text: true }, ctx && ctx.signal);
-      if (res.kind === "aborted") return;
+      /* #7959: an aborted read is a route change, and an auth answer is a 401 whose sign-in strip the shell has put up. Neither redraws
+         the body, which would otherwise be emptied with no text. */
+      if (res.kind === "aborted" || res.kind === "auth") return;
       while (body.firstChild) body.removeChild(body.firstChild);
       for (const n of renderFindings(server, res)) if (n) body.appendChild(n);
     };

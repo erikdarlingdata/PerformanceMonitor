@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Threading;
@@ -78,9 +79,6 @@ internal static class DarlingDataReader
     /* #2484: the two series behind the viewer's Current Waits tab. Both read waiting_tasks, which the
        snapshot reads already expose row-by-row -- get_waiting_tasks answers "what is waiting now" and
        never "was it worse an hour ago", which is the question that decides whether anything is wrong. */
-    public sealed record WaitingTaskTrendRow(DateTime CollectionTime, string WaitType, long TotalWaitMs);
-
-    public sealed record BlockedSessionTrendRow(DateTime CollectionTime, string DatabaseName, long BlockedCount);
 
     /*
         One row of the RAW per-run collection log, as opposed to the CollectorHealth rollup above.
@@ -210,7 +208,7 @@ internal static class DarlingDataReader
     /// before the rung. <c>SampleIntervalSeconds</c> is the seconds the delta covers under the three-state rule
     /// (0 = no delta knowable, null on a gauge), the denominator of the row's per-second figure.</summary>
     public sealed record PerfmonRow(
-        string CounterName, string InstanceName, long Value, long? DeltaValue, int? CntrType = null, int? SampleIntervalSeconds = null);
+        string CounterName, string InstanceName, long Value, long? DeltaValue, int? CntrType = null, int? SampleIntervalSeconds = null, string? ObjectName = null);
 
     /// <summary>One (database, query_hash) group's summed query-stats deltas over the window. Time
     /// metrics are in microseconds (converted to ms by the tool, matching Lite).</summary>
@@ -299,7 +297,10 @@ internal static class DarlingDataReader
         DateTime? RegisteredAt = null,
         int? SqlEngineEdition = null,
         IReadOnlyList<string>? SameMachineAs = null,
-        decimal MonthlyCostUsd = 0m);
+        decimal MonthlyCostUsd = 0m,
+        DateTime? ConnectDownSince = null,
+        string? LastConnectError = null,
+        bool Attempted = false);
 
     /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).
     /// <paramref name="UtcOffsetMinutes"/> is the offset IN FORCE at that collection (V16; null on a pre-V16 row)
@@ -376,8 +377,10 @@ internal static class DarlingDataReader
     /// CPU BUCKETED (#3960): <see cref="CpuUtilizationSql"/>'s de-skewed samples, byte for byte, averaged per bucket of
     /// <c>$4</c> minutes on the samples' own UTC instant — the tool used to bucket every sample to the minute in C#,
     /// after reading a week of them (40,000 rows on an Azure SQL DB source) — with the busiest sample's SQL and total
-    /// CPU beside the averages and the sample count. A NULL reading counts as 0, as the per-sample reader always read
-    /// it. Each point is stamped at its bucket's start and NOT clamped to the window's: the window is on
+    /// CPU beside the averages and the sample count. A NULL SQL reading counts as 0, as the per-sample reader always read
+    /// it. A NULL other-process reading (#7682: SQL Server on Linux before 2025 CU1 cannot report host CPU) is NOT 0: the other, total, idle and
+    /// peak-total figures average or take the maximum over the rows that have one, so a bucket with none returns NULL for all four and a bucket
+    /// that mixes both keeps what it can measure. Each point is stamped at its bucket's start and NOT clamped to the window's: the window is on
     /// collection_time, and a collection can carry samples from before it, which the per-minute points always showed
     /// at their own minute. $1 server_id, $2/$3 window (naive UTC), $4 the bucket width in minutes.
     /// </summary>
@@ -385,11 +388,12 @@ internal static class DarlingDataReader
         SELECT
             date_bin(CAST($4 AS integer) * INTERVAL '1 minute', sample_time, {TrendBucketSql.OriginSql}) AS bucket_start,
             AVG(COALESCE(sqlserver_cpu_utilization, 0)) AS sql_server_cpu,
-            AVG(COALESCE(other_process_cpu_utilization, 0)) AS other_process_cpu,
-            AVG(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS total_cpu,
-            AVG(GREATEST(0, 100 - (COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)))) AS idle_cpu,
+            AVG(other_process_cpu_utilization) AS other_process_cpu,
+            AVG(COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization) AS total_cpu,
+            AVG(CASE WHEN other_process_cpu_utilization IS NOT NULL
+                     THEN GREATEST(0, 100 - (COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization)) END) AS idle_cpu,
             MAX(COALESCE(sqlserver_cpu_utilization, 0)) AS peak_sql_server_cpu,
-            MAX(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS peak_total_cpu,
+            MAX(COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization) AS peak_total_cpu,
             COUNT(*) AS samples
         FROM (
         {CpuUtilizationSql}
@@ -415,11 +419,11 @@ internal static class DarlingDataReader
             items.Add(new CpuBucketPoint(
                 reader.GetDateTime(0),
                 Convert.ToDouble(reader.GetValue(1)),
-                Convert.ToDouble(reader.GetValue(2)),
-                Convert.ToDouble(reader.GetValue(3)),
-                Convert.ToDouble(reader.GetValue(4)),
+                reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3)),
+                reader.IsDBNull(4) ? null : Convert.ToDouble(reader.GetValue(4)),
                 Convert.ToInt32(reader.GetValue(5)),
-                Convert.ToInt32(reader.GetValue(6)),
+                reader.IsDBNull(6) ? null : Convert.ToInt32(reader.GetValue(6)),
                 reader.GetInt64(7)));
         }
 
@@ -850,7 +854,7 @@ internal static class DarlingDataReader
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1)
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
-        ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC
+        ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC, database_name, file_name
         """;
 
     /// <summary>
@@ -1037,11 +1041,12 @@ internal static class DarlingDataReader
             delta_cntr_value,
             collection_time,
             cntr_type,
-            sample_interval_seconds
+            sample_interval_seconds,
+            object_name
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_perfmon_stats WHERE server_id = $1)
-        ORDER BY counter_name
+        ORDER BY lower(counter_name), counter_name, instance_name
         """;
 
     public static async Task<LatestSnapshot<PerfmonRow>> GetLatestPerfmonStatsAsync(
@@ -1062,7 +1067,8 @@ internal static class DarlingDataReader
                 /* NULL stays NULL: a gauge row stores no delta (V132); 0 here would be a fabricated zero. */
                 reader.IsDBNull(3) ? null : reader.GetInt64(3),
                 reader.IsDBNull(5) ? null : reader.GetInt32(5),
-                reader.IsDBNull(6) ? null : reader.GetInt32(6)));
+                reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7)));
             capturedAt ??= reader.GetDateTime(4);
         }
 
@@ -1081,9 +1087,10 @@ internal static class DarlingDataReader
     /// the text lookup reads <c>query_stats</c> plus <c>query_text_dim</c> for the newest row only, which resolves the #1767 payload dimension — the plan
     /// tools read it the same way. $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database filter (NULL = all),
     /// $6 lifetime max_dop floor (0 = no parallelism filter; #3541 A13).
-    /// $7 the candidate limit for pass 1 (#5313: top + 5 first, larger when the WAITFOR trim leaves a short page).
+    /// $7 the candidate limit for pass 1 (#5313: top + 5 first, larger when the WAITFOR trim leaves a short page),
+    /// $8 the databases to leave out (#7725: the ones the server dropped, ranked after the listed ones by a second read; NULL = none).
     /// </summary>
-    public const string TopQueriesSql = $"""
+    public static readonly string TopQueriesSql = $"""
         WITH winners AS MATERIALIZED (
             /* #5226 pass 1 of 2: rank every group of the window on NARROW columns. The wide row (forty
                aggregates and the distinct-text count) forces a sort of wide rows when it shares the
@@ -1105,6 +1112,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+           {DatabaseFilter.ExcludeClause("database_name", 8)}
             /*TAG:hash:query_hash*/
             /* #4394: excludes zero-interval rows (sample_interval_seconds = 0) through
                TimescaleSupport.IntervalHonestSourceFilter, the same filter the hourly successors
@@ -1141,47 +1149,53 @@ internal static class DarlingDataReader
                COALESCE equality is only a hashable pre-filter (PostgreSQL cannot hash or merge an IS NOT
                DISTINCT FROM, so alone it would nested-loop every window row against every winner); the IS NOT
                DISTINCT FROM terms make the match exact. A winner is unique per key, so no row repeats. */
+            /* #4394 and #8139: the interval filter sits on each measure, not on the pass, so the text pick below sees
+               every row of the group as the lookup it replaced did, a first-sighting, reset or gap row (interval 0)
+               included, while no measure takes such a row into a sum, an extreme, a handle or a count;
+               last_execution_time is an observation and stays over every row. */
             SELECT
                 database_name,
                 query_hash,
                 host_object_name,
-                CAST(SUM(delta_execution_count) AS bigint) AS total_executions,
-                CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
-                CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
-                CAST(SUM(delta_logical_reads) AS bigint) AS total_reads,
-                CAST(SUM(delta_logical_writes) AS bigint) AS total_writes,
-                CAST(SUM(delta_physical_reads) AS bigint) AS total_physical_reads,
-                CAST(SUM(delta_rows) AS bigint) AS total_rows,
-                CAST(SUM(delta_spills) AS bigint) AS total_spills,
-                MIN(min_dop) AS min_dop,
-                MAX(max_dop) AS max_dop,
-                MIN(min_worker_time) AS min_worker_time,
-                MAX(max_worker_time) AS max_worker_time,
-                MIN(min_elapsed_time) AS min_elapsed_time,
-                MAX(max_elapsed_time) AS max_elapsed_time,
-                MAX(query_plan_hash) AS query_plan_hash,
-                MAX(sql_handle) AS sql_handle,
-                MAX(plan_handle) AS plan_handle,
+                CAST(SUM(delta_execution_count) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_executions,
+                CAST(SUM(delta_worker_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_cpu_us,
+                CAST(SUM(delta_elapsed_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_elapsed_us,
+                CAST(SUM(delta_logical_reads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_reads,
+                CAST(SUM(delta_logical_writes) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_writes,
+                CAST(SUM(delta_physical_reads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_physical_reads,
+                CAST(SUM(delta_rows) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_rows,
+                CAST(SUM(delta_spills) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_spills,
+                MIN(min_dop) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_dop,
+                MAX(max_dop) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_dop,
+                MIN(min_worker_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_worker_time,
+                MAX(max_worker_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_worker_time,
+                MIN(min_elapsed_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_elapsed_time,
+                MAX(max_elapsed_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_elapsed_time,
+                MAX(query_plan_hash) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS query_plan_hash,
+                MAX(sql_handle) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS sql_handle,
+                MAX(plan_handle) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS plan_handle,
+                /* An observation, not a measure: the newest time the plan ran, read over every row of the group, a
+                   zero-interval row included, as the Viewer reads it. */
                 MAX(last_execution_time) AS last_execution_time,
-                MAX(creation_time) AS creation_time,
-                MIN(min_physical_reads) AS min_physical_reads,
-                MAX(max_physical_reads) AS max_physical_reads,
-                MIN(min_rows) AS min_rows,
-                MAX(max_rows) AS max_rows,
-                MIN(min_grant_kb) AS min_grant_kb,
-                MAX(max_grant_kb) AS max_grant_kb,
-                MIN(min_used_grant_kb) AS min_used_grant_kb,
-                MAX(max_used_grant_kb) AS max_used_grant_kb,
-                MIN(min_ideal_grant_kb) AS min_ideal_grant_kb,
-                MAX(max_ideal_grant_kb) AS max_ideal_grant_kb,
-                MIN(min_spills) AS min_spills,
-                MAX(max_spills) AS max_spills,
-                MIN(min_reserved_threads) AS min_reserved_threads,
-                MAX(max_reserved_threads) AS max_reserved_threads,
-                MIN(min_used_threads) AS min_used_threads,
-                MAX(max_used_threads) AS max_used_threads,
-                MAX(total_clr_time) AS total_clr_time,
-                MAX(plan_generation_num) AS plan_generation_num,
+                MAX(creation_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS creation_time,
+                MIN(min_physical_reads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_physical_reads,
+                MAX(max_physical_reads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_physical_reads,
+                MIN(min_rows) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_rows,
+                MAX(max_rows) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_rows,
+                MIN(min_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_grant_kb,
+                MAX(max_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_grant_kb,
+                MIN(min_used_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_used_grant_kb,
+                MAX(max_used_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_used_grant_kb,
+                MIN(min_ideal_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_ideal_grant_kb,
+                MAX(max_ideal_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_ideal_grant_kb,
+                MIN(min_spills) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_spills,
+                MAX(max_spills) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_spills,
+                MIN(min_reserved_threads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_reserved_threads,
+                MAX(max_reserved_threads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_reserved_threads,
+                MIN(min_used_threads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_used_threads,
+                MAX(max_used_threads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_used_threads,
+                MAX(total_clr_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS total_clr_time,
+                MAX(plan_generation_num) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS plan_generation_num,
                 MAX(CAST(delta_worker_time AS double precision) / NULLIF(sample_interval_seconds, 0) / 1000.0) AS worker_time_per_second,
                 /* #2012: how many DISTINCT statement texts this hash group merged. query_hash is a
                    SHAPE hash — INSERT...EXEC statements naming DIFFERENT callee procs share one
@@ -1190,36 +1204,92 @@ internal static class DarlingDataReader
                    the statement. Counted over the #1767 content digest already on every row (~free);
                    COUNT(DISTINCT) skips NULLs, so 0 means only pre-dimension legacy rows, which age
                    out with raw retention. */
-                COUNT(DISTINCT query_text_digest) AS distinct_texts,
+                COUNT(DISTINCT query_text_digest) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS distinct_texts,
+                /* #8136: the group's newest text-bearing row, picked in this pass over the winners' rows so latest_text
+                   below is a lookup on the capped rows and not a third read of the window. The pick is a MAX over a byte
+                   key that sorts the way the lookup used to: collection_time first (timestamp_send is its microseconds,
+                   big-endian, positive for any collection date), then collection_id (the row collected last wins a tie;
+                   int8send of a positive id), then the row's text as a flag byte and payload: 0x00 and the inline text
+                   when the row carries one (pre-dimension rows only; v_query_stats' COALESCE prefers it), else 0x01 and
+                   the 32-byte digest. Only rows that carry a text or a digest take part, which is the row the view gives
+                   a text for. A MAX keeps one value per group and has a combine step, so the aggregate stays partial and
+                   parallel where the planner wants it; an ordered array aggregate loses both. */
+                MAX(timestamp_send(q.collection_time) || int8send(q.collection_id)
+                    || CASE WHEN q.query_text IS NOT NULL THEN '\x00'::bytea || convert_to(q.query_text, 'UTF8') ELSE '\x01'::bytea || q.query_text_digest END)
+                    FILTER (WHERE q.query_text IS NOT NULL OR q.query_text_digest IS NOT NULL) AS latest_text_key,
                 MAX(w.rank_metric) AS rank_metric,
                 MAX(w.rank_cpu) AS rank_cpu
-            FROM query_stats
+            FROM (
+                /* #8570: the window's rows of the winners' query hashes only, through idx_query_stats_server_hash_time
+                   (server_id, query_hash, collection_time) where a store has it. The join below used to be the only thing that
+                   narrowed this pass to the winners, so a 24-hour window scanned every row it had a second time (360,000 rows
+                   and 36,700 pages to build 25 wide rows; 37,700 pages in all against 73,100 here). The equality is plain (an
+                   IN semi-join, so a hash shared by two winners is read once, not once a winner) and cannot match a NULL
+                   hash, so the second arm reads the NULL-hash rows, and only when a winner has a NULL hash. The join below stays
+                   the exact NULL-safe match, so the groups and every figure are unchanged. */
+                SELECT * FROM query_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                AND   query_hash IN (SELECT win_query_hash FROM winners)
+                UNION ALL
+                SELECT * FROM query_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                AND   query_hash IS NULL
+                AND   EXISTS (SELECT 1 FROM winners WHERE win_query_hash IS NULL)
+            ) AS q
             JOIN winners AS w
                 ON  COALESCE(query_hash, '') = COALESCE(w.win_query_hash, '')
                 AND database_name IS NOT DISTINCT FROM w.win_database_name
                 AND query_hash IS NOT DISTINCT FROM w.win_query_hash
                 AND host_object_name IS NOT DISTINCT FROM w.win_host_object_name
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
-            AND   {TimescaleSupport.IntervalHonestSourceFilter}
             GROUP BY database_name, query_hash, host_object_name
         ),
         latest_text AS MATERIALIZED (
-            /* #5309: the representative text of EVERY ranked group in ONE lookup. This used to be a lateral
-               lookup of the newest row, one per ranked row, which on a store without TimescaleDB scanned
-               the raw table once per row (25 scans, 28 of 38 seconds at seven days). Here one pass reads the
-               window's rows for the winners' keys and keeps the newest row per key. The newest row is chosen on
-               narrow columns (the inline text exists only on pre-dimension rows) and the text is resolved from
-               query_text_dim for that one row afterwards, so the sort never carries a wide text. A row counts
-               as having text when its inline text or its dimension row exists, the rule v_query_stats' COALESCE
-               gives. The key match is NULL-safe, with the COALESCE equality as the hashable pre-filter (see
-               pass 2). The group's own host object keeps one caller's text from labelling another's (#2012).
-               MATERIALIZED, because the join to it below is NULL-safe (IS NOT DISTINCT FROM), which PostgreSQL
-               cannot hash: left plain, it inlines this CTE into a nested loop and re-runs it per ranked row
-               (a 120-candidate round scanned the 20,000-row query_text_dim 10,000 times, 9,975 ms; materialized,
-               805 ms, same rows). The CTE is read once and the join probes its result. */
+            /* #5309, #8136: the representative text of EVERY ranked group, resolved for the capped rows only. Pass 2
+               carries each group's newest text-bearing row out of its read of the winners' rows (latest_text_key: 8
+               bytes of time, 8 of collection id, a flag byte at offset 16, then the payload from byte 18), so this reads
+               at most $7 rows and the dimension: the inline text when that row has one (flag 0x00, pre-dimension rows
+               only), else its digest (flag 0x01) resolved from query_text_dim, the rule v_query_stats' COALESCE gives.
+               A digest resolves here unless its dimension row is missing, which the collector allows (#7419: a
+               fact row is committed before its dimension row, and a failed dimension write is not retried);
+               orphans and fallback_text below cover that key the way the lookup did. The group's own host object
+               keeps one caller's text from labelling another's (#2012). MATERIALIZED, because the join to it below is
+               NULL-safe (IS NOT DISTINCT FROM), which PostgreSQL cannot hash: left plain, it inlines this CTE into a
+               nested loop and re-runs it per ranked row (a 120-candidate round scanned the 20,000-row query_text_dim
+               10,000 times, 9,975 ms; materialized, 805 ms, same rows). The CTE is read once and the join probes its
+               result. */
+            SELECT
+                k.database_name,
+                k.query_hash,
+                k.host_object_name,
+                COALESCE(CASE WHEN get_byte(k.latest_text_key, 16) = 0 THEN convert_from(substring(k.latest_text_key FROM 18), 'UTF8') END, d.query_text) AS query_text
+            FROM ranked AS k
+            LEFT JOIN query_text_dim AS d ON d.digest = CASE WHEN get_byte(k.latest_text_key, 16) = 1 THEN substring(k.latest_text_key FROM 18) END
+        ),
+        orphans AS MATERIALIZED (
+            /* #7419: the collector commits a fact row whose text digest has no dimension row (the dimension write follows
+               the facts, and a failed one is not retried), so a pick can carry a digest the dimension cannot resolve.
+               These are the capped rows whose pick did not resolve: a key that has a pick but no text. */
+            SELECT k.database_name, k.query_hash, k.host_object_name
+            FROM ranked AS k
+            JOIN latest_text AS t
+                ON  t.database_name IS NOT DISTINCT FROM k.database_name
+                AND t.query_hash IS NOT DISTINCT FROM k.query_hash
+                AND t.host_object_name IS NOT DISTINCT FROM k.host_object_name
+            WHERE k.latest_text_key IS NOT NULL
+            AND   t.query_text IS NULL
+        ),
+        fallback_text AS MATERIALIZED (
+            /* The lookup latest_text replaced, run for the orphan keys only: the newest row of each whose inline text or
+               dimension row exists, the rule v_query_stats' COALESCE gives. The EXISTS over orphans is an init plan that
+               gates the window scan (a one-time filter in the plan), so with no orphans the window is not read at all;
+               with one, this reads the window for that key's rows, as every read did before #8136. MATERIALIZED for
+               the same reason latest_text is. */
             SELECT
                 l.database_name,
                 l.query_hash,
@@ -1234,14 +1304,15 @@ internal static class DarlingDataReader
                     q.query_text,
                     q.query_text_digest
                 FROM query_stats AS q
-                JOIN winners AS w
-                    ON  COALESCE(q.query_hash, '') = COALESCE(w.win_query_hash, '')
-                    AND q.database_name IS NOT DISTINCT FROM w.win_database_name
-                    AND q.query_hash IS NOT DISTINCT FROM w.win_query_hash
-                    AND q.host_object_name IS NOT DISTINCT FROM w.win_host_object_name
+                JOIN orphans AS o
+                    ON  COALESCE(q.query_hash, '') = COALESCE(o.query_hash, '')
+                    AND q.database_name IS NOT DISTINCT FROM o.database_name
+                    AND q.query_hash IS NOT DISTINCT FROM o.query_hash
+                    AND q.host_object_name IS NOT DISTINCT FROM o.host_object_name
                 WHERE q.server_id = $1
                 AND   q.collection_time >= $2
                 AND   q.collection_time <= $3
+                AND   EXISTS (SELECT 1 FROM orphans)
                 AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
                 ORDER BY q.database_name, q.query_hash, q.host_object_name, q.collection_time DESC, q.collection_id DESC
             ) AS l
@@ -1269,7 +1340,7 @@ internal static class DarlingDataReader
             r.max_worker_time,
             r.min_elapsed_time,
             r.max_elapsed_time,
-            t.query_text,
+            COALESCE(t.query_text, f.query_text) AS query_text,
             r.distinct_texts,
             CAST(1 AS bigint) AS distinct_query_hashes,
             r.last_execution_time,
@@ -1301,7 +1372,11 @@ internal static class DarlingDataReader
             ON  t.database_name IS NOT DISTINCT FROM r.database_name
             AND t.query_hash IS NOT DISTINCT FROM r.query_hash
             AND t.host_object_name IS NOT DISTINCT FROM r.host_object_name
-        WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
+        LEFT JOIN fallback_text AS f
+            ON  f.database_name IS NOT DISTINCT FROM r.database_name
+            AND f.query_hash IS NOT DISTINCT FROM r.query_hash
+            AND f.host_object_name IS NOT DISTINCT FROM r.host_object_name
+        WHERE COALESCE(t.query_text, f.query_text) IS NULL OR COALESCE(t.query_text, f.query_text) NOT LIKE 'WAITFOR%'
         ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST, r.database_name, r.query_hash, r.host_object_name
         LIMIT $4
         )
@@ -1341,7 +1416,7 @@ internal static class DarlingDataReader
     /// <c>query_hash</c> in a rolled-up row is one member of the group, exactly as <c>query_text</c> already
     /// is when <c>distinct_texts &gt; 1</c> — <c>distinct_query_hashes</c> is what says so.</para>
     /// </summary>
-    public const string TopQueriesByHostObjectSql = $"""
+    public static readonly string TopQueriesByHostObjectSql = $"""
         WITH winners AS MATERIALIZED (
             /* #5226 pass 1 of 2: rank every group of the window on NARROW columns. The wide row (forty
                aggregates and the distinct-text count) forces a sort of wide rows when it shares the
@@ -1363,6 +1438,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+           {DatabaseFilter.ExcludeClause("database_name", 8)}
             /*TAG:hash:query_hash*/
             /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
             AND   {TimescaleSupport.IntervalHonestSourceFilter}
@@ -1387,54 +1463,70 @@ internal static class DarlingDataReader
                group matches on (database, host object) and EVERY fragment hash, an ad-hoc group on its own hash
                (NULL host object and NULL hash included). The COALESCE equalities are only the hashable pre-filter
                (see TopQueriesSql); the IS NOT DISTINCT FROM terms make the match exact. */
+            /* #4394 and #8138: the interval filter sits on each measure, not on the pass, so the text pick below sees
+               every row of the group as the lookup it replaced did, a first-sighting, reset or gap row (interval 0)
+               included, while no measure takes such a row into a sum, an extreme, a handle or a count;
+               last_execution_time is an observation and stays over every row. */
             SELECT
                 database_name,
-                MAX(query_hash) AS query_hash,
+                MAX(query_hash) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS query_hash,
                 host_object_name,
-                CAST(SUM(delta_execution_count) AS bigint) AS total_executions,
-                CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
-                CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
-                CAST(SUM(delta_logical_reads) AS bigint) AS total_reads,
-                CAST(SUM(delta_logical_writes) AS bigint) AS total_writes,
-                CAST(SUM(delta_physical_reads) AS bigint) AS total_physical_reads,
-                CAST(SUM(delta_rows) AS bigint) AS total_rows,
-                CAST(SUM(delta_spills) AS bigint) AS total_spills,
-                MIN(min_dop) AS min_dop,
-                MAX(max_dop) AS max_dop,
-                MIN(min_worker_time) AS min_worker_time,
-                MAX(max_worker_time) AS max_worker_time,
-                MIN(min_elapsed_time) AS min_elapsed_time,
-                MAX(max_elapsed_time) AS max_elapsed_time,
-                MAX(query_plan_hash) AS query_plan_hash,
-                MAX(sql_handle) AS sql_handle,
-                MAX(plan_handle) AS plan_handle,
+                CAST(SUM(delta_execution_count) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_executions,
+                CAST(SUM(delta_worker_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_cpu_us,
+                CAST(SUM(delta_elapsed_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_elapsed_us,
+                CAST(SUM(delta_logical_reads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_reads,
+                CAST(SUM(delta_logical_writes) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_writes,
+                CAST(SUM(delta_physical_reads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_physical_reads,
+                CAST(SUM(delta_rows) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_rows,
+                CAST(SUM(delta_spills) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_spills,
+                MIN(min_dop) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_dop,
+                MAX(max_dop) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_dop,
+                MIN(min_worker_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_worker_time,
+                MAX(max_worker_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_worker_time,
+                MIN(min_elapsed_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_elapsed_time,
+                MAX(max_elapsed_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_elapsed_time,
+                MAX(query_plan_hash) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS query_plan_hash,
+                MAX(sql_handle) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS sql_handle,
+                MAX(plan_handle) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS plan_handle,
+                /* An observation, not a measure: the newest time the plan ran, read over every row of the group, a
+                   zero-interval row included, as the Viewer reads it. */
                 MAX(last_execution_time) AS last_execution_time,
-                MAX(creation_time) AS creation_time,
-                MIN(min_physical_reads) AS min_physical_reads,
-                MAX(max_physical_reads) AS max_physical_reads,
-                MIN(min_rows) AS min_rows,
-                MAX(max_rows) AS max_rows,
-                MIN(min_grant_kb) AS min_grant_kb,
-                MAX(max_grant_kb) AS max_grant_kb,
-                MIN(min_used_grant_kb) AS min_used_grant_kb,
-                MAX(max_used_grant_kb) AS max_used_grant_kb,
-                MIN(min_ideal_grant_kb) AS min_ideal_grant_kb,
-                MAX(max_ideal_grant_kb) AS max_ideal_grant_kb,
-                MIN(min_spills) AS min_spills,
-                MAX(max_spills) AS max_spills,
-                MIN(min_reserved_threads) AS min_reserved_threads,
-                MAX(max_reserved_threads) AS max_reserved_threads,
-                MIN(min_used_threads) AS min_used_threads,
-                MAX(max_used_threads) AS max_used_threads,
-                MAX(total_clr_time) AS total_clr_time,
-                MAX(plan_generation_num) AS plan_generation_num,
+                MAX(creation_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS creation_time,
+                MIN(min_physical_reads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_physical_reads,
+                MAX(max_physical_reads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_physical_reads,
+                MIN(min_rows) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_rows,
+                MAX(max_rows) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_rows,
+                MIN(min_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_grant_kb,
+                MAX(max_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_grant_kb,
+                MIN(min_used_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_used_grant_kb,
+                MAX(max_used_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_used_grant_kb,
+                MIN(min_ideal_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_ideal_grant_kb,
+                MAX(max_ideal_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_ideal_grant_kb,
+                MIN(min_spills) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_spills,
+                MAX(max_spills) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_spills,
+                MIN(min_reserved_threads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_reserved_threads,
+                MAX(max_reserved_threads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_reserved_threads,
+                MIN(min_used_threads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_used_threads,
+                MAX(max_used_threads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_used_threads,
+                MAX(total_clr_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS total_clr_time,
+                MAX(plan_generation_num) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS plan_generation_num,
                 MAX(CAST(delta_worker_time AS double precision) / NULLIF(sample_interval_seconds, 0) / 1000.0) AS worker_time_per_second,
-                COUNT(DISTINCT query_text_digest) AS distinct_texts,
+                COUNT(DISTINCT query_text_digest) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS distinct_texts,
                 /* #2235: the fragment count IS the finding — 21 here is why a per-hash ranking missed it. */
-                COUNT(DISTINCT query_hash) AS distinct_query_hashes,
+                COUNT(DISTINCT query_hash) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS distinct_query_hashes,
+                /* #8138: the group's newest text-bearing row, picked in this pass over the winners' rows so latest_text
+                   below is a lookup on the capped rows and not a third read of the window: the same byte-key MAX as
+                   TopQueriesSql's pass 2 (collection time, collection id, then a flag byte and the inline text or the
+                   digest; see its note). This pass groups by the lens's key, so a proc-hosted group's pick is the newest
+                   text of ANY of its fragments and an ad-hoc group's the newest of its own hash. The pick sits inside
+                   this pass's tag filter (#5984), so under a tag it is the newest text of the group's TAGGED fragments,
+                   the rows the row's measures come from; fallback_text below carries the same token. */
+                MAX(timestamp_send(q.collection_time) || int8send(q.collection_id)
+                    || CASE WHEN q.query_text IS NOT NULL THEN '\x00'::bytea || convert_to(q.query_text, 'UTF8') ELSE '\x01'::bytea || q.query_text_digest END)
+                    FILTER (WHERE q.query_text IS NOT NULL OR q.query_text_digest IS NOT NULL) AS latest_text_key,
                 MAX(w.rank_metric) AS rank_metric,
                 MAX(w.rank_cpu) AS rank_cpu
-            FROM query_stats
+            FROM query_stats AS q
             JOIN winners AS w
                 ON  COALESCE(host_object_name, '') = COALESCE(w.win_host_object_name, '')
                 AND COALESCE(CASE WHEN host_object_name IS NULL THEN query_hash END, '') = COALESCE(w.win_group_hash, '')
@@ -1446,14 +1538,45 @@ internal static class DarlingDataReader
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             /*TAG:hash:query_hash*/
-            AND   {TimescaleSupport.IntervalHonestSourceFilter}
             GROUP BY database_name, host_object_name,
                      CASE WHEN host_object_name IS NULL THEN query_hash END
         ),
         latest_text AS MATERIALIZED (
-            /* #5309: one lookup for every ranked group - see TopQueriesSql. The key is the grouping key: a
-               proc-hosted group takes the newest text of ANY of its fragments (host object, no hash), an
-               ad-hoc group the newest text of its OWN hash, exactly the old per-row predicate. */
+            /* #5309, #8138: the representative text of EVERY ranked group, resolved for the capped rows only, as in
+               TopQueriesSql. Pass 2 carries each group's newest text-bearing row (latest_text_key: 8 bytes of time, 8 of
+               collection id, a flag byte at offset 16, then the payload from byte 18), so this reads at most $7 rows and
+               the dimension: the inline text when that row has one (flag 0x00), else its digest (flag 0x01) resolved from
+               query_text_dim. The key is the grouping key: a proc-hosted group carries its host object and a NULL group
+               hash, an ad-hoc group its own hash, so the page's NULL-safe join below finds each. */
+            SELECT
+                k.database_name,
+                k.host_object_name,
+                CASE WHEN k.host_object_name IS NULL THEN k.query_hash END AS group_hash,
+                COALESCE(CASE WHEN get_byte(k.latest_text_key, 16) = 0 THEN convert_from(substring(k.latest_text_key FROM 18), 'UTF8') END, d.query_text) AS query_text
+            FROM ranked AS k
+            LEFT JOIN query_text_dim AS d ON d.digest = CASE WHEN get_byte(k.latest_text_key, 16) = 1 THEN substring(k.latest_text_key FROM 18) END
+        ),
+        orphans AS MATERIALIZED (
+            /* #7419: the collector commits a fact row whose text digest has no dimension row (the dimension write follows
+               the facts, and a failed one is not retried), so a pick can carry a digest the dimension cannot resolve.
+               These are the capped rows whose pick did not resolve: a key that has a pick but no text. */
+            SELECT k.database_name, k.host_object_name, CASE WHEN k.host_object_name IS NULL THEN k.query_hash END AS group_hash
+            FROM ranked AS k
+            JOIN latest_text AS t
+                ON  t.database_name IS NOT DISTINCT FROM k.database_name
+                AND t.host_object_name IS NOT DISTINCT FROM k.host_object_name
+                AND t.group_hash IS NOT DISTINCT FROM CASE WHEN k.host_object_name IS NULL THEN k.query_hash END
+            WHERE k.latest_text_key IS NOT NULL
+            AND   t.query_text IS NULL
+        ),
+        fallback_text AS MATERIALIZED (
+            /* The lookup latest_text replaced, run for the orphan keys only: the newest row of each whose inline text or
+               dimension row exists, the rule v_query_stats' COALESCE gives, keyed as the lens groups (a proc-hosted group
+               takes the newest text of ANY of its fragments). It carries the tag token pass 2 carries, so under a tag it
+               reads the group's tagged fragments only, the rows the pick and the measures read. The EXISTS over orphans is
+               an init plan that gates the window scan (a one-time filter in the plan), so with no orphans the window is not
+               read at all; with one, this reads the window for that key's rows, as every read did before #8138.
+               MATERIALIZED for the same reason latest_text is. */
             SELECT
                 l.database_name,
                 l.host_object_name,
@@ -1468,15 +1591,17 @@ internal static class DarlingDataReader
                     q.query_text,
                     q.query_text_digest
                 FROM query_stats AS q
-                JOIN winners AS w
-                    ON  COALESCE(q.host_object_name, '') = COALESCE(w.win_host_object_name, '')
-                    AND COALESCE(CASE WHEN q.host_object_name IS NULL THEN q.query_hash END, '') = COALESCE(w.win_group_hash, '')
-                    AND q.database_name IS NOT DISTINCT FROM w.win_database_name
-                    AND q.host_object_name IS NOT DISTINCT FROM w.win_host_object_name
-                    AND CASE WHEN q.host_object_name IS NULL THEN q.query_hash END IS NOT DISTINCT FROM w.win_group_hash
+                JOIN orphans AS o
+                    ON  COALESCE(q.host_object_name, '') = COALESCE(o.host_object_name, '')
+                    AND COALESCE(CASE WHEN q.host_object_name IS NULL THEN q.query_hash END, '') = COALESCE(o.group_hash, '')
+                    AND q.database_name IS NOT DISTINCT FROM o.database_name
+                    AND q.host_object_name IS NOT DISTINCT FROM o.host_object_name
+                    AND CASE WHEN q.host_object_name IS NULL THEN q.query_hash END IS NOT DISTINCT FROM o.group_hash
                 WHERE q.server_id = $1
                 AND   q.collection_time >= $2
                 AND   q.collection_time <= $3
+                /*TAG:hash:q.query_hash*/
+                AND   EXISTS (SELECT 1 FROM orphans)
                 AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
                 ORDER BY q.database_name, q.host_object_name, CASE WHEN q.host_object_name IS NULL THEN q.query_hash END, q.collection_time DESC, q.collection_id DESC
             ) AS l
@@ -1504,7 +1629,7 @@ internal static class DarlingDataReader
             r.max_worker_time,
             r.min_elapsed_time,
             r.max_elapsed_time,
-            t.query_text,
+            COALESCE(t.query_text, f.query_text) AS query_text,
             r.distinct_texts,
             r.distinct_query_hashes,
             r.last_execution_time,
@@ -1535,7 +1660,11 @@ internal static class DarlingDataReader
             ON  t.database_name IS NOT DISTINCT FROM r.database_name
             AND t.host_object_name IS NOT DISTINCT FROM r.host_object_name
             AND t.group_hash IS NOT DISTINCT FROM CASE WHEN r.host_object_name IS NULL THEN r.query_hash END
-        WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
+        LEFT JOIN fallback_text AS f
+            ON  f.database_name IS NOT DISTINCT FROM r.database_name
+            AND f.host_object_name IS NOT DISTINCT FROM r.host_object_name
+            AND f.group_hash IS NOT DISTINCT FROM CASE WHEN r.host_object_name IS NULL THEN r.query_hash END
+        WHERE COALESCE(t.query_text, f.query_text) IS NULL OR COALESCE(t.query_text, f.query_text) NOT LIKE 'WAITFOR%'
         ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST, r.database_name, r.host_object_name, r.query_hash
         LIMIT $4
         )
@@ -1579,13 +1708,13 @@ internal static class DarlingDataReader
     /// call time — never a literal relation name. $1 server_id, $2/$3 window (naive UTC; $3 is EXCLUSIVE — a
     /// bucket is stamped at its START, so the bucket that begins at $3 lies after the window and is not read),
     /// $4 top, $5 database
-    /// filter (NULL = all), $6 the candidate limit (#5313: top + 5 first, larger on a refill round), $7 the materialization
-    /// ceiling (naive UTC), bound only when the ceiling is known.
-    /// <c>$CEIL$</c> becomes <c>AND f.bucket &lt; $7</c> or nothing. <c>$IOSUMS$</c> (#5329) is the three reads/writes
+    /// filter (NULL = all), $6 the candidate limit (#5313: top + 5 first, larger on a refill round), $7 the databases to leave out
+    /// (#7725: the ones the server dropped; NULL = none), $8 the materialization ceiling (naive UTC), bound only when the ceiling is known.
+    /// <c>$CEIL$</c> becomes <c>AND f.bucket &lt; $8</c> or nothing. <c>$IOSUMS$</c> (#5329) is the three reads/writes
     /// sums on <c>query_stats_io_hourly</c> and typed NULLs on the stitched relation. <c>min_dop</c> and host-object grouping need columns only raw carries, so
-    /// a read that sets either never reaches this const (it is forced to raw) and it takes no $6 or $7.
+    /// a read that sets either never reaches this const (it is forced to raw) and it takes no $6, $7 or $8.
     /// </summary>
-    public const string TopQueriesHourlySql = """
+    public static readonly string TopQueriesHourlySql = $"""
         WITH ranked AS MATERIALIZED (
             SELECT
                 database_name,
@@ -1602,6 +1731,7 @@ internal static class DarlingDataReader
             AND   bucket >= $2
             AND   bucket < $3$CEIL$
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+           {DatabaseFilter.ExcludeClause("database_name", 7)}
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_hash
             HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
@@ -1936,6 +2066,8 @@ internal static class DarlingDataReader
         AddDatabases(command, databases);
         AddInt(command, minMaxDop);
         AddInt(command, candidates);
+        /* #7725: $8, the databases this ranking leaves out (NULL = none), in the ranking pass of both raw statements. */
+        command.Parameters.Add(databases.ExcludeParameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -2048,7 +2180,7 @@ internal static class DarlingDataReader
         var sql = TopRankings.Apply(TopQueriesHourlySql, ranking, hourly: true, io: io)
             .Replace(TopQueriesHourlyFromPlaceholder, fromClause, StringComparison.Ordinal)
             .Replace(TopQueriesHourlyIoSumsPlaceholder, io ? TopRankings.HourlyIoSums : TopRankings.HourlyNoIoSums, StringComparison.Ordinal)
-            .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(7), StringComparison.Ordinal);
+            .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(8), StringComparison.Ordinal);
         sql = QueryTagReadJoin.Apply(sql, serverId, tags);
 
         var firstBucketTask = coverage.GetHourlyFirstBucketAsync(
@@ -2058,7 +2190,7 @@ internal static class DarlingDataReader
         try
         {
         /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger $6 while more
-           candidates exist, under its bound. $6 is the candidate limit, $7 the ceiling when there is one. */
+           candidates exist, under its bound. $6 is the candidate limit, $7 the databases left out (#7725), $8 the ceiling when there is one. */
         rows = await TopFill.RunAsync(top, async candidates =>
         {
             var page = new List<TopQueryRow>();
@@ -2069,6 +2201,8 @@ internal static class DarlingDataReader
             AddInt(command, top);
             AddDatabases(command, databases);
             AddInt(command, candidates);
+            /* #7725: $7, the databases this ranking leaves out (NULL = none); the ceiling, when there is one, is $8. */
+            command.Parameters.Add(databases.ExcludeParameter());
             if (ceiling is not null)
             {
                 AddTimestamp(command, ceiling.Value);
@@ -2574,9 +2708,10 @@ internal static class DarlingDataReader
     /// Top Query Store groups over the window — a focused projection of the viewer's
     /// <c>QueryStoreTopSql</c> (the columns Lite's get_query_store_top returns): group by
     /// (database, query_id, plan_id, query_hash, execution_type_desc, replica_role), average the per-interval
-    /// metrics, rank by total duration (<c>SUM(execution_count) * AVG(avg_duration_us)</c>) descending,
+    /// metrics weighted by each interval's execution count (#7169, <see cref="QueryStoreWeightedAverage"/>), rank by
+    /// total duration (<c>SUM(avg_duration_us * execution_count)</c>) descending,
     /// over-fetch by 5 for the WAITFOR trim, cap at top. The avg columns are bigint (per-interval averages) →
-    /// double precision before the AVG/scale. Reads the base <c>query_store_stats</c> table (no v_ view).
+    /// double precision before the weighted sum/scale. Reads the base <c>query_store_stats</c> table (no v_ view).
     /// $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database (NULL = all), $6 execution outcome
     /// (NULL = all; Regular, Aborted or Exception otherwise, one row per outcome either way), $7 module_name
     /// (NULL = every module; applied to the deduplicated interval rows, before the ranking and the cap).
@@ -2594,14 +2729,14 @@ internal static class DarlingDataReader
     /// shared with <see cref="QueryStoreTopTableSql"/>, so the two reads cannot drift above <c>ranked</c>.
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top, $5 database, $6 execution outcome.
     /// </summary>
-    private const string QueryStoreTopRawPrefix = """
+    private const string QueryStoreTopRawPrefix = $$"""
         WITH deduped AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
                per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
                cycle as its last_execution_time advances, so the SAME interval (same first_execution_time)
                is stored repeatedly with a growing execution_count. SUM(execution_count) over the raw rows
-               reports 10 + 25 + 40 for an interval that reached 40, and AVG(avg_*) becomes an avg-of-avgs
-               weighted by how many times each interval happened to be re-collected. This surface feeds
+               reports 10 + 25 + 40 for an interval that reached 40, and the execution-weighted
+               averages would count a re-collected interval again at its own execution count. This surface feeds
                BOTH the MCP tool and the REST route, so un-deduped numbers reach an agent's reasoning as
                readily as the web dashboard. Twins the viewer's QueryStoreTopSql.
 
@@ -2617,8 +2752,19 @@ internal static class DarlingDataReader
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+            /* #7814: the window is the interval's own start, the expression the web duration strip's bars are keyed on
+               (get_query_store_duration_trend, #1892), so a window's rows are the intervals its bars draw. It was collection_time,
+               which trails the interval's start by up to its length: an interval collected inside the window but started before it
+               was returned with no bar, and the window's last interval, collected after its end, was missing. Legacy rows have no
+               interval start and keep collection_time. The collection_time bounds below are chunk exclusion, not filters, as in the
+               Viewer's read (#7776): the floor is implied by the predicate (an interval is collected after it starts; the hour is
+               clock-skew slack) and the ceiling is a day of engine-maximum interval plus collector-outage allowance. They keep
+               idx_query_store_stats_time (server_id, collection_time) and the hypertable's chunk pruning; the start predicate is a
+               residual filter on the rows they bring back. */
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
+            AND   collection_time >= $2 - {{QueryStoreIntervalWide.CollectionFloorSlackSql}}
+            AND   collection_time <= $3 + {{QueryStoreIntervalWide.CollectionCeilingSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             /* Filtered HERE, before the ROW_NUMBER, not after it: execution_type_desc is in the partition,
                so dropping the other outcomes first cannot change which row wins any partition, and the window
@@ -2631,8 +2777,11 @@ internal static class DarlingDataReader
     /// The table read's head (#3953): <c>query_store_interval_wide</c> already holds the latest snapshot per
     /// interval — the raw prefix's ROW_NUMBER dedupe above, maintained as the table is written — so this reads
     /// it directly and sets <c>rn</c> to a literal 1 rather than computing a rank. $2 is the gate's <c>ReadStart</c>:
-    /// <c>max(window start, raw's chunk floor)</c> at and above the floor, where raw chunks drop whole and the table
-    /// returns exactly the raw read's own answer, and the exact below-floor start beneath it. $3 is bound the same way
+    /// <c>max(window start, raw's chunk floor)</c> at and above the floor, and the exact below-floor start beneath it.
+    /// The clamp is a <c>collection_time</c>, while the window is placed by the interval's start (#7814), so at the
+    /// clamp itself this read differs from raw's answer by the intervals that started before the floor and were collected
+    /// after it: raw still holds them and this read starts past them. They are the one interval straddling the floor,
+    /// which sits at the edge of what raw retains, so the table read answers for the window from the floor on. $3 is bound the same way
     /// raw's own $3 is (a plain lower bound, never NULL): the MCP surface has no concept of an open/preset end.
     /// $6 is repeated here, before this CTE's own GROUP BY-eligible rows reach <c>ranked</c>, mirroring the raw
     /// prefix's placement — <c>execution_type_desc</c> is a <c>ranked</c> GROUP BY key, not filtered again
@@ -2646,13 +2795,14 @@ internal static class DarlingDataReader
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). A static readonly rather than a const
     /// because the interval literal is derived from that TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.</para>
-    /// <para><b>The upper bound (#5523).</b> <c>first_execution_time &lt;= $3 + </c>
-    /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/> closes the range that
+    /// <para><b>The upper bound (#5523, #7814).</b> <c>first_execution_time &lt;= $3 + </c>
+    /// <see cref="QueryStoreIntervalWide.IntervalStartFirstExecMarginSql"/> closes the range that
     /// <c>ix_query_store_interval_wide_server_first_exec</c> scans. The floor alone ran from the window start to now, so
     /// a window that ended days ago walked every newer row of the server (109,362 blocks a call on a 43-server
-    /// store). The slack is twelve hours. It drops a row only when the monitored server's clock runs more than that ahead of
-    /// the service's, or a collection cycle runs longer than that (<see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>'s
-    /// summary).</para>
+    /// store). The window is placed by the interval's start (<c>COALESCE(interval_start_time_utc, collection_time)</c>,
+    /// #7814), so the margin is the start-placed one the duration trend's arm 1 uses: an interval that starts before $3 can
+    /// hold a first execution up to its own length (a day) after it. It was <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>
+    /// while the window was placed by <c>collection_time</c>.</para>
     /// </summary>
     private static readonly string QueryStoreTopTablePrefix = $$"""
         WITH deduped AS (
@@ -2661,10 +2811,13 @@ internal static class DarlingDataReader
                 1 AS rn
             FROM query_store_interval_wide
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+            /* #7814: placed by the interval's start, as the raw read is (QueryStoreTopRawPrefix). The first_execution_time range
+               below is what ix_query_store_interval_wide_server_first_exec serves; this is a residual filter, and no collection_time
+               bound is added because none could drop a row here (an interval is collected after it starts). */
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             AND   ($6::text IS NULL OR execution_type_desc = $6)
         ),
@@ -2692,7 +2845,7 @@ internal static class DarlingDataReader
     /// before <c>LIMIT $8</c>, the round's candidate limit) — module_name is not a GROUP BY key here (<c>MAX(module_name)</c> is the
     /// aggregate), so it has to filter the deduplicated rows before the GROUP BY rather than after it, and
     /// living in the shared suffix means both the raw and the table CTE inherit that same placement.</summary>
-    private const string QueryStoreTopRankedHead = """
+    private const string QueryStoreTopRankedHead = $$"""
         ranked AS (
             SELECT
                 database_name,
@@ -2710,20 +2863,21 @@ internal static class DarlingDataReader
                    standalone/non-AG server, where every row shares one value. */
                 replica_role,
                 CAST(SUM(execution_count) AS bigint) AS total_executions,
-                AVG(CAST(avg_duration_us AS double precision)) / 1000.0 AS avg_duration_ms,
-                AVG(CAST(avg_cpu_time_us AS double precision)) / 1000.0 AS avg_cpu_time_ms,
-                AVG(CAST(avg_logical_io_reads AS double precision)) AS avg_logical_reads,
-                AVG(CAST(avg_logical_io_writes AS double precision)) AS avg_logical_writes,
-                AVG(CAST(avg_physical_io_reads AS double precision)) AS avg_physical_reads,
-                AVG(CAST(avg_rowcount AS double precision)) AS avg_rowcount,
+                {{QueryStoreWeightedAverage.DurationUs}} / 1000.0 AS avg_duration_ms,
+                {{QueryStoreWeightedAverage.CpuTimeUs}} / 1000.0 AS avg_cpu_time_ms,
+                {{QueryStoreWeightedAverage.LogicalReads}} AS avg_logical_reads,
+                {{QueryStoreWeightedAverage.LogicalWrites}} AS avg_logical_writes,
+                {{QueryStoreWeightedAverage.PhysicalReads}} AS avg_physical_reads,
+                {{QueryStoreWeightedAverage.Rowcount}} AS avg_rowcount,
                 MAX(last_execution_time) AS last_execution_time,
                 MAX(query_plan_hash) AS query_plan_hash
             FROM deduped
             WHERE rn = 1
             AND   ($7::text IS NULL OR module_name = $7)
+            /*SELFKEY:deduped*/
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
-            ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+            ORDER BY {{QueryStoreWeightedAverage.RankByDuration}} DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $8
         ),
 
@@ -2821,7 +2975,7 @@ internal static class DarlingDataReader
         """;
 
     /// <summary><see cref="QueryStoreTopRankedHead"/> + <see cref="QueryStoreTopTail"/>: byte-identical to the single
-    /// string it was before the tail was split off for <see cref="QueryStoreTopDailyTableSql"/> (a test pins its hash).</summary>
+    /// string it was before the tail was split off for <see cref="QueryStoreTopDailyTableSql"/>.</summary>
     private const string QueryStoreTopSuffix = QueryStoreTopRankedHead + QueryStoreTopTail;
 
     /// <summary>
@@ -2835,15 +2989,21 @@ internal static class DarlingDataReader
     /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>, so an edge reads about a day of the server's rows, not
     /// every row newer than it), so a partial first or last day, and any day without a built row, is exact.
     /// <para><b>Every arm is projected as recombinable parts</b>: the execution count, and for each averaged column its
-    /// value as <c>numeric</c> and a 0/1 for "not NULL" (the summary stores the same two things as
-    /// <c>&lt;col&gt;_sum</c> and <c>&lt;col&gt;_n</c>). <c>ranked</c> then groups the unioned rows by the table read's own
-    /// keys and computes <c>SUM(sum) / NULLIF(SUM(n), 0)</c>, which is the table read's unweighted mean of interval
-    /// averages. In the clean case it equals the table read bit for bit: <c>AVG(double precision)</c> of the
-    /// bigint-valued columns is <c>Sx / N</c> with <c>Sx</c> a sum of integers, exact in a double while it stays below
-    /// 2^53; here <c>Sx</c> is an exact <c>numeric</c> sum that is converted to a double once and divided by the same
-    /// <c>N</c>, so both are one correctly rounded division of the same two numbers. $7 filters the unioned rows before
+    /// execution-weighted sum <c>avg * execution_count</c> as <c>numeric</c> (the summary stores the same thing as
+    /// <c>&lt;col&gt;_wsum</c>, V240, #7169). <c>ranked</c> then groups the unioned rows by the table read's own
+    /// keys and computes <c>SUM(wsum) / NULLIF(SUM(ec), 0)</c>, which is the table read's execution-weighted mean of interval
+    /// averages, and ranks on <c>SUM(duration_wsum)</c>, the plan's total duration. In the clean case it equals the table read bit for
+    /// bit: the weighted sum of the bigint-valued columns is a sum of integer products, exact in a double while it stays below
+    /// 2^53; here it is an exact <c>numeric</c> sum that is converted to a double once and divided by the same
+    /// execution total, so both are one correctly rounded division of the same two numbers. $7 filters the unioned rows before
     /// the GROUP BY, where the table read puts it (<c>module_name</c> is part of the summary's key). The text lateral,
     /// the WAITFOR exclusion and the ordering are <see cref="QueryStoreTopTail"/>, shared with the table read.</para>
+    /// <para><b>The window's placement (#7814).</b> The raw read and the interval-table read place a window by the interval's
+    /// start (<c>COALESCE(interval_start_time_utc, collection_time)</c>). This read does not: its two edge arms and the days
+    /// summary stay on <c>collection_time</c> and whole UTC days. A continuous aggregate buckets on the one column it was built
+    /// on and cannot be re-bucketed on the interval start, and this read only runs when the window holds at least one whole
+    /// built UTC day inside <c>[ReadStart, end)</c>, so the offset is at the two outer edges and is under one interval
+    /// (an hour on the default cadence), small beside a window of a day or more.</para>
     /// <para><b>Approximate only through the summary's documented staleness</b>: a row written into a day after that day
     /// was built is missed, and a row whose <c>collection_time</c> moves into the next day is counted twice until the
     /// second pass. Those residuals, and why the summary has them, are in the V161 comment in <c>PgMigrations</c> and
@@ -2855,12 +3015,12 @@ internal static class DarlingDataReader
             SELECT
                 database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name,
                 CAST(execution_count AS numeric) AS ec,
-                CAST(avg_duration_us AS numeric) AS duration_sum, CAST(CAST(avg_duration_us IS NOT NULL AS integer) AS bigint) AS duration_n,
-                CAST(avg_cpu_time_us AS numeric) AS cpu_sum, CAST(CAST(avg_cpu_time_us IS NOT NULL AS integer) AS bigint) AS cpu_n,
-                CAST(avg_logical_io_reads AS numeric) AS reads_sum, CAST(CAST(avg_logical_io_reads IS NOT NULL AS integer) AS bigint) AS reads_n,
-                CAST(avg_logical_io_writes AS numeric) AS writes_sum, CAST(CAST(avg_logical_io_writes IS NOT NULL AS integer) AS bigint) AS writes_n,
-                CAST(avg_physical_io_reads AS numeric) AS physical_sum, CAST(CAST(avg_physical_io_reads IS NOT NULL AS integer) AS bigint) AS physical_n,
-                CAST(avg_rowcount AS numeric) AS rowcount_sum, CAST(CAST(avg_rowcount IS NOT NULL AS integer) AS bigint) AS rowcount_n,
+                CAST(avg_duration_us AS numeric) * execution_count AS duration_wsum,
+                CAST(avg_cpu_time_us AS numeric) * execution_count AS cpu_wsum,
+                CAST(avg_logical_io_reads AS numeric) * execution_count AS reads_wsum,
+                CAST(avg_logical_io_writes AS numeric) * execution_count AS writes_wsum,
+                CAST(avg_physical_io_reads AS numeric) * execution_count AS physical_wsum,
+                CAST(avg_rowcount AS numeric) * execution_count AS rowcount_wsum,
                 last_execution_time, query_plan_hash
             FROM query_store_interval_wide
             WHERE server_id = $1
@@ -2874,12 +3034,12 @@ internal static class DarlingDataReader
             SELECT
                 database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name,
                 CAST(execution_count AS numeric) AS ec,
-                CAST(avg_duration_us AS numeric), CAST(CAST(avg_duration_us IS NOT NULL AS integer) AS bigint),
-                CAST(avg_cpu_time_us AS numeric), CAST(CAST(avg_cpu_time_us IS NOT NULL AS integer) AS bigint),
-                CAST(avg_logical_io_reads AS numeric), CAST(CAST(avg_logical_io_reads IS NOT NULL AS integer) AS bigint),
-                CAST(avg_logical_io_writes AS numeric), CAST(CAST(avg_logical_io_writes IS NOT NULL AS integer) AS bigint),
-                CAST(avg_physical_io_reads AS numeric), CAST(CAST(avg_physical_io_reads IS NOT NULL AS integer) AS bigint),
-                CAST(avg_rowcount AS numeric), CAST(CAST(avg_rowcount IS NOT NULL AS integer) AS bigint),
+                CAST(avg_duration_us AS numeric) * execution_count,
+                CAST(avg_cpu_time_us AS numeric) * execution_count,
+                CAST(avg_logical_io_reads AS numeric) * execution_count,
+                CAST(avg_logical_io_writes AS numeric) * execution_count,
+                CAST(avg_physical_io_reads AS numeric) * execution_count,
+                CAST(avg_rowcount AS numeric) * execution_count,
                 last_execution_time, query_plan_hash
             FROM query_store_interval_wide
             WHERE server_id = $1
@@ -2893,12 +3053,12 @@ internal static class DarlingDataReader
             SELECT
                 database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name,
                 execution_count_sum,
-                avg_duration_us_sum, avg_duration_us_n,
-                avg_cpu_time_us_sum, avg_cpu_time_us_n,
-                avg_logical_io_reads_sum, avg_logical_io_reads_n,
-                avg_logical_io_writes_sum, avg_logical_io_writes_n,
-                avg_physical_io_reads_sum, avg_physical_io_reads_n,
-                avg_rowcount_sum, avg_rowcount_n,
+                avg_duration_us_wsum,
+                avg_cpu_time_us_wsum,
+                avg_logical_io_reads_wsum,
+                avg_logical_io_writes_wsum,
+                avg_physical_io_reads_wsum,
+                avg_rowcount_wsum,
                 last_execution_time_max, query_plan_hash_max
             FROM query_store_top_daily
             WHERE server_id = $1
@@ -2917,32 +3077,42 @@ internal static class DarlingDataReader
                 MAX(module_name) AS module_name,
                 replica_role,
                 CAST(SUM(ec) AS bigint) AS total_executions,
-                CAST(SUM(duration_sum) AS double precision) / NULLIF(SUM(duration_n), 0) / 1000.0 AS avg_duration_ms,
-                CAST(SUM(cpu_sum) AS double precision) / NULLIF(SUM(cpu_n), 0) / 1000.0 AS avg_cpu_time_ms,
-                CAST(SUM(reads_sum) AS double precision) / NULLIF(SUM(reads_n), 0) AS avg_logical_reads,
-                CAST(SUM(writes_sum) AS double precision) / NULLIF(SUM(writes_n), 0) AS avg_logical_writes,
-                CAST(SUM(physical_sum) AS double precision) / NULLIF(SUM(physical_n), 0) AS avg_physical_reads,
-                CAST(SUM(rowcount_sum) AS double precision) / NULLIF(SUM(rowcount_n), 0) AS avg_rowcount,
+                CAST(SUM(duration_wsum) AS double precision) / NULLIF(SUM(ec), 0) / 1000.0 AS avg_duration_ms,
+                CAST(SUM(cpu_wsum) AS double precision) / NULLIF(SUM(ec), 0) / 1000.0 AS avg_cpu_time_ms,
+                CAST(SUM(reads_wsum) AS double precision) / NULLIF(SUM(ec), 0) AS avg_logical_reads,
+                CAST(SUM(writes_wsum) AS double precision) / NULLIF(SUM(ec), 0) AS avg_logical_writes,
+                CAST(SUM(physical_wsum) AS double precision) / NULLIF(SUM(ec), 0) AS avg_physical_reads,
+                CAST(SUM(rowcount_wsum) AS double precision) / NULLIF(SUM(ec), 0) AS avg_rowcount,
                 MAX(last_execution_time) AS last_execution_time,
                 MAX(query_plan_hash) AS query_plan_hash
             FROM parts
             WHERE ($7::text IS NULL OR module_name = $7)
+            /*SELFKEY:parts*/
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
-            ORDER BY SUM(ec) * (CAST(SUM(duration_sum) AS double precision) / NULLIF(SUM(duration_n), 0)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+            ORDER BY CAST(SUM(duration_wsum) AS double precision) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $10
         ),
 
         """ + QueryStoreTopTail;
 
-    /// <summary>The days of <c>[$2, $3)</c> that have a built summary row for server $1. $2 and $3 are dates.</summary>
+    /// <summary>
+    /// The days of <c>[$2, $3)</c> that have a built summary row for server $1 AND were built by a V240-or-newer builder
+    /// (#7169, <see cref="QueryStoreTopDaily.DayIsWeightedSql"/>). A day built before V240 has NULL weighted sums, which would
+    /// sum to a wrong average beside a non-NULL execution count, so it counts as not built and is read from the wide table until
+    /// the service rebuilds it. $2 and $3 are dates. The weighted test reads one probe row for each day, not every row of the day
+    /// (#7379), so a long window over days built before V240 does not read the wide summary.
+    /// </summary>
     private const string QueryStoreTopBuiltDaysSql = """
-        SELECT day
-        FROM query_store_top_daily_built
-        WHERE server_id = $1
-        AND   day >= $2::date
-        AND   day < $3::date
-        ORDER BY day
+        SELECT b.day
+        FROM query_store_top_daily_built AS b
+        WHERE b.server_id = $1
+        AND   b.day >= $2::date
+        AND   b.day < $3::date
+        AND   
+        """ + QueryStoreTopDaily.DayIsWeightedSql + """
+
+        ORDER BY b.day
         """;
 
     /// <summary>
@@ -3106,9 +3276,18 @@ internal static class DarlingDataReader
            re-read the window; the tail looks up text only until the page is full, so the answer and the lookups
            are the rounds' own (TopFill.FinalCandidates). */
         List<QueryStoreRow> rows;
-        await using (var command = postgres.CreateCommand(QueryTagReadJoin.Apply(QueryStoreTopSql, serverId, tags)))
+        /* #7736: the monitor's own statements leave ranked before its candidate limit once the key backfill has run, so the gate and
+           the read are one snapshot: one read-only REPEATABLE READ transaction, as the interval-table read below runs in. */
+        await using (var connection = await postgres.OpenConnectionAsync(cancellationToken))
+        await using (var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken))
         {
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await using (var readOnly = new NpgsqlCommand(SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var rawSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, QueryTagReadJoin.Apply(QueryStoreTopSql, serverId, tags), cancellationToken);
+            await using var command = new NpgsqlCommand(rawSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
             AddWindow(command, serverId, startUtc, endUtc);
             AddInt(command, top);
             AddDatabases(command, databases);
@@ -3123,6 +3302,14 @@ internal static class DarlingDataReader
         ReadScope.NoteRows(rows.Count);
         return new QueryStoreTopRead(rows, null);
     }
+
+    /// <summary>#7736: <paramref name="sql"/> with the self-statement test on the key table in <c>ranked</c>, ahead of its candidate limit,
+    /// once its backfill has run (<see cref="QueryStoreSelfKeys.ReadyAsync"/>, read in this read's snapshot), else as it is: the
+    /// tail's text test still removes the monitor's own statements from a store the backfill has not reached.</summary>
+    private static async Task<string> WithSelfKeysBeforeCandidateLimitAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, CancellationToken cancellationToken) =>
+        await QueryStoreSelfKeys.ReadyAsync(connection, transaction, McpCommandDeadlines.ReadSeconds, cancellationToken)
+            ? QueryStoreSelfStatement.WithRankedKeyTest(sql)
+            : sql;
 
     /// <summary>The transaction's own read-only statement (#3953). Named, not inline, so this store-only
     /// construction keeps the receiver shape <c>McpReadCommandTimeoutTests</c>' census recognizes: a
@@ -3220,6 +3407,9 @@ internal static class DarlingDataReader
             /* #5984: the query tag filter, ahead of the ranking and the cap. */
             topSql = QueryTagReadJoin.Apply(topSql, serverId, tags);
 
+            /* #7736: the monitor's own statements leave ranked before its candidate limit, once the key backfill has run. */
+            topSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, topSql, cancellationToken);
+
             /* #5313: the same candidate limit as the raw read, bound LAST ($8 on the interval table read, $10 on the
                daily read, after its two dates). #5815: one run at TopFill's final limit; each fill round used to
                re-read the server's whole window from the wide table. */
@@ -3295,7 +3485,10 @@ internal static class DarlingDataReader
         """;
 
     /// <summary>
-    /// Every enabled server plus its newest collection instant — the list_servers read. Drives the
+    /// Every enabled server plus its newest successful collection instant — the list_servers read. #8464: only a
+    /// <c>SUCCESS</c> row counts (<see cref="CollectionRunSql.SuccessfulCollectorRun"/>). Every attempt writes a row, a
+    /// failed one included, so a read over every row moved a dark server's <c>last_collection</c> forward on each failed
+    /// attempt, and the freshness-derived status with it. Drives the
     /// freshness-derived status the tool assigns (the headless viewer has no live ping either — see
     /// <c>ServerSummaryItem.ClassifyFreshness</c>). <c>created_date</c> rides on the same registry row for the
     /// retention rule <see cref="ServerListRow"/> describes (#3967). $-free (no parameters, no bare now()) so a
@@ -3335,7 +3528,10 @@ internal static class DarlingDataReader
             s.created_date,
             s.sql_engine_edition,
             {SameMachineAsColumnSql},
-            COALESCE(c.monthly_cost_usd, 0) AS monthly_cost_usd
+            COALESCE(c.monthly_cost_usd, 0) AS monthly_cost_usd,
+            {ConnectDownSinceSql.Healed} AS connect_down_since,
+            s.last_connect_error,
+            {CollectionAttemptSql.Attempted} AS attempted
         FROM servers s
         JOIN config.config_monitored_servers c ON c.server_id = s.server_id
         LEFT JOIN LATERAL
@@ -3343,7 +3539,7 @@ internal static class DarlingDataReader
             SELECT cl.collection_time
             FROM v_collection_log cl
             WHERE cl.server_id = s.server_id
-            AND   {CollectionCycleRow.NotCycleRowSql}
+            AND   {CollectionRunSql.SuccessfulCollectorRun}
             ORDER BY cl.collection_time DESC
             LIMIT 1
         ) AS latest ON TRUE
@@ -3371,7 +3567,10 @@ internal static class DarlingDataReader
                 reader.IsDBNull(7) ? null : reader.GetDateTime(7),
                 reader.IsDBNull(8) ? null : reader.GetInt32(8),
                 reader.IsDBNull(9) ? null : reader.GetFieldValue<string[]>(9),
-                reader.GetDecimal(10)));
+                reader.GetDecimal(10),
+                reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+                reader.IsDBNull(12) ? null : reader.GetString(12),
+                reader.GetBoolean(13)));
         }
 
         return rows;
@@ -3767,7 +3966,7 @@ LIMIT 1";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ReadScope.Warn($"#6254 collection health could not read the Query Store read source for server {serverId}; it is shown without one", ex);
+            ReadScope.Warn($"Collection health could not read the Query Store read source for server {serverId}, so it is shown without one. The cause is logged with this entry.", ex);
             return new Dictionary<string, string>(StringComparer.Ordinal);
         }
 
@@ -3785,7 +3984,7 @@ LIMIT 1";
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, windowStartUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new CollectorHealth
@@ -3841,6 +4040,11 @@ LIMIT 1";
         }
 
         ApplyScheduledFrequencies(rows, serverId, scheduleOverrides);
+
+        /* #7242: the activity quiet bar is observed time, which the ranked subquery's run count cannot give: the gaps between the
+           streak's runs, read for just the rows the bar decides, after the health reader has closed (one connection at a time). */
+        await DarlingFleetReader.ApplyObservedQuietRunsAsync(
+            postgres, rows.Select(r => (serverId, r)).ToList(), windowStartUtc, DateTime.UtcNow, cancellationToken);
         return rows;
     }
 
@@ -3898,7 +4102,7 @@ FROM config.config_collector_schedules";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ReadScope.Warn($"#4999 collection health could not read the collector schedule overrides for server {serverId}; its collectors are judged by their shipped cadences", ex);
+            ReadScope.Warn($"Collection health could not read the collector schedule overrides for server {serverId}, so its collectors are judged by their shipped cadences. The cause is logged with this entry.", ex);
             return Array.Empty<ScheduleOverride>();
         }
 
@@ -4439,6 +4643,61 @@ FROM config.config_collector_schedules";
     }
 
     /// <summary>
+    /// #8571: whether one collector has EVER recorded a run for this server, ignoring any window. An event-list tool that finds no rows
+    /// asks it to tell a collector that never ran (not_collected, with the enable step) from one that ran and found nothing (empty).
+    /// LIMIT 1 on <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>, so it stops at the first row.
+    /// </summary>
+    public const string CollectorEverRanSql = """
+        SELECT 1
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collector_name = $2
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="CollectorEverRanSql"/>.</summary>
+    public static async Task<bool> CollectorEverRanAsync(
+        NpgsqlDataSource postgres, int serverId, string collectorName, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(CollectorEverRanSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddNullableText(command, collectorName);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    /// <summary>
+    /// #8571: the number of log rows that match <see cref="GetCollectionLogAsync"/>'s filters in the window, uncapped, for the page's
+    /// <c>runs_total</c>. Asked only when the over-fetch saw more rows than the limit, so a page that holds everything never pays for it.
+    /// </summary>
+    public const string CollectionLogCountSql = """
+        SELECT COUNT(*)
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   ($4::text IS NULL OR collector_name = $4::text)
+        AND   ($5::double precision IS NULL OR duration_ms >= $5::double precision)
+        AND   ($6::text IS NULL OR status = UPPER($6::text))
+        """;
+
+    /// <summary>Runs <see cref="CollectionLogCountSql"/>.</summary>
+    public static async Task<long> CountCollectionLogAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime windowStartUtc, DateTime windowEndUtc,
+        string? collectorName, double? minDurationMs, string? status, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(CollectionLogCountSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddTimestamp(command, windowStartUtc);
+        AddTimestamp(command, windowEndUtc);
+        AddNullableText(command, string.IsNullOrWhiteSpace(collectorName) ? null : collectorName.Trim());
+        AddNullableDouble(command, minDurationMs);
+        AddNullableText(command, string.IsNullOrWhiteSpace(status) ? null : status.Trim());
+        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
     /// Runs <see cref="CollectionLogSql"/>, or <see cref="CollectionLogSlowestFirstSql"/> when
     /// <paramref name="minDurationMs"/> is supplied. See <see cref="CollectionLogBody"/> for the window and
     /// filter semantics.
@@ -4616,6 +4875,38 @@ FROM config.config_collector_schedules";
         LIMIT $3
         """;
 
+    /// <summary>
+    /// #8571: the fleet twin of <see cref="CollectionLogCountSql"/>: the log rows that match <see cref="CollectionLogFleetBody"/>'s
+    /// filters in the window across the same enabled servers (the same <c>servers</c> join), uncapped, for the fleet page's
+    /// <c>runs_total</c>. Asked only when the over-fetch saw more rows than the limit. $1 window start, $2 window end, $3 collector
+    /// name or NULL, $4 duration floor or NULL, $5 status or NULL.
+    /// </summary>
+    public const string CollectionLogFleetCountSql = """
+        SELECT COUNT(*)
+        FROM v_collection_log cl
+        JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
+        WHERE cl.collection_time >= $1
+        AND   cl.collection_time <= $2
+        AND   ($3::text IS NULL OR cl.collector_name = $3::text)
+        AND   ($4::double precision IS NULL OR cl.duration_ms >= $4::double precision)
+        AND   ($5::text IS NULL OR cl.status = UPPER($5::text))
+        """;
+
+    /// <summary>Runs <see cref="CollectionLogFleetCountSql"/>.</summary>
+    public static async Task<long> CountCollectionLogFleetAsync(
+        NpgsqlDataSource postgres, DateTime windowStartUtc, DateTime windowEndUtc,
+        string? collectorName, double? minDurationMs, string? status, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(CollectionLogFleetCountSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddTimestamp(command, windowStartUtc);
+        AddTimestamp(command, windowEndUtc);
+        AddNullableText(command, string.IsNullOrWhiteSpace(collectorName) ? null : collectorName.Trim());
+        AddNullableDouble(command, minDurationMs);
+        AddNullableText(command, string.IsNullOrWhiteSpace(status) ? null : status.Trim());
+        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
     /// <summary>Whether ANY enabled server has EVER recorded a collector run — the fleet-wide
     /// <see cref="HasAnyCollectionLogSql"/>, used the same way: to tell a genuinely quiet fleet-wide window
     /// from a fleet that has never once collected (every server newly added, or the service never started).
@@ -4676,27 +4967,81 @@ FROM config.config_collector_schedules";
     }
 
     /// <summary>
-    /// Waiting-task total wait duration per wait type per collection, for one server over an explicit
-    /// window. The viewer's Current Waits reader verbatim. Grouped on <c>rtrim(wait_type)</c>, so a wait stored
-    /// with and without the trailing space the collector trimmed from #4884 on is one series under the clean name.
-    /// $1 server_id, $2 start, $3 end (naive UTC).
+    /// Waiting-task total wait duration per wait type, bucketed (#7877, #7904, #7974). The inner CTE keeps the per-collection total
+    /// exactly as the un-bucketed read computed it (the wait type's summed duration in ONE collection); the outer read averages those
+    /// per-collection totals over EVERY collection that ran in the bucket, a collection in which the wait type was absent counting as 0, so
+    /// a wait type present in 1 of 60 collections reads 1/60 of one present in all 60. The run count M is the bucket's SUCCESS runs of the
+    /// <c>waiting_tasks</c> collector in <c>v_collection_log</c> (a collector that ran and found nothing waiting writes no row but does log
+    /// a run); where the log holds fewer runs than the series has rows (a log older than the data, a run stamped a moment into the next
+    /// bucket) M is the rows' own count, so a mean is never taken over fewer collections than it was seen in. The largest single collection
+    /// is the peak and <c>collection_count</c> is M. Grouped on <c>rtrim(wait_type)</c>, so a wait stored with and without the
+    /// trailing space the collector trimmed from #4884 on is one series under the clean name.
+    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket width minutes. The first bucket is clamped to $2.
     /// </summary>
-    public const string WaitingTaskTrendSql = """
+    public const string WaitingTaskTrendSql = $$"""
+        WITH per_collection AS
+        (
+            SELECT
+                collection_time,
+                rtrim(wait_type) AS wait_type,
+                CAST(SUM(wait_duration_ms) AS bigint) AS total_wait_ms
+            FROM waiting_tasks
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   wait_type IS NOT NULL
+            GROUP BY
+                collection_time,
+                rtrim(wait_type)
+        ),
+        bucketed AS
+        (
+            SELECT
+                GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                wait_type,
+                SUM(total_wait_ms) AS sum_wait_ms,
+                MAX(total_wait_ms) AS peak_wait_ms,
+                COUNT(*) AS present_count
+            FROM per_collection
+            GROUP BY
+                1, wait_type
+        ),
+        runs AS
+        (
+            SELECT
+                GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                COUNT(*) AS run_count
+            FROM v_collection_log
+            WHERE server_id = $1
+            AND   collector_name = 'waiting_tasks'
+            AND   status = 'SUCCESS'
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            GROUP BY
+                1
+        )
         SELECT
-            collection_time,
-            rtrim(wait_type) AS wait_type,
-            CAST(SUM(wait_duration_ms) AS bigint) AS total_wait_ms
+            b.bucket_start,
+            b.wait_type,
+            CAST(ROUND(b.sum_wait_ms / GREATEST(COALESCE(r.run_count, 0), b.present_count)) AS bigint) AS avg_wait_ms,
+            b.peak_wait_ms,
+            CAST(GREATEST(COALESCE(r.run_count, 0), b.present_count) AS bigint) AS collection_count
+        FROM bucketed AS b
+        LEFT JOIN runs AS r
+            ON r.bucket_start = b.bucket_start
+        ORDER BY
+            b.bucket_start, b.wait_type
+        """;
+
+    /// <summary>How many wait types the window holds: the series count the bucket width is sized for (#7904). Same filters as <see cref="WaitingTaskTrendSql"/>.
+    /// $1 server_id, $2 start, $3 end (naive UTC).</summary>
+    public const string WaitingTaskSeriesCountSql = """
+        SELECT COUNT(DISTINCT rtrim(wait_type))
         FROM waiting_tasks
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
-        GROUP BY
-            collection_time,
-            rtrim(wait_type)
-        ORDER BY
-            collection_time,
-            rtrim(wait_type)
         """;
 
     /// <summary>
@@ -4722,24 +5067,39 @@ FROM config.config_collector_schedules";
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
 
-    /// <summary>Runs <see cref="WaitingTaskTrendSql"/>.</summary>
-    public static async Task<List<WaitingTaskTrendRow>> GetWaitingTaskTrendAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+    /// <summary>Runs <see cref="WaitingTaskSeriesCountSql"/>.</summary>
+    public static async Task<int> CountWaitingTaskSeriesAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(WaitingTaskSeriesCountSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken) ?? 0);
+    }
+
+    /// <summary>Runs <see cref="WaitingTaskTrendSql"/> at <paramref name="bucketMinutes"/>.</summary>
+    public static async Task<List<CurrentWaitsWaitPoint>> GetWaitingTaskTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int bucketMinutes,
         CancellationToken cancellationToken = default)
     {
-        var rows = new List<WaitingTaskTrendRow>();
+        var rows = new List<CurrentWaitsWaitPoint>();
         await using var command = postgres.CreateCommand(WaitingTaskTrendSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
+        AddInt(command, bucketMinutes);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new WaitingTaskTrendRow(
+            rows.Add(new CurrentWaitsWaitPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
-                reader.IsDBNull(2) ? 0 : reader.GetInt64(2)));
+                reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                reader.GetInt64(4)));
         }
 
         return rows;
@@ -4747,62 +5107,131 @@ FROM config.config_collector_schedules";
 
     /// <summary>
     /// Blocked-session count per database per collection, for one server over an explicit window.
-    /// <para>blocking_session_id > 0 is the blocked-ness test, so this counts sessions WAITING ON another
-    /// session rather than every waiting task. The optional database filter is kept from the viewer's read
+    /// <para>A session is blocked when a waiting task of it has <c>blocking_session_id > 0</c> AND
+    /// <c>blocking_session_id &lt;> session_id</c>: a parallel query's exchange threads wait on their OWN session
+    /// (<c>intra_query_parallelism</c>), which is not blocking (#7577). The count is DISTINCT sessions, not tasks, so a
+    /// session with several blocked threads is one blocked session. The optional database filter is kept from the viewer's read
     /// rather than dropped for a simpler signature: on a busy instance one database usually owns the
     /// blocking, and a series that cannot be narrowed to it answers a different question from the one the
     /// viewer answers. $1 server_id, $2 start, $3 end (naive UTC), $4 the databases as one <c>text[]</c> (#5244): SQL NULL
     /// is every database, otherwise the series is limited to the named ones (<see cref="DatabaseFilter.Clause"/>, so one name
     /// and several are the same statement text).</para>
+    /// <para>#7974: bucketed, the figure is the database's blocked sessions summed over the bucket and divided by EVERY collection that ran
+    /// in it (a collection with nothing blocked for the database counts 0), by the same run count <see cref="WaitingTaskTrendSql"/> uses
+    /// and with the same floor. $5 is the bucket width in minutes.</para>
     /// </summary>
     public static readonly string BlockedSessionTrendSql = $$"""
+        WITH per_collection AS
+        (
+            SELECT
+                collection_time,
+                database_name,
+                COUNT(DISTINCT session_id) AS blocked_count
+            FROM waiting_tasks
+            WHERE server_id = $1
+            AND   blocking_session_id > 0
+            AND   blocking_session_id <> session_id
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   database_name IS NOT NULL
+            {{DatabaseFilter.All.Clause("database_name", 4)}}
+            GROUP BY
+                collection_time,
+                database_name
+        ),
+        bucketed AS
+        (
+            SELECT
+                GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                database_name,
+                SUM(blocked_count) AS sum_blocked_count,
+                MAX(blocked_count) AS peak_blocked_count,
+                COUNT(*) AS present_count
+            FROM per_collection
+            GROUP BY
+                1, database_name
+        ),
+        runs AS
+        (
+            SELECT
+                GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                COUNT(*) AS run_count
+            FROM v_collection_log
+            WHERE server_id = $1
+            AND   collector_name = 'waiting_tasks'
+            AND   status = 'SUCCESS'
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            GROUP BY
+                1
+        )
         SELECT
-            collection_time,
-            database_name,
-            COUNT(*) AS blocked_count
+            b.bucket_start,
+            b.database_name,
+            CAST(b.sum_blocked_count AS double precision) / GREATEST(COALESCE(r.run_count, 0), b.present_count) AS avg_blocked_count,
+            b.peak_blocked_count,
+            CAST(GREATEST(COALESCE(r.run_count, 0), b.present_count) AS bigint) AS collection_count
+        FROM bucketed AS b
+        LEFT JOIN runs AS r
+            ON r.bucket_start = b.bucket_start
+        ORDER BY
+            b.bucket_start, b.database_name
+        """;
+
+    /// <summary>How many databases have blocked sessions in the window under the same filter: the blocked series' share of the series count the
+    /// bucket width is sized for (#7904). $1 server_id, $2 start, $3 end (naive UTC), $4 the databases.</summary>
+    public static readonly string BlockedSessionSeriesCountSql = $$"""
+        SELECT COUNT(DISTINCT database_name)
         FROM waiting_tasks
         WHERE server_id = $1
         AND   blocking_session_id > 0
+        AND   blocking_session_id <> session_id
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   database_name IS NOT NULL
         {{DatabaseFilter.All.Clause("database_name", 4)}}
-        GROUP BY
-            collection_time,
-            database_name
-        ORDER BY
-            collection_time,
-            database_name
         """;
 
-    /// <summary>Runs <see cref="BlockedSessionTrendSql"/> for one database (a blank name is every database).</summary>
-    public static Task<List<BlockedSessionTrendRow>> GetBlockedSessionTrendAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        string? databaseName = null, CancellationToken cancellationToken = default) =>
-        GetBlockedSessionTrendAsync(postgres, serverId, startUtc, endUtc, DatabaseFilter.One(databaseName), cancellationToken);
+    /// <summary>Runs <see cref="BlockedSessionSeriesCountSql"/>.</summary>
+    public static async Task<int> CountBlockedSessionSeriesAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DatabaseFilter databases,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(BlockedSessionSeriesCountSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        AddDatabases(command, databases);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken) ?? 0);
+    }
 
     /// <summary>
     /// <see cref="BlockedSessionTrendSql"/> over a SET of databases (#5244): <paramref name="databases"/> empty
-    /// (<see cref="DatabaseFilter.All"/>) is every database, otherwise only the named databases' blocked sessions are counted.
+    /// (<see cref="DatabaseFilter.All"/>) is every database, otherwise only the named databases' blocked sessions are counted,
+    /// bucketed to <paramref name="bucketMinutes"/> (#7877, #7904).
     /// </summary>
-    public static async Task<List<BlockedSessionTrendRow>> GetBlockedSessionTrendAsync(
+    public static async Task<List<CurrentWaitsBlockedPoint>> GetBlockedSessionTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        DatabaseFilter databases, CancellationToken cancellationToken = default)
+        DatabaseFilter databases, int bucketMinutes, CancellationToken cancellationToken = default)
     {
-        var rows = new List<BlockedSessionTrendRow>();
+        var rows = new List<CurrentWaitsBlockedPoint>();
         await using var command = postgres.CreateCommand(BlockedSessionTrendSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
         AddDatabases(command, databases);
+        AddInt(command, bucketMinutes);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new BlockedSessionTrendRow(
+            rows.Add(new CurrentWaitsBlockedPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
-                reader.IsDBNull(2) ? 0 : reader.GetInt64(2)));
+                reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
+                reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                reader.GetInt64(4)));
         }
 
         return rows;
@@ -4866,34 +5295,6 @@ FROM config.config_collector_schedules";
     /// <param name="Source">Which arm answered (#5244): "blocked-process-report" or "DMV snapshot", the tags <c>get_blocking</c> rows carry.</param>
     public sealed record BlockingDurationStatsRow(
         DateTime Time, long EventCount, long TotalDurationMs, long MaxDurationMs, double AvgDurationMs, string? Source = null);
-
-    /// <summary>
-    /// Whether ANY of the three capture paths behind the blocking-severity read has ever produced a row.
-    /// <para>Each can be off independently: the XE blocked-process report needs its session running, the
-    /// DMV snapshot needs its collector enabled, and deadlock capture is separate from both. Probing one
-    /// would report "never captured" for a server capturing fine through another; probing neither would
-    /// let a silent capture gap read as a clean bill of health.</para>
-    /// <para>Deadlocks are in here because the verdict gates on the blocking series AND the deadlock
-    /// series both being empty. Probing only the two blocking sources would call a server 'genuinely
-    /// clear' on the strength of blocking capture alone, while deadlock capture had never run -- the
-    /// reassuring-wrong answer this probe exists to prevent, missed for the deadlock half.</para>
-    /// </summary>
-    public const string HasAnyBlockingCaptureSql = """
-        SELECT 1
-        WHERE EXISTS (SELECT 1 FROM v_blocked_process_reports WHERE server_id = $1)
-        OR    EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1)
-        OR    EXISTS (SELECT 1 FROM v_deadlocks WHERE server_id = $1)
-        """;
-
-    /// <summary>Runs <see cref="HasAnyBlockingCaptureSql"/>.</summary>
-    public static async Task<bool> HasAnyBlockingCaptureAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
-    {
-        await using var command = postgres.CreateCommand(HasAnyBlockingCaptureSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddInt(command, serverId);
-        return await command.ExecuteScalarAsync(cancellationToken) is not null;
-    }
 
     /// <summary>Runs <see cref="BlockingDurationStatsSql"/> over every database.</summary>
     public static Task<List<BlockingDurationStatsRow>> GetBlockingDurationStatsAsync(
@@ -5151,6 +5552,20 @@ internal sealed class CollectorHealth
     public long TrailingZeroRowSuccessRuns { get; set; }
 
     /// <summary>
+    /// #7242: the newest run that was NOT a zero-row SUCCESS (<c>last_zero_row_streak_break_time</c>), the instant the quiet streak
+    /// began after. Set by the fleet read only, where it is the lower bound of the exact run count taken for an activity collector
+    /// whose last productive run is older than the quiet bar (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>).
+    /// </summary>
+    internal DateTime? LastZeroRowStreakBreakTime { get; set; }
+
+    /// <summary>
+    /// #7242: the gaps between the runs of the trailing zero-row streak, set for the rows the activity quiet bar turns on
+    /// (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>) and null for every other. The observed quiet time the bar is
+    /// measured in is read off it at the cadence this row is banded against, so a schedule edit changes it without another read.
+    /// </summary>
+    internal ObservedQuietGaps? ObservedQuietGaps { get; set; }
+
+    /// <summary>
     /// Whether this collector WAS producing rows and is now recording SUCCESS with zero rows every cycle
     /// (#3885) — the regression class whose status word is the most reassuring one the vocabulary has,
     /// which is why nothing on any health surface could see it. Event collectors and on-load collectors
@@ -5158,7 +5573,8 @@ internal sealed class CollectorHealth
     /// stays HEALTHY.
     /// </summary>
     public bool ProducedThenStopped => CollectorHealthClassifier.ProducedThenStopped(
-        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime);
+        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime, FrequencyMinutes,
+        ObservedQuietGaps?.Minutes(FrequencyMinutes));
 
     /// <summary>
     /// The sentence a produced-then-stopped collector carries, or null when it is not one (#3885).

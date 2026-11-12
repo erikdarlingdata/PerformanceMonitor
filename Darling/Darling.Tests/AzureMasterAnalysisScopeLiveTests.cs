@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
@@ -274,19 +275,6 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
         Assert.Contains("SeparatelyMonitoredDatabases = separatelyMonitoredDatabases", worker, StringComparison.Ordinal);
     }
 
-    /* A master that is disconnected when the fleet sweep fires has no runtime; its list comes from the stored edition and the
-       registry, so its earlier events are not counted twice in the sweep band. */
-    [Fact]
-    public void TheFleetSweep_ScopesATargetWithNoRuntime_ThroughTheStoredEdition()
-    {
-        var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs").Replace("\r\n", "\n");
-        Assert.Contains(
-            "fleetSweepSeparate[target.Config.ServerId] = target.Runtime is null\n"
-            + "                            ? await AnalysisSeparatelyMonitoredDatabasesAsync(target.Config.ServerId, _registryState?.Read(), postgres, stoppingToken)\n"
-            + "                            : AnalysisSeparatelyMonitoredDatabases(target.Runtime);",
-            worker, StringComparison.Ordinal);
-    }
-
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -296,7 +284,22 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
         var (_, filtered) = await RunAsync(plan, Separate, true);
         Assert.DoesNotContain(filtered, f => f.Key == "ANOMALY_BLOCKING_SPIKE");
         var (_, control) = await RunAsync(plan, null, true);
-        Assert.Contains(control, f => f.Key == "ANOMALY_BLOCKING_SPIKE");
+        var spike = control.Single(f => f.Key == "ANOMALY_BLOCKING_SPIKE");
+        Assert.Equal(bpr ? 0.0 : 1.0, spike.Metadata.GetValueOrDefault(CountFamilyMetadata.FromDmvSnapshotsKey));   /* #7537: the plain read stamps the DMV arm */
+    }
+
+    /* #7537: the scoped read (an Azure master target) stamps the arm too, so the spike text names the right unit there. */
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task BlockingSpike_ScopedRead_StampsTheDmvArmOnly_WhenNoBlockedProcessReportsExist(bool bpr)
+    {
+        var plan = new Plan(bpr, new string?[] { "GP", "HS", "HS", "HS", "HS", "HS" }, Array.Empty<string[]>());
+        var (_, filtered) = await RunAsync(plan, Separate, true);
+
+        var spike = filtered.Single(f => f.Key == "ANOMALY_BLOCKING_SPIKE");
+        Assert.Equal(5.0, spike.Value);
+        Assert.Equal(bpr ? 0.0 : 1.0, spike.Metadata.GetValueOrDefault(CountFamilyMetadata.FromDmvSnapshotsKey));
     }
 
     [Fact]

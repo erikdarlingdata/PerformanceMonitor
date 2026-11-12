@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using Microsoft.AspNetCore.Http;
 
 namespace PerformanceMonitor.Darling.Service.Hosting;
@@ -19,8 +20,11 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// group-level write gate and inherits correct attribution without knowing this type exists.
 ///
 /// <para><b>Seats.</b> The shared token (<see cref="Subject"/> null, edit — the pre-#2550 reach,
-/// unchanged); an OIDC admin (named, edit); an OIDC viewer (named, read-only); and <see cref="ReadsOnly"/>
-/// (<see cref="Subject"/> null, read-only), which the host stores for every request on a dashboard that
+/// unchanged); an OIDC admin (named, edit); an OIDC viewer (named, read-only); a named web token (#7735: named by its
+/// entry, <see cref="TokenName"/> set, read-only or edit as the entry's role says, decided from the live set on every request); a scoped
+/// reader (a named reader whose entry carries <c>allowedTagIds</c>: <see cref="AllowedTagIds"/> set from the live set on every request, the
+/// scope never in the cookie, and every server read held to the servers under those tags); and
+/// <see cref="ReadsOnly"/> (<see cref="Subject"/> null, read-only), which the host stores for every request on a dashboard that
 /// <c>web.allowTokenlessLoopback</c> serves with no token, and for a shared-token session when the token is under
 /// the length floor.</para>
 ///
@@ -32,8 +36,15 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// slot decodes to neither shape is REFUSED (the session reads as invalid, the user re-authenticates):
 /// serving an un-decodable identity would put an unnamed principal behind the write paths this exists to
 /// attribute.</para>
+///
+/// <para>A named web token's cookie (<c>t1:{name}</c>) carries the NAME only, no role: the auth middleware looks the name up in the
+/// token set the start resolved and sits the seat with that entry's current role, so a token removed from the config ends its
+/// sessions and a role change applies to them. <see cref="TryResolveSeat"/> hands such a cookie back read-only with
+/// <see cref="TokenName"/> set, and the middleware's lookup decides the rest.</para>
 /// </summary>
-internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? OwnerKey = null)
+/// <param name="AllowedTagIds">The scoped reader's server tag ids, or null for every other seat. The tag tree and the tag map are read
+/// on each request, so a tag change applies to the next request without a new sign-in.</param>
+internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? OwnerKey = null, string? TokenName = null, IReadOnlyList<int>? AllowedTagIds = null, Guid? GroupId = null, Guid? GroupGeneration = null)
 {
     /// <summary>The shared-token seat: full edit reach, exactly what the token granted before per-user identity
     /// existed.</summary>
@@ -87,6 +98,9 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     private const string AdminPrefixV2 = "o2:a:";
     private const string ViewerPrefixV2 = "o2:v:";
 
+    /// <summary>The prefix of a named web token's cookie subject (#7735): <c>t1:{name}</c>, the name alone.</summary>
+    private const string TokenPrefix = "t1:";
+
     /// <summary>The length of an owner key: base64url (no padding) of a SHA-256 hash is 43 characters. It has no <c>:</c>.</summary>
     internal const int OwnerKeyLength = 43;
 
@@ -113,6 +127,18 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     /// <summary>What <c>updated_by</c> gets stamped with: the person when there is one, else the honest
     /// <c>web</c> constant the shared-token seat has always written.</summary>
     internal string EditorPrincipal => Subject ?? DarlingWebEndpoints.WebEditorPrincipal;
+
+    /// <summary>The names a built-in writer stamps on <c>updated_by</c>, <c>requested_by</c> and the <c>person:</c> journal actor as itself:
+    /// the shared token's <c>web</c>, the MCP surface's <c>mcp</c>, the command line's <c>cli</c> and the Viewer's <c>viewer</c>. A named web
+    /// token's name is its <see cref="EditorPrincipal"/>, so no token may take one of these (#7735): a person's edits would read as a surface's.</summary>
+    internal static readonly string[] BuiltInStamps =
+    {
+        DarlingWebEndpoints.WebEditorPrincipal, DarlingWebEndpoints.McpEditorPrincipal, DarlingServiceConnectionTest.RequestedBy, "viewer",
+    };
+
+    /// <summary>True when <paramref name="name"/> is one of <see cref="BuiltInStamps"/>, compared ignoring case.</summary>
+    internal static bool IsBuiltInStamp(string? name) =>
+        name is not null && Array.Exists(BuiltInStamps, stamp => string.Equals(stamp, name, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>The request's resolved seat. Every pipeline the host builds stores one before routing (the auth gate,
     /// or the reads-only gate of a tokenless dashboard); an absent item (routes mapped without the
@@ -144,9 +170,17 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
             : (admin ? AdminPrefixV2 : ViewerPrefixV2) + ownerKey + ":" + subject;
     }
 
+    /// <summary>Encodes a named web token's seat for the session cookie's subject slot (#7735): <c>t1:{name}</c>.</summary>
+    internal static string EncodeTokenCookieSubject(string name) => TokenPrefix + name;
+
+    internal static string EncodeGroupCookieSubject(Guid groupId, Guid generation) =>
+        "g1:" + groupId.ToString("N") + ":" + generation.ToString("N");
+
     /// <summary>
     /// Resolves a validated session cookie's subject slot to a seat. Null (the two-segment shared-token
-    /// cookie) is the shared-token seat; a recognized <c>o1:</c> or <c>o2:</c> encoding is that OIDC seat (<c>o1</c> with no owner key); anything else is
+    /// cookie) is the shared-token seat; a recognized <c>o1:</c> or <c>o2:</c> encoding is that OIDC seat (<c>o1</c> with no owner key); a
+    /// <c>t1:</c> encoding is a named web token's seat, handed back READ-ONLY with <see cref="TokenName"/> set, for the middleware to look up
+    /// in the live token set (an unknown name is then no seat at all); anything else is
     /// FALSE — treat the session as invalid and re-authenticate. Only sign-in ever writes this slot, so an
     /// unrecognized value is a version we do not speak, not a user to guess about.
     /// </summary>
@@ -155,6 +189,26 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
         if (cookieSubject is null)
         {
             seat = SharedToken;
+            return true;
+        }
+
+        if (cookieSubject.StartsWith("g1:", StringComparison.Ordinal))
+        {
+            var parts=cookieSubject.Split(':');
+            if(parts.Length==3 && Guid.TryParseExact(parts[1],"N",out var group) && group!=Guid.Empty &&
+                Guid.TryParseExact(parts[2],"N",out var generation) && generation!=Guid.Empty)
+            {
+                seat=new DarlingWebSeat(null,false,GroupId:group,GroupGeneration:generation);
+                return true;
+            }
+            seat=ReadsOnly;
+            return false;
+        }
+
+        if (cookieSubject.StartsWith(TokenPrefix, StringComparison.Ordinal) && cookieSubject.Length > TokenPrefix.Length)
+        {
+            var name = cookieSubject.Substring(TokenPrefix.Length);
+            seat = new DarlingWebSeat(name, CanEdit: false, TokenName: name);
             return true;
         }
 
@@ -213,6 +267,11 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     /// custom-view panel through it, so blocking it would break the read surface the viewer seat exists to
     /// grant). Everything else non-GET is refused — INCLUDING write endpoints that do not exist yet, which is
     /// the point of gating on the method instead of enumerating routes.
+    /// <para>One more exception (#7109): a seat signed in with an <see cref="OwnerKey"/> may POST the two proposal presses,
+    /// <c>/api/proposals/{id}/first-press</c> and <c>/api/proposals/{id}/confirm</c>, matched exactly (<see cref="IsProposalPressPath"/>).
+    /// A grant gives the approve power to a person whatever the role of their sign-in, so the press endpoint, not this gate, decides: a seat
+    /// that cannot edit presses only as the enabled person its key maps to, and the press API checks that person's grant. A seat with no
+    /// owner key (the reads-only shared token, a front door's viewer, an older cookie) names nobody and stays refused here.</para>
     /// </summary>
     internal static bool IsRequestAllowed(DarlingWebSeat seat, string method, string path)
     {
@@ -226,6 +285,33 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
             return true;
         }
 
-        return HttpMethods.IsPost(method) && string.Equals(path, "/api/compose/run", StringComparison.OrdinalIgnoreCase);
+        if (!HttpMethods.IsPost(method))
+        {
+            return false;
+        }
+
+        return string.Equals(path, "/api/compose/run", StringComparison.OrdinalIgnoreCase)
+            || (seat.OwnerKey is not null && IsProposalPressPath(path));
+    }
+
+    /// <summary>True for exactly <c>/api/proposals/{id}/first-press</c> or <c>/api/proposals/{id}/confirm</c>, the id a GUID in its hyphenated
+    /// form, with no other segment and no trailing slash (#7109).</summary>
+    internal static bool IsProposalPressPath(string path)
+    {
+        const string Prefix = "/api/proposals/";
+        if (!path.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var rest = path.AsSpan(Prefix.Length);
+        var slash = rest.IndexOf('/');
+        if (slash < 0 || !Guid.TryParseExact(rest[..slash], "D", out _))
+        {
+            return false;
+        }
+
+        var verb = rest[(slash + 1)..];
+        return verb.Equals("first-press", StringComparison.OrdinalIgnoreCase) || verb.Equals("confirm", StringComparison.OrdinalIgnoreCase);
     }
 }

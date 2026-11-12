@@ -239,15 +239,35 @@ public partial class MainWindow
             return;
         }
 
-        Dictionary<int, DateTime> freshness;
+        Dictionary<int, (DateTime? LastCollectionUtc, bool Attempted)> freshness;
         try
         {
-            freshness = await _dataService.GetServerFreshnessAsync();
+            freshness = await _dataService.GetServerCollectionStateAsync();
         }
         catch (Exception ex)
         {
+            /* Nothing was read this tick, so the dots and the Collection field must not keep last tick's answer: a
+               green dot and "Collection: Active" under an unreachable store are claims nothing measured. */
             ViewerLogger.Warn("ServerStatus", $"freshness read failed: {ex.Message}");
+            foreach (var s in _fleet.All)
+            {
+                s.ClearFreshness();
+            }
+
+            CollectionStatusText.Text = CollectionStatusUnknownLabel;
             return;
+        }
+
+        /* #7590: the service's own connect answer, read beside the freshness. A read that fails leaves the age rule in charge. */
+        Dictionary<int, (DateTime SinceUtc, string? Error, DateTime? NextAttemptUtc)> connectDown;
+        try
+        {
+            connectDown = await _dataService.GetServerConnectDownAsync();
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Warn("ServerStatus", $"connect state read failed: {ex.Message}");
+            connectDown = new Dictionary<int, (DateTime SinceUtc, string? Error, DateTime? NextAttemptUtc)>();
         }
 
         var nowUtc = DateTime.UtcNow;
@@ -257,7 +277,13 @@ public partial class MainWindow
 
         foreach (var s in servers)
         {
-            DateTime? last = freshness.TryGetValue(s.ServerId, out var t) ? t : null;
+            DateTime? last = freshness.TryGetValue(s.ServerId, out var t) ? t.LastCollectionUtc : null;
+            /* #8464: whether any collector has run against the server, refreshed with its newest success so a server the collectors
+               start failing against after the registry read bands Offline on this tick, not as awaiting its first collection. */
+            s.Attempted = t.Attempted || s.Attempted;
+            s.ConnectDownSince = connectDown.TryGetValue(s.ServerId, out var down) ? down.SinceUtc : null;
+            s.LastConnectError = connectDown.TryGetValue(s.ServerId, out var down2) ? down2.Error : null;
+            s.NextConnectAttemptUtc = connectDown.TryGetValue(s.ServerId, out var down3) ? down3.NextAttemptUtc : null;
             s.ApplyFreshness(last, nowUtc);
 
             if (last.HasValue && (newest is null || last.Value > newest.Value))
@@ -270,17 +296,26 @@ public partial class MainWindow
            the server COUNT is a separate field (ServerCountText). Mirrors Lite's UpdateCollectorHealth. */
         await UpdateCollectorHealthTextAsync();
 
-        if (newest is null)
+        CollectionStatusText.Text = CollectionStatusLabel(newest, nowUtc);
+    }
+
+    /// <summary>The status bar's Collection field when the freshness read failed: neither Active nor Idle, because
+    /// neither was measured.</summary>
+    internal const string CollectionStatusUnknownLabel = "Collection: Unknown";
+
+    /// <summary>The status bar's Collection field from the fleet's newest collection: Idle when nothing has collected,
+    /// Active within 90 seconds, otherwise how long ago.</summary>
+    internal static string CollectionStatusLabel(DateTime? newestUtc, DateTime nowUtc)
+    {
+        if (newestUtc is null)
         {
-            CollectionStatusText.Text = "Collection: Idle";
+            return "Collection: Idle";
         }
-        else
-        {
-            var age = nowUtc - newest.Value;
-            CollectionStatusText.Text = age.TotalSeconds < 90
-                ? "Collection: Active"
-                : $"Collection: {FormatAge(age)} ago";
-        }
+
+        var age = nowUtc - newestUtc.Value;
+        return age.TotalSeconds < 90
+            ? "Collection: Active"
+            : $"Collection: {FormatAge(age)} ago";
     }
 
     /// <summary>
@@ -413,10 +448,7 @@ public partial class MainWindow
                 tally = tally.Add(h.CollectorName, h.HealthStatus, h.ServerAlwaysOnOff, h.EngineGated);
             }
 
-            CollectorHealthText.Text = $"Collectors: {tally.Healthy} OK"
-                + (tally.Warning > 0 ? $", {tally.Warning} warning" : "")
-                + (tally.NotCollected > 0 ? $", {tally.NotCollected} not collected" : "")
-                + (tally.NoPermission > 0 ? $", {tally.NoPermission} no permission" : "");
+            CollectorHealthText.Text = CollectorCountText.StatusBar(tally);
             CollectorHealthText.SetResourceReference(System.Windows.Controls.TextBlock.ForegroundProperty, "ForegroundMutedBrush");
             CollectorHealthText.ToolTip = null;
         }
@@ -508,7 +540,7 @@ public partial class MainWindow
            with nothing said. The store's log line has the reason; this is the half the user sees. */
         StatusText.Text = _serverStore.LastSaveSucceeded
             ? (isFavorite ? $"Pinned {server.DisplayName}" : $"Unpinned {server.DisplayName}")
-            : $"Could not save the pin for {server.DisplayName} — see the viewer log. It will be back as it was on the next launch.";
+            : $"Could not save the pin for {server.DisplayName}: see the viewer log. It will be back as it was on the next launch.";
     }
 
     private async void ServerContextMenu_Edit_Click(object sender, RoutedEventArgs e)
@@ -549,7 +581,7 @@ public partial class MainWindow
     private async void ServerContextMenu_Remove_Click(object sender, RoutedEventArgs e)
     {
         var server = GetServerFromContextMenu(sender);
-        if (server is null || _dataService is null)
+        if (server is null || _dataService is null || _dataService.IsReadOnly)
         {
             return;
         }
@@ -609,7 +641,7 @@ public partial class MainWindow
     private async void ServerContextMenu_Silence_Click(object sender, RoutedEventArgs e)
     {
         var server = GetServerFromContextMenu(sender);
-        if (server is null || _dataService is null)
+        if (server is null || _dataService is null || _dataService.IsReadOnly)
         {
             return;
         }
@@ -630,7 +662,7 @@ public partial class MainWindow
             server.SetSilenced(true);
             _viewerMuteRules.Add(silence);
             StatusText.Text =
-                $"Silenced all alerts for '{server.DisplayName}' — tray toasts stop now; the service applies it within "
+                $"Silenced all alerts for '{server.DisplayName}': tray toasts stop now; the service applies it within "
                 + $"{ViewerDataService.ServiceReloadTickSeconds} s. Right-click → Unsilence to restore.";
         }
         catch (ViewerReadOnlyException ex)
@@ -658,7 +690,7 @@ public partial class MainWindow
     private async void ServerContextMenu_Unsilence_Click(object sender, RoutedEventArgs e)
     {
         var server = GetServerFromContextMenu(sender);
-        if (server is null || _dataService is null)
+        if (server is null || _dataService is null || _dataService.IsReadOnly)
         {
             return;
         }
@@ -704,7 +736,7 @@ public partial class MainWindow
             server.SetSilenced(false);
             StatusText.Text = plan.CreateRules.Count == 0
                 ? $"Unsilenced '{server.DisplayName}'."
-                : $"Unsilenced '{server.DisplayName}'; kept {plan.CreateRules.Count} other server(s) that shared its legacy silence silenced, now keyed by server.";
+                : $"Unsilenced '{server.DisplayName}'; kept {CountText.Plural(plan.CreateRules.Count, "other server")} that shared its legacy silence silenced, now keyed by server.";
             if (plan.CreateRules.Count > 0)
             {
                 ViewerLogger.Info("ServerManagement", StatusText.Text);
@@ -816,11 +848,11 @@ public partial class MainWindow
         if (dialog.ShowDialog() == true && dialog.AddedCount > 0)
         {
             await LoadServersAsync(preserveSelection: true);
-            var msg = $"Added {dialog.AddedCount} server(s)";
-            if (dialog.SkippedCount > 0) msg += $", skipped {dialog.SkippedCount} duplicate(s)";
+            var msg = $"Added {CountText.Plural(dialog.AddedCount, "server")}";
+            if (dialog.SkippedCount > 0) msg += $", skipped {CountText.Plural(dialog.SkippedCount, "duplicate")}";
             if (dialog.CollidedCount > 0) msg += $", {dialog.CollidedCount} collided (id matches another server)";
             if (dialog.FailedCount > 0) msg += $", {dialog.FailedCount} failed";
-            StatusText.Text = msg + ". The Darling service will start collecting them on its next reload.";
+            StatusText.Text = msg + $". The Darling service will start collecting {(dialog.AddedCount == 1 ? "it" : "them")} on its next reload.";
         }
     }
 
@@ -1003,13 +1035,13 @@ public partial class MainWindow
             var registrySaved = imported == 0 || _serverStore.LastSaveSucceeded;
 
             var message = registrySaved
-                ? $"Imported {imported} server definition(s)."
-                : $"Read {imported} server definition(s), but they could not be saved to "
-                  + $"{Path.GetFileName(ViewerServerStore.DefaultFilePath())} — see the viewer log. They will "
+                ? $"Imported {CountText.Plural(imported, "server definition")}."
+                : $"Read {CountText.Plural(imported, "server definition")}, but {(imported == 1 ? "it" : "they")} could not be saved to "
+                  + $"{Path.GetFileName(ViewerServerStore.DefaultFilePath())}: see the viewer log. {(imported == 1 ? "It" : "They")} will "
                   + "not be there on the next launch.";
             if (skipped > 0)
             {
-                message += $"\nSkipped {skipped} already-configured server(s).";
+                message += $"\nSkipped {CountText.Plural(skipped, "already-configured server")}.";
             }
             if (pushedToStore > 0)
             {
@@ -1025,7 +1057,7 @@ public partial class MainWindow
             }
             if (copied > 0)
             {
-                message += $"\nCopied {copied} settings file(s). Restart the viewer to apply them.";
+                message += $"\nCopied {CountText.Plural(copied, "settings file")}. Restart the viewer to apply {(copied == 1 ? "it" : "them")}.";
             }
             message += "\n\nServer credentials are NOT importable (they live only in Windows Credential Manager, " +
                        "per user). Re-enter any SQL/service-principal secret in Manage Servers.";
@@ -1047,11 +1079,39 @@ public partial class MainWindow
 
     // ── Sidebar collapse toggle ─────────────────────────────────────────────────────
 
+    /* #8266: false until the user collapses or opens the sidebar with its button. From then on the window width no longer
+       switches it. */
+    private bool _sidebarChosenByUser;
+
+    /* The content grid's width (the window less its 10 DIP margins) below which the sidebar's 280 leaves too little for the tabs:
+       it shows its rail instead. A 900 wide window is under it; 1280 is not. */
+    private const double SidebarAutoCollapseWidth = 1080;
+
     private void ToggleSidebar_Click(object sender, RoutedEventArgs e)
     {
-        _sidebarCollapsed = !_sidebarCollapsed;
+        _sidebarChosenByUser = true;
+        SetSidebarCollapsed(!_sidebarCollapsed);
+    }
 
-        if (_sidebarCollapsed)
+    private void RootGrid_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (_sidebarChosenByUser || !e.WidthChanged)
+        {
+            return;
+        }
+
+        var narrow = e.NewSize.Width < SidebarAutoCollapseWidth;
+        if (narrow != _sidebarCollapsed)
+        {
+            SetSidebarCollapsed(narrow);
+        }
+    }
+
+    private void SetSidebarCollapsed(bool collapsed)
+    {
+        _sidebarCollapsed = collapsed;
+
+        if (collapsed)
         {
             SidebarColumn.Width = new GridLength(40);
             SidebarHeaderText.Visibility = Visibility.Collapsed;

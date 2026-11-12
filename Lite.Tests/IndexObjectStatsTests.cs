@@ -300,4 +300,41 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         Assert.DoesNotContain(anomalies, f => f.Key == "ANOMALY_OBJECT_GROWTH");
         Assert.DoesNotContain(anomalies, f => f.Key == "ANOMALY_OBJECT_CONTENTION");
     }
+
+    /// <summary>#7897: a table that held no pages yesterday and holds 500 MB today fires. The percent has no value from an empty
+    /// start, so the fact carries none, and its ratio against the trip threshold is the growth against the MB floor.</summary>
+    [Fact]
+    public async Task DetectObjectStatsAnomalies_GrowthFromEmpty_Fires()
+    {
+        await InsertObjectStat(_prior, "AppDb", 400, 1, "dbo", "Staging", "PK_Staging", 0m, 0, 0, 0, 0, 0, 0, 0);
+        await InsertObjectStat(_latest, "AppDb", 400, 1, "dbo", "Staging", "PK_Staging", 500m, 2_000_000, 10, 1, 0, 50, 0, 0);
+        for (int d = 1; d <= 5; d++)
+            await SeedCpuAsync(_latest.AddDays(-d), 10);
+
+        var context = new AnalysisContext { ServerId = ServerId, ServerName = "TestServer", TimeRangeStart = _latest.AddHours(-4), TimeRangeEnd = _latest };
+        var anomalies = await _detector.DetectAnomaliesAsync(context);
+
+        var growth = anomalies.FirstOrDefault(f => f.Key == "ANOMALY_OBJECT_GROWTH");
+        Assert.NotNull(growth);
+        Assert.Equal("dbo.Staging", growth!.ObjectName);
+        Assert.Equal(0, growth.Metadata["prior_mb"]);
+        Assert.True(growth.Metadata["growth_mb"] >= 499);
+        Assert.False(growth.Metadata.ContainsKey("growth_pct"));
+        Assert.True(growth.Metadata["growth_ratio"] >= 1.0);
+    }
+
+    /// <summary>#7897: growth from empty is still held to the MB floor, so an empty table that reaches 50 MB does not fire.</summary>
+    [Fact]
+    public async Task DetectObjectStatsAnomalies_GrowthFromEmptyUnderTheFloor_DoesNotFire()
+    {
+        await InsertObjectStat(_prior, "AppDb", 400, 1, "dbo", "Staging", "PK_Staging", 0m, 0, 0, 0, 0, 0, 0, 0);
+        await InsertObjectStat(_latest, "AppDb", 400, 1, "dbo", "Staging", "PK_Staging", 50m, 200_000, 10, 1, 0, 50, 0, 0);
+        for (int d = 1; d <= 5; d++)
+            await SeedCpuAsync(_latest.AddDays(-d), 10);
+
+        var context = new AnalysisContext { ServerId = ServerId, ServerName = "TestServer", TimeRangeStart = _latest.AddHours(-4), TimeRangeEnd = _latest };
+        var anomalies = await _detector.DetectAnomaliesAsync(context);
+
+        Assert.DoesNotContain(anomalies, f => f.Key == "ANOMALY_OBJECT_GROWTH");
+    }
 }

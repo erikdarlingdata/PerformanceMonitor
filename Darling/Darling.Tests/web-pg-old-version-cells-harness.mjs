@@ -59,9 +59,9 @@ globalThis.document = {
 const answers = {
   get_pg_top_queries: {
     queries: [
-      { queryid: "101", calls: 5, wal_bytes: null },
-      { queryid: "102", calls: 5, wal_bytes: 0 },
-      { queryid: "103", calls: 5, wal_bytes: 2048 },
+      { queryid: "101", database_name: "appdb", calls: 5, wal_bytes: null },
+      { queryid: "102", database_name: "database 16385", calls: 5, wal_bytes: 0 },
+      { queryid: "103", database_name: "appdb", calls: 5, wal_bytes: 2048 },
     ],
     evictions: {},
   },
@@ -109,7 +109,7 @@ try {
       const cells = collect(tr, "td").map((td) => td.textContent);
       return Object.fromEntries(heads.map((h, i) => [h, cells[i]]));
     });
-    return { present: true, rows };
+    return { present: true, headers: heads, rows };
   };
 
   console.log(JSON.stringify({

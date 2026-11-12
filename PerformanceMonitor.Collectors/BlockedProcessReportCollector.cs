@@ -84,6 +84,10 @@ public sealed class BlockedProcessReportCollector : CollectorDefinitionBase<Bloc
         public DateTime? BlockingLastBatchCompleted { get; set; }
         public int BlockedPriority { get; set; }
         public int BlockingPriority { get; set; }
+
+        /// <summary>#7497: the blocking process's own <c>trancount</c> from the report, its open transaction count. Null when the
+        /// report has no blocking process or no <c>trancount</c> attribute: an unknown count is never stored as 0.</summary>
+        public int? BlockingOpenTransactionCount { get; set; }
         public string? ReportXml { get; set; }
         public int? ObjectId { get; set; }
         public int? DatabaseId { get; set; }
@@ -140,7 +144,7 @@ public sealed class BlockedProcessReportCollector : CollectorDefinitionBase<Bloc
     /// for the "did anything arrive?" fact no MAX() over the collected rows can answer when the answer is
     /// no. See <see cref="XeShredGate"/> for why the counter is exact and which shapes always shred.
     /// </summary>
-    public override IReadOnlyList<string> StateKeys { get; } = new[] { XeShredGate.StateKey };
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { XeShredGate.StateKey, RingBufferLossAccounting.StateKey };
 
     /// <summary>
     /// This collector's object-resolution cursors return, after the payload, the per-database lookups
@@ -203,6 +207,10 @@ JOIN sys.dm_xe_sessions AS xes
         var planApply = context.CapturePlanXml
             ? BuildPlanResolutionApply("blocked-process", "bqp") + BuildPlanResolutionApply("blocking-process", "kqp")
             : "";
+
+        var sessionPositionSql = context.Target.IsAzureSqlDb
+            ? RingBufferXml.SessionPositionDatabaseSql
+            : RingBufferXml.SessionPositionServerSql;
 
         string query = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -285,6 +293,12 @@ SET @shred_needed =
         ELSE 0
     END;
 
+/* #8146: the position fragments. The session row (created, dropped, limit) is read on EVERY run, gated or not, so a
+   run that skips the shred still measures what the session dropped; the header comes from the shredded target below. */
+{RingBufferXml.PositionDeclareSql}
+
+SET @ring_position_session = N'{XeSessionName}';
+
 IF @shred_needed = 1
 BEGIN
     {RingBufferXml.DeclareSql}
@@ -301,6 +315,8 @@ BEGIN
 
     {RingBufferXml.TruncationSql}
 
+    {RingBufferXml.HeaderSql}
+
     INSERT
         @PerformanceMonitor_BlockedProcess
     (
@@ -310,6 +326,8 @@ BEGIN
         ring_xml = @ring_xml
     WHERE @ring_xml IS NOT NULL;
 END;
+
+{sessionPositionSql}
 
 SELECT
     x.event_time,
@@ -767,7 +785,9 @@ SELECT
     execution_count = @execution_count,
     gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END,
     /* #6441: whether SQL Server truncated the ring buffer's XML (all NULL when the gate skipped the read). */
-    {RingBufferXml.TruncationColumnsSql};
+    {RingBufferXml.TruncationColumnsSql},
+    /* #8146: the target header, the session row and the limit, for ReadAsync's loss accounting. */
+    {RingBufferXml.PositionColumnsSql};
 
 /* Trailing result set = the payload path's probe-failure contract (#1851/#1865,
    EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync). Always returned, and empty on both of
@@ -892,6 +912,8 @@ OUTER APPLY
            up to shape; NULL on Lite and whenever the statement's plan aged out of cache). */
         new CollectorColumn("blocked_query_plan_xml", CollectorColumnType.Varchar),
         new CollectorColumn("blocking_query_plan_xml", CollectorColumnType.Varchar),
+        /* #7497: the blocking process's trancount from the report; NULL when the report carries none. */
+        new CollectorColumn("blocking_open_transaction_count", CollectorColumnType.Integer),
     };
 
     /* ── #3161: what this collector measured, for its own collection_log row ───────────────────────────
@@ -1003,6 +1025,10 @@ OUTER APPLY
 
             /* #6441: SQL Server cuts a ring buffer's XML at about 4 MB and keeps the OLDEST events. */
             RingBufferXml.MeasureTruncation(reader, 2, context);
+
+            /* #8146: what the ring buffer evicted and the session dropped since the last run, gated run included. */
+            var truncated = reader.FieldCount > 2 && !reader.IsDBNull(2) && reader.GetBoolean(2);
+            RingBufferLossAccounting.Apply(context, RingBufferObservation.Read(reader, 5), truncated);
         }
 
         /* Measure() ACCUMULATES a repeated label, which is what makes this correct on the per-database
@@ -1091,7 +1117,8 @@ OUTER APPLY
             .Value(row.ContentiousObject)
             .Value(row.MonitorLoop)
             .Value(row.BlockedQueryPlanXml)    /* null unless CapturePlanXml resolved it (Darling) */
-            .Value(row.BlockingQueryPlanXml);
+            .Value(row.BlockingQueryPlanXml)
+            .Value(row.BlockingOpenTransactionCount);    /* #7497: appended last so a pre-V241 store comes up to shape with one ADD COLUMN */
     }
 
     /// <summary>
@@ -1150,7 +1177,9 @@ OUTER APPLY
                 BlockingLastTranStarted = DateTime.TryParse(blockingProcess?.Attribute("lasttranstarted")?.Value, out var bklts) ? bklts : null,
                 BlockingLastBatchStarted = DateTime.TryParse(blockingProcess?.Attribute("lastbatchstarted")?.Value, out var bklbs) ? bklbs : null,
                 BlockingLastBatchCompleted = DateTime.TryParse(blockingProcess?.Attribute("lastbatchcompleted")?.Value, out var bklbc) ? bklbc : null,
-                BlockingPriority = int.TryParse(blockingProcess?.Attribute("priority")?.Value, out var bkp) ? bkp : 0
+                BlockingPriority = int.TryParse(blockingProcess?.Attribute("priority")?.Value, out var bkp) ? bkp : 0,
+                /* #7497: the real blocking element carries trancount (and no transactionname or lasttranstarted, read above in case an older engine sends them). */
+                BlockingOpenTransactionCount = int.TryParse(blockingProcess?.Attribute("trancount")?.Value, out var bktc) ? bktc : null
             };
         }
         catch

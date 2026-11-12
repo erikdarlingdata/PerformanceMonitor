@@ -187,10 +187,10 @@ public sealed class FinOpsUtilizationFiguresTests
     [Fact]
     public void TheMcpStolenMemoryNote_IsTheViewersTooltipTextAboveAmber_AndAbsentBelow()
     {
-        Assert.Equal(ProvisioningVerdict.StolenMemoryNote(72.5), PerformanceMonitor.Darling.Service.Mcp.DarlingMcpFinOpsTools.StolenMemoryNoteOrNull(72.5));
+        Assert.Equal(ProvisioningVerdict.StolenMemoryNote(72.5, System.Globalization.CultureInfo.InvariantCulture), PerformanceMonitor.Darling.Service.Mcp.DarlingMcpFinOpsTools.StolenMemoryNoteOrNull(72.5));
         Assert.Contains("outside the buffer pool", PerformanceMonitor.Darling.Service.Mcp.DarlingMcpFinOpsTools.StolenMemoryNoteOrNull(72.5));
         Assert.Null(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpFinOpsTools.StolenMemoryNoteOrNull(20));
-        Assert.Equal("", ProvisioningVerdict.StolenMemoryNote(20));
+        Assert.Equal("", ProvisioningVerdict.StolenMemoryNote(20, System.Globalization.CultureInfo.InvariantCulture));
     }
 
     [Fact]

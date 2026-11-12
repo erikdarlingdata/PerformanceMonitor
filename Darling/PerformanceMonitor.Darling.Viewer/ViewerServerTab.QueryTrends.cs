@@ -76,14 +76,21 @@ public partial class ViewerServerTab
 
     /// <summary>Loads the Performance Trends sub-tab: the four per-second trend reads run concurrently
     /// (NpgsqlDataSource pools a connection each), then each result renders into its chart.</summary>
-    private async Task LoadPerformanceTrendsAsync(DateTime startUtc, DateTime endUtc, DateTime? tierNowUtc)
+    private async Task LoadPerformanceTrendsAsync(DateTime startUtc, DateTime endUtc, DateTime? tierNowUtc, ViewerLoadTimer? timer = null)
     {
+        timer?.Surface = "Queries > Performance Trends";
         using var readFanOut = ViewerReadFanOut.Of(4);
 
         var queryDurationTask = _dataService.GetQueryDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc);
         var procDurationTask = _dataService.GetProcedureDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc);
         var queryStoreDurationTask = _dataService.GetQueryStoreDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         var executionCountTask = _dataService.GetExecutionCountTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc);
+
+        /* #8549: each trend read is booked by name (Track hands the task back unchanged), so the slow one is the one the SlowLoad line names. */
+        _ = timer?.Track("query duration trend read", queryDurationTask);
+        _ = timer?.Track("procedure duration trend read", procDurationTask);
+        _ = timer?.Track("Query Store duration trend read", queryStoreDurationTask);
+        _ = timer?.Track("execution count trend read", executionCountTask);
 
         await Task.WhenAll(queryDurationTask, procDurationTask, queryStoreDurationTask, executionCountTask);
 
@@ -98,7 +105,7 @@ public partial class ViewerServerTab
         IReadOnlyList<BaselineDiscontinuity> discontinuities;
         try
         {
-            discontinuities = await _dataService.GetBaselineDiscontinuitiesAsync(_server.ServerId, startUtc, endUtc);
+            discontinuities = await Timed(timer, "baseline discontinuity read", _dataService.GetBaselineDiscontinuitiesAsync(_server.ServerId, startUtc, endUtc));
         }
         catch (Exception ex)
         {
@@ -106,10 +113,10 @@ public partial class ViewerServerTab
             discontinuities = Array.Empty<BaselineDiscontinuity>();
         }
 
-        UpdateQueryDurationTrendChart(queryDurationTask.Result, startUtc, endUtc, discontinuities);
-        UpdateProcDurationTrendChart(procDurationTask.Result, startUtc, endUtc, discontinuities);
-        UpdateQueryStoreDurationTrendChart(queryStoreDurationTask.Result, startUtc, endUtc, discontinuities);
-        UpdateExecutionCountTrendChart(executionCountTask.Result, startUtc, endUtc, discontinuities);
+        ClientStep(timer, "query duration chart draw", () => UpdateQueryDurationTrendChart(queryDurationTask.Result, startUtc, endUtc, discontinuities));
+        ClientStep(timer, "procedure duration chart draw", () => UpdateProcDurationTrendChart(procDurationTask.Result, startUtc, endUtc, discontinuities));
+        ClientStep(timer, "Query Store duration chart draw", () => UpdateQueryStoreDurationTrendChart(queryStoreDurationTask.Result, startUtc, endUtc, discontinuities));
+        ClientStep(timer, "execution count chart draw", () => UpdateExecutionCountTrendChart(executionCountTask.Result, startUtc, endUtc, discontinuities));
     }
 
     /// <summary>
@@ -157,7 +164,19 @@ public partial class ViewerServerTab
                     : $"{series.Source} (one point per collection)"
                 : $"{series.Source} rollup (one point per hour)",
             series.Truncated ? series.EffectiveStartUtc : null,
-            "the store no longer holds the rest of this window at this tier");
+            DescribeUnservedHead(series));
+
+    /// <summary>
+    /// Why a raw or hourly trend chart's head was not served (#7416 item 21). A late first point alone proves nothing aged out
+    /// (a query first run later, or a server that was off earlier, gives the same one), so the chart says the earlier part aged out of
+    /// the tier, and for how long the tier keeps data, only when the series says the requested start is older than that.
+    /// </summary>
+    internal static string DescribeUnservedHead(QueryTrendSeries series)
+        => series.StartOlderThanTier
+            ? series.TierKeepsDays is int days
+                ? $"the earlier part has aged out of this tier, which keeps {days} {(days == 1 ? "day" : "days")} of data"
+                : "the earlier part has aged out of this tier"
+            : "the store holds nothing earlier in this window at this tier";
 
     /// <summary>The bucket width named in a raw trend's coverage title (#4234): minutes below an hour, whole hours from it.</summary>
     private static string DescribeBucketWidth(int minutes)
@@ -232,7 +251,7 @@ public partial class ViewerServerTab
         ClearChart(QueryDurationTrendChart);
         ApplyTheme(QueryDurationTrendChart);
 
-        if (data.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "Duration ms/s"); return; }
+        if (data.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "ms/sec"); return; }
         ShowTrendCoverage(QueryDurationTrendChart, series);
 
         var rangeStart = startUtc.ToOADate();
@@ -249,9 +268,9 @@ public partial class ViewerServerTab
         MarkDiscontinuities(QueryDurationTrendChart, discontinuities);
 
         QueryDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        QueryDurationTrendChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        QueryDurationTrendChart.Plot.Axes.SetLimitsX(ChartXStart(QueryDurationTrendChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(QueryDurationTrendChart);
-        QueryDurationTrendChart.Plot.YLabel("Duration ms/s");
+        QueryDurationTrendChart.Plot.YLabel("ms/sec");
         SetChartYLimitsWithLegendPadding(QueryDurationTrendChart, 0, values.Max());
         ShowChartLegend(QueryDurationTrendChart);
         QueryDurationTrendChart.Refresh();
@@ -263,7 +282,7 @@ public partial class ViewerServerTab
         ClearChart(ProcDurationTrendChart);
         ApplyTheme(ProcDurationTrendChart);
 
-        if (data.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "Duration ms/s"); return; }
+        if (data.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "ms/sec"); return; }
         ShowTrendCoverage(ProcDurationTrendChart, series);
 
         var rangeStart = startUtc.ToOADate();
@@ -280,9 +299,9 @@ public partial class ViewerServerTab
         MarkDiscontinuities(ProcDurationTrendChart, discontinuities);
 
         ProcDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        ProcDurationTrendChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        ProcDurationTrendChart.Plot.Axes.SetLimitsX(ChartXStart(ProcDurationTrendChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(ProcDurationTrendChart);
-        ProcDurationTrendChart.Plot.YLabel("Duration ms/s");
+        ProcDurationTrendChart.Plot.YLabel("ms/sec");
         SetChartYLimitsWithLegendPadding(ProcDurationTrendChart, 0, values.Max());
         ShowChartLegend(ProcDurationTrendChart);
         ProcDurationTrendChart.Refresh();
@@ -294,7 +313,7 @@ public partial class ViewerServerTab
         ClearChart(QueryStoreDurationTrendChart);
         ApplyTheme(QueryStoreDurationTrendChart);
 
-        if (data.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "Duration ms/s"); return; }
+        if (data.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "ms/sec"); return; }
         ShowTrendCoverage(QueryStoreDurationTrendChart, series);
 
         var rangeStart = startUtc.ToOADate();
@@ -303,7 +322,9 @@ public partial class ViewerServerTab
         var values = data.Select(d => d.Value).ToArray();
 
         _queryStoreDurationTrendHover?.Clear();
-        var plot = QueryStoreDurationTrendChart.Plot.Add.TimeSeries(times, values);
+        /* #7508: a rollup+raw series is one point per hour before the raw start and one per interval from it, so the gap rule judges each side by its own spacing. */
+        var seamX = series.Route.UseRollup ? series.Route.RawStartUtc.ToOADate() : (double?)null;
+        var plot = QueryStoreDurationTrendChart.Plot.Add.TimeSeries(times, values, seamX);
         plot.LegendText = "Query Store Duration";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("QueryStoreDuration"));
         ChartStyle.StyleScatter(plot);
@@ -311,9 +332,9 @@ public partial class ViewerServerTab
         MarkDiscontinuities(QueryStoreDurationTrendChart, discontinuities);
 
         QueryStoreDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        QueryStoreDurationTrendChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        QueryStoreDurationTrendChart.Plot.Axes.SetLimitsX(ChartXStart(QueryStoreDurationTrendChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(QueryStoreDurationTrendChart);
-        QueryStoreDurationTrendChart.Plot.YLabel("Duration ms/s");
+        QueryStoreDurationTrendChart.Plot.YLabel("ms/sec");
         SetChartYLimitsWithLegendPadding(QueryStoreDurationTrendChart, 0, values.Max());
         ShowChartLegend(QueryStoreDurationTrendChart);
         QueryStoreDurationTrendChart.Refresh();
@@ -325,7 +346,7 @@ public partial class ViewerServerTab
         ClearChart(ExecutionCountTrendChart);
         ApplyTheme(ExecutionCountTrendChart);
 
-        if (data.Count == 0) { RefreshEmptyChart(ExecutionCountTrendChart, "Executions", "Executions/sec"); return; }
+        if (data.Count == 0) { RefreshEmptyChart(ExecutionCountTrendChart, "Executions", "exec/sec"); return; }
         ShowTrendCoverage(ExecutionCountTrendChart, series);
 
         var rangeStart = startUtc.ToOADate();
@@ -342,9 +363,9 @@ public partial class ViewerServerTab
         MarkDiscontinuities(ExecutionCountTrendChart, discontinuities);
 
         ExecutionCountTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        ExecutionCountTrendChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        ExecutionCountTrendChart.Plot.Axes.SetLimitsX(ChartXStart(ExecutionCountTrendChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(ExecutionCountTrendChart);
-        ExecutionCountTrendChart.Plot.YLabel("Executions/sec");
+        ExecutionCountTrendChart.Plot.YLabel("exec/sec");
         SetChartYLimitsWithLegendPadding(ExecutionCountTrendChart, 0, values.Max());
         ShowChartLegend(ExecutionCountTrendChart);
         ExecutionCountTrendChart.Refresh();

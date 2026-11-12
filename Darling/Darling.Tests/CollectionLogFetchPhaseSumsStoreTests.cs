@@ -439,7 +439,7 @@ public class CollectionLogFetchPhaseSumsStoreTests
     private static string RungSql() => PgMigrations.Scripts.Single(s => s.Version == RungVersion).Sql;
 
     private static string RunnerSource() =>
-        ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs");
+        RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs");
 
     /// <summary>One completed item's per-database split, as the runner's context would carry it.</summary>
     private static CollectorContext Item(

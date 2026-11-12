@@ -122,7 +122,7 @@ public sealed class QueryStoreHealthCollectorDefinitionTests
         /* Already connected to the database, so the payload body runs bare — no three-part name, no
            sp_executesql at all, and no parameters to map. */
         var plan = QueryStoreHealthCollector.Instance.BuildQuery(azure);
-        Assert.Contains("FROM sys.database_query_store_options AS qso", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("FROM sys.database_query_store_options AS PerformanceMonitorLite", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotMatch(s_threePartReference, plan.Text);
         Assert.DoesNotContain("sp_executesql", plan.Text, StringComparison.Ordinal);
         Assert.Empty(plan.Parameters);
@@ -185,17 +185,17 @@ public sealed class QueryStoreHealthCollectorDefinitionTests
     /// <summary>The eleven SELECT ordinals in ReadRowsAsync's order; the last is the 2017+ gated one.</summary>
     private static readonly string[] s_allOrdinals =
     {
-        "actual_state = qso.actual_state_desc",
-        "desired_state = qso.desired_state_desc",
-        "readonly_reason = qso.readonly_reason",
-        "current_storage_size_mb = qso.current_storage_size_mb",
-        "max_storage_size_mb = qso.max_storage_size_mb",
-        "size_based_cleanup_mode = qso.size_based_cleanup_mode_desc",
-        "stale_query_threshold_days = qso.stale_query_threshold_days",
-        "max_plans_per_query = qso.max_plans_per_query",
-        "interval_length_minutes = qso.interval_length_minutes",
-        "query_capture_mode = qso.query_capture_mode_desc",
-        "wait_stats_capture_mode = qso.wait_stats_capture_mode_desc",
+        "actual_state = PerformanceMonitorLite.actual_state_desc",
+        "desired_state = PerformanceMonitorLite.desired_state_desc",
+        "readonly_reason = PerformanceMonitorLite.readonly_reason",
+        "current_storage_size_mb = PerformanceMonitorLite.current_storage_size_mb",
+        "max_storage_size_mb = PerformanceMonitorLite.max_storage_size_mb",
+        "size_based_cleanup_mode = PerformanceMonitorLite.size_based_cleanup_mode_desc",
+        "stale_query_threshold_days = PerformanceMonitorLite.stale_query_threshold_days",
+        "max_plans_per_query = PerformanceMonitorLite.max_plans_per_query",
+        "interval_length_minutes = PerformanceMonitorLite.interval_length_minutes",
+        "query_capture_mode = PerformanceMonitorLite.query_capture_mode_desc",
+        "wait_stats_capture_mode = PerformanceMonitorLite.wait_stats_capture_mode_desc",
     };
 
     /// <summary>
@@ -229,20 +229,20 @@ public sealed class QueryStoreHealthCollectorDefinitionTests
         var azure2016Registration = Context(13, isAzureSqlDb: true); /* Azure always has it — the gate ignores the number there. */
 
         var onPremText = QueryStoreHealthCollector.Instance.BuildPerItemQuery("db1", onPrem2016).Text;
-        Assert.Contains("query_capture_mode = qso.query_capture_mode_desc", onPremText, StringComparison.Ordinal);
+        Assert.Contains("query_capture_mode = PerformanceMonitorLite.query_capture_mode_desc", onPremText, StringComparison.Ordinal);
         Assert.DoesNotContain("wait_stats_capture_mode", onPremText, StringComparison.Ordinal);
         /* The tail follows the last ungated column directly — no dangling comma where the gated column was. */
-        Assert.Contains("query_capture_mode = qso.query_capture_mode_desc\nFROM sys.database_query_store_options AS qso", onPremText.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Contains("query_capture_mode = PerformanceMonitorLite.query_capture_mode_desc\nFROM sys.database_query_store_options AS PerformanceMonitorLite", onPremText.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 
         var azureText = QueryStoreHealthCollector.Instance.BuildQuery(azure2016Registration).Text;
-        Assert.Contains("wait_stats_capture_mode = qso.wait_stats_capture_mode_desc", azureText, StringComparison.Ordinal);
+        Assert.Contains("wait_stats_capture_mode = PerformanceMonitorLite.wait_stats_capture_mode_desc", azureText, StringComparison.Ordinal);
 
         /* And a 2017 on-prem target gets the full eleven, comma-joined, in order. */
         var onPrem2017 = QueryStoreHealthCollector.Instance.BuildPerItemQuery("db1", Context(14, isAzureSqlDb: false)).Text;
         var positions = s_allOrdinals.Select(o => onPrem2017.IndexOf(o, StringComparison.Ordinal)).ToArray();
         Assert.All(positions, p => Assert.True(p >= 0));
         Assert.True(positions.SequenceEqual(positions.OrderBy(p => p)));
-        Assert.Contains("interval_length_minutes = qso.interval_length_minutes,\n    query_capture_mode = qso.query_capture_mode_desc,\n    wait_stats_capture_mode = qso.wait_stats_capture_mode_desc\nFROM", onPrem2017.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Contains("interval_length_minutes = PerformanceMonitorLite.interval_length_minutes,\n    query_capture_mode = PerformanceMonitorLite.query_capture_mode_desc,\n    wait_stats_capture_mode = PerformanceMonitorLite.wait_stats_capture_mode_desc\nFROM", onPrem2017.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
     }
 
     /// <summary>

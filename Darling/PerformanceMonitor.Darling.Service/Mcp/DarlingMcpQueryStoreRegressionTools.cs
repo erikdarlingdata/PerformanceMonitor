@@ -46,7 +46,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
     /// </summary>
     private const int QueryTextPreviewLength = 240;
 
-    [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE: recent window (hours_back) vs a fixed 7-day baseline before it. get_query_store_top ranks EXPENSIVE, this ranks CHANGED. Gated: average CPU regressed over 25%. Timeouts or errors that rose also qualify (regression_reason). duration_regression_percent and severity are null, not 0%, when their baseline is 0. additional_duration_ms is the ranking key. empty: no regression, or nothing yet in the baseline window. unavailable: no baseline exists yet. not_collected: this server's engine cannot run Query Store. <<GUIDE>> Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's per-execution cost inside a recent window against its baseline - a FIXED 7-day lookback ending at that window's start (#4195; before this it was every capture EVER collected before the window, so its cost tracked how much history the store still retained rather than the window asked for, and the comparison period silently grew on a server with more retention). baseline_start and baseline_end name the period the baseline asks for. cost_baseline_start and failure_baseline_start say where the cost baseline and the timeouts and errors baseline really start, effective_start is the later of the two, and truncation_note says which table served each, so read them to know what was compared. A store that starts inside the baseline holds only part of it, and one that starts at or after baseline_end has a baseline with no hours, so timeouts and errors are flagged on recent runs alone, and cost only against an interval that ran before baseline_end and was collected after it. A regression against something older than the baseline lookback is not caught. Returns baseline vs recent duration and CPU with the regression percent for each (logical reads are not reported, #5506), and beside them the Aborted (timeouts, cancels) and Exception (errors) runs of the same query: for each group the run count, the CPU and duration per execution, and the count per hour, for the baseline and the recent window (the two differ in length, so compare the per-hour figures), the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept where Regular average CPU regressed by more than 25% and the query added at least 1 s of CPU over the recent window (its recent runs times the rise in its CPU per run), so a few runs of a cheap query are not listed while one run of a job that got much more expensive is (regression_reason cost), or where the Aborted rate per hour (timeouts) or the Exception rate per hour (errors) in the recent window is at least twice the baseline's, or nonzero where the baseline had none, with at least 3 such runs in the recent window - so a query whose timeouts rose is listed even if its Regular CPU fell, and one 30 s timeout among a thousand fast runs, which barely moves an average, is not hidden. regression_reason is cost, timeouts, errors or a comma-separated combination. Failure-only rows are listed after the cost rows and take at most a third of the limit (more only if cost rows leave room), so a flood of errors cannot push the cost rows out; their severity is HIGH when the rate is at least five times the baseline's (or the baseline had none) and MEDIUM otherwise, never CRITICAL. Cost compares Regular runs only: the daily totals hold no other kind, and blending Aborted runs in would hide them. The Aborted and Exception figures are read live from the per-interval table (or the raw tier), not from the daily totals. A regression percent whose BASELINE side is 0 has no denominator and is returned as null, with the reason under undefined_percents - never as 0, which would read as no change when the truth is the largest possible one; compare the two absolute figures instead. The ranking key is the absolute, execution-weighted duration delta, which exists whether or not a ratio does, so a null percent never sorts as 0. severity is banded from the duration percent and is null when that percent is. Both sides are WEIGHTED per execution (the summed cost divided by the summed executions, so a busy interval counts for what it ran; before #5506 the baseline was an average of the interval averages, which is not the true cost per execution), over Regular executions only, and the baseline's closed days come from the per-day totals the analysis engine keeps (collect.plan_regression_daily), with the days at its edges read live, so a call no longer re-reads a week of Query Store rows. Reads the per-interval tables when they hold the window, and the raw tier otherwise; history_source says which served. Past the raw tier's retention the cost baseline is read from query_store_interval_latest (kept 15 days, so a full baseline at hours_back 168) and the timeouts and errors baseline from query_store_interval_wide (kept 10 days, so a shorter one), and each per-hour rate divides by the hours from its own start.")]
+    [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE: recent window (hours_back) vs a fixed 7-day baseline before it. get_query_store_top ranks EXPENSIVE, this ranks CHANGED. Gated: average CPU regressed over 25%. Timeouts or errors that rose also qualify (regression_reason). duration_regression_percent and severity are null, not 0%, when their baseline is 0. additional_duration_ms is the ranking key. empty: no regression, or nothing yet in the baseline window. unavailable: no baseline exists yet. not_collected: this server's engine cannot run Query Store. <<GUIDE>> Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's per-execution cost inside a recent window against its baseline - a FIXED 7-day lookback ending at that window's start (before this it was every capture EVER collected before the window, so its cost tracked how much history the store still retained rather than the window asked for, and the comparison period silently grew on a server with more retention). baseline_start and baseline_end name the period the baseline asks for. cost_baseline_start and failure_baseline_start say where the cost baseline and the timeouts and errors baseline really start, effective_start is the later of the two, and truncation_note says how far back each comparison reaches, so read them to know what was compared. A store that starts inside the baseline holds only part of it, and one that starts at or after baseline_end has a baseline with no hours, so timeouts and errors are flagged on recent runs alone, and cost only against an interval that ran before baseline_end and was collected after it. A regression against something older than the baseline lookback is not caught. Returns baseline vs recent duration and CPU with the regression percent for each (logical reads are not reported), and beside them the Aborted (timeouts, cancels) and Exception (errors) runs of the same query: for each group the run count, the CPU and duration per execution, and the count per hour, for the baseline and the recent window (the two differ in length, so compare the per-hour figures), the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept where Regular average CPU regressed by more than 25% and the query added at least 1 s of CPU over the recent window (its recent runs times the rise in its CPU per run), so a few runs of a cheap query are not listed while one run of a job that got much more expensive is (regression_reason cost), or where the Aborted rate per hour (timeouts) or the Exception rate per hour (errors) in the recent window is at least twice the baseline's, or nonzero where the baseline had none, with at least 3 such runs in the recent window - so a query whose timeouts rose is listed even if its Regular CPU fell, and one 30 s timeout among a thousand fast runs, which barely moves an average, is not hidden. regression_reason is cost, timeouts, errors or a comma-separated combination. Failure-only rows are listed after the cost rows and take at most a third of the limit (more only if cost rows leave room), so a flood of errors cannot push the cost rows out; their severity is HIGH when the rate is at least five times the baseline's (or the baseline had none) and MEDIUM otherwise, never CRITICAL. Cost compares Regular runs only: the daily totals hold no other kind, and blending Aborted runs in would hide them. The Aborted and Exception figures are read live from the per-interval table (or the raw tier), not from the daily totals. A regression percent whose BASELINE side is 0 has no denominator and is returned as null, with the reason under undefined_percents - never as 0, which would read as no change when the truth is the largest possible one; compare the two absolute figures instead. The ranking key is the absolute, execution-weighted duration delta, which exists whether or not a ratio does, so a null percent never sorts as 0. severity is banded from the duration percent (CRITICAL over 100%, HIGH over 50%, MEDIUM over 25%, else LOW) and is null when that percent is. A cost row that added under 1 minute of duration over the window (additional_duration_ms) AND under 1 second per run (recent_duration_ms minus baseline_duration_ms) reads LOW whatever its percent, and stays listed. Both sides are WEIGHTED per execution (the summed cost divided by the summed executions, so a busy interval counts for what it ran; an older build averaged the interval averages instead, which is not the true cost per execution), over Regular executions only, and the baseline's closed days come from the per-day totals the analysis engine keeps (collect.plan_regression_daily), with the days at its edges read live, so a call no longer re-reads a week of Query Store rows. Reads the per-interval tables when they hold the window, and the raw tier otherwise; history_source says which served. Past the raw tier's retention the cost baseline is read from query_store_interval_latest (kept 15 days, so a full baseline at hours_back 168) and the timeouts and errors baseline from query_store_interval_wide (kept 10 days, so a shorter one), and each per-hour rate divides by the hours from its own start.")]
     public static Task<string> GetQueryStoreRegressions(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -149,8 +149,12 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 tailFor: effectiveStart => QueryStoreRegressionRules.TailFor(effectiveStart, start));
 
             if (rows.Count == 0)
-                return McpHelpers.WithDatabasesLeftOut(
-                    await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, baselineStart, hours_back, databaseFilter, notice, tableSpans, dataStart, !string.IsNullOrWhiteSpace(as_of), cancellationToken), leftOut)!;
+                /* #7167: the all-clear rung below is a true negative only while the server is being collected. */
+                return await DarlingServerOfflineNote.EmptyAsync(
+                    postgres, resolved.ServerId, resolved.DisplayName, end,
+                    McpHelpers.WithDatabasesLeftOut(
+                        await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, baselineStart, hours_back, databaseFilter, notice, tableSpans, dataStart, !string.IsNullOrWhiteSpace(as_of), cancellationToken), leftOut)!,
+                    cancellationToken, start);
 
             /* #6750: always present. On the table path below raw's floor each arm's own start; otherwise both are the notice's effective_start. */
             var costBaselineStart = tableSpans is not null ? McpHelpers.FormatEffectiveStart(tableSpans.CostStart) : notice.EffectiveStart;
@@ -196,6 +200,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 regressions = shown.Select(r => RegressionRowJson(r, full_text)),
                 /* #6654: the dropped databases this read left out, in the words get_top_procedures_by_cpu uses. */
                 databases_left_out = DatabasesLeftOut.Named(leftOut),
+                databases_left_out_count = DatabasesLeftOut.Count(leftOut),
                 databases_left_out_note = DatabasesLeftOut.Note(leftOut),
             }, McpHelpers.JsonOptions);
 
@@ -238,10 +243,12 @@ public sealed class DarlingMcpQueryStoreRegressionTools
     {
         var cost = McpHelpers.FormatEffectiveStart(spans.CostStart);
         var failure = McpHelpers.FormatEffectiveStart(spans.FailureStart);
-        var note = "The window reaches further back than this server's raw query_store_stats retains, so the baseline was read from the per-interval tables, each from where it holds complete history. ";
+        /* #7729: no table names and no retention figures. The page prints this sentence, and a person cannot act on query_store_interval_wide: they need
+           how far back each comparison reaches. */
+        var note = "This range reaches past the detailed history this server keeps, so the baseline was read from its Query Store interval summaries, each from where it holds complete history. ";
         note += spans.CostFromLatest
-            ? $"Cost (Regular runs) was compared from {cost} to the end of the baseline, from query_store_interval_latest, which keeps {DarlingRetention.QueryStoreIntervalLatestRetentionDays} days. Timeouts and errors were compared from {failure} to the end of the baseline, from query_store_interval_wide, which keeps {QueryStoreIntervalPartitions.WideHorizonDays} days."
-            : $"Cost, timeouts and errors were compared from {failure} to the end of the baseline, from query_store_interval_wide, which keeps {QueryStoreIntervalPartitions.WideHorizonDays} days.";
+            ? $"Cost (Regular runs) was compared from {cost}, and timeouts and errors from {failure}, each to the end of the baseline."
+            : $"Cost, timeouts and errors were compared from {failure} to the end of the baseline.";
         if (DateTime.SpecifyKind(spans.FailureStart, DateTimeKind.Unspecified) >= DateTime.SpecifyKind(baselineEnd, DateTimeKind.Unspecified))
         {
             note += " That timeouts and errors baseline holds no hours, so timeouts and errors are flagged on recent runs alone.";
@@ -339,7 +346,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
 
         void Note(string field, string baseline, string recent)
             => (notes ??= new List<string>()).Add(
-                $"{field} is null: no_baseline — {baseline} is 0, so the ratio has no denominator; this is NOT 0% change. Compare {baseline} to {recent} directly.");
+                $"{field} is null: no_baseline, {baseline} is 0, so the ratio has no denominator; this is NOT 0% change. Compare {baseline} to {recent} directly.");
 
         if (r.DurationRegressionPercent is null) Note("duration_regression_percent", "baseline_duration_ms", "recent_duration_ms");
         if (r.CpuRegressionPercent is null) Note("cpu_regression_percent", "baseline_cpu_ms", "recent_cpu_ms");
@@ -391,7 +398,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                     is { } firstInterval ? McpHelpers.Status("unavailable", firstInterval + (replay ? $" That is this server's state now, not as of {end:yyyy-MM-dd HH:mm}Z, the end of the requested window, which holds no Query Store sample." : "") + " There is nothing to compare yet, so this is not a report of zero regressions.") : null)
                 ?? McpHelpers.Status(
                     "unavailable",
-                    $"No Query Store data has EVER been collected for {serverName}, so this is NOT a report of zero regressions — there is nothing to compare. Query Store may be OFF on this server's databases, which get_query_store_health will say; otherwise check that collection is running for this server.");
+                    $"No Query Store data has EVER been collected for {serverName}, so this is NOT a report of zero regressions: there is nothing to compare. Query Store may be OFF on this server's databases, which get_query_store_health will say; otherwise check that collection is running for this server.");
         }
 
         if (!hasBaseline)
@@ -402,7 +409,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             return McpHelpers.Status(
                 "unavailable",
                 $"{serverName} has no Query Store capture in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline window before this window, so there is no baseline to compare against and no regression can be detected however badly one regressed. This is NOT a clean bill of health. "
-                    + (kept ?? $"Either this server's whole collected history falls inside the last {hours_back} hour(s), or it has none older than the baseline lookback yet."),
+                    + (kept ?? $"Either this server's whole collected history falls inside the last {CountText.Plural(hours_back, "hour")}, or it has none older than the baseline lookback yet."),
                 notice.AsHints());
         }
 
@@ -410,7 +417,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
         {
             return McpHelpers.Status(
                 "empty",
-                $"{serverName} has Query Store history from before this window but nothing collected IN the last {hours_back} hour(s), so there is a recent side missing rather than nothing to report. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
+                $"{serverName} has Query Store history from before this window but nothing collected IN the last {CountText.Plural(hours_back, "hour")}, so there is a recent side missing rather than nothing to report. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
                 notice.AsHints());
         }
 
@@ -435,7 +442,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             {
                 return McpHelpers.Status(
                     "empty",
-                    $"No Query Store capture on {serverName} in the last {hours_back} hour(s) or in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline before it matched {scope}, so the filter matched nothing and this is NOT the all-clear: no query in {that} was compared. Check the database {(one ? "name" : "names")}, or drop the filter to read every database.",
+                    $"No Query Store capture on {serverName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))} or in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline before it matched {scope}, so the filter matched nothing and this is NOT the all-clear: no query in {that} was compared. Check the database {(one ? "name" : "names")}, or drop the filter to read every database.",
                     notice.AsHints());
             }
 
@@ -444,7 +451,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 var keptSome = await RetentionCause.ForDatabaseAsync(postgres, serverId, baselineStart, start, floor, tableSpans is not null, one, cancellationToken);
                 return McpHelpers.Status(
                     "unavailable",
-                    $"{serverName} has no Query Store capture of {scope} in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline window before this window, so there is no baseline for {that} to compare against and no regression of {(one ? "its" : "their")} queries can be detected however badly one regressed. This is NOT a clean bill of health: no query in {that} was compared. " + (keptSome ?? $"Either {thatPossessive} whole collected history falls inside the last {hours_back} hour(s), or {(one ? "it has" : "they have")} none older than the baseline lookback yet."),
+                    $"{serverName} has no Query Store capture of {scope} in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline window before this window, so there is no baseline for {that} to compare against and no regression of {(one ? "its" : "their")} queries can be detected however badly one regressed. This is NOT a clean bill of health: no query in {that} was compared. " + (keptSome ?? $"Either {thatPossessive} whole collected history falls inside the last {CountText.Plural(hours_back, "hour")}, or {(one ? "it has" : "they have")} none older than the baseline lookback yet."),
                     notice.AsHints());
             }
 
@@ -452,7 +459,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             {
                 return McpHelpers.Status(
                     "empty",
-                    $"{serverName} has Query Store history of {scope} from before this window but nothing of {(one ? "it" : "them")} collected IN the last {hours_back} hour(s), so {thatPossessive} recent side is missing rather than nothing to report, and this is NOT the all-clear: no query in {that} was compared. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
+                    $"{serverName} has Query Store history of {scope} from before this window but nothing of {(one ? "it" : "them")} collected IN the last {CountText.Plural(hours_back, "hour")}, so {thatPossessive} recent side is missing rather than nothing to report, and this is NOT the all-clear: no query in {that} was compared. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
                     notice.AsHints());
             }
         }
@@ -461,8 +468,8 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             "empty",
             McpHelpers.QuietUnlessCut(
                 notice.WindowTruncated, notice.EffectiveStart,
-                factual: $"No query on {serverName} regressed in the last {hours_back} hour(s). Both a baseline and this window were collected and no query's Regular average CPU is more than 25% worse than its baseline with at least 1 s of added CPU, and none of their timeouts or errors rose",
-                coveredClaim: " — this IS the all-clear for this read."),
+                factual: $"No query on {serverName} regressed {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}. Both a baseline and this window were collected and no query's Regular average CPU is more than 25% worse than its baseline with at least 1 s of added CPU, and none of their timeouts or errors rose",
+                coveredClaim: ": this is the all-clear for this read."),
             notice.AsHints());
     }
 }

@@ -421,7 +421,7 @@ public static class PgServerLogCsvParser
 
         var logTime = fields[0];
 
-        if (!TryParseLogTime(logTime, out var occurredAtUtc, out var zoneText))
+        if (!PgLogEntry.TryParseStampAndZone(logTime, out var occurredAtUtc, out var zoneText))
         {
             return false;
         }
@@ -479,36 +479,6 @@ public static class PgServerLogCsvParser
             QueryIdText: queryIdText);
 
         return true;
-    }
-
-    /// <summary>
-    /// <c>log_time</c> renders as <c>YYYY-MM-DD HH:MM:SS.mmm ZONE</c> — the same stamp-then-zone shape the
-    /// stderr assembler reads. This check decides only "is this a record" — a stamp that parses — never
-    /// whether the zone is UTC (#4053 review H1): a non-zero-offset zone is still a record, and the zone
-    /// decision belongs to <see cref="PgLogEventsCollector"/>'s foreign-zone filter, which runs after every
-    /// record has been recovered. Rejecting a foreign-zone stamp here starved that filter of the very
-    /// entries it exists to judge, and a non-UTC target read as quiet instead of refused.
-    /// </summary>
-    private static bool TryParseLogTime(string logTime, out DateTime occurredAtUtc, out string zoneText)
-    {
-        occurredAtUtc = default;
-        zoneText = string.Empty;
-
-        var spaceIndex = logTime.LastIndexOf(' ');
-
-        if (spaceIndex < 0 || spaceIndex == logTime.Length - 1)
-        {
-            return false;
-        }
-
-        var stamp = logTime[..spaceIndex];
-        zoneText = logTime[(spaceIndex + 1)..];
-
-        return DateTime.TryParse(
-            stamp,
-            CultureInfo.InvariantCulture,
-            DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
-            out occurredAtUtc);
     }
 
     private static string? NullIfEmpty(string value) => value.Length == 0 ? null : value;

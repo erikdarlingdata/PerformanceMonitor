@@ -111,6 +111,8 @@ public sealed class McpResponseBudgetPerfmonAndBlockedXmlToolTests : IClassFixtu
         Assert.InRange(returned, 1, 4);
         Assert.Equal(returned, root.GetProperty("reports_returned").GetInt32());
         Assert.True(root.GetProperty("truncated").GetBoolean());
+        /* #7545: the window held exactly the limit (5 of 5), so the size cut is the only reason for truncated. */
+        Assert.False(root.GetProperty("more_reports_than_limit").GetBoolean());
         Assert.Equal(5 - returned, root.GetProperty("left_out_count").GetInt32());
         Assert.Equal(5 - returned, root.GetProperty("left_out_reports").GetArrayLength());
         Assert.Contains("limit 1", root.GetProperty("size_note").GetString(), StringComparison.Ordinal);
@@ -144,6 +146,32 @@ public sealed class McpResponseBudgetPerfmonAndBlockedXmlToolTests : IClassFixtu
             service, _serverManager, ServerName, hours_back: 24, limit: 1, as_of: eventTime));
         Assert.Equal(1, one.RootElement.GetProperty("reports").GetArrayLength());
         Assert.Equal(leftOut.GetProperty("blocked_spid").GetInt32(), one.RootElement.GetProperty("reports")[0].GetProperty("blocked_spid").GetInt32());
+    }
+
+    /* #7545: the row-limit fact is its own key, so a window holding exactly limit large reports (a size cut only) is told apart from one
+       that held more than limit. */
+    [Fact]
+    public async Task BlockedProcessXml_MoreReportsThanLimit_IsItsOwnKey_NotTheSizeCut()
+    {
+        var service = new LocalDataService(_duckDb);
+        var bigXml = BuildReportXml(18_000);
+        var newest = DateTime.UtcNow.AddMinutes(-5);
+        newest = new DateTime(newest.Ticks - (newest.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        for (var i = 0; i < 5; i++)
+        {
+            await SeedBlockedReportAsync(newest.AddMinutes(-i * 10), 100 + i, bigXml);
+        }
+
+        using (var exact = JsonDocument.Parse(await McpBlockingTools.GetBlockedProcessXml(service, _serverManager, ServerName, limit: 5)))
+        {
+            Assert.True(exact.RootElement.GetProperty("truncated").GetBoolean());
+            Assert.True(exact.RootElement.GetProperty("left_out_count").GetInt32() > 0);
+            Assert.False(exact.RootElement.GetProperty("more_reports_than_limit").GetBoolean());
+        }
+
+        await SeedBlockedReportAsync(newest.AddMinutes(-50), 105, bigXml);
+        using var more = JsonDocument.Parse(await McpBlockingTools.GetBlockedProcessXml(service, _serverManager, ServerName, limit: 5));
+        Assert.True(more.RootElement.GetProperty("more_reports_than_limit").GetBoolean());
     }
 
     [Fact]

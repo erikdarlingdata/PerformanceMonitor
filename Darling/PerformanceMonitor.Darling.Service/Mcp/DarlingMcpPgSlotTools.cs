@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -73,12 +74,13 @@ public sealed class DarlingMcpPgSlotTools
         _ => 0,
     };
 
-    [McpServerTool(Name = "get_pg_replication_slots"), Description("Replication slot health: whether retained WAL is unbounded and GROWING (fills disk, pins vacuum). Window ends at as_of. not_collected: engine is not PostgreSQL. empty: none sampled in hours_back, none exist or none collected; per-instance, a replica's empty doesn't clear the writer. slots_present: slots in window; read worst_severity. retained_wal_bytes/_gb, safe_wal_size_bytes, xmin ages: null on the collector's -1 sentinel; no ceiling by default isn't a gap. retained_wal_growth_bytes is 0 when flat (measured), null when unmeasurable. worst_slot ranks by severity, not size.<<GUIDE>>Gets PostgreSQL replication slot health, including whether any slot is retaining WAL without bound. An abandoned slot is one of the few PostgreSQL conditions that can take a server down by itself, and it does so two independent ways: it retains every WAL segment its consumer has not confirmed - unbounded by default, so it will fill the volume and stop the server - and it simultaneously pins the vacuum horizon so nothing gets reclaimed cluster-wide. Reports whether retained WAL is still GROWING across the window, which is the difference between a consumer that is merely behind and a volume filling in front of you. Common orphan sources are a removed CDC task, a finished blue/green deployment, a decommissioned Debezium consumer, or a failed major-version upgrade. Works on any PostgreSQL target.")]
+    [McpServerTool(Name = "get_pg_replication_slots"), Description("Replication slot health: whether retained WAL is unbounded and GROWING (fills disk, pins vacuum). Window ends at as_of. not_collected: engine is not PostgreSQL. empty: none sampled in hours_back, none exist or none collected; per-instance, a replica's empty doesn't clear the writer. slots_present: slots in window; read worst_severity. retained_wal_bytes/_gb, safe_wal_size_bytes, xmin ages: null on the collector's -1 sentinel; no ceiling by default isn't a gap. retained_wal_growth_bytes is 0 when flat (measured), null when unmeasurable. worst_slot ranks by severity, not size.<<GUIDE>>Gets PostgreSQL replication slot health, including whether any slot is retaining WAL without bound. An abandoned slot is one of the few PostgreSQL conditions that can take a server down by itself, and it does so two independent ways: it retains every WAL segment its consumer has not confirmed - unbounded by default, so it will fill the volume and stop the server - and it simultaneously pins the vacuum horizon so nothing gets reclaimed cluster-wide. Reports whether retained WAL is still GROWING across the window, which is the difference between a consumer that is merely behind and a volume filling in front of you. total_retained_wal_gb is the WAL the disk holds because of slots: the furthest slot's figure, since slots hold overlapping stretches of the same log, not the sum; null when no slot was measured. Common orphan sources are a removed CDC task, a finished blue/green deployment, a decommissioned Debezium consumer, or a failed major-version upgrade. Works on any PostgreSQL target.")]
     public static async Task<string> GetPgReplicationSlots(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze, used for the WAL growth comparison. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
@@ -90,8 +92,18 @@ public sealed class DarlingMcpPgSlotTools
         try
         {
             var now = windowEnd;
-            var rows = await DarlingPgSlotReader.GetPgSlotsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
+            /* #7910: every capture lists every slot, so a slot missing from the collector's newest run was dropped, and its
+               last stored sample is not the present state. The read marks it (DarlingPgSlotReader, PgCurrentCapture); it is
+               left out of the slots, the worst slot and the totals, and named in omitted_slots so the drop is visible. */
+            var allRows = await DarlingPgSlotReader.GetPgSlotsAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, includeCleared: true, cancellationToken: cancellationToken);
+            var rows = allRows.Where(r => r.IsCurrent).ToList();
+            var omittedSlots = allRows.Where(r => !r.IsCurrent).Select(r => r.SlotName).OrderBy(n => n, StringComparer.Ordinal).ToList();
+            var omittedNote = omittedSlots.Count == 0
+                ? null
+                : $"{CountText.Plural(omittedSlots.Count, "slot")} had a stored sample in the window but {(omittedSlots.Count == 1 ? "is" : "are")} absent from the collector's newest run "
+                  + string.Create(System.Globalization.CultureInfo.InvariantCulture, $"({allRows[0].LatestCaptureAt:yyyy-MM-dd HH:mm:ss} UTC), so {(omittedSlots.Count == 1 ? "it was dropped since and is" : "they were dropped since and are")} not reported as ")
+                  + $"current. {(omittedSlots.Count == 1 ? "Its" : "Their")} last sample is older than that run.";
 
             /* No slots is the common, healthy case on most servers — say so rather than returning an
                "unavailable" envelope that reads like a collection problem.
@@ -110,16 +122,29 @@ public sealed class DarlingMcpPgSlotTools
                     return gated;
                 }
 
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, JsonSerializer.Serialize(new
+                /* #7010: a slot row exists only while the slot does, so the probe reads the collector's logged runs (the web's
+                   source for this read), which are written whether or not a slot existed: "collected, nothing there" is a run with
+                   no row, "not collected" is no run. The all-clear is an empty answer and carries the window floor under hints. */
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                    postgres, "get_pg_replication_slots", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, logger, cancellationToken);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,
                     hours_back,
                     status = "empty",
-                    finding = "This instance has no replication slots in the window, so it is not itself "
-                            + "retaining WAL or pinning vacuum through one.",
+                    hints = emptyNotice.AsHints(),
+                    omitted_slots = omittedSlots,
+                    omitted_slots_note = omittedNote,
+                    finding = McpHelpers.QuietUnlessCut(
+                        emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                        factual: omittedSlots.Count > 0
+                            ? "This instance has no replication slots in the collector's newest run; the slots in omitted_slots "
+                                + "were present earlier in the window and have been dropped since"
+                            : "This instance has no replication slots in the captures the store holds for the window",
+                        coveredClaim: ", so it is not itself retaining WAL or pinning vacuum through one."),
                     scope = "Per-instance. Slots live on the writer, so if this target is a replica, check "
                           + "the cluster's writer before concluding the cluster has no abandoned slot.",
-                }, McpHelpers.JsonOptions), cancellationToken);
+                }, McpHelpers.JsonOptions), emptyNotice), cancellationToken, now.AddHours(-hours_back));
             }
 
             var slots = rows.Select(r =>
@@ -138,6 +163,8 @@ public sealed class DarlingMcpPgSlotTools
                 return new
                 {
                     slot_name = r.SlotName,
+                    /* #7910: the sample every figure below comes from. */
+                    last_seen = r.MeasuredAt,
                     severity = Classify(r.WalStatus, r.IsActive, growing),
                     slot_type = r.SlotType,
                     plugin = r.Plugin,
@@ -178,19 +205,39 @@ public sealed class DarlingMcpPgSlotTools
 
             var worst = slots[0];
 
-            return JsonSerializer.Serialize(new
+            /* #7010: the growth figures compare a slot's retained WAL at its first sighting in the window with its latest, so the
+               answer names where the store's coverage of the window starts. */
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_replication_slots", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, logger, cancellationToken);
+
+            /* #7939: the WAL the disk holds because of slots. Each slot's figure is the current WAL position minus its own
+               restart_lsn, so slots behind on one cluster retain overlapping stretches of the same log and the server keeps
+               WAL back to the oldest restart_lsn only. That is the largest measured figure, not the sum: three slots holding
+               45, 8 and 1 GB of the same log hold 45 GB on disk. Unmeasured slots (the -1 sentinel, null here) are left out,
+               and when no slot was measured the total is null: a 0 there would claim nothing is retained when nothing was
+               read. A measured 0 reads 0. */
+            var walHeldBySlots = slots.Max(s => s.retained_wal_bytes);
+
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
+                /* #7010: the window floor, right after hours_back. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 status = "slots_present",
                 slot_count = slots.Count,
                 inactive_count = slots.Count(s => !s.is_active),
                 worst_slot = worst.slot_name,
                 worst_severity = worst.severity,
-                total_retained_wal_gb = Math.Round(
-                    slots.Where(s => s.retained_wal_bytes > 0).Sum(s => s.retained_wal_bytes ?? 0) / 1024.0 / 1024.0 / 1024.0, 2),
+                omitted_slots = omittedSlots,
+                omitted_slots_note = omittedNote,
+                total_retained_wal_gb = walHeldBySlots is null
+                    ? (double?)null
+                    : Math.Round(walHeldBySlots.Value / 1024.0 / 1024.0 / 1024.0, 2),
                 slots,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -45,6 +45,12 @@ public sealed class ArchiveResetGateReleaseTests : IDisposable
     private readonly string _archiveDir;
     private readonly string _month = DateTime.UtcNow.ToString("yyyyMM", CultureInfo.InvariantCulture);
 
+    /* The reset exports the live tables as yyyyMMdd_HHmm_<table>.parquet at the current minute. A seeded per-cycle file on the
+       same day with a stamp at or before that minute (the 50 file run seeds 0000 to 0049) can take that very name, the export
+       then fails, the reset gives up before compaction and the test waits for a compaction that never comes (#7055: a run at
+       00:22 UTC on the 1st). The seeded day is therefore never today. */
+    private readonly string _seedDay = DateTime.UtcNow.Day == 1 ? "02" : "01";
+
     public ArchiveResetGateReleaseTests()
     {
         CollectionResetGate.ResetForTests();
@@ -98,11 +104,11 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
 
         var mergedPath = Path.Combine(_archiveDir, $"{_month}_collection_log.parquet").Replace("\\", "/");
         await ExecAsync($"COPY collection_log TO '{mergedPath}' (FORMAT PARQUET)");
-        var seedPath = Path.Combine(_archiveDir, $"{_month}01_0000_collection_log.parquet").Replace("\\", "/");
+        var seedPath = Path.Combine(_archiveDir, $"{_month}{_seedDay}_0000_collection_log.parquet").Replace("\\", "/");
         await ExecAsync($"COPY collection_log TO '{seedPath}' (FORMAT PARQUET)");
         for (var i = 1; i < perCycleFiles; i++)
         {
-            File.Copy(seedPath, Path.Combine(_archiveDir, $"{_month}01_{i / 60:D2}{i % 60:D2}_collection_log.parquet"));
+            File.Copy(seedPath, Path.Combine(_archiveDir, $"{_month}{_seedDay}_{i / 60:D2}{i % 60:D2}_collection_log.parquet"));
         }
 
         await initializer.CreateArchiveViewsAsync();

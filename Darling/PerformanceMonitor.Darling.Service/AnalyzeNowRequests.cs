@@ -122,7 +122,7 @@ internal static class AnalyzeNowRequests
             /* The function is missing (a store provisioned before this release) or the login may not execute it. */
             return new SnapshotRequestOutcome(
                 false, StoreRefusedCode,
-                "This dashboard's store login cannot queue an analysis run. Re-run Darling/tools/provision-roles.sql on the store "
+                "This dashboard's store login cannot queue an analysis run. Re-run " + DarlingManagedRoles.ProvisionRolesScriptPath + " on the store "
                 + "(it adds config.request_analyze_now), or use the Viewer's Generate now.",
                 null, null);
         }

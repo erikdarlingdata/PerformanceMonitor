@@ -28,7 +28,7 @@ public sealed class WebDataStartNoteBlockingDeadlockTests
     private const string Oldest = "2026-01-02T12:30:00.0000000Z";
 
     private static NpgsqlDataSource NeverConnects() =>
-        NpgsqlDataSource.Create("Host=127.0.0.1;Port=9;Username=x;Database=x;Timeout=1;Pooling=false");
+        NpgsqlDataSource.Create("Host=127.0.0.1;Port=9;Username=x;Database=x;Timeout=15;Pooling=false");
 
     private static readonly CancellationToken Cancelled = new(canceled: true);
 

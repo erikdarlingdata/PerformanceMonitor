@@ -156,7 +156,7 @@ public sealed class ExternalAlertSourceVerbLiveTests
         finally
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
-                await new LiveCleanupBatch(cleanup).RemoveRolesAsync(["admin", "viewer", "mcp", GroupName], RunSuffix, cleanupCt));
+                await new LiveCleanupBatch(cleanup).RemoveRolesAsync(["admin", "viewer", "web", "mcp", GroupName], RunSuffix, cleanupCt));
         }
     }
 
@@ -296,7 +296,7 @@ public sealed class ExternalAlertSourceVerbLiveTests
             /* Rotate: a new password, a new verifier, the old password refused. */
             var rotate = await RunAsync("--rotate-alert-source", SourceName);
             Assert.Equal(0, rotate.Exit);
-            Assert.Contains($"Ended 1 open session(s) of login '{RoleName}'", rotate.Output, StringComparison.Ordinal);
+            Assert.Contains($"Ended 1 open session of login '{RoleName}'", rotate.Output, StringComparison.Ordinal);
             await AssertSessionsGoneAsync(owner, $"usename = '{RoleName}'", ct);
             await Assert.ThrowsAnyAsync<Exception>(() => ScalarAsync<int>(heldBeforeRotate, "SELECT 1", ct));
 
@@ -336,10 +336,10 @@ public sealed class ExternalAlertSourceVerbLiveTests
             var remove = await RunAsync("--remove-alert-source", SourceName);
             Assert.Equal(0, remove.Exit);
             Assert.Contains("dropped", remove.Output);
-            Assert.Contains($"Ended 1 open session(s) of login '{RoleName}'", remove.Output, StringComparison.Ordinal);
+            Assert.Contains($"Ended 1 open session of login '{RoleName}'", remove.Output, StringComparison.Ordinal);
             await AssertSessionsGoneAsync(owner, $"usesysid = {loginOid}", ct);
             await Assert.ThrowsAnyAsync<Exception>(() => ScalarAsync<int>(heldBeforeRemove, "SELECT 1", ct));
-            Assert.Contains("2 queued alert row(s), 2 of them not yet delivered", remove.Output);
+            Assert.Contains("2 queued alert rows, 2 of them not yet delivered", remove.Output);
             Assert.False(await ScalarAsync<bool>(owner, $"SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RoleName}')", ct));
             Assert.Empty(await GroupMembersAsync(owner, ct));
             Assert.Equal(0, await ScalarAsync<long>(owner, "SELECT count(*) FROM config.external_alert_source", ct));
@@ -355,7 +355,7 @@ public sealed class ExternalAlertSourceVerbLiveTests
         finally
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
-                await new LiveCleanupBatch(cleanup).RemoveRolesAsync(["admin", "viewer", "mcp", RoleName, StrayName, GroupName], RunSuffix, cleanupCt));
+                await new LiveCleanupBatch(cleanup).RemoveRolesAsync(["admin", "viewer", "web", "mcp", RoleName, StrayName, GroupName], RunSuffix, cleanupCt));
         }
     }
 }

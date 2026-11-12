@@ -33,6 +33,12 @@ export const KEY_SEVERITY_COLORS = "darling.local.severityColors.v1";
 export const KEY_SIDEBAR = "darling.local.sidebar.v1";
 export const KEY_DB_FILTER = "darling.local.dbFilter.v1";
 export const KEY_VIEW_GROUPS = "darling.local.viewGroups.v1";
+/** The PostgreSQL servers this browser has opened (#8554), as hashes of the route's server name (a name is never stored): the server page
+ *  starts a server's first reads before its fleet card arrives, on the SQL Server tabs, unless the server is in this set. */
+export const KEY_PG_SERVERS = "darling.local.pgServers.v1";
+/** The server id a fleet card gave each server this browser has opened (#8554), by hash of the route's server name (a name is never stored).
+ *  A saved database filter is keyed by that id, so with it the server page can apply the filter before the card arrives. */
+export const KEY_SERVER_IDS = "darling.local.serverIds.v1";
 /** The collapsed sidebar groups of ONE store at a front door (#6840), under this key plus "/" and the store's name. A tag id is
  *  handed out by each store on its own, so tag 5 in one store is not tag 5 in another. Server ids are not scoped this way: they
  *  are a hash of the server's name, the same server has the same id in every store, and favourites, acknowledgements and the
@@ -47,6 +53,8 @@ export const MAX_DB_NAMES = 50;
 export const MAX_DB_NAME_LENGTH = 128;
 export const MAX_DB_QUERY_BYTES = 4096;
 const DB_PAIR_OVERHEAD = "&database_name=".length;
+const MAX_PG_SERVERS = 500;
+const MAX_SERVER_IDS = 500;
 
 /** The severities with a colour choice, in the order the settings list them, and the palette each falls back to. */
 export const SEVERITIES = ["critical", "warning", "info"];
@@ -74,10 +82,13 @@ let favorites = new Set();
 let acks = new Map(); // server_id -> epoch ms of the acknowledgement
 let colors = {}; // severity -> "#rrggbb" (only valid choices)
 let sidebarCollapsed = false;
+let navCollapsed = false; // the sidebar's page links folded away so the server list gets the height (#8578)
 let sidebarGrouped = false;
 let dbFilters = new Map(); // server_id -> the chosen database names (1 to MAX_DB_NAMES, kept exactly as chosen)
 let viewGroups = new Set(); // collapsed Custom Views sidebar groups (#6214): "my", or "folder:" + the folder's name
 let sidebarGroups = new Set(); // collapsed sidebar groups: tag ids, plus the fixed ids "favourites" and "untagged"
+let pgServers = new Set(); // hashes of the route names of servers a fleet card called PostgreSQL (#8554), oldest first
+let serverIds = new Map(); // hash of the route's server name -> the server id its fleet card gave (#8554), oldest first
 let storeScope = null; // the front door's picked store, or null (store mode: the keys are what they always were)
 let attention = new Map(); // server_id -> { count, critical, latestMs } from the last alert read
 const listeners = new Set();
@@ -101,15 +112,31 @@ function writeJson(key, value, store = storage) {
   }
 }
 
+/** A server id is a 32-bit hash of the server's name (ServerIdHelper.GetDeterministicHashCode): any whole number from
+ *  -2,147,483,648 to 2,147,483,647 except 0, negative for about half the servers. 0 is no server: the store's own alerts and
+ *  an external source's alert that names no registered server carry server_id 0, and they get no badge, star or filter. */
+const MIN_SERVER_ID = -2147483648;
+const MAX_SERVER_ID = 2147483647;
+
 function isServerId(n) {
-  return Number.isSafeInteger(n) && n > 0;
+  return Number.isInteger(n) && n !== 0 && n >= MIN_SERVER_ID && n <= MAX_SERVER_ID;
+}
+
+/** A stored object key as a server id, or NaN: an optional minus sign and up to ten digits, which isServerId then bounds. */
+function serverIdFromKey(k) {
+  return /^-?\d{1,10}$/.test(k) ? Number(k) : NaN;
+}
+
+/** A tag id is handed out by the store, counting up from 1. */
+function isTagId(g) {
+  return Number.isSafeInteger(g) && g > 0;
 }
 
 /** The fixed sidebar group ids that are not tags. */
 const FIXED_GROUPS = ["favourites", "untagged"];
 
 function isGroupId(g) {
-  return isServerId(g) || FIXED_GROUPS.includes(g);
+  return isTagId(g) || FIXED_GROUPS.includes(g);
 }
 
 /** The Custom Views sidebar's group ids (#6214): the fixed "my" group, or "folder:" + a folder name (a name the store holds to 100
@@ -132,7 +159,7 @@ export function reload() {
   const a = readJson(KEY_ACKS);
   if (a && a.acks && typeof a.acks === "object" && !Array.isArray(a.acks)) {
     for (const [k, t] of Object.entries(a.acks)) {
-      const id = /^\d{1,9}$/.test(k) ? Number(k) : NaN;
+      const id = serverIdFromKey(k);
       if (isServerId(id) && typeof t === "number" && Number.isFinite(t) && t > 0 && acks.size < MAX_IDS) acks.set(id, t);
     }
   }
@@ -150,14 +177,26 @@ export function reload() {
   const d = readJson(KEY_DB_FILTER);
   if (d && d.servers && typeof d.servers === "object" && !Array.isArray(d.servers)) {
     for (const [k, names] of Object.entries(d.servers)) {
-      const id = /^\d{1,9}$/.test(k) ? Number(k) : NaN;
+      const id = serverIdFromKey(k);
       const kept = isServerId(id) && dbFilters.size < MAX_IDS ? cleanDatabaseNames(names) : null;
       if (kept) dbFilters.set(id, kept);
     }
   }
 
+  const pg = readJson(KEY_PG_SERVERS);
+  pgServers = new Set(pg && Array.isArray(pg.hashes) ? pg.hashes.filter(Number.isInteger).slice(-MAX_PG_SERVERS) : []);
+
+  serverIds = new Map();
+  const si = readJson(KEY_SERVER_IDS);
+  if (si && Array.isArray(si.ids)) {
+    for (const pair of si.ids.slice(-MAX_SERVER_IDS)) {
+      if (Array.isArray(pair) && Number.isInteger(pair[0]) && isServerId(pair[1])) serverIds.set(pair[0], pair[1]);
+    }
+  }
+
   const s = readJson(KEY_SIDEBAR);
   sidebarCollapsed = !!(s && s.collapsed === true);
+  navCollapsed = !!(s && s.navCollapsed === true);
   sidebarGrouped = !!(s && s.grouped === true);
   const g0 = storeScope === null ? s : readJson(sidebarGroupsKey());
   sidebarGroups = new Set(g0 && Array.isArray(g0.collapsedGroups) ? g0.collapsedGroups.filter(isGroupId).slice(0, MAX_IDS) : []);
@@ -298,6 +337,61 @@ export function setDatabaseFilter(serverId, names) {
   return true;
 }
 
+/** True when at least one server has a saved database filter. A filter is keyed by the fleet card's server id, so a page that
+ *  starts reading before the card arrives (#8554) cannot apply one and only starts when there is none to apply. */
+export function hasDatabaseFilter() {
+  return dbFilters.size > 0;
+}
+
+/* ─────────────────────────── PostgreSQL servers seen (#8554) ─────────────────────────── */
+
+/** FNV-1a over the route's server name: a number to remember, never the name itself. A collision only makes the page skip an early
+ *  start for one server (or make one early start that the card then replaces), neither of which shows. */
+function nameHash(name) {
+  let h = 0x811c9dc5;
+  const text = String(name);
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h;
+}
+
+/** True when a fleet card has called the server named by the route PostgreSQL in this browser before. */
+export function isRememberedPostgres(routeName) {
+  return pgServers.has(nameHash(routeName));
+}
+
+/** Notes what a fleet card said about the server named by the route: PostgreSQL adds it to the set, anything else takes it out. */
+export function rememberEngine(routeName, isPostgres) {
+  const h = nameHash(routeName);
+  if (pgServers.has(h) === (isPostgres === true)) return;
+  if (isPostgres === true) {
+    pgServers.add(h);
+    if (pgServers.size > MAX_PG_SERVERS) pgServers.delete(pgServers.values().next().value);
+  } else {
+    pgServers.delete(h);
+  }
+  writeJson(KEY_PG_SERVERS, { hashes: [...pgServers] });
+}
+
+/** The server id a fleet card gave the server named by the route when this browser last saw one, or null. */
+export function rememberedServerId(routeName) {
+  const id = serverIds.get(nameHash(routeName));
+  return id === undefined ? null : id;
+}
+
+/** Notes the id a fleet card gave the server named by the route (#8554). A card with no usable id leaves what was there. */
+export function rememberServerId(routeName, serverId) {
+  if (!isServerId(serverId)) return;
+  const h = nameHash(routeName);
+  if (serverIds.get(h) === serverId) return;
+  serverIds.delete(h);
+  serverIds.set(h, serverId);
+  if (serverIds.size > MAX_SERVER_IDS) serverIds.delete(serverIds.keys().next().value);
+  writeJson(KEY_SERVER_IDS, { ids: [...serverIds] });
+}
+
 /* ─────────────────────────── alert count and acknowledgement ─────────────────────────── */
 
 /** The instant of a stored alert_time in epoch ms. The store's instants are naive UTC, so a value with no zone is read as UTC. */
@@ -307,26 +401,24 @@ export function alertMs(value) {
 }
 
 /**
- * Per-server attention from a get_alert_history page: the actionable rows only. A muted row (a mute rule suppressed
- * it) and a resolution row (good news) never count, the desktop badge's own rule.
+ * Per-server attention from a get_alert_badge_summary answer (#8551): one entry per server with at least one actionable
+ * alert in the last 24 hours, { server_id, count, critical, latest_alert_time }. The store has already left out muted
+ * rows (a mute rule suppressed them), dismissed rows and resolution rows (good news), the desktop badge's own rule, so
+ * nothing is filtered or counted here and no row cap can cut a count short.
  */
-export function summarizeAlerts(rows) {
+export function summarizeBadges(servers) {
   const out = new Map();
-  for (const r of Array.isArray(rows) ? rows : []) {
-    if (!r || !isServerId(r.server_id) || r.muted === true || r.severity === "resolution" || r.dismissed === true) continue;
-    const t = alertMs(r.alert_time);
-    const s = out.get(r.server_id) || { count: 0, critical: false, latestMs: 0 };
-    s.count++;
-    if (r.severity === "critical") s.critical = true;
-    if (Number.isFinite(t) && t > s.latestMs) s.latestMs = t;
-    out.set(r.server_id, s);
+  for (const r of Array.isArray(servers) ? servers : []) {
+    if (!r || !isServerId(r.server_id) || !Number.isSafeInteger(r.count) || r.count < 1) continue;
+    const t = alertMs(r.latest_alert_time);
+    out.set(r.server_id, { count: r.count, critical: r.critical === true, latestMs: Number.isFinite(t) ? t : 0 });
   }
   return out;
 }
 
-/** Applies a fresh alert read: an acknowledgement is cleared by an alert newer than it (ack-until-worse). */
-export function updateAttention(rows) {
-  attention = summarizeAlerts(rows);
+/** Applies a fresh summary: an acknowledgement is cleared by an alert newer than it (ack-until-worse). */
+export function updateAttention(servers) {
+  attention = summarizeBadges(servers);
   let cleared = false;
   for (const [id, ackMs] of [...acks]) {
     const s = attention.get(id);
@@ -368,16 +460,17 @@ let attentionRead = null;
 let attentionReadAt = 0;
 
 /**
- * Refreshes the badge counts with ONE get_alert_history read for the whole fleet. Callers within the TTL share the
- * one request, so the sidebar poll and the fleet page cost the store one read per tick, not one each. A failed read
- * leaves the last counts in place.
+ * Refreshes the badge counts with ONE get_alert_badge_summary read for the whole fleet (#8551: a few bytes per server,
+ * where the page used to download the newest 1,000 alert rows and count them). Callers within the TTL share the one
+ * request, so the sidebar poll and the fleet page cost the store one read per tick, not one each. A failed read leaves
+ * the last counts in place.
  */
 export function refreshAttention(readTool, now = Date.now()) {
   if (attentionRead && now - attentionReadAt < ATTENTION_TTL_MS) return attentionRead;
   attentionReadAt = now;
-  attentionRead = Promise.resolve(readTool("get_alert_history", { hours_back: 24, limit: 1000 }))
+  attentionRead = Promise.resolve(readTool("get_alert_badge_summary", {}))
     .then((res) => {
-      if (res && res.kind === "data" && res.data && Array.isArray(res.data.alerts)) updateAttention(res.data.alerts);
+      if (res && res.kind === "data" && res.data && Array.isArray(res.data.servers)) updateAttention(res.data.servers);
     })
     .catch(() => {
       attentionReadAt = 0;
@@ -429,16 +522,27 @@ export function setSidebarCollapsed(collapsed) {
   changed();
 }
 
+/** Whether the sidebar's page links are folded away (#8578). Per browser, default expanded. */
+export function isNavCollapsed() {
+  return navCollapsed;
+}
+
+export function setNavCollapsed(collapsed) {
+  navCollapsed = collapsed === true;
+  writeSidebar();
+  changed();
+}
+
 /** One writer for the sidebar key, so a change to one field never drops the others. */
 function writeSidebar() {
   if (storeScope === null) {
-    writeJson(KEY_SIDEBAR, { collapsed: sidebarCollapsed, grouped: sidebarGrouped, collapsedGroups: [...sidebarGroups] });
+    writeJson(KEY_SIDEBAR, { collapsed: sidebarCollapsed, navCollapsed, grouped: sidebarGrouped, collapsedGroups: [...sidebarGroups] });
     return;
   }
   /* At a front door the collapsed/grouped choices stay shared, the legacy groups stay as store mode left them, and this
      store's groups go under its own key. */
   const legacy = readJson(KEY_SIDEBAR);
-  writeJson(KEY_SIDEBAR, { collapsed: sidebarCollapsed, grouped: sidebarGrouped, collapsedGroups: legacy && Array.isArray(legacy.collapsedGroups) ? legacy.collapsedGroups : [] });
+  writeJson(KEY_SIDEBAR, { collapsed: sidebarCollapsed, navCollapsed, grouped: sidebarGrouped, collapsedGroups: legacy && Array.isArray(legacy.collapsedGroups) ? legacy.collapsedGroups : [] });
   writeJson(sidebarGroupsKey(), { collapsedGroups: [...sidebarGroups] });
 }
 

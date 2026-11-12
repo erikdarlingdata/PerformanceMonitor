@@ -468,4 +468,48 @@ public sealed class FleetViewTests
         Assert.DoesNotContain(ServerRows(fleet), r => r.Server.ServerName == "sql-prod");
         Assert.Contains(Headers(fleet), h => h.Title == "Prod");
     }
+
+    /// <summary>#7984: a search for a tag's name finds the servers tagged under it, the same fields as the Overview
+    /// search and the same coverage a custom alert rule on the tag has: the server tagged HOSTS under PROD &gt; BULK
+    /// is shown for "BULK" and for "PROD", and its branch stays in the tree.</summary>
+    [Fact]
+    public void Search_MatchesTheTagsAboveAServersTag()
+    {
+        var fleet = FleetOf(Server(1, "bulk-host-1"), Server(2, "ag-listener"), Server(3, "standby"));
+        fleet.SetTags(
+            new[] { Tag(1, "PROD"), Tag(2, "BULK", 1), Tag(3, "HOSTS", 2), Tag(4, "LISTENERS", 2), Tag(5, "DR") },
+            new[] { Assign(1, 3), Assign(2, 4), Assign(3, 5) });
+
+        fleet.SetSearch("BULK");
+        Assert.Equal(new[] { 1, 2 }, ServerRows(fleet).Select(r => r.Server.ServerId).Distinct().OrderBy(i => i));
+        Assert.Contains(Headers(fleet), h => h.Title == "BULK");
+        Assert.Contains(Headers(fleet), h => h.Title == "HOSTS");
+
+        fleet.SetSearch("prod");
+        Assert.Equal(new[] { 1, 2 }, ServerRows(fleet).Select(r => r.Server.ServerId).Distinct().OrderBy(i => i));
+
+        fleet.SetSearch("HOSTS");
+        Assert.Equal(new[] { 1 }, ServerRows(fleet).Select(r => r.Server.ServerId).Distinct());
+
+        fleet.SetSearch("DR");
+        Assert.Equal(new[] { 3 }, ServerRows(fleet).Select(r => r.Server.ServerId).Distinct());
+    }
+
+    /// <summary>#7984: a parent cycle a store can hold, and a parent id with no row, end the walk instead of
+    /// hanging or throwing, and the search still reaches the names that exist.</summary>
+    [Fact]
+    public void Search_EndsOnAParentCycle_AndOnADanglingParent()
+    {
+        var fleet = FleetOf(Server(1, "looped"), Server(2, "orphaned"));
+        fleet.SetTags(
+            new[] { Tag(1, "A", 2), Tag(2, "B", 1), Tag(3, "ORPHAN", 99) },
+            new[] { Assign(1, 1), Assign(2, 3) });
+
+        /* A cycle has no root, so the tree draws neither tag; the point here is that the search returns. */
+        fleet.SetSearch("B");
+        Assert.NotNull(fleet.Visible);
+
+        fleet.SetSearch("orphan");
+        Assert.Equal(new[] { 2 }, ServerRows(fleet).Select(r => r.Server.ServerId).Distinct());
+    }
 }

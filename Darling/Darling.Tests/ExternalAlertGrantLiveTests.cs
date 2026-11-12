@@ -59,7 +59,7 @@ public sealed class ExternalAlertGrantLiveTests
         RoleUnmarked = "ea_plain_" + RunSuffix;
         RoleSuper = "ea_su_" + RunSuffix;
         RoleTableOwner = "ea_tblown_" + RunSuffix;
-        CleanupRoles = ["admin", "viewer", "mcp", RoleA, RoleB, RoleUnmarked, RoleSuper, RoleTableOwner, DarlingManagedRoles.AlertSourceGroupRoleName];
+        CleanupRoles = ["admin", "viewer", "web", "mcp", RoleA, RoleB, RoleUnmarked, RoleSuper, RoleTableOwner, DarlingManagedRoles.AlertSourceGroupRoleName];
     }
 
     private const string SourcePassword = "ExtAlertSrcPw0123456789abcdef01";
@@ -857,7 +857,8 @@ SET search_path = pg_temp, config, public", ct);
                 .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_ADMIN_PASSWORD", "ScriptAdmin5654", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_VIEWER_PASSWORD", "ScriptViewer5654", StringComparison.Ordinal)
-                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal);
+                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_WEB_PASSWORD", "ScriptWeb6991", StringComparison.Ordinal);
             await ExecAsync(owner, script, ct);
 
             Assert.Equal(5, await ScalarAsync<int>(owner, $"SELECT rolconnlimit FROM pg_roles WHERE rolname = '{RoleA}'", ct));
@@ -964,7 +965,8 @@ SET search_path = pg_temp, config, public", ct);
                 .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_ADMIN_PASSWORD", "ScriptAdmin5654", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_VIEWER_PASSWORD", "ScriptViewer5654", StringComparison.Ordinal)
-                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal);
+                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_WEB_PASSWORD", "ScriptWeb6991", StringComparison.Ordinal);
             await ExecAsync(owner, script, ct);
 
             foreach (var function in new[]
@@ -1008,8 +1010,8 @@ SET search_path = pg_temp, config, public", ct);
             await owner.OpenAsync(ct);
             await PgMigrations.MigrateAsync(owner, ct);
             Assert.SkipWhen(
-                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct),
-                "A cluster-wide admin/viewer/mcp role already exists on this rig; the script would refuse it.");
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp'))", ct),
+                "A cluster-wide admin/viewer/web/mcp role already exists on this rig; the script would refuse it.");
             Assert.SkipUnless(
                 await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'darling')", ct),
                 "The script names the store owner 'darling', and this rig has no such role.");
@@ -1021,21 +1023,22 @@ SET search_path = pg_temp, config, public", ct);
                 .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_ADMIN_PASSWORD", "ScriptAdmin5654", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_VIEWER_PASSWORD", "ScriptViewer5654", StringComparison.Ordinal)
-                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal);
+                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_WEB_PASSWORD", "ScriptWeb6991", StringComparison.Ordinal);
             await ExecAsync(owner, script, ct);
 
-            await using (var viewer = await LoginAsync(scratch, "viewer", "ScriptViewer5654", ct))
+            await using (var web = await LoginAsync(scratch, "web", "ScriptWeb6991", ct))
             {
-                await ExecAsync(viewer, "BEGIN ISOLATION LEVEL REPEATABLE READ", ct);
-                await ExecAsync(viewer, "SELECT 1", ct);
+                await ExecAsync(web, "BEGIN ISOLATION LEVEL REPEATABLE READ", ct);
+                await ExecAsync(web, "SELECT 1", ct);
                 var refused = await Assert.ThrowsAsync<PostgresException>(() =>
-                    ScalarAsync<long>(viewer, "SELECT config.request_active_queries_live(4242, 'web')", ct));
+                    ScalarAsync<long>(web, "SELECT config.request_active_queries_live(4242, 'web')", ct));
                 Assert.Equal("DL400", refused.SqlState);
                 Assert.Contains("READ COMMITTED", refused.MessageText, StringComparison.Ordinal);
-                await ExecAsync(viewer, "ROLLBACK", ct);
+                await ExecAsync(web, "ROLLBACK", ct);
 
                 Assert.Equal(0L, await ScalarAsync<long>(owner, "SELECT count(*) FROM config.config_command", ct));
-                Assert.True(await ScalarAsync<long>(viewer, "SELECT config.request_active_queries_live(4242, 'web')", ct) > 0);
+                Assert.True(await ScalarAsync<long>(web, "SELECT config.request_active_queries_live(4242, 'web')", ct) > 0);
             }
 
             bodySucceeded = true;
@@ -1132,9 +1135,9 @@ ALTER TABLE config.config_mute_rules DROP COLUMN external_source", ct);
             Assert.Contains(
                 $"REVOKE ALL ON FUNCTION config.submit_external_alert({DarlingManagedRoles.ExternalAlertSubmitSignature}) FROM PUBLIC;", sql, StringComparison.Ordinal);
             Assert.Contains(
-                $"REVOKE ALL ON FUNCTION config.submit_external_alert({DarlingManagedRoles.ExternalAlertSubmitSignature}) FROM admin, viewer, mcp;", sql, StringComparison.Ordinal);
+                $"REVOKE ALL ON FUNCTION config.submit_external_alert({DarlingManagedRoles.ExternalAlertSubmitSignature}) FROM admin, viewer, web, mcp;", sql, StringComparison.Ordinal);
             Assert.Contains("REVOKE ALL ON config.external_alert_source, config.external_alert_pending, config.external_alert_state", sql, StringComparison.Ordinal);
-            Assert.Contains("FROM PUBLIC, admin, viewer, mcp CASCADE", sql, StringComparison.Ordinal);
+            Assert.Contains("FROM PUBLIC, admin, viewer, web, mcp CASCADE", sql, StringComparison.Ordinal);
             Assert.Contains(DarlingManagedRoles.AlertSourceRoleMarker, sql, StringComparison.Ordinal);
             Assert.Contains("GRANT CONNECT ON DATABASE %I TO %I", sql, StringComparison.Ordinal);
             Assert.Contains("NOINHERIT CONNECTION LIMIT " + DarlingManagedRoles.AlertSourceConnectionLimit, sql, StringComparison.Ordinal);

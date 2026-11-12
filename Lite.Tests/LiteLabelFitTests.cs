@@ -25,6 +25,7 @@ namespace PerformanceMonitorLite.Tests;
 /// Utilization CPU card, so both are laid out at the 1366x768 width with Lite's own theme: the CPU labels show in full and the Calendar list
 /// keeps each label clear of its duration.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public class LiteLabelFitTests
 {
     private const double ScreenWidth = 1366;
@@ -66,12 +67,12 @@ public class LiteLabelFitTests
     [Fact]
     public void TheCpuCardLabels_ShowInFull_At1366()
     {
-        var found = StaTestThread.Run(() =>
+        var found = StaTestThread.Run(() => WithTheme(() =>
         {
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = ScreenWidth, Height = ScreenHeight };
             window.Resources.MergedDictionaries.Add(Theme());
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ((FrameworkElement)tab.FindName("UtilizationContent")).Visibility = Visibility.Visible;
@@ -103,9 +104,33 @@ public class LiteLabelFitTests
             {
                 window.Close();
             }
-        });
+        }));
 
         Assert.True(found.Count == 0, string.Join(Environment.NewLine, found));
+    }
+
+    /// <summary>Runs <paramref name="body"/> with Lite's dark theme in the application scope, where the FinOps tab's StaticResource lookups (its TrimmedCell style is based on DataGridCellText) resolve while it loads, as they do in the app.</summary>
+    private static T WithTheme<T>(Func<T> body)
+    {
+        var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        ResourceDictionary? added = null;
+        if (!app.Resources.Contains("DataGridCellText"))
+        {
+            added = Theme();
+            app.Resources.MergedDictionaries.Add(added);
+        }
+
+        try
+        {
+            return body();
+        }
+        finally
+        {
+            if (added is not null)
+            {
+                app.Resources.MergedDictionaries.Remove(added);
+            }
+        }
     }
 
     [Fact]
@@ -120,7 +145,7 @@ public class LiteLabelFitTests
             };
             var window = new Window { Content = picker, Width = ScreenWidth, Height = ScreenHeight };
             window.Resources.MergedDictionaries.Add(Theme());
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             var found = new List<string>();
             try
             {

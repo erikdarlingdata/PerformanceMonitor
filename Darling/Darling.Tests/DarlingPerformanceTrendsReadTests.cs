@@ -57,6 +57,8 @@ public sealed class DarlingPerformanceTrendsReadTests
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            /* #7010: the server was registered days ago, so a window of a few hours is inside what the store can cover (the window floor of a server with no collection log runs is its registration time). */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET created_date = $2 WHERE server_id = $1", ServerId, DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-3)));
 
             /* ── never sampled: all three siblings refuse to look like a quiet server ── */
             var neverProcs = JsonDocument.Parse(
@@ -86,6 +88,8 @@ public sealed class DarlingPerformanceTrendsReadTests
             /* ── sampled, but outside the window: a quiet window, and widening IS the move ── */
             await SeedProcedureAsync(connection, ct, HoursAgo(48), executions: 10, elapsedUs: 5_000_000);
             await SeedQueryAsync(connection, ct, HoursAgo(48), executions: 10, elapsedUs: 5_000_000);
+            await RecordRunAsync(connection, ct, "procedure_stats");
+            await RecordRunAsync(connection, ct, "query_stats");
 
             var quietProcs = JsonDocument.Parse(
                 await DarlingMcpTrendTools.GetProcedureDurationTrend(postgres, ServerName, 1)).RootElement;
@@ -109,7 +113,19 @@ public sealed class DarlingPerformanceTrendsReadTests
             {
                 AssertDisclosureBlock(envelope);
                 Assert.Equal("raw", envelope.GetProperty("source").GetString());
+            }
+
+            /* #7010: the window floor counts a server in a window when it holds a row there or the collection log records a run there. The quiet
+               answers have the runs recorded above, so their window is covered; the never-sampled answers have neither a row nor a run in the
+               window, so the store holds none of it and they say so. */
+            foreach (var envelope in new[] { quietProcs, quietQueries })
+            {
                 Assert.False(envelope.GetProperty("window_truncated").GetBoolean());
+            }
+
+            foreach (var envelope in new[] { neverProcs, neverStore, neverQueries })
+            {
+                Assert.True(envelope.GetProperty("window_truncated").GetBoolean());
             }
 
             /* Not asserted: effective_hours_back on the empty raw answers. It is derived from the store's
@@ -122,11 +138,15 @@ public sealed class DarlingPerformanceTrendsReadTests
             Assert.Equal("1 minute", quietQueries.GetProperty("bucket").GetString());
             Assert.Equal(1, quietQueries.GetProperty("bucket_minutes").GetInt32());
 
+            /* The procedure trend's time axis is the collector's clean runs (a run that stored no row is a measured 0), so the runs recorded for the
+               quiet window must not become points of the series below: it reads the two collections it seeds and nothing else. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", ServerId);
+
             /*
                 ── the procedure series, at a rate BELOW one execution per second ──
-                Two snapshots five minutes apart, two executions between them: 0.0067/sec. The shipped
-                integer field truncates that to 0, which reads as an idle server; the double does not.
-                This is the whole reason executions_per_second exists.
+                Two snapshots five minutes apart, two executions between them: 0.0067/sec. An integer
+                cannot carry that rate, so executions_per_second carries it and execution_count carries
+                the two executions (#8073).
 
                 These rows carry no sample_interval_seconds (the pre-V128 shape), so the read LAG-derives
                 the interval — and the FIRST snapshot, which has nothing to LAG against, is UNRATED: two
@@ -161,10 +181,12 @@ public sealed class DarlingPerformanceTrendsReadTests
 
             var second = procTrend[1];
             Assert.True(second.GetProperty("value").GetDouble() > 0, "elapsed ms/sec must be a real rate");
-            Assert.Equal(0, second.GetProperty("execution_count").GetInt64());
+            /* #8073: execution_count is the executions the point's rate was built from, the 2 seeded here, and the
+               rate below one per second keeps its own key instead of being truncated into the count. */
+            Assert.Equal(2, second.GetProperty("execution_count").GetInt64());
             Assert.True(
                 second.GetProperty("executions_per_second").GetDouble() > 0,
-                "executions_per_second must survive a rate below 1/sec that execution_count truncates to zero");
+                "executions_per_second must survive a rate below 1/sec");
 
             /* #3541 A2: the unit is in the field name now. Same quantity as `value`, kept beside it on the
                execution_count precedent. */
@@ -260,7 +282,7 @@ public sealed class DarlingPerformanceTrendsReadTests
     internal static void AssertDisclosureBlock(JsonElement envelope)
     {
         var keys = envelope.EnumerateObject().Select(p => p.Name).ToArray();
-        var block = new[] { "source", "effective_start", "effective_hours_back", "window_truncated", "bucket", "bucket_minutes", "aggregate_note" };
+        var block = new[] { "source", "effective_start", "effective_hours_back", "window_truncated", "start_older_than_tier", "tier_keeps_days", "bucket", "bucket_minutes", "aggregate_note" };
         var at = Array.IndexOf(keys, "source");
         Assert.True(at >= 0, "the envelope has no `source`");
         Assert.Equal(block, keys.Skip(at).Take(block.Length).ToArray());
@@ -304,9 +326,22 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
             Db, 7L, 9L, "Regular", executions, avgDurationUs, intervalId,
             DarlingMcpTestData.Naive(intervalStart));
 
+    /// <summary>
+    /// #7010: one clean collector run for the table's collector five minutes ago. A running collector logs a run every cycle, and the window floor counts a
+    /// server in a window when it holds a row there or the collection log records a run there: a sparse table's quiet window has the runs and no rows.
+    /// #7167: it is five minutes, not thirty: a run on the 30-minute offline threshold ages past it before the read, and the empty answer turns unavailable.
+    /// </summary>
+    private static Task RecordRunAsync(NpgsqlConnection connection, CancellationToken ct, string table) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+VALUES ($1,$2,$3,$4,$5,100,'SUCCESS',0)",
+            CollectionIdGenerator.Next(), ServerId, ServerName, CollectorCatalog.All.First(c => c.TargetTable == table).Name,
+            DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-5)));
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM procedure_stats WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM query_stats WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM query_store_stats WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ServerId);
@@ -419,6 +454,9 @@ public sealed class DarlingPerformanceTrendsTierRoutingLiveTests
         Assert.StartsWith("2026-03-04T11:00:00", queryTrend[1].GetProperty("time").GetString()!, StringComparison.Ordinal);
         Assert.Equal(0.5, queryTrend[1].GetProperty("value").GetDouble(), 9);
         Assert.Equal(0.005, queryTrend[1].GetProperty("executions_per_second").GetDouble(), 9);
+        /* #8073: the hour's summed executions ride beside the rate: 36 + 72 in the 10:00 hour, 18 in the 11:00 hour. */
+        Assert.Equal(108, queryTrend[0].GetProperty("execution_count").GetInt64());
+        Assert.Equal(18, queryTrend[1].GetProperty("execution_count").GetInt64());
 
         /* #3897: a six-hour window would bucket at two minutes on raw, but this one is served by the rollup, whose
            grain is the hour — the automatic width is raised to it, never finer. At that width each point's peak
@@ -438,6 +476,7 @@ public sealed class DarlingPerformanceTrendsTierRoutingLiveTests
         Assert.StartsWith("2026-03-04T10:00:00", wideTrend[0].GetProperty("time").GetString()!, StringComparison.Ordinal);
         Assert.Equal(1.75, wideTrend[0].GetProperty("elapsed_ms_per_second").GetDouble(), 9);
         Assert.Equal(126d / 7200d, wideTrend[0].GetProperty("executions_per_second").GetDouble(), 9);
+        Assert.Equal(126, wideTrend[0].GetProperty("execution_count").GetInt64());
         Assert.Equal(3.0, wideTrend[0].GetProperty("peak_elapsed_ms_per_second").GetDouble(), 9);
         Assert.Contains("one 2-hour bucket", wide.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
         Assert.StartsWith("2026-03-04T10:00:00", wide.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
@@ -460,6 +499,9 @@ public sealed class DarlingPerformanceTrendsTierRoutingLiveTests
         Assert.Equal(1.0, procedureTrend[0].GetProperty("value").GetDouble(), 9);
         Assert.Equal(0.005, procedureTrend[0].GetProperty("executions_per_second").GetDouble(), 9);
         Assert.Equal(0.1, procedureTrend[1].GetProperty("value").GetDouble(), 9);
+        /* #8073: 9 + 9 executions in the 10:00 hour, 2 in the 11:00 hour. */
+        Assert.Equal(18, procedureTrend[0].GetProperty("execution_count").GetInt64());
+        Assert.Equal(2, procedureTrend[1].GetProperty("execution_count").GetInt64());
 
         /* ── the raw-only read of the SAME fixture: the estimator this replaced, and the revert-proof.
               Three per-collection points, the first UNRATED (null) because the LAG idiom has no previous

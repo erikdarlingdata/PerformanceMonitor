@@ -136,14 +136,35 @@ namespace PerformanceMonitor.Ui
         /// with a one-line legend. A ten-entry legend is three lines and a restart marker adds an entry, so the row grows by what the
         /// legend, the bottom ticks and the padding take, and the tab scrolls instead (<see cref="Attach"/>).
         /// </summary>
-        public const double MinPlotAreaHeight = 100;
+        public const double MinPlotAreaHeight = 120; // #8220: 120, up from 100, the same floor the legend rule keeps (WrappedLegendLayout.MinPlotHeight)
 
-        /// <summary>The row height that leaves <see cref="MinPlotAreaHeight"/> for the plot when everything but the plot takes <paramref name="chromeHeight"/>.</summary>
-        public static double RowMinHeightFor(double chromeHeight) => Math.Max(MinPlotHeight, chromeHeight + MinPlotAreaHeight);
+        /// <summary>#8086: the smallest share of its chart the plot may take. Below it the tab scrolls instead of squeezing the plot.</summary>
+        public const double MinPlotShare = 0.55;
+
+        /// <summary>
+        /// The row height that leaves <see cref="MinPlotAreaHeight"/> pixels, and <see cref="MinPlotShare"/> of the row, for the plot when everything but the plot takes <paramref name="chromeHeight"/>.
+        /// #8220: a legend beside the plot is chosen only while its whole column fits the plot's height (<see cref="WrappedLegendLayout"/>), so when the
+        /// legend is beside the plot (<paramref name="sideLegendHeight"/> is its column, padding included, 0 for a legend under the plot) the row also
+        /// stops at the chrome plus that column. Without it the minimum came from the side layout's small chrome, the row shrank until the column no
+        /// longer fit, the legend moved under the plot, that chrome raised the minimum, the row grew, and the legend moved back, on every layout pass
+        /// for ever (the Viewer's Latch and Spinlock charts at 1280x800 froze the window).
+        /// </summary>
+        public static double RowMinHeightFor(double chromeHeight, double sideLegendHeight = 0) =>
+            Math.Max(
+                Math.Max(MinPlotHeight, Math.Max(chromeHeight + MinPlotAreaHeight, chromeHeight / (1 - MinPlotShare))),
+                sideLegendHeight > 0 ? chromeHeight + sideLegendHeight + SideLegendSlack : 0);
+
+        /// <summary>Room beyond the column's height, so a figure rounded to whole pixels still passes the legend rule's "the column fits" test.</summary>
+        private const double SideLegendSlack = 0.5;
+
+        /// <summary>The minimum height of the chart's row (<see cref="RowMinHeightFor(double, double)"/>) for the chrome and legend placement of the plot's last render; null before the first.</summary>
+        public static double? RowMinHeightFor(ScottPlot.Plot plot) =>
+            s_chrome.TryGetValue(plot, out var c) && !double.IsNaN(c.Height) ? RowMinHeightFor(c.Height, c.SideLegend) : null;
 
         private sealed class Chrome
         {
             public double Height = double.NaN;
+            public double SideLegend; // #8220: the height of a legend column beside the plot, 0 when the legend is under it
             public float FigureHeight;
             public bool FitPending;
         }
@@ -158,7 +179,7 @@ namespace PerformanceMonitor.Ui
 
         /// <summary>
         /// Measures every render of the chart and, when the chart sits in a star row of a Grid whose XAML minimum is
-        /// <see cref="MinPlotHeight"/> or more, raises that row's minimum to <see cref="RowMinHeightFor"/> and the Grid's own minimum
+        /// <see cref="MinPlotHeight"/> or more, raises that row's minimum to <see cref="RowMinHeightFor(double, double)"/> and the Grid's own minimum
         /// to the rows' total, so the tab's scroll viewer scrolls instead of clipping the chart. A chart anywhere else is only measured.
         /// Safe to call more than once per plot. Rendering happens on the UI thread; the row is adjusted after it, at background priority.
         /// </summary>
@@ -173,8 +194,10 @@ namespace PerformanceMonitor.Ui
             {
                 var measured = chrome.FigureHeight - rp.DataRect.Height;
                 if (!(measured > 0) || double.IsInfinity(measured)) return;
-                var changed = double.IsNaN(chrome.Height) || Math.Abs(chrome.Height - measured) > 0.5;
+                var side = plot.Layout.LayoutEngine is WrappedLegendLayout { Panel.Edge: ScottPlot.Edge.Right } legend ? legend.SideColumnHeight : 0;
+                var changed = double.IsNaN(chrome.Height) || Math.Abs(chrome.Height - measured) > 0.5 || Math.Abs(chrome.SideLegend - side) > 0.5;
                 chrome.Height = measured;
+                chrome.SideLegend = side;
                 if (!changed || chrome.FitPending) return;
                 chrome.FitPending = true;
                 chart.Dispatcher.BeginInvoke(() =>
@@ -185,15 +208,26 @@ namespace PerformanceMonitor.Ui
             };
         }
 
+        /// <summary>The element the tab's Grid sees for a chart: the chart, or the <see cref="ChartPanel"/> card it sits in.</summary>
+        private static System.Windows.DependencyObject HostOf(WpfPlot chart)
+        {
+            for (System.Windows.DependencyObject? up = chart; up is not null; up = System.Windows.Media.VisualTreeHelper.GetParent(up))
+                if (up is ChartPanel card) return card;
+            return chart;
+        }
+
         private static void FitRow(WpfPlot chart)
         {
             // WpfPlot -> Border -> Grid is how every chart tab hosts a chart; walk up to the Grid whichever the nesting.
-            System.Windows.DependencyObject child = chart;
+            // #8144: a chart in a ChartPanel card is hosted by the card's Border in the tab's Grid, so the walk starts at the card.
+            // A Grid with no rows of its own is a row group: one row's charts, aligned with each other and not with the rows around
+            // them. It is not the Grid whose row holds the chart, so the walk goes on to the Grid above it.
+            System.Windows.DependencyObject child = HostOf(chart);
             System.Windows.Controls.Grid? grid = null;
             while (child is not null)
             {
                 var parent = System.Windows.Media.VisualTreeHelper.GetParent(child);
-                if (parent is System.Windows.Controls.Grid g) { grid = g; break; }
+                if (parent is System.Windows.Controls.Grid g && !IsRowGroup(g)) { grid = g; break; }
                 child = parent;
             }
             if (grid is null || child is not System.Windows.FrameworkElement host) return;
@@ -208,23 +242,64 @@ namespace PerformanceMonitor.Ui
             foreach (System.Windows.UIElement sibling in grid.Children)
             {
                 if (System.Windows.Controls.Grid.GetRow(sibling) != row) continue;
-                var plot = ((sibling as System.Windows.Controls.Border)?.Child as WpfPlot ?? sibling as WpfPlot)?.Plot;
-                // The Border around the chart has a margin between charts, and that is part of the row, not of the chart.
-                var margin = sibling is System.Windows.FrameworkElement fe ? fe.Margin.Top + fe.Margin.Bottom : 0;
-                if (plot is not null && ChromeHeight(plot) is { } h) need = Math.Max(need, Math.Ceiling(RowMinHeightFor(h) + margin)); // whole pixels: the chart renders at its pixel size, truncated
+                foreach (var (plot, margin, card) in HostedPlots(sibling, 0))
+                {
+                    if (RowMinHeightFor(plot) is { } h) need = Math.Max(need, Math.Ceiling(h + margin) + (card ? 1 : 0)); // whole pixels; a card's fractional chrome rounds the chart down by up to one more: the chart renders at its pixel size, truncated
+                }
             }
             if (Math.Abs(definition.MinHeight - need) > 0.5) definition.MinHeight = need;
 
             var baseGridMin = (double)s_baseGridMin.GetValue(grid, g => ((System.Windows.Controls.Grid)g).MinHeight);
             double total = 0;
-            foreach (var d in grid.RowDefinitions)
+            for (var i = 0; i < grid.RowDefinitions.Count; i++)
             {
+                var d = grid.RowDefinitions[i];
                 if (d.Height.IsStar) total += d.MinHeight;
                 else if (d.Height.IsAbsolute) total += d.Height.Value;
-                else total += d.ActualHeight;
+                else total += d.ActualHeight - OpenExpanderContentHeight(grid, i);
             }
             var gridMin = Math.Max(baseGridMin, total);
             if (Math.Abs(grid.MinHeight - gridMin) > 0.5) grid.MinHeight = gridMin;
+        }
+
+        /// <summary>A Grid with no rows of its own: one row's charts side by side, grouped so they align with each other alone.</summary>
+        private static bool IsRowGroup(System.Windows.Controls.Grid grid) => grid.RowDefinitions.Count == 0;
+
+        /// <summary>
+        /// The plots a row's child hosts, each with the height the row spends around it: the host's margin between charts, a card's own
+        /// chrome, and the margin of a row group that holds the host. Each is part of the row and not of the chart.
+        /// </summary>
+        private static System.Collections.Generic.IEnumerable<(ScottPlot.Plot Plot, double Margin, bool Card)> HostedPlots(System.Windows.UIElement host, double outerMargin)
+        {
+            var margin = outerMargin + (host is System.Windows.FrameworkElement fe ? fe.Margin.Top + fe.Margin.Bottom : 0);
+            if (host is System.Windows.Controls.Grid group && IsRowGroup(group))
+            {
+                foreach (System.Windows.UIElement child in group.Children)
+                {
+                    foreach (var hosted in HostedPlots(child, margin)) yield return hosted;
+                }
+                yield break;
+            }
+            var inner = (host as System.Windows.Controls.Border)?.Child ?? host;
+            var card = inner as ChartPanel;
+            var plot = ((card?.Content ?? inner) as WpfPlot)?.Plot;
+            if (plot is not null) yield return (plot, margin + (card?.ChromeHeight ?? 0), card is not null);
+        }
+
+        /// <summary>
+        /// The content height, margins included, of every opened <see cref="System.Windows.Controls.Expander"/> in the row. An Auto row counts
+        /// toward the Grid's floor at its closed height, so the floor follows the charts, and a snapshot grid a reader opened does not keep
+        /// the page tall after it closes. A row without an opened expander counts in full.
+        /// </summary>
+        private static double OpenExpanderContentHeight(System.Windows.Controls.Grid grid, int row)
+        {
+            double height = 0;
+            foreach (System.Windows.UIElement child in grid.Children)
+            {
+                if (System.Windows.Controls.Grid.GetRow(child) == row && child is System.Windows.Controls.Expander { IsExpanded: true, Content: System.Windows.FrameworkElement content })
+                    height += content.ActualHeight + content.Margin.Top + content.Margin.Bottom;
+            }
+            return height;
         }
 
         /// <summary>

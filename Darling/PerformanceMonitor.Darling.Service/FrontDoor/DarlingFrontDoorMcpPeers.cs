@@ -18,6 +18,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace PerformanceMonitor.Darling.Service.FrontDoor;
 
@@ -89,7 +91,7 @@ internal sealed class DarlingFrontDoorMcpPeers : IFrontDoorMcpPeers, IAsyncDispo
         _links = config.ToStores().ToDictionary(s => s.Name, s => new Link(s, innerHandler), StringComparer.OrdinalIgnoreCase);
     }
 
-    public async Task<CallToolResult> CallAsync(string store, CallToolRequestParams call, bool agentRole, CancellationToken ct)
+    public async Task<CallToolResult> CallAsync(string store, CallToolRequestParams call, bool agentRole, CancellationToken ct, McpDataDetail detail = McpDataDetail.Full)
     {
         if (!_links.TryGetValue(store?.Trim() ?? string.Empty, out var link))
         {
@@ -123,7 +125,7 @@ internal sealed class DarlingFrontDoorMcpPeers : IFrontDoorMcpPeers, IAsyncDispo
             McpClient? client = null;
             try
             {
-                client = await link.GetClientAsync(agentRole, token, limit.Token).ConfigureAwait(false);
+                client = await link.GetClientAsync(agentRole, detail, token, limit.Token).ConfigureAwait(false);
                 return await client.CallToolAsync(call, limit.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -142,7 +144,7 @@ internal sealed class DarlingFrontDoorMcpPeers : IFrontDoorMcpPeers, IAsyncDispo
             }
             catch (Exception ex)
             {
-                link.Discard(agentRole, client);
+                link.Discard(agentRole, detail, client);
 
                 if (link.Recorder.RefusalSince(refusalsBefore) is { } refusal)
                 {
@@ -192,11 +194,12 @@ internal sealed class DarlingFrontDoorMcpPeers : IFrontDoorMcpPeers, IAsyncDispo
         }
     }
 
-    /// <summary>One store: its HTTP client, and one MCP client per role.</summary>
+    /// <summary>One store: its HTTP client, and one MCP client per role and caller data detail level (#7023: the level is a header of the
+    /// client, so a caller at one level never rides another's connection; at most six clients per store).</summary>
     private sealed class Link : IAsyncDisposable
     {
         private readonly HttpClient _http;
-        private readonly Dictionary<bool, McpClient> _clients = new();
+        private readonly Dictionary<(bool Agent, McpDataDetail Detail), McpClient> _clients = new();
         private readonly SemaphoreSlim _gate = new(1, 1);
 
         public Link(FrontDoorStore store, Func<FrontDoorStore, HttpMessageHandler>? innerHandler)
@@ -211,11 +214,11 @@ internal sealed class DarlingFrontDoorMcpPeers : IFrontDoorMcpPeers, IAsyncDispo
 
         public RefusalRecorder Recorder { get; }
 
-        public async Task<McpClient> GetClientAsync(bool agentRole, string token, CancellationToken ct)
+        public async Task<McpClient> GetClientAsync(bool agentRole, McpDataDetail detail, string token, CancellationToken ct)
         {
             lock (_clients)
             {
-                if (_clients.TryGetValue(agentRole, out var existing) && !existing.Completion.IsCompleted)
+                if (_clients.TryGetValue((agentRole, detail), out var existing) && !existing.Completion.IsCompleted)
                 {
                     return existing;
                 }
@@ -227,7 +230,7 @@ internal sealed class DarlingFrontDoorMcpPeers : IFrontDoorMcpPeers, IAsyncDispo
                 McpClient? stale = null;
                 lock (_clients)
                 {
-                    if (_clients.TryGetValue(agentRole, out var existing))
+                    if (_clients.TryGetValue((agentRole, detail), out var existing))
                     {
                         if (!existing.Completion.IsCompleted)
                         {
@@ -235,7 +238,7 @@ internal sealed class DarlingFrontDoorMcpPeers : IFrontDoorMcpPeers, IAsyncDispo
                         }
 
                         stale = existing;
-                        _clients.Remove(agentRole);
+                        _clients.Remove((agentRole, detail));
                     }
                 }
 
@@ -250,7 +253,7 @@ internal sealed class DarlingFrontDoorMcpPeers : IFrontDoorMcpPeers, IAsyncDispo
                         Endpoint = Store.McpUrl,
                         Name = "front-door:" + Store.Name,
                         TransportMode = HttpTransportMode.StreamableHttp,
-                        AdditionalHeaders = new Dictionary<string, string> { ["Authorization"] = "Bearer " + token },
+                        AdditionalHeaders = HeadersFor(token, detail),
                         /* The store answers statelessly, so there is nothing to push: do not hold a second stream open. */
                         EnableStandaloneGetStream = false,
                     },
@@ -265,7 +268,7 @@ internal sealed class DarlingFrontDoorMcpPeers : IFrontDoorMcpPeers, IAsyncDispo
                     ct).ConfigureAwait(false);
                 lock (_clients)
                 {
-                    _clients[agentRole] = client;
+                    _clients[(agentRole, detail)] = client;
                 }
 
                 return client;
@@ -276,8 +279,21 @@ internal sealed class DarlingFrontDoorMcpPeers : IFrontDoorMcpPeers, IAsyncDispo
             }
         }
 
+        /// <summary>The headers of a store client: the token, and below <c>full</c> the caller's level (#7023), which the store reads as a
+        /// narrowing of its own level for the calls on this connection.</summary>
+        private static Dictionary<string, string> HeadersFor(string token, McpDataDetail detail)
+        {
+            var headers = new Dictionary<string, string> { ["Authorization"] = "Bearer " + token };
+            if (detail != McpDataDetail.Full)
+            {
+                headers[DarlingMcpTokenSet.DataDetailHeader] = McpDataDetailModes.Word(detail);
+            }
+
+            return headers;
+        }
+
         /// <summary>Drops a client after a failure so the next call builds a new one.</summary>
-        public void Discard(bool agentRole, McpClient? client)
+        public void Discard(bool agentRole, McpDataDetail detail, McpClient? client)
         {
             if (client is null)
             {
@@ -286,9 +302,9 @@ internal sealed class DarlingFrontDoorMcpPeers : IFrontDoorMcpPeers, IAsyncDispo
 
             lock (_clients)
             {
-                if (_clients.TryGetValue(agentRole, out var current) && ReferenceEquals(current, client))
+                if (_clients.TryGetValue((agentRole, detail), out var current) && ReferenceEquals(current, client))
                 {
-                    _clients.Remove(agentRole);
+                    _clients.Remove((agentRole, detail));
                 }
             }
 

@@ -41,9 +41,6 @@ public sealed class DarlingMcpQueryTagTools
     /// <summary>The per-command deadline the write tools use, the same as the server-tag tools'.</summary>
     internal const int WriteCommandSeconds = DarlingMcpServerTagTools.WriteCommandSeconds;
 
-    /// <summary>The longest hash, database, schema or object text one key part takes.</summary>
-    internal const int MaxKeyPartLength = 256;
-
     /// <summary>The most hand assignments one <c>list_query_tags</c> answer carries.</summary>
     internal const int MaxListedAssignments = 2000;
 
@@ -54,10 +51,9 @@ public sealed class DarlingMcpQueryTagTools
     internal const string MapNote = "The tag map is not rebuilt by this write: it takes effect on the collector's next map pass, not at once.";
 
     private const string KindHash = "hash";
-    private const string KindObject = "object";
 
     [McpServerTool(Name = "create_query_tag"), Description(
-        "Creates a query tag, at the root or under parent_id. A query tag labels queries (by query_hash or by object, see assign_query_tag) so resource use can be grouped by it; it is not a server tag. Names are trimmed, 1-100 characters, unique among siblings ignoring case (the same name under two different parents is fine); tags nest at most four levels. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (null) and undo (the delete_query_tag call for the new id).")]
+        "Creates a query tag, at the root or under parent_id. A query tag labels queries (by query_hash or by object, see assign_query_tag) so resource use can be grouped by it; it is not a server tag. Names are trimmed, 1-100 characters, unique among siblings ignoring case (the same name under two different parents is fine); tags nest at most four levels. Needs mcp.allowWrites or a named operator token. The tag map takes effect on the collector's next map pass. The answer carries previous (null) and undo (the delete_query_tag call for the new id).")]
     public static Task<string> CreateQueryTag(
         NpgsqlDataSource postgres,
         [Description("The tag name (1-100 characters, trimmed, unique among siblings).")] string name,
@@ -67,7 +63,7 @@ public sealed class DarlingMcpQueryTagTools
         CreateQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), name, parent_id, colour, cancellationToken);
 
     [McpServerTool(Name = "update_query_tag"), Description(
-        "PARTIAL edit of a query tag: send only name, colour or parent_id in changes_json; an explicit null clears colour or moves the tag to the root. A move carries the subtree, its assignments and its rules; it is refused with cycle if the new parent is the tag or one of its descendants, and with depth_limit past four levels. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (the tag's name, colour and parent_id before) and undo (the update_query_tag call that puts the changed fields back).")]
+        "PARTIAL edit of a query tag: send only name, colour or parent_id in changes_json; an explicit null clears colour or moves the tag to the root. A move carries the subtree, its assignments and its rules; it is refused with cycle if the new parent is the tag or one of its descendants, and with depth_limit past four levels. Needs mcp.allowWrites or a named operator token. The tag map takes effect on the collector's next map pass. The answer carries previous (the tag's name, colour and parent_id before) and undo (the update_query_tag call that puts the changed fields back).")]
     public static Task<string> UpdateQueryTag(
         NpgsqlDataSource postgres,
         [Description("The tag id (from list_query_tags).")] int tag_id,
@@ -76,7 +72,7 @@ public sealed class DarlingMcpQueryTagTools
         UpdateQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), tag_id, changes_json, cancellationToken);
 
     [McpServerTool(Name = "delete_query_tag"), Description(
-        "Deletes a query tag AND its child tags, their hand assignments and their rules. Permanent. A tag that has children, assignments or rules answers confirm_required with the counts and deletes nothing; send it again with confirm=true to proceed. Collected data is untouched. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (the deleted tag); a tag that had no children, assignments or rules also carries undo (the create_query_tag call, which makes a new id), and any other delete carries an undo_note instead, because no single call restores the subtree.")]
+        "Deletes a query tag AND its child tags, their hand assignments and their rules. Permanent. A tag that has children, assignments or rules answers confirm_required with the counts and deletes nothing; send it again with confirm=true to proceed. Collected data is untouched. Needs mcp.allowWrites or a named operator token. The tag map takes effect on the collector's next map pass. The answer carries previous (the deleted tag); a tag that had no children, assignments or rules also carries undo (the create_query_tag call, which makes a new id), and any other delete carries an undo_note instead, because no single call restores the subtree.")]
     public static Task<string> DeleteQueryTag(
         NpgsqlDataSource postgres,
         [Description("The tag id (from list_query_tags).")] int tag_id,
@@ -85,7 +81,7 @@ public sealed class DarlingMcpQueryTagTools
         DeleteQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), tag_id, confirm, cancellationToken);
 
     [McpServerTool(Name = "assign_query_tag"), Description(
-        "Hand-assigns a query tag to one key: kind 'hash' takes query_hash; kind 'object' takes database_name, schema_name AND object_name (all three). server_id limits the assignment to one monitored server; omit it for every server. One tag per key and server scope, with a hash and the object names compared ignoring case: a key that already has a hand tag in that scope moves to this tag, and the result says so (status moved). A hand assignment beats any rule. query_id is kept for display only and never matched on. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (the tag the key held before in this scope, or null) and undo (unassign_query_tag for a new assignment, assign_query_tag with the earlier tag for a move).")]
+        "Hand-assigns a query tag to one key: kind 'hash' takes query_hash; kind 'object' takes database_name, schema_name AND object_name (all three). server_id limits the assignment to one monitored server; omit it for every server. One tag per key and server scope, with a hash and the object names compared ignoring case: a key that already has a hand tag in that scope moves to this tag, and the result says so (status moved). A hand assignment beats any rule. query_id is kept for display only and never matched on. Needs mcp.allowWrites or a named operator token. The tag map takes effect on the collector's next map pass. The answer carries previous (the tag the key held before in this scope, or null) and undo (unassign_query_tag for a new assignment, assign_query_tag with the earlier tag for a move).")]
     public static Task<string> AssignQueryTag(
         NpgsqlDataSource postgres,
         [Description("The tag id (from list_query_tags).")] int tag_id,
@@ -100,7 +96,7 @@ public sealed class DarlingMcpQueryTagTools
         AssignQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), tag_id, kind, query_hash, database_name, schema_name, object_name, server_id, query_id, null, cancellationToken);
 
     [McpServerTool(Name = "unassign_query_tag"), Description(
-        "Removes the hand tag from one key in exactly one server scope: the same kind, key parts and server_id that assign_query_tag took (omit server_id for the every-server assignment; a server-limited assignment is a different row). A key with no hand tag in that scope is a no-op. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (the tag that was removed) and undo (the assign_query_tag call that restores it).")]
+        "Removes the hand tag from one key in exactly one server scope: the same kind, key parts and server_id that assign_query_tag took (omit server_id for the every-server assignment; a server-limited assignment is a different row). A key with no hand tag in that scope is a no-op. Needs mcp.allowWrites or a named operator token. The tag map takes effect on the collector's next map pass. The answer carries previous (the tag that was removed) and undo (the assign_query_tag call that restores it).")]
     public static Task<string> UnassignQueryTag(
         NpgsqlDataSource postgres,
         [Description("The key kind: 'hash' or 'object'.")] string kind,
@@ -237,6 +233,15 @@ public sealed class DarlingMcpQueryTagTools
         }
     }
 
+    /// <summary>
+    /// The refusal a delete without confirm=true gets while the tag has a subtree: each count reads as a person says it
+    /// ("1 child tag", "3 hand assignments"), the way the apps' count labels do.
+    /// </summary>
+    internal static string TagInUseMessage(int tagId, QueryTagDeleteImpact impact) =>
+        string.Create(
+            CultureInfo.InvariantCulture,
+            $"Tag {tagId} has {CountText.Plural(impact.ChildTags, "child tag")}, {CountText.Plural(impact.Assignments, "hand assignment")} and {CountText.Plural(impact.Rules, "rule")} in its subtree, and deleting it deletes them all. Nothing was deleted. Repeat with confirm=true to proceed.");
+
     /// <summary>delete_query_tag's body over the store.</summary>
     internal static async Task<string> DeleteQueryTagCore(
         QueryTagStore store, int tagId, bool confirm, CancellationToken ct = default)
@@ -252,9 +257,7 @@ public sealed class DarlingMcpQueryTagTools
                 {
                     ["status"] = "confirm_required",
                     ["refusal"] = "tag_in_use",
-                    ["message"] = string.Create(
-                        CultureInfo.InvariantCulture,
-                        $"Tag {tagId} has {needed.Impact.ChildTags} child tag(s), {needed.Impact.Assignments} hand assignment(s) and {needed.Impact.Rules} rule(s) in its subtree, and deleting it deletes them all. Nothing was deleted. Repeat with confirm=true to proceed."),
+                    ["message"] = TagInUseMessage(tagId, needed.Impact),
                     ["tag_id"] = tagId,
                     ["child_tags"] = needed.Impact.ChildTags,
                     ["assignments"] = needed.Impact.Assignments,
@@ -470,14 +473,32 @@ public sealed class DarlingMcpQueryTagTools
         try
         {
             var snapshot = await store.ReadSnapshotAsync(ct);
+            var allowedIds = DarlingServerResolver.WebAllowedServerIds;
+            if (allowedIds is not null)
+            {
+                var tagIds = await store.UsedTagIdsAsync(allowedIds, ct);
+                snapshot = snapshot with
+                {
+                    Tags = snapshot.Tags.Where(tag => tagIds.Contains(tag.Id))
+                        .Select(tag => tag with { ParentId = tag.ParentId is int parent && tagIds.Contains(parent) ? parent : null }).ToList(),
+                    Assignments = snapshot.Assignments.Where(assignment =>
+                        assignment.ServerId is int id && allowedIds.Contains(id)).ToList(),
+                    ServerNames = snapshot.ServerNames.Where(pair => allowedIds.Contains(pair.Key))
+                        .ToDictionary(pair => pair.Key, pair => pair.Value),
+                };
+            }
+
             var tags = new JsonArray();
             var listed = 0;
             var truncated = false;
             foreach (var tag in InTreeOrder(snapshot.Tags))
             {
                 var node = TagNode(snapshot, tag);
-                node["rule_count"] = snapshot.RuleCountByTag.GetValueOrDefault(tag.Id);
-                node["enabled_rule_count"] = snapshot.EnabledRuleCountByTag.GetValueOrDefault(tag.Id);
+                if (allowedIds is null)
+                {
+                    node["rule_count"] = snapshot.RuleCountByTag.GetValueOrDefault(tag.Id);
+                    node["enabled_rule_count"] = snapshot.EnabledRuleCountByTag.GetValueOrDefault(tag.Id);
+                }
                 var mine = snapshot.Assignments.Where(a => a.TagId == tag.Id).ToList();
                 node["assignment_count"] = mine.Count;
                 var assignments = new JsonArray();
@@ -511,6 +532,7 @@ public sealed class DarlingMcpQueryTagTools
                     ["note"] = "A tag, assignment or rule write takes effect on the collector's next map pass; the map is current when built_version has caught up with rules_version.",
                 },
             };
+            if (allowedIds is not null) result.Remove("map");
             result["assignments_returned"] = listed;
             result["truncated"] = truncated;
             if (truncated)
@@ -541,72 +563,15 @@ public sealed class DarlingMcpQueryTagTools
         bool requireHashShape = false)
     {
         refusal = null;
-        var cleanKind = kind?.Trim().ToLowerInvariant();
-        if (cleanKind is not (KindHash or KindObject))
+        var parts = QueryTagKeyParser.TryParse(kind, queryHash, databaseName, schemaName, objectName, serverId, requireHashShape, out var problem);
+        if (parts is null)
         {
-            refusal = Refusal("invalid", "bad_kind", "kind must be 'hash' or 'object'.");
+            refusal = Refusal("invalid", problem!.Code, problem.Message);
             return null;
         }
 
-        /* No sign test on serverId: it is an FNV hash cast to a signed int (ServerIdHelper), so about half of all real ids are
-           negative. The registry check in assign_query_tag is what refuses an id that is not a monitored server (#6020). */
-        var hash = Clean(queryHash);
-        var database = Clean(databaseName);
-        var schema = Clean(schemaName);
-        var obj = Clean(objectName);
-        foreach (var (field, value) in new[] { ("query_hash", hash), ("database_name", database), ("schema_name", schema), ("object_name", obj) })
-        {
-            if (value is not null && (value.Length > MaxKeyPartLength || value.Any(char.IsControl)))
-            {
-                refusal = Refusal("invalid", "bad_key", string.Create(CultureInfo.InvariantCulture, $"{field} must be at most {MaxKeyPartLength} characters with no control characters."));
-                return null;
-            }
-        }
-
-        if (cleanKind == KindHash)
-        {
-            if (hash is null)
-            {
-                refusal = Refusal("invalid", "missing_key", "kind 'hash' needs query_hash.");
-                return null;
-            }
-
-            if (database is not null || schema is not null || obj is not null)
-            {
-                refusal = Refusal("invalid", "bad_key", "kind 'hash' takes query_hash only; database_name, schema_name and object_name belong to kind 'object'.");
-                return null;
-            }
-
-            /* #6455: a NEW assignment must name something a query hash can be; unassign skips this so a key stored before the check
-               can still be removed. */
-            if (requireHashShape && !QueryHashIdentity.IsAssignableHash(hash))
-            {
-                refusal = Refusal("invalid", "bad_key", "query_hash must be hexadecimal: 0x followed by 1 to 16 hex digits (for example 0x1A2B3C4D5E6F7081), or the decimal number the long-query trace stores.");
-                return null;
-            }
-
-            /* The resolver matches a hash ignoring case, so the key stores one spelling of it (#6020). Unassign skips the shape
-               check above, so a key stored before it (all zeros, or neither hex nor decimal) is kept as typed and can be removed. */
-            return new QueryTagKey(KindHash, serverId, QueryHashIdentity.CanonicalKey(hash) ?? hash, null, null, null);
-        }
-
-        var missing = new[] { ("database_name", database), ("schema_name", schema), ("object_name", obj) }.Where(p => p.Item2 is null).Select(p => p.Item1).ToList();
-        if (missing.Count > 0)
-        {
-            refusal = Refusal("invalid", "missing_key", $"kind 'object' needs database_name, schema_name and object_name; missing: {string.Join(", ", missing)}.");
-            return null;
-        }
-
-        if (hash is not null)
-        {
-            refusal = Refusal("invalid", "bad_key", "kind 'object' takes database_name, schema_name and object_name only; query_hash belongs to kind 'hash'.");
-            return null;
-        }
-
-        return new QueryTagKey(KindObject, serverId, null, database, schema, obj);
+        return new QueryTagKey(parts.Kind, parts.ServerId, parts.Hash, parts.Database, parts.Schema, parts.Name);
     }
-
-    private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     // -------------------------------------------------------------- results
 

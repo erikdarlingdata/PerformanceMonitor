@@ -10,15 +10,18 @@
    (view database_resources) over a window picked on the shared time range picker (#5562: a rolling length of at least an hour, within the read's reach), with each database's share of the server's CPU and I/O. */
 
 import { VIZ } from "../../panels.js";
-import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { el, mount, loadingStrip, captionStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
 import { gatedEmptyStrip } from "./gate.js";
 import { finopsWindowControl } from "./window.js";
 
 // The default window.
 const HOURS = 24;
 
+// #7922: the chosen window per server, kept here so the 60 s rebuild of the tab does not put it back to 24 hours.
+const chosenHours = new Map();
+
 const COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "cpu_time_ms", label: "CPU", format: "ms" },
   { key: "cpu_share_pct", label: "CPU %", format: "num2" },
   { key: "logical_reads", label: "Logical reads", format: "int" },
@@ -47,6 +50,7 @@ export const tab = {
     let seq = 0;
     const load = async (hours) => {
       const mine = ++seq;
+      chosenHours.set(server, hours);
       mount(body, loadingStrip());
       try {
         const res = await readTool("get_finops", { server, view: "database_resources", hours }, ctx && ctx.signal);
@@ -56,16 +60,17 @@ export const tab = {
         if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
         const data = res.data || {};
         mount(body, [
-          noticeStrip(noticeText(data)),
+          captionStrip(noticeText(data), data.truncated === true),
           VIZ.table(data, { rowsKey: "rows", columns: COLUMNS, emptyText: "No database resource usage was recorded for this server." }),
         ]);
       } catch (e) {
         if (mine === seq && e?.name !== "AbortError") mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
       }
     };
-    const win = finopsWindowControl({ hours: HOURS, onChange: (hours) => load(hours) });
+    const start = chosenHours.get(server) ?? HOURS;
+    const win = finopsWindowControl({ hours: start, onChange: (hours) => load(hours) });
     const root = el("div", {}, [win.node, body]);
-    load(HOURS);
+    load(start);
     return root;
   },
 };

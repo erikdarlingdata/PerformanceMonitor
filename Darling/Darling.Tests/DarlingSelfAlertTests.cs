@@ -217,6 +217,53 @@ public sealed class DarlingSelfAlertTests
             return Task.CompletedTask;
         }
 
+        /// <summary>#7068: the open fire row the history answers <c>GetOpenFireAsync</c> with (null: none), and the metrics asked.</summary>
+        public AlertHistoryFire? OpenFire { get; set; }
+
+        public List<string> OpenFireAsked { get; } = new();
+
+        /// <summary>#7068: when set, the open fire per (server key, metric) instead of <see cref="OpenFire"/>; a failing read when
+        /// <see cref="OpenFireThrows"/>. Every question is kept in <see cref="OpenFireQuestions"/> with the resolution titles asked.</summary>
+        public Func<string, string, AlertHistoryFire?>? OpenFireFor { get; set; }
+
+        public bool OpenFireThrows { get; set; }
+
+        public List<(string ServerKey, string Metric, string[] Titles)> OpenFireQuestions { get; } = new();
+
+        public Task<AlertHistoryFire?> GetOpenFireAsync(
+            string serverId, string metricName, IReadOnlyList<string> resolutionMetricNames, DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true)
+        {
+            OpenFireAsked.Add(metricName);
+            OpenFireQuestions.Add((serverId, metricName, resolutionMetricNames.ToArray()));
+            if (OpenFireThrows)
+            {
+                throw new InvalidOperationException("history is down");
+            }
+
+            return Task.FromResult(OpenFireFor is null ? OpenFire : OpenFireFor(serverId, metricName));
+        }
+
+        /// <summary>#7068: every fire and clear the history answers <c>GetStandingAsync</c> with, per (server key, metric); when null the
+        /// standing read is the one open fire above.</summary>
+        public Func<string, string, AlertHistoryStanding>? StandingFor { get; set; }
+
+        public async Task<AlertHistoryStanding> GetStandingAsync(
+            string serverId, string metricName, IReadOnlyList<string> resolutionMetricNames, DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true)
+        {
+            if (StandingFor is null)
+            {
+                return AlertHistoryStanding.Of(await GetOpenFireAsync(serverId, metricName, resolutionMetricNames, sinceUtc, untilUtc, countMuted));
+            }
+
+            OpenFireQuestions.Add((serverId, metricName, resolutionMetricNames.ToArray()));
+            if (OpenFireThrows)
+            {
+                throw new InvalidOperationException("history is down");
+            }
+
+            return StandingFor(serverId, metricName);
+        }
+
         public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
 
@@ -234,7 +281,9 @@ public sealed class DarlingSelfAlertTests
     /// </summary>
     internal sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
     {
-        public List<(Microsoft.Extensions.Logging.LogLevel Level, string Message)> Entries { get; } = new();
+        /// <summary>Each entry's exception is the object handed to the logger (the <c>LogError(ex, ...)</c>
+        /// overload), null when a call passed only text, so a test can tell the two apart.</summary>
+        public List<(Microsoft.Extensions.Logging.LogLevel Level, string Message, Exception? Exception)> Entries { get; } = new();
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
@@ -246,7 +295,7 @@ public sealed class DarlingSelfAlertTests
             TState state,
             Exception? exception,
             Func<TState, Exception?, string> formatter) =>
-            Entries.Add((logLevel, formatter(state, exception)));
+            Entries.Add((logLevel, formatter(state, exception), exception));
     }
 
     /// <summary>One evaluator + fakes + a controllable clock per test.</summary>
@@ -311,6 +360,7 @@ public sealed class DarlingSelfAlertTests
         public bool BackupOverdueEnabled { get; set; }
         public bool LogBackupOverdueEnabled { get; set; }
         public bool CheckDbOverdueEnabled { get; set; }
+        public Func<DatabaseProtectionGlobalThresholds>? ProtectionThresholds { get; set; }
         /// <summary>#6874: the Agent Alert Gaps switch, read live. Default off, the shipped default.</summary>
         public bool AgentAlertSetupEnabled { get; set; }
         /// <summary>#6875: the Identity Capacity switch, read live. Default off, the shipped default. The bars default to 70 and 90, and an override
@@ -324,7 +374,18 @@ public sealed class DarlingSelfAlertTests
         /// can be asserted rather than assumed.</summary>
         public CapturingLogger Log { get; } = new();
 
-        public DarlingSelfAlertEvaluator Build() => new(
+        public DarlingSelfAlertEvaluator Build()
+        {
+            var e = BuildCore();
+            e.HoldSelfHealth = HoldSelfHealth;
+            return e;
+        }
+
+        /// <summary>#7086: false (the default here) lets the self-health conditions page on a first breach, as the older tests
+        /// in this file assume. The hold tests set it true.</summary>
+        public bool HoldSelfHealth { get; set; }
+
+        private DarlingSelfAlertEvaluator BuildCore() => new(
             Settings, Deliverer, History,
             _ => MuteThrows ? throw new InvalidOperationException("mute check boom") : Muted,
             logger: Log, utcNow: () => Now,
@@ -344,6 +405,7 @@ public sealed class DarlingSelfAlertTests
             backupOverdueEnabled: () => BackupOverdueEnabled,
             logBackupOverdueEnabled: () => LogBackupOverdueEnabled,
             checkDbOverdueEnabled: () => CheckDbOverdueEnabled,
+            protectionThresholds: ProtectionThresholds,
             identityCapacityEnabled: () => IdentityCapacityEnabled,
             resolveThreshold: ResolveThreshold);
     }
@@ -782,14 +844,14 @@ public sealed class DarlingSelfAlertTests
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Contains("The Blocking Extended Events session is missing", fired.DetailText, StringComparison.Ordinal);
-        Assert.Equal("Blocking capture is not running \u2014 XE session missing", fired.ShortMessage);
+        Assert.Equal("Blocking capture is not running. XE session missing", fired.ShortMessage);
 
         /* Two sessions: the short message agrees the way the detail does (#6703's round-1 review). */
         var h2 = new Harness();
         await h2.Build().ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Array.Empty<string>(), Ct);
         var both = Assert.Single(h2.Deliverer.Outcomes);
         Assert.Contains("Extended Events sessions are missing", both.DetailText, StringComparison.Ordinal);
-        Assert.EndsWith("capture is not running \u2014 XE sessions missing", both.ShortMessage, StringComparison.Ordinal);
+        Assert.EndsWith("capture is not running. XE sessions missing", both.ShortMessage, StringComparison.Ordinal);
     }
 
     /* ---------------- capture-down on a server whose engine does not run the collector (#6912) ---------------- */
@@ -870,7 +932,10 @@ public sealed class DarlingSelfAlertTests
         Assert.Contains("client timeouts and cancels capture", fired.DetailText, StringComparison.Ordinal);
         Assert.DoesNotContain("locking", fired.DetailText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("deadlock", fired.DetailText, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("ALTER ANY EVENT SESSION", fired.DetailText, StringComparison.Ordinal);
+        /* #8528: with no ensure failure on record the detail says what the collector found and what the service does next; it names a
+           grant only when the service's own ensure was refused for permission. */
+        Assert.Contains("found the Client timeouts session stopped, absent or unreadable", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("ALTER ANY EVENT SESSION", fired.DetailText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2418,12 +2483,12 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("not valid until 2026-07-04 12:00:00Z; not being served", early.CurrentValue);
         Assert.Equal("valid at service start", early.ThresholdValue);
         Assert.Equal(
-            "web dashboard TLS certificate NOT YET VALID (valid from 2026-07-04 12:00:00Z) — LAN dashboard is loopback-only",
+            "web dashboard TLS certificate NOT YET VALID (valid from 2026-07-04 12:00:00Z): LAN dashboard is loopback-only",
             early.ShortMessage);
         Assert.Equal(
             "The web dashboard's configured TLS certificate was not yet valid when the service started (not valid until "
-            + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN dashboard is bound LOOPBACK-ONLY — "
-            + "unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. The window opens 2026-07-04 12:00:00Z: "
+            + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN dashboard is bound LOOPBACK-ONLY. "
+            + "Unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. The window opens 2026-07-04 12:00:00Z: "
             + "if that is in the past by any wall clock you trust, this host's clock is behind; if it is genuinely ahead, "
             + "the certificate installed is one issued for a future rotation." + refusedTail,
             early.DetailText);
@@ -2433,9 +2498,9 @@ public sealed class DarlingSelfAlertTests
         var late = Assert.Single(opened.Deliverer.Outcomes);
         Assert.Equal(
             "The web dashboard's configured TLS certificate was not yet valid when the service started (not valid until "
-            + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN dashboard is bound LOOPBACK-ONLY — "
-            + "unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. The window opened 2026-07-04 12:00:00Z, "
-            + "after the service started — the host judged the certificate once, at load, and stays loopback-only on "
+            + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN dashboard is bound LOOPBACK-ONLY. "
+            + "Unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. The window opened 2026-07-04 12:00:00Z, "
+            + "after the service started. The host judged the certificate once, at load, and stays loopback-only on "
             + "that verdict until it is restarted." + refusedTail,
             late.DetailText);
 
@@ -2528,7 +2593,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("mcptlscert", fired.ServerKey);
         Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);   // as unreachable as expired
         Assert.Equal(
-            "MCP server TLS certificate NOT YET VALID (valid from 2026-07-04 12:00:00Z) — LAN MCP endpoint is loopback-only",
+            "MCP server TLS certificate NOT YET VALID (valid from 2026-07-04 12:00:00Z): LAN MCP endpoint is loopback-only",
             fired.ShortMessage);
         Assert.Contains("The MCP server's configured TLS certificate was not yet valid", fired.DetailText);
         Assert.Contains("the LAN MCP endpoint is bound LOOPBACK-ONLY", fired.DetailText);
@@ -2605,7 +2670,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("mcptlscert", fired.ServerKey);
         Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
         Assert.Equal(
-            "MCP server TLS certificate COULD NOT BE LOADED — LAN MCP endpoint is loopback-only", fired.ShortMessage);
+            "MCP server TLS certificate COULD NOT BE LOADED: LAN MCP endpoint is loopback-only", fired.ShortMessage);
         Assert.Contains(LoadFailureReason, fired.DetailText);
         Assert.Contains("refused to expose the LAN MCP endpoint: it is bound LOOPBACK-ONLY", fired.DetailText);
         Assert.Contains("restart the service", fired.DetailText);
@@ -2801,8 +2866,8 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("valid at service start", early.ThresholdValue);
         Assert.Equal(
             "The MCP server's configured TLS certificate was not yet valid when the service started (not valid until "
-            + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN MCP endpoint is bound LOOPBACK-ONLY — "
-            + "unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. The window opens 2026-07-04 12:00:00Z: "
+            + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN MCP endpoint is bound LOOPBACK-ONLY. "
+            + "Unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. The window opens 2026-07-04 12:00:00Z: "
             + "if that is in the past by any wall clock you trust, this host's clock is behind; if it is genuinely ahead, "
             + "the certificate installed is one issued for a future rotation. Correct the system clock or install the "
             + "currently-valid certificate, then restart the service so the host loads it again. "
@@ -2840,6 +2905,28 @@ public sealed class DarlingSelfAlertTests
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             new Harness { Now = CertClock, MuteThrows = true }.Build()
                 .ApplyMcpTlsCertificateAsync(McpCert(CertClock.AddDays(10)), Ct));
+    }
+
+    /// <summary>Both wrappers' catch-alls hand the logger the exception itself, so the entry carries its type,
+    /// stack and inner exception, not only the text the {Message} placeholder formats into the line.</summary>
+    [Fact]
+    public async Task TlsCertEvaluateWrappers_LogTheExceptionItself_NotOnlyItsMessage()
+    {
+        var web = new Harness { Now = CertClock, MuteThrows = true };
+        await web.Build().EvaluateWebTlsCertificateAsync(Cert(CertClock.AddDays(10)), Ct);
+        Assert.Contains(
+            web.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Error
+                && x.Message == "Web TLS certificate self-alert failed: mute check boom"
+                && x.Exception is InvalidOperationException { Message: "mute check boom" });
+
+        var mcp = new Harness { Now = CertClock, MuteThrows = true };
+        await mcp.Build().EvaluateMcpTlsCertificateAsync(McpCert(CertClock.AddDays(10)), Ct);
+        Assert.Contains(
+            mcp.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Error
+                && x.Message == "MCP TLS certificate self-alert failed: mute check boom"
+                && x.Exception is InvalidOperationException { Message: "mute check boom" });
     }
 
     /// <summary>Master switch off: the MCP alert is as silent as the web one, even for an expired certificate.</summary>
@@ -2995,6 +3082,104 @@ public sealed class DarlingSelfAlertTests
             new[] { Mute(StaleDays + 100, enabled: false, id: "rule-disabled") }, Ct);
 
         Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    /// <summary>
+    /// #7183: a recurring window (#7040) and a digest rule (#7083) are permanent by design, so neither is a
+    /// forgotten rule however old, blanket or scoped. A plain open-ended mute of the same age still is.
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_RecurringAndDigestRules_AreNotFlagged_HoweverOldOrBlanket()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var blanketRecurring = Mute(StaleDays + 30, metric: null, id: "rule-recurring-blanket");
+        MakeRecurring(blanketRecurring);
+        var scopedRecurring = Mute(StaleDays + 30, id: "rule-recurring-scoped");
+        MakeRecurring(scopedRecurring);
+        var blanketDigest = Mute(StaleDays + 30, metric: null, id: "rule-digest-blanket");
+        blanketDigest.Action = MuteRuleActions.Digest;
+        var scopedDigest = Mute(StaleDays + 30, id: "rule-digest-scoped");
+        scopedDigest.Action = MuteRuleActions.Digest;
+
+        await e.ApplyStaleMuteRulesAsync(
+            new[] { blanketRecurring, scopedRecurring, blanketDigest, scopedDigest }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task StaleMute_PlainOpenEndedMutes_StillFlag_BesideRecurringAndDigestRules()
+    {
+        var h = new Harness();
+
+        var recurring = Mute(StaleDays + 30, metric: null, id: "rule-recurring");
+        MakeRecurring(recurring);
+        var digest = Mute(StaleDays + 30, metric: null, id: "rule-digest");
+        digest.Action = MuteRuleActions.Digest;
+
+        await h.Build().ApplyStaleMuteRulesAsync(
+            new[] { recurring, digest, Mute(StaleDays + 1, id: "rule-plain-scoped") }, Ct);
+
+        var scoped = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("1", scoped.CurrentValue);
+        Assert.Equal(AlertSeverityLevel.Warning, scoped.Severity);
+        Assert.Contains("rule-plain-scoped", scoped.DetailText);
+        Assert.DoesNotContain("rule-recurring", scoped.DetailText);
+        Assert.DoesNotContain("rule-digest", scoped.DetailText);
+
+        var h2 = new Harness();
+        await h2.Build().ApplyStaleMuteRulesAsync(
+            new[] { recurring, digest, Mute(StaleDays + 1, metric: null, id: "rule-plain-blanket") }, Ct);
+
+        var blanket = Assert.Single(h2.Deliverer.Outcomes);
+        Assert.Equal("1", blanket.CurrentValue);
+        Assert.Equal(AlertSeverityLevel.Critical, blanket.Severity);
+        Assert.Contains("rule-plain-blanket", blanket.DetailText);
+    }
+
+    /// <summary>
+    /// #7183: the validator accepts a recurring window of 00:00-23:59 every day, or 00:01-00:00 across midnight,
+    /// so those schedules mute nearly around the clock with no expiry. They are no bound, so the stale check
+    /// still reports them. A window that leaves an hour a day unmuted, or skips a day, is bounded and is not reported.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 0, 23, 59, null, true)]
+    [InlineData(0, 1, 0, 0, null, true)]
+    [InlineData(0, 0, 23, 59, 0x7F, true)]
+    [InlineData(1, 0, 5, 0, null, false)]
+    [InlineData(0, 0, 23, 59, 0x40, false)]
+    [InlineData(0, 1, 0, 0, 0x3F, false)]
+    [InlineData(0, 0, 22, 59, null, false)]
+    public async Task StaleMute_RecurringWindow_IsReportedOnlyWhenItIsNoRealBound(
+        int startH, int startM, int endH, int endM, int? days, bool reported)
+    {
+        var h = new Harness();
+        var rule = Mute(StaleDays + 30, metric: null, id: "rule-recurring-window");
+        rule.RecurStartTime = new TimeOnly(startH, startM);
+        rule.RecurEndTime = new TimeOnly(endH, endM);
+        rule.RecurDays = days;
+        rule.RecurTimeZone = "UTC";
+
+        await h.Build().ApplyStaleMuteRulesAsync(new[] { rule }, Ct);
+
+        if (reported)
+        {
+            var outcome = Assert.Single(h.Deliverer.Outcomes);
+            Assert.Contains("rule-recurring-window", outcome.DetailText);
+        }
+        else
+        {
+            Assert.Empty(h.Deliverer.Outcomes);
+        }
+    }
+
+    private static void MakeRecurring(MuteRule rule)
+    {
+        rule.RecurStartTime = new TimeOnly(1, 0);
+        rule.RecurEndTime = new TimeOnly(5, 0);
+        rule.RecurTimeZone = "UTC";
     }
 
     /// <summary>
@@ -3774,9 +3959,12 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("(matches all alerts)", unconstrained.Summary);
         Assert.True(unconstrained.Matches(anyAlert));
 
-        /* Not a match dimension: the rule's identity and the operator's note. Everything else that is a
-           writable string IS one, which is what makes this loop cover a dimension added later. */
-        var notDimensions = new[] { nameof(MuteRule.Id), nameof(MuteRule.Reason) };
+        /* Not a match dimension: the rule's identity and the operator's note. RecurTimeZone is not one either:
+           it names the clock a recurring window reads (#7040) and narrows when a rule applies, not which alerts
+           it matches. Action (#7083) is not one either: it says what a matching alert is handed to (a mute or the
+           daily digest), not which alerts match. Everything else that is a writable string IS one, which is what
+           makes this loop cover a dimension added later. */
+        var notDimensions = new[] { nameof(MuteRule.Id), nameof(MuteRule.Reason), nameof(MuteRule.RecurTimeZone), nameof(MuteRule.Action) };
         var dimensions = typeof(MuteRule).GetProperties()
             .Where(p => p.PropertyType == typeof(string) && p.CanWrite && p.CanRead)
             .Where(p => !notDimensions.Contains(p.Name, StringComparer.Ordinal))
@@ -3789,7 +3977,7 @@ public sealed class DarlingSelfAlertTests
             dimension.SetValue(rule, "constrained");
 
             Assert.False(rule.MatchesEveryAlert,
-                $"a rule constrained by {dimension.Name} alone still claims to match every alert — "
+                $"a rule constrained by {dimension.Name} alone still claims to match every alert. "
                 + "MuteRule.MatchDescriptions does not know about that dimension");
             Assert.NotEqual("(matches all alerts)", rule.Summary);
         }
@@ -3939,7 +4127,7 @@ public sealed class DarlingSelfAlertTests
         foreach (var id in jobIds)
         {
             list.Add(new StuckPolicyJob(
-                id, "wait_stats", "next_start is -infinity — the scheduler will never run it again",
+                id, "wait_stats", "next_start is -infinity. The scheduler will never run it again",
                 Arm: StuckPolicyJobArm.NextStartNegativeInfinity));
         }
 
@@ -4191,6 +4379,92 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(2, rearm.Calls.Count);  /* re-stuck after recovery -> re-armed fresh */
     }
 
+    /* ---------------- #7076: the restart seed of a stuck policy job, and the close of an ended episode ---------------- */
+
+    private static Harness HarnessWithOpenJobRow(string? step)
+    {
+        var h = new Harness();
+        h.History.OpenFireFor = (key, metric) => metric == "Compression Job Stuck" && key == "compressjob:1001"
+            ? new AlertHistoryFire(
+                h.Now.AddDays(-2), 0,
+                step is null ? null : AlertContextSerializer.Serialize(new AlertContext { PolicyJobStep = step }))
+            : null;
+        return h;
+    }
+
+    [Fact]
+    public async Task CompressionJobs_FirstPass_SeededReArmed_SendsTheReHungPageOnce_WithoutReArmingAgain()
+    {
+        var h = HarnessWithOpenJobRow(AlertContextSerializer.PolicyJobStepReArmed);
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("re-hung after self-heal", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.Equal(AlertContextSerializer.PolicyJobStepEscalated, fired.Context?.PolicyJobStep);
+
+        /* The re-hang was announced, so the job is now escalated: the next pass sends nothing and still does not re-arm. */
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        Assert.Empty(rearm.Calls);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Theory]
+    [InlineData("Escalated")]
+    [InlineData(null)]
+    public async Task CompressionJobs_FirstPass_SeededEscalated_NeitherReArmsNorPages(string? step)
+    {
+        var h = HarnessWithOpenJobRow(step);
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Contains(h.History.OpenFireQuestions, q => q.ServerKey == "compressjob:1001" && q.Metric == "Compression Job Stuck");
+    }
+
+    [Fact]
+    public async Task CompressionJobs_FirstPass_HealthyJobWithAnOpenRow_WritesItsResolution_SoALaterStickIsANewEpisode()
+    {
+        var h = HarnessWithOpenJobRow(AlertContextSerializer.PolicyJobStepEscalated);
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+        var healthy = Reading(StuckJobs(), new PolicyJobRunReading(
+            1001, TimescaleSupport.StorePolicyJobFamily.Compression, "wait_stats", Held: false, LastRunStatus: null, TotalFailures: 0));
+
+        await e.ApplyPolicyJobsStuckAsync(healthy, rearm.Delegate, Ct);
+
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal("Compression Job Recovered", resolved.MetricName);
+        Assert.Equal("compressjob:1001", resolved.AlertKey);
+
+        /* Checked once: the same healthy job on the next pass reads the history no more. */
+        var asked = h.History.OpenFireQuestions.Count;
+        await e.ApplyPolicyJobsStuckAsync(healthy, rearm.Delegate, Ct);
+        Assert.Equal(asked, h.History.OpenFireQuestions.Count);
+        Assert.Single(h.History.Records);
+    }
+
+    [Fact]
+    public async Task CompressionJobs_HealthyJobWithNoOpenRow_WritesNoResolution()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var healthy = Reading(StuckJobs(), new PolicyJobRunReading(
+            1001, TimescaleSupport.StorePolicyJobFamily.Compression, "wait_stats", Held: false, LastRunStatus: null, TotalFailures: 0));
+
+        await e.ApplyPolicyJobsStuckAsync(healthy, new RearmRecorder().Delegate, Ct);
+
+        Assert.Empty(h.History.Records);
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
     [Fact]
     public async Task CompressionJobs_AlertsDisabled_DoesNotFireOrRearm()
     {
@@ -4271,7 +4545,6 @@ public sealed class DarlingSelfAlertTests
                 && x.Message.Contains("crash backoff", StringComparison.Ordinal));
         Assert.Contains("1001", info.Message, StringComparison.Ordinal);
         Assert.Contains("not re-armed, not alerted", info.Message, StringComparison.Ordinal);
-        Assert.Contains("#3591", info.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -4331,8 +4604,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.History.Records);
         Assert.Contains(h.Log.Entries, x => x.Level == Microsoft.Extensions.Logging.LogLevel.Information
-            && x.Message.Contains("running on schedule again", StringComparison.Ordinal)
-            && x.Message.Contains("#3591", StringComparison.Ordinal));
+            && x.Message.Contains("running on schedule again", StringComparison.Ordinal));
 
         /* Fresh first sight afterwards: deferred again, not escalated — the state was dropped. */
         h.Now = h.Now.AddHours(1);
@@ -4364,7 +4636,7 @@ public sealed class DarlingSelfAlertTests
     public void CompressionJobs_TheOldRowShape_DefaultsToTheRearmPath()
     {
         /* The three-argument record every pre-#3591 caller and pin builds is the old semantics, by default. */
-        Assert.False(new StuckPolicyJob(1L, "wait_stats", "next_start is -infinity — the scheduler will never run it again").SchedulerRetries);
+        Assert.False(new StuckPolicyJob(1L, "wait_stats", "next_start is -infinity. The scheduler will never run it again").SchedulerRetries);
     }
 
     /* ---------------- #3816: the self-heal covers every policy family ---------------- */
@@ -4467,7 +4739,7 @@ public sealed class DarlingSelfAlertTests
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Retention Job Stuck", fired.MetricName);
-        Assert.Contains("NOT the #2813 Retention Held condition", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("NOT the Retention Held condition", fired.DetailText, StringComparison.Ordinal);
         Assert.Contains("scheduled = false", fired.DetailText, StringComparison.Ordinal);
     }
 
@@ -4508,7 +4780,6 @@ public sealed class DarlingSelfAlertTests
             h.Log.Entries,
             x => x.Level == Microsoft.Extensions.Logging.LogLevel.Warning);
         Assert.Contains("HELD", warned.Message, StringComparison.Ordinal);
-        Assert.Contains("#1680/#1877", warned.Message, StringComparison.Ordinal);
         Assert.Contains("retention job 9100", warned.Message, StringComparison.Ordinal);
     }
 
@@ -4570,7 +4841,6 @@ public sealed class DarlingSelfAlertTests
         var warned = Assert.Single(
             h.Log.Entries,
             x => x.Level == Microsoft.Extensions.Logging.LogLevel.Debug);
-        Assert.Contains("#4299", warned.Message, StringComparison.Ordinal);
         Assert.Contains("unscheduled by design", warned.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("detector defect", warned.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("drop history", warned.Message, StringComparison.Ordinal);
@@ -4615,7 +4885,7 @@ public sealed class DarlingSelfAlertTests
             Assert.Equal(metric, fired.MetricName);
             Assert.Equal(key, fired.ServerKey);
             Assert.Contains("still in crash backoff", fired.ShortMessage, StringComparison.Ordinal);
-            Assert.Contains("#9360", fired.DetailText, StringComparison.Ordinal);
+            Assert.Contains("retry_period", fired.DetailText, StringComparison.Ordinal);
         }
     }
 
@@ -4678,7 +4948,7 @@ public sealed class DarlingSelfAlertTests
             x => x.Level == Microsoft.Extensions.Logging.LogLevel.Information
                 && x.Message.StartsWith("Store job health:", StringComparison.Ordinal));
         Assert.Equal(
-            "Store job health: 5 jobs read (compression 2, refresh 1, retention 2), 0 dead, 0 stuck, 1 held, 0 re-armed, 0 alerted (#3816)",
+            "Store job health: 5 jobs read (compression 2, refresh 1, retention 2), 0 dead, 0 stuck, 0 stale, 1 held, 0 re-armed, 0 alerted (#3816)",
             summary.Message);
     }
 
@@ -5615,7 +5885,7 @@ public sealed class DarlingSelfAlertTests
             "await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken, sweepGeneration: generation);",
             sweep, StringComparison.Ordinal);
         Assert.Contains(
-            "await ApplyCaptureDownAsync(serverId, serverName, missing, notRunOnEngine, cancellationToken, sweepGeneration: generation);",
+            "await ApplyCaptureDownAsync(serverId, serverName, missing, notRunOnEngine, cancellationToken, sweepGeneration: generation, ensure: captureSessions);",
             sweep, StringComparison.Ordinal);
         Assert.Contains(
             "await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, everRan, cancellationToken, sweepGeneration: generation);",
@@ -5695,7 +5965,6 @@ public sealed class DarlingSelfAlertTests
         var handler = Regex.Match(source[start..end], @"catch \(Exception ex\) when \(ex is not OperationCanceledException\)\s*\{");
         Assert.True(handler.Success, "TryConnectAsync has no failed-connect handler");
         var handlerCode = source[(start + handler.Index)..end];
-        var handlerRaw = raw[(start + handler.Index)..end];
 
         var cleared = handlerCode.IndexOf("server.Runtime = null;", StringComparison.Ordinal);
         Assert.True(cleared >= 0, "the failed-connect handler no longer clears server.Runtime");
@@ -5705,14 +5974,14 @@ public sealed class DarlingSelfAlertTests
             "the server.Retired return comes before server.Runtime = null, so a removed server keeps a half-built runtime");
         var checkEnd = check.Index + check.Length;
 
-        var firstLog = Regex.Match(handlerCode, @"_logger\.Log\w+\(");
+        /* #7067: the connect-failure log lines (first failure, changed cause, hourly "still failing") moved into
+           LogConnectFailure, which the handler calls once. The ordering rule is unchanged: that call, like the count and
+           the backoff, comes after the Retired return. */
         var after = new (string What, int At)[]
         {
             ("the failure count", handlerCode.IndexOf("ConsecutiveConnectFailures++", StringComparison.Ordinal)),
             ("the backoff", handlerCode.IndexOf("NextConnectAttempt =", StringComparison.Ordinal)),
-            ("the first log call", firstLog.Success ? firstLog.Index : -1),
-            ("the 'Connect failed, retrying' log line", handlerRaw.IndexOf("Connect failed, retrying in", StringComparison.Ordinal)),
-            ("the 'Connect still failing, retrying' log line", handlerRaw.IndexOf("Connect still failing, retrying in", StringComparison.Ordinal)),
+            ("the connect-failure log call", handlerCode.IndexOf("LogConnectFailure(", StringComparison.Ordinal)),
             ("the Offline alert", handlerCode.IndexOf("ApplyConnectionOutcomeAsync(", StringComparison.Ordinal)),
         };
 
@@ -5837,25 +6106,25 @@ public sealed class DarlingSelfAlertTests
             logger: null,
             utcNow: () => now);
 
-        /* Fire: total CPU 90 >= 80, held for AlertEngine.CpuBreachSamples distinct samples (#3282 — one
+        /* Fire: total CPU 90 >= 80, held for AlertEngine.SqlCpuBreachSamples distinct samples (#3282 — one
            sample over the bar is no longer an incident). */
         var sampleAt = new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
-        for (var i = 0; i < AlertEngine.CpuBreachSamples; i++)
+        for (var i = 0; i < AlertEngine.SqlCpuBreachSamples; i++)
         {
             sampleAt = sampleAt.AddMinutes(1);
-            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 90, 90, false, false, sampleAt), Ct);
+            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 90, 90, false, false, sampleAt) { CpuSampleUtcOnly = sampleAt }, Ct);
         }
 
         Assert.Single(deliverer.Outcomes);
         Assert.Empty(history.Records); /* no resolution yet */
 
-        /* Clear: CPU back below threshold for AlertEngine.CpuClearSamples distinct samples => the engine
+        /* Clear: CPU back below threshold for fifteen minutes of distinct samples => the engine
            emits a resolution => a history row is written. */
         now = now.AddMinutes(1);
-        for (var i = 0; i < AlertEngine.CpuClearSamples; i++)
+        for (var i = 0; i < ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1); i++)
         {
             sampleAt = sampleAt.AddMinutes(1);
-            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 10, 10, false, false, sampleAt), Ct);
+            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 10, 10, false, false, sampleAt) { CpuSampleUtcOnly = sampleAt }, Ct);
         }
         var resolved = Assert.Single(history.Records);
         Assert.Equal("CPU Resolved", resolved.MetricName);
@@ -6453,7 +6722,6 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
 
         /* The mechanism, by cadence and by issue, and the confirmation line an operator can grep for. */
         Assert.Contains("hourly maintenance tick", detail, StringComparison.Ordinal);
-        Assert.Contains("#3812", detail, StringComparison.Ordinal);
         Assert.Contains("'Retention re-evaluation:'", detail, StringComparison.Ordinal);
 
         /* The restart is OPTIONAL now, and said to be. The two #3297 phrases that made it mandatory must be
@@ -7119,9 +7387,9 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
             <= TimescaleSupport.RefreshPhaseSlotSeconds * 1_000L,
             $"a default of {TimescaleSupport.RefreshSlotPercentOfHourlyCadence}% of an hourly cadence fires at "
             + $"{HourlyCadenceMs * TimescaleSupport.RefreshSlotPercentOfHourlyCadence / 100 / 1_000}s against a "
-            + $"{TimescaleSupport.RefreshPhaseSlotSeconds}s window — after the compression grid's stated "
+            + $"{TimescaleSupport.RefreshPhaseSlotSeconds}s window. After the compression grid's stated "
             + "precondition is already false, which is the failure #3060 is about. The knob cannot move "
-            + "without a rung (V57), so the repair is the grid (#3174)");
+            + "without a rung (V57), so the repair is the grid");
 
         /* The seed must survive its own clamp, asserted through the REAL clamp rather than a copy of its
            bounds — a step fine enough to drive the derived default below the floor would have the clamp
@@ -7663,7 +7931,7 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
             new[] { Mute(StaleDays + 1), ExplicitMute(serverName: DarlingSelfAlertEvaluator.StoreServerLabel) }, Ct);
         var stillFired = Assert.Single(notSuppressed.Deliverer.Outcomes);
         Assert.False(stillFired.Muted,
-            "a rule scoped to the retired constant must not match an opted-in store's rows — the coupling the docs warn about");
+            "a rule scoped to the retired constant must not match an opted-in store's rows. The coupling the docs warn about");
     }
 
     /// <summary>
@@ -7765,5 +8033,160 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         var worker = RepoFile.ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
         Assert.Contains("storeName: config.Peers?.StoreName", worker, StringComparison.Ordinal);
+    }
+
+    /* ---------------- #8302: the crash-backoff escalation states the backoff as the scheduler computes it ---------------- */
+
+    [Fact]
+    public async Task PolicyJobs_CrashBackoffEscalation_StatesTheLinearBackoff_AndTheRetryPeriodRemedy()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1002), rearm.Delegate, Ct);
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1002), rearm.Delegate, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(rearm.Calls);
+
+        /* The scheduler's wait after a crash is retry_period x consecutive_crashes, at least five minutes, restarted on
+           every reload of its job list. It is not a doubling, and it does not clear by itself while anything reloads
+           the list every hour; the remedy is the short retry period every job this product schedules carries. */
+        Assert.DoesNotContain("doubles", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("retry_period", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("consecutive_crashes", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    /* ---------------- #8302: a stale daily rollup is its own condition, not a stuck job ---------------- */
+
+    private static StorePolicyJobHealth StaleRollup(params long[] jobIds) => Reading(jobIds.Select(id => new StuckPolicyJob(
+        id, "query_store_stats_interval_daily", "newest materialized bucket ended 4.0 days behind its source's", SchedulerRetries: false,
+        Family: TimescaleSupport.StorePolicyJobFamily.Refresh, Arm: StuckPolicyJobArm.DailyRollupStale)).ToList());
+
+    [Fact]
+    public async Task StaleDailyRollup_WarnsUnderItsOwnName_NeverRearms_AndResolvesWhenItCatchesUp()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(StaleRollup(7001), rearm.Delegate, Ct);
+
+        /* A rollup behind its source is not a hung job: no re-arm, a Warning under its own name, its own text. */
+        Assert.Empty(rearm.Calls);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Daily Rollup Stale", fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Equal("rollupstale:7001", fired.ServerKey);
+        Assert.Contains("query_store_stats_interval_daily", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("refresh_continuous_aggregate", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("re-armed", fired.DetailText, StringComparison.Ordinal);
+
+        /* Still behind an hour on: no escalation, no re-arm, and nothing more sent while refire is off. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(StaleRollup(7001), rearm.Delegate, Ct);
+        Assert.Empty(rearm.Calls);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Caught up: one resolution row under its own recovered name. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
+        Assert.Empty(rearm.Calls);
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal("Daily Rollup Recovered", resolved.MetricName);
+        Assert.Equal("rollupstale:7001", resolved.ServerId);
+    }
+
+    [Fact]
+    public async Task StaleDailyRollup_IsCountedInThePassSummary()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyPolicyJobsStuckAsync(StaleRollup(7002), new RearmRecorder().Delegate, Ct);
+
+        var summary = Assert.Single(h.Log.Entries, x => x.Message.StartsWith("Store job health:", StringComparison.Ordinal));
+        Assert.Contains("1 stale", summary.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A restart while a rollup is still behind: the open fire row in the history seeds the state, so the first pass
+    /// announces nothing new, and the pass where it catches up still resolves the row.</summary>
+    [Fact]
+    public async Task StaleDailyRollup_StillBehindAcrossARestart_IsNotAnnouncedAgain_AndStillResolves()
+    {
+        var h = new Harness();
+        h.History.OpenFireFor = (serverKey, metric) =>
+            serverKey == "rollupstale:7005" && metric == "Daily Rollup Stale" ? new AlertHistoryFire(h.Now.AddHours(-3), 0, null) : null;
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(StaleRollup(7005), rearm.Delegate, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(rearm.Calls);
+
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal("Daily Rollup Recovered", resolved.MetricName);
+        Assert.Equal("rollupstale:7005", resolved.ServerId);
+    }
+
+    /// <summary>A rollup refreshed by hand while the service was down: its fire row is still open in the history, no process
+    /// tracked it, and the first pass that reads its job healthy closes the row, once.</summary>
+    [Fact]
+    public async Task StaleDailyRollup_CaughtUpWhileTheServiceWasDown_HasItsOpenRowClosedOnce()
+    {
+        var h = new Harness();
+        h.History.OpenFireFor = (serverKey, metric) =>
+            serverKey == "rollupstale:7006" && metric == "Daily Rollup Stale" ? new AlertHistoryFire(h.Now.AddDays(-1), 0, null) : null;
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+        var healthy = Reading(StuckJobs(), new PolicyJobRunReading(
+            7006, TimescaleSupport.StorePolicyJobFamily.Refresh, "query_store_stats_interval_daily", Held: false, LastRunStatus: "Success", TotalFailures: 0));
+
+        await e.ApplyPolicyJobsStuckAsync(healthy, rearm.Delegate, Ct);
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal("Daily Rollup Recovered", resolved.MetricName);
+        Assert.Equal("rollupstale:7006", resolved.ServerId);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(healthy, rearm.Delegate, Ct);
+        Assert.Single(h.History.Records);
+    }
+
+    /// <summary>A rollup that is behind and whose job then crashes: the stale condition stands through the crash and is resolved
+    /// once, when the rollup catches up, never while the lag is unchanged.</summary>
+    [Fact]
+    public async Task StaleDailyRollup_WhoseJobCrashesWhileBehind_IsNotResolvedUntilItCatchesUp()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(StaleRollup(7007), rearm.Delegate, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The job crashes while the rollup is still behind: both arms arrive for the same job. */
+        h.Now = h.Now.AddHours(1);
+        var both = Reading(StaleRollup(7007).Stuck.Concat(CrashBackoffJobs(7007)).ToList());
+        await e.ApplyPolicyJobsStuckAsync(both, rearm.Delegate, Ct);
+        Assert.Empty(h.History.Records);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The crash clears, the rollup is still behind: nothing new is announced and nothing is resolved. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(StaleRollup(7007), rearm.Delegate, Ct);
+        Assert.Empty(h.History.Records);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* It catches up: one resolution. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
+        Assert.Empty(rearm.Calls);
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal("Daily Rollup Recovered", resolved.MetricName);
     }
 }

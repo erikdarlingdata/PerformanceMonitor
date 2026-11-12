@@ -164,7 +164,7 @@ public class DarlingMcpPgPlanToolsTests
         var text = DarlingMcpPgPlanTools.NoPlanCapturedMessage(BigQueryId, 24);
 
         Assert.Contains("not a top-N page", text, StringComparison.Ordinal);
-        Assert.Contains("the last 24 hour(s)", text, StringComparison.Ordinal);
+        Assert.Contains("the last 24 hours", text, StringComparison.Ordinal);
         Assert.Contains("get_pg_top_queries", text, StringComparison.Ordinal);
         Assert.Contains("auto_explain.log_min_duration", text, StringComparison.Ordinal);
         Assert.Contains("get_pg_plan_capture_readiness", text, StringComparison.Ordinal);
@@ -183,7 +183,7 @@ public class DarlingMcpPgPlanToolsTests
         var text = DarlingMcpPgPlanTools.NoPlanCapturedMessage(null, 48);
 
         Assert.Contains("every statement", text, StringComparison.Ordinal);
-        Assert.Contains("the last 48 hour(s)", text, StringComparison.Ordinal);
+        Assert.Contains("the last 48 hours", text, StringComparison.Ordinal);
         Assert.Contains("auto_explain.log_min_duration", text, StringComparison.Ordinal);
         Assert.Contains("plan_content_retention_days", text, StringComparison.Ordinal);
 
@@ -264,8 +264,8 @@ public class DarlingMcpPgPlanToolsTests
 
     /// <summary>
     /// The unsatisfied facets are NAMED rather than reduced to a verdict. There is deliberately no
-    /// ready/not-ready boolean: an unmet <c>plan_attribution</c> still captures plans and merely orphans
-    /// them, while <c>message_locale</c> and <c>log_line_prefix_readable</c> are about the target-side log
+    /// ready/not-ready boolean: an unmet <c>plan_attribution</c> means no plan is stored or plans carry
+    /// no query id, while <c>message_locale</c> and <c>log_line_prefix_readable</c> are about the target-side log
     /// reads rather than about capture, so one flag would have to pick a meaning and be wrong under the
     /// other — the exact collapse the collector splits its rows to avoid.
     /// </summary>

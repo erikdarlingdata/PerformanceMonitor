@@ -37,18 +37,28 @@ public partial class ServerTab : UserControl
     /// #4284: pure day-shift for the Compare-to selection -- Yesterday is 1 day back, Last week and Same day
     /// last week are 7 days back, None (index &lt;= 0) is no comparison. Basis-agnostic: the shift is a fixed
     /// duration, so it commutes with whatever basis (UTC or server-local) the caller's start/end are already
-    /// in. Pulled out of <see cref="GetComparisonRange"/> as a static helper, the way #4279 pulled
+    /// in. The baseline ends where the current window starts when the window is longer than the shift (a 7-day
+    /// window compared with Yesterday): a straight shift there overlaps the window by all but one day, so the
+    /// grid compares the window mostly with itself and every row reads as unchanged. The comparison reads
+    /// aggregate per-execution averages, so a baseline shorter than the window still compares like with like.
+    /// Pulled out of <see cref="GetComparisonRange"/> as a static helper, the way #4279 pulled
     /// <see cref="LocalDataService.GetQueriesTabWindowUtc"/> out of its instance callers, so a test can drive
     /// it directly without constructing the WPF UserControl.
     /// </summary>
     internal static (DateTime From, DateTime To)? ShiftComparisonRange(int selectedIndex, DateTime currentStart, DateTime currentEnd)
-        => selectedIndex switch
+    {
+        var shiftDays = selectedIndex switch
         {
-            1 => (currentStart.AddDays(-1), currentEnd.AddDays(-1)),   // Yesterday
-            2 => (currentStart.AddDays(-7), currentEnd.AddDays(-7)),   // Last week
-            3 => (currentStart.AddDays(-7), currentEnd.AddDays(-7)),   // Same day last week
-            _ => null
+            1 => 1,   // Yesterday
+            2 => 7,   // Last week
+            3 => 7,   // Same day last week
+            _ => 0
         };
+        if (shiftDays == 0) return null;
+
+        var to = currentEnd.AddDays(-shiftDays);
+        return (currentStart.AddDays(-shiftDays), to < currentStart ? to : currentStart);
+    }
 
     /// <summary>
     /// #4284: computes the comparison baseline for the Queries tab's three comparison reads

@@ -144,8 +144,10 @@ public static class PostgresAlertEvaluator
 
     /// <summary>
     /// #3444 (V122): the shipped default for <c>blocking.pg_count_threshold</c> — how many distinct ROOT
-    /// blockers inside the rolling window fire the PostgreSQL Blocking alert. 1, for the same
-    /// reproduce-today's-behaviour reason as <see cref="DeadlockCountThresholdDefault"/>.
+    /// blockers inside the rolling window fire the PostgreSQL Blocking alert. 1 when
+    /// shipped, for the same reproduce-today's-behaviour reason as <see cref="DeadlockCountThresholdDefault"/>;
+    /// 3 since #7083, with the same 15-second worst-wait floor and one-event wait bar as SQL Server
+    /// (<see cref="BlockingPageRule"/>).
     ///
     /// <para><b>The denominators differ, which is the second reason this is not SQL Server's
     /// <c>blocking.count_threshold</c>.</b> That figure counts engine-recorded blocked-process reports and
@@ -153,7 +155,7 @@ public static class PostgresAlertEvaluator
     /// <c>pg_stat_activity</c> — PostgreSQL records nothing unless asked, so the same numeral is a bar
     /// against two different measurement processes.</para>
     /// </summary>
-    public const int BlockingCountThresholdDefault = 1;
+    public const int BlockingCountThresholdDefault = 3;
 
     /// <summary>
     /// The FLOOR both #3444 count knobs clamp to on read, and the lower write bound
@@ -311,22 +313,22 @@ public static class PostgresAlertEvaluator
             shortMessage = $"[{db.DatabaseName}] {counter} age {age:N0} is {pctOfCeiling:0.#}% of the way to the "
                 + "wraparound wall"
                 + (viaCeiling
-                    ? " — past vacuum_failsafe_age, where PostgreSQL abandons its cost limits and skips "
+                    ? ". Past vacuum_failsafe_age, where PostgreSQL abandons its cost limits and skips "
                       + "index cleanup trying to catch up."
-                    : $" and past twice {settingName} ({setting:N0}) — autovacuum's own wraparound defence "
+                    : $" and past twice {settingName} ({setting:N0}). Autovacuum's own wraparound defence "
                       + "is not keeping up.")
                 + " At the wall the server stops accepting writes, and the remedy is hours of vacuuming, so act now.";
         }
         else if (viaCeiling)
         {
             shortMessage = $"[{db.DatabaseName}] {counter} age {age:N0} is {pctOfCeiling:0.#}% of the way to the "
-                + "wraparound wall — already well past the routine vacuum-forcing point on this cluster's own "
+                + "wraparound wall. Already well past the routine vacuum-forcing point on this cluster's own "
                 + $"{settingName}. Vacuum now rather than waiting to see if autovacuum keeps pace.";
         }
         else
         {
-            shortMessage = $"[{db.DatabaseName}] {counter} age {age:N0} has reached {settingName} ({setting:N0}) — "
-                + "the point where autovacuum forces a wraparound-prevention vacuum — and has not come back down "
+            shortMessage = $"[{db.DatabaseName}] {counter} age {age:N0} has reached {settingName} ({setting:N0}), "
+                + "the point where autovacuum forces a wraparound-prevention vacuum, and has not come back down "
                 + "since. Confirm autovacuum is actually keeping up rather than merely running.";
         }
 
@@ -448,7 +450,7 @@ public static class PostgresAlertEvaluator
         var rotating = !identityFractionHolds;
         var subject = rotating ? XminRotatingHoldersSubject : holder;
         var holderClause = rotating
-            ? $"by a succession of different holders rather than one chronic one — the latest is {holder}"
+            ? $"by a succession of different holders rather than one chronic one. The latest is {holder}"
             : $"by {holder}, the winner in {xmin.ObservationsHeld} of the {xmin.ObservationsTotal} "
                 + "collections that recorded a holder";
 
@@ -474,12 +476,12 @@ public static class PostgresAlertEvaluator
     /// </summary>
     public static string RemedyFor(string? source) => source switch
     {
-        "session" => "A backend is idle in transaction — end it, and look at why the application left it open.",
-        "replication_slot" => "An inactive replication slot is pinning it — if its consumer is gone, the slot must be dropped.",
-        "replication_slot_catalog" => "A logical slot's catalog_xmin is pinning it — its consumer is not confirming; check the CDC/logical pipeline.",
-        "standby_feedback" => "A standby's hot_standby_feedback is pinning it — a long query on the replica, or the feedback setting itself.",
-        "prepared_transaction" => "An orphaned prepared transaction is pinning it — COMMIT PREPARED or ROLLBACK PREPARED it.",
-        _ => "Unrecognized holder — read pg_stat_activity, pg_replication_slots and pg_prepared_xacts directly.",
+        "session" => "A backend is idle in transaction. End it, and look at why the application left it open.",
+        "replication_slot" => "An inactive replication slot is pinning it. If its consumer is gone, the slot must be dropped.",
+        "replication_slot_catalog" => "A logical slot's catalog_xmin is pinning it. Its consumer is not confirming; check the CDC/logical pipeline.",
+        "standby_feedback" => "A standby's hot_standby_feedback is pinning it. A long query on the replica, or the feedback setting itself.",
+        "prepared_transaction" => "An orphaned prepared transaction is pinning it. COMMIT PREPARED or ROLLBACK PREPARED it.",
+        _ => "Unrecognized holder: read pg_stat_activity, pg_replication_slots and pg_prepared_xacts directly.",
     };
 
     public static Finding? EvaluateSlot(PostgresSlotAlertInfo slot)
@@ -505,9 +507,9 @@ public static class PostgresAlertEvaluator
 
         var body = slot.WalStatus switch
         {
-            "lost" => $"Slot [{slot.SlotName}] is LOST — the WAL its consumer needs is gone and the slot "
+            "lost" => $"Slot [{slot.SlotName}] is LOST. The WAL its consumer needs is gone and the slot "
                     + "cannot resume. It has to be recreated, and its consumer resynchronised.",
-            "unreserved" => $"Slot [{slot.SlotName}] is UNRESERVED — required WAL has already been removed. "
+            "unreserved" => $"Slot [{slot.SlotName}] is UNRESERVED. Required WAL has already been removed. "
                           + "Its consumer will fail on next connect.",
             _ when severity == AlertSeverityLevel.Critical =>
                 $"Slot [{slot.SlotName}] is inactive and still accumulating: {gb:N1} GB retained, "
@@ -590,6 +592,45 @@ public static class PostgresAlertEvaluator
         }
 
         var critical = avgWaiters >= PoisonWaitCriticalAvgWaiters;
+
+        /* #7082: a Warning pages only once the episode has held for two back-to-back windows, 20 minutes
+           (PostgreSQL only; SQL Server's THREADPOOL and RESOURCE_SEMAPHORE keep the fast page). The field
+           data was an Aurora store where a job on a two-hour schedule produced 8 minute episodes of 1.0 to
+           2.4 average backends on IPC:BtreePage and IPC:BufferIo that ended on their own. Two windows are
+           measured on the collector's clock (the prior window rides on the read), not counted in sweeps, so
+           a sliding window evaluated every sweep cannot satisfy it in 11 minutes. Critical keeps today's rule. */
+        if (!critical && wait.PriorWindowAccumulatedWaitMs < PoisonWaitWarningAvgWaiters * windowMs)
+        {
+            return null;
+        }
+
+        return BuildPoisonWaitFinding(wait, avgWaiters, critical);
+    }
+
+    /// <summary>
+    /// The Warning-level Poison Wait that the two-window hold (#7082) is holding back right now: at or over the
+    /// Warning bar in the current window, under the Critical bar, and the earlier window under the Warning bar. The
+    /// host writes one held (digest) row per episode for it and pages nothing. Null for anything else, so a
+    /// finding <see cref="EvaluatePoisonWait"/> pages is never also held.
+    /// </summary>
+    public static Finding? EvaluateHeldPoisonWait(PostgresPoisonWaitAlertInfo wait)
+    {
+        ArgumentNullException.ThrowIfNull(wait);
+        var windowMs = PoisonWaitWindowMinutes * 60_000.0;
+        var avgWaiters = wait.AccumulatedWaitMs / windowMs;
+        if (avgWaiters < PoisonWaitWarningAvgWaiters
+            || avgWaiters >= PoisonWaitCriticalAvgWaiters
+            || wait.PriorWindowAccumulatedWaitMs >= PoisonWaitWarningAvgWaiters * windowMs)
+        {
+            return null;
+        }
+
+        return BuildPoisonWaitFinding(wait, avgWaiters, critical: false);
+    }
+
+    private static Finding BuildPoisonWaitFinding(PostgresPoisonWaitAlertInfo wait, double avgWaiters, bool critical)
+    {
+        var windowMs = PoisonWaitWindowMinutes * 60_000.0;
         var breachedAvg = critical ? PoisonWaitCriticalAvgWaiters : PoisonWaitWarningAvgWaiters;
         var subject = PoisonWaitSubject(wait);
         var accumulatedSeconds = wait.AccumulatedWaitMs / 1000;
@@ -602,11 +643,11 @@ public static class PostgresAlertEvaluator
                 $"{accumulatedSeconds:N0}s of {subject} wait in {PoisonWaitWindowMinutes}m"),
             string.Create(CultureInfo.InvariantCulture,
                 $"{breachedAvg * PoisonWaitWindowMinutes * 60:N0}s accumulated over {PoisonWaitWindowMinutes}m "
-                + $"(an average of {breachedAvg:0.#} backend(s) continuously waiting)"),
+                + $"(an average of {breachedAvg:0.#} {(breachedAvg == 1 ? "backend" : "backends")} continuously waiting)"),
             string.Create(CultureInfo.InvariantCulture,
                 $"[{subject}] {accumulatedSeconds:N0}s of wait accumulated in the last "
-                + $"{PoisonWaitWindowMinutes} minutes across {wait.AccumulatedWaits:N0} waits — on average "
-                + $"{avgWaiters:N1} backend(s) continuously stuck. {PoisonWaitRemedyFor(wait.WaitEvent)}"),
+                + $"{PoisonWaitWindowMinutes} minutes across {wait.AccumulatedWaits:N0} waits. On average "
+                + $"{avgWaiters:N1} {(avgWaiters == 1 ? "backend" : "backends")} continuously stuck. {PoisonWaitRemedyFor(wait.WaitEvent)}"),
             wait.AccumulatedWaitMs,
             breachedAvg * windowMs);
     }
@@ -621,16 +662,68 @@ public static class PostgresAlertEvaluator
         $"{wait.WaitType}:{wait.WaitEvent}";
 
     /// <summary>
+    /// The Poison Wait detail text on PostgreSQL (#7082): the top three wait events by average waiting backends
+    /// over the window, then the top three statements seen waiting on the alerting event, so a reader can judge
+    /// the page without opening a tool. Null when the read behind it failed: the alert still pages on its
+    /// figures, and an empty section would claim a quiet window that was never looked at.
+    /// <para>Statement text arrives at the <c>mcp.dataDetail</c> level already (see
+    /// <see cref="PostgresPoisonWaitStatement"/>). It is cut with <see cref="AlertContextBuilders.TruncateStatement"/>
+    /// like every other statement in an alert text.</para>
+    /// </summary>
+    public static string? BuildPoisonWaitDetailText(PostgresPoisonWaitDetail? detail, string subject)
+    {
+        if (detail is null)
+        {
+            return null;
+        }
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append(CultureInfo.InvariantCulture,
+            $"  Top wait events, average backends waiting over {PoisonWaitWindowMinutes}m:\n");
+        if (detail.TopEvents.Count == 0)
+        {
+            sb.Append("    none recorded in the window\n");
+        }
+
+        foreach (var top in detail.TopEvents)
+        {
+            sb.Append(CultureInfo.InvariantCulture, $"    {top.WaitType}:{top.WaitEvent}  {top.AvgWaiters:N1}\n");
+        }
+
+        if (detail.Statements.Count == 0)
+        {
+            sb.Append(CultureInfo.InvariantCulture,
+                $"  Statements waiting on {subject}: none recorded in the window");
+            return sb.ToString();
+        }
+
+        sb.Append(CultureInfo.InvariantCulture, $"  Top statements waiting on {subject}:");
+        foreach (var statement in detail.Statements)
+        {
+            var unit = string.Equals(statement.Source, "pg_wait_sampling", StringComparison.Ordinal)
+                ? "samples"
+                : "captures";
+            sb.Append(CultureInfo.InvariantCulture, $"\n    queryid {statement.QueryId} ({statement.Count:N0} {unit})");
+            if (!string.IsNullOrWhiteSpace(statement.QueryText))
+            {
+                sb.Append(": ").Append(AlertContextBuilders.TruncateStatement(statement.QueryText!, 200));
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// The two poison events present identically as "everything got slow at once" and have completely
     /// different fixes, so the alert carries the fix — the same reasoning as <see cref="RemedyFor"/>.
     /// Matched case-insensitively because wait-event name casing differs between Aurora majors.
     /// </summary>
     public static string PoisonWaitRemedyFor(string? waitEvent) => waitEvent?.ToLowerInvariant() switch
     {
-        "btreepage" => "Backends are queueing on individual B-tree index pages — a hot index insert point "
+        "btreepage" => "Backends are queueing on individual B-tree index pages. A hot index insert point "
             + "is serializing them. Sample pg_stat_activity for the statements waiting on this event and "
             + "look at the indexes their writes converge on.",
-        "bufferio" => "Backends are stacked behind one another's in-flight page reads — the same pages are "
+        "bufferio" => "Backends are stacked behind one another's in-flight page reads. The same pages are "
             + "being demanded faster than storage returns them. Look for a working set outgrowing "
             + "shared_buffers, or a storage latency shift in the I/O statistics.",
         _ => "Sample pg_stat_activity for the statements waiting on this event.",

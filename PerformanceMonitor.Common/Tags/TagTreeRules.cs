@@ -93,18 +93,45 @@ public static class TagTreeRules
 
     /// <summary>The 0-based depth of a tag: a root is 0. A missing tag, or a parent chain longer than the walk
     /// bound, reads as the bound reached so far.</summary>
-    public static int Depth(IReadOnlyList<TagTreeNode> tags, int tagId)
+    public static int Depth(IReadOnlyList<TagTreeNode> tags, int tagId) =>
+        ParentChain(tags.ToDictionary(t => t.Id), tagId).Count();
+
+    /// <summary>#7984: the tags above <paramref name="tagId"/>, nearest first, so a search for a tag's name finds
+    /// the servers tagged under it, the way a custom alert rule on the tag covers them. The same bounded walk as
+    /// <see cref="Depth"/>: a parent id with no row contributes nothing, and a cycle ends at the first tag seen
+    /// twice.</summary>
+    public static IReadOnlyList<TagTreeNode> Ancestors(IReadOnlyList<TagTreeNode> tags, int tagId)
     {
         var byId = tags.ToDictionary(t => t.Id);
-        var depth = 0;
-        var current = tagId;
-        while (depth < MaxWalkSteps && byId.TryGetValue(current, out var row) && row.ParentId is int parent)
+        var seen = new HashSet<int> { tagId };
+        var result = new List<TagTreeNode>();
+        foreach (var parent in ParentChain(byId, tagId))
         {
-            depth++;
-            current = parent;
+            if (!seen.Add(parent))
+            {
+                break;
+            }
+
+            if (byId.TryGetValue(parent, out var row))
+            {
+                result.Add(row);
+            }
         }
 
-        return depth;
+        return result;
+    }
+
+    /// <summary>Each parent id named on the chain above <paramref name="tagId"/>, nearest first. A step follows
+    /// the current row's <c>ParentId</c>, so a parent id with no row is the last step, and the walk stops at
+    /// <see cref="MaxWalkSteps"/> steps so a malformed cycle ends.</summary>
+    private static IEnumerable<int> ParentChain(Dictionary<int, TagTreeNode> byId, int tagId)
+    {
+        var current = tagId;
+        for (var step = 0; step < MaxWalkSteps && byId.TryGetValue(current, out var row) && row.ParentId is int parent; step++)
+        {
+            yield return parent;
+            current = parent;
+        }
     }
 
     /// <summary>The deepest descendant's depth relative to the tag: a leaf is 0.</summary>

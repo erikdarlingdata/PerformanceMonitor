@@ -106,6 +106,16 @@ public partial class MainWindow
         }
     }
 
+    /// <summary>The sidebar search (#8169): filters the list by server or tag name as the user types. Replacing the
+    /// list's items drops its selection, so the rebind goes through <see cref="ApplyFleetTagsAndRebind"/>, which keeps the
+    /// selected server by id while it still shows and otherwise selects the first match, so Enter opens it.</summary>
+    private void ServerSearchBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        var previousServerId = (ServerListView.SelectedItem as FleetServerRow)?.Server.ServerId;
+        _fleet.SetSearch(ServerSearchBox.Text);
+        ApplyFleetTagsAndRebind(previousServerId);
+    }
+
     /// <summary>A plain <see cref="ListBox"/> selects a header row when it is clicked; we intercept that,
     /// recover the server that was selected before, toggle the group's expand/collapse, and restore the
     /// selection to a server (never a header). A server-row selection needs no extra work in Lite — the

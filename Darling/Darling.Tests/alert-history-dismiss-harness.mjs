@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url";
 class FakeNode {
   constructor(tag) {
     this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null; this._text = "";
-    this.className = ""; this.dataset = {}; this.value = ""; this.checked = false; this.open = false; this.isRoot = false;
+    this.className = ""; this.style = {}; this.dataset = {}; this.value = ""; this.checked = false; this.open = false; this.isRoot = false;
   }
   get parentNode() { return this.parent; }
   get firstChild() { return this.children[0] || null; }
@@ -63,7 +63,7 @@ globalThis.fetch = async (url, init) => {
     const req = JSON.parse(init.body);
     posts.push({ url: u, contentType: init.headers["Content-Type"], req });
     const r = postReply(req);
-    return { status: r.status, ok: r.status < 300, text: async () => JSON.stringify(r.body) };
+    return { status: r.status, ok: r.status < 300, text: async () => (r.text !== undefined ? r.text : JSON.stringify(r.body)) };
   }
   urls.push(u);
   if (readFails && u.includes("/get_alert_history")) return { status: 500, ok: false, text: async () => JSON.stringify({ error: "read failed" }) };
@@ -160,6 +160,77 @@ try {
       button(main, "Dismiss All").fire("click"); await tick();
       out.all = posts.map((p) => ({ url: p.url, contentType: p.contentType, keys: p.req.alerts }));
     },
+    async columnFilter() {
+      // #7919: a column filter hides rows with display:none; Dismiss All must act on the rows still shown, not the whole window
+      alertsReply = { alerts: [row(1, { severity: "info" }), row(2), row(3, { severity: "info" }), row(4), row(5, { dismissed: true, severity: "info" })], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      const th = main.all("th").find((t) => t.textContent.includes("Severity"));
+      th.all("button")[0].fire("click", { target: th.all("button")[0] });
+      const box = main.all("input").find((i) => i.className === "grid-filter-input");
+      box.value = "info"; box.fire("input");
+      out.shownMetrics = bodyRows(main).filter((tr) => tr.style.display !== "none").map((tr) => (tr.children.find((td) => td.textContent.startsWith("High CPU")) || { textContent: "" }).textContent);
+      out.allDisabled = button(main, "Dismiss All").disabled;
+      box.value = "no such severity"; box.fire("input");
+      out.allDisabledWhenNoneShown = button(main, "Dismiss All").disabled;
+      box.value = "info"; box.fire("input");
+      alertsReply = { alerts: [], truncated: false };
+      button(main, "Dismiss All").fire("click"); await tick();
+      out.asks = confirms.slice();
+      out.posts = posts.map((p) => p.req.alerts.map((a) => a.metric_name));
+    },
+    async pollTickBehindSavedFilter() {
+      // #7919: the Severity filter is already on when the page builds (kept from the last visit), then a poll tick adds alerts.
+      const severityFilter = (main, text) => {
+        const th = main.all("th").find((t) => t.textContent.includes("Severity"));
+        th.all("button")[0].fire("click", { target: th.all("button")[0] });
+        const box = main.all("input").find((i) => i.className === "grid-filter-input");
+        box.value = text; box.fire("input");
+      };
+      alertsReply = { alerts: [row(1, { severity: "info" }), row(2)], truncated: false };
+      const first = newMain(); await renderAlerts(first);
+      severityFilter(first, "info");
+      // the page is left and opened again: the filter is on from the first draw
+      alertsReply = { alerts: [row(2), row(3, { dismissed: true, severity: "info" })], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      const shown = () => bodyRows(main).filter((tr) => tr.style.display !== "none").map((tr) => (tr.children.find((td) => td.textContent.startsWith("High CPU")) || { textContent: "" }).textContent);
+      out.shownAtBuild = shown();
+      out.allDisabledAtBuild = button(main, "Dismiss All").disabled;
+      // the 60 s poll lands on the same page: one new live alert the filter shows, one new live alert it hides
+      alertsReply = { alerts: [row(1, { severity: "info" }), row(2), row(3, { dismissed: true, severity: "info" }), row(4)], truncated: false };
+      await renderAlerts(main);
+      out.shownAfterPoll = shown();
+      out.allDisabledAfterPoll = button(main, "Dismiss All").disabled;
+      alertsReply = { alerts: [], truncated: false };
+      button(main, "Dismiss All").fire("click"); await tick();
+      out.asks = confirms.slice();
+      out.posts = posts.map((p) => p.req.alerts.map((a) => a.metric_name));
+    },
+    async selectedBehindColumnFilter() {
+      // #7919: Dismiss Selected counts and posts only the checked rows the column filters leave showing
+      alertsReply = { alerts: [row(1, { severity: "info" }), row(2, { severity: "info" }), row(3)], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      for (const cb of boxes(main)) check(cb);
+      const label = () => button(main, "Dismiss Selected").textContent;
+      out.labelAllChecked = label();
+      const th = main.all("th").find((t) => t.textContent.includes("Severity"));
+      th.all("button")[0].fire("click", { target: th.all("button")[0] });
+      const box = main.all("input").find((i) => i.className === "grid-filter-input");
+      box.value = "info"; box.fire("input");
+      out.labelFiltered = label();
+      out.disabledFiltered = button(main, "Dismiss Selected").disabled;
+      box.value = ""; box.fire("input");
+      out.labelCleared = label();
+      box.value = "info"; box.fire("input");
+      alertsReply = { alerts: [row(3)], truncated: false };
+      button(main, "Dismiss Selected").fire("click"); await tick();
+      out.posts = posts.map((p) => p.req.alerts.map((a) => a.metric_name));
+      // the hidden checked row stays checked but is not counted while hidden, and is back, checked, once the filter is cleared
+      out.labelAfterPost = label();
+      out.disabledAfterPost = button(main, "Dismiss Selected").disabled;
+      box.value = ""; box.fire("input");
+      out.labelAfterClear = label();
+      out.checkedAfterClear = boxes(main).map((b) => b.checked);
+    },
     async chunks() {
       const many = Array.from({ length: 1500 }, (_, i) => row(i + 1, { alert_time: new Date(T0 - 60000 - i * 30000).toISOString() })); // 30 s apart so all 1500 sit inside the default day
       alertsReply = { alerts: many, truncated: false };
@@ -196,6 +267,13 @@ try {
       postReply = () => ({ status: 401, body: { error: "Session expired" } });
       button(main, "Dismiss Selected").fire("click"); await tick();
       out.status401 = statusOf(main).textContent;
+      // a 403 that carries no message of its own (a JSON object with no error field, then an empty body) reads as the read-only fallback
+      postReply = () => ({ status: 403, body: {} });
+      button(main, "Dismiss Selected").fire("click"); await tick();
+      out.status403NoError = statusOf(main).textContent;
+      postReply = () => ({ status: 403, text: "" });
+      button(main, "Dismiss Selected").fire("click"); await tick();
+      out.status403NoBody = statusOf(main).textContent;
     },
     async truncatedPrompt() {
       alertsReply = { alerts: [row(1), row(2)], truncated: true };

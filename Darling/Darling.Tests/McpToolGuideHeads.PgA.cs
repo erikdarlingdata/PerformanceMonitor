@@ -321,7 +321,7 @@ public sealed class McpToolGuideHeadsPgPlanTests
     {
         var text = DarlingMcpPgDeadlockTools.NoDeadlocksText("target-a", 24);
 
-        Assert.StartsWith("No deadlock was reported on target-a in the last 24 hour(s).", text, StringComparison.Ordinal);
+        Assert.StartsWith("No deadlock was reported on target-a in the last 24 hours.", text, StringComparison.Ordinal);
         Assert.Contains("message_locale facet", text, StringComparison.Ordinal);
         Assert.Contains("log_line_prefix_readable facet", text, StringComparison.Ordinal);
         Assert.Contains("FOUR different things", text, StringComparison.Ordinal);
@@ -402,7 +402,7 @@ public sealed class McpToolGuideHeadsPgTrendCpuTests
         ("get_pg_cpu_utilization", "100% is often a scale-up, not saturation"),
         ("get_pg_cpu_utilization", "acu_utilization_percent is percent of the CONFIGURED ceiling, the saturation figure"),
         ("get_pg_cpu_utilization", "null ACU means no sample, never headroom"),
-        ("get_pg_cpu_utilization", "Host-memory bytes (since V136) are null when unmeasured"),
+        ("get_pg_cpu_utilization", "Host-memory bytes are null when unmeasured"),
     ];
 
     [Fact]

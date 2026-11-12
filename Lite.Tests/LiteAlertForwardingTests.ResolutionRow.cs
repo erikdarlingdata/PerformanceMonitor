@@ -111,7 +111,7 @@ public partial class LiteAlertForwardingTests
             var h = new Harness { ResolutionHook = LiteAlertResolutionRecorder.Callback(history, (_, _) => Task.CompletedTask) };
             var engine = h.Build();
 
-            var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+            var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
             Assert.Single(h.Deliverer.Outcomes);
 
             /* The fire opens a request for the same server and metric the engine named. */
@@ -123,7 +123,7 @@ public partial class LiteAlertForwardingTests
             Assert.Equal(0, (await investigations.SweepAsync(TestContext.Current.CancellationToken)).Resolved);
 
             h.Now = h.Now.AddMinutes(6);
-            await DriveCpuAsync(engine, sqlCpu: 10, totalCpu: 12, samples: AlertEngine.CpuClearSamples, from: at);
+            await DriveCpuAsync(engine, sqlCpu: 10, totalCpu: 12, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1), from: at);
             Assert.Single(h.Resolutions);
 
             Assert.Equal(1, (await investigations.SweepAsync(TestContext.Current.CancellationToken)).Resolved);

@@ -9,7 +9,6 @@
     <Copyright>Copyright © 2026 Darling Data, LLC</Copyright>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
-    <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;CA1848;CA1852;CA1305;CA1860;CA1707;CA1507;CA1806;CA2254</NoWarn>
     <!-- #5796: true when this build targets Windows, which gates the three PowerShell scripts below. -->
     <DarlingShipsWindowsScripts>false</DarlingShipsWindowsScripts>
     <DarlingShipsWindowsScripts Condition="$(RuntimeIdentifier.StartsWith('win'))">true</DarlingShipsWindowsScripts>
@@ -33,6 +32,8 @@
     <PackageReference Include="Microsoft.Data.SqlClient" />
     <!-- #5802: lifts the transitive System.Security.Cryptography.Pkcs off SqlClient's vulnerable 9.0.18; see Directory.Packages.props. -->
     <PackageReference Include="System.Security.Cryptography.Pkcs" />
+    <!-- #8650: lifts the transitive System.Formats.Cbor off CborProtocol's 9.0.5; see Directory.Packages.props. -->
+    <PackageReference Include="System.Formats.Cbor" />
     <!-- #3838: the Entra (Active Directory) authentication providers were split OUT of the core
          Microsoft.Data.SqlClient package in 7.x, so a project that sets
          SqlAuthenticationMethod.ActiveDirectory* on a connection string and does NOT carry this
@@ -104,6 +105,11 @@
     <!-- #6469: the double-click launcher for install-darling.ps1. A .cmd is not Authenticode-signed with the scripts; it only
          starts PowerShell elevated with the execution policy bypassed for that one process. -->
     <None Include="..\tools\Install-Darling.cmd" Link="Install-Darling.cmd" CopyToOutputDirectory="PreserveNewest" Condition="$(DarlingShipsWindowsScripts)" />
+    <!-- #7077: the role-provisioning script the service's refusals and log lines tell the operator of a store they run
+         themselves to re-run. It is plain SQL for psql, so it is not signed, and it ships on every publish (the Windows zip,
+         the MSI payload, the Linux tarball and the container image), not only where the Windows scripts do, because a
+         bring-your-own store runs on any of them. The messages name it "in the install folder". -->
+    <None Include="..\tools\provision-roles.sql" Link="provision-roles.sql" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

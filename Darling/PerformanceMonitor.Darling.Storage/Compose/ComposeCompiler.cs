@@ -80,7 +80,9 @@ public sealed record ComposeRunContext(
     long? QueryStoreGroupMembers = null,
     DateTime? QueryStoreStampThrough = null,
     bool ModuleMapMissing = false,
-    IReadOnlyList<int>? QueryStoreRawServerIds = null)
+    IReadOnlyList<int>? QueryStoreRawServerIds = null,
+    bool QueryStoreFleetReady = false,
+    IReadOnlyList<int>? AuthorizedServerIds = null)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -225,7 +227,7 @@ public static class ComposeCompiler
         string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam, ComposeRunContext context, string? wideStartParam = null,
         IReadOnlyList<string>? dimensionFilters = null, string? serverScopeSql = null, bool restrictDedupe = false,
         string? edgeStartParam = null, string? edgeEndParam = null, ComposeAggregate aggregate = ComposeAggregate.Sum,
-        StampRelation? stamp = null, string? splitRawParam = null)
+        StampRelation? stamp = null, string? splitRawParam = null, string? sumPerCaptureColumn = null)
     {
         if (route.Tier == ComposeSourceTier.HourlyRawEdges)
         {
@@ -297,9 +299,28 @@ public static class ComposeCompiler
                 + ") AS dte_ranked WHERE dte_rn = 1)";
         }
 
+        /* #8573: a SumPerCapture measure (the connected-backend count) is a level held one row per database, so a capture's figure
+           is the sum across its rows, and the panel's aggregate must run over those per-capture sums. Summing within each
+           (server, collection_time) first keeps avg and max from ever adding captures together. The group columns are the ones the
+           outer server scope and window filter on, so both push into this subquery. A capture whose every row is NULL (a row written
+           before the column existed) sums to NULL and stays out of the aggregate. */
+        if (sumPerCaptureColumn is not null)
+        {
+            return $"(SELECT server_id, server_name, {timeColumn}, SUM({sumPerCaptureColumn}) AS {sumPerCaptureColumn} "
+                + $"FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
+                + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam} "
+                + $"GROUP BY server_id, server_name, {timeColumn})";
+        }
+
         if (!string.Equals(sourceTable, QueryStoreTable, StringComparison.Ordinal))
         {
-            return $"{PgSchemaGenerator.CollectSchema}.{sourceTable}";
+            /* #7676: memory_grant_stats keeps the small-query semaphore (id 1) beside the regular one (id 0), two rows per
+               pool and collection. Compose aggregates rows, so over both, AVG(granted_memory_mb) would average the two
+               semaphores and MAX(waiter_count) would take the larger where the pool's figure is the sum. A panel reads
+               id 0 only, the grain it had before id 1 was collected. */
+            return string.Equals(sourceTable, "memory_grant_stats", StringComparison.Ordinal)
+                ? $"(SELECT * FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} WHERE COALESCE(resource_semaphore_id, 0) = 0)"
+                : $"{PgSchemaGenerator.CollectSchema}.{sourceTable}";
         }
 
         /* #4605: query_store_interval_wide (V145) already holds the latest snapshot per
@@ -549,10 +570,11 @@ public static class ComposeCompiler
            interpolated (the compile-run endpoint resolves the $server variable to this). */
         var startParam = p.AddTimestamp(context.StartUtc);
         var endParam = p.AddTimestamp(context.EndUtc);
-        var hasServerScope = context.Servers is { Count: > 0 };
-        var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
+        var hasServerScope = context.Servers is { Count: > 0 } || context.AuthorizedServerIds is not null;
+        var serverScopeParam = context.Servers is { Count: > 0 } ? p.AddTextArray(context.Servers) : null;
+        var authorizedParam = context.AuthorizedServerIds is not null ? p.AddIntArray(context.AuthorizedServerIds) : null;
         var unregisteredParam = hasServerScope && context.UnregisteredServers is { Count: > 0 } ? p.AddTextArray(context.UnregisteredServers) : null;
-        string FactScope() => ServerScope($"{FactAlias}.", serverScopeParam!, unregisteredParam);
+        string FactScope() => ServerScope($"{FactAlias}.", serverScopeParam!, unregisteredParam, authorizedParam);
 
         /* The hourly-raw-edges route binds its two edge instants here and no other route binds anything, so every
            other compile keeps its parameters. wideStartParam below is Query Store only and the hybrid route never
@@ -569,7 +591,7 @@ public static class ComposeCompiler
            with no watermark (or a stale one, older than the window) binds nothing new and compiles the window ranking (see the module
            CTE below). A watermark later than the run's now (written ahead of the clock by an older build) counts as no watermark. */
         string? moduleOverlayFloorParam = null;
-        if (!route.IsCagg && plan.UsesModuleJoin && !context.ModuleMapMissing
+        if (!route.IsCagg && plan.UsesModuleJoin && !context.ModuleMapMissing && context.AuthorizedServerIds is null
             && context.ModuleMapThrough is DateTime moduleMapThrough && moduleMapThrough <= context.NowUtc
             && moduleMapThrough - DarlingModuleMap.WatermarkSlack > context.StartUtc)
         {
@@ -641,8 +663,9 @@ public static class ComposeCompiler
         var stampRelation = stampPlan is null
             ? null
             : new StampRelation(stampPlan.Partials, stampThroughParam!,
-                AndScope(hasServerScope ? ServerScope("s.", serverScopeParam!, unregisteredParam) : null, splitRawParam is null ? null : $"s.server_id <> ALL({splitRawParam})"),
-                AndScope(hasServerScope ? ServerScope("b.", serverScopeParam!, null) : null, splitRawParam is null ? null : $"b.server_id <> ALL({splitRawParam})"));
+                AndScope(hasServerScope ? ServerScope("s.", serverScopeParam!, unregisteredParam, authorizedParam) : null, splitRawParam is null ? null : $"s.server_id <> ALL({splitRawParam})"),
+                AndScope(hasServerScope ? ServerScope("b.", serverScopeParam!, null, authorizedParam) : null, splitRawParam is null ? null : $"b.server_id <> ALL({splitRawParam})"),
+                ReadsFleetRollup(plan, context, hasServerScope, splitRawParam is not null));
 
         /* In stamp mode every value is the combine form over the relation's partial columns (single scan: over rank_base's). */
         string PrimaryValue() => singleScan
@@ -657,7 +680,7 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate, stampRelation, splitRawParam));
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate, stampRelation, splitRawParam, plan.Measure.SumPerCapture ? plan.Measure.Column : null));
 
             /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
                relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a
@@ -731,7 +754,7 @@ public static class ComposeCompiler
                servers, 2.88 million rows) that was 12 to 16 s against the window ranking's 5 to 14 s, which sorts in parallel. So that
                case compiles the window ranking itself, the same text a store without the map compiles, and costs what it cost before
                #5811. */
-            if (!context.ModuleMapMissing && moduleOverlayFloorParam is not null)
+            if (!context.ModuleMapMissing && context.AuthorizedServerIds is null && moduleOverlayFloorParam is not null)
             {
                 AppendMapFirstModuleCte(sql, startParam, endParam, moduleOverlayFloorParam, hasServerScope ? serverScopeParam : null, unregisteredParam);
             }
@@ -747,7 +770,7 @@ public static class ComposeCompiler
                 sql.Append("          AND collection_time <= ").Append(endParam).Append('\n');
                 if (hasServerScope)
                 {
-                    sql.Append("          AND ").Append(ServerScope(string.Empty, serverScopeParam!, unregisteredParam)).Append('\n');
+                    sql.Append("          AND ").Append(ServerScope(string.Empty, serverScopeParam!, unregisteredParam, authorizedParam)).Append('\n');
                 }
 
                 sql.Append("          AND sql_handle IS NOT NULL\n");
@@ -816,7 +839,7 @@ public static class ComposeCompiler
                otherwise outrank every REAL winner and silently occupy a series slot. Worse here than in
                the plain Ranked arm below (where the NULL row is at least visible): this ordering decides
                MEMBERSHIP for the whole chart. */
-            sql.Append("    ORDER BY value DESC NULLS LAST\n");
+            sql.Append("    ORDER BY value DESC NULLS LAST").Append(RankTieBreak(plan)).Append('\n');
             sql.Append("    LIMIT ").Append(p.AddInt(plan.TopN)).Append('\n');
             sql.Append(")\n");
         }
@@ -919,7 +942,7 @@ public static class ComposeCompiler
                 /* NULLS LAST for the same reason as the rank CTE above: DESC's default NULLS FIRST put a
                    NULL-aggregate group at the TOP of the ranking, ahead of every real value — and under
                    the LIMIT it evicted a legitimate member. */
-                sql.Append("ORDER BY value DESC NULLS LAST\n");
+                sql.Append("ORDER BY value DESC NULLS LAST").Append(RankTieBreak(plan)).Append('\n');
                 sql.Append("LIMIT ").Append(p.AddInt(plan.TopN));
                 break;
             default: /* Scalar — a single aggregate row. */
@@ -1117,8 +1140,13 @@ public static class ComposeCompiler
     /// registry row resolves to no id (the runner finds those, <see cref="ComposeRunContext.UnregisteredServers"/>), so those
     /// names alone also match on the row's stored <c>server_name</c> through <paramref name="unregisteredParam"/>.</para>
     /// </summary>
-    internal static string ServerScope(string prefix, string namesParam, string? unregisteredParam) =>
-        ServerScopeSql.Predicate(prefix, namesParam, unregisteredParam);
+    internal static string ServerScope(string prefix, string? namesParam, string? unregisteredParam, string? authorizedParam = null)
+    {
+        var requested = namesParam is null ? null : ServerScopeSql.Predicate(prefix, namesParam, unregisteredParam);
+        var authorized = authorizedParam is null ? null : $"{prefix}server_id = ANY({authorizedParam})";
+        return requested is null ? authorized!
+            : authorized is null ? requested : $"({requested} AND {authorized})";
+    }
 
     /// <summary>
     /// The read that runs before a panel's <see cref="AnnotationClockFrame.ServerLocal"/> annotation query
@@ -1144,11 +1172,12 @@ public static class ComposeCompiler
         sql.Append("SELECT DISTINCT ON (server_name) server_name, time_zone_id, utc_offset_minutes\n");
         sql.Append("FROM ").Append(PgSchemaGenerator.CollectSchema).Append(".server_properties\n");
         sql.Append("WHERE utc_offset_minutes IS NOT NULL\n");
-        if (context.Servers is { Count: > 0 })
+        if (context.Servers is { Count: > 0 } || context.AuthorizedServerIds is not null)
         {
-            var scopeParam = p.AddTextArray(context.Servers);
+            var scopeParam = context.Servers is { Count: > 0 } ? p.AddTextArray(context.Servers) : null;
             var unregisteredParam = context.UnregisteredServers is { Count: > 0 } ? p.AddTextArray(context.UnregisteredServers) : null;
-            sql.Append("AND   ").Append(ServerScope(string.Empty, scopeParam, unregisteredParam)).Append('\n');
+            var authorizedParam = context.AuthorizedServerIds is not null ? p.AddIntArray(context.AuthorizedServerIds) : null;
+            sql.Append("AND   ").Append(ServerScope(string.Empty, scopeParam, unregisteredParam, authorizedParam)).Append('\n');
         }
 
         sql.Append("ORDER BY server_name, collection_time DESC");
@@ -1326,8 +1355,9 @@ public static class ComposeCompiler
         var p = new ParamList();
         var startParam = p.AddTimestamp(context.StartUtc);
         var endParam = p.AddTimestamp(context.EndUtc);
-        var hasServerScope = context.Servers is { Count: > 0 };
-        var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
+        var hasServerScope = context.Servers is { Count: > 0 } || context.AuthorizedServerIds is not null;
+        var serverScopeParam = context.Servers is { Count: > 0 } ? p.AddTextArray(context.Servers) : null;
+        var authorizedParam = context.AuthorizedServerIds is not null ? p.AddIntArray(context.AuthorizedServerIds) : null;
         var unregisteredParam = hasServerScope && context.UnregisteredServers is { Count: > 0 } ? p.AddTextArray(context.UnregisteredServers) : null;
         var serverLocal = source.Frame == AnnotationClockFrame.ServerLocal;
 
@@ -1350,7 +1380,7 @@ public static class ComposeCompiler
         sql.Append("  AND ").Append(ts).Append(" <= ").Append(endParam).Append('\n');
         if (hasServerScope)
         {
-            sql.Append("  AND ").Append(ServerScope($"{FactAlias}.", serverScopeParam!, unregisteredParam)).Append('\n');
+            sql.Append("  AND ").Append(ServerScope($"{FactAlias}.", serverScopeParam!, unregisteredParam, authorizedParam)).Append('\n');
         }
 
         sql.Append("ORDER BY ts\n");
@@ -1542,6 +1572,7 @@ public static class ComposeCompiler
 
     private const string StampTable = "query_store_compose_stamp";
     private const string StampBuiltTable = "query_store_compose_stamp_built";
+    private const string FleetTable = "query_store_compose_fleet";
 
     /// <summary>The rollup column for <paramref name="partialExpression"/> (the partial's fact-form text, for example
     /// <c>SUM(f.execution_count)</c>), or null when the rollup does not hold it, in which case the panel compiles the wide-table
@@ -1560,7 +1591,7 @@ public static class ComposeCompiler
 
     /// <summary>The names the stamp relation is spelled with: its partial columns, the bound <c>$stampThrough</c>, and the server
     /// scope predicate over the registry alias <c>s</c> (null for the fleet).</summary>
-    private sealed record StampRelation(IReadOnlyList<StampPartial> Partials, string ThroughParam, string? ScopeSql, string? LedgerScopeSql);
+    private sealed record StampRelation(IReadOnlyList<StampPartial> Partials, string ThroughParam, string? ScopeSql, string? LedgerScopeSql, bool Fleet = false);
 
     /// <summary>
     /// Whether this compile reads the Query Store rollup (#5582 part 3), and the combine-form values it reads it with. Null (the
@@ -1642,6 +1673,36 @@ public static class ComposeCompiler
         return route;
     }
 
+    /// <summary>
+    /// Whether arm 1 of a stamp-mode compile reads the fleet rollup (<see cref="QueryStoreComposeStamp.FleetTable"/>, V239, #7146) in place of
+    /// the stamp (the caller has already established that the compile is a stamp plan, so every measure is read from the stamp's partials).
+    /// All of these hold: the store has the table (<see cref="ComposeRunContext.QueryStoreFleetReady"/>); no server scope; no server on the
+    /// raw route; no filter of any kind (server, database, module, tag, hash); and the only grouping column is <c>query_hash</c> or none,
+    /// because the fleet table keeps no server, database or module. The per-hour validity check is in the statement itself
+    /// (<see cref="BuildStampRelation"/>), so it is decided for the hours the read really takes. The two-argument overload (#7285) asks
+    /// the same of the runner's context, so the size guard counts the fleet hours only for a panel whose text really reads the table.
+    /// </summary>
+    internal static bool ReadsFleetRollup(PanelPlan plan, ComposeRunContext context) =>
+        ReadsFleetRollup(plan, context, context.Servers is { Count: > 0 },
+            context.QueryStoreWideEligible
+            && context.QueryStoreRawServerIds is { Count: > 0 }
+            && string.Equals(plan.Measure.SourceTable, QueryStoreTable, StringComparison.Ordinal));
+
+    private static bool ReadsFleetRollup(PanelPlan plan, ComposeRunContext context, bool hasServerScope, bool hasRawServers) =>
+        context.QueryStoreFleetReady
+        && !hasServerScope
+        && !hasRawServers
+        && plan.Filters.Count == 0
+        && plan.GroupBy.All(d => string.Equals(d.Column, "query_hash", StringComparison.Ordinal));
+
+    /// <summary>
+    /// The second sort of a top-N rank (#7146): the group key columns, ascending, after <c>value DESC NULLS LAST</c>. Without it, several groups that
+    /// tie at the Nth value left the choice of members to the plan, so the fleet path, the stamp path and two runs of the same path could keep
+    /// different members. The names are the select list's own aliases, so the tie-break is the same on every route. Empty when there is no grouping.
+    /// </summary>
+    private static string RankTieBreak(PanelPlan plan) =>
+        plan.GroupBy.Count == 0 ? string.Empty : ", " + string.Join(", ", plan.GroupBy.Select(d => d.Name));
+
     /// <summary>Whether <see cref="Compile"/> would read the Query Store rollup for this panel and context (#5582 part 3). The runner asks
     /// before the guard, so the guard weights the rollup hours only for a panel whose text really reads them: a panel the rollup cannot
     /// serve (a partial with no rollup column, a module-join group) compiles to the wide-table text and counts every hour at 1.0.</summary>
@@ -1666,9 +1727,11 @@ public static class ComposeCompiler
     /// <list type="number">
     /// <item><b>rollup</b>: the rollup's rows in <c>[wideStart, $stampThrough)</c> of hours whose (server, hour) was built and has had no
     /// late write since (<c>built_seq = late_seq</c>, a semi-join on the build ledger);</item>
-    /// <item><b>stale</b>: for each ledger pair in an hour of <c>[date_trunc('hour', wideStart), $stampThrough)</c> whose build is behind its
-    /// late writes (<c>built_seq IS DISTINCT FROM late_seq</c>), the wide rows of that server and hour inside the same bounds, each as
-    /// the partials of the one row (<c>CROSS JOIN LATERAL</c>, so the wide table is probed per pair);</item>
+    /// <item><b>stale</b>: for each hour of <c>[date_trunc('hour', wideStart), $stampThrough)</c> that has a ledger pair whose build is behind its
+    /// late writes (<c>built_seq IS DISTINCT FROM late_seq</c>), the wide rows of those servers in that hour inside the same bounds, each as
+    /// the partials of the one row (<c>CROSS JOIN LATERAL</c> over the stale hours, with <c>server_id = ANY(...)</c>: the wide table is probed once
+    /// per stale HOUR, not once per pair, #7762). A stale pair no longer ends the rollup at its hour: the rollup arm leaves exactly the stale pairs
+    /// out and this arm reads exactly them, so every row is read once whatever <c>$stampThrough</c> is;</item>
     /// <item><b>tail</b>: the wide rows from <c>$stampThrough</c> (never the window start) through the window end, as partials.</item>
     /// </list>
     /// Every arm applies the server scope and the pushable dimension filters, over the registry join <c>s</c> and the fact-row alias
@@ -1695,20 +1758,51 @@ public static class ComposeCompiler
             + $"AND EXISTS (SELECT 1 FROM {built} AS b WHERE b.server_id = f.server_id AND b.hour = date_trunc('hour', f.collection_time) AND b.built_seq = b.late_seq)"
             + scopeAndFilters;
 
+        /* #7146: the fleet read. Arm 1 takes an hour's rows from the fleet table when NO pair of that hour is unfit for it, and from the
+           stamp, as above, when one is. A pair is unfit when its build is behind its late writes (the stamp path reads that pair from the
+           wide table in the stale arm), when the fleet table was not built against its current late_seq (fleet_built_seq: NULL on every hour
+           built before V239 until the ordinary tick rebuilds it, so those hours are never read from a table that does not hold them). A removed
+           server needs no clause: removal flips is_enabled and deletes no registry, stamp, ledger or fleet row, so both paths keep its history
+           alike. An hour with no ledger row at all is not read from the fleet table either, as the stamp reads nothing of it (rows left by a build that retired the hour). The check is per hour, so one bad pair costs that hour the stamp path and no other. The hours it sends to the stamp are driven from the ledger,
+           by a lateral probe behind an optimisation fence as the stale arm is, so a store with no unfit pair reads no stamp rows at all.
+           The fleet arm names the same columns as the others; the three it has no value for are NULL, which no group, filter or measure of a
+           fleet-eligible panel reads. */
+        if (stamp.Fleet)
+        {
+            string Unfit(string alias) =>
+                $"({alias}.built_seq IS DISTINCT FROM {alias}.late_seq OR {alias}.fleet_built_seq IS DISTINCT FROM {alias}.late_seq)";
+            var fleetRows = $"SELECT CAST(NULL AS integer) AS server_id, CAST(NULL AS text) AS database_name, CAST(NULL AS text) AS module_name, f.query_hash, f.collection_time, CAST(NULL AS text) AS server_name{rollupPartials} "
+                + $"FROM {schema}.{FleetTable} AS f "
+                + $"WHERE f.collection_time >= {wideStartParam} AND f.collection_time < {through} "
+                + $"AND EXISTS (SELECT 1 FROM {built} AS y WHERE y.hour = date_trunc('hour', f.collection_time)) "
+                + $"AND NOT EXISTS (SELECT 1 FROM {built} AS x WHERE x.hour = date_trunc('hour', f.collection_time) AND {Unfit("x")})";
+            var unfitHoursRollup = $"SELECT {Head}{rollupPartials} FROM "
+                + $"(SELECT DISTINCT x.hour FROM {built} AS x WHERE x.hour >= date_trunc('hour', {wideStartParam}) AND x.hour < {through} AND {Unfit("x")}) AS ih "
+                + $"CROSS JOIN LATERAL (SELECT st.* FROM {schema}.{StampTable} AS st WHERE st.collection_time >= ih.hour AND st.collection_time < ih.hour + interval '1 hour' "
+                + $"AND st.collection_time >= {wideStartParam} AND st.collection_time < {through} "
+                + $"AND EXISTS (SELECT 1 FROM {built} AS b WHERE b.server_id = st.server_id AND b.hour = ih.hour AND b.built_seq = b.late_seq) OFFSET 0) AS f "
+                + $"JOIN {servers} AS s ON s.server_id = f.server_id";
+            rollup = $"{fleetRows} UNION ALL {unfitHoursRollup}";
+        }
+
         /* OFFSET 0 is an optimisation fence (#5582 part 3, found on a live plan): without it the planner pulls the lateral subquery up
            into a plain join and may start from the wide table, scanning every wide row of the window and probing the ledger once per
            row, which is the read this rollup exists to avoid. With it the ledger's stale pairs drive, and the wide table is probed once
            per stale pair, so no stale pair means no wide read at all. */
-        var stale = $"SELECT {Head}{rowPartials} FROM {built} AS b "
-            + $"CROSS JOIN LATERAL (SELECT w.* FROM {wide} AS w WHERE w.server_id = b.server_id AND w.collection_time >= b.hour AND w.collection_time < b.hour + interval '1 hour' "
-            + $"AND w.collection_time >= {wideStartParam} AND w.collection_time < {through} OFFSET 0) AS f "
-            + $"JOIN {servers} AS s ON s.server_id = f.server_id "
+        /* #7762: one probe per stale HOUR, with the hour's stale servers in an array, not one per stale pair. At 210 servers a late write that touches many
+           servers of one hour made one wide-table probe per server; the array probe is one per hour, and it reads the same rows. */
+        var stale = $"SELECT {Head}{rowPartials} FROM "
+            + $"(SELECT b.hour, array_agg(b.server_id) AS server_ids FROM {built} AS b "
             + $"WHERE b.hour >= date_trunc('hour', {wideStartParam}) AND b.hour < {through} AND b.built_seq IS DISTINCT FROM b.late_seq"
             /* The server scope on the LEDGER row too (#5582 part 3, found on a live plan): spelled only over the registry join it is applied
                after the lateral, so every stale pair of every server cost a wide-table probe and a scoped panel paid for servers it never
                asked about. On b it is applied before the lateral; the scope over s stays for the unregistered-name spelling. */
             + (stamp.LedgerScopeSql is null ? string.Empty : " AND " + stamp.LedgerScopeSql)
-            + scopeAndFilters;
+            + " GROUP BY b.hour) AS sh "
+            + $"CROSS JOIN LATERAL (SELECT w.* FROM {wide} AS w WHERE w.server_id = ANY(sh.server_ids) AND w.collection_time >= sh.hour AND w.collection_time < sh.hour + interval '1 hour' "
+            + $"AND w.collection_time >= {wideStartParam} AND w.collection_time < {through} OFFSET 0) AS f "
+            + $"JOIN {servers} AS s ON s.server_id = f.server_id "
+            + $"WHERE TRUE{scopeAndFilters}";
 
         var tail = $"SELECT {Head}{rowPartials} FROM {wide} AS f JOIN {servers} AS s ON s.server_id = f.server_id "
             + $"WHERE f.collection_time >= {through} AND f.collection_time <= {endParam}"

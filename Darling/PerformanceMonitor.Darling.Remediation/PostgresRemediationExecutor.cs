@@ -104,7 +104,9 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
     /// server accepted the signal. The tool's own backend is never matched, nor is a session of Darling (an <c>application_name</c> that starts with
     /// <c>PerformanceMonitorDarling</c> AND a role that is the monitoring role (<c>@monitoring_role</c>; unset means the application name alone) or the
     /// remediation role, or the remediation role with any application name), and neither is anything but a client session: the check
-    /// <see cref="KillRefusal"/> makes from the read before is repeated here, in the statement that ends the session.
+    /// <see cref="KillRefusal"/> makes from the read before is repeated here, in the statement that ends the session. A write that holds a binding
+    /// (<c>@check_activity</c>) also matches nothing unless <c>xact_start</c> and <c>state_change</c> are still the values the dry run read, and a
+    /// NULL equals only a NULL (#7109).
     /// </summary>
     internal const string KillSql = @"
 SELECT pg_catalog.pg_terminate_backend(a.pid)
@@ -112,6 +114,9 @@ FROM pg_catalog.pg_stat_activity AS a
 WHERE a.pid OPERATOR(pg_catalog.=) @pid
 AND   extract(epoch FROM a.backend_start)::bigint OPERATOR(pg_catalog.=) @start_epoch
 AND   a.backend_type OPERATOR(pg_catalog.=) 'client backend'
+AND   (NOT @check_activity::pg_catalog.bool
+       OR (a.xact_start IS NOT DISTINCT FROM @expected_xact_start::pg_catalog.timestamptz
+           AND a.state_change IS NOT DISTINCT FROM @expected_state_change::pg_catalog.timestamptz))
 AND   a.pid OPERATOR(pg_catalog.<>) pg_catalog.pg_backend_pid()
 AND   NOT coalesce(a.usename OPERATOR(pg_catalog.=) current_user, false)
 AND   NOT (pg_catalog.lower(pg_catalog.left(coalesce(a.application_name, ''), 25)) OPERATOR(pg_catalog.=) 'performancemonitordarling'
@@ -129,7 +134,9 @@ SELECT extract(epoch FROM a.backend_start)::bigint AS start_epoch,
        a.backend_type,
        a.application_name,
        coalesce(a.usename OPERATOR(pg_catalog.=) current_user, false) AS is_caller_role,
-       coalesce(a.usename::pg_catalog.text OPERATOR(pg_catalog.=) @monitoring_role::pg_catalog.text, false) AS is_monitoring_role
+       coalesce(a.usename::pg_catalog.text OPERATOR(pg_catalog.=) @monitoring_role::pg_catalog.text, false) AS is_monitoring_role,
+       a.xact_start,
+       a.state_change
 FROM pg_catalog.pg_stat_activity AS a
 WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
 
@@ -160,7 +167,8 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
     /// Kills one backend, only when it is still the backend the caller named: the same pid and the same start second. A dry run reads and decides and
     /// kills nothing. Every refusal comes before the kill statement, and a login that may not signal the target is refused, not tried.
     /// </summary>
-    public async Task<RemediationResult> KillBackendAsync(ServerActionPermit permit, int pid, long startEpoch, bool dryRun, CancellationToken ct)
+    public async Task<RemediationResult> KillBackendAsync(ServerActionPermit permit, int pid, long startEpoch, bool dryRun, CancellationToken ct,
+        PgKillExpectedActivity? expected = null)
     {
         const string name = "kill_session";
         if (pid <= 0 || startEpoch <= 0)
@@ -207,6 +215,7 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
                 kill.Parameters.Add(new NpgsqlParameter("pid", NpgsqlDbType.Integer) { Value = pid });
                 kill.Parameters.Add(new NpgsqlParameter("start_epoch", NpgsqlDbType.Bigint) { Value = startEpoch });
                 kill.Parameters.Add(MonitoringRoleParameter(_monitoringUserName));
+                AddKillActivityParameters(kill, expected);
                 var answer = KillStatementSeam.Value is { } seam ? await seam(kill, ct) : await kill.ExecuteScalarAsync(ct);
                 terminated = answer is bool flag ? flag : null;
             }
@@ -237,7 +246,7 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
             }
 
             /* Nothing matched, or the server did not take the signal: read AFTER the statement and say which. */
-            return Log(await AfterAsync(connection, name, pid, startEpoch, facts, _monitoringUserName, ct));
+            return Log(await AfterAsync(connection, name, pid, startEpoch, facts, _monitoringUserName, expected, ct));
         }
         catch (OperationCanceledException)
         {
@@ -380,14 +389,32 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
             reader.IsDBNull(17) ? null : reader.GetInt64(17), !reader.IsDBNull(18) && reader.GetBoolean(18));
     }
 
+    /// <summary>
+    /// The three parameters the kill statement takes for the activity check (#7109). With no <paramref name="expected"/> the check is off. With one,
+    /// the statement matches only a backend whose <c>xact_start</c> and <c>state_change</c> equal the expected values, a NULL equal only to a NULL.
+    /// </summary>
+    internal static void AddKillActivityParameters(NpgsqlCommand command, PgKillExpectedActivity? expected)
+    {
+        command.Parameters.Add(new NpgsqlParameter("check_activity", NpgsqlDbType.Boolean) { Value = expected is not null });
+        command.Parameters.Add(new NpgsqlParameter("expected_xact_start", NpgsqlDbType.TimestampTz)
+        {
+            Value = expected?.XactStartUtc is { } xact ? DateTime.SpecifyKind(xact, DateTimeKind.Utc) : DBNull.Value,
+        });
+        command.Parameters.Add(new NpgsqlParameter("expected_state_change", NpgsqlDbType.TimestampTz)
+        {
+            Value = expected?.StateChangeUtc is { } change ? DateTime.SpecifyKind(change, DateTimeKind.Utc) : DBNull.Value,
+        });
+    }
+
     /// <summary>The <c>@monitoring_role</c> parameter of <see cref="KillSql"/> and <see cref="AfterSql"/>: NULL when the server's monitoring role is not known.</summary>
     private static NpgsqlParameter MonitoringRoleParameter(string? monitoringRole) =>
         new("monitoring_role", NpgsqlDbType.Text) { Value = (object?)monitoringRole ?? DBNull.Value };
 
     private static async Task<RemediationResult> AfterAsync(NpgsqlConnection connection, string name, int pid, long startEpoch, PgKillSessionFacts facts,
-        string? monitoringRole, CancellationToken ct)
+        string? monitoringRole, PgKillExpectedActivity? expected, CancellationToken ct)
     {
         long? actual = null;
+        var activityChanged = false;
         var own = false;
         var found = false;
         string? backendType = null;
@@ -408,11 +435,17 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
                 applicationName = reader.IsDBNull(3) ? null : reader.GetString(3);
                 callerRole = !reader.IsDBNull(4) && reader.GetBoolean(4);
                 monitoringMatch = !reader.IsDBNull(5) && reader.GetBoolean(5);
+                if (expected is not null)
+                {
+                    DateTime? xactStart = reader.IsDBNull(6) ? null : reader.GetFieldValue<DateTime>(6);
+                    DateTime? stateChange = reader.IsDBNull(7) ? null : reader.GetFieldValue<DateTime>(7);
+                    activityChanged = xactStart != expected.XactStartUtc || stateChange != expected.StateChangeUtc;
+                }
             }
         }
 
         /* With no monitoring role known, the application name alone decides, as KillSql's statement does. */
-        return AfterAnswer(name, pid, startEpoch, facts, found, actual, own, backendType, applicationName, callerRole, monitoringRole is null || monitoringMatch);
+        return AfterAnswer(name, pid, startEpoch, facts, found, actual, own, backendType, applicationName, callerRole, monitoringRole is null || monitoringMatch, activityChanged);
     }
 
     /// <summary>
@@ -422,7 +455,7 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
     /// <see cref="KillSql"/> matched nothing) is refused as <c>tool_login_session</c>, with no facts, as <see cref="KillRefusal"/> refuses it.
     /// </summary>
     internal static RemediationResult AfterAnswer(string name, int pid, long startEpoch, PgKillSessionFacts facts, bool found, long? actualEpoch, bool own, string? backendType = null,
-        string? applicationName = null, bool isCallerRole = false, bool isMonitoringRole = false)
+        string? applicationName = null, bool isCallerRole = false, bool isMonitoringRole = false, bool activityChanged = false)
     {
         if (!found)
             return RemediationResult.Refused(name, false, RemediationResult.Reasons.SessionGone, $"Backend {pid} is gone. Nothing was run.");
@@ -442,6 +475,12 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
 
         if (IsDarlingSession(applicationName, isCallerRole, isMonitoringRole))
             return RemediationResult.Refused(name, false, RemediationResult.Reasons.ToolLoginSession, DarlingSessionMessage(pid));
+
+        if (activityChanged)
+        {
+            return RemediationResult.Refused(name, false, RemediationResult.Reasons.SessionChanged,
+                $"Backend {pid} has run something new since the dry run: its transaction or its state changed, so it may hold different work than the work that was checked. Nothing was run. Read it again with a dry run to see what it holds now.");
+        }
 
         return RemediationResult.Failed(name, false, $"The server did not take the signal for backend {pid}. Nothing is known to have ended.");
     }
@@ -540,6 +579,12 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
         return result;
     }
 }
+
+/// <summary>
+/// What a PostgreSQL kill write expects of the backend beyond its pid and start second (#7109): the <c>xact_start</c> and <c>state_change</c> the
+/// dry run read, in UTC. NULL equals only NULL.
+/// </summary>
+public sealed record PgKillExpectedActivity(DateTime? XactStartUtc, DateTime? StateChangeUtc);
 
 /// <summary>
 /// What the server's session view held for the backend a PostgreSQL kill named, read in the sign-in that decided (#5632). No statement text is

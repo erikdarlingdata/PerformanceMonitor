@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -36,7 +37,13 @@ public static class ViewerDatabaseProtectionText
 
     private const string Dash = "-";
 
-    /// <summary>The status line: the summary sentence and when the newest capture was taken.</summary>
+    /// <summary>
+    /// The status line: the summary sentence and when the newest capture was taken. The capture time is stored naive UTC and is stamped
+    /// to the second with its zone's label on the same clock as the tab's "Last refreshed" stamp (#8576), through
+    /// <see cref="ViewerTimeHelper.FormatFleetWide(DateTime, string, TimeDisplayMode)"/>: this machine's zone in Local mode, UTC in
+    /// every other mode, so the Server Time setting reads UTC here as it does beside it. It used to read the server's own offset
+    /// ("UTC-05:00") next to a refresh stamp in UTC, so one tab showed two clocks.
+    /// </summary>
     public static string StatusLine(ViewerDatabaseProtectionRead read)
     {
         ArgumentNullException.ThrowIfNull(read);
@@ -45,8 +52,8 @@ public static class ViewerDatabaseProtectionText
             return read.Message ?? NoCapture;
         }
 
-        var local = DateTime.SpecifyKind(captured, DateTimeKind.Utc).ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
-        return $"{read.Summary.Text}   Captured: {local}";
+        var when = ViewerTimeHelper.FormatFleetWide(captured, "yyyy-MM-dd HH:mm:ss", ViewerTimeHelper.CurrentDisplayMode);
+        return $"{read.Summary.Text}   Captured: {when}";
     }
 
     /// <summary>The sentence under the list when it has no row: the read's sentence, or the empty-capture sentence.</summary>
@@ -85,6 +92,16 @@ public static class ViewerDatabaseProtectionText
                 d.Band.ExcludedReason ?? "",
                 d.Band.AnyOverdue))
             .ToList();
+    }
+
+    /// <summary>
+    /// Whether the Platform column has anything to show (#7416): a boxed server reads "native" on every row, which draws as nothing, so the grid drops the
+    /// column when no row names a platform, as the web page does.
+    /// </summary>
+    public static bool ShowsPlatformColumn(IEnumerable<ViewerDatabaseProtectionRow> rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        return rows.Any(r => !string.IsNullOrEmpty(r.Platform));
     }
 
     /// <summary>The platform as the reader gives it, read with spaces: a plain SQL Server (native) shows nothing.</summary>

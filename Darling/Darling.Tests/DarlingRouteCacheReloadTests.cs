@@ -139,6 +139,11 @@ public sealed class DarlingRouteCacheReloadTests
             return current is null ? true : !(bool)current;
         }
 
+        if (type == typeof(DateTime?))
+        {
+            return current is null ? new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc) : ((DateTime)current).AddMinutes(1);
+        }
+
         if (type == typeof(IReadOnlyCollection<string>))
         {
             return new[] { "slack" };

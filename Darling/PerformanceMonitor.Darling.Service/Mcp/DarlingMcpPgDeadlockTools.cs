@@ -43,15 +43,15 @@ public sealed class DarlingMcpPgDeadlockTools
 
     /// <summary>The empty-status text (was "no_deadlocks", #6130): why an empty window is not proof of a quiet server.</summary>
     internal static string NoDeadlocksText(string serverName, int hoursBack) =>
-        $"No deadlock was reported on {serverName} in the last {hoursBack} "
-        + "hour(s). FOUR different things produce that and they are worth telling apart: "
+        $"No deadlock was reported on {serverName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}"
+        + ". FOUR different things produce that and they are worth telling apart: "
         + "the server had no deadlocks, which is the healthy answer; the log could not be "
         + "read; the log was read and PostgreSQL did not write it in English; or, on a target "
         + "that logs in the stderr format, the log was read but its line prefix is one the "
         + "reader cannot parse. The pg_plan_capture_readiness collector judges all four, "
         + "because plan capture reads the same file the same way - the English one as its "
-        + "message_locale facet (#3061) and the prefix one as its log_line_prefix_readable "
-        + "facet (#4735) - and get_pg_plan_capture_readiness is the read that returns those "
+        + "message_locale facet and the prefix one as its log_line_prefix_readable "
+        + "facet - and get_pg_plan_capture_readiness is the read that returns those "
         + "facets with the remedy for each. "
         + "The last two are the causes nothing else hints at: lc_messages translates "
         + "PostgreSQL's own messages including the severity label, so a target writing "
@@ -68,10 +68,10 @@ public sealed class DarlingMcpPgDeadlockTools
         $"No deadlock graph is stored for {serverName}. Either the server had no "
         + "deadlocks, which is the healthy answer, or its log could not be read, or it "
         + "was read in a language this does not match - PostgreSQL translates its own "
-        + "messages under a non-English lc_messages, severity label included (#3061) - or "
+        + "messages under a non-English lc_messages, severity label included - or "
         + "it was read on a stderr log target whose log_line_prefix the reader cannot parse, "
         + "so every line was dropped (the log_line_prefix_readable facet of "
-        + "get_pg_plan_capture_readiness, #4735). "
+        + "get_pg_plan_capture_readiness). "
         + "get_pg_database_stats carries pg_stat_database's cumulative deadlock counter, "
         + "which tells the healthy case from the others.";
 
@@ -125,7 +125,7 @@ public sealed class DarlingMcpPgDeadlockTools
                         NoDeadlocksText(resolved.DisplayName, hours_back),
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "pg_deadlocks", resolved.ServerName, windowStart, windowEnd, cancellationToken),
-                            null, windowStart, windowEnd, "pg_deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken);
+                            null, windowStart, windowEnd, "pg_deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken, windowStart);
             }
 
             /* #4966: the notice is always COVERAGE, whether or not the cap cut the page (the cap is reported by truncated). A sparse event
@@ -175,7 +175,7 @@ public sealed class DarlingMcpPgDeadlockTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("A deadlock_hash from get_pg_deadlocks. Omit for the most recent graphs.")] string? deadlock_hash = null,
-        [Description("Maximum graphs to return when no hash is given. Default 5.")] int limit = 5,
+        [Description("Maximum graphs to return when no hash is given. Default 5. Read truncated to know whether more graphs were recorded than were returned.")] int limit = 5,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
@@ -186,8 +186,11 @@ public sealed class DarlingMcpPgDeadlockTools
 
         try
         {
-            var rows = await DarlingPgDeadlockReader.GetDeadlockDetailAsync(
-                postgres, resolved.ServerId, deadlock_hash, limit, cancellationToken);
+            /* #7455 (the #3653 dialect): limit + 1 as the fetch, so the reply says whether more graphs exist
+               than the page holds. graph_count was the only size it gave. */
+            var fetched = await DarlingPgDeadlockReader.GetDeadlockDetailAsync(
+                postgres, resolved.ServerId, deadlock_hash, limit + 1, cancellationToken);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
             {
@@ -212,6 +215,7 @@ public sealed class DarlingMcpPgDeadlockTools
                 server = resolved.DisplayName,
                 status = "deadlock_detail",
                 graph_count = rows.Count,
+                truncated,
                 note = "graph is PostgreSQL's own DETAIL block, as written apart from stripped tab indenting and "
                      + "the statements' literals, each replaced by ?; a statement that cannot be read to its end "
                      + "is withheld. It reads as: one line per wait edge naming who waits for what and who "

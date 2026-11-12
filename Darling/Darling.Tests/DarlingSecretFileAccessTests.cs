@@ -109,7 +109,7 @@ public sealed class DarlingSecretFileAccessTests
 
         var branch = source.IndexOf("if (!existingCluster)", StringComparison.Ordinal);
         Assert.True(branch >= 0, "the fresh-cluster branch is gone");
-        var gate = source.IndexOf("RefuseInitdbOnUnlockedStoreFolder(storeFolder, storeFolderLocked);", StringComparison.Ordinal);
+        var gate = source.IndexOf("RefuseInitdbOnUnlockedStoreFolder(storeFolder, storeFolderLocked, _dataDirectory);", StringComparison.Ordinal);
         var initdb = source.IndexOf("await InitializeClusterAsync(binDirectory, cancellationToken);", StringComparison.Ordinal);
         Assert.True(gate > branch && initdb > gate, "the store-folder gate must sit inside the fresh-cluster branch, before initdb");
         Assert.Equal(1, CountOf(source, "RefuseInitdbOnUnlockedStoreFolder(storeFolder"));
@@ -120,7 +120,7 @@ public sealed class DarlingSecretFileAccessTests
     {
         var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs");
 
-        var at = source.IndexOf("private static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
+        var at = source.IndexOf("internal static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
         Assert.True(at >= 0, "HardenFiles is gone");
         var body = source[at..Math.Min(source.Length, at + 17000)];
 
@@ -143,7 +143,7 @@ public sealed class DarlingSecretFileAccessTests
     [InlineData("DarlingStoreUpgrade.cs", "var preUpgradeCopy = Path.Combine(parent, PreUpgradeAutoConfFileName);", "File.Copy(sourcePath, preUpgradeCopy", "DarlingFileSecurity.CreateHardenedFile(preUpgradeCopy, allowInteractiveRead: false)")]
     [InlineData("DarlingCliCommands.cs", "private static void CopyToHardenedBackup(", "File.Copy(sourcePath, backupPath", "DarlingFileSecurity.CreateHardenedFile(backupPath, allowInteractiveRead: false)")]
     [InlineData("DarlingCliCommands.cs", "private static async Task WriteExportFileAsync(", "DarlingFileSecurity.HardenFile(", "DarlingFileSecurity.CreateHardenedFile(path, allowInteractiveRead: true)")]
-    [InlineData("DarlingStoreUpgrade.cs", "step = \"initdb-new-cluster\";", "File.WriteAllText(passwordFile", "DarlingManagedPostgres.WriteHardenedText(passwordFile")]
+    [InlineData("DarlingStoreUpgrade.cs", "internal async Task InitializeNewClusterAsync(", "File.WriteAllText(passwordFile", "DarlingManagedPostgres.WriteHardenedText(passwordFile")]
     [InlineData("DarlingStoreUpgrade.cs", "private static string? TrySavePreUpgradeConf(", "File.Copy(sourcePath, preUpgradeCopy", "DarlingFileSecurity.CreateHardenedFile(preUpgradeCopy, allowInteractiveRead: false)")]
     [InlineData("DarlingManagedPostgres.cs", "var generated = StoreTlsCertificates.Create(", "File.WriteAllText(keyPath", "WriteHardenedText(keyPath, generated.ServerKeyPem)")]
     public void SecretFiles_AreCreatedHardened_NotWrittenThenHardened(string file, string anchor, string forbidden, string required)

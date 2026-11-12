@@ -73,6 +73,7 @@ public sealed class ComposeSetupScriptTests : IDisposable
         /* It says where the dashboard is and how to read the token, and prints no secret. */
         Assert.Contains("http://127.0.0.1:5153", run.Output);
         Assert.Contains("cat secrets/web_token.txt", run.Output);
+        Assert.Contains("never put a secret inline in darling.json", run.Output);
         foreach (var secret in new[] { password, Read("secrets/web_token.txt"), Read("secrets/mcp_token.txt"), SqlPassword })
         {
             Assert.DoesNotContain(secret, run.Output);
@@ -86,9 +87,12 @@ public sealed class ComposeSetupScriptTests : IDisposable
             foreach (var name in new[] { "store_password.txt", "store_connection", "web_token.txt", "mcp_token.txt", "sql_password.txt" })
             {
                 Assert.Equal(
-                    UnixFileMode.UserRead | UnixFileMode.UserWrite,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead,
                     File.GetUnixFileMode(Path.Combine(_folder, "secrets", name)));
             }
+            Assert.Equal(
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead,
+                File.GetUnixFileMode(Path.Combine(_folder, "darling.json")));
         }
     }
 

@@ -32,6 +32,8 @@ public sealed class QueryTagUsageWindow : Window
     private readonly ComboBox _tag = new() { Width = 220, Margin = new Thickness(0, 0, 8, 0) };
     private readonly TextBlock _message = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 4) };
     private readonly StackPanel _tables = new();
+
+    internal const string NoTagsMessage = PerformanceMonitor.Common.QueryTagUsageLabels.NoTagsWindowMessage;
     private List<QueryTagRow> _tags = [];
     private bool _loading;
 
@@ -99,6 +101,15 @@ public sealed class QueryTagUsageWindow : Window
                 var keep = _tag.SelectedItem as string;
                 _tag.ItemsSource = choices;
                 _tag.SelectedItem = keep is not null && choices.Contains(keep) ? keep : QueryTagGrid.AllChoice;
+            }
+
+            /* #8115: with no tag defined every table would be one untagged row equal to its total, so the answer is one sentence, the one
+               the Darling Viewer's window gives. */
+            if (data.Tags.Count == 0)
+            {
+                _message.Text = NoTagsMessage;
+                _tables.Children.Clear();
+                return;
             }
 
             int? filter = null;

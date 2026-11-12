@@ -16,8 +16,20 @@ namespace Darling.Tests;
 /// database made them order-dependent (caught live: the V20 round-trip read the V3 defaults an
 /// earlier test seeded). Each such test gets its own database instead — created here, dropped on
 /// dispose with <c>WITH (FORCE)</c> so a lingering connection can never wedge the drop.
-/// <c>Pooling=false</c> on the scratch connection string keeps in-process pooled connections from
-/// pinning the database in the first place.
+///
+/// <para><b>The scratch connection string pools (#8231).</b> A test's connections and data sources on it reuse their
+/// physical connections, where an unpooled string opened a socket per statement and left it in TIME_WAIT, until a leg of
+/// live classes ran its runner out of ephemeral ports. The dispose clears this process's pools for the string before the
+/// drop, so no idle pooled backend is left for the FORCE to terminate and no dead physical connection stays in the pool
+/// behind it. The database's default <c>search_path</c> is set at mint, before any test connection exists: a pooled
+/// physical connection keeps the session defaults its backend started with, so one opened before the test's
+/// <c>MigrateAsync</c> set that default would resolve no bare table name on a later lease. The connection string itself
+/// stays bare, as an operator's would be. Npgsql resets the rest of a session's state (its GUCs, role, temporary tables,
+/// advisory locks, prepared statements) when a connection is returned, and the string does not turn that off. A test that
+/// needs a session of its own (a backend it terminates, a session lock released by closing, a count of the database's
+/// backends, state set in a physical connection initializer) says so with <c>Pooling = false</c> on its own string, and a
+/// test that drops and recreates a database under one name clears that name's pool first. The factory's own statements on
+/// a scratch database run unpooled, so the only connections in a scratch string's pool are the test's.</para>
 ///
 /// <para><b>A scratch database must not outlive its run (#4981).</b> Each one that has the TimescaleDB extension
 /// holds a background-worker slot for its scheduler, and a long-lived local cluster has only a few, so databases
@@ -88,7 +100,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     ///
     /// <para>The extension goes in right after <c>CREATE DATABASE</c>, into <c>public</c> (the database has no <c>collect</c>
     /// schema yet, and creating one first makes <c>MigrateAsync</c> take the store for an already-moved one), and BEFORE the
-    /// test's own <c>MigrateAsync</c>. That is the order of a
+    /// first <c>MigrateAsync</c>: the template's for a default store, the test's own for an <paramref name="emptyStore"/>. That is the order of a
     /// restarted service (extension from the last start, then migrate), not of a brand-new store (migrate, then extension,
     /// which the shared live-postgres store keeps: see <see cref="LivePostgresStoreFixture"/>). The only migration that
     /// branches on the extension is V23, and with the extension present it converts <c>collection_log</c> to a hypertable a
@@ -99,56 +111,82 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// connection, because a failed <c>CREATE EXTENSION</c> terminates the backend, and returns false, and the database is
     /// then plain PostgreSQL, which is what those tests ran on before.</para>
     /// </summary>
-    /// <param name="plainPostgres">Leave TimescaleDB off. Only for a test whose subject is the store WITHOUT the extension.</param>
-    public static async Task<ScratchPostgres> CreateAsync(string baseConnectionString, CancellationToken cancellationToken, bool plainPostgres = false)
+    /// <param name="plainPostgres">Leave TimescaleDB off. Only for a test whose subject is the store WITHOUT the extension.
+    /// The database is created from <c>template0</c>, so it carries no extension row the cluster's <c>template1</c> holds (the
+    /// TimescaleDB image installs the extension into <c>template1</c>, and a database cloned from it would answer the product's
+    /// <c>pg_extension</c> probes as a TimescaleDB store). Such a database is also empty, as <paramref name="emptyStore"/> describes.</param>
+    /// <param name="emptyStore">Leave the database unmigrated (#7097). By default the database is a clone of a template
+    /// this process migrated once (see <see cref="GetTemplateAsync"/>), so the test's own <c>MigrateAsync</c> is a no-op:
+    /// the same schema, journal and jobs at about half the cost. Pass this when the test applies part of the ladder,
+    /// stages a store shape before migrating, asserts what <c>MigrateAsync</c> applied or never migrates at all.</param>
+    /// <param name="cCollation">Create the database with <c>LC_COLLATE</c> and <c>LC_CTYPE</c> <c>C</c>, the collation a managed store is
+    /// initialised with (<c>--locale=C</c>), so a test of text order sees byte order wherever the cluster's own default is a
+    /// locale (#7550). The database is unmigrated, as with <paramref name="emptyStore"/>.</param>
+    public static async Task<ScratchPostgres> CreateAsync(
+        string baseConnectionString, CancellationToken cancellationToken, bool plainPostgres = false, bool emptyStore = false,
+        bool cCollation = false)
     {
         HookExitDrain();
         await SweepOncePerClusterAsync(baseConnectionString, cancellationToken);
 
-        /* The factory's pattern (prefix, creation stamp, 12 hex): safe to interpolate as a quoted identifier. */
-        var databaseName = ScratchDatabaseSweep.NewName(DateTime.UtcNow);
+        if (plainPostgres || emptyStore || cCollation)
+        {
+            return await CreateEmptyAsync(baseConnectionString, plainPostgres, CurrentTestName(), cancellationToken, cCollation);
+        }
 
-        /* Remembered BEFORE the create, so a failure or cancellation anywhere after it still has a drop queued; the
-           exit drain uses IF EXISTS, so a name whose create never ran costs nothing. */
-        Remembered[databaseName] = (baseConnectionString, CurrentTestName());
-
+        var template = await GetTemplateAsync(baseConnectionString, cancellationToken);
+        ScratchPostgres clone;
         try
         {
-            await using var admin = new NpgsqlConnection(UnpooledAdminConnectionString(baseConnectionString));
-            await admin.OpenAsync(cancellationToken);
-            await using var create = new NpgsqlCommand($"CREATE DATABASE \"{databaseName}\"", admin);
-            await create.ExecuteNonQueryAsync(cancellationToken);
+            clone = await MintAsync(baseConnectionString, template.Name, CurrentTestName(), cancellationToken);
         }
-        catch
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InvalidCatalogName)
         {
-            await TryDropAsync(baseConnectionString, databaseName);
-            throw;
+            /* Another process's start-of-run sweep dropped the template: to the sweep it is an idle factory-named database
+               past AbandonedAfter, which is what a killed run's template must look like for the sweep to remove it. Only a
+               process that outlives AbandonedAfter next to a younger one gets here, and one more build answers it. */
+            ForgetTemplate(baseConnectionString, template.Name);
+            template = await GetTemplateAsync(baseConnectionString, cancellationToken);
+            clone = await MintAsync(baseConnectionString, template.Name, CurrentTestName(), cancellationToken);
         }
 
-        var builder = new NpgsqlConnectionStringBuilder(baseConnectionString)
+        clone.TimescaleEnabled = template.TimescaleEnabled;
+        if (template.TimescaleEnabled)
         {
-            Database = databaseName,
-            Pooling = false,
-        };
+            try
+            {
+                /* CREATE EXTENSION is what tells TimescaleDB's launcher to start a database's scheduler, and a clone never
+                   runs it: its scheduler would otherwise not start, so its jobs would never run. */
+                await using var connection = new NpgsqlConnection(Unpooled(clone.ConnectionString));
+                await connection.OpenAsync(cancellationToken);
+                await using var start = new NpgsqlCommand("SELECT _timescaledb_functions.start_background_workers()", connection);
+                /* The call waits on TimescaleDB's launcher, which starts schedulers one at a time. With a parallel suite
+                   cloning databases on one cluster, a wait past Npgsql's default 30 seconds failed a test that had nothing
+                   to do with the scheduler (#7430). A slow start is not this fixture's question. */
+                start.CommandTimeout = 120;
+                await start.ExecuteNonQueryAsync(cancellationToken);
+            }
+            catch
+            {
+                await TryDropAsync(baseConnectionString, clone.DatabaseName);
+                throw;
+            }
+        }
 
-        /* The base string can already carry the session pin (LiveStoreSessionTimeZone adds it to DARLING_TEST_PG),
-           so the unpinned string drops it. */
-        builder.Remove("Timezone");
+        return clone;
+    }
 
-        /* Pinned to UTC the way every product store connection is, so a cluster whose default zone is behind UTC
-           cannot skew timestamp round trips (a chunk's range_end read back through a ::timestamp cast). */
-        var scratch = new ScratchPostgres(
-            baseConnectionString,
-            databaseName,
-            PerformanceMonitor.Darling.Storage.DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString),
-            builder.ConnectionString);
-
-        var clusterKey = builder.Host + ":" + builder.Port;
+    /// <summary>An empty database: <c>CREATE DATABASE</c>, then the extension unless <paramref name="plainPostgres"/>.</summary>
+    private static async Task<ScratchPostgres> CreateEmptyAsync(
+        string baseConnectionString, bool plainPostgres, string creator, CancellationToken cancellationToken, bool cCollation = false)
+    {
+        var scratch = await MintAsync(baseConnectionString, template: null, creator, cancellationToken, cCollation, plainPostgres);
+        var clusterKey = ClusterKey(baseConnectionString);
         if (!plainPostgres && !ClustersWithoutTimescale.ContainsKey(clusterKey))
         {
             try
             {
-                scratch.TimescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, cancellationToken);
+                scratch.TimescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(Unpooled(scratch.ConnectionString), cancellationToken);
                 if (!scratch.TimescaleEnabled)
                 {
                     /* The cluster cannot load the library: do not pay a failed CREATE EXTENSION (it ends the backend) per database. */
@@ -157,7 +195,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
             }
             catch
             {
-                await TryDropAsync(baseConnectionString, databaseName);
+                await TryDropAsync(baseConnectionString, scratch.DatabaseName);
                 throw;
             }
         }
@@ -165,6 +203,169 @@ internal sealed class ScratchPostgres : IAsyncDisposable
         return scratch;
     }
 
+    /// <summary>Runs <c>CREATE DATABASE</c>, from <paramref name="template"/> when one is named, from <c>template0</c> for a
+    /// <paramref name="cCollation"/> or <paramref name="plainPostgres"/> database, and returns its handle.</summary>
+    private static async Task<ScratchPostgres> MintAsync(
+        string baseConnectionString, string? template, string creator, CancellationToken cancellationToken, bool cCollation = false,
+        bool plainPostgres = false)
+    {
+        /* The factory's pattern (prefix, creation stamp, 12 hex): safe to interpolate as a quoted identifier. */
+        var databaseName = ScratchDatabaseSweep.NewName(DateTime.UtcNow);
+
+        /* Remembered BEFORE the create, so a failure or cancellation anywhere after it still has a drop queued; the
+           exit drain uses IF EXISTS, so a name whose create never ran costs nothing. */
+        Remembered[databaseName] = (baseConnectionString, creator);
+
+        try
+        {
+            await using var admin = await LeaseAdminAsync(UnpooledAdminConnectionString(baseConnectionString), cancellationToken);
+            await using var create = new NpgsqlCommand(
+                template is not null ? $"CREATE DATABASE \"{databaseName}\" TEMPLATE \"{template}\""
+                : cCollation ? $"CREATE DATABASE \"{databaseName}\" TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'"
+                : plainPostgres ? $"CREATE DATABASE \"{databaseName}\" TEMPLATE template0"
+                : $"CREATE DATABASE \"{databaseName}\"",
+                admin.Connection);
+            /* CREATE DATABASE ... TEMPLATE waits for the cluster to finish other databases' creates and drops, and with a
+               parallel suite on one cluster it ran past Npgsql's default 30 seconds and failed a test whose question was not
+               the create (#8699). The scheduler start call in CreateAsync allows 120 seconds for the same reason. */
+            create.CommandTimeout = 120;
+            await create.ExecuteNonQueryAsync(cancellationToken);
+
+            /* The store's database-default search_path, set before any test connection exists (#8231). MigrateAsync sets the
+               same default, idempotently, but a pooled physical connection keeps the session defaults its backend started
+               with, so a connection a test opened before its MigrateAsync ran would resolve no bare table name on a later
+               lease. Set here, every backend of the database starts with it. The connection string itself stays bare, as an
+               operator's would be: a test that must see no default resets it on the database. */
+            await using var searchPath = new NpgsqlCommand(
+                $"ALTER DATABASE \"{databaseName}\" SET search_path = {PerformanceMonitor.Darling.Storage.PgSchemaGenerator.SearchPath}",
+                admin.Connection);
+            await searchPath.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch
+        {
+            await TryDropAsync(baseConnectionString, databaseName);
+            throw;
+        }
+
+        /* Pooled: see the class summary. */
+        var builder = new NpgsqlConnectionStringBuilder(baseConnectionString)
+        {
+            Database = databaseName,
+        };
+
+        /* The base string can already carry the session pin (LiveStoreSessionTimeZone adds it to DARLING_TEST_PG),
+           so the unpinned string drops it. */
+        builder.Remove("Timezone");
+
+        /* Pinned to UTC the way every product store connection is, so a cluster whose default zone is behind UTC
+           cannot skew timestamp round trips (a chunk's range_end read back through a ::timestamp cast). */
+        return new ScratchPostgres(
+            baseConnectionString,
+            databaseName,
+            PerformanceMonitor.Darling.Storage.DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString),
+            builder.ConnectionString);
+    }
+
+    /// <summary>The migrated database a process clones, and whether it has TimescaleDB. See <see cref="GetTemplateAsync"/>.</summary>
+    internal sealed record StoreTemplate(string Name, bool TimescaleEnabled);
+
+    /// <summary>
+    /// The creator the exit drain sees for a template. A template is meant to live until the process exits, so unlike a
+    /// test's database, its drop there is not a leak to report.
+    /// </summary>
+    private const string TemplateCreator = "this process's store template";
+
+    /// <summary>
+    /// One template per cluster, role and application name in this process. Evicted when its build fails or the database
+    /// goes. The application name is there for a test that drops a template: its own name gets it one no parallel test clones.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, Lazy<Task<StoreTemplate>>> Templates = new();
+
+    private static string TemplateKey(string baseConnectionString)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(baseConnectionString);
+        return $"{ClusterKey(baseConnectionString)}:{builder.Username}:{builder.ApplicationName}";
+    }
+
+    /// <summary>
+    /// The template this process clones for this cluster and role, built on first use (#7097). Migrating every store
+    /// was the largest part of a store's cost: a clone with its no-op <c>MigrateAsync</c> took 2.4 s where the build took
+    /// 5.6 s, and 1.3 s against 2.7 s with four running at once.
+    ///
+    /// <para><b>Per process, not per cluster.</b> Test processes that share a cluster can be different builds with
+    /// different ladders, so a shared template would need a build key and a lock across processes, to save about 5 s
+    /// per process. A process drops its own template at exit, and the start-of-run sweep removes a killed run's.</para>
+    ///
+    /// <para><b>Closed, not marked a template.</b> A clone fails if any session is in the source, and TimescaleDB keeps a
+    /// scheduler in every database with the extension. So the build stops the scheduler and sets
+    /// <c>ALLOW_CONNECTIONS false</c>: the launcher skips such a database, and nothing can connect later. It does not set
+    /// <c>IS_TEMPLATE</c>: the role that clones is the owner, which does not need it, and <c>DROP DATABASE</c> and the
+    /// sweep refuse or skip a database that has it, so a killed run's template would stay.</para>
+    ///
+    /// <para><b>What a clone does not inherit.</b> <c>CREATE DATABASE</c> copies neither the database's own settings nor
+    /// its grants; the factory sets the database-default <c>search_path</c> itself at mint (see <see cref="MintAsync"/>), and
+    /// the grants arrive with the test's <c>MigrateAsync</c>, just as they do on a fresh store. Rows a rung stamps with
+    /// <c>now()</c> carry the template's time, and a rung's random row is the
+    /// same in every clone (<c>config.pseudonym_key</c>). A test that depends on either passes <c>emptyStore</c>.</para>
+    /// </summary>
+    internal static async Task<StoreTemplate> GetTemplateAsync(string baseConnectionString, CancellationToken cancellationToken)
+    {
+        var key = TemplateKey(baseConnectionString);
+
+        /* The build runs on no caller's token: the test that happens to start it being cancelled must not fail the
+           others waiting on it. */
+        var build = Templates.GetOrAdd(key, _ => new Lazy<Task<StoreTemplate>>(() => BuildTemplateAsync(baseConnectionString)));
+        try
+        {
+            return await build.Value.WaitAsync(cancellationToken);
+        }
+        catch when (build.Value.IsFaulted)
+        {
+            /* Not cached: a refused connection would otherwise fail every test left in the process. */
+            Templates.TryRemove(new KeyValuePair<string, Lazy<Task<StoreTemplate>>>(key, build));
+            throw;
+        }
+    }
+
+    private static void ForgetTemplate(string baseConnectionString, string templateName)
+    {
+        var key = TemplateKey(baseConnectionString);
+        if (Templates.TryGetValue(key, out var build)
+            && build.Value.IsCompletedSuccessfully
+            && build.Value.Result.Name == templateName)
+        {
+            Templates.TryRemove(new KeyValuePair<string, Lazy<Task<StoreTemplate>>>(key, build));
+        }
+    }
+
+    private static async Task<StoreTemplate> BuildTemplateAsync(string baseConnectionString)
+    {
+        var template = await CreateEmptyAsync(baseConnectionString, plainPostgres: false, TemplateCreator, CancellationToken.None);
+        try
+        {
+            await using (var connection = new NpgsqlConnection(Unpooled(template.ConnectionString)))
+            {
+                await connection.OpenAsync();
+                await PerformanceMonitor.Darling.Storage.PgMigrations.MigrateAsync(connection);
+                if (template.TimescaleEnabled)
+                {
+                    await using var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection);
+                    await stop.ExecuteNonQueryAsync();
+                }
+            }
+
+            await using var admin = await LeaseAdminAsync(UnpooledAdminConnectionString(baseConnectionString), CancellationToken.None);
+            await using var close = new NpgsqlCommand($"ALTER DATABASE \"{template.DatabaseName}\" WITH ALLOW_CONNECTIONS false", admin.Connection);
+            await close.ExecuteNonQueryAsync();
+        }
+        catch
+        {
+            await TryDropAsync(baseConnectionString, template.DatabaseName);
+            throw;
+        }
+
+        return new StoreTemplate(template.DatabaseName, template.TimescaleEnabled);
+    }
 
     /// <summary>
     /// Drops the database, retrying a transient refusal. A drop that still fails is reported and the database stays
@@ -173,6 +374,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// </summary>
     public async ValueTask DisposeAsync()
     {
+        ClearPools();
         for (var attempt = 1; attempt <= DropAttempts; attempt++)
         {
             try
@@ -192,6 +394,29 @@ internal sealed class ScratchPostgres : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Closes this process's idle pooled connections on both scratch strings and dooms the ones a test still holds, so they
+    /// close when returned. Before the drop: an idle pooled backend would otherwise be what <c>WITH (FORCE)</c> terminates,
+    /// and its physical connection would then sit dead in the pool. A data source a test built on the string has a pool of
+    /// its own, which its dispose clears.
+    /// </summary>
+    private void ClearPools()
+    {
+        using var pinned = new NpgsqlConnection(ConnectionString);
+        NpgsqlConnection.ClearPool(pinned);
+        using var unpinned = new NpgsqlConnection(UnpinnedConnectionString);
+        NpgsqlConnection.ClearPool(unpinned);
+    }
+
+    /// <summary>
+    /// <paramref name="connectionString"/> with pooling off, for the factory's own statements on a scratch database (a
+    /// clone's scheduler start, the template's build, the extension probe). Each is one statement on a database no test has
+    /// touched yet, and a pooled one would leave an idle backend, named after the base string, in the pool the test's first
+    /// connection then draws from, and in the template's case a session the clone would refuse to copy from.
+    /// </summary>
+    private static string Unpooled(string connectionString) =>
+        new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString;
+
     /// <summary>True while this process still has a drop pending for <paramref name="databaseName"/>.</summary>
     internal static bool IsRemembered(string databaseName) => Remembered.ContainsKey(databaseName);
 
@@ -207,6 +432,22 @@ internal sealed class ScratchPostgres : IAsyncDisposable
             if (Remembered.TryGetValue(name, out var entry))
             {
                 await DropAsync(entry.AdminConnectionString, name);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Forgets every pending drop made through <paramref name="baseConnectionString"/>. For a test that mints through a
+    /// connection string that can never create a database (so none exists), where the exit drain's drop would only fail
+    /// and report a leak.
+    /// </summary>
+    internal static void ForgetRememberedFor(string baseConnectionString)
+    {
+        foreach (var (name, entry) in Remembered.ToArray())
+        {
+            if (entry.AdminConnectionString == baseConnectionString)
+            {
+                Remembered.TryRemove(name, out _);
             }
         }
     }
@@ -275,6 +516,10 @@ internal sealed class ScratchPostgres : IAsyncDisposable
         {
             /* The database is already gone: nothing to quiesce, and the drop below is IF EXISTS. */
         }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ObjectNotInPrerequisiteState)
+        {
+            /* ALLOW_CONNECTIONS false, which only a store template has (#7097): no scheduler, and so no job worker, runs there. */
+        }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             /* The caller's own deadline (the exit drain's), not the cap: the caller decides whether the drop still runs. */
@@ -305,9 +550,8 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     private static async Task DropAsync(string adminConnectionString, string databaseName)
     {
         await QuiesceTimescaleJobsAsync(adminConnectionString, databaseName);
-        await using var admin = new NpgsqlConnection(UnpooledAdminConnectionString(adminConnectionString));
-        await admin.OpenAsync();
-        await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)", admin);
+        await using var admin = await LeaseAdminAsync(UnpooledAdminConnectionString(adminConnectionString), CancellationToken.None);
+        await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)", admin.Connection);
         await drop.ExecuteNonQueryAsync();
         Remembered.TryRemove(databaseName, out _);
     }
@@ -379,9 +623,69 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// <c>DROP DATABASE ... WITH (FORCE)</c> on a scratch database and, half a second later, the
     /// <c>CALL run_job(...)</c> of the retired-baseline race test. With pooling off, the backend that ran a create or a
     /// drop ends when the connection closes, and no other test ever runs on it.
+    /// <para>#8206: the factory keeps the connections it opens with this string and runs its next create or drop on one of
+    /// them (<see cref="LeaseAdminAsync"/>), so a leg that mints hundreds of scratch databases no longer pays a fresh socket,
+    /// and an ephemeral port left in TIME_WAIT, per create and per drop: a leg ran its runner out of ports (WSAENOBUFS on a
+    /// connect). The connections stay unpooled, so Npgsql never hands one to a test, and only the factory runs on them. The
+    /// application name is what tells them apart in pg_stat_activity.</para>
     /// </summary>
     internal static string UnpooledAdminConnectionString(string adminConnectionString) =>
-        new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false }.ConnectionString;
+        new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false, ApplicationName = AdminApplicationName }.ConnectionString;
+
+    /// <summary>The application name of the factory's admin connections (#8206).</summary>
+    internal const string AdminApplicationName = "darling-tests-scratch-admin";
+
+    /// <summary>The factory's open admin connections not in use, per unpooled admin connection string.</summary>
+    private static readonly ConcurrentDictionary<string, ConcurrentBag<NpgsqlConnection>> IdleAdminConnections = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// An open admin connection on <paramref name="unpooledAdminConnectionString"/>: one the factory opened earlier and has
+    /// finished with when there is one still open, a new one otherwise. Disposing the lease hands the connection back when it
+    /// is still open and closes it when it is not.
+    /// </summary>
+    private static async Task<AdminLease> LeaseAdminAsync(string unpooledAdminConnectionString, CancellationToken cancellationToken)
+    {
+        var idle = IdleAdminConnections.GetOrAdd(unpooledAdminConnectionString, static _ => new ConcurrentBag<NpgsqlConnection>());
+        while (idle.TryTake(out var reused))
+        {
+            if (reused.FullState == System.Data.ConnectionState.Open)
+            {
+                return new AdminLease(reused, idle);
+            }
+
+            await reused.DisposeAsync();
+        }
+
+        var connection = new NpgsqlConnection(unpooledAdminConnectionString);
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
+
+        return new AdminLease(connection, idle);
+    }
+
+    private sealed class AdminLease(NpgsqlConnection connection, ConcurrentBag<NpgsqlConnection> idle) : IAsyncDisposable
+    {
+        public NpgsqlConnection Connection { get; } = connection;
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Connection.FullState == System.Data.ConnectionState.Open)
+            {
+                idle.Add(Connection);
+            }
+            else
+            {
+                await Connection.DisposeAsync();
+            }
+        }
+    }
 
     /// <summary>The admin connection string with the exit drain's own connect and command timeouts, and no pooling: one connection per drop.</summary>
     internal static string ExitDrainConnectionString(string adminConnectionString) =>
@@ -539,7 +843,11 @@ internal sealed class ScratchPostgres : IAsyncDisposable
             await drop.ExecuteNonQueryAsync(CancellationToken.None);
             Remembered.TryRemove(db.Name, out _);
             drain.Settle(index, ExitDrain.Dropped);
-            Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}); dropped at process exit.");
+            if (db.Creator != TemplateCreator)
+            {
+                Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}); dropped at process exit.");
+            }
+
             return ExitDrop.Done;
         }
         catch (Exception ex)

@@ -38,7 +38,7 @@ public static class MonitoredServerConnection
             /* tcp: so SqlClient never falls back to a named pipe over SMB with this process's Windows credentials (#6352). */
             DataSource = PerformanceMonitor.Common.ServerHostSetting.TcpDataSource(server.Host),
             InitialCatalog = string.IsNullOrWhiteSpace(server.Database) ? "master" : server.Database,
-            ApplicationName = "PerformanceMonitorDarling",
+            ApplicationName = PerformanceMonitor.Common.MonitorApplicationNames.Darling,
             ConnectTimeout = 15,
             CommandTimeout = 60,
             TrustServerCertificate = server.TrustServerCertificate,

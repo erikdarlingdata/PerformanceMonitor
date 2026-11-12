@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
 using System.Xml.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.PlanAnalysis;
 
@@ -38,11 +39,8 @@ public static class ShowPlanParser
 
         // The input is already an in-memory string here, so a length check is the guard; the
         // limit is in characters, not bytes.
-        if (xml.Length > MaxParseCharacters)
-        {
-            plan.ParseError = $"Plan XML exceeds the supported size limit of {MaxParseCharacters:N0} characters.";
+        if (RefusedForSize(xml, plan))
             return plan;
-        }
 
         var (thread, tcs) = StartParseThread(xml, plan, cancellationToken);
         thread.Join();
@@ -66,11 +64,8 @@ public static class ShowPlanParser
     {
         var plan = new ParsedPlan { RawXml = xml };
 
-        if (xml.Length > MaxParseCharacters)
-        {
-            plan.ParseError = $"Plan XML exceeds the supported size limit of {MaxParseCharacters:N0} characters.";
+        if (RefusedForSize(xml, plan))
             return Task.FromResult(plan);
-        }
 
         var (_, tcs) = StartParseThread(xml, plan, cancellationToken);
         return tcs.Task;
@@ -118,6 +113,18 @@ public static class ShowPlanParser
         };
         thread.Start();
         return (thread, tcs);
+    }
+
+    // The size refusal Parse and ParseAsync share: text over MaxParseCharacters is not read, and the plan carries the
+    // refusal's message and its flag together.
+    private static bool RefusedForSize(string xml, ParsedPlan plan)
+    {
+        if (xml.Length <= MaxParseCharacters)
+            return false;
+
+        plan.ParseError = string.Create(CultureInfo.InvariantCulture, $"Plan XML exceeds the supported size limit of {MaxParseCharacters:N0} characters.");
+        plan.ExceedsParseLimit = true;
+        return true;
     }
 
     // This runs on the dedicated thread started by StartParseThread, not a thread-pool thread.
@@ -169,6 +176,9 @@ public static class ShowPlanParser
             cancellationToken.ThrowIfCancellationRequested();
             var root = doc.Root;
             if (root == null) return;
+
+            // Recorded before the walk, so a plan the walk refuses or throws on is still known to be a plan.
+            plan.IsShowPlanXml = root.Name == Ns + "ShowPlanXML";
 
             plan.BuildVersion = root.Attribute("Version")?.Value;
             plan.Build = root.Attribute("Build")?.Value;
@@ -437,6 +447,7 @@ public static class ShowPlanParser
             return stmt;
         }
 
+        stmt.HasQueryPlan = true;
         ParseStmtAttributes(stmt, stmtEl);
         ParseQueryPlanElements(stmt, stmtEl, queryPlanEl);
 
@@ -545,6 +556,7 @@ public static class ShowPlanParser
         };
 
         ParseStmtAttributes(stmt, stmtEl);
+        stmt.HasQueryPlan = true;
         ParseQueryPlanElements(stmt, stmtEl, queryPlanEl);
 
         var opNode = ParseRelOp(relOpEl, 0, cancellationToken);
@@ -586,7 +598,8 @@ public static class ShowPlanParser
     {
         stmt.StatementOptmLevel = stmtEl.Attribute("StatementOptmLevel")?.Value;
         stmt.StatementOptmEarlyAbortReason = stmtEl.Attribute("StatementOptmEarlyAbortReason")?.Value;
-        stmt.StatementParameterizationType = (int)ParseDouble(stmtEl.Attribute("StatementParameterizationType")?.Value);
+        var parameterizationType = stmtEl.Attribute("StatementParameterizationType")?.Value;
+        stmt.StatementParameterizationType = parameterizationType is null ? null : (int)ParseDouble(parameterizationType);
         stmt.StatementSqlHandle = stmtEl.Attribute("StatementSqlHandle")?.Value;
         stmt.DatabaseContextSettingsId = ParseLong(stmtEl.Attribute("DatabaseContextSettingsId")?.Value);
         stmt.ParentObjectId = (int)ParseDouble(stmtEl.Attribute("ParentObjectId")?.Value);
@@ -654,7 +667,7 @@ public static class ShowPlanParser
                 MaxUsedMemoryKB = ParseLong(memEl.Attribute("MaxUsedMemory")?.Value),
                 HasMaxUsedMemory = long.TryParse(memEl.Attribute("MaxUsedMemory")?.Value,
                     System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out _),
-                GrantWaitTimeMs = ParseLong(memEl.Attribute("GrantWaitTime")?.Value),
+                GrantWaitTimeMs = ParseLong(memEl.Attribute("GrantWaitTime")?.Value) * 1000, // #7882: showplan GrantWaitTime is in SECONDS; stored as milliseconds
                 LastRequestedMemoryKB = ParseLong(memEl.Attribute("LastRequestedMemory")?.Value),
                 IsMemoryGrantFeedbackAdjusted = memEl.Attribute("IsMemoryGrantFeedbackAdjusted")?.Value
             };
@@ -727,6 +740,7 @@ public static class ShowPlanParser
 
         // OptimizerStatsUsage
         var statsUsageEl = queryPlanEl.Element(Ns + "OptimizerStatsUsage");
+        stmt.HasStatsUsage = statsUsageEl != null;
         if (statsUsageEl != null)
         {
             foreach (var statEl in statsUsageEl.Elements(Ns + "StatisticsInfo"))
@@ -734,7 +748,7 @@ public static class ShowPlanParser
                 stmt.StatsUsage.Add(new OptimizerStatsUsageItem
                 {
                     StatisticsName = statEl.Attribute("Statistics")?.Value?.Replace("[", "").Replace("]", "") ?? "",
-                    TableName = statEl.Attribute("Table")?.Value?.Replace("[", "").Replace("]", "") ?? "",
+                    TableName = CleanTempTableName(statEl.Attribute("Table")?.Value?.Replace("[", "").Replace("]", "") ?? ""),
                     DatabaseName = statEl.Attribute("Database")?.Value?.Replace("[", "").Replace("]", ""),
                     SchemaName = statEl.Attribute("Schema")?.Value?.Replace("[", "").Replace("]", ""),
                     ModificationCount = ParseLong(statEl.Attribute("ModificationCount")?.Value),
@@ -1145,12 +1159,13 @@ public static class ShowPlanParser
                 node.IconName   = isHeap ? "rid_lookup" : "bookmark_lookup";
             }
 
-            // Table cardinality and rows to be read (on <RelOp> per XSD)
+            // Table cardinality and rows to be read (on <RelOp> per XSD). #7898: EstimatedRowsRead stays 0 when
+            // the plan does not carry it; EstimateRowsWithoutRowGoal is a different quantity (the output
+            // estimate before the row goal), and the viewer shows each only when the plan has it.
             node.TableCardinality = ParseDouble(relOpEl.Attribute("TableCardinality")?.Value);
+            node.HasTableCardinality = relOpEl.Attribute("TableCardinality") != null;
             node.EstimatedRowsRead = ParseDouble(relOpEl.Attribute("EstimatedRowsRead")?.Value);
             node.EstimateRowsWithoutRowGoal = ParseDouble(relOpEl.Attribute("EstimateRowsWithoutRowGoal")?.Value);
-            if (node.EstimatedRowsRead == 0)
-                node.EstimatedRowsRead = node.EstimateRowsWithoutRowGoal;
 
             // TOP operator properties
             var topExprEl = physicalOpEl.Element(Ns + "TopExpression")?.Descendants(Ns + "ScalarOperator").FirstOrDefault();
@@ -1512,12 +1527,14 @@ public static class ShowPlanParser
             long totalUdfCpu = 0, maxUdfElapsed = 0;
             long maxInputMemoryGrant = 0, maxOutputMemoryGrant = 0, maxUsedMemoryGrant = 0;
             string? actualExecMode = null;
+            bool hasRowsRead = false;
 
             foreach (var thread in runtimeEl.Elements(Ns + "RunTimeCountersPerThread"))
             {
                 totalRows += ParseLong(thread.Attribute("ActualRows")?.Value);
                 totalExecutions += ParseLong(thread.Attribute("ActualExecutions")?.Value);
                 totalRowsRead += ParseLong(thread.Attribute("ActualRowsRead")?.Value);
+                hasRowsRead |= thread.Attribute("ActualRowsRead") != null;
                 totalRebinds += ParseLong(thread.Attribute("ActualRebinds")?.Value);
                 totalRewinds += ParseLong(thread.Attribute("ActualRewinds")?.Value);
                 totalCpu += ParseLong(thread.Attribute("ActualCPUms")?.Value);
@@ -1555,6 +1572,7 @@ public static class ShowPlanParser
             node.ActualRows = totalRows;
             node.ActualExecutions = totalExecutions;
             node.ActualRowsRead = totalRowsRead;
+            node.HasActualRowsRead = hasRowsRead;
             node.ActualRebinds = totalRebinds;
             node.ActualRewinds = totalRewinds;
             node.ActualElapsedMs = maxElapsed;
@@ -1805,12 +1823,12 @@ public static class ShowPlanParser
             var writes = ParseLong(sortSpillEl.Attribute("WritesToTempDb")?.Value);
             var reads = ParseLong(sortSpillEl.Attribute("ReadsFromTempDb")?.Value);
             var prefix = spillToTempDbEl != null
-                ? $"Sort spill level {spillLevel}, {spillThreads} thread(s)"
+                ? $"Sort spill level {spillLevel}, {spillThreads} {(spillThreads == "1" ? "thread" : "threads")}"
                 : "Sort spill";
             result.Add(new PlanWarning
             {
                 WarningType = "Sort Spill",
-                Message = $"{prefix} — Granted: {granted:N0} KB, Used: {used:N0} KB, Writes: {writes:N0}, Reads: {reads:N0}",
+                Message = string.Create(CultureInfo.InvariantCulture, $"{prefix}. Granted: {granted:N0} KB, Used: {used:N0} KB, Writes: {writes:N0}, Reads: {reads:N0}"),
                 Severity = PlanWarningSeverity.Warning,
                 SpillDetails = new SpillDetail
                 {
@@ -1831,12 +1849,12 @@ public static class ShowPlanParser
             var writes = ParseLong(hashSpillEl.Attribute("WritesToTempDb")?.Value);
             var reads = ParseLong(hashSpillEl.Attribute("ReadsFromTempDb")?.Value);
             var prefix = spillToTempDbEl != null
-                ? $"Hash spill level {spillLevel}, {spillThreads} thread(s)"
+                ? $"Hash spill level {spillLevel}, {spillThreads} {(spillThreads == "1" ? "thread" : "threads")}"
                 : "Hash spill";
             result.Add(new PlanWarning
             {
                 WarningType = "Hash Spill",
-                Message = $"{prefix} — Granted: {granted:N0} KB, Used: {used:N0} KB, Writes: {writes:N0}, Reads: {reads:N0}",
+                Message = string.Create(CultureInfo.InvariantCulture, $"{prefix}. Granted: {granted:N0} KB, Used: {used:N0} KB, Writes: {writes:N0}, Reads: {reads:N0}"),
                 Severity = PlanWarningSeverity.Warning,
                 SpillDetails = new SpillDetail
                 {
@@ -1854,16 +1872,16 @@ public static class ShowPlanParser
             !warningsEl.Elements(Ns + "SortSpillDetails").Any() &&
             !warningsEl.Elements(Ns + "HashSpillDetails").Any())
         {
-            var msg = $"Spill level {spillLevel}, {spillThreads} thread(s)";
+            var msg = $"Spill level {spillLevel}, {spillThreads} {(spillThreads == "1" ? "thread" : "threads")}";
             var grantedKB = ParseLong(spillToTempDbEl.Attribute("GrantedMemoryKB")?.Value);
             var usedKB = ParseLong(spillToTempDbEl.Attribute("UsedMemoryKB")?.Value);
             var writes = ParseLong(spillToTempDbEl.Attribute("WritesToTempDb")?.Value);
             var reads = ParseLong(spillToTempDbEl.Attribute("ReadsFromTempDb")?.Value);
             if (grantedKB > 0 || writes > 0)
             {
-                msg += $" — Granted: {grantedKB:N0} KB, Used: {usedKB:N0} KB";
-                if (writes > 0) msg += $", Writes: {writes:N0}";
-                if (reads > 0) msg += $", Reads: {reads:N0}";
+                msg += string.Create(CultureInfo.InvariantCulture, $". Granted: {grantedKB:N0} KB, Used: {usedKB:N0} KB");
+                if (writes > 0) msg += string.Create(CultureInfo.InvariantCulture, $", Writes: {writes:N0}");
+                if (reads > 0) msg += string.Create(CultureInfo.InvariantCulture, $", Reads: {reads:N0}");
             }
             result.Add(new PlanWarning
             {
@@ -1876,15 +1894,16 @@ public static class ShowPlanParser
         // Exchange spill details
         foreach (var exchSpillEl in warningsEl.Elements(Ns + "ExchangeSpillDetails"))
         {
+            var writes = ParseLong(exchSpillEl.Attribute("WritesToTempDb")?.Value);
             result.Add(new PlanWarning
             {
                 WarningType = "Exchange Spill",
-                Message = $"Exchange spill — {ParseLong(exchSpillEl.Attribute("WritesToTempDb")?.Value):N0} writes to TempDB. The parallel exchange operator ran out of memory buffers and spilled rows to disk. This typically means the memory grant was too small for the data volume flowing through this exchange.",
+                Message = $"Exchange spill: {CountText.Plural(writes, "write")} to TempDB. The parallel exchange operator ran out of memory buffers and spilled rows to disk. This typically means the memory grant was too small for the data volume flowing through this exchange.",
                 Severity = PlanWarningSeverity.Warning,
                 SpillDetails = new SpillDetail
                 {
                     SpillType = "Exchange",
-                    WritesToTempDb = ParseLong(exchSpillEl.Attribute("WritesToTempDb")?.Value)
+                    WritesToTempDb = writes
                 }
             });
         }
@@ -1917,7 +1936,7 @@ public static class ShowPlanParser
                 result.Add(new PlanWarning
                 {
                     WarningType = "Memory Grant",
-                    Message = $"{kind}: Granted {grantedMB:N0} MB, Used {usedMB:N0} MB",
+                    Message = string.Create(CultureInfo.InvariantCulture, $"{kind}: Granted {grantedMB:N0} MB, Used {usedMB:N0} MB"),
                     Severity = PlanWarningSeverity.Warning
                 });
             }

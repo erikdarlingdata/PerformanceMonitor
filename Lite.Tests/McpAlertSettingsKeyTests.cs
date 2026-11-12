@@ -130,7 +130,8 @@ public sealed class McpAlertSettingsKeyTests
         var poison = Settings().GetProperty("poison_wait");
         Assert.Contains("threshold_ms", KeysOf(poison));
         Assert.Equal(McpAlertTools.PoisonWaitThresholdMsNote, poison.GetProperty("threshold_ms_note").GetString());
-        Assert.StartsWith("retired by #3593", McpAlertTools.PoisonWaitThresholdMsNote, StringComparison.Ordinal);
+        /* #8572: the reply names no tracker number. */
+        Assert.DoesNotMatch(@"#\d", McpAlertTools.PoisonWaitThresholdMsNote);
 
         var darlingTools = File.ReadAllText(FindRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs")));
@@ -180,6 +181,9 @@ public sealed class McpAlertSettingsKeyTests
 
     /// <summary>#6875: the Identity Capacity alert is Darling-only (the collector behind it has no Lite twin), so Lite reports no such group.</summary>
     private const string IdentityCapacityGroup = "identity_capacity";
+
+    /// <summary>#7041: the Daily Health Report is Darling-only (Lite has no report scheduler or report builder), so Lite reports no such group.</summary>
+    private const string DailyReportGroup = "daily_report";
 
     /// <summary>#3368: the other group Darling reports and Lite does not. The health-band tiers decide what
     /// colour a server's card reads and how the worst-first ranking and <c>get_fleet_overview</c> count bands
@@ -349,7 +353,7 @@ public sealed class McpAlertSettingsKeyTests
         foreach (var (group, darlingKeys) in darling)
         {
             if (group == SelfAlertsGroup || group == HealthBandsGroup || group == FleetSweepGroup || group == AgentAlertGapsGroup
-                || DatabaseProtectionGroups.Contains(group, StringComparer.Ordinal) || group == IdentityCapacityGroup) continue;
+                || DatabaseProtectionGroups.Contains(group, StringComparer.Ordinal) || group == IdentityCapacityGroup || group == DailyReportGroup) continue;
 
             if (!root.TryGetProperty(group, out var element))
             {

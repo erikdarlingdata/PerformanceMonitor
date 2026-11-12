@@ -744,6 +744,70 @@ public class PagerDutyWebhookTests
     }
 
     /// <summary>
+    /// #7225: the per-channel failure count and its log, now one helper for the four webhook channels (PagerDuty stands
+    /// in for them). An error text logs loudly for the first <see cref="WebhookAlertService.FailingChannelThreshold"/>
+    /// failures in a row and then only on every 50th. A throw logs every time. A delivery after failures says so and
+    /// clears the count and the last error. The count the log stops at is the one the "channel failing" notice starts at.
+    /// </summary>
+    [Fact]
+    public async Task ChannelFailures_LogLoudThenEveryFiftieth_AThrowLogsEveryTime_AndADeliveryClearsTheRun()
+    {
+        Assert.Equal(3, WebhookAlertService.FailingChannelThreshold);
+        var logged = new List<(Microsoft.Extensions.Logging.LogLevel Level, string Message)>();
+        var settings = new WebhookSettings { PagerDutyRoutingKey = "rk-test" };
+        var service = new WebhookAlertService(settings, Branding, new CapturingLogger(logged));
+        var mode = "error";
+        service.PostPagerDutyAsyncOverride = (_, _) => mode switch
+        {
+            "error" => Task.FromResult<string?>("boom"),
+            "throw" => throw new InvalidOperationException("kaboom"),
+            _ => Task.FromResult<string?>(null),
+        };
+
+        for (var i = 1; i <= 50; i++)
+        {
+            await SendSingleAlertAsync(service, "High CPU", serverId: "srv-" + i.ToString(CultureInfo.InvariantCulture));
+        }
+
+        Assert.Equal((50, "boom"), service.GetPagerDutyHealth());
+        Assert.Equal(
+            new[]
+            {
+                "PAGERDUTY WEBHOOK FAILED (1x): boom",
+                "PAGERDUTY WEBHOOK FAILED (2x): boom",
+                "PAGERDUTY WEBHOOK FAILED (3x): boom",
+                "PAGERDUTY WEBHOOK STILL FAILING: 50 failures. Last: boom",
+            },
+            logged.Where(l => l.Message.StartsWith("PAGERDUTY WEBHOOK", StringComparison.Ordinal)).Select(l => l.Message).ToArray());
+        Assert.All(logged.Where(l => l.Message.StartsWith("PAGERDUTY WEBHOOK", StringComparison.Ordinal)),
+            l => Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Error, l.Level));
+
+        mode = "throw";
+        await SendSingleAlertAsync(service, "High CPU", serverId: "srv-throw-1");
+        await SendSingleAlertAsync(service, "High CPU", serverId: "srv-throw-2");
+        Assert.Equal((52, "kaboom"), service.GetPagerDutyHealth());
+        Assert.Equal(
+            new[] { (Microsoft.Extensions.Logging.LogLevel.Error, "PagerDuty webhook error: kaboom"), (Microsoft.Extensions.Logging.LogLevel.Error, "PagerDuty webhook error: kaboom") },
+            logged.Where(l => l.Message.StartsWith("PagerDuty webhook error", StringComparison.Ordinal)).ToArray());
+
+        mode = "ok";
+        Assert.Equal(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, "High CPU", serverId: "srv-ok"));
+        Assert.Equal((0, (string?)null), service.GetPagerDutyHealth());
+        Assert.Contains((Microsoft.Extensions.Logging.LogLevel.Information, "PagerDuty webhook recovered after 52 failure(s)"), logged);
+    }
+
+    private sealed class CapturingLogger(List<(Microsoft.Extensions.Logging.LogLevel Level, string Message)> sink)
+        : Microsoft.Extensions.Logging.ILogger<WebhookAlertService>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter) => sink.Add((logLevel, formatter(state, exception)));
+    }
+
+    /// <summary>
     /// One alert through the real <see cref="WebhookAlertService"/> fan-out with the PagerDuty post
     /// captured. Each <see cref="WebhookAlertService"/> is constructed per send (no shared state leaks
     /// between the sends an A/B case sequences); the shared per-test cooldown is the POINT of the

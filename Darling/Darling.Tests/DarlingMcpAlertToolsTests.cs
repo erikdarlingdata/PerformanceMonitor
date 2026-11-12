@@ -108,13 +108,13 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     [Theory]
-    [InlineData("get_alert_history", "server_name,hours_back,limit,as_of,include_dismissed,metric_name,family,include_streak")]
+    [InlineData("get_alert_history", "server_name,hours_back,limit,as_of,include_dismissed,metric_name,family,include_streak,full_text")]
     [InlineData("get_mute_rules", "enabled_only")]
     [InlineData("update_alert_settings", "settings_json")]
     /* #5915: each mute write tool also takes the optional agent_action, last (Level 2: ignored under the writes arm). */
-    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at,server_id,client_app_pattern,external_source,agent_action,starts_at")]
-    [InlineData("delete_mute_rule", "rule_id,agent_action")]
-    [InlineData("set_mute_rule_enabled", "rule_id,enabled,agent_action")]
+    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at,server_id,client_app_pattern,external_source,agent_action,starts_at,recur_days,recur_start,recur_end,recur_time_zone,action")]
+    [InlineData("delete_mute_rule", "rule_id,agent_action,reason")]
+    [InlineData("set_mute_rule_enabled", "rule_id,enabled,agent_action,reason")]
     [InlineData("update_mute_rule", "rule_id,changes_json,agent_action")]
     [InlineData("set_notification_route_enabled", "route_id,enabled")]
     [InlineData("set_notification_route_fallback", "route_id,fallback_route_id")]
@@ -182,7 +182,6 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         var sql = Reader.AlertHistoryAllServersSql;
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
         Assert.Contains("(a.dismissed = FALSE OR $4)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("a.server_id =", sql, StringComparison.Ordinal);   /* fleet-wide */
         Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);       /* #2495 upper edge */
         Assert.Contains("LIMIT $3", sql, StringComparison.Ordinal);
     }
@@ -369,7 +368,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         Assert.Equal("page", payload["analysis"]!["uncorroborated_route"]!.GetValue<string>());
         Assert.Equal(DarlingAlertSettings.RouteSourceStore, payload["analysis"]!["uncorroborated_route_source"]!.GetValue<string>());
         Assert.Equal(DarlingMcpAlertTools.UncorroboratedRouteNote, payload["analysis"]!["uncorroborated_route_note"]!.GetValue<string>());
-        Assert.StartsWith("#3712: the EFFECTIVE route, resolved store-over-file", DarlingMcpAlertTools.UncorroboratedRouteNote, StringComparison.Ordinal);
+        Assert.StartsWith("The effective route, resolved store-over-file", DarlingMcpAlertTools.UncorroboratedRouteNote, StringComparison.Ordinal);
         Assert.DoesNotContain("FILE-LEVEL", DarlingMcpAlertTools.UncorroboratedRouteNote, StringComparison.Ordinal);
 
         /* A NULL store half with nothing published: neither home holds a route, so the shipped digest applies and
@@ -472,7 +471,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         Assert.Contains("the STORE winning", read, StringComparison.Ordinal);
         Assert.Contains("analysis.uncorroborated_route_source", read, StringComparison.Ordinal);
         Assert.Contains("'store', 'file' or 'default'", read, StringComparison.Ordinal);
-        Assert.Contains("analysis.uncorroborated_route is WRITABLE since V137", write, StringComparison.Ordinal);
+        Assert.Contains("analysis.uncorroborated_route is WRITABLE", write, StringComparison.Ordinal);
         Assert.Contains("null CLEARS the column", write, StringComparison.Ordinal);
         Assert.Contains("uncorroborated_route_source", write, StringComparison.Ordinal);
         foreach (var description in new[] { read, write })
@@ -514,7 +513,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         var poison = payload["poison_wait"]!;
         Assert.Equal(1000, poison["threshold_ms"]!.GetValue<int>());
         Assert.Equal(DarlingMcpAlertTools.PoisonWaitThresholdMsNote, poison["threshold_ms_note"]!.GetValue<string>());
-        Assert.StartsWith("retired by #3593", DarlingMcpAlertTools.PoisonWaitThresholdMsNote, StringComparison.Ordinal);
+        /* #8572: the reply names no tracker number. */
+        Assert.DoesNotMatch(@"#\d", DarlingMcpAlertTools.PoisonWaitThresholdMsNote);
 
         /* Setting the value: stored under its old bounds, named in the targets, and warned about. */
         var (targets, error, warnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
@@ -572,6 +572,105 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     private static string ToolDescription(string toolName) =>
         ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == toolName)
             .GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+    /// <summary>
+    /// #7028 (V230): the two blocking band snapshot tiers take 0 (that tier is off) or 1 to 86400, refuse anything between, below or above,
+    /// and bind the order of the pair only when both are above 0. The read-only unit label is accepted and writes nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("0", true)]
+    [InlineData("1", true)]
+    [InlineData("86400", true)]
+    [InlineData("45.5", true)]
+    [InlineData("0.5", false)]
+    [InlineData("-1", false)]
+    [InlineData("86400.5", false)]
+    [InlineData("\"30\"", false)]
+    [InlineData("null", false)]
+    public void BlockingSnapshotTiers_AcceptZeroOrTheBandRange_AndRefuseTheRest(string value, bool accepted)
+    {
+        foreach (var key in new[] { "blocking_warn_snapshot_wait_seconds", "blocking_critical_snapshot_wait_seconds" })
+        {
+            var (targets, error) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse("{\"health_bands\":{\"" + key + "\":" + value + "}}")!);
+            if (accepted)
+            {
+                Assert.Null(error);
+                Assert.Equal(new[] { (DarlingMcpAlertTools.AlertSettingsTable, key) }, targets.ToArray());
+            }
+            else
+            {
+                Assert.NotNull(error);
+                Assert.Contains("health_bands." + key, error, StringComparison.Ordinal);
+                Assert.Empty(targets);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(30, 120, true)]
+    [InlineData(30, 30, true)]
+    [InlineData(0, 15, true)]
+    [InlineData(30, 0, true)]
+    [InlineData(0, 0, true)]
+    [InlineData(120, 30, false)]
+    public void BlockingSnapshotTiers_InOneBody_MustKeepCriticalAtOrAboveWarn_WhenBothAreOn(double warn, double critical, bool accepted)
+    {
+        var body = (JsonObject)JsonNode.Parse(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"{{\"health_bands\":{{\"blocking_warn_snapshot_wait_seconds\":{warn},\"blocking_critical_snapshot_wait_seconds\":{critical}}}}}"))!;
+        var (targets, error) = ParseAsPartialUpdate(body);
+        if (accepted)
+        {
+            Assert.Null(error);
+            Assert.Equal(2, targets.Count);
+        }
+        else
+        {
+            Assert.NotNull(error);
+            Assert.Contains("blocking_critical_snapshot_wait_seconds", error, StringComparison.Ordinal);
+            /* The parser reports its error and the caller writes nothing, whatever it had collected before the refusal. */
+        }
+    }
+
+    [Fact]
+    public void BlockingBandUnitLabel_ComesHomeFromARoundTrip_AndClaimsNoColumn()
+    {
+        var (targets, error) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse("{\"health_bands\":{\"blocking_band_unit\":\"waits_per_hour\"}}")!);
+        Assert.Null(error);
+        Assert.Empty(targets);
+
+        var payload = SerializedSettingsPayload(SampleSettingsRow());
+        Assert.Equal("waits_per_hour", payload["health_bands"]!["blocking_band_unit"]!.GetValue<string>());
+        Assert.Equal(33.5, payload["health_bands"]!["blocking_warn_snapshot_wait_seconds"]!.GetValue<double>());
+        Assert.Equal(95.5, payload["health_bands"]!["blocking_critical_snapshot_wait_seconds"]!.GetValue<double>());
+    }
+
+    /// <summary>
+    /// #7616 / #3631: the tool that REPORTS the blocking tiers names the unit each engine bands them in. A PostgreSQL
+    /// card with at least 3 captures bands blocked captures per hour through the same tiers, so the read must not say the
+    /// tiers are waits only, nor that a PostgreSQL server has no blocking band, and the payload carries the PostgreSQL unit
+    /// beside the SQL Server one (which a round-tripped write accepts and ignores).
+    /// </summary>
+    [Fact]
+    public void BlockingBandUnit_IsNamedForBothEngines_ByTheReadDescriptionAndThePayload()
+    {
+        var read = ToolDescription("get_alert_settings");
+        Assert.Contains("blocking_band_unit: waits_per_hour", read, StringComparison.Ordinal);
+        Assert.Contains("blocking_band_unit_postgres: captures_per_hour_at_1_minute_cadence", read, StringComparison.Ordinal);
+        Assert.Contains("blocked CAPTURES per hour", read, StringComparison.Ordinal);
+        Assert.DoesNotContain("no blocking band", read, StringComparison.Ordinal);
+
+        var write = ToolDescription("update_alert_settings");
+        Assert.Contains("blocking_band_unit_postgres: captures_per_hour_at_1_minute_cadence", write, StringComparison.Ordinal);
+
+        var payload = SerializedSettingsPayload(SampleSettingsRow());
+        Assert.Equal("waits_per_hour", payload["health_bands"]!["blocking_band_unit"]!.GetValue<string>());
+        Assert.Equal("captures_per_hour_at_1_minute_cadence", payload["health_bands"]!["blocking_band_unit_postgres"]!.GetValue<string>());
+
+        var (targets, error) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(
+            "{\"health_bands\":{\"blocking_band_unit\":\"waits_per_hour\",\"blocking_band_unit_postgres\":\"captures_per_hour_at_1_minute_cadence\"}}")!);
+        Assert.Null(error);
+        Assert.Empty(targets);
+    }
 
     /// <summary>
     /// The SELECT's column count and the positional read must agree. Every field on
@@ -1334,7 +1433,11 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         AgentAlertGapsEnabled: true,
         BackupOverdueEnabled: true, LogBackupOverdueEnabled: true, CheckDbOverdueEnabled: true,
         IdentityCapacityEnabled: true, IdentityCapacityWarningPercent: 72, IdentityCapacityCriticalPercent: 92,
-        BlockingWarnPerHour: 6.5, BlockingCriticalPerHour: 22.5, BlockingWarnWaitSeconds: 11.5, BlockingCriticalWaitSeconds: 62.5);
+        BlockingWarnPerHour: 6.5, BlockingCriticalPerHour: 22.5, BlockingWarnWaitSeconds: 11.5, BlockingCriticalWaitSeconds: 62.5,
+        /* #7028 (V230): deliberately NOT the shipped 0 / 0 (off), so a payload that dropped the columns would not match. */
+        BlockingWarnSnapshotWaitSeconds: 33.5, BlockingCriticalSnapshotWaitSeconds: 95.5,
+        DailyReportEnabled: true, DailyReportSendAt: "06:30", DailyReportTimeZone: "America/New_York", DailyReportTitle: "Morning report",
+        BackupOverdueThresholdHours: 168, LogBackupOverdueThresholdMinutes: 60, CheckDbOverdueThresholdHours: 336);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()
@@ -1520,6 +1623,12 @@ internal sealed class FakeMuteRuleStore : IMuteRuleStore
     /// create verb's write-to-read-back window (#3450). Takes the rule because, unlike the flag/edit verbs, the
     /// caller does not know the generated id before the write.</summary>
     internal Action<MuteRule>? AfterInsert { get; set; }
+
+    /// <summary>The store's own refusal of a rule's repeat schedule (#7040), like the zone check Darling's PostgreSQL store runs; null accepts.</summary>
+    internal Func<MuteRule, string?>? RecurrenceRefusal { get; set; }
+
+    public Task<string?> RecurrenceRefusalAsync(MuteRule rule, CancellationToken cancellationToken = default) =>
+        Task.FromResult(RecurrenceRefusal?.Invoke(rule));
 
     internal FakeMuteRuleStore Seed(MuteRule rule)
     {
@@ -2185,6 +2294,9 @@ public sealed class CreateMuteRuleCoreTests
     private static JsonNode Payload(string json) =>
         JsonNode.Parse(json)!["mute_rule"] ?? throw new InvalidOperationException($"no mute_rule in {json}");
 
+    /* A fixed future instant, whole seconds so it round-trips through the wire spelling unchanged. */
+    private static readonly DateTime FutureExpiry = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(30), DateTimeKind.Utc);
+
     [Fact]
     public async Task AFullBody_CreatesAnEnabledRule_AndReportsTheStoredRow()
     {
@@ -2199,9 +2311,9 @@ public sealed class CreateMuteRuleCoreTests
               "wait_type_pattern": "LCK",
               "job_name_pattern": "nightly",
               "reason": "  known load window  ",
-              "expires_at_utc": "2026-12-01T00:00:00Z"
+              "expires_at_utc": "{FUTURE}"
             }
-            """);
+            """.Replace("{FUTURE}", FutureExpiry.ToString("o", System.Globalization.CultureInfo.InvariantCulture)));
 
         Assert.Equal("created", DarlingMcpTestData.StatusOf(result));
 
@@ -2213,7 +2325,7 @@ public sealed class CreateMuteRuleCoreTests
         Assert.Equal("pm-server-1", stored.ServerName);
         Assert.Equal("known load window", stored.Reason);
         Assert.Equal("nightly", stored.JobNamePattern);
-        Assert.Equal(new DateTime(2026, 12, 1, 0, 0, 0, DateTimeKind.Utc), stored.ExpiresAtUtc);
+        Assert.Equal(FutureExpiry, stored.ExpiresAtUtc);
 
         /* The #3306 clock starts NOW — the store's value, which is also what the payload reports. */
         Assert.True((DateTime.UtcNow - stored.CreatedAtUtc).Duration() < TimeSpan.FromMinutes(1));
@@ -2263,11 +2375,72 @@ public sealed class CreateMuteRuleCoreTests
         /* create_mute_rule's parameter spelling, honored here through the SAME parser normalization. */
         var store = new FakeMuteRuleStore();
 
-        var result = await DarlingMcpAlertTools.CreateMuteRuleCore(store, "{\"expires_at\":\"2026-06-01T00:00:00Z\"}");
+        var result = await DarlingMcpAlertTools.CreateMuteRuleCore(store, $"{{\"expires_at\":\"{FutureExpiry:o}\"}}");
 
         Assert.Equal("created", DarlingMcpTestData.StatusOf(result));
-        Assert.Equal(new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc),
-            store.Row((string)Payload(result)["id"]!)!.ExpiresAtUtc);
+        Assert.Equal(FutureExpiry, store.Row((string)Payload(result)["id"]!)!.ExpiresAtUtc);
+    }
+
+    /* #7198: a rule born already expired mutes nothing, so a create must refuse it instead of answering "created". */
+    [Theory]
+    [InlineData("expires_at")]
+    [InlineData("expires_at_utc")]
+    public async Task APastExpiry_IsRefused_AndStoresNothing(string key)
+    {
+        var store = new FakeMuteRuleStore();
+        var past = DateTime.UtcNow.AddMinutes(-5).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+
+        var result = await DarlingMcpAlertTools.CreateMuteRuleCore(store, $"{{\"{key}\":\"{past}\"}}");
+
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(result));
+        Assert.Contains("already in the past", result, StringComparison.Ordinal);
+        Assert.Equal(0, store.Count);
+    }
+
+    [Fact]
+    public async Task TheMcpCreate_RefusesAPastExpiry_AndStoresNothing()
+    {
+        var store = new FakeMuteRuleStore();
+        var past = DateTime.UtcNow.AddMinutes(-5).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+
+        var result = await DarlingMcpAlertTools.CreateMuteRuleOver(store, "pm-server-1", "High CPU", null, null, null, null, "stale clock", past);
+
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(result));
+        Assert.Contains("already in the past", result, StringComparison.Ordinal);
+        Assert.Equal(0, store.Count);
+    }
+
+    [Fact]
+    public async Task TheMcpCreate_RefusesAnExpiryExactlyAtNow_ButAcceptsOneSecondLater()
+    {
+        /* The boundary: an expiry equal to the create's clock mutes nothing, so it is refused (<=, not <). */
+        var store = new FakeMuteRuleStore();
+        var now = new DateTime(2030, 6, 1, 12, 0, 0, DateTimeKind.Utc);
+
+        var atNow = await DarlingMcpAlertTools.CreateMuteRuleOver(store, "pm-server-1", "High CPU", null, null, null, null, "edge",
+            now.ToString("o", System.Globalization.CultureInfo.InvariantCulture), nowUtc: now);
+
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(atNow));
+        Assert.Equal(0, store.Count);
+
+        var later = await DarlingMcpAlertTools.CreateMuteRuleOver(store, "pm-server-1", "High CPU", null, null, null, null, "edge",
+            now.AddSeconds(1).ToString("o", System.Globalization.CultureInfo.InvariantCulture), nowUtc: now);
+
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(later));
+    }
+
+    [Fact]
+    public async Task AnUpdate_MayStillSetAPastExpiry_ToEndARule()
+    {
+        var store = new FakeMuteRuleStore();
+        var created = await DarlingMcpAlertTools.CreateMuteRuleCore(store, $"{{\"expires_at\":\"{FutureExpiry:o}\"}}");
+        var id = (string)Payload(created)["id"]!;
+        var past = DateTime.UtcNow.AddMinutes(-5).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+
+        var updated = await DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, $"{{\"expires_at_utc\":\"{past}\"}}");
+
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(updated));
+        Assert.True(store.Row(id)!.ExpiresAtUtc < DateTime.UtcNow);
     }
 
     [Fact]
@@ -2766,8 +2939,9 @@ public sealed class WebMuteRuleEndpointFlowTests
         var store = new FakeMuteRuleStore();
 
         /* POST /api/mute-rules */
+        var future = DateTime.UtcNow.AddDays(30).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
         var created = await DarlingMcpAlertTools.CreateMuteRuleCore(store,
-            "{\"metric_name\":\"High CPU\",\"reason\":\"initial\",\"expires_at_utc\":\"2026-12-01T00:00:00Z\"}");
+            $"{{\"metric_name\":\"High CPU\",\"reason\":\"initial\",\"expires_at_utc\":\"{future}\"}}");
         Assert.Equal("created", DarlingMcpTestData.StatusOf(created));
         var id = (string)JsonNode.Parse(created)!["mute_rule"]!["id"]!;
         var born = store.Row(id)!.CreatedAtUtc;

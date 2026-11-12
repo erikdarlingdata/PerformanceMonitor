@@ -132,7 +132,7 @@ public sealed class WebClickthroughPickListTests
     [Fact]
     public void TheAlertingReadsPanel_MarksItsWhichRanForAndNewestTilesHideWhenEmpty()
     {
-        var text = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        var text = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         var start = text.IndexOf("const ALERT_READ_STATS = [", StringComparison.Ordinal);
         var block = text[start..text.IndexOf("];", start, StringComparison.Ordinal)];
         var tiles = block.Split('\n').Where(l => l.TrimStart().StartsWith("{ key: \"alert_read_health.", StringComparison.Ordinal)).ToArray();
@@ -179,7 +179,7 @@ public sealed class WebClickthroughPickListTests
     [Fact]
     public void TheCollectorGridsMessageColumns_ArePlain_AndTheQueryStorePageTextNamesNoTool()
     {
-        var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        var tabs = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         foreach (var key in new[] { "note_summary", "output_finding", "regression_finding" })
         {
             Assert.Matches("key: \"" + key + "\"[^}]*plain: true", tabs);
@@ -224,8 +224,8 @@ public sealed class WebClickthroughPickListTests
         ];
         var r = Run("plain", System.Text.Json.JsonSerializer.Serialize(inputs));
         var o = Strings(r.GetProperty("out"));
-        Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[0]);
-        Assert.Equal("shred gated: 1, events read: 0", o[1]);
+        Assert.Equal("latest run: shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0, report xml empty: 0", o[0]);
+        Assert.Equal("shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0", o[1]);
         Assert.Equal(inputs[2], o[2]);
         Assert.Equal(inputs[3], o[3]);
     }

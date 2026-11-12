@@ -473,7 +473,7 @@ public static partial class PgTargetScorer
     [
         new()
         {
-            Description = "Dead tuples are RISING through the backlog while autovacuum ran on the table — it is running and losing, not merely late",
+            Description = "Dead tuples are RISING through the backlog while autovacuum ran on the table: it is running and losing, not merely late",
             /* unmeasured: chosen, not measured — calibrate against pg_autovacuum_stats before the next release. */
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AutovacuumBacklog, out var f)
@@ -482,7 +482,7 @@ public static partial class PgTargetScorer
         },
         new()
         {
-            Description = "autovacuum_enabled is OFF on this table (reloption) — the engine will never clear it; only a manual VACUUM can",
+            Description = "autovacuum_enabled is OFF on this table (reloption): the engine will never clear it; only a manual VACUUM can",
             /* unmeasured: chosen, not measured — calibrate against pg_autovacuum_stats before the next release. */
             Boost = 0.5,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AutovacuumBacklog, out var f)
@@ -490,21 +490,21 @@ public static partial class PgTargetScorer
         },
         new()
         {
-            Description = "PG_XMIN_HOLD co-fired — a held xmin horizon makes these dead tuples unremovable, so vacuuming cannot clear the backlog",
+            Description = "PG_XMIN_HOLD co-fired: a held xmin horizon makes these dead tuples unremovable, so vacuuming cannot clear the backlog",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.XminHold, out var f) && f.BaseSeverity > 0,
         },
         new()
         {
-            Description = "CONFIG_PG_AUTOVACUUM_OFF co-fired — autovacuum is off server-wide, so the backlog is by configuration, not by load",
+            Description = "CONFIG_PG_AUTOVACUUM_OFF co-fired: autovacuum is off server-wide, so the backlog is by configuration, not by load",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.5,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.ConfigAutovacuumOff, out var f) && f.BaseSeverity > 0,
         },
         new()
         {
-            Description = "Many tables are persistently past their line — the worker pool, not this table's shape, is the bottleneck",
+            Description = "Many tables are persistently past their line: the worker pool, not this table's shape, is the bottleneck",
             /* The gate is BacklogManyTables above (measured, 2026-09-19); the boost itself is unmeasured: chosen,
                not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.2,
@@ -517,14 +517,14 @@ public static partial class PgTargetScorer
     [
         new()
         {
-            Description = "PG_XMIN_HOLD co-fired — a held horizon stops freezing outright; the forced vacuum cannot advance relfrozenxid past it",
+            Description = "PG_XMIN_HOLD co-fired: a held horizon stops freezing outright; the forced vacuum cannot advance relfrozenxid past it",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.5,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.XminHold, out var f) && f.BaseSeverity > 0,
         },
         new()
         {
-            Description = "PG_AUTOVACUUM_BACKLOG co-fired — the anti-wraparound vacuum queues behind tables autovacuum is already failing to clear",
+            Description = "PG_AUTOVACUUM_BACKLOG co-fired: the anti-wraparound vacuum queues behind tables autovacuum is already failing to clear",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AutovacuumBacklog, out var f) && f.BaseSeverity > 0,
@@ -535,14 +535,14 @@ public static partial class PgTargetScorer
     [
         new()
         {
-            Description = "PG_WRAPAROUND_TREND co-fired — the held horizon is already showing as a freeze age autovacuum cannot bring down",
+            Description = "PG_WRAPAROUND_TREND co-fired: the held horizon is already showing as a freeze age autovacuum cannot bring down",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.5,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.WraparoundTrend, out var f) && f.BaseSeverity > 0,
         },
         new()
         {
-            Description = "PG_AUTOVACUUM_BACKLOG co-fired — tables are past their trigger line and staying there: the damage the hold is doing",
+            Description = "PG_AUTOVACUUM_BACKLOG co-fired, tables are past their trigger line and staying there: the damage the hold is doing",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AutovacuumBacklog, out var f) && f.BaseSeverity > 0,
@@ -559,7 +559,7 @@ public static partial class PgTargetScorer
     [
         new()
         {
-            Description = "PG_AUTOVACUUM_BACKLOG co-fired — tables are persistently past their own trigger line, so this setting has measured consequences",
+            Description = "PG_AUTOVACUUM_BACKLOG co-fired: tables are persistently past their own trigger line, so this setting has measured consequences",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.5,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AutovacuumBacklog, out var f) && f.BaseSeverity > 0,

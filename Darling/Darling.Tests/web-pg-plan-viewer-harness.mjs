@@ -53,11 +53,14 @@ const scenarios = {
     viewer.resetPgPlanViewer();
     const cell = viewer.pgPlanCell("srv-a", row);
     out.buttonBefore = cell.byText("Plan") !== null;
+    out.planButtonClass = cell.byText("Plan").className;
     out.preBefore = pre(cell) !== null;
     cell.byText("Plan").click();
     out.text = pre(cell).textContent;
     out.hasCopy = cell.byText("Copy") !== null;
     out.hasDownload = cell.byText("Download .json") !== null;
+    out.copyButtonClass = cell.byText("Copy").className;
+    out.downloadButtonClass = cell.byText("Download .json").className;
     out.expanded = cell.byText("Hide plan").attrs["aria-expanded"];
     out.fetches = fetches.length;
     out.openClass = cell.className;

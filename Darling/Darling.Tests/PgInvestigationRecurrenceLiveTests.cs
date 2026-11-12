@@ -138,10 +138,17 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
                 sql.Parameters.Add(new NpgsqlParameter { Value = requestId });
                 sql.Parameters.Add(new NpgsqlParameter { Value = ServerId });
                 await using var reader = await sql.ExecuteReaderAsync(ct);
-                var counted = 0L;
+                /* The SQL returns the bounded fires; the clock test is the shared builder's, as in the reader. */
+                var around = default(DateTime);
+                var fires = new System.Collections.Generic.List<(DateTime FireUtc, bool Muted)>();
                 while (await reader.ReadAsync(ct))
-                    if (!reader.IsDBNull(2)) counted += reader.GetInt64(4);
-                Assert.Equal(2L, counted);
+                {
+                    around = DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(1), DateTimeKind.Utc);
+                    if (!reader.IsDBNull(2))
+                        fires.Add((DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(2), DateTimeKind.Utc), reader.GetBoolean(3)));
+                }
+                Assert.Equal(anchor, around);
+                Assert.Equal(2, InvestigationAlertRecurrence.FromFires("Blocking", around, fires, null).Fired);
             }
         });
     }
@@ -160,6 +167,33 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
             var recurrence = await ReadAsync(dataSource, requestId, anchor, ct);
             Assert.Equal(1, recurrence.Fired);
             Assert.Equal(new[] { new DateOnly(2026, 10, 14) }, recurrence.FiredDates);
+        });
+    }
+
+    /// <summary>The reader hands the server's own zone (its newest <c>server_properties</c> row) to the streak rule: with a stored
+    /// Eastern clock, an Agent job at 02:00 local that fired at 06:00 UTC after the spring change of 2026 and at 07:00 UTC before it
+    /// (03:00 EDT on the Sunday, when the clock skipped 02:00) is a streak of 7; read in UTC, as a server with no stored clock is,
+    /// it would be 3.</summary>
+    [Fact]
+    public async Task TheStreak_FollowsTheServersZone_AcrossASpringForwardSunday()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            var anchor = new DateTime(2026, 3, 12, 6, 0, 0, DateTimeKind.Utc); // Thursday, 02:00 EDT
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, utc_offset_minutes, time_zone_id)
+VALUES ($1, $2, $3, $4, $5, $6)",
+                -7_626_001, DarlingMcpTestData.Naive(anchor.AddHours(-1)), ServerId, ServerName, -240, "Eastern Standard Time");
+            var requestId = await OpenAsync(dataSource, anchor, ct);
+            foreach (var day in new[] { 1, 2, 3 })
+                await FireAsync(connection, anchor.AddDays(-day), ct);                 // 02:00 EDT
+            foreach (var day in new[] { 4, 5, 6, 7 })
+                await FireAsync(connection, anchor.AddDays(-day).AddHours(1), ct);     // 07:00 UTC: 03:00 EDT on the Sunday, 02:00 EST before it
+
+            var recurrence = await ReadAsync(dataSource, requestId, anchor, ct);
+            Assert.Equal(7, recurrence.StreakDays);
+            Assert.Equal(7, recurrence.Fired);
+            Assert.Equal(7, recurrence.FiredDates.Count);
         });
     }
 

@@ -2,7 +2,8 @@
    the page opens on a SQL Server target, the server list says which targets are PostgreSQL, and on a PostgreSQL target a
    panel that does not apply says one short line instead of the gate paragraph. FinOpsPostgresTargetTests starts it as
        node finops-postgres-target-harness.mjs <path to wwwroot/js> <scenario>
-   with HARNESS_REGISTRY (the list_servers rows) and HARNESS_READS (tool name -> answer body) in the environment.
+   with HARNESS_REGISTRY (the list_servers rows) and HARNESS_READS (tool name -> answer body) in the environment, and
+   HARNESS_SESSION (the /api/session answer) when the page is to be drawn under a given session.
    `fetch` and the DOM are stand-ins; everything else is the shipped code. */
 import fs from "node:fs";
 import os from "node:os";
@@ -84,13 +85,16 @@ globalThis.document = {
   createElement: (tag) => new FakeNode(tag),
   createElementNS: (ns, tag) => new FakeNode(tag),
   createTextNode: (text) => new FakeNode("#text", text),
+  querySelectorAll: () => [], /* keepScroll lists the page's grids; this fake page draws none */
 };
 
 const REGISTRY = JSON.parse(process.env.HARNESS_REGISTRY || "[]");
 const READS = JSON.parse(process.env.HARNESS_READS || "{}");
+const SESSION = process.env.HARNESS_SESSION ? JSON.parse(process.env.HARNESS_SESSION) : null;
 globalThis.fetch = async (url) => {
   await new Promise((r) => setTimeout(r, 2));
   const u = String(url);
+  if (SESSION && u.split("?")[0].endsWith("/api/session")) return { status: 200, ok: true, text: async () => JSON.stringify(SESSION) };
   const tool = (u.match(/\/api\/read\/([a-z_]+)/) || [])[1];
   const body = tool === "list_servers" ? { server_count: REGISTRY.length, servers: REGISTRY } : READS[tool] || {};
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
@@ -102,10 +106,12 @@ process.on("unhandledRejection", (e) => rejections.push(String(e && e.stack ? e.
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "finops-pg-target-"));
 let finops;
+let views;
 try {
   fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   finops = await import(pathToFileURL(path.join(scratch, "pages", "finops.js")).href);
+  views = await import(pathToFileURL(path.join(scratch, "views-api.js")).href);
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
@@ -121,6 +127,8 @@ const picker = (root) => all(root, (n) => n.tag === "select" && n.attrs["aria-la
 
 const render = async (server, tab) => {
   const main = new FakeNode("main");
+  /* The shell reads the session before any page draws; a scenario given a session reads it first too. */
+  if (SESSION) await views.getSession();
   finops.renderFinops(main, server, tab);
   await settle();
   return main;
@@ -138,6 +146,12 @@ const scenarios = {
     const main = await render(process.env.HARNESS_SERVER, process.env.HARNESS_TAB);
     const strips = all(main, (n) => /\bstrip\b/.test(String(n.className))).map((n) => n.textContent);
     return { strips };
+  },
+  /* #8555: the headings and strips of a tab in page order, so a test can tell which heading a strip sits under. */
+  outline: async () => {
+    const main = await render(process.env.HARNESS_SERVER, process.env.HARNESS_TAB);
+    const nodes = all(main, (n) => n.tag === "h3" || /\bstrip\b/.test(String(n.className))).map((n) => (n.tag === "h3" ? "h3: " : "strip: ") + n.textContent);
+    return { nodes };
   },
 };
 

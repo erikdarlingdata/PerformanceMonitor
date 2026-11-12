@@ -316,7 +316,7 @@ public static partial class PgTargetScorer
         [
             new()
             {
-                Description = "PG_BLOAT_TREND co-fired on a database this trend names — part of the growth is dead space autovacuum has not reclaimed, and the bloat card's levers come before any storage decision",
+                Description = "PG_BLOAT_TREND co-fired on a database this trend names: part of the growth is dead space autovacuum has not reclaimed, and the bloat card's levers come before any storage decision",
                 /* unmeasured: GrowthBloatCoFireBoost (see the constant). */
                 Boost = GrowthBloatCoFireBoost,
                 Predicate = facts => facts.TryGetValue(PgTargetFactKeys.DatabaseGrowth, out var growth)
@@ -326,7 +326,7 @@ public static partial class PgTargetScorer
             },
             new()
             {
-                Description = "ANOMALY_PG_DATABASE_GROWTH co-fired — the instance's growth rate in this window is unusual against its own hour-of-week routine, so the fortnight's slope is happening now, not a step that already happened",
+                Description = "ANOMALY_PG_DATABASE_GROWTH co-fired: the instance's growth rate in this window is unusual against its own hour-of-week routine, so the fortnight's slope is happening now, not a step that already happened",
                 /* unmeasured: GrowthAnomalyCoFireBoost (see the constant). */
                 Boost = GrowthAnomalyCoFireBoost,
                 Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AnomalyDatabaseGrowth, out var anomaly) && anomaly.BaseSeverity > 0,

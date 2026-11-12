@@ -64,7 +64,7 @@ public partial class AboutWindow : Window
             if (updateInfo != null)
             {
                 _pendingUpdate = updateInfo;
-                UpdateStatusText.Text = $"Update available: v{updateInfo.TargetFullRelease.Version} — click to install";
+                UpdateStatusText.Text = $"Update available: v{updateInfo.TargetFullRelease.Version} (click to install)";
                 UpdateStatusText.Cursor = System.Windows.Input.Cursors.Hand;
                 UpdateStatusText.MouseLeftButtonUp -= UpdateStatusText_Click;
                 UpdateStatusText.MouseLeftButtonUp += VelopackDownload_Click;
@@ -89,7 +89,7 @@ public partial class AboutWindow : Window
         else if (result.IsUpdateAvailable)
         {
             _updateReleaseUrl = result.ReleaseUrl;
-            UpdateStatusText.Text = $"Update available: {result.LatestVersion} (you have {result.CurrentVersion}) — click to open releases";
+            UpdateStatusText.Text = $"Update available: {result.LatestVersion} (you have {result.CurrentVersion}). Click to open releases";
             UpdateStatusText.Cursor = System.Windows.Input.Cursors.Hand;
             UpdateStatusText.MouseLeftButtonUp -= VelopackDownload_Click;
             UpdateStatusText.MouseLeftButtonUp += UpdateStatusText_Click;
@@ -163,9 +163,9 @@ public partial class AboutWindow : Window
                 UseShellExecute = true
             });
         }
-        catch
+        catch (Exception ex)
         {
-            MessageBox.Show($"Could not open URL: {url}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not open {url} in your browser: {ex.Message}. Copy the address and paste it into a browser.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 }

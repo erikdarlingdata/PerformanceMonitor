@@ -109,8 +109,12 @@ public sealed class QueryStoreWideUpperBoundLiveTests
         var mcpNew = DarlingDataReader.QueryStoreTopTableSql;
         var mcpOld = Cut(mcpNew, @"\s*AND\s+first_execution_time <= \$3 \+ interval '\d+ minutes'");
         var mcpTop = await TopIdsAsync(connection, mcpNew, ct);
-        Assert.Equal(ExpectedTop, mcpTop);
-        Assert.Equal(ExpectedTop.Append(11).OrderBy(q => q), await TopIdsAsync(connection, mcpOld, ct));
+        /* #7814: the MCP read places an interval by its start as the grid does (see the grid's note below), so its window holds the
+           same rows as the grid's: row 7 and not row 2, and row 11 inside the day-plus-an-hour start margin. No seeded row is past
+           that margin, so cutting the bound out changes nothing here. */
+        int[] expectedMcp = { 1, 3, 4, 5, 7, 9, 10, 11, 12, 13 };
+        Assert.Equal(expectedMcp, mcpTop);
+        Assert.Equal(expectedMcp, await TopIdsAsync(connection, mcpOld, ct));
 
         /* ---- The long-window read: only the two edge arms read the wide table; no daily row is built, so the middle
            days contribute nothing, and the edges are what the bound could clip. ---- */
@@ -124,8 +128,13 @@ public sealed class QueryStoreWideUpperBoundLiveTests
         /* ---- The Queries grid's table read: a closed end, and the open end a preset window binds as NULL. ---- */
         var gridNew = ViewerDataService.QueryStoreTopTableSql;
         var gridOld = Cut(gridNew, @"\s*AND\s+\(\$3::timestamp IS NULL OR first_execution_time <= \$3 \+ interval '\d+ minutes'\)");
-        Assert.Equal(ExpectedTop, await GridIdsAsync(connection, gridNew, W1, ct));
-        Assert.Equal(ExpectedTop.Append(11).OrderBy(q => q), await GridIdsAsync(connection, gridOld, W1, ct));
+        /* #7776: the grid places an interval by its start (seeded five minutes before its collection), so the window holds row 7 (collected a
+           minute past the end, started inside it) and not row 2 (collected at the start, started before it), and row 11 (first execution
+           12 h 1 min past the end) is inside the day-plus-an-hour start margin. No seeded row is past that margin, so cutting the bound out
+           changes nothing for the grid here. */
+        int[] expectedGrid = { 1, 3, 4, 5, 7, 9, 10, 11, 12, 13 };
+        Assert.Equal(expectedGrid, await GridIdsAsync(connection, gridNew, W1, ct));
+        Assert.Equal(expectedGrid, await GridIdsAsync(connection, gridOld, W1, ct));
         var openEndNew = await GridIdsAsync(connection, gridNew, null, ct);
         Assert.Equal(await GridIdsAsync(connection, gridOld, null, ct), openEndNew);
         Assert.Contains(8, openEndNew);

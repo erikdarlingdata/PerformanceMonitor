@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Common;
 
@@ -63,9 +64,17 @@ public static class SystemHealthSignificance
 
     /// <summary>
     /// The low-physical-memory notification sp_HealthParser keeps under warnings_only for the
-    /// MemoryConditions (line 3420) and MemoryBroker (line 3651) categories.
+    /// MemoryConditions category (line 3420). It is a resource-monitor value; the memory broker never carries it
+    /// (#7466), so the broker gate uses <see cref="BrokerShrinkNotification"/>.
     /// </summary>
     public const string LowMemoryNotification = "RESOURCE_MEMPHYSICAL_LOW";
+
+    /// <summary>
+    /// The memory broker's own notification for lowering a target (#7466). The broker event carries one of
+    /// STABLE, GROW or SHRINK (Microsoft's support blog on memory broker ring buffer entries), never the resource
+    /// monitor's RESOURCE_MEMPHYSICAL_* values, so SHRINK is the only broker value that can be a sign of pressure.
+    /// </summary>
+    public const string BrokerShrinkNotification = "SHRINK";
 
     /// <summary>
     /// error_reported numbers sp_HealthParser always excludes from severe errors — 17830 (a network
@@ -138,11 +147,93 @@ public static class SystemHealthSignificance
         string.Equals(record.LastNotification, LowMemoryNotification, StringComparison.Ordinal);
 
     /// <summary>
-    /// A memory-broker ratio-change row is significant when its <c>notification</c> is
-    /// RESOURCE_MEMPHYSICAL_LOW, per sp_HealthParser.sql line 3651 under <c>@warnings_only = 1</c>.
+    /// A memory-broker ratio-change row is significant when its <c>notification</c> is SHRINK (#7466). The broker
+    /// event carries STABLE, GROW or SHRINK, so the RESOURCE_MEMPHYSICAL_LOW test copied from sp_HealthParser's
+    /// <c>@warnings_only</c> filter (line 3651) could never pass: every broker read answered empty. A shrink is not
+    /// always an incident, because a broker lowers its target under ordinary workload shifts too, so a SHRINK row is
+    /// a lead to read next to the memory-conditions and node-OOM reads, not a diagnosis on its own.
+    /// <c>sp_HealthParser</c>, which lives in another repository, still has the unreachable predicate.
     /// </summary>
     public static bool IsSignificant(MemoryBrokerRecord record) =>
-        string.Equals(record.Notification, LowMemoryNotification, StringComparison.Ordinal);
+        string.Equals(record.Notification, BrokerShrinkNotification, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The significant memory-broker records of <paramref name="eventXmls"/>, in their order: the rows a Memory Broker grid shows. An
+    /// event is shredded with <paramref name="shred"/> (<see cref="SystemHealthParser.ParseMemoryBroker"/> when none is given) and kept
+    /// when <see cref="IsSignificant(MemoryBrokerRecord)"/> says so. An event that does not shred is skipped.
+    /// <para>#8534: an event that <see cref="CanBeAShrink"/> rules out is never shredded. A window holds many STABLE and GROW events for
+    /// each SHRINK, and shredding is most of what the read costs. The rows are those of shredding every event.</para>
+    /// </summary>
+    public static List<MemoryBrokerRecord> SignificantBrokerRecords(IEnumerable<string> eventXmls, Func<string, MemoryBrokerRecord?>? shred = null)
+    {
+        shred ??= SystemHealthParser.ParseMemoryBroker;
+        var records = new List<MemoryBrokerRecord>();
+        foreach (var xml in eventXmls)
+        {
+            if (xml is null || !CanBeAShrink(xml))
+                continue;
+
+            if (shred(xml) is { } record && IsSignificant(record))
+                records.Add(record);
+        }
+
+        return records;
+    }
+
+    /// <summary>The start of the notification followed by markup, for each place XML can split the word: <c>S&lt;</c>, <c>SH&lt;</c> and so on.</summary>
+    private static readonly string[] ShrinkSplitByMarkup =
+        Enumerable.Range(1, BrokerShrinkNotification.Length - 1).Select(length => BrokerShrinkNotification[..length] + "<").ToArray();
+
+    /// <summary>The name of the event's data node that holds the notification, as <see cref="SystemHealthParser.ParseMemoryBroker"/> looks it up.</summary>
+    private const string NotificationDataName = "notification";
+
+    /// <summary>
+    /// Whether an event's XML can shred to the SHRINK notification. The shredded value is the text inside the notification's value element,
+    /// with any markup inside it left out, so it reads SHRINK only when the XML holds the word, or spells it another way: with a character or
+    /// entity reference, which needs an ampersand; with a CDATA section, which ends in <c>]]&gt;</c>; or with other markup (a comment, an
+    /// element) between two of its letters, which puts the start of the word straight before an angle bracket. XML with none of the four
+    /// cannot be a SHRINK, whatever else it holds.
+    /// <para>The split is looked for only from the first <c>notification</c> onward. The node is found by an attribute that holds that word,
+    /// and with no ampersand the word can only be there literally, so the node and its value start at or after it. A value before it, such as
+    /// a broker name that ends in S, is not a split notification.</para>
+    /// </summary>
+    internal static bool CanBeAShrink(string eventXml)
+    {
+        if (eventXml.Contains(BrokerShrinkNotification, StringComparison.Ordinal) || eventXml.Contains('&') || eventXml.Contains("]]>", StringComparison.Ordinal))
+            return true;
+
+        var node = eventXml.IndexOf(NotificationDataName, StringComparison.Ordinal);
+        if (node < 0)
+            return false;
+
+        var fromTheNode = eventXml.AsSpan(node);
+        foreach (var split in ShrinkSplitByMarkup)
+        {
+            if (fromTheNode.Contains(split, StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Counts memory-broker events by their <c>notification</c> value, as the MCP reads report what a window held
+    /// before the gate (#7466): <c>{"GROW": 12, "SHRINK": 3, "STABLE": 40}</c>. An event with no notification counts
+    /// under <see cref="NoBrokerNotification"/>. Sorted by value so the payload is stable.
+    /// </summary>
+    public static SortedDictionary<string, int> CountBrokerNotifications(IEnumerable<MemoryBrokerRecord> records)
+    {
+        var counts = new SortedDictionary<string, int>(StringComparer.Ordinal);
+        foreach (var record in records)
+        {
+            var key = string.IsNullOrEmpty(record.Notification) ? NoBrokerNotification : record.Notification;
+            counts[key] = counts.TryGetValue(key, out var n) ? n + 1 : 1;
+        }
+        return counts;
+    }
+
+    /// <summary>The key <see cref="CountBrokerNotifications"/> uses for a broker event that carried no notification value.</summary>
+    public const string NoBrokerNotification = "(none)";
 
     /// <summary>
     /// Every recorded memory-node OOM is significant — sp_HealthParser applies NO WHERE filter to this

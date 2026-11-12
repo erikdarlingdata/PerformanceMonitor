@@ -124,6 +124,21 @@ public sealed class McpLatestSnapshotStampTests : IClassFixture<SharedDuckDbFixt
     }
 
     [Fact]
+    public async Task GetResourceSemaphore_ShowsNoMaxTargetForTheSmallQuerySemaphore_NotAZero()
+    {
+        var (@base, anchor) = Past();
+        /* The DMV has no max target for the small-query semaphore (id 1), so the stored NULL reads null, not a 0 ceiling (#7676). */
+        await SeedGrantAsync(@base, waiters: 0, timeoutsDelta: 0, grantedMb: 500, semaphore: 0);
+        await SeedGrantAsync(@base, waiters: 0, timeoutsDelta: 0, grantedMb: 100, semaphore: 1);
+
+        var root = Parse(await McpMemoryTools.GetResourceSemaphore(_dataService, _serverManager, ServerName, 1, anchor));
+
+        var bySemaphore = root.GetProperty("grants").EnumerateArray().ToDictionary(g => g.GetProperty("resource_semaphore_id").GetInt32());
+        Assert.Equal(12000d, bySemaphore[0].GetProperty("max_target_memory_mb").GetDouble());
+        Assert.Equal(JsonValueKind.Null, bySemaphore[1].GetProperty("max_target_memory_mb").ValueKind);
+    }
+
+    [Fact]
     public async Task GetMemoryGrants_ReadsThePoolWindow_WithANullSemaphoreId()
     {
         var (@base, anchor) = Past();
@@ -149,6 +164,43 @@ public sealed class McpLatestSnapshotStampTests : IClassFixture<SharedDuckDbFixt
         Assert.Equal(6000d, window.GetProperty("peak_granted_memory_mb").GetDouble());
         Assert.Equal(Stamp(@base.AddMinutes(-30)), window.GetProperty("peak_granted_at").GetString());
         Assert.Equal(2, window.GetProperty("snapshots_in_window").GetInt64());
+    }
+
+    [Fact]
+    public async Task GetMemoryGrants_LongWindow_GrantsIsTheNewestCollection_NotABucketMean()
+    {
+        /* #7879: 29.5 hours of one-minute collections, the last two differing (waiters 0 then 4, granted 100 then 900). Past about
+           25 hours the chart read's buckets are wider than the collection interval, so its last bucket was a mean of the
+           last minutes stamped at the bucket start. grants[] must be the newest collection itself. The 30 second offset keeps
+           the newest collection off every bucket grid line, so a bucket stamp can never equal its own time. */
+        var now = DateTime.UtcNow;
+        var newest = new DateTime(now.Ticks - (now.Ticks % TimeSpan.TicksPerMinute), DateTimeKind.Utc).AddHours(-2).AddSeconds(30);
+        const int collections = 1770;
+        await ExecAsync(@"
+INSERT INTO memory_grant_stats
+    (collection_id, collection_time, server_id, server_name, resource_semaphore_id, pool_id,
+     target_memory_mb, max_target_memory_mb, total_memory_mb, available_memory_mb, granted_memory_mb, used_memory_mb,
+     grantee_count, waiter_count, timeout_error_count, forced_grant_count, timeout_error_count_delta, forced_grant_count_delta)
+SELECT
+    -(1000 + i), $1 - to_minutes(CAST(i AS INTEGER)), $2, $3, 0, 2,
+    8000, 12000, 8000, 8000 - CASE WHEN i = 0 THEN 900 ELSE 100 END,
+    CASE WHEN i = 0 THEN 900 ELSE 100 END, CASE WHEN i = 0 THEN 900 ELSE 100 END,
+    3, CASE WHEN i = 0 THEN 4 ELSE 0 END, 4, 2, 0, 0
+FROM range($4) t(i)",
+            Naive(newest), _serverId, ServerName, collections);
+        var anchor = newest.AddMinutes(5).ToString("o");
+
+        var root = Parse(await McpMemoryTools.GetMemoryGrants(_dataService, _serverManager, ServerName, 30, anchor));
+
+        Assert.Equal(Stamp(newest), root.GetProperty("captured_at").GetString());
+        Assert.Equal(300, root.GetProperty("age_seconds").GetInt64());
+        var latest = Assert.Single(root.GetProperty("grants").EnumerateArray());
+        Assert.Equal(4, latest.GetProperty("waiter_count").GetInt32());
+        Assert.Equal(900d, latest.GetProperty("granted_memory_mb").GetDouble());
+        Assert.Equal(Stamp(newest), latest.GetProperty("collection_time").GetString());
+
+        var window = Assert.Single(root.GetProperty("window").EnumerateArray());
+        Assert.Equal(collections, window.GetProperty("snapshots_in_window").GetInt64());
     }
 
     /* ───────────────────────── the search-bound pair: a snapshot older than the span is refused ───────────────────────── */
@@ -225,10 +277,12 @@ public sealed class McpLatestSnapshotStampTests : IClassFixture<SharedDuckDbFixt
         Assert.Equal(Stamp(@base), Parse(await McpMemoryTools.GetMemoryClerks(_dataService, _serverManager, ServerName)).GetProperty("captured_at").GetString());
         Assert.Equal(Stamp(@base), Parse(await McpIoTools.GetFileIoStats(_dataService, _serverManager, ServerName)).GetProperty("captured_at").GetString());
 
-        /* Perfmon: the stamp comes from the unfiltered snapshot, so a filter that matches nothing still says when. */
-        var perfmon = Parse(await McpPerfmonTools.GetPerfmonStats(_dataService, _serverManager, ServerName, "no such counter"));
-        Assert.Equal(Stamp(@base), perfmon.GetProperty("captured_at").GetString());
-        Assert.Empty(perfmon.GetProperty("counters").EnumerateArray());
+        /* Perfmon: the stamp comes from the unfiltered snapshot, so a filter that matches nothing still says when. #8090: such a
+           filter answers a status word (not_collected, with the collected counters), and the stamp rides in its hints. */
+        var perfmon = JsonDocument.Parse(await McpPerfmonTools.GetPerfmonStats(_dataService, _serverManager, ServerName, "no such counter")).RootElement.Clone();
+        Assert.Equal("not_collected", perfmon.GetProperty("status").GetString());
+        Assert.Equal(Stamp(@base), perfmon.GetProperty("hints").GetProperty("captured_at").GetString());
+        Assert.Equal(Stamp(@base), Parse(await McpPerfmonTools.GetPerfmonStats(_dataService, _serverManager, ServerName)).GetProperty("captured_at").GetString());
     }
 
     [Fact]
@@ -259,7 +313,10 @@ VALUES ($1, $2, $3, $4, 'AppDb', 'MAXDOP', '4', NULL)", _nextId--, Naive(connect
     public async Task GetServerSummary_NamesThreeClocks_SoAStaleCpuRowCannotHideUnderAFreshLog()
     {
         var (@base, _) = Past();
-        var cpuAt = @base.AddDays(-1);
+        /* #7196: the CPU row is minutes old (a stale one now shows no figure), and the memory row and the log are
+           long past it, so the three stamps still differ. */
+        var nowUtc = DateTime.UtcNow;
+        var cpuAt = new DateTime(nowUtc.Ticks - (nowUtc.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc).AddMinutes(-10);
         await ExecAsync(@"
 INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
 VALUES ($1, $2, $3, $4, $2, 42, 3)", _nextId--, Naive(cpuAt), _serverId, ServerName);
@@ -439,7 +496,7 @@ INSERT INTO memory_grant_stats
     (collection_id, collection_time, server_id, server_name, resource_semaphore_id, pool_id,
      target_memory_mb, max_target_memory_mb, total_memory_mb, available_memory_mb, granted_memory_mb, used_memory_mb,
      grantee_count, waiter_count, timeout_error_count, forced_grant_count, timeout_error_count_delta, forced_grant_count_delta)
-VALUES ($1, $2, $3, $4, $5, $6, 8000, 12000, 8000, $7, $8, $8, 3, $9, 4, 2, $10, 0)",
+VALUES ($1, $2, $3, $4, $5, $6, 8000, CASE WHEN $5 = 1 THEN NULL ELSE 12000 END, 8000, $7, $8, $8, 3, $9, 4, 2, $10, 0)",
         _nextId--, Naive(at), _serverId, ServerName, semaphore, pool, 8000 - grantedMb, grantedMb, waiters, timeoutsDelta);
 
     private Task SeedSchedulerAsync(DateTime at, int runnable) => ExecAsync(@"

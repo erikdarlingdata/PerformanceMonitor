@@ -192,7 +192,7 @@ public sealed class DarlingTlsKeyFileScriptTests
     {
         var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs");
         var start = source.IndexOf("internal static TlsKeyFileResult HardenTlsKeyFiles(", StringComparison.Ordinal);
-        var end = source.IndexOf("private static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
+        var end = source.IndexOf("internal static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
         Assert.True(start > 0 && end > start, $"the verb's key file section was not found (start {start}, end {end}).");
 
         return Regex.Matches(source[start..end], @"""  ([A-Z]{2,}(?: [A-Z]{2,})*)(?= |""|\))")

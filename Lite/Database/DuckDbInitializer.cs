@@ -79,6 +79,21 @@ public partial class DuckDbInitializer : IDisposable
     /// </summary>
     internal int CompletedTrimCycleCount;
 
+    /// <summary>
+    /// How long <see cref="RunMemoryTrimCycle"/>'s two lock tries wait. <see cref="TimeSpan.Zero"/> in production:
+    /// a trim cycle never blocks a real caller, so a busy lock is a skipped cycle and the next tick gets another
+    /// try. The store lock is process-wide, so a test that must see one cycle complete sets this to a hang guard,
+    /// and the cycle then defers to whatever else in the process holds the lock at that instant instead of
+    /// skipping. Instance state, like <see cref="CompletedTrimCycleCount"/>, so there is nothing to restore.
+    /// </summary>
+    internal TimeSpan TrimLockWaitForTests = TimeSpan.Zero;
+
+    /// <summary>
+    /// #8535: a test's way to make the lowering fail, since the real target is built to be accepted. When set, the trim lowers
+    /// <c>memory_limit</c> to this instead of <see cref="TrimTargetFor"/>. Null outside tests.
+    /// </summary>
+    internal string? TrimTargetOverrideForTests;
+
     /* #5650: a busy-skipped trim cycle used to log only at Debug. RecordTrimSkip counts both skip paths and writes
        one Information line at most an hour, counted from the first skip; the line resets the count and the hour. */
     private static readonly TimeSpan TrimSkipLogInterval = TimeSpan.FromHours(1);
@@ -192,6 +207,26 @@ public partial class DuckDbInitializer : IDisposable
        a read hold is open reads it to know the writer has reached the lock wait before the hold ends. */
     internal static int WaitingWriteCountForTests => s_dbLock.WaitingWriteCount;
 
+    /* Test seam (#7256): how many budgeted writers are between asking for the write lock and holding it, polling or parked.
+       The lock's own waiting-writer count sees a parked writer only, and a budgeted writer polls for most of its budget. */
+    internal static int PendingWriteCountForTests => s_dbLock.WaitingWriteCount + Volatile.Read(ref s_pollingWriters);
+
+    private static int s_pollingWriters;
+
+    /* Test seam (#8490): this initializer's own budgeted writers between asking for the write lock and holding it, by mode:
+       polling with no queue position, or parked as a waiting writer. Per instance, unlike PendingWriteCountForTests, so a test
+       reads its own writers whatever the other initializers in the process are doing. */
+    internal int PollingWriterCountForTests => Volatile.Read(ref _pollingWriters);
+    internal int ParkedWriterCountForTests => Volatile.Read(ref _parkedWriters);
+
+    /* Test seam (#8490): this initializer's own readers between asking for the read lock and holding it. Per instance, unlike
+       WaitingReadCountForTests, for the same reason as the writer counts above. */
+    internal int WaitingReaderCountForTests => Volatile.Read(ref _waitingReaders);
+
+    private int _pollingWriters;
+    private int _parkedWriters;
+    private int _waitingReaders;
+
     /* Fires in ResetDatabaseCoreAsync after the database and WAL files are deleted and before the schema is
        recreated: a test throws from it to stand in for a process kill with no database file on disk. */
     internal static Action? AfterDatabaseFilesDeletedForTests { get; set; }
@@ -224,6 +259,20 @@ public partial class DuckDbInitializer : IDisposable
     public IDisposable AcquireReadLock(
         CancellationToken cancellationToken,
         [CallerMemberName] string? holderMember = null, [CallerFilePath] string? holderFile = null)
+    {
+        /* Counted as this initializer's waiting reader from the ask to the hold (#8490). */
+        Interlocked.Increment(ref _waitingReaders);
+        try
+        {
+            return AcquireReadLockCore(holderMember, holderFile, cancellationToken);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _waitingReaders);
+        }
+    }
+
+    private IDisposable AcquireReadLockCore(string? holderMember, string? holderFile, CancellationToken cancellationToken)
     {
         try
         {
@@ -306,7 +355,8 @@ public partial class DuckDbInitializer : IDisposable
     /// Acquires an exclusive write lock on the database. Blocks until all readers finish.
     /// Dispose the returned object to release the lock.
     /// When a timeout is specified, throws <see cref="TimeoutException"/> if the lock
-    /// cannot be acquired within the given duration (e.g., archival is in progress).
+    /// cannot be acquired within the given duration (e.g., archival is in progress). A budgeted
+    /// wait polls for the lock first and parks only for its tail: <see cref="TryEnterWriteLockPollingFirst"/>.
     /// </summary>
     public IDisposable AcquireWriteLock(
         TimeSpan? timeout = null, [CallerMemberName] string? holderMember = null, [CallerFilePath] string? holderFile = null)
@@ -314,7 +364,8 @@ public partial class DuckDbInitializer : IDisposable
         if (timeout.HasValue)
         {
             var waitStarted = Stopwatch.GetTimestamp();
-            if (!s_dbLock.TryEnterWriteLock(timeout.Value))
+            var held = TryEnterWriteLockPollingFirst(timeout.Value, waitStarted, holderMember, holderFile);
+            if (held is null)
             {
                 /* #5650: say who holds the lock and for how long, from the registry every acquisition writes
                    to. The old text named "archival or maintenance" whatever the holder was. */
@@ -323,13 +374,116 @@ public partial class DuckDbInitializer : IDisposable
                     StoreLockHolders.Snapshot(),
                     StoreLockHolders.Name(holderMember, holderFile));
             }
+
+            return held;
         }
-        else
-        {
-            s_dbLock.EnterWriteLock();
-        }
+
+        s_dbLock.EnterWriteLock();
         return new LockReleaser(s_dbLock, write: true, StoreLockHolders.Register(holderMember, holderFile, write: true), WriteHoldWarnAfter);
     }
+
+    /// <summary>
+    /// #7256: a budgeted writer's wait, in two parts. For all but the last <see cref="WriteLockParkTail"/> of its budget
+    /// it asks for the lock with no wait, once every <see cref="WriteLockPollInterval"/>, and takes it the moment no
+    /// reader holds it. Only for that tail does it park in <c>TryEnterWriteLock</c> as a waiting writer.
+    ///
+    /// <para>The difference is what a waiting writer does to readers. <see cref="ReaderWriterLockSlim"/> admits no new
+    /// reader while a writer waits, so a writer parked for its whole budget behind one long archive read holds every
+    /// tab read of that time at the door for the rest of the read: on a store with hundreds of archive files, a tab
+    /// switch of over a second at the median against a few milliseconds alone. A polling writer is not waiting as far
+    /// as the lock knows, so readers keep flowing around it.</para>
+    ///
+    /// <para>The tail is the bound on starvation. A writer polling against readers that never leave a gap never finds
+    /// the lock free; once parked, no new reader gets in ahead of it, and it has the lock as soon as the readers in
+    /// flight finish. So a reader is held behind a budgeted writer for at most the tail, plus the writer's own hold,
+    /// and the writer keeps the whole budget it was given: the deadline is the same, and a budget no longer than the
+    /// tail parks at once. A writer whose budget runs out still throws <see cref="StoreLockTimeoutException"/>, and
+    /// every budgeted caller treats that as "skip this cycle".</para>
+    ///
+    /// <para>Returns the releaser for the hold, registered with the holder registry the moment the lock is taken
+    /// on either path, or null when the budget ran out. Disposing the releaser unregisters the holder and exits the
+    /// lock, as for every other acquisition.</para>
+    /// </summary>
+    private LockReleaser? TryEnterWriteLockPollingFirst(TimeSpan timeout, long waitStarted, string? holderMember, string? holderFile)
+    {
+        var deadline = waitStarted + ToTimestampTicks(timeout);
+        var parkAt = deadline - ToTimestampTicks(WriteLockParkTail < timeout ? WriteLockParkTail : timeout);
+        Interlocked.Increment(ref s_pollingWriters);
+        Interlocked.Increment(ref _pollingWriters);
+        try
+        {
+            while (true)
+            {
+                if (s_dbLock.TryEnterWriteLock(0))
+                {
+                    return new LockReleaser(s_dbLock, write: true, StoreLockHolders.Register(holderMember, holderFile, write: true), WriteHoldWarnAfter);
+                }
+
+                var now = Stopwatch.GetTimestamp();
+                if (now >= parkAt)
+                {
+                    break;
+                }
+
+                var untilPark = Stopwatch.GetElapsedTime(now, parkAt);
+                Thread.Sleep(untilPark < WriteLockPollInterval ? untilPark : WriteLockPollInterval);
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref s_pollingWriters);
+            Interlocked.Decrement(ref _pollingWriters);
+        }
+
+        var remaining = Stopwatch.GetElapsedTime(Stopwatch.GetTimestamp(), deadline);
+        if (remaining < TimeSpan.Zero)
+        {
+            remaining = TimeSpan.Zero;
+        }
+
+        Interlocked.Increment(ref _parkedWriters);
+        try
+        {
+            if (!s_dbLock.TryEnterWriteLock(remaining))
+            {
+                return null;
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _parkedWriters);
+        }
+
+        return new LockReleaser(s_dbLock, write: true, StoreLockHolders.Register(holderMember, holderFile, write: true), WriteHoldWarnAfter);
+    }
+
+    private static long ToTimestampTicks(TimeSpan duration) => (long)(duration.TotalSeconds * Stopwatch.Frequency);
+
+    /// <summary>
+    /// How often a budgeted writer asks for the lock while it polls (#7256). Only reached under contention, like
+    /// <see cref="ReadLockPollInterval"/>, and the same 50 ms: the writer joins at most that long after the last
+    /// reader leaves, and the wait stays in the kernel between asks rather than spinning.
+    /// </summary>
+    private static readonly TimeSpan WriteLockPollInterval = TimeSpan.FromMilliseconds(50);
+
+    /// <summary>
+    /// The last part of a budgeted writer's wait, spent parked as a waiting writer that holds new readers back
+    /// (#7256). One second: the longest any reader waits behind a budgeted writer, and long enough for the ordinary
+    /// store reads in flight at the park, which take milliseconds, to finish inside it so the writer gets its turn.
+    /// An instance value rather than a static so a test can set it on its own initializer; a tail no shorter than the
+    /// writer's budget makes it park at once.
+    /// </summary>
+    internal TimeSpan WriteLockParkTail { get; set; } = InitialWriteLockParkTail;
+
+    internal static readonly TimeSpan DefaultWriteLockParkTail = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// The tail every new initializer starts with: <see cref="DefaultWriteLockParkTail"/> in the product, where nothing sets it.
+    /// A test host whose budgets are bounds on the wait rather than polling windows sets this once, before any initializer is
+    /// built, to the budget its writers use, so every budgeted writer in that process parks at once and the budget is the only
+    /// bound (#8490); a test whose subject is the shipped tail sets <see cref="WriteLockParkTail"/> on its own initializer.
+    /// </summary>
+    internal static TimeSpan InitialWriteLockParkTail { get; set; } = DefaultWriteLockParkTail;
 
     /// <summary>
     /// #5731 hold watchdog: a WRITE hold that lasts longer than this logs one warning naming the holder when it
@@ -423,7 +577,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 78;
+    internal const int CurrentSchemaVersion = 81;
 
     private readonly string _archivePath;
 
@@ -543,12 +697,17 @@ public partial class DuckDbInitializer : IDisposable
     }
 
     /// <summary>
-    /// Checks the sentinel's current memory usage and, if it is over <see cref="TrimThresholdBytes"/>,
+    /// Checks the sentinel's current memory usage less the memory a trim cannot free (#8535) and, if that is over <see cref="TrimThresholdBytes"/>,
     /// cycles <c>memory_limit</c> down to <see cref="TrimTargetMemoryLimit"/> and back up to force DuckDB's
     /// buffer manager to release cached pages (#4262 round 1 finding 1). Internal so a test can call this
     /// directly instead of waiting on <see cref="_trimTimer"/>'s real interval.
     /// </summary>
-    internal void RunMemoryTrimCycle()
+    /// <param name="closedServerName">
+    /// Null for the timer's tick. A server tab close passes the closed server's name (#8535), which only tags the log lines so a
+    /// reader can tell a close-triggered trim from a tick. The cycle is the same one and never waits on a lock, so the close
+    /// never waits on it; a busy store means the next tick takes the trim.
+    /// </param>
+    internal void RunMemoryTrimCycle(string? closedServerName = null)
     {
         /* Snapshot rather than repeated field reads: a concurrent ResetDatabaseAsync/Dispose can set
            _sentinel to null (or a new instance) between any two reads here, and ObjectDisposedException
@@ -564,18 +723,27 @@ public partial class DuckDbInitializer : IDisposable
            connection can take the whole process down, not just throw a catchable exception. Never wait
            (same "a trim cycle must never block a real caller" rule as the write lock below): if the read
            lock is busy, skip this cycle and try again in TrimInterval. Released before the write-lock
-           attempt below so the trim never holds both locks at once. */
-        if (!s_dbLock.TryEnterReadLock(0))
+           attempt below so the trim never holds both locks at once. The wait is TrimLockWaitForTests: zero
+           outside tests. */
+        if (!s_dbLock.TryEnterReadLock(TrimLockWaitForTests))
         {
             RecordTrimSkip();
+            if (closedServerName is not null)
+            {
+                /* #8535: a tick writes nothing here (the hourly skip line covers it), but a close asked for this trim, so say it waits. */
+                _logger?.LogInformation("{Trigger}: the local database was busy, so the trim was skipped and waits for the next tick.",
+                    TrimTriggerLabel(closedServerName));
+            }
             return;
         }
         var readHoldId = StoreLockHolders.Register(nameof(RunMemoryTrimCycle), "DuckDbInitializer.cs", write: false);
 
         double? beforeBytes;
+        IReadOnlyList<MemoryTag>? beforeTags = null;
         try
         {
             beforeBytes = ReadSentinelMemoryUsageBytes(sentinel);
+            beforeTags = TryReadMemoryTags(sentinel);
         }
         catch (Exception ex)
         {
@@ -588,18 +756,34 @@ public partial class DuckDbInitializer : IDisposable
             StoreLockHolders.Unregister(readHoldId);
         }
 
-        if (beforeBytes is null || beforeBytes < TrimThresholdBytes)
+        /* #8535: the threshold counts only what a trim can free. The pinned tags (ART indexes and the rest) stay resident through a
+           limit change, so a store whose indexes alone pass the threshold would trip the trim every minute, and each trim empties the
+           two caches the tabs then read again, for no memory gained. A tick under the threshold writes no line: the open and close
+           lines carry the numbers, and a line a minute that says "nothing" only buries the ticks that did something. */
+        if (beforeBytes is null || ReclaimableBytes(beforeBytes.Value, beforeTags) < TrimThresholdBytes)
             return;
 
         /* Never wait — a reader must never block behind the trim (#4262 round 1 finding 1). If the write
-           lock is busy, skip this cycle; the next one TrimInterval later gets another try. */
-        if (!s_dbLock.TryEnterWriteLock(0))
+           lock is busy, skip this cycle; the next one TrimInterval later gets another try. The wait is
+           TrimLockWaitForTests: zero outside tests. */
+        /* Counted as this initializer's parked writer while it waits (#8490), so a test that holds the lock against the cycle can
+           tell this cycle's wait from another initializer's. Zero wait outside tests, so the count is never raised there. */
+        Interlocked.Increment(ref _parkedWriters);
+        try
         {
-            RecordTrimSkip();
-            _logger?.LogDebug(
-                "Trim cycle: skipped, write lock unavailable ({BeforeMb:F0} MiB in use)",
-                beforeBytes.Value / (1024.0 * 1024.0));
-            return;
+            if (!s_dbLock.TryEnterWriteLock(TrimLockWaitForTests))
+            {
+                RecordTrimSkip();
+                _logger?.LogDebug(
+                    "Trim cycle: skipped, write lock unavailable ({BeforeMb:F0} MiB in use)",
+                    beforeBytes.Value / (1024.0 * 1024.0));
+                LogTrimTick(beforeTags, $"Over the {Mb(TrimThresholdBytes)} MB trim threshold, but the local database was busy, so the trim was skipped.", closedServerName);
+                return;
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _parkedWriters);
         }
         var writeHoldId = StoreLockHolders.Register(nameof(RunMemoryTrimCycle), "DuckDbInitializer.cs", write: true);
 
@@ -614,15 +798,37 @@ public partial class DuckDbInitializer : IDisposable
 
             var configuredMemoryLimit = ConfiguredMemoryLimit;
 
-            using (var cmd = lockedSentinel.CreateCommand())
+            /* #8535: the target sits above the memory the buffer manager cannot give up (ART indexes, the object cache and the
+               other tags that are not a cache of the database file), because DuckDB refuses a limit below what it holds
+               that cannot be evicted. A 64 MB target failed every minute once the indexes alone held more than that, and the
+               failure only reached a Debug line, so the trim never ran and nothing said so. */
+            var target = TrimTargetOverrideForTests ?? TrimTargetFor(TryReadMemoryTags(lockedSentinel));
+            string? lowerFailure = null;
+            try
             {
-                cmd.CommandText = $"SET memory_limit='{TrimTargetMemoryLimit}'";
-                cmd.ExecuteNonQuery();
+                using var lower = lockedSentinel.CreateCommand();
+                lower.CommandText = $"SET memory_limit='{target}'";
+                lower.ExecuteNonQuery();
             }
-            using (var cmd = lockedSentinel.CreateCommand())
+            catch (DuckDBException ex)
             {
-                cmd.CommandText = $"SET memory_limit='{configuredMemoryLimit}'";
-                cmd.ExecuteNonQuery();
+                lowerFailure = ex.Message.Split('\n')[0].Trim();
+            }
+            finally
+            {
+                /* The limit goes back whether or not it came down: DuckDB keeps the old limit when a lowering fails, and
+                   putting it back anyway costs nothing and never leaves a trim's limit behind. */
+                using var restore = lockedSentinel.CreateCommand();
+                restore.CommandText = $"SET memory_limit='{configuredMemoryLimit}'";
+                restore.ExecuteNonQuery();
+            }
+
+            if (lowerFailure is not null)
+            {
+                LogTrimTick(TryReadMemoryTags(lockedSentinel),
+                    $"Over the {Mb(TrimThresholdBytes)} MB trim threshold, but DuckDB would not lower memory_limit to {target}: {lowerFailure}",
+                    closedServerName);
+                return;
             }
 
             /* #4262 round 3: only incremented once both SET statements above actually ran, so a test can
@@ -640,8 +846,12 @@ public partial class DuckDbInitializer : IDisposable
                 beforeBytes.Value / (1024.0 * 1024.0),
                 (afterBytes ?? 0) / (1024.0 * 1024.0),
                 stopwatch.ElapsedMilliseconds,
-                TrimTargetMemoryLimit,
+                target,
                 configuredMemoryLimit);
+            LogTrimTick(TryReadMemoryTags(lockedSentinel),
+                $"Trimmed from {Mb((long)beforeBytes.Value)} MB to {Mb((long)(afterBytes ?? 0))} MB in {stopwatch.ElapsedMilliseconds} ms " +
+                $"(memory_limit {target}, then {configuredMemoryLimit}).",
+                closedServerName);
         }
         finally
         {
@@ -1490,7 +1700,7 @@ public partial class DuckDbInitializer : IDisposable
     /// must NOT match, or the destructive Parquet rebuild fires on a database
     /// that is merely locked or recovering a WAL from an unclean shutdown.
     /// </summary>
-    private static bool IsStorageVersionError(Exception ex)
+    internal static bool IsStorageVersionError(Exception ex)
     {
         /* DuckDB reports a genuine version mismatch as one of:
            - "Serialization Error: Failed to deserialize: ..." (incompatible storage format)
@@ -1498,7 +1708,7 @@ public partial class DuckDbInitializer : IDisposable
               but we can only read version Y"
            Since DuckDB v0.10+, newer libraries read older files, so this almost
            always means an older library was pointed at a newer file. */
-        var message = ex.ToString().ToLowerInvariant();
+        var message = DuckDbFailureText.Of(ex);
         return message.Contains("failed to deserialize")
             || message.Contains("trying to read a database file with version")
             || message.Contains("storage version");
@@ -1509,19 +1719,36 @@ public partial class DuckDbInitializer : IDisposable
     /// another process (a just-killed prior instance, antivirus) is holding it.
     /// These are safe to retry and must never trigger the Parquet rebuild.
     /// </summary>
-    private static bool IsTransientLockError(Exception ex)
+    internal static bool IsTransientLockError(Exception ex)
     {
-        var message = ex.ToString().ToLowerInvariant();
+        var message = DuckDbFailureText.Of(ex);
         return message.Contains("conflicting lock")
             || message.Contains("could not set lock")
             || message.Contains("being used by another process");
+    }
+
+    /* Test seam (#7769): a test replaces the file move to make the backup rename fail. Production leaves it null
+       and the move is File.Move. */
+    internal Action<string, string>? MoveFileForTests { get; set; }
+
+    /// <summary>#7812: set when a rebuild left the new database without all of the old data, null otherwise. The window
+    /// shows it once after the database is open at start. A database reset that reaches the same rebuild sets it too, but
+    /// nothing shows it then: it is a once-at-start notice.</summary>
+    internal DatabaseRebuildOutcome? RebuildOutcome { get; private set; }
+
+    private void MoveFile(string source, string destination)
+    {
+        if (MoveFileForTests is { } move)
+            move(source, destination);
+        else
+            File.Move(source, destination);
     }
 
     /// <summary>
     /// Exports all tables from the old database to Parquet, deletes the database, and reimports.
     /// Uses DuckDB's EXPORT DATABASE which writes one Parquet file per table.
     /// </summary>
-    private async Task MigrateViaParquetAsync(string archivePath)
+    internal async Task MigrateViaParquetAsync(string archivePath)
     {
         var exportDir = Path.Combine(archivePath, $"upgrade_{DateTime.Now:yyyyMMdd_HHmmss}");
         Directory.CreateDirectory(exportDir);
@@ -1554,28 +1781,67 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogWarning(ex, "Could not export old database — data will be preserved as backup file only");
         }
 
-        /* Step 2: Back up and delete the old database file */
+        /* Step 2: Move the old database file (and its .wal) aside as a backup.
+           #7769: when the move fails the file is NEVER deleted. With the export failed too, it is the only copy of the
+           collected history. Both files stay where they are and the start stops with a message that names the file.
+           The .wal moves first: if it fails nothing has moved, and if the main file then fails the .wal goes back, so a
+           backup never ends up without its .wal and a stale .wal never sits beside a fresh database. */
         var backupPath = _databasePath + $".backup_{DateTime.Now:yyyyMMdd_HHmmss}";
+        var walPath = _databasePath + ".wal";
+        var walMoved = false;
         try
         {
-            /* DuckDB may have .wal files too */
-            File.Move(_databasePath, backupPath);
-            _logger?.LogInformation("Backed up old database to {BackupPath}", backupPath);
-
-            var walPath = _databasePath + ".wal";
             if (File.Exists(walPath))
             {
-                File.Move(walPath, backupPath + ".wal");
+                MoveFile(walPath, backupPath + ".wal");
+                walMoved = true;
+            }
+
+            MoveFile(_databasePath, backupPath);
+            _logger?.LogInformation("Backed up old database to {BackupPath}", backupPath);
+            if (!exported)
+            {
+                /* The old file is unreadable here and is not imported: the new database starts empty, so say where the old
+                   one went (#7769). */
+                _logger?.LogWarning("The old database could not be read. Lite is starting with a new empty database. " +
+                    "The old file is preserved at {BackupPath}.", backupPath);
             }
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to back up old database, deleting instead");
-            File.Delete(_databasePath);
+            var walRestoreFailed = false;
+            if (walMoved)
+            {
+                try
+                {
+                    MoveFile(backupPath + ".wal", walPath);
+                }
+                catch (Exception restoreEx)
+                {
+                    walRestoreFailed = true;
+                    _logger?.LogError(restoreEx, "Could not put the write-ahead log back at {WalPath}; it is at {BackupWalPath}",
+                        walPath, backupPath + ".wal");
+                }
+            }
 
-            var walPath = _databasePath + ".wal";
-            if (File.Exists(walPath)) File.Delete(walPath);
+            /* When the export worked, a full Parquet copy of the data is in exportDir: say so, it is the way out if the
+               rename keeps failing. Each retried start writes another upgrade_<time> folder and nothing removes the old
+               ones (#7769), which is why the message names the folder. */
+            var copyNote = exported
+                ? $"A full copy of its data was written to {exportDir}. "
+                : "";
+            _logger?.LogError(ex, "Failed to back up old database {DatabasePath}; leaving it in place and not starting. " +
+                "Export succeeded: {Exported}, export folder: {ExportDir}", _databasePath, exported, exportDir);
+            throw new InvalidOperationException(
+                $"Lite could not move the database file {_databasePath} aside to back it up before rebuilding it, so it was left in place and not deleted. " +
+                copyNote +
+                (walRestoreFailed ? $"Its write-ahead log is at {backupPath}.wal. " : "") +
+                $"Close any other copy of Lite, check that the folder allows renaming files, and start Lite again. ({ex.Message})", ex);
         }
+
+        /* The old file moved aside and nothing will be imported from it: record where it went (#7812). */
+        if (!exported)
+            RebuildOutcome = new DatabaseRebuildOutcome(backupPath, null);
 
         /* Step 3: If we exported successfully, import into the fresh database */
         if (exported)
@@ -1593,9 +1859,12 @@ public partial class DuckDbInitializer : IDisposable
             catch (Exception ex)
             {
                 /* Import may fail if schema changed between versions — that's okay,
-                   the normal initialization will create fresh tables */
-                _logger?.LogWarning(ex, "Could not import Parquet data — starting with fresh tables. " +
-                    "Parquet files preserved at {ExportDir} for manual recovery.", exportDir);
+                   the normal initialization will create any missing tables. IMPORT DATABASE is not one
+                   transaction, so a failure partway can leave some tables loaded. */
+                _logger?.LogWarning(ex, "Could not import Parquet data — starting without all of the old data (none or only part of it was loaded). " +
+                    "Parquet files preserved at {ExportDir} for manual recovery; the old database file is preserved at {BackupPath}.",
+                    exportDir, backupPath);
+                RebuildOutcome = new DatabaseRebuildOutcome(backupPath, exportDir);
             }
         }
     }
@@ -3095,6 +3364,33 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Running migration to v78: adding collection_log.read_source");
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(78));
         }
+
+        if (fromVersion < 79)
+        {
+            /* v79 (#7497, twinning Darling's V241): blocked_process_reports.blocking_open_transaction_count, the blocking process's own trancount from
+               the report XML. INTEGER, nullable, the LAST column (the shared added-columns list). NULL on a row stored before v79 and on a report with no
+               trancount; the archive views union parquet by name, so a parquet file written before v79 reads NULL for it. */
+            _logger?.LogInformation("Running migration to v79: adding blocked_process_reports.blocking_open_transaction_count");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(79));
+        }
+
+        if (fromVersion < 80)
+        {
+            /* v80 (#7573, twinning Darling's V243): waiting_tasks.program_name, the waiting task's session program name. VARCHAR, nullable, the LAST
+               column (the shared added-columns list). NULL on a row stored before v80 and never hidden by a reader; the archive views union parquet by
+               name, so a parquet file written before v80 reads NULL for it. */
+            _logger?.LogInformation("Running migration to v80: adding waiting_tasks.program_name");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(80));
+        }
+
+        if (fromVersion < 81)
+        {
+            /* v81 (#7691, twinning Darling's V250): memory_pressure_events.memory_node_id, the memory node a resource monitor record came from. INTEGER,
+               nullable, the LAST column (the shared added-columns list). NULL on a row stored before v81 and on a record with no node; the archive
+               views union parquet by name, so a parquet file written before v81 reads NULL for it. */
+            _logger?.LogInformation("Running migration to v81: adding memory_pressure_events.memory_node_id");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(81));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3175,6 +3471,12 @@ public partial class DuckDbInitializer : IDisposable
         (77, "ag_replica_states", "primary_replica", "VARCHAR"),
         /* #6254: which server a collector run read its Query Store rows from (the Query Store replica or the primary). NULL on a row stored before v78. */
         (78, "collection_log", "read_source", "VARCHAR"),
+        /* #7497: the blocking process's own trancount from the blocked process report (Darling's V241 column). NULL on a row stored before v79 and on a report that has none. */
+        (79, "blocked_process_reports", "blocking_open_transaction_count", "INTEGER"),
+        /* #7573: the program name of the waiting task's session (Darling's V243 column). NULL on a row stored before v80; a reader never hides a NULL. */
+        (80, "waiting_tasks", "program_name", "VARCHAR"),
+        /* #7691: the memory node a resource monitor ring buffer record came from (Darling's V250 column). NULL on a row stored before v81 and on a record that has none. */
+        (81, "memory_pressure_events", "memory_node_id", "INTEGER"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>
@@ -3350,6 +3652,19 @@ public partial class DuckDbInitializer : IDisposable
     internal void BumpArchiveViewGeneration() => Interlocked.Increment(ref _archiveViewGeneration);
 
     private long _archiveViewGeneration;
+
+    /// <summary>
+    /// The oldest and newest time column value in a table's Parquet archive, one entry per table and column and
+    /// archive view generation (#7256). The span only changes when the files do, and the files change exactly when
+    /// <see cref="ArchiveViewGeneration"/> goes up, so a read whose window lies outside the span skips the archive
+    /// without opening one of its files. See <c>LocalDataService.ArchiveSpan</c>.
+    /// </summary>
+    internal ArchiveWatermarkCache ArchiveSpans { get; } = new();
+
+    /// <summary>True when the archive view of <paramref name="table"/> removes copies on a natural key. Such a view can
+    /// hide a hot row, so a read of it never swaps the view for the hot table or reasons from the archive's span.</summary>
+    internal static bool ArchiveViewDedups(string table) =>
+        table == "config_alert_log" || ArchiveViewDedupKeys.ContainsKey(table);
 
     /// <summary>
     /// A counter that goes up by one each time <see cref="CreateArchiveViewsCoreAsync"/> finishes, which
@@ -3690,7 +4005,7 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
     }
 
     /* The read_parquet source argument for one or more globs: a quoted string for one, a list for several. */
-    private static string ParquetSourceSql(List<string> globs) =>
+    internal static string ParquetSourceSql(List<string> globs) =>
         globs.Count == 1
             ? $"'{EscapeSqlPath(globs[0])}'"
             : "[" + string.Join(", ", globs.Select(g => $"'{EscapeSqlPath(g)}'")) + "]";

@@ -188,6 +188,9 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
         await _duckDb.InitializeFromTemplateAsync();
         await SeedServerClockAsync();
         await SeedRunsAsync("default_trace_events", WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
+        /* #7167: the server is being collected now (a run of another collector a minute ago), so the empty window is the collector's
+           alone and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedRunsAsync("wait_stats", DateTime.UtcNow.AddMinutes(-1), DateTime.UtcNow.AddMinutes(-1), everyMinutes: 1);
 
         var root = Root(await TraceAsync());
 
@@ -463,7 +466,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
         AssertTruncatedAt(root.GetProperty("hints"), Anchor.AddDays(-2), "blocked_process_report and deadlocks");
 
         /* #4966: cut at a start, so the "genuinely clear" claim gives way to the cut sentence that points at effective_start. */
-        Assert.Equal($"No blocking or deadlocks recorded for {ServerName} in the last {HoursBack} hour(s). {McpHelpers.CutWindowNothingMessage}", root.GetProperty("message").GetString());
+        Assert.Equal($"No blocking or deadlocks recorded for {ServerName} in the {PerformanceMonitor.Common.CountText.Plural(HoursBack, "hour")} ending at {Anchor:yyyy-MM-dd HH:mm} UTC. {McpHelpers.CutWindowNothingMessage}", root.GetProperty("message").GetString());
     }
 
     /// <summary>#4966: both blocking collectors have run from before the window: the covered text keeps its "genuinely clear" claim.</summary>
@@ -479,7 +482,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
         Assert.Equal("empty", root.GetProperty("status").GetString());
         AssertCovered(root.GetProperty("hints"), WindowStart);
         Assert.Equal(
-            $"No blocking or deadlocks recorded for {ServerName} in the last {HoursBack} hour(s). The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.",
+            $"No blocking or deadlocks recorded for {ServerName} in the {PerformanceMonitor.Common.CountText.Plural(HoursBack, "hour")} ending at {Anchor:yyyy-MM-dd HH:mm} UTC. The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window.",
             root.GetProperty("message").GetString());
     }
 
@@ -488,13 +491,16 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     {
         await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("blocked_process_report", WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
+        /* #7167: the server is being collected now (a run of another collector a minute ago), so the empty window is the collector's
+           alone and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedRunsAsync("wait_stats", DateTime.UtcNow.AddMinutes(-1), DateTime.UtcNow.AddMinutes(-1), everyMinutes: 1);
 
         var root = Root(await BlockingAsync());
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
         AssertNothingHeld(root.GetProperty("hints"), "blocked_process_report and deadlocks");
         /* #4966: no start to name, so the sentence says nothing was read. */
-        Assert.Equal($"No blocking or deadlocks recorded for {ServerName} in the last {HoursBack} hour(s). {McpHelpers.CutWindowNothingReadMessage}", root.GetProperty("message").GetString());
+        Assert.Equal($"No blocking or deadlocks recorded for {ServerName} in the {PerformanceMonitor.Common.CountText.Plural(HoursBack, "hour")} ending at {Anchor:yyyy-MM-dd HH:mm} UTC. {McpHelpers.CutWindowNothingReadMessage}", root.GetProperty("message").GetString());
     }
 
     [Fact]
@@ -502,6 +508,9 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     {
         await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("blocked_process_report", WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
+        /* #7167: the server is being collected now (a run of another collector a minute ago), so the empty window is the collector's
+           alone and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedRunsAsync("wait_stats", DateTime.UtcNow.AddMinutes(-1), DateTime.UtcNow.AddMinutes(-1), everyMinutes: 1);
 
         var root = Root(await BlockingAsync(hoursBack: 1));
 

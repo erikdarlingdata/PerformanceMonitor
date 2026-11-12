@@ -35,7 +35,7 @@ public partial class LocalDataService
     /// window materialised every waiting-task row to return thirty, and the envelope stated no bound at all.
     /// The tool now passes <c>limit + 1</c> and reads the extra row as truncation.</para>
     /// </summary>
-    public async Task<List<WaitingTaskRow>> GetWaitingTasksAsync(int serverId, int hoursBack = 1, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int? limit = null)
+    public async Task<List<WaitingTaskRow>> GetWaitingTasksAsync(int serverId, int hoursBack = 1, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int? limit = null, bool includeMonitor = false)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -74,7 +74,7 @@ FROM v_waiting_tasks
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3{dbClause}
-{exclude}
+{exclude}{MonitorSnapshotClause("program_name", includeMonitor)}
 GROUP BY collection_time, session_id, rtrim(wait_type), database_name
 ORDER BY collection_time DESC, MAX(wait_duration_ms) DESC{limitClause}";
 
@@ -105,6 +105,246 @@ ORDER BY collection_time DESC, MAX(wait_duration_ms) DESC{limitClause}";
                     ? null
                     : reader.GetString(9).Split(',', StringSplitOptions.RemoveEmptyEntries).Select(int.Parse).ToArray()
             });
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// How many series <c>get_current_waits_trend</c> will draw in the window (#7904): the wait types, and the databases with
+    /// blocked sessions under <paramref name="databaseNames"/>. The bucket width is sized for their sum, because the point budget
+    /// counts points across every series. Same filters as <see cref="GetCurrentWaitsWaitPointsAsync"/> and
+    /// <see cref="GetCurrentWaitsBlockedPointsAsync"/>; Darling's twin is <c>DarlingDataReader.CountWaitingTaskSeriesAsync</c> plus <c>CountBlockedSessionSeriesAsync</c>.
+    /// </summary>
+    public async Task<int> CountCurrentWaitsSeriesAsync(int serverId, int hoursBack, DateTime? asOfUtc, IReadOnlyList<string>? databaseNames)
+    {
+        using var connection = await OpenConnectionAsync();
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
+        var total = 0;
+
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = $@"
+SELECT COUNT(DISTINCT rtrim(wait_type))
+FROM v_waiting_tasks
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+AND   wait_type IS NOT NULL
+{exclude}";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = startTime });
+            command.Parameters.Add(new DuckDBParameter { Value = endTime });
+            var waitTypes = await command.ExecuteScalarAsync();
+            total += waitTypes is null or DBNull ? 0 : Convert.ToInt32(waitTypes);
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+            command.CommandText = @"
+SELECT COUNT(DISTINCT database_name)
+FROM v_waiting_tasks
+WHERE server_id = $1
+AND   blocking_session_id > 0
+AND   blocking_session_id <> session_id
+AND   collection_time >= $2
+AND   collection_time <= $3" + dbClause + @"
+AND   database_name IS NOT NULL";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = startTime });
+            command.Parameters.Add(new DuckDBParameter { Value = endTime });
+            foreach (var db in dbValues)
+                command.Parameters.Add(new DuckDBParameter { Value = db });
+            var databases = await command.ExecuteScalarAsync();
+            total += databases is null or DBNull ? 0 : Convert.ToInt32(databases);
+        }
+
+        return total;
+    }
+
+    /// <summary>
+    /// <c>get_current_waits_trend</c>'s waiting-task series (#7877): per wait type, bucketed to <paramref name="bucketMinutes"/>. The inner read keeps the
+    /// per-collection total (the wait type's summed duration in ONE collection); the outer read averages those over EVERY collection
+    /// that ran in the bucket (#7974), a collection in which the wait type was absent counting 0, and keeps the largest as the peak, so a wide bucket never reads as a bigger wait
+    /// than one collection and a wait type seen in 1 of 60 collections reads 1/60 of one seen in all 60. The run count M is the bucket's SUCCESS runs of the
+    /// <c>waiting_tasks</c> collector in <c>v_collection_log</c> (a run that found nothing waiting writes no row but is logged), floored at the series' own row
+    /// count so a log older than the data never divides by fewer collections than the series was seen in; <c>collection_count</c> is M. (The desktop chart's
+    /// <see cref="GetWaitingTaskTrendAsync"/> sums per bucket on purpose and is not this read.) Darling's twin is <c>DarlingDataReader.GetWaitingTaskTrendAsync</c>.
+    /// </summary>
+    internal async Task<List<CurrentWaitsWaitPoint>> GetCurrentWaitsWaitPointsAsync(int serverId, int hoursBack, DateTime? asOfUtc, int bucketMinutes)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
+        command.CommandText = $@"
+WITH per_collection AS
+(
+    SELECT
+        collection_time,
+        rtrim(wait_type) AS wait_type,
+        SUM(wait_duration_ms) AS total_wait_ms
+    FROM v_waiting_tasks
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   wait_type IS NOT NULL
+{exclude}
+    GROUP BY
+        collection_time,
+        rtrim(wait_type)
+),
+bucketed AS
+(
+    SELECT
+        GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+        wait_type,
+        SUM(total_wait_ms) AS sum_wait_ms,
+        MAX(total_wait_ms) AS peak_wait_ms,
+        COUNT(*) AS present_count
+    FROM per_collection
+    GROUP BY
+        1, wait_type
+),
+runs AS
+(
+    SELECT
+        GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+        COUNT(*) AS run_count
+    FROM v_collection_log
+    WHERE server_id = $1
+    AND   collector_name = 'waiting_tasks'
+    AND   status = 'SUCCESS'
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    GROUP BY
+        1
+)
+SELECT
+    b.bucket_start,
+    b.wait_type,
+    ROUND(CAST(b.sum_wait_ms AS DOUBLE) / GREATEST(COALESCE(r.run_count, 0), b.present_count)) AS avg_wait_ms,
+    b.peak_wait_ms,
+    GREATEST(COALESCE(r.run_count, 0), b.present_count) AS collection_count
+FROM bucketed AS b
+LEFT JOIN runs AS r
+    ON r.bucket_start = b.bucket_start
+ORDER BY
+    b.bucket_start, b.wait_type";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+
+        var items = new List<CurrentWaitsWaitPoint>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new CurrentWaitsWaitPoint(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
+                reader.IsDBNull(3) ? 0 : ToInt64(reader.GetValue(3)),
+                Convert.ToInt64(reader.GetValue(4))));
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// <c>get_current_waits_trend</c>'s blocked-session series (#7877): per database, bucketed to <paramref name="bucketMinutes"/>. The inner read is
+    /// <see cref="GetBlockedSessionTrendAsync"/>'s per-collection distinct blocked sessions (#7577); the outer read averages them over EVERY collection that ran
+    /// in the bucket (a gauge is never summed, #4349; a collection with none blocked for the database counts 0, #7974, over the same run count as
+    /// <see cref="GetCurrentWaitsWaitPointsAsync"/>) and keeps the most any one collection saw as the peak. Darling's twin is
+    /// <c>DarlingDataReader.GetBlockedSessionTrendAsync</c>.
+    /// </summary>
+    internal async Task<List<CurrentWaitsBlockedPoint>> GetCurrentWaitsBlockedPointsAsync(
+        int serverId, int hoursBack, DateTime? asOfUtc, IReadOnlyList<string>? databaseNames, int bucketMinutes)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var widthParam = 4 + dbValues.Count;
+
+        command.CommandText = $@"
+WITH per_collection AS
+(
+    SELECT
+        collection_time,
+        database_name,
+        COUNT(DISTINCT session_id) AS blocked_count
+    FROM v_waiting_tasks
+    WHERE server_id = $1
+    AND   blocking_session_id > 0
+    AND   blocking_session_id <> session_id
+    AND   collection_time >= $2
+    AND   collection_time <= $3" + dbClause + $@"
+    AND   database_name IS NOT NULL
+    GROUP BY
+        collection_time,
+        database_name
+),
+bucketed AS
+(
+    SELECT
+        GREATEST(time_bucket(to_minutes(CAST(${widthParam} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+        database_name,
+        SUM(blocked_count) AS sum_blocked_count,
+        MAX(blocked_count) AS peak_blocked_count,
+        COUNT(*) AS present_count
+    FROM per_collection
+    GROUP BY
+        1, database_name
+),
+runs AS
+(
+    SELECT
+        GREATEST(time_bucket(to_minutes(CAST(${widthParam} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+        COUNT(*) AS run_count
+    FROM v_collection_log
+    WHERE server_id = $1
+    AND   collector_name = 'waiting_tasks'
+    AND   status = 'SUCCESS'
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    GROUP BY
+        1
+)
+SELECT
+    b.bucket_start,
+    b.database_name,
+    CAST(b.sum_blocked_count AS DOUBLE) / GREATEST(COALESCE(r.run_count, 0), b.present_count) AS avg_blocked_count,
+    b.peak_blocked_count,
+    GREATEST(COALESCE(r.run_count, 0), b.present_count) AS collection_count
+FROM bucketed AS b
+LEFT JOIN runs AS r
+    ON r.bucket_start = b.bucket_start
+ORDER BY
+    b.bucket_start, b.database_name";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+
+        var items = new List<CurrentWaitsBlockedPoint>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new CurrentWaitsBlockedPoint(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? 0 : ToInt64(reader.GetValue(3)),
+                Convert.ToInt64(reader.GetValue(4))));
         }
 
         return items;
@@ -213,6 +453,8 @@ ORDER BY
 
     /// <summary>
     /// Gets blocked session count trend grouped by database for charting.
+    /// <para>#7577: counts DISTINCT sessions with a waiting task blocked by ANOTHER session (<c>blocking_session_id &lt;> session_id</c>);
+    /// a parallel query's exchange threads wait on their own session and are not blocked.</para>
     /// <para>#4349: bucketed (matching #4234/#4340's shape). A blocked-session count is a PER-SNAPSHOT
     /// gauge, not a delta — a bucket's value is the AVERAGE of the per-collection counts it covers
     /// (rounded, matching the CPU tab's gauge-averaging idiom), never their SUM: summing would double (or
@@ -239,10 +481,11 @@ WITH per_collection AS
     SELECT
         collection_time,
         database_name,
-        COUNT(*) AS blocked_count
+        COUNT(DISTINCT session_id) AS blocked_count
     FROM v_waiting_tasks
     WHERE server_id = $1
     AND   blocking_session_id > 0
+    AND   blocking_session_id <> session_id
     AND   collection_time >= $2
     AND   collection_time <= $3" + dbClause + $@"
     AND   database_name IS NOT NULL

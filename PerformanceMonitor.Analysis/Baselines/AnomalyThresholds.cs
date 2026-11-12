@@ -92,6 +92,27 @@ public static class AnomalyThresholds
     /// </summary>
     public const double DefaultEventRatioThreshold = 3.0;
 
+    /// <summary>
+    /// #7885: the fewest blocking events (blocked process reports, or DMV snapshot rows on the snapshot arm) an
+    /// analysis window must hold before <c>ANOMALY_BLOCKING_SPIKE</c> can fire, whatever the baseline says. The
+    /// gate bounds the numerator; the ratio arm beside it compares the window's per-hour rate with the bucket's
+    /// real mean.
+    /// </summary>
+    public const long BlockingSpikeMinEvents = 5;
+
+    /// <summary>#7885: the deadlock twin of <see cref="BlockingSpikeMinEvents"/>, for <c>ANOMALY_DEADLOCK_SPIKE</c>.</summary>
+    public const long DeadlockSpikeMinEvents = 3;
+
+    /// <summary>
+    /// #7885: the floor the spike ratio's divisor takes, in events per hour. It only keeps a zero from reaching
+    /// the division: a trustworthy bucket's mean is above zero (a measured zero is
+    /// <see cref="BaselineBucket.IsZeroHistory"/>, never trustworthy), and the smallest real mean, one event over
+    /// a month of covered days, is thousands of times larger, so the floor never alters a measured ratio. A floor
+    /// of one event an hour would turn "3x baseline" into "3 an hour" on every server whose mean sits under one,
+    /// which is most of them, and leave a mature store less sensitive than a young one.
+    /// </summary>
+    public const double EventBaselineRateEpsilon = 1e-6;
+
     // #1486 absolute-magnitude floors (the z-path sanity ceiling) so a z-score against a thin
     // baseline can't surface a trivial value; sigma display cap so a variance-collapsed baseline
     // can't render millions-of-sigma.
@@ -491,15 +512,27 @@ public static class AnomalyThresholds
     public const double PgDatabaseGrowthFallbackBytesPerDay = 2.0 * 1024.0 * 1024.0 * 1024.0;  // 2 GiB of growth per day
 
     /// <summary>
-    /// #3653 A8 option B (lane L1a): the minimum per-tile sample count for <c>AnomalyGate.EvaluateTiles</c> to
-    /// score a tile at all — the same figure as <c>BaselineMath.SelectBucket</c>'s flat-tier "minimum viable
-    /// baseline" floor (3). A tile below this is a partial first/last hour of the window or a restart gap, not
-    /// a real hour's worth of samples; the design's never-blind rule is that dropping it is safe because the
-    /// next overlapping scheduled pass scores it once it fills in. Unrelated to the baseline BUCKET's own
-    /// sample floors (<c>BaselineBucket</c>'s tier-specific sample minimums) — this gates the WINDOW tile's
-    /// sample count, not the historical bucket it is compared against.
+    /// The minimum per-tile sample count for <c>AnomalyGate.EvaluateTiles</c> to score a tile at all — the same
+    /// figure as <c>BaselineMath.SelectBucket</c>'s flat-tier "minimum viable baseline" floor (3). A tile below it
+    /// holds too few samples for a peak and a mean to mean anything. It is a sample floor, not a coverage rule: at a
+    /// one-minute cadence three samples are a three-minute sliver of the hour, so a tile must also clear
+    /// <see cref="MinTileCoverage"/>, measured from the samples' own timestamps, before it is scored. Unrelated to
+    /// the baseline BUCKET's own sample floors (<c>BaselineBucket</c>'s tier-specific sample minimums) — this gates
+    /// the WINDOW tile's sample count, not the historical bucket it is compared against.
     /// </summary>
     public const int MinTileSamples = 3;
+
+    /// <summary>
+    /// #8293: the least of its hour a tile's collection must cover for <c>AnomalyGate.EvaluateTiles</c> to score it —
+    /// half. Coverage is the tile's distinct collection instants, each worth one cadence, with the cadence measured
+    /// from the window's own tiles (<c>WindowTiles.CollectionCadence</c>), so a one-minute and a fifteen-minute
+    /// collector get the same rule: thirty one-minute samples, or two quarter-hour ones. A tile under it is the
+    /// window's leading or trailing partial hour, or an hour the collector mostly missed, and its mean clause has
+    /// nothing to dilute a burst against; the next pass scores the hour once it fills in. Threshold cards still
+    /// report an acute stall at once, so only the anomaly card for a rise that starts on the hour waits, by up to
+    /// one pass.
+    /// </summary>
+    public static readonly TimeSpan MinTileCoverage = TimeSpan.FromMinutes(30);
 
     // #3653 A8 slice 1: the N-aware (Šidák) peak cutoff — see AnomalyGate class remarks for the pair gate this feeds.
 

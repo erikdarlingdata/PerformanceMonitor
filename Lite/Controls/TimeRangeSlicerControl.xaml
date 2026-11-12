@@ -67,6 +67,11 @@
                                    FontSize="11"
                                    Foreground="{DynamicResource SlicerLabelBrush}"
                                    VerticalAlignment="Center" Margin="12,0,0,0"/>
+                        <!-- #8224: the strip's metric ("Total CPU (ms)") is named here, beside the range, not drawn over the strip where a peak runs into it. -->
+                        <TextBlock x:Name="MetricLabel" Text=""
+                                   FontSize="11"
+                                   Foreground="{DynamicResource SlicerToggleBrush}"
+                                   VerticalAlignment="Center" Margin="12,0,0,0"/>
                     </StackPanel>
                 </Button>
                 <StackPanel x:Name="QuickRangeChips" Grid.Column="1" Orientation="Horizontal"

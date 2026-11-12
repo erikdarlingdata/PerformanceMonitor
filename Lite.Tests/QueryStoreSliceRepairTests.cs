@@ -519,6 +519,44 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
     }
 
     /// <summary>
+    /// #7200: the completion marker's completed_at is UTC whatever zone the DuckDB session runs in. The zone is forced to UTC+14
+    /// (a zone no CI machine uses), so the old CURRENT_TIMESTAMP write lands fourteen hours ahead of the window around UtcNow.
+    /// </summary>
+    [Fact]
+    public async Task StartupRepair_StampsTheMarkerInUtc_WhateverTheSessionZone()
+    {
+        await RunAsync("SET GLOBAL TimeZone = 'Pacific/Kiritimati'");
+        try
+        {
+            var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+            var before = DateTime.UtcNow.AddMinutes(-1);
+            await service.RepairOnStartupAsync();
+            var after = DateTime.UtcNow.AddMinutes(1);
+
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync();
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = $"SELECT completed_at FROM {QueryStoreSliceRepairService.MarkerTable}";
+            var stamp = (DateTime)(await cmd.ExecuteScalarAsync())!;
+
+            Assert.InRange(stamp, before, after);
+        }
+        finally
+        {
+            await RunAsync("RESET GLOBAL TimeZone");
+        }
+    }
+
+    private async Task RunAsync(string sql)
+    {
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
     /// Source guard: every phase of the repair that MUTATES must sit inside a write-lock scope.
     ///
     /// <para>The read lock permits concurrent readers by design — that is what it is for — and this service is

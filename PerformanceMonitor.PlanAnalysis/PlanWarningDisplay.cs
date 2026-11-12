@@ -21,7 +21,7 @@ namespace PerformanceMonitor.PlanAnalysis;
 public static class PlanWarningDisplay
 {
     /// <summary>
-    /// The warning's display header: "⚠ {type}{source tag}{legacy tag} — up to {N}% benefit" when
+    /// The warning's display header: "⚠ {type}{source tag}{legacy tag}: up to {N}% benefit" when
     /// <see cref="PlanWarning.MaxBenefitPercent"/> has a value, or just "⚠ {type}{source tag}{legacy tag}"
     /// when it's null (not quantifiable). Matches PerformanceStudio's plan-warning and
     /// node-warning header text exactly, including the " [legacy]" tag (#4566), ported from
@@ -33,7 +33,7 @@ public static class PlanWarningDisplay
         var sourceTag = WarningSourceTag(warning);
         var legacyTag = warning.IsLegacy ? " [legacy]" : "";
         return warning.MaxBenefitPercent.HasValue
-            ? $"\u26A0 {warning.WarningType}{sourceTag}{legacyTag} \u2014 up to {FormatBenefitPercent(warning.MaxBenefitPercent.Value)}% benefit"
+            ? $"\u26A0 {warning.WarningType}{sourceTag}{legacyTag}: up to {FormatBenefitPercent(warning.MaxBenefitPercent.Value)}% benefit"
             : $"\u26A0 {warning.WarningType}{sourceTag}{legacyTag}";
     }
 
@@ -62,14 +62,34 @@ public static class PlanWarningDisplay
         pct >= 100 ? $"{pct:N0}" : $"{pct:N1}";
 
     /// <summary>
-    /// #4572: the one place a warning's severity becomes a colour. Mirrors PerformanceStudio's
-    /// <c>WarningSeverityBrush</c> (one helper instead of the same ternary repeated at every
-    /// warning-rendering site), but keeps PM's existing literal hex values rather than PS's theme
-    /// tokens, so this change carries no visual difference.
+    /// #4572: a warning's severity as a fixed colour, tuned for a dark background. The plan viewer paints warning text with
+    /// theme brushes per severity (<c>PlanViewerControl.WarningSeverityBrush</c>, as PerformanceStudio's helper of that name
+    /// does) and falls back to these values only when a host's theme lacks the key.
     /// </summary>
     public static string WarningSeverityColorHex(PlanWarningSeverity severity) =>
         severity == PlanWarningSeverity.Critical ? "#E57373"
         : severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
+
+    /// <summary>
+    /// #8447: what a statement's warnings are, everywhere the viewer counts or lists them (the root
+    /// operator's badge, the root tooltip and the Statements grid): the statement-level warnings, then
+    /// every operator's warnings in tree order, at every severity. A statement whose findings are all
+    /// statement-level, such as a memory grant warning, still counts them.
+    /// </summary>
+    public static List<PlanWarning> StatementWarnings(PlanStatement statement)
+    {
+        var all = new List<PlanWarning>(statement.PlanWarnings);
+        if (statement.RootNode != null)
+            AddOperatorWarnings(statement.RootNode, all);
+        return all;
+    }
+
+    private static void AddOperatorWarnings(PlanNode node, List<PlanWarning> warnings)
+    {
+        warnings.AddRange(node.Warnings);
+        foreach (var child in node.Children)
+            AddOperatorWarnings(child, warnings);
+    }
 
     /// <summary>
     /// #4534: the text the viewer needs to turn a warning header into a link to the operator it came
@@ -86,7 +106,7 @@ public static class PlanWarningDisplay
 
         var tooltip = originNodeIds.Count == 1
             ? $"Go to operator (Node {originNodeIds[0]})"
-            : $"Go to Node {originNodeIds[0]} \u2014 also from {string.Join(", ", originNodeIds.Skip(1).Select(id => "Node " + id))}";
+            : $"Go to Node {originNodeIds[0]}, also from {string.Join(", ", originNodeIds.Skip(1).Select(id => "Node " + id))}";
 
         return ("  \u2192", tooltip);
     }

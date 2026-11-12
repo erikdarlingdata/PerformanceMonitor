@@ -54,17 +54,14 @@ public sealed class PurgeContinuationTests
     private static async Task LaunchAndFinishAsync(DarlingWorker worker, DateTime at, Func<DarlingWorker, Task>? body = null)
     {
         Assert.True(worker.TryStartScheduledPurge(at, async _ => { if (body is not null) { await body(worker); } }, CancellationToken.None));
-        await WaitForSlotAsync(worker, at);
+        await WaitForSlotAsync(worker);
     }
 
-    /// <summary>Waits until the slot is free: a launch attempt at a far-future time that is not due must not say "still running".</summary>
-    private static async Task WaitForSlotAsync(DarlingWorker worker, DateTime _)
+    /// <summary>Waits until the slot is free: the slot's tracked task completes once the pass has finished and any failure is
+    /// logged, which is when a launch attempt stops saying "still running". A pass that never finishes fails the test at the bound.</summary>
+    private static async Task WaitForSlotAsync(DarlingWorker worker)
     {
-        for (var i = 0; i < 200 && worker.PurgeSlotBusyForTest; i++)
-        {
-            await Task.Delay(10);
-        }
-
+        await worker.PurgeTaskForTests!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         Assert.False(worker.PurgeSlotBusyForTest);
     }
 
@@ -127,7 +124,7 @@ public sealed class PurgeContinuationTests
             customRetentionDays: null,
             CancellationToken.None);
         Assert.True(outcome.Success);
-        await WaitForSlotAsync(worker, end);
+        await WaitForSlotAsync(worker);
 
         Assert.False(DueAt(worker, end.AddMinutes(59)));
         Assert.True(DueAt(worker, end.AddMinutes(61)));
@@ -214,7 +211,7 @@ public sealed class PurgeContinuationTests
         Assert.False(secondRan);
 
         gate.SetResult();
-        await WaitForSlotAsync(worker, T0);
+        await WaitForSlotAsync(worker);
         Assert.True(DueAt(worker, T0.AddHours(2)));
     }
 

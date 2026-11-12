@@ -76,6 +76,19 @@ public sealed class CollectorTargetInfo
     public int SqlMajorVersion { get; init; }
 
     /// <summary>
+    /// The version gate most collectors share (#7222): true when this target runs SQL Server
+    /// <paramref name="major"/> or later, or is an Azure SQL Database or Managed Instance (which report a
+    /// low major yet carry the feature, so they are never version-gated). An unknown version (0) passes
+    /// when <paramref name="unknownIsNewest"/> is true and fails when it is false, so each caller states
+    /// which way an unprobed target should go.
+    /// </summary>
+    public bool MeetsMinimumVersion(int major, bool unknownIsNewest) =>
+        (unknownIsNewest && SqlMajorVersion == 0)
+        || SqlMajorVersion >= major
+        || IsAzureSqlDb
+        || IsAzureManagedInstance;
+
+    /// <summary>
     /// True when the monitored login can read msdb (<c>HAS_DBACCESS('msdb') = 1</c>), as probed at
     /// connect by both hosts (Lite's ServerManager and Darling's DarlingServerConnector, verbatim
     /// <c>HAS_DBACCESS(N'msdb')</c>).

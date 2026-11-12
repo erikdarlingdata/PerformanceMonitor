@@ -30,8 +30,9 @@ namespace Darling.Tests;
 /// (<c>Column 'wal_records' is null</c> on every PostgreSQL 10 and 12 target).
 /// <para>The server here is newer than the version the test claims. The collector is handed the old major (and the old
 /// extension version), so it projects the NULLs an old server would send. Where the old text names a column the new
-/// server no longer has, the source object is a stand-in: for <c>pg_stat_statements</c> a table in a scratch schema with
-/// the pre-1.8 column names, reached through the same extension-schema lookup the real view goes through. Write stats
+/// server no longer has, the source object is a stand-in: for <c>pg_stat_statements</c> a function
+/// <c>pg_stat_statements(showtext boolean)</c> over a table in a scratch schema with the pre-1.8 column names, the shape the
+/// extension ships and the call the collector makes (#7783), reached through the same extension-schema lookup. Write stats
 /// below 14 read <c>pg_stat_bgwriter</c> columns that PostgreSQL 17 moved out, so they cannot run on a new server; the
 /// Aurora flavor of the query sends the same NULL WAL projections, and runs here.</para>
 /// </summary>
@@ -164,17 +165,21 @@ public sealed class PgOldVersionReadPathLiveTests
         var bodySucceeded = false;
         try
         {
+            /* The pre-1.8 extension as it ships: pg_stat_statements(showtext boolean) over the rows, in a schema other than
+               public. The collector calls the function with showtext off (#7783), so a table or view of that name is not enough. */
             await ExecAsync(source, $"""
                 DROP SCHEMA IF EXISTS {Scratch} CASCADE;
                 CREATE SCHEMA {Scratch};
-                CREATE TABLE {Scratch}.pg_stat_statements (
+                CREATE TABLE {Scratch}.pgss_rows (
                     queryid bigint, dbid oid, userid oid, calls bigint,
                     total_time double precision, min_time double precision, max_time double precision, mean_time double precision,
                     rows bigint, shared_blks_hit bigint, shared_blks_read bigint, shared_blks_dirtied bigint, shared_blks_written bigint,
                     temp_blks_read bigint, temp_blks_written bigint, blk_read_time double precision, blk_write_time double precision);
-                INSERT INTO {Scratch}.pg_stat_statements VALUES
+                INSERT INTO {Scratch}.pgss_rows VALUES
                     (101, 1, 10, 5, 50, 1, 20, 10, 5, 100, 10, 1, 1, 0, 0, 0, 0),
                     (102, 1, 10, 9, 90, 2, 30, 10, 9, 200, 20, 2, 2, 0, 0, 0, 0);
+                CREATE FUNCTION {Scratch}.pg_stat_statements(showtext boolean) RETURNS SETOF {Scratch}.pgss_rows
+                    LANGUAGE sql AS 'SELECT * FROM {Scratch}.pgss_rows';
                 """, ct);
 
             var first = Context(serverId, serverName, Anchor, major, statementsVersion: extensionVersion);
@@ -187,7 +192,7 @@ public sealed class PgOldVersionReadPathLiveTests
                 Assert.Null(row.WalBytes);
             });
 
-            await ExecAsync(source, $"UPDATE {Scratch}.pg_stat_statements SET calls = calls + 3, total_time = total_time + 30, rows = rows + 3", ct);
+            await ExecAsync(source, $"UPDATE {Scratch}.pgss_rows SET calls = calls + 3, total_time = total_time + 30, rows = rows + 3", ct);
             var second = Context(serverId, serverName, Anchor.AddMinutes(1), major, statementsVersion: extensionVersion);
             Assert.Equal(2, (await RunAsync(PgStatementStatsCollector.Instance, second, source, store, ct)).Count);
 
@@ -230,26 +235,40 @@ public sealed class PgOldVersionReadPathLiveTests
         return JsonSerializer.SerializeToNode(details[key])!.AsObject();
     }
 
-    private static async Task PlantWalAsync(NpgsqlConnection store, int serverId, string serverName, long queryId, DateTime at, long walBytes, CancellationToken ct)
+    /// <summary>
+    /// One stored sample of a series, shaped as the collector stores it: <paramref name="calls"/> is the cumulative
+    /// counter and <paramref name="deltaCalls"/> the interval the collector measured against its previous pass, 0 for
+    /// an interval it could not measure.
+    /// </summary>
+    private static async Task PlantWalAsync(
+        NpgsqlConnection store, int serverId, string serverName, long queryId, DateTime at, long calls, long deltaCalls, long walBytes, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(@"
 INSERT INTO pg_statement_stats
     (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel,
      calls, total_exec_time_ms, max_exec_time_ms, rows_returned, shared_blks_hit, shared_blks_read,
      temp_blks_read, temp_blks_written, wal_bytes, delta_calls, delta_total_exec_time_ms, delta_rows)
-VALUES ($1, $2, $3, $4, $5, 1, 10, TRUE, 5, 50, 20, 5, 100, 10, 0, 0, $6, 5, 50, 5)", store);
+VALUES ($1, $2, $3, $4, $5, 1, 10, TRUE, $7, 50, 20, 5, 100, 10, 0, 0, $6, $8, 50, 5)", store);
         command.Parameters.AddWithValue(CollectionIdGenerator.Next());
         command.Parameters.AddWithValue(at);
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(serverName);
         command.Parameters.AddWithValue(queryId);
         command.Parameters.AddWithValue(walBytes);
+        command.Parameters.AddWithValue(calls);
+        command.Parameters.AddWithValue(deltaCalls);
         await command.ExecuteNonQueryAsync(ct);
     }
 
     /// <summary>
     /// The other half of the bad-actor detail's rule: a target that DID report WAL gets its number, and a zero when
     /// the counter did not move. NULL is for "never reported", not for "nothing changed".
+    /// <para>Each series is two in-window samples as the collector stores them (#7909): a first sighting it could not
+    /// date (<c>delta_calls = 0</c>), which contributes nothing on any counter, then a measured interval of five calls
+    /// (<c>calls</c> 10, <c>delta_calls</c> 5), whose WAL increment is its <c>wal_bytes</c> less the first sample's.
+    /// So 201 reads 0 + (5,000 − 1,000) = 4,000 and 202 reads 0 + (1,000 − 1,000) = 0. A sample stored with
+    /// <c>delta_calls = calls</c> would instead be credited with its whole cumulative figure, which is the first
+    /// sighting's shape, not a measured interval's.</para>
     /// </summary>
     [Fact]
     public async Task BadActorDetail_ReportsWalWhenTheTargetReportedIt_IncludingAZeroChange()
@@ -263,10 +282,10 @@ VALUES ($1, $2, $3, $4, $5, 1, 10, TRUE, 5, 50, 20, 5, 100, 10, 0, 0, $6, 5, 50,
         var bodySucceeded = false;
         try
         {
-            await PlantWalAsync(store, serverId, serverName, 201, Anchor, 1_000, ct);
-            await PlantWalAsync(store, serverId, serverName, 201, Anchor.AddMinutes(1), 5_000, ct);
-            await PlantWalAsync(store, serverId, serverName, 202, Anchor, 1_000, ct);
-            await PlantWalAsync(store, serverId, serverName, 202, Anchor.AddMinutes(1), 1_000, ct);
+            await PlantWalAsync(store, serverId, serverName, 201, Anchor, calls: 5, deltaCalls: 0, walBytes: 1_000, ct);
+            await PlantWalAsync(store, serverId, serverName, 201, Anchor.AddMinutes(1), calls: 10, deltaCalls: 5, walBytes: 5_000, ct);
+            await PlantWalAsync(store, serverId, serverName, 202, Anchor, calls: 5, deltaCalls: 0, walBytes: 1_000, ct);
+            await PlantWalAsync(store, serverId, serverName, 202, Anchor.AddMinutes(1), calls: 10, deltaCalls: 5, walBytes: 1_000, ct);
 
             var builder = new NpgsqlConnectionStringBuilder(connectionString!) { SearchPath = PgSchemaGenerator.SearchPath };
             await using var dataSource = NpgsqlDataSource.Create(builder.ConnectionString);

@@ -81,6 +81,8 @@ public sealed class FleetIdentifierScrubTests
         "prod", "dev", "local", "sql", "aurora", "srv", "box", "web", "target", "bench", "gone",
         // A zone offset in the time range picker's label and tests ("UTC-04:00", #5562): a clock offset, never a tenant.
         "utc",
+        // The JSON Schema dialect named by a "$schema" URL ("draft-07", the Helm chart's values.schema.json, #8017): a spec version, never a tenant.
+        "draft",
     };
 
     /*

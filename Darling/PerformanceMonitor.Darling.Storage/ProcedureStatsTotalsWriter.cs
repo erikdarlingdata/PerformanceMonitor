@@ -177,16 +177,20 @@ public static class ProcedureStatsTotalsWriter
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
-            /* The transaction is aborted until this runs; it also undoes the SET LOCAL above. */
-            await transaction.RollbackAsync(GapSavepointName, cancellationToken);
-            await transaction.ReleaseAsync(GapSavepointName, cancellationToken);
-
+            /* Logged before the savepoint is rolled back, because the rollback is itself a round trip to the store: on a broken
+               connection it throws too, and that throw would leave this arm before the fault that broke it was ever recorded.
+               The batch then fails with the rollback's own exception, as it must on a dead transaction, with the gap fill's
+               fault already in the log ahead of it. */
             logger?.LogWarning(
                 ex,
                 "Procedure totals gap fill (#5638) failed for server {ServerName} ({ServerId}): the collections after {GapAfter:o} and before {GapBefore:o} " +
-                "were not totalled, so they stay out of the duration trend (as before the fix). The batch continues and its own totals row becomes the new anchor; " +
+                "were not totalled, so they stay out of the duration trend (as before the fix). The batch tries to continue (it fails if the savepoint rollback fails too) and its own totals row becomes the new anchor; " +
                 "once this batch commits the gap is not retried, by a later batch of this cycle or of any other.",
                 serverName, serverId, anchor, stamp);
+
+            /* The transaction is aborted until this runs; it also undoes the SET LOCAL above. */
+            await transaction.RollbackAsync(GapSavepointName, cancellationToken);
+            await transaction.ReleaseAsync(GapSavepointName, cancellationToken);
         }
     }
 

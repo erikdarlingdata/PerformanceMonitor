@@ -9,7 +9,6 @@
     <Copyright>Copyright © 2026 Darling Data, LLC</Copyright>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
-    <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;CA1848;CA1852;CA1305;CA1860;CA1707;CA1507;CA1806</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,16 +19,13 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="PerformanceMonitorLite" />
-    <InternalsVisibleTo Include="PerformanceMonitorDashboard" />
     <InternalsVisibleTo Include="Lite.Tests" />
-    <InternalsVisibleTo Include="Dashboard.Tests" />
     <!-- Darling's PgFactCollector reconstructs blocking chains through the same internal
          BlockingPairRow/BlockingChainReconstructor/BlockingPairRowMerge seam both apps use. -->
     <InternalsVisibleTo Include="PerformanceMonitor.Darling.Analysis" />
-    <!-- The Darling viewer's Blocking tab (W1e) reconstructs the block-chain the same way Lite/Dashboard
-         do: it fetches internal BlockingPairRow rows and calls BlockingChainReconstructor, then bridges
-         the internal reconstruction to the shared Common BlockingChainModel through its own copied
-         BlockingChainViewerProjection (the same per-app pattern Lite and Dashboard use). -->
+    <!-- The Darling viewer's Blocking tab reconstructs the block-chain the same way Lite does: it fetches
+         internal BlockingPairRow rows, calls BlockingChainReconstructor, and hands the internal reconstruction
+         to BlockingChainViewerProjection.BuildModelForSession, which is internal too. -->
     <InternalsVisibleTo Include="PerformanceMonitor.Darling.Viewer" />
     <!-- #3653 A8 slice 1: Darling.Tests pins AnomalyThresholds.NAwarePeakCutoff / InverseNormalCdf directly,
          both internal, before trusting AnomalyGate on top of them. -->

@@ -388,17 +388,19 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
     }
 
     /// <summary>
-    /// #3653 (A11): the query duration trend — the read that LAG-recomputed an interval <c>query_stats</c> has
+    /// #3653 (A11) and #7161: the query duration trend — the read that LAG-recomputed an interval <c>query_stats</c> has
     /// stored from its first schema, and so divided a restart row's fabricated 0 delta by the real elapsed
     /// seconds into a confident 0.00 ms/sec. The procedure fixture's four collections, on query_stats: t1/t2
     /// pre-v61 (NULL interval) — t1 has no prior and is UNRATED, t2 divides by the LAG's 300 s; t3 a restart
     /// (every row 0) — unrated, where the LAG-only read said 0.00; t4 a steady pass with a readmitted plan (0)
-    /// beside a measured 120 s row — the STORED 120 wins over the LAG's 300, and the readmitted plan adds
-    /// nothing to the sums. Same rows, same expectations as the procedure test, on purpose: the two reads are
-    /// one idiom now.
+    /// beside a measured 120 s row. Since #7161 a collection's seconds are its gap to the previous collection (the
+    /// #5449 rule the procedure grain uses), not the longest stored interval of any one query in it, so t4 divides
+    /// by its 300 s gap to t3 (1200 ms / 300 s = 4.0): the stored 120 would drop the 180 s the store holds no
+    /// collection for out of every bucket's seconds. The readmitted plan still adds nothing to the sums. The
+    /// procedure grain's no-collection-log test above is this fixture with the same 4.0.
     /// </summary>
     [Fact]
-    public async Task QueryDurationTrend_LeavesTheUnknowableCollectionUnrated_PrefersTheStoredInterval_KeepsPreV61History()
+    public async Task QueryDurationTrend_LeavesTheUnknowableCollectionUnrated_RatesByTheGapToThePrevious_KeepsPreV61History()
     {
         var t1 = Truncate(DateTime.UtcNow.AddHours(-2));
         var t2 = t1.AddMinutes(5);
@@ -427,19 +429,19 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
         Assert.Equal(2.0, points[1].Value!.Value, precision: 6);
         Assert.Equal(0.1, points[1].ExecutionsPerSecond!.Value, precision: 6);
 
-        /* t4: the STORED 120 s — 1200 / 120 = 10.0, not the LAG's 1200 / 300 = 4.0; 24 / 120 = 0.2. */
-        Assert.Equal(10.0, points[3].Value!.Value, precision: 6);
-        Assert.Equal(0.2, points[3].ExecutionsPerSecond!.Value, precision: 6);
+        /* t4 (#7161): the 300 s gap to t3, not the stored 120 s (the old 10.0 and 0.2): 1200 / 300 = 4.0; 24 / 300 = 0.08. */
+        Assert.Equal(4.0, points[3].Value!.Value, precision: 6);
+        Assert.Equal(0.08, points[3].ExecutionsPerSecond!.Value, precision: 6);
     }
 
     /// <summary>
-    /// #3653 (A11): the execution-count trend is the duration trend's executions column on its own and reads
-    /// the interval the same way. Same fixture: t1 unrated (no prior), t2 the LAG's 300 s (30 / 300 = 0.1),
-    /// t3 the restart marker — unrated, where the LAG-only read published 0.00 executions/sec — and t4 the
-    /// stored 120 s (24 / 120 = 0.2, not the LAG's 24 / 300 = 0.08).
+    /// #3653 (A11) and #7161: the execution-count trend is the duration trend's executions column on its own and
+    /// rates the same seconds. Same fixture: t1 unrated (no prior), t2 the LAG's 300 s (30 / 300 = 0.1), t3 the
+    /// restart marker — unrated, where the LAG-only read published 0.00 executions/sec — and t4 its 300 s gap to t3
+    /// (24 / 300 = 0.08; the stored 120 s it carries would have said 0.2, see the duration test above).
     /// </summary>
     [Fact]
-    public async Task ExecutionCountTrend_LeavesTheUnknowableCollectionUnrated_PrefersTheStoredInterval_KeepsPreV61History()
+    public async Task ExecutionCountTrend_LeavesTheUnknowableCollectionUnrated_RatesByTheGapToThePrevious_KeepsPreV61History()
     {
         var t1 = Truncate(DateTime.UtcNow.AddHours(-2));
         var t2 = t1.AddMinutes(5);
@@ -458,7 +460,7 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
         Assert.Null(points[0].Value);
         Assert.Equal(0.1, points[1].Value!.Value, precision: 6);
         Assert.Null(points[2].Value);
-        Assert.Equal(0.2, points[3].Value!.Value, precision: 6);
+        Assert.Equal(0.08, points[3].Value!.Value, precision: 6);   /* 24 / the 300 s gap to t3 (the stored 120 s said 0.2) */
     }
 
     /// <summary>

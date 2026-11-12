@@ -42,7 +42,7 @@ public partial class InvestigationPracticePanel : UserControl
         /// <summary>The instant the Reported column is formatted from, and sorts by (not its text).</summary>
         public DateTime ReportedAtUtc => Row.ReportedAtUtc;
 
-        public string ReportedDisplay => Row.ReportedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+        public string ReportedDisplay => ViewerTimeHelper.FormatFleetWide(Row.ReportedAtUtc, "yyyy-MM-dd HH:mm");
 
         public string FeedbackSummary => string.Create(CultureInfo.InvariantCulture, $"{Row.Feedback.Count}, newest: {Row.Feedback[0].Verdict}");
     }
@@ -116,7 +116,7 @@ public partial class InvestigationPracticePanel : UserControl
             PracticeScoresGrid.ItemsSource = (await _dataService.GetInvestigationPracticeScoresAsync(Days))
                 .Select(s => new PracticeScoreItem(s)).ToList();
             PracticeStatusText.Text = string.Create(CultureInfo.InvariantCulture,
-                $"{_cases.Count} judged case(s) in the last {Days} days. A newest corrected verdict is the answer; else right or partly right makes the report's verdict the answer (partly counts half); wrong with no correction has no answer.");
+                $"{CountText.Plural(_cases.Count, "judged case")} in the last {Days} days. A newest corrected verdict is the answer; else right or partly right makes the report's verdict the answer (partly counts half); wrong with no correction has no answer.");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -141,7 +141,7 @@ public partial class InvestigationPracticePanel : UserControl
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            PracticeStatusText.Text = "Could not open the practice request: " + ex.Message;
+            PracticeStatusText.Text = "Could not open the practice request: " + ViewerDataService.InputErrorText(ex);
         }
     }
 

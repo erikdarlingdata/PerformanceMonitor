@@ -38,6 +38,9 @@ public partial class ViewerServerTab
 
     private DispatcherTimer? _autoRefreshTimer;
 
+    /* #8367: the window whose Closed event stops _autoRefreshTimer; see HookHostWindowClosed. */
+    private Window? _hostWindow;
+
     /// <summary>
     /// Raised when the user clicks "Apply to All": MainWindow broadcasts the held range to every other open server
     /// tab (<see cref="TimeRangePresets.ForBroadcast"/>: a calendar period goes as the instants it names). The
@@ -90,6 +93,9 @@ public partial class ViewerServerTab
             return;
         }
 
+        /* #8549: the picker already names the new range, but the grid and the slicer keep the old range's rows until the read returns
+           (half a minute on Query Store by Duration over 30 days), and a pick made while a refresh is reading is only queued. Say so. */
+        StatusChanged?.Invoke(ViewerRangeRefreshStatus.Loading(_server.DisplayName, e.Spec));
         await RefreshActiveInnerTabAsync();
     }
 
@@ -104,7 +110,25 @@ public partial class ViewerServerTab
         {
             _autoRefreshTimer.Start();
         }
+
+        /* #8367: a DispatcherTimer is rooted by its dispatcher, so a tab whose window has closed would otherwise keep ticking on
+           that thread for the life of the process. Unloaded cannot tell that apart from a tab switch (a TabControl unloads the
+           tab it switches away from, and the tab stays in its window), so the window's own Closed event is what stops it. */
+        Loaded += HookHostWindowClosed;
     }
+
+    /* #8367: Loaded fires again on every switch back to this tab, so the window is hooked once; a tab that moves to another
+       window lets go of the first. */
+    private void HookHostWindowClosed(object sender, RoutedEventArgs e)
+    {
+        var window = Window.GetWindow(this);
+        if (window is null || ReferenceEquals(window, _hostWindow)) return;
+        if (_hostWindow is not null) _hostWindow.Closed -= HostWindow_Closed;
+        _hostWindow = window;
+        window.Closed += HostWindow_Closed;
+    }
+
+    private void HostWindow_Closed(object? sender, EventArgs e) => _autoRefreshTimer?.Stop();
 
     private async void OnAutoRefreshTick(object? sender, EventArgs e)
     {
@@ -166,8 +190,6 @@ public partial class ViewerServerTab
     /// panel notes that say how often a collector runs share one read every five minutes.</summary>
     private ViewerScheduleOverridesCache _scheduleOverrides = null!;
 
-    private string? _noteCollector;
-
     /// <summary>Redraws the picker's resolved text from the clock, the zone and the notes. Run when the display zone moved
     /// and on every refresh, so a range that slides with now shows the window it is reading.</summary>
     private void RefreshRangePicker() => RangePicker.Refresh();
@@ -218,14 +240,6 @@ public partial class ViewerServerTab
         try
         {
             var collector = CurrentMainCollector();
-            if (!string.Equals(collector, _noteCollector, StringComparison.Ordinal))
-            {
-                /* A different top-level tab: the data-start note belonged to the last tab's surface, so it clears here and
-                   the new tab's own probe sets it again. */
-                _noteCollector = collector;
-                RecordDataStart(null);
-            }
-
             var overrides = collector is not null ? await _scheduleOverrides.GetAsync() : null;
 
             RangePicker.SampleInterval = ViewerTimeRangeWindow.SampleIntervalFor(collector, _server.ServerId, overrides);
@@ -233,20 +247,6 @@ public partial class ViewerServerTab
         catch (Exception ex)
         {
             ViewerLogger.Warn("ViewerServerTab", $"time range note failed | {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Sets the picker's "Data starts ..." note from a data-start probe a surface already awaited (#5562, the desktop twin
-    /// of the web's retention note): the same <c>floor</c> the surface's "Showing since" banner reads. No query of its own.
-    /// Every banner site reaches it through <see cref="UpdateTruncationBanner"/> and <see cref="ViewerDataStartNote.Feed"/>
-    /// (#5562 R7), for the tab on screen. A null floor (the probe found nothing, or failed) clears the note.
-    /// </summary>
-    internal void RecordDataStart(DateTime? floor)
-    {
-        if (RangePicker.DataStartUtc != floor)
-        {
-            RangePicker.DataStartUtc = floor;
         }
     }
 
@@ -352,6 +352,76 @@ public partial class ViewerServerTab
            first read after a range was applied from another tab, or a server that moved zone), so draw it again. A
            range that slides with now is redrawn from the clock too (#4766, #5562). */
         RefreshRangePicker();
+    }
+
+    private DateTime? _serverDataStartUtc;
+
+    /// <summary>When the server was first collected (#7386), the start the charts' X axis may not go before, and what the picker's
+    /// "Data starts" note names: the note previews whatever range a reader types, so it takes the server's oldest row, not the
+    /// floor a surface's window probe found (a probe is bounded to the window it was asked about, which for a covered window
+    /// is the window's own start). Null until the first read, or when the server has no row yet, and then the note is hidden.</summary>
+    internal DateTime? ServerDataStartUtc
+    {
+        get => _serverDataStartUtc;
+        set
+        {
+            _serverDataStartUtc = value;
+            RangePicker.DataStartUtc = value;
+        }
+    }
+
+    private DateTime _serverDataStartReadUtc = DateTime.MinValue;
+
+    /// <summary>How long a read of the server's data start stands. The start only moves later, when old rows are purged, so the
+    /// charts re-read it with the normal refresh at most this often, not once per chart.</summary>
+    internal static readonly TimeSpan ServerDataStartMaxAge = TimeSpan.FromMinutes(10);
+
+    /// <summary>Reads the server's data start for the charts (#7386), one read for the whole tab, at most once per
+    /// <see cref="ServerDataStartMaxAge"/>. A failed read drops the start (null means the axis stays as picked), the same as Lite, and the next refresh reads again.</summary>
+    internal async Task RefreshServerDataStartAsync()
+    {
+        if (DateTime.UtcNow - _serverDataStartReadUtc < ServerDataStartMaxAge)
+        {
+            return;
+        }
+
+        try
+        {
+            ServerDataStartUtc = await _dataService.GetServerDataStartAsync(_server.ServerId, _server.IsPostgres);
+            _serverDataStartReadUtc = DateTime.UtcNow;
+            OverviewLanes.ServerDataStartUtc = ServerDataStartUtc;
+        }
+        catch
+        {
+            /* The start only trims empty width off a chart. A read that failed makes no claim, so the charts fall back to the
+               picked range (as Lite does) rather than trust a start the failed read could not confirm. The read time stays
+               old, so the next refresh tries again. */
+            ServerDataStartUtc = null;
+            OverviewLanes.ServerDataStartUtc = null;
+        }
+    }
+
+    /// <summary>The X axis start of a time chart over [start, end] (#7386), in the charts' OLE automation dates.</summary>
+    internal double ChartXStart(double startOa, double endOa) => ChartAxisStart.XStart(startOa, endOa, ServerDataStartUtc);
+
+    /// <summary><see cref="ChartXStart(double, double)"/> for a window held as instants.</summary>
+    internal double ChartXStart(DateTime startUtc, DateTime endUtc) => ChartXStart(startUtc.ToOADate(), endUtc.ToOADate());
+
+    /// <summary>The X axis start of a chart whose series are already on <paramref name="plot"/> (#7386): never later than the earliest
+    /// point it drew, whichever relation fed it (an hourly tier, a collector with its own retention), so no plotted point is hidden.</summary>
+    internal double ChartXStart(ScottPlot.Plot plot, double startOa, double endOa) => ChartAxisStart.XStart(startOa, endOa, ServerDataStartUtc, plot);
+
+    /// <summary><see cref="ChartXStart(ScottPlot.Plot, double, double)"/> for a window held as instants.</summary>
+    internal double ChartXStart(ScottPlot.Plot plot, DateTime startUtc, DateTime endUtc) => ChartXStart(plot, startUtc.ToOADate(), endUtc.ToOADate());
+
+    /// <summary>For a chart a shared renderer drew with the axis start it was given up front: moves the left edge back when the
+    /// renderer plotted a point older than that start (#7386), and refreshes the chart.</summary>
+    internal void KeepPlottedInView(ScottPlot.WPF.WpfPlot chart, DateTime startUtc, DateTime endUtc)
+    {
+        if (ChartAxisStart.WidenToPlotted(chart.Plot, startUtc.ToOADate(), endUtc.ToOADate(), ServerDataStartUtc))
+        {
+            chart.Refresh();
+        }
     }
 
     /// <summary>Pushes this tab's server clock onto the process-wide helper. Called before every render so

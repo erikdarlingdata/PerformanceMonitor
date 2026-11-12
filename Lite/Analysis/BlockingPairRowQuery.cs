@@ -109,10 +109,15 @@ AND blocking_spid <> 0";
     /// them are on the analysis pass; a default would have let either keep passing nothing while the
     /// signature claimed the read was abandonable. The viewer's call is the one that legitimately has
     /// no pass to abandon, and it says so at its own call site rather than here.</para>
+    ///
+    /// <para>#7256: <paramref name="plan"/>, when the caller took one for <c>dmv_blocking_snapshots</c> before its read lock
+    /// at this window's start, reads the hot table alone for a window newer than the archive, so no Parquet file is opened.
+    /// <c>event_time</c> is a snapshot's collection time, so the plan's <c>collection_time</c> span bounds this
+    /// <c>event_time</c> window. Null reads the view, as before.</para>
     /// </summary>
     internal static async Task AppendDmvSnapshotRowsAsync(
         Func<DuckDBCommand> createCommand, List<BlockingPairRow> rows, int serverId, DateTime start, DateTime end,
-        CancellationToken cancellationToken, bool includeText = true)
+        CancellationToken cancellationToken, bool includeText = true, ArchiveReadPlan? plan = null)
     {
         var dmv = new List<BlockingPairRow>();
         using (var cmd = createCommand())
@@ -122,7 +127,7 @@ AND blocking_spid <> 0";
             var textColumns = includeText
                 ? "blocked_sql_text, blocking_sql_text"
                 : "''::VARCHAR AS blocked_sql_text, ''::VARCHAR AS blocking_sql_text";
-            cmd.CommandText = $@"
+            var sql = $@"
 SELECT
     {LeadingColumns},
     {textColumns},
@@ -134,6 +139,7 @@ WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
 {SpidFilter}
 ORDER BY event_time DESC
 LIMIT 5000";
+            cmd.CommandText = plan is null ? sql : plan.Apply(sql);
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = start });
             cmd.Parameters.Add(new DuckDBParameter { Value = end });
@@ -156,10 +162,16 @@ LIMIT 5000";
     /// blocking text, NULL read as empty text as <see cref="Read"/> does; a key whose row is gone is absent. A missing
     /// spid or ecid reads as 0 on both sides, exactly as <see cref="Read"/> maps it. When more than one row of a key is
     /// stored, the one with the longest wait is read, which is the row the reconstruction keeps for an edge.
+    ///
+    /// <para>#7256: every DMV-source key comes from a row the window's own DMV read returned, so each is at or after the
+    /// window start. A <paramref name="plan"/> taken for <c>dmv_blocking_snapshots</c> at that start therefore covers this
+    /// read too, and it is applied to the DMV source only. The blocked-process-report source stays on the view
+    /// (<see cref="StoredEventCopies"/> needs the whole archive for first-copy semantics). The caller must pass keys of
+    /// the plan's window only.</para>
     /// </summary>
     internal static async Task<Dictionary<PairRowKey, (string BlockedSql, string BlockingSql)>> ReadChainLevelTextAsync(
         Func<DuckDBCommand> createCommand, bool dmvSource, int serverId, IReadOnlyCollection<PairRowKey> keys,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, ArchiveReadPlan? plan = null)
     {
         var text = new Dictionary<PairRowKey, (string BlockedSql, string BlockingSql)>();
         var list = keys.ToList();
@@ -189,7 +201,7 @@ LIMIT 5000";
             var source = dmvSource
                 ? $"v_dmv_blocking_snapshots WHERE {where}"
                 : $"{StoredEventCopies.BlockedProcessReports(where)} AS ev";
-            cmd.CommandText = $@"
+            var sql = $@"
 SELECT
     event_time,
     COALESCE(blocked_spid, 0),
@@ -200,6 +212,7 @@ SELECT
     blocking_sql_text
 FROM {source}
 ORDER BY wait_time_ms DESC NULLS LAST";
+            cmd.CommandText = dmvSource && plan is not null ? plan.Apply(sql) : sql;
 
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))

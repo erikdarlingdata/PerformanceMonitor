@@ -89,10 +89,13 @@ public sealed class DarlingMcpDatabaseProtectionTools
                         $"No database protection capture in the {hours_back}-hour window ending {Format(windowEnd)}. The database_protection collector has not run in it.");
             }
 
-            var thresholds = DatabaseProtectionThresholds.Default;
+            /* #7611: the global ages and this server's overrides. A database is judged against its own (database override, server override, global
+               value); `thresholds` below is the server-wide figure and each fact's threshold_minutes is the one its database was judged against. */
+            var resolver = await DatabaseProtectionThresholdSettings.ReadAsync(postgres, resolved.ServerId, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var thresholds = resolver.For(null);
             var capturedAt = DateTime.SpecifyKind(read.NewestCapture!.Value, DateTimeKind.Utc);
             var banded = read.Databases
-                .Select(d => (Fact: d, Band: DatabaseProtectionBands.Evaluate(d, capturedAt, thresholds)))
+                .Select(d => (Fact: d, Band: DatabaseProtectionBands.Evaluate(d, capturedAt, resolver.For(d.DatabaseName))))
                 .ToList();
             var summary = DatabaseProtectionBands.Summarize(banded);
             var listed = overdue_only ? banded.Where(b => b.Band.AnyOverdue).ToList() : banded;
@@ -108,6 +111,12 @@ public sealed class DarlingMcpDatabaseProtectionTools
                     full_backup_days = thresholds.FullBackup.TotalDays,
                     log_backup_minutes = (long)thresholds.LogBackup.TotalMinutes,
                     checkdb_days = thresholds.CheckDb.TotalDays,
+                    full_backup_hours = (long)thresholds.FullBackup.TotalHours,
+                    checkdb_hours = (long)thresholds.CheckDb.TotalHours,
+                    global_full_backup_hours = resolver.Global.BackupHours,
+                    global_log_backup_minutes = resolver.Global.LogBackupMinutes,
+                    global_checkdb_hours = resolver.Global.CheckDbHours,
+                    databases_with_own_thresholds = read.Databases.Where(d => resolver.For(d.DatabaseName) != thresholds).Select(d => d.DatabaseName).ToList(),
                 },
                 summary = new
                 {
@@ -134,7 +143,7 @@ public sealed class DarlingMcpDatabaseProtectionTools
                     full_backup = Fact(b.Fact.LastFullBackupTime, b.Band.FullBackup, b.Fact.FullBackupState ?? ""),
                     log_backup = Fact(b.Fact.LastLogBackupTime, b.Band.LogBackup, b.Fact.LogBackupState ?? ""),
                 }),
-                note = "All times are UTC. last_time is null when there is no time to show (never, none_in_window, unknown, unavailable). " +
+                note = "All times are UTC. A threshold is the global setting (get_alert_settings) unless a server or database override (set_alert_threshold_override) replaces it; each fact's threshold_minutes is the one its database was judged against. last_time is null when there is no time to show (never, none_in_window, unknown, unavailable). " +
                     "Backups are read from the last 60 days of msdb, so none_in_window means none in 60 days, not never. " +
                     "An excluded database and a platform-managed target are never overdue. A native-only (Amazon RDS) target's backups are not judged, but its CHECKDB is.",
             }, McpHelpers.JsonOptions);

@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// drop-down lists only the picked server's categories. The tests drive the real tab's own redraw (<c>ApplyChoices</c>) and its real
 /// drop-downs.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerJobHistoryServerFilterTests
 {
     private const int SqlA = 1;
@@ -86,6 +87,53 @@ public sealed class ViewerJobHistoryServerFilterTests
             Pick(tab.ServerFilterComboBox, SqlA.ToString());
             Assert.Equal("No job runs recorded in the selected time range", tab.NoJobsMessage.Text);
         });
+    }
+
+    /* #8564: a PostgreSQL target has no SQL Agent and never will, and the empty grid used to read "No job runs recorded", a true
+       negative about a collector that never runs there. It now says what Agent Alerts, Database Protection and Identity Capacity say. */
+    private const int PgA = 7;
+    private const int PgB = 8;
+    private const string NeverRuns = "written for SQL Server and never runs against another engine";
+
+    private static DarlingServer Pg(int id, string name) => new(id, name, name, true, null, engineKind: MonitoredEngineKind.Postgres, postgresMajorVersion: 16);
+
+    [Fact]
+    public void PickingAPostgresServer_SaysTheCollectorNeverRunsAgainstAnotherEngine()
+    {
+        OnTab(tab =>
+        {
+            var servers = ViewerDataService.ServersOf([new DarlingServer(SqlA, "sql-a", "sql-a", true, 16), Pg(PgA, "pg-a")]);
+            tab.ApplyChoices(servers, [], []);
+
+            Assert.Equal(new[] { "All Servers", "pg-a", "sql-a" }, Texts(tab.ServerFilterComboBox));
+            Pick(tab.ServerFilterComboBox, PgA.ToString());
+            Assert.Contains("pg-a runs ", tab.NoJobsMessage.Text, StringComparison.Ordinal);
+            Assert.Contains(NeverRuns, tab.NoJobsMessage.Text, StringComparison.Ordinal);
+
+            Pick(tab.ServerFilterComboBox, SqlA.ToString());
+            Assert.Equal("No job runs recorded in the selected time range", tab.NoJobsMessage.Text);
+        });
+    }
+
+    [Fact]
+    public void AllServers_OnAStoreWithNoSqlServer_SaysTheSameSentence_AndOnAMixedStoreKeepsTheUsualNote()
+    {
+        OnTab(tab =>
+        {
+            tab.ApplyChoices(ViewerDataService.ServersOf([Pg(PgA, "pg-a"), Pg(PgB, "pg-b")]), [], []);
+            Assert.Contains(NeverRuns, tab.NoJobsMessage.Text, StringComparison.Ordinal);
+
+            tab.ApplyChoices(ViewerDataService.ServersOf([Pg(PgA, "pg-a"), new DarlingServer(SqlA, "sql-a", "sql-a", true, 16)]), [], []);
+            Assert.Equal("No job runs recorded in the selected time range", tab.NoJobsMessage.Text);
+        });
+    }
+
+    [Fact]
+    public void ADisabledPostgresServer_IsNotOffered()
+    {
+        var servers = ViewerDataService.ServersOf([new DarlingServer(PgA, "pg-a", "pg-a", false, null, engineKind: MonitoredEngineKind.Postgres)]);
+
+        Assert.Empty(servers.Choices);
     }
 
     [Fact]

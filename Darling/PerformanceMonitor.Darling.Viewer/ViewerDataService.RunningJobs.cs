@@ -19,7 +19,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>
-    /// The Running Jobs grid's read — Lite's <c>GetRunningJobsAsync</c> ported to Postgres verbatim
+    /// The Running Jobs grid's read — Lite's <c>ReadRunningJobsAsync</c> ported to Postgres verbatim
     /// (runs against the <c>v_running_jobs</c> passthrough view): the latest snapshot only (the
     /// <c>collection_time = MAX(...)</c> self-subquery), ordered by current duration descending. All the
     /// derived columns (avg/p95/percent-of-average/is-running-long) are collector-side, so the read is
@@ -32,7 +32,7 @@ public sealed partial class ViewerDataService
     /// a run that stored none means nothing is running, unless a snapshot newer than that log row exists (the Darling
     /// service stamps the log row when the run ends, after its rows are stored). A server with no such log row keeps the
     /// newest snapshot. The same text as the MCP tool's <c>DarlingJobReader.RunningJobsSql</c> and Lite's
-    /// <c>GetRunningJobsAsync</c>.</para>
+    /// <c>ReadRunningJobsAsync</c>.</para>
     ///
     /// <para>The snapshot must also be recent: <c>collection_time &gt;= $2</c> is the alert read's #1812 bound
     /// (<see cref="PerformanceMonitor.Alerting.RunningJobsCurrency.Cutoff"/>, three missed cycles at the effective running_jobs cadence).

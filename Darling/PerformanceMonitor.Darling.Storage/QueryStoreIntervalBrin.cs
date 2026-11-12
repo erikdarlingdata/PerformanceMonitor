@@ -257,7 +257,7 @@ FROM
 
     private static string AlterOffSql(string index) => $"ALTER INDEX {index} SET (autosummarize = off);";
 
-    private static async Task<int> ReadDeadlockTimeoutMsAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    internal static async Task<int> ReadDeadlockTimeoutMsAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         await using var read = new NpgsqlCommand(DeadlockTimeoutSql, connection) { CommandTimeout = CatalogReadTimeoutSeconds };
         return Convert.ToInt32(await read.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), System.Globalization.CultureInfo.InvariantCulture);

@@ -47,6 +47,26 @@ public static class MetricFormatter
     }
 
     /// <summary>
+    /// An estimated row count as the plan viewer prints it on every surface (#8187): one decimal
+    /// with thousands separators, so the node tooltip's Estimated Rows, the arrow tooltip's
+    /// Estimated Number of Rows Per Execution and the Properties panel's Est. Rows Per Exec read
+    /// the same figure for the same estimate. The optimizer's estimates are fractional, and the
+    /// one decimal keeps 1.1 from reading as 1 on one surface and 1.1 on the next.
+    /// </summary>
+    public static string FormatEstimatedRows(double rows, IFormatProvider? provider = null)
+        => rows.ToString("N1", provider ?? CultureInfo.CurrentCulture);
+
+    /// <summary>
+    /// An operator's estimated execution count (once, plus once per estimated rebind and once per estimated
+    /// rewind) as the plan viewer prints it (#8380): thousands separators, and one decimal only when the
+    /// count has one. Rebind and rewind estimates are routinely fractional, so 10.5 rebinds is 11.5 runs and
+    /// reads "11.5" in the Properties panel, never a rounded "12" beside an Est. Rows All Execs that was
+    /// computed from 11.5. A whole count stays whole: 1,001 runs is "1,001", not "1,001.0".
+    /// </summary>
+    public static string FormatEstimatedExecutions(double executions, IFormatProvider? provider = null)
+        => executions.ToString("#,##0.#", provider ?? CultureInfo.CurrentCulture);
+
+    /// <summary>
     /// The same ladder the statements grid already uses (under a second stays in
     /// milliseconds like "847ms", under a minute scales to seconds with one decimal like
     /// "3.5s", and anything longer splits into minutes and seconds like "20m 35s"), for a

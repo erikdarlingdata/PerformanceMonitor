@@ -87,6 +87,12 @@ public static partial class SensitiveStatements
     internal static void SetWarmUp(Task? warmUp, long startedTimestamp) =>
         Volatile.Write(ref s_warmUpState, warmUp is null ? null : new WarmUpState(warmUp, startedTimestamp));
 
+    /// <summary>How many times a caller waited on a running warm-up: a blocking wait or an await that began. A test
+    /// seam: it proves the warm-up's own judging calls never wait on it, without timing them.</summary>
+    internal static long WarmUpWaits => Interlocked.Read(ref s_warmUpWaits);
+
+    private static long s_warmUpWaits;
+
     /// <summary>
     /// True only while a call could still be made to wait: a warm-up is registered, it has not completed, the caller is
     /// not the warm-up itself, and its single deadline has not passed. A cheap read (no sizing, no wait): the callers
@@ -171,6 +177,7 @@ public static partial class SensitiveStatements
 
         try
         {
+            Interlocked.Increment(ref s_warmUpWaits);
             return warmUp.Wait(remaining);
         }
 #pragma warning disable CA1031 // a failed wait changes nothing: the call is judged as it would be cold
@@ -203,6 +210,7 @@ public static partial class SensitiveStatements
     {
         try
         {
+            Interlocked.Increment(ref s_warmUpWaits);
             await warmUp.WaitAsync(remaining).ConfigureAwait(false);
         }
 #pragma warning disable CA1031 // a timeout or a failed warm-up changes nothing: the call is judged as it would be cold

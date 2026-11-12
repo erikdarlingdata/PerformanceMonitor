@@ -38,38 +38,63 @@ namespace PerformanceMonitor.Ui
     /// </summary>
     public static class ChartStyle
     {
-        /// <summary>Resolves the chrome colors for the currently active theme.</summary>
+        /// <summary>
+        /// Resolves the chrome colors for the currently active theme. Each one is read from the application's theme dictionary
+        /// (#3577: a per-user override regenerates that dictionary, so the chart takes the operator's colors with the panels
+        /// around it), and falls back to the theme's stock hex when the app has no dictionary (the tests, a headless host).
+        /// The figure and legend sit on the raised panel color, the data area on the well color (Dark) or the page color
+        /// (the light themes), text on the foreground, and the legend outline on the border.
+        /// #8266: the grid is the theme's ink at a low alpha in every theme, so a 1 px gridline reads against the plot
+        /// the same way in each (a contrast of about 1.5 against the plot background) and stays quieter than the axis.
+        /// </summary>
         public static ChartThemeColors GetThemeColors()
         {
             if (ThemeManager.CurrentTheme == "CoolBreeze")
+            {
+                var figure = ThemeColor("BackgroundLightColor", "#EEF4FA");
+                var text = ThemeColor("ForegroundColor", "#1A2A3A");
+                var border = ThemeColor("BorderColor", "#A8BDD0");
                 return new ChartThemeColors(
-                    ScottPlot.Color.FromHex("#EEF4FA"),
-                    ScottPlot.Color.FromHex("#DAE6F0"),
-                    ScottPlot.Color.FromHex("#1A2A3A"),
-                    ScottPlot.Color.FromHex("#A8BDD0").WithAlpha(120),
-                    ScottPlot.Color.FromHex("#EEF4FA"),
-                    ScottPlot.Color.FromHex("#1A2A3A"),
-                    ScottPlot.Color.FromHex("#A8BDD0"));
+                    figure,
+                    ThemeColor("BackgroundColor", "#DAE6F0"),
+                    text,
+                    text.WithAlpha(60),
+                    figure,
+                    text,
+                    border);
+            }
 
             if (ThemeManager.HasLightBackground)
+            {
+                var figure = ThemeColor("BackgroundLightColor", "#FFFFFF");
+                var text = ThemeColor("ForegroundColor", "#1A1D23");
                 return new ChartThemeColors(
-                    ScottPlot.Color.FromHex("#FFFFFF"),
-                    ScottPlot.Color.FromHex("#F5F7FA"),
-                    ScottPlot.Color.FromHex("#1A1D23"),
-                    ScottPlot.Colors.Black.WithAlpha(20),
-                    ScottPlot.Color.FromHex("#FFFFFF"),
-                    ScottPlot.Color.FromHex("#1A1D23"),
-                    ScottPlot.Color.FromHex("#DEE2E6"));
+                    figure,
+                    ThemeColor("BackgroundColor", "#F5F7FA"),
+                    text,
+                    ScottPlot.Colors.Black.WithAlpha(50),
+                    figure,
+                    text,
+                    ThemeColor("BorderColor", "#DEE2E6"));
+            }
 
+            var darkFigure = ThemeColor("BackgroundLightColor", "#22252b");
+            var darkText = ThemeColor("ForegroundColor", "#E4E6EB");
             return new ChartThemeColors(
-                ScottPlot.Color.FromHex("#22252b"),
-                ScottPlot.Color.FromHex("#111217"),
-                ScottPlot.Color.FromHex("#E4E6EB"),
+                darkFigure,
+                ThemeColor("BackgroundDarkColor", "#111217"),
+                darkText,
                 ScottPlot.Colors.White.WithAlpha(40),
-                ScottPlot.Color.FromHex("#22252b"),
-                ScottPlot.Color.FromHex("#E4E6EB"),
-                ScottPlot.Color.FromHex("#2a2d35"));
+                darkFigure,
+                darkText,
+                ThemeColor("BorderColor", "#2a2d35"));
         }
+
+        /// <summary>The theme dictionary's <see cref="Color"/> under <paramref name="key"/>, or <paramref name="fallbackHex"/> when the app has none.</summary>
+        private static ScottPlot.Color ThemeColor(string key, string fallbackHex) =>
+            Application.Current?.TryFindResource(key) is Color c
+                ? new ScottPlot.Color(c.R, c.G, c.B, c.A)
+                : ScottPlot.Color.FromHex(fallbackHex);
 
         /// <summary>
         /// Applies the full chrome theme to a ScottPlot chart (backgrounds, axis/grid/legend
@@ -98,6 +123,7 @@ namespace PerformanceMonitor.Ui
             chart.Plot.Axes.Left.Label.ForeColor = c.Text;
             chart.Plot.Axes.Bottom.TickLabelStyle.FontSize = 13;
             chart.Plot.Axes.Left.TickLabelStyle.FontSize = 13;
+            ApplyAxisTitleStyle(chart);
 
             ApplyShortPlotFixes(chart);
 
@@ -114,9 +140,11 @@ namespace PerformanceMonitor.Ui
 
         /// <summary>
         /// Minimal chrome for simple single-series charts (e.g. the history dialogs): backgrounds,
-        /// axis, grid, and tick label colors only — no legend handling, axis-margin override,
+        /// axis, grid, tick label and legend colors only — no legend placement, axis-margin override,
         /// font-size override, background brush, or first-render hook. Sources colors from
-        /// <see cref="GetThemeColors"/> so the per-theme hexes can't drift from the full theme.
+        /// <see cref="GetThemeColors"/> so the per-theme hexes can't drift from the full theme. The legend
+        /// takes the theme's colors because ScottPlot draws one inside the plot for any named series, and
+        /// its stock white box and black text do not belong on a dark plot (#8540).
         /// </summary>
         public static void ApplyMinimalChartTheme(WpfPlot chart)
         {
@@ -127,6 +155,9 @@ namespace PerformanceMonitor.Ui
             chart.Plot.Grid.MajorLineColor = c.Grid;
             chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = c.Text;
             chart.Plot.Axes.Left.TickLabelStyle.ForeColor = c.Text;
+            chart.Plot.Legend.BackgroundColor = c.LegendBackground;
+            chart.Plot.Legend.FontColor = c.LegendForeground;
+            chart.Plot.Legend.OutlineColor = c.LegendOutline;
             ApplyShortPlotFixes(chart);
         }
 
@@ -137,10 +168,21 @@ namespace PerformanceMonitor.Ui
                 chart.Plot.Axes.Left.TickGenerator = new MinimumTickGenerator();
             ChartLayout.Attach(chart); // #6832: before the title, whose refit reads what this measured
             ChartAxisTitle.Attach(chart);
+            ChartGroupAligner.Attach(chart); // #7385: charts shown together share one plot rectangle
             // #6832: the panel is sized from the tick labels of one pass and drawn with those of the next, and on a short plot the
             // second pass adds the axis' top tick ("398.17") that the first never measured, so that label ran into the title.
             chart.Plot.Axes.Left.MinimumSize = (float)ChartAxisTitle.LeftPanelMinWidth;
         }
+
+        /// <summary>
+        /// #7606: marks the chart's Y axis as a count (sessions, deadlocks, tasks, events): whole-number ticks only, with one above
+        /// zero (<see cref="CountTickGenerator"/>). Call it after <see cref="ApplyThemeToChart"/> or
+        /// <see cref="ApplyMinimalChartTheme"/>, which install the stock ticks, and after <c>ClearChart</c>, whose reset drops it.
+        /// </summary>
+        public static void UseCountAxis(WpfPlot chart) => UseCountAxis(chart.Plot);
+
+        /// <inheritdoc cref="UseCountAxis(WpfPlot)"/>
+        public static void UseCountAxis(ScottPlot.Plot plot) => plot.Axes.Left.TickGenerator = new CountTickGenerator();
 
         private static void HandleChartFirstLoaded(object sender, RoutedEventArgs e)
         {
@@ -162,6 +204,22 @@ namespace PerformanceMonitor.Ui
             chart.Plot.Axes.Left.Label.ForeColor = text;
             chart.Plot.Axes.Bottom.TickLabelStyle.FontSize = 13;
             chart.Plot.Axes.Left.TickLabelStyle.FontSize = 13;
+            ApplyAxisTitleStyle(chart);
+        }
+
+        /// <summary>
+        /// #8224: an axis title (the Y unit: "ms", "MB/s", "events/hour") is one style on every chart: regular weight at
+        /// <see cref="ChartAxisTitle.BaseFontSize"/>. ScottPlot's stock axis title is bold at 16 points, so a chart that never set
+        /// the style drew its unit heavier and larger than its neighbours. <see cref="ChartAxisTitle"/> shrinks the size on a
+        /// plot too short for the title, and nothing else changes it.
+        /// </summary>
+        public static void ApplyAxisTitleStyle(WpfPlot chart)
+        {
+            foreach (var axis in new ScottPlot.IAxis[] { chart.Plot.Axes.Left, chart.Plot.Axes.Bottom })
+            {
+                axis.Label.Bold = false;
+                axis.Label.FontSize = (float)ChartAxisTitle.BaseFontSize;
+            }
         }
 
         /// <summary>
@@ -198,6 +256,28 @@ namespace PerformanceMonitor.Ui
 
             var (yMin, yMax) = ComputeYLimitsWithLegendPadding(dataYMin, dataYMax);
             chart.Plot.Axes.SetLimitsY(yMin, yMax);
+        }
+
+        /// <summary>
+        /// #8086: a chart whose every drawn value is zero shows a flat line on a Y axis that starts at 0. ScottPlot's autoscale of a
+        /// flat line is a symmetric range around it (-1 to 1), which draws the line in the middle of nothing. Only a chart whose
+        /// Y axis goes below zero while all its data is zero is changed, so limits a caller set (0 to 105 for CPU) stay.
+        /// </summary>
+        public static void FloorAllZeroYAxis(ScottPlot.Plot plot)
+        {
+            var seen = false;
+            foreach (var plottable in plot.PlottableList)
+            {
+                if (!plottable.LegendItems.Any()) continue;
+                var limits = plottable.GetAxisLimits();
+                if (!double.IsFinite(limits.Bottom) || !double.IsFinite(limits.Top)) continue;
+                if (limits.Bottom != 0 || limits.Top != 0) return;
+                seen = true;
+            }
+
+            if (!seen || plot.Axes.GetLimits().Bottom >= 0) return;
+            var (yMin, yMax) = ComputeYLimitsWithLegendPadding(0, 0);
+            plot.Axes.SetLimitsY(yMin, yMax);
         }
 
         /// <summary>

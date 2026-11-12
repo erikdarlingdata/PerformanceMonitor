@@ -73,7 +73,7 @@ public sealed class ViewerSnapshotStripCollectedTests : IDisposable
     {
         var xaml = ViewerFile("ViewerServerTab.xaml");
 
-        Assert.Matches(@"<TextBlock Text=""Collected"" Foreground=""\{DynamicResource ForegroundDimBrush\}"" FontSize=""11""/>\s*<TextBlock x:Name=""MemoryCollectedText"" Text=""--""", xaml);
+        Assert.Matches(@"<TextBlock Text=""Collected"" Foreground=""\{DynamicResource ForegroundDimBrush\}"" FontSize=""11""[^>]*/>\s*<TextBlock x:Name=""MemoryCollectedText"" Text=""--""", xaml);
         Assert.Matches(@"<TextBlock Text=""Collected:""[^>]*ForegroundDimBrush[^>]*/>\s*<TextBlock x:Name=""PlanCacheCollectedText"" Text=""--""", xaml);
         Assert.Matches(@"<TextBlock Text=""Collected:""[^>]*ForegroundDimBrush[^>]*/>\s*<TextBlock x:Name=""SessionStatsCollectedText"" Text=""N/A""", xaml);
     }

@@ -59,7 +59,9 @@ public sealed class PgPlanCaptureCollector : PostgresCollectorDefinitionBase<PgP
 
     /// <param name="QueryId">From <c>%Q</c> in <c>log_line_prefix</c>, which is the ONLY place auto_explain
     /// exposes it — the plan JSON contains no identifier of its own, even with <c>compute_query_id</c> on.
-    /// Joins <c>pg_statement_stats</c>. Zero means the prefix was not configured, and the plan is an orphan
+    /// Joins <c>pg_statement_stats</c>. Zero means no id was available (a csvlog record from PostgreSQL 13, which
+    /// has no query_id column, or <c>compute_query_id</c> off), and the plan is an orphan. A stderr target whose prefix
+    /// lacks <c>%Q</c> in the readable shape stores no plan at all
     /// (<c>pg_plan_capture_readiness</c> reports this as the <c>plan_attribution</c> facet).</param>
     /// <param name="PlanHash">Of the REDACTED plan, so the same shape recurs to the same hash regardless of
     /// the values it ran with — which is what makes dedup work at all.</param>
@@ -134,6 +136,25 @@ public sealed class PgPlanCaptureCollector : PostgresCollectorDefinitionBase<PgP
        guard below (item 1, #4058) and the pattern's own literal stay ONE spelling. */
     private const string PlanMarkerLiteral = "LOG:  duration: ";
 
+    /* The block pattern both pg_read_file route statements splice (#7182): ONE spelling, so the two copies
+       cannot drift apart, and the SAME pattern as PgPlanLogParser.s_planBlock (the RDS API route's) rather
+       than a narrower one. The readiness rule for plan_attribution accepts a colon-separated prefix
+       ('%t:%r:%u@%d:[%p]:%Q '), so a pattern that read only the space family met that facet and stored
+       nothing. The colon alternative's character classes are the C# pattern's, which is what keeps a forged
+       '[1] 424242 LOG:  duration:' in a STATEMENT echo from being reached. Groups: (1) query id, (2) duration,
+       (3) the plan lines; the colon alternative is non-capturing, so the readers' m[1..3] are unchanged.
+
+       The gap before the pid bracket passes the exact text '[local]' and no other bracket: %r and %h render
+       '[local]' for a Unix-socket session, so '%t:%r:%u@%d:[%p]:%Q ' and '%m %r [%p] %Q ' write
+       '... UTC:[local]:u@d:[81]:123 LOG:' there, and a gap that could not pass that '[' dropped every plan from a
+       local-socket session while plan_attribution read met. The forgery guarantee holds because '[local]' is not
+       '[digits]': the gap still cannot consume the real pid bracket, so a forged '[1] 424242 LOG:' later in the
+       line stays unreachable, and a forged '[local]' in a STATEMENT echo only sits behind that same real bracket. */
+    internal const string PlanBlockPatternSql =
+        @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? "
+        + @"(?:[^ [\n]+ (?:[^[\n]|\[local\])*\[\d+\]|[^ :\n]+:(?:[^[\n]|\[local\])*\[\d+\])"
+        + @"[ :](-?\d+) " + PlanMarkerLiteral + @"([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)";
+
     /* The csvlog twin of PlanMarkerLiteral (#4053 part b2): csvlog's own "message" field never carries the
        severity label — that is its own column — so a captured record's message reads "duration: N ms
        plan:\n{json}" with no "LOG:  " head, verified live on a pg18 rig with logging_collector=on and
@@ -172,7 +193,7 @@ FROM (
     FROM tail
     CROSS JOIN LATERAL regexp_matches(
          tail.body,
-         '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ [\n]+ [^[\n]*\[\d+\] (-?\d+) " + PlanMarkerLiteral + @"([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
+         '" + PlanBlockPatternSql + @"',
          'gn') WITH ORDINALITY AS mm(m, ord)
     ORDER BY tail.part DESC, mm.ord DESC
     LIMIT " + MatchFetchLiteral + @"
@@ -275,7 +296,7 @@ FROM (
     FROM tail
     CROSS JOIN LATERAL regexp_matches(
          pg_catalog.encode(tail.body, 'escape'),
-         '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ [\n]+ [^[\n]*\[\d+\] (-?\d+) " + PlanMarkerLiteral + @"([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
+         '" + PlanBlockPatternSql + @"',
          'gn') WITH ORDINALITY AS mm(m, ord)
     WHERE pg_catalog.position(tail.body, '" + PlanMarkerLiteral + @"'::bytea) > 0
     ORDER BY tail.part DESC, mm.ord DESC

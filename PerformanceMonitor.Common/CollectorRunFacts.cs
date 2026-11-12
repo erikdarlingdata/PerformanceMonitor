@@ -8,6 +8,7 @@
 
 using System;
 using System.Globalization;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Common;
 
@@ -27,11 +28,15 @@ namespace PerformanceMonitor.Common;
 /// <param name="LastSuccessUtc">The newest successful run, or null when there is none.</param>
 /// <param name="LastSuccessRows"><c>rows_collected</c> of that newest successful run, or null when it was not
 /// recorded (an older log row).</param>
+/// <param name="FirstSuccessInWindowUtc">The earliest successful run inside the read's window (#7442), or null when the store
+/// did not ask or there is none. A run in the window does not show when collection began: this is the instant a window note
+/// measures coverage from, the way an empty answer's floor does when rows exist.</param>
 public sealed record CollectorRunFacts(
     long SuccessfulRuns,
     long? SuccessfulRunsInWindow,
     DateTime? LastSuccessUtc,
-    long? LastSuccessRows)
+    long? LastSuccessRows,
+    DateTime? FirstSuccessInWindowUtc = null)
 {
     /// <summary>The count <see cref="SuccessfulRuns"/> stops at: the reads only need "none, one, or two or more".</summary>
     public const int RunsCap = 2;
@@ -77,14 +82,14 @@ public sealed record CollectorRunFacts(
                deny rows the collector did record there. Say what was measured: nothing in the databases it still has. */
             return ("empty",
                 string.Create(CultureInfo.InvariantCulture,
-                    $"No procedure ran in the last {hoursBack}h in a database this server still has: the procedure_stats collector ran successfully {SuccessfulRunsInWindow} time(s) in the window and recorded nothing for them. {databasesLeftOut} database(s) the server no longer lists were left out of this read (see databases_left_out)."));
+                    $"No procedure ran in the last {hoursBack}h in a database this server still has: the procedure_stats collector ran successfully {CountText.Plural(SuccessfulRunsInWindow ?? 0, "time")} in the window and recorded nothing for them."));
         }
 
         if (SuccessfulRunsInWindow is > 0)
         {
             return ("empty",
                 string.Create(CultureInfo.InvariantCulture,
-                    $"No procedure executed in the last {hoursBack}h that matches this request: the procedure_stats collector ran successfully {SuccessfulRunsInWindow} time(s) in the window and recorded nothing for it."));
+                    $"No procedure executed in the last {hoursBack}h that matches this request: the procedure_stats collector ran successfully {CountText.Plural(SuccessfulRunsInWindow ?? 0, "time")} in the window and recorded nothing for it."));
         }
 
         var last = LastSuccessUtc is { } at ? string.Create(CultureInfo.InvariantCulture, $" (its last successful run was {at:yyyy-MM-dd HH:mm:ss} UTC)") : "";
@@ -111,7 +116,7 @@ public sealed record CollectorRunFacts(
 
         var verdict = scope is null ? $"found no {found} to store" : $"stored no {found} for {scope}";
         return string.Create(CultureInfo.InvariantCulture,
-            $"{collectorName} ran {SuccessfulRunsInWindow} time(s) in the last {hoursBack} hour(s) and {verdict}. This is not a collection gap: collection health showing successful runs that stored no rows is consistent with it.");
+            $"{collectorName} ran {CountText.Plural(SuccessfulRunsInWindow ?? 0, "time")} in the last {CountText.Plural(hoursBack, "hour")} and {verdict}. This is not a collection gap: collection health showing successful runs that stored no rows is consistent with it.");
     }
 
     /// <summary>
@@ -128,5 +133,47 @@ public sealed record CollectorRunFacts(
         }
 
         return string.Create(CultureInfo.InvariantCulture, $"No trace flags are enabled as of the trace_flags collector's latest successful run ({LastSuccessUtc:yyyy-MM-dd HH:mm:ss} UTC).");
+    }
+
+    /// <summary>
+    /// #7459: the answer for a trace-flag read that came back with no flags. <c>empty</c> only when the trace_flags collector's
+    /// newest successful run stored nothing, which is the collector saying no flag is on (<see cref="NoTraceFlagsEnabled"/>).
+    /// With no successful run, or a newest run that did not record finding none, the store cannot say no flag is enabled, so
+    /// the status is <c>unavailable</c>: <c>empty</c> always means somebody looked.
+    /// </summary>
+    public (string Status, string Message) TraceFlagsEmpty()
+    {
+        if (NoTraceFlagsEnabled() is { } none)
+        {
+            return ("empty", none);
+        }
+
+        return NoFindingOnRecord("trace_flags", "trace flags");
+    }
+
+    /// <summary>
+    /// #7459: the answer for a running-jobs read that came back with no jobs and no fresher explanation. A successful
+    /// running_jobs run says no SQL Agent job was running as of that run, so <c>empty</c>, stating the run's time. With no
+    /// successful run the tool never looked, so <c>unavailable</c>.
+    /// </summary>
+    public (string Status, string Message) RunningJobsEmpty()
+    {
+        if (LastSuccessUtc is { } at)
+        {
+            return ("empty", string.Create(CultureInfo.InvariantCulture, $"No running SQL Agent jobs found as of the running_jobs collector's latest successful run ({at:yyyy-MM-dd HH:mm:ss} UTC)."));
+        }
+
+        return NoFindingOnRecord("running_jobs", "running SQL Agent jobs");
+    }
+
+    private (string Status, string Message) NoFindingOnRecord(string collectorName, string what)
+    {
+        if (LastSuccessUtc is { } at)
+        {
+            return ("unavailable", string.Create(CultureInfo.InvariantCulture,
+                $"No {what} are stored, and the {collectorName} collector's latest successful run ({at:yyyy-MM-dd HH:mm:ss} UTC) did not record finding none, so this is not a report that there are none. Check collection health."));
+        }
+
+        return ("unavailable", $"The {collectorName} collector has not completed a run yet, so there is nothing to report on {what}. This is not a report that there are none. Check collection health.");
     }
 }

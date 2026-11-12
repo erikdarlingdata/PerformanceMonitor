@@ -654,7 +654,7 @@ public sealed class AlertDeliveryChannelTests
     /// reaching for it fails here instead of quietly reintroducing #3169.
     /// </summary>
     [Fact]
-    public void TheLegacyHatch_HasExactlyOneProductionCaller()
+    public void TheLegacyHatch_HasNoProductionCaller()
     {
         var root = RepoRoot();
         var callers = new List<string>();
@@ -686,7 +686,8 @@ public sealed class AlertDeliveryChannelTests
             callers.Add(relative);
         }
 
-        Assert.Equal(new[] { "deprecated/Dashboard/Services/EmailAlertService.cs" }, callers.OrderBy(c => c).ToArray());
+        /* The one caller was the deprecated Dashboard's EmailAlertService, now frozen in a zip (#6973). */
+        Assert.Empty(callers);
     }
 
     /* ─────────────── helpers ─────────────── */

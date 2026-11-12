@@ -132,7 +132,7 @@ public static class PgFileSettingsCapability
         }
 
         using var command = connection.CreateCommand();
-        command.CommandText = ProbeSql;
+        command.CommandText = PgOwnStatement.Mark(ProbeSql);
         var result = await command.ExecuteScalarAsync(cancellationToken);
 
         /* "readable:isWindows" - see ProbeSql's own remarks (#4251 round-1 review, H1(a)) for why a second

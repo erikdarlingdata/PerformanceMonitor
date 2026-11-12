@@ -40,7 +40,7 @@ public sealed partial class ViewerDataService
     /// <summary>What the write buttons say when the gate is off.</summary>
     public const string CustomAlertRulesReadOnlyMessage =
         "This connection cannot change custom alert rules: the store login has no INSERT, UPDATE and DELETE on custom_alert_rules. " +
-        "Rules can be viewed but not changed here. Connect as a login that holds that grant (postgres.connectAs = \"admin\") and restart the viewer.";
+        "Rules can be viewed but not changed here. " + ViewerReadOnlyException.HowToConnectAsAdmin;
 
     /// <summary>The name a write stamps into <c>updated_by</c>: the Windows user running the viewer, as every other viewer write does.</summary>
     public static string CustomAlertRuleUpdatedBy() => Environment.UserName;

@@ -101,6 +101,35 @@ public sealed class StatsHistoryBehaviourTests
         Assert.Equal(0, r.GetProperty("selects").GetInt32());
     }
 
+    /// <summary>#7586: on a page that has its own Query picker and chart, the History button selects the row there and opens nothing in the
+    /// row, so the page never holds two copies of the chart and its two notes. A row without the keys is still a dash.</summary>
+    [Fact]
+    public void WithAPicker_TheHistoryButtonSelectsTheRow_AndOpensNoPanelInTheRow()
+    {
+        var r = Run("pickerRoute");
+        var picked = r.GetProperty("picked").EnumerateArray().ToArray();
+        Assert.Single(picked);
+        Assert.Equal("0xABC", picked[0].GetProperty("query_hash").GetString());
+        Assert.Equal(0, r.GetProperty("fetches").GetInt32());
+        Assert.Equal(0, r.GetProperty("charts").GetInt32());
+        Assert.Equal(0, r.GetProperty("panels").GetInt32());
+        Assert.False(r.GetProperty("hideButton").GetBoolean());
+        Assert.Equal("—", r.GetProperty("noHashStillDash").GetString());
+    }
+
+    /// <summary>#7586: a query averaging 30 s read "0 ms ... 80,000 ms" with another "ms" above the axis. Every tick now prints seconds, the
+    /// way the grid does, from the largest tick, and the caption is gone because every tick carries its unit.</summary>
+    [Fact]
+    public void TheQueryHistoryAxis_PrintsOneUnitFromTheLargestTick_WithNoCaption()
+    {
+        var r = Run("queryAxis");
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("axisUnit").ValueKind);
+        Assert.Equal("ms", r.GetProperty("sizeUnit").GetString());
+        Assert.Equal(1000, r.GetProperty("perAtTop").GetInt32());
+        Assert.Equal(new[] { "0 s", "10 s", "20 s", "30 s", "40 s" }, r.GetProperty("labels").EnumerateArray().Select(l => l.GetString()));
+        Assert.Equal("33.7 s", r.GetProperty("tooltip").GetString());
+    }
+
     [Fact]
     public void AnOpenPanel_SurvivesARebuild_AndAChangedWindowReadsAgain()
     {
@@ -172,5 +201,56 @@ public sealed class StatsHistoryBehaviourTests
         Assert.Equal("—", r.GetProperty("noName").GetString());
         Assert.Equal("—", r.GetProperty("noDb").GetString());
         Assert.Equal("—", r.GetProperty("noHash").GetString());
+    }
+
+    /// <summary>
+    /// #7416 item 21: a first point later than the window's start does not prove anything aged out (a query first run five hours ago gives
+    /// the same one). The panel says the earlier part aged out of the tier, and how long the tier keeps data, only when the read says the
+    /// requested start is older than the tier keeps.
+    /// </summary>
+    [Fact]
+    public void ALateFirstPoint_SaysAgedOutOnlyWhenTheStartIsOlderThanTheTierKeeps()
+    {
+        var r = Run("headNote");
+        string Note(string key) => Assert.Single(r.GetProperty(key).EnumerateArray(), n => n.GetString()!.Contains("starts")).GetString()!;
+
+        foreach (var late in new[] { Note("lateProcedure"), Note("lateQuery") })
+        {
+            Assert.Contains("starts 4.9 hours back, not the 24 the window asked for. The store holds nothing earlier in this window at this tier.", late);
+            Assert.DoesNotContain("aged out", late);
+        }
+
+        Assert.Contains("History starts 90 hours back, not the 168 the window asked for. The earlier part has aged out of this tier, which keeps 4 days of data.", Note("oldProcedure"));
+        Assert.Contains("The earlier part has aged out of this tier, which keeps 90 days of data.", Note("oldQuery"));
+        Assert.EndsWith("The earlier part has aged out of this tier.", Note("oldQueryNoDays"));
+    }
+
+    /// <summary>#7945: a read that fails with no sentence of its own (a 500 with an empty body) says which path failed, through the shared
+    /// read path every page read takes, so the strip names the read and not just the status.</summary>
+    [Fact]
+    public void AFailedReadWithNoMessage_NamesThePathItAskedFor()
+    {
+        var r = Run("failedReadNamesPath");
+        var error = Assert.Single(r.GetProperty("error").EnumerateArray()).GetString()!;
+        Assert.StartsWith("The Darling service answered HTTP 500 for /api/read/get_procedure_duration_trend with no message.", error);
+    }
+
+    /// <summary>
+    /// #7933: the procedures a reader opens History on are the rare ones, whose rates sit under 1: one 50 ms run in a five-minute bucket is
+    /// 0.17 ms/s, and a procedure that runs once an hour is 0.00028 a second. A tooltip prints each with its significant digits, so a point
+    /// above zero never reads 0, and only a true 0 reads 0. An axis tick still takes its decimals from the tick step.
+    /// </summary>
+    [Fact]
+    public void ATooltipOnASmallRate_KeepsItsDigits_AndOnlyATrueZeroReadsZero()
+    {
+        var r = Run("tooltipRates");
+
+        var msPerSecond = r.GetProperty("msPerSecond");
+        Assert.Equal(new[] { "0.17 ms/s", "0 ms/s", "200 ms/s" }, msPerSecond.GetProperty("tooltip").EnumerateArray().Select(s => s.GetString()));
+        Assert.Equal(new[] { "0.0 ms/s", "0.2 ms/s", "0.4 ms/s" }, msPerSecond.GetProperty("ticks").EnumerateArray().Select(s => s.GetString()));
+
+        var perSecond = r.GetProperty("perSecond");
+        Assert.Equal(new[] { "0.00028", "0", "4" }, perSecond.GetProperty("tooltip").EnumerateArray().Select(s => s.GetString()));
+        Assert.Equal(new[] { "0.000", "0.200", "0.400" }, perSecond.GetProperty("ticks").EnumerateArray().Select(s => s.GetString()));
     }
 }

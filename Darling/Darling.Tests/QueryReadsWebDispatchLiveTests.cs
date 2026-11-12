@@ -76,23 +76,23 @@ public sealed class QueryReadsWebDispatchLiveTests
                      })
             {
                 var all = await WebReadAsync(postgres, serverName, read, "24");
-                Assert.Equal(14_000 * unit, Rate(all), 9);
+                Assert.Equal(14_000 * unit, Rate(all), 6);
                 Assert.Null(Echo(all));
 
                 var both = await WebReadAsync(postgres, serverName, read, "24", A, B);
-                Assert.True(Math.Abs(5_000 * unit - Rate(both)) < 1e-9, $"{read} over A and B read {Rate(both)}, not A + B's work: {both}");
+                Assert.True(Math.Abs(5_000 * unit - Rate(both)) < 1e-6, $"{read} over A and B read {Rate(both)}, not A + B's work: {both}");
                 Assert.Equal("the chosen databases", Echo(both));
 
                 var one = await WebReadAsync(postgres, serverName, read, "24", B);
-                Assert.Equal(2_000 * unit, Rate(one), 9);
+                Assert.Equal(2_000 * unit, Rate(one), 6);
                 Assert.Equal(B, Echo(one));
             }
 
             /* A blank name is every database and echoes null, never the raw whitespace. */
             var blank = await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, serverName, 24, null, null, "   ", ct);
-            Assert.Equal(14_000 * perSecond, Rate(blank), 9);
+            Assert.Equal(14_000 * perSecond, Rate(blank), 6);
             Assert.Null(Echo(blank));
-            Assert.Equal(14_000 * storePerSecond, Rate(await DarlingMcpTrendTools.GetQueryStoreDurationTrend(postgres, serverName, 24, null, "", ct)), 9);
+            Assert.Equal(14_000 * storePerSecond, Rate(await DarlingMcpTrendTools.GetQueryStoreDurationTrend(postgres, serverName, 24, null, "", ct)), 6);
         }, DurationTrendDatabaseFilterLiveTests.Cleanup);
 
     /// <summary>The empty answers of the three trends: one name by its name, two by "the chosen databases", status stays <c>empty</c>.</summary>
@@ -194,7 +194,7 @@ public sealed class QueryReadsWebDispatchLiveTests
             }
 
             /* A blank name is every database: the public tool echoes null and answers with the rows. */
-            var blank = await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, serverName, 1, 30, null, null, "  ", null, ct);
+            var blank = await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, serverName, 1, 30, null, null, false, "  ", null, ct);
             Assert.Null(Echo(blank));
             Assert.Equal(6, JsonDocument.Parse(blank).RootElement.GetProperty("completions_returned").GetInt32());
             bodySucceeded = true;

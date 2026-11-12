@@ -66,7 +66,7 @@ public sealed class LaneAxisAlignerWiringTests
     /// </summary>
     private static string SyncXAxesBody(string source, string what)
     {
-        int start = source.IndexOf("private void SyncXAxes(", StringComparison.Ordinal);
+        int start = source.IndexOf("void SyncXAxes(", StringComparison.Ordinal);
         Assert.True(start >= 0, $"{what} no longer has a SyncXAxes - re-anchor this pin rather than deleting it");
 
         int open = source.IndexOf('{', start);

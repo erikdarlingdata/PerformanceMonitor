@@ -99,7 +99,7 @@ public sealed class DarlingMcpPgLogEventTools
                         "empty",
                         $"No log event{(familyFilter is null ? string.Empty : $" in family '{familyFilter}'")}"
                         + $"{(minRank > 1 ? $" at {severityLabel} or worse" : string.Empty)} was stored for "
-                        + $"{resolved.DisplayName} in the last {hours_back} hour(s). Four things produce that: "
+                        + $"{resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}. Four things produce that: "
                         + "the server wrote none, which is the healthy answer for the error and lock_wait "
                         + "families; the setting that family depends on is off on the target "
                         + "(log_connections / log_disconnections for connection, log_lock_waits for "
@@ -115,7 +115,7 @@ public sealed class DarlingMcpPgLogEventTools
                         + "is the problem rather than the server.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "pg_log_events", resolved.ServerName, windowStart, windowEnd, cancellationToken),
-                            null, windowStart, windowEnd, "pg_log_events", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken);
+                            null, windowStart, windowEnd, "pg_log_events", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken, windowStart);
             }
 
             var truncated = page.Rows.Count > limit;

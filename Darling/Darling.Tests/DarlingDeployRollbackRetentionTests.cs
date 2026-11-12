@@ -658,6 +658,476 @@ public sealed class DarlingDeployRollbackRetentionTests
     }
 
     /// <summary>
+    /// #8537: the pre-stop guard decides on the path it read when it listed the processes, so a managed
+    /// PostgreSQL backend that exits a moment later does not refuse the upgrade.
+    ///
+    /// <para>On Windows every PostgreSQL connection is its own <c>postgres.exe</c>, and on a busy store
+    /// backends start and end all the time. One that exits after the guard lists it has no path left to
+    /// read, and a missing path is not a path outside <c>pg-runtime</c>.</para>
+    ///
+    /// <para>Run as shipped, see <see cref="RunPreStopGuard"/>: the guard's own statements run against a
+    /// process list the test supplies, so no real process has to exit at the right moment.</para>
+    /// </summary>
+    [Fact]
+    public void ThePreStopGuard_LetsThroughAManagedBackendThatExitsAfterItIsListed()
+    {
+        var run = RunPreStopGuard(
+            new GuardProcess("PerformanceMonitor.Darling.Service", 4100, GuardRoot + @"\PerformanceMonitor.Darling.Service.exe", Fate.Running),
+            new GuardProcess("postgres", 4200, GuardRoot + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running),
+            new GuardProcess("postgres", 10048, GuardRoot + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.ExitsOnceListed));
+
+        Assert.False(run.Refused,
+            "the pre-stop guard refused the upgrade over a managed PostgreSQL backend that exited after it was listed (#8537):\n  " + run.Text);
+    }
+
+    /// <summary>
+    /// #8537: a process the service stop would not close, which has exited by the time the guard decides,
+    /// is dropped. It holds no file, so there is nothing for an operator to close.
+    /// </summary>
+    [Fact]
+    public void ThePreStopGuard_DropsAProcessOutsideTheServiceThatHasExitedByTheDecision()
+    {
+        var run = RunPreStopGuard(
+            new GuardProcess("PerformanceMonitor.Darling.Service", 4100, GuardRoot + @"\PerformanceMonitor.Darling.Service.exe", Fate.Running),
+            new GuardProcess("PerformanceMonitor.Darling.Viewer", 5300, GuardRoot + @"\viewer\PerformanceMonitor.Darling.Viewer.exe", Fate.ExitsOnceListed));
+
+        Assert.False(run.Refused,
+            "the pre-stop guard refused the upgrade over a process that had already exited (#8537):\n  " + run.Text);
+    }
+
+    /// <summary>
+    /// The refusal the guard exists for is kept (#2525): a running process the service stop will not close
+    /// refuses the upgrade, and so does one whose exit state cannot be read. Only a process known to have
+    /// exited is dropped. The service and the bundled PostgreSQL are not listed.
+    /// </summary>
+    [Fact]
+    public void ThePreStopGuard_StillRefusesARunningProcessTheServiceStopWillNotClose()
+    {
+        var run = RunPreStopGuard(
+            new GuardProcess("PerformanceMonitor.Darling.Service", 4100, GuardRoot + @"\PerformanceMonitor.Darling.Service.exe", Fate.Running),
+            new GuardProcess("postgres", 4200, GuardRoot + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running),
+            new GuardProcess("PerformanceMonitor.Darling.Viewer", 5300, GuardRoot + @"\viewer\PerformanceMonitor.Darling.Viewer.exe", Fate.Running),
+            new GuardProcess("psql", 5400, GuardRoot + @"\psql.exe", Fate.ExitStateUnreadable));
+
+        Assert.True(run.Refused, "the pre-stop guard let an upgrade through with processes holding the install tree (#2525):\n  " + run.Text);
+        Assert.Contains(run.Lines, line => line.Contains("PerformanceMonitor.Darling.Viewer (pid 5300)", StringComparison.Ordinal));
+        Assert.Contains(run.Lines, line => line.Contains("psql (pid 5400)", StringComparison.Ordinal));
+        Assert.DoesNotContain(run.Lines, line => line.Contains("(pid 4100)", StringComparison.Ordinal));
+        Assert.DoesNotContain(run.Lines, line => line.Contains("(pid 4200)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #8537: the refusal names each process with the path the guard read from it, so an operator can see
+    /// which executable under the install tree it is. A backend that exited after it was listed is not
+    /// among them.
+    /// </summary>
+    [Fact]
+    public void ThePreStopGuard_NamesEachProcessItRefusesOn_WithThePathItRead()
+    {
+        const string viewerPath = GuardRoot + @"\viewer\PerformanceMonitor.Darling.Viewer.exe";
+
+        var run = RunPreStopGuard(
+            new GuardProcess("PerformanceMonitor.Darling.Service", 4100, GuardRoot + @"\PerformanceMonitor.Darling.Service.exe", Fate.Running),
+            new GuardProcess("postgres", 10048, GuardRoot + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.ExitsOnceListed),
+            new GuardProcess("PerformanceMonitor.Darling.Viewer", 5300, viewerPath, Fate.Running));
+
+        Assert.True(run.Refused, "the pre-stop guard let an upgrade through with a Viewer holding the install tree (#2525):\n  " + run.Text);
+        Assert.True(
+            run.Lines.Exists(line => line.Contains("PerformanceMonitor.Darling.Viewer (pid 5300)", StringComparison.Ordinal)
+                && line.Contains(viewerPath, StringComparison.Ordinal)),
+            "the refusal does not name the Viewer with the path the guard read from it (#8537):\n  " + run.Text);
+        Assert.False(
+            run.Lines.Exists(line => line.Contains("(pid 10048)", StringComparison.Ordinal)),
+            "the refusal names a managed PostgreSQL backend that exited after it was listed (#8537):\n  " + run.Text);
+    }
+
+    /// <summary>
+    /// The check after the stop is kept (#2525): with the service down, a single process still running out
+    /// of the install tree refuses the run, the bundled PostgreSQL included, and an empty tree passes. One
+    /// process is the count that matters: a lone object is not a list, and the check counts what it is given.
+    /// </summary>
+    [Fact]
+    public void ThePostStopCheck_StillRefusesOnASingleProcessLeftUnderTheInstallTree()
+    {
+        var clear = RunPostStopCheck();
+        Assert.False(clear.Refused, "the post-stop check refused with nothing running out of the install tree:\n  " + clear.Text);
+
+        var held = RunPostStopCheck(
+            new GuardProcess("postgres", 4200, GuardRoot + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running));
+
+        Assert.True(held.Refused, "the post-stop check let the copy go ahead with a process still running out of the install tree (#2525):\n  " + held.Text);
+        Assert.Contains(held.Lines, line => line.Contains("postgres (pid 4200)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #8546: a 32-bit PowerShell on 64-bit Windows reads no path for a 64-bit process, so every listing
+    /// the guard makes would come back empty and both phases would pass with nothing checked. The guard
+    /// refuses to run from one and names the 64-bit shell. A 64-bit shell, and a 32-bit shell on 32-bit
+    /// Windows, go on to the listing.
+    /// </summary>
+    [Fact]
+    public void TheStopGuard_RefusesToRunFromA32BitShellOn64BitWindows()
+    {
+        var service = new GuardProcess("PerformanceMonitor.Darling.Service", 4100, GuardRoot + @"\PerformanceMonitor.Darling.Service.exe", Fate.Running);
+
+        var blind = RunPreStopGuard(new GuardSetup { Is64BitProcess = false }, service);
+
+        Assert.True(blind.Refused, "the stop guard ran from a 32-bit PowerShell on 64-bit Windows, where it can read no 64-bit process's path (#8546):\n  " + blind.Text);
+        Assert.True(
+            blind.Lines.Exists(line => line.StartsWith("REFUSED ", StringComparison.Ordinal)
+                && line.Contains("32-bit PowerShell on 64-bit Windows", StringComparison.Ordinal)
+                && line.Contains(@"\sysnative\WindowsPowerShell\v1.0\powershell.exe", StringComparison.Ordinal)),
+            "the refusal does not say the shell is 32-bit and name the 64-bit one to run from (#8546):\n  " + blind.Text);
+
+        var sixtyFour = RunPreStopGuard(new GuardSetup(), service);
+        Assert.False(sixtyFour.Refused, "the stop guard refused a 64-bit shell with only the service running:\n  " + sixtyFour.Text);
+
+        var thirtyTwoBitWindows = RunPreStopGuard(new GuardSetup { Is64BitOperatingSystem = false, Is64BitProcess = false }, service);
+        Assert.False(thirtyTwoBitWindows.Refused, "the stop guard refused a 32-bit shell on 32-bit Windows, which reads every path:\n  " + thirtyTwoBitWindows.Text);
+    }
+
+    /// <summary>
+    /// #8546: a listing that cannot see is not an install tree with nothing running out of it. While the
+    /// service is running, its own process is the one thing the listing has to contain, and a listing
+    /// without it refuses the upgrade whatever kept it out. With the service stopped there is no such
+    /// process to ask for, and the same listing passes.
+    /// </summary>
+    [Fact]
+    public void ThePreStopGuard_RefusesWhenTheServiceIsRunningAndTheListingDoesNotContainIt()
+    {
+        var postmaster = new GuardProcess("postgres", 4200, GuardRoot + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running);
+
+        var nothingListed = RunPreStopGuard(new GuardSetup { ServiceStatus = "Running" });
+        Assert.True(nothingListed.Refused, "the pre-stop guard passed with the service running and no process listed under the install tree (#8546):\n  " + nothingListed.Text);
+        Assert.True(
+            nothingListed.Lines.Exists(line => line.StartsWith("REFUSED ", StringComparison.Ordinal)
+                && line.Contains("could not find its process", StringComparison.Ordinal)),
+            "the refusal does not say the service's own process was not found (#8546):\n  " + nothingListed.Text);
+
+        var serviceMissing = RunPreStopGuard(new GuardSetup { ServiceStatus = "Running" }, postmaster);
+        Assert.True(serviceMissing.Refused, "the pre-stop guard passed with the service running and its process missing from the listing (#8546):\n  " + serviceMissing.Text);
+
+        var stopped = RunPreStopGuard(new GuardSetup { ServiceStatus = "Stopped" });
+        Assert.False(stopped.Refused, "the pre-stop guard refused a stopped service with nothing running out of the install tree:\n  " + stopped.Text);
+    }
+
+    /// <summary>
+    /// #8546: <c>-InstallRoot</c> may reach the service's folder by another spelling (a junction, a
+    /// <c>subst</c> drive, a short name), and a process reports the path it was started from. The guard
+    /// lists under the registered folder as well, judges each process against the spelling it was found
+    /// under, and lists each one once.
+    /// </summary>
+    [Fact]
+    public void ThePreStopGuard_SeesAProcessUnderTheRegisteredFolder_WhenInstallRootIsAnotherSpellingOfIt()
+    {
+        const string registered = @"C:\PerformanceMonitorDarling";
+        const string typed = @"D:\Darling";
+        var setup = new GuardSetup { InstallRoot = typed, RegisteredRoot = registered };
+        var service = new GuardProcess("PerformanceMonitor.Darling.Service", 4100, registered + @"\PerformanceMonitor.Darling.Service.exe", Fate.Running);
+        var postmaster = new GuardProcess("postgres", 4200, registered + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running);
+        var viewer = new GuardProcess("PerformanceMonitor.Darling.Viewer", 5300, registered + @"\viewer\PerformanceMonitor.Darling.Viewer.exe", Fate.Running);
+
+        var held = RunPreStopGuard(setup, service, postmaster, viewer);
+
+        Assert.True(held.Refused, "the pre-stop guard let the upgrade through with a Viewer running from the folder the service is registered at (#8546):\n  " + held.Text);
+        Assert.Contains(held.Lines, line => line.Contains("PerformanceMonitor.Darling.Viewer (pid 5300)", StringComparison.Ordinal)
+            && line.Contains(registered + @"\viewer\PerformanceMonitor.Darling.Viewer.exe", StringComparison.Ordinal));
+        Assert.DoesNotContain(held.Lines, line => line.Contains("(pid 4100)", StringComparison.Ordinal));
+        Assert.DoesNotContain(held.Lines, line => line.Contains("(pid 4200)", StringComparison.Ordinal));
+
+        /* The service and its PostgreSQL under the registered spelling are excused, as they are under the typed one. */
+        var clear = RunPreStopGuard(setup, service, postmaster);
+        Assert.False(clear.Refused, "the pre-stop guard refused the service and its PostgreSQL under the registered folder:\n  " + clear.Text);
+
+        /* A process under the typed spelling is still seen, and each process is listed once. */
+        var both = RunPreStopGuard(setup, service, viewer,
+            new GuardProcess("psql", 5400, typed + @"\psql.exe", Fate.Running));
+        Assert.True(both.Refused, "the pre-stop guard let the upgrade through with processes under both spellings of the install folder (#8546):\n  " + both.Text);
+        Assert.Single(both.Lines, line => line.Contains("(pid 5300)", StringComparison.Ordinal));
+        Assert.Single(both.Lines, line => line.Contains("psql (pid 5400)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #8546: the check after the stop lists under the registered folder too, so a process left running
+    /// from it refuses the run when <c>-InstallRoot</c> spells that folder another way.
+    /// </summary>
+    [Fact]
+    public void ThePostStopCheck_SeesAProcessUnderTheRegisteredFolder_WhenInstallRootIsAnotherSpellingOfIt()
+    {
+        const string registered = @"C:\PerformanceMonitorDarling";
+        var setup = new GuardSetup { InstallRoot = @"D:\Darling", RegisteredRoot = registered, ServiceStatus = "Stopped" };
+
+        var held = RunPostStopCheck(setup,
+            new GuardProcess("postgres", 4200, registered + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running));
+
+        Assert.True(held.Refused, "the post-stop check let the copy go ahead with a process still running from the folder the service is registered at (#8546):\n  " + held.Text);
+        Assert.Contains(held.Lines, line => line.Contains("postgres (pid 4200)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #8546: a process started by a short (8.3) spelling of the install folder reports that spelling, and
+    /// the folders the guard looks under are in their long form. The guard spells the process's path out
+    /// before it compares, so a service registered through a short path is found and excused with its
+    /// PostgreSQL, and a Viewer started that way still refuses the upgrade. The refusal gives the path as
+    /// the process reports it.
+    /// </summary>
+    [Fact]
+    public void ThePreStopGuard_FindsProcessesStartedByAShortSpellingOfTheInstallFolder()
+    {
+        const string noShortNames = "this machine's temp folder has no short (8.3) spelling to start a process by.";
+        var setup = new GuardSetup { ShortNamedFolder = true };
+        var service = new GuardProcess("PerformanceMonitor.Darling.Service", 4100, ShortRootMarker + @"\PerformanceMonitor.Darling.Service.exe", Fate.Running);
+        var postmaster = new GuardProcess("postgres", 4200, ShortRootMarker + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running);
+
+        var healthy = RunPreStopGuard(setup, service, postmaster);
+        Assert.SkipWhen(healthy.NoShortNames, noShortNames);
+        Assert.False(healthy.Refused,
+            "the pre-stop guard refused a healthy install whose service was started by a short (8.3) spelling of its folder (#8546):\n  " + healthy.Text);
+
+        var held = RunPreStopGuard(setup, service, postmaster,
+            new GuardProcess("PerformanceMonitor.Darling.Viewer", 5300, ShortRootMarker + @"\viewer\PerformanceMonitor.Darling.Viewer.exe", Fate.Running));
+        Assert.SkipWhen(held.NoShortNames, noShortNames);
+        Assert.True(held.Refused, "the pre-stop guard let the upgrade through with a Viewer started by a short (8.3) spelling of the install folder (#8546):\n  " + held.Text);
+        Assert.True(
+            held.Lines.Exists(line => line.Contains("PerformanceMonitor.Darling.Viewer (pid 5300)", StringComparison.Ordinal)
+                && line.Contains(held.ShortRoot + @"\viewer\PerformanceMonitor.Darling.Viewer.exe", StringComparison.OrdinalIgnoreCase)),
+            "the refusal does not name the Viewer with the path it reports (#8546):\n  " + held.Text);
+        Assert.DoesNotContain(held.Lines, line => line.Contains("(pid 4100)", StringComparison.Ordinal));
+        Assert.DoesNotContain(held.Lines, line => line.Contains("(pid 4200)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #8546: the check after the stop finds a process started by a short (8.3) spelling of the install
+    /// folder, so a postmaster that outlived the stop on an install registered that way refuses the run.
+    /// </summary>
+    [Fact]
+    public void ThePostStopCheck_FindsAProcessStartedByAShortSpellingOfTheInstallFolder()
+    {
+        var held = RunPostStopCheck(new GuardSetup { ShortNamedFolder = true, ServiceStatus = "Stopped" },
+            new GuardProcess("postgres", 4200, ShortRootMarker + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running));
+
+        Assert.SkipWhen(held.NoShortNames, "this machine's temp folder has no short (8.3) spelling to start a process by.");
+        Assert.True(held.Refused, "the post-stop check let the copy go ahead with a process started by a short (8.3) spelling of the install folder still running (#8546):\n  " + held.Text);
+        Assert.Contains(held.Lines, line => line.Contains("postgres (pid 4200)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #8546: a service in any state but Stopped has a process, and the stop acts on every such state. So
+    /// the pre-stop guard asks for the service's process in each of them, not only while it is Running.
+    /// </summary>
+    [Theory]
+    [InlineData("StartPending")]
+    [InlineData("StopPending")]
+    [InlineData("Paused")]
+    public void ThePreStopGuard_AsksForTheServiceProcessInEveryStateButStopped(string status)
+    {
+        var run = RunPreStopGuard(new GuardSetup { ServiceStatus = status });
+
+        Assert.True(run.Refused, $"the pre-stop guard passed with the service {status} and no process listed under the install tree (#8546):\n  " + run.Text);
+        Assert.True(
+            run.Lines.Exists(line => line.StartsWith("REFUSED ", StringComparison.Ordinal)
+                && line.Contains("could not find its process", StringComparison.Ordinal)),
+            "the refusal does not say the service's own process was not found (#8546):\n  " + run.Text);
+    }
+
+    private const string GuardRoot = @"C:\PerformanceMonitorDarling";
+
+    /// <summary>What a stand-in process does once the guard has listed it.</summary>
+    private enum Fate
+    {
+        /// <summary>Still running when the guard decides.</summary>
+        Running,
+
+        /// <summary>Exits once its path has been read: a later read finds no path, and <c>HasExited</c> is true.</summary>
+        ExitsOnceListed,
+
+        /// <summary>Still running, and reading its <c>HasExited</c> fails.</summary>
+        ExitStateUnreadable,
+    }
+
+    private sealed record GuardProcess(string Name, int Id, string Path, Fate Fate);
+
+    /// <summary>What the guard finds on the machine besides the processes: the folder <c>-InstallRoot</c>
+    /// names, the folder the service is registered at (the same text unless given), the service's state,
+    /// and whether Windows and the shell are 64-bit.</summary>
+    private sealed record GuardSetup
+    {
+        public string InstallRoot { get; init; } = GuardRoot;
+        public string? RegisteredRoot { get; init; }
+        public string ServiceStatus { get; init; } = "Running";
+        public bool Is64BitOperatingSystem { get; init; } = true;
+        public bool Is64BitProcess { get; init; } = true;
+
+        /// <summary>The install folder is a real folder the probe makes under the temp folder, given to the
+        /// guard in its long form, and a process path that starts with <see cref="ShortRootMarker"/> is
+        /// under that folder's short (8.3) spelling. <see cref="InstallRoot"/> and
+        /// <see cref="RegisteredRoot"/> are not read.</summary>
+        public bool ShortNamedFolder { get; init; }
+    }
+
+    /// <summary>Stands at the start of a stand-in process's path for the short (8.3) spelling of the folder
+    /// a <see cref="GuardSetup.ShortNamedFolder"/> run makes.</summary>
+    private const string ShortRootMarker = "<short>";
+
+    /// <summary>What a phase printed. <see cref="NoShortNames"/> is true when a
+    /// <see cref="GuardSetup.ShortNamedFolder"/> run found no short spelling for its folder, and the phase
+    /// was not run. <see cref="ShortRoot"/> is the short spelling such a run used.</summary>
+    private sealed record GuardRun(bool Refused, List<string> Lines, bool NoShortNames = false, string? ShortRoot = null)
+    {
+        public string Text => Lines.Count == 0 ? "(the guard printed nothing)" : string.Join("\n  ", Lines);
+    }
+
+    /// <summary>The guard before the stop, on a 64-bit shell with the service running from <see cref="GuardRoot"/>.</summary>
+    private static GuardRun RunPreStopGuard(params GuardProcess[] processes) => RunGuardStatements("pre-stop", new GuardSetup(), processes);
+
+    /// <summary>The guard before the stop: every statement between the check of the folder the service is
+    /// registered at and the pre-flight.</summary>
+    private static GuardRun RunPreStopGuard(GuardSetup setup, params GuardProcess[] processes) => RunGuardStatements("pre-stop", setup, processes);
+
+    /// <summary>The check after the stop, with <c>-InstallRoot</c> the folder the service is registered at.</summary>
+    private static GuardRun RunPostStopCheck(params GuardProcess[] processes) => RunGuardStatements("post-stop", new GuardSetup { ServiceStatus = "Stopped" }, processes);
+
+    /// <summary>The check after the stop: the statement that lists <c>$stillHolding</c> through the
+    /// <c>if</c> that refuses on them.</summary>
+    private static GuardRun RunPostStopCheck(GuardSetup setup, params GuardProcess[] processes) => RunGuardStatements("post-stop", setup, processes);
+
+    /// <summary>
+    /// Runs one phase of the stop guard as the script ships it, under Windows PowerShell 5.1, against
+    /// <paramref name="processes"/> in place of the machine's own process list.
+    ///
+    /// <para>PowerShell's parser hands over every function the script defines, and the phase's own
+    /// statements. None of the script's other code runs. <c>Get-Process</c> returns the stand-ins,
+    /// <c>Get-Service</c> and <c>Get-DarlingShellBitness</c> answer from <paramref name="setup"/>,
+    /// <c>Note</c> and <c>Fail</c> print what they are given, and <c>Fail</c> ends the phase the way the
+    /// script's own ends the run.</para>
+    ///
+    /// <para>A stand-in is a .NET object, as a process is, so a lone one counts as one the way a lone
+    /// process does. Its name, id, <c>Path</c> and <c>HasExited</c> are the test's. <c>Path</c> and
+    /// <c>HasExited</c> answer the way a process does at that point in its life: see <see cref="Fate"/>.</para>
+    /// </summary>
+    private static GuardRun RunGuardStatements(string phase, GuardSetup setup, GuardProcess[] processes)
+    {
+        static string Quote(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+        static string Bool(bool value) => value ? "$true" : "$false";
+
+        var probe = new StringBuilder();
+        probe.AppendLine("$ErrorActionPreference = 'Stop'");
+        probe.AppendLine($"$phase = {Quote(phase)}");
+        probe.AppendLine($"$ast = [System.Management.Automation.Language.Parser]::ParseFile({Quote(PathTo("Darling", "tools", "upgrade-darling.ps1"))}, [ref]$null, [ref]$null)");
+        probe.AppendLine("""
+            foreach ($definition in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+                . ([scriptblock]::Create($definition.Extent.Text))
+            }
+
+            $assigns = { param($node, $name) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq $name }
+            $guard = @()
+            $closed = $false
+            if ($phase -eq 'pre-stop') {
+                # Everything after the read of the registered folder and the if that checks it, up to the pre-flight.
+                $anchor = $ast.Find({ param($node) & $assigns $node '$registeredRoot' }, $true)
+                if ($null -eq $anchor) { throw 'upgrade-darling.ps1 no longer reads $registeredRoot.' }
+                $position = 0
+                foreach ($statement in $anchor.Parent.Statements) {
+                    if ($statement.Extent.StartOffset -lt $anchor.Extent.StartOffset) { continue }
+                    $position++
+                    if ($position -le 2) { continue }
+                    if (& $assigns $statement '$preflightProblem') { $closed = $true; break }
+                    $guard += $statement.Extent.Text
+                }
+            }
+            else {
+                # From the listing after the stop through the if that refuses on it.
+                $anchor = $ast.Find({ param($node) & $assigns $node '$stillHolding' }, $true)
+                if ($null -eq $anchor) { throw 'upgrade-darling.ps1 no longer lists $stillHolding.' }
+                foreach ($statement in $anchor.Parent.Statements) {
+                    if ($statement.Extent.StartOffset -lt $anchor.Extent.StartOffset) { continue }
+                    $guard += $statement.Extent.Text
+                    if ($statement -is [System.Management.Automation.Language.IfStatementAst]) { $closed = $true; break }
+                }
+            }
+            if (-not $closed -or $guard.Count -lt 2) { throw "upgrade-darling.ps1's $phase guard was not found where it is expected." }
+
+            function New-TestProcess([string]$name, [int]$id, [string]$path, [string]$fate) {
+                $process = New-Object System.Object
+                $process | Add-Member -NotePropertyMembers @{ ProcessName = $name; Id = $id; ImagePath = $path; Fate = $fate; Life = @{ Exited = $false } }
+                $process | Add-Member -MemberType ScriptProperty -Name Path -Value {
+                    if ($this.Life.Exited) { return $null }
+                    if ($this.Fate -eq 'ExitsOnceListed') { $this.Life.Exited = $true }
+                    return $this.ImagePath
+                }
+                $process | Add-Member -MemberType ScriptProperty -Name HasExited -Value {
+                    if ($this.Fate -eq 'ExitStateUnreadable') { throw 'Access is denied' }
+                    return $this.Life.Exited
+                }
+                return $process
+            }
+
+            $testProcesses = @()
+            """);
+        if (setup.ShortNamedFolder)
+        {
+            /* A real folder, because only a folder that exists has a short spelling to spell out. The long
+               form is the script's own, and the short one is the file system's. */
+            probe.AppendLine("""
+                $made = Join-Path ([IO.Path]::GetTempPath()) ('PerformanceMonitorDarling-8546-' + [guid]::NewGuid().ToString('N'))
+                [void][IO.Directory]::CreateDirectory($made)
+                $longRoot = Get-DarlingCanonicalPath $made
+                $shortRoot = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($made).ShortPath
+                if ([string]::IsNullOrEmpty($longRoot) -or [string]::IsNullOrEmpty($shortRoot) -or $shortRoot.IndexOf('~') -lt 0 -or $shortRoot -ieq $longRoot) {
+                    Remove-Item -LiteralPath $made -Recurse -Force -ErrorAction SilentlyContinue
+                    'NOSHORT'
+                    'DONE'
+                    exit 0
+                }
+                "SHORTROOT $shortRoot"
+                """);
+        }
+
+        string PathExpression(string path) => setup.ShortNamedFolder && path.StartsWith(ShortRootMarker, StringComparison.Ordinal)
+            ? "($shortRoot + " + Quote(path[ShortRootMarker.Length..]) + ")"
+            : Quote(path);
+
+        foreach (var process in processes)
+        {
+            probe.AppendLine($"$testProcesses += New-TestProcess {Quote(process.Name)} {process.Id} {PathExpression(process.Path)} {Quote(process.Fate.ToString())}");
+        }
+        probe.AppendLine(setup.ShortNamedFolder ? "$InstallRoot = $longRoot" : $"$InstallRoot = {Quote(setup.InstallRoot)}");
+        probe.AppendLine(setup.ShortNamedFolder ? "$registeredRoot = $longRoot" : $"$registeredRoot = {Quote(setup.RegisteredRoot ?? setup.InstallRoot)}");
+        probe.AppendLine($"$testServiceStatus = {Quote(setup.ServiceStatus)}");
+        probe.AppendLine($"$testBitness = New-Object psobject -Property @{{ Is64BitOperatingSystem = {Bool(setup.Is64BitOperatingSystem)}; Is64BitProcess = {Bool(setup.Is64BitProcess)} }}");
+        probe.AppendLine("""
+            function Get-Process { return $testProcesses }
+            function Get-Service { return (New-Object psobject -Property @{ Status = $testServiceStatus }) }
+            function Get-DarlingShellBitness { return $testBitness }
+            function Note([string]$message) { Write-Output "NOTE $message" }
+            function Fail([string]$message) { Write-Output "REFUSED $message"; throw 'refused' }
+
+            $serviceName = 'PerformanceMonitor Darling'
+            $SkipStopGuard = $false
+            try { . ([scriptblock]::Create($guard -join "`r`n")) }
+            catch { if ($_.Exception.Message -ne 'refused') { throw } }
+            finally { if ($made) { Remove-Item -LiteralPath $made -Recurse -Force -ErrorAction SilentlyContinue } }
+            'DONE'
+            """);
+
+        var lines = RunWindowsPowerShell(probe.ToString());
+        Assert.True(lines.Count > 0 && lines[^1] == "DONE",
+            "the stop guard probe did not run to its end:\n  " + string.Join("\n  ", lines));
+        lines.RemoveAt(lines.Count - 1);
+
+        if (lines.Remove("NOSHORT"))
+        {
+            return new GuardRun(false, lines, NoShortNames: true);
+        }
+
+        const string shortRootPrefix = "SHORTROOT ";
+        var shortRoot = lines.Find(line => line.StartsWith(shortRootPrefix, StringComparison.Ordinal));
+        if (shortRoot is not null) { lines.Remove(shortRoot); }
+
+        return new GuardRun(lines.Exists(line => line.StartsWith("REFUSED ", StringComparison.Ordinal)), lines, ShortRoot: shortRoot?[shortRootPrefix.Length..]);
+    }
+
+    /// <summary>
     /// The copy path requires the service to be REGISTERED, and refuses before anything is stopped or
     /// copied when it is not.
     ///

@@ -67,7 +67,7 @@
                                  capture in its collection group. -->
                             <CheckBox x:Name="QueryStoreBackfillCheckBox" Content="Fill Query Store history gaps in the background"
                                       Margin="0,10,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
-                            <TextBlock Text="Catches up Query Store history the live path never sees: a newly added server's recent tail, gaps left by an outage, and a freshly restored database's imported catalog. Runs in bounded background slices. Turn it off when a heavy catch-up is costing a monitored server more than the history is worth — live collection is unaffected, and re-enabling resumes exactly where it left off."
+                            <TextBlock Text="Catches up Query Store history the live path never sees: a newly added server's recent tail, gaps left by an outage, and a freshly restored database's imported catalog. Runs in bounded background slices. Turn it off when a heavy catch-up is costing a monitored server more than the history is worth. Live collection is unaffected, and re-enabling resumes exactly where it left off."
                                        FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                        Margin="20,2,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
@@ -199,17 +199,21 @@
                                     </ComboBox>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
-                                    <CheckBox x:Name="AlertBlockingCheckBox" Content="Blocking sessions &#x2265;" VerticalAlignment="Center"
+                                    <CheckBox x:Name="AlertBlockingCheckBox" Content="Blocking events &#x2265;" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingCheckBox}" x:Name="AlertBlockingThresholdBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingCheckBox}" x:Name="AlertBlockingThresholdBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                 </WrapPanel>
+                                <TextBlock TextWrapping="Wrap" Margin="44,2,0,0" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Text="Pages when this many blocking events land in the last hour and the longest wait among them is 15 seconds or more (the 15 is fixed). Each blocked session counts as one event, at its longest wait."/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
-                                    <TextBlock x:Name="AlertBlockingWaitSecondsLabel" TextWrapping="Wrap" Text="Total blocked wait &#x2265;" VerticalAlignment="Center" Margin="24,0,0,0"
+                                    <TextBlock x:Name="AlertBlockingWaitSecondsLabel" TextWrapping="Wrap" Text="Long blocking wait &#x2265;" VerticalAlignment="Center" Margin="24,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingWaitSecondsLabel}" x:Name="AlertBlockingWaitSecondsBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingWaitSecondsLabel}" x:Name="AlertBlockingWaitSecondsBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="seconds (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 </WrapPanel>
+                                <TextBlock TextWrapping="Wrap" Margin="44,2,0,0" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Text="One blocked session that waits this long pages at once, whatever the count above. It is also the bar for the total blocked wait across the latest blocking snapshot (the Blocking Wait Time alert). 0 turns both off."/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertDeadlockCheckBox" Content="Deadlocks &#x2265;" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
@@ -220,14 +224,14 @@
                                          fleet-calibrated bars shared with the PostgreSQL edition (PoisonWaitEvaluator). The ms box was the
                                          retired per-wait-average bar; its box is gone from the window (nothing reads it), and the saved
                                          value is left as it is on save. The preview line below the section states the live bars. -->
-                                    <CheckBox x:Name="AlertPoisonWaitCheckBox" Content="Poison waits (THREADPOOL, etc.) — accumulated wait over a 10-minute window" VerticalAlignment="Center"
+                                    <CheckBox x:Name="AlertPoisonWaitCheckBox" Content="Poison waits (THREADPOOL, etc.): accumulated wait over a 10-minute window" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"
                                               ToolTip="The Poison Wait alert fires when a poison wait type accumulates 600 s of wait inside 10 minutes (WARNING) or 6,000 s (CRITICAL)."/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <!-- #5641: Runnable Queue grades the AVERAGE runnable tasks per scheduler over the collections of the last 5 minutes
                                          (at least 3; otherwise the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates)). The two bars are whole numbers; Critical never below Warning. -->
-                                    <CheckBox x:Name="AlertRunnableQueueCheckBox" Content="Runnable queue (runnable tasks per scheduler, windowed average) — Warning at" VerticalAlignment="Center"
+                                    <CheckBox x:Name="AlertRunnableQueueCheckBox" Content="Runnable queue (runnable tasks per scheduler, windowed average): Warning at" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"
                                               ToolTip="The Runnable Queue alert averages runnable tasks per scheduler over the collections in the last 5 minutes when there are at least 3, otherwise over the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates). It fires WARNING at the first bar and CRITICAL at the second; a Warning that worsens to Critical is delivered at once."/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertRunnableQueueCheckBox}" x:Name="AlertRunnableQueueWarningBox" Width="45" Text="8" Margin="6,0,0,0" VerticalAlignment="Center"
@@ -241,7 +245,7 @@
                                     <!-- #5640: the Client Timeouts alert grades client timeouts and cancels (the sqlserver.attention event: a client cancelled a query
                                          or its timeout expired) per minute over the covered span of the attention collector's last runs (about 3 minutes). ON by default since #5736:
                                          the bars are relative to each server's own normal rate (#5736). The two bars are the floors; the two multiples scale the server's baseline. All whole numbers; Critical never below Warning. -->
-                                    <CheckBox x:Name="AlertClientTimeoutsCheckBox" Content="Client timeouts and cancels per minute — Warning at" VerticalAlignment="Center"
+                                    <CheckBox x:Name="AlertClientTimeoutsCheckBox" Content="Client timeouts and cancels per minute: Warning at" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"
                                               ToolTip="The Client Timeouts alert counts client timeouts and cancels per minute (the sqlserver.attention event: a client cancelled a query or its timeout expired) over the attention collector's last runs (about 3 minutes). The two bars are floors: the Warning bar is the higher of the first floor and the Warning multiple times the server's own baseline (the p99.9 of its 3-minute average rate over the last 7 days), and the Critical bar the same with the second floor and the Critical multiple. A server with under a day of capture uses the floors. A Warning that worsens to Critical is delivered at once. On by default."/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertClientTimeoutsCheckBox}" x:Name="AlertClientTimeoutsWarningBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
@@ -250,16 +254,19 @@
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.Name="Client timeouts, critical at" x:Name="AlertClientTimeoutsCriticalBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Critical floor: client timeouts and cancels (attentions) per minute (same span as the Warning floor). Never below the Warning floor. Default 60. The bar is the higher of this floor and the Critical multiple times the server's own baseline."/>
+                                    <!-- One panel, so the two multiples and their baseline wrap as a pair instead of splitting across lines. -->
+                                    <StackPanel Orientation="Horizontal">
                                     <TextBlock Text="(floors), or" VerticalAlignment="Center" Margin="6,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.Name="Client timeouts, warning multiple" x:Name="AlertClientTimeoutsWarningMultipleBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"
+                                    <TextBox AutomationProperties.Name="Client timeouts, warning multiple" x:Name="AlertClientTimeoutsWarningMultipleBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Warning multiple: the Warning bar is at least this many times the server's own baseline (the p99.9 of its 3-minute average rate over the last 7 days). At least 1. Default 3. A server with under a day of capture (or under 720 minutes with a successful run) has no baseline and uses the floors."/>
                                     <TextBlock Text="x /" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.Name="Client timeouts, critical multiple" x:Name="AlertClientTimeoutsCriticalMultipleBox" Width="35" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
+                                    <TextBox AutomationProperties.Name="Client timeouts, critical multiple" x:Name="AlertClientTimeoutsCriticalMultipleBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Critical multiple: the Critical bar is at least this many times the server's own baseline. Never below the Warning multiple. Default 10."/>
                                     <TextBlock Text="x the server's own baseline" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
+                                    </StackPanel>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertLongRunningQueryCheckBox" Content="Long-running queries over" VerticalAlignment="Center"
@@ -304,7 +311,7 @@
                                 <TextBlock Text="Exclude sessions whose login IS (comma-separated, case-insensitive, whole name):"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,4" FontSize="12"/>
                                 <TextBox AutomationProperties.Name="Excluded logins" x:Name="AlertLrqExcludedLoginsBox" Margin="20,0,0,4"/>
-                                <TextBlock Text="Defaults from a 7-day read of one large production store: SQL Agent job steps (program prefix 'SQLAgent - TSQL JobStep', ~460 sessions/week, 35–62 min medians) and the NT AUTHORITY\SYSTEM / NT AUTHORITY\NETWORK SERVICE logins (the multi-day CDC-shaped background). The application's admin login is NOT a default: it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share. Named humans are never excluded — they are what the alert is for. An excluded session is never evaluated (the opposite of a mute); the alert card counts how many each list removed. Empty a box to disable that default."
+                                <TextBlock Text="Defaults from a 7-day read of one large production store: SQL Agent job steps (program prefix 'SQLAgent - TSQL JobStep', ~460 sessions/week, 35–62 min medians) and the NT AUTHORITY\SYSTEM / NT AUTHORITY\NETWORK SERVICE logins (the multi-day CDC-shaped background). The application's admin login is NOT a default: it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share. Named humans are never excluded. They are what the alert is for. An excluded session is never evaluated (the opposite of a mute); the alert card counts how many each list removed. Empty a box to disable that default."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
@@ -351,7 +358,7 @@
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertLongRunningJobCheckBox" Content="Agent jobs running over" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertLongRunningJobCheckBox}" x:Name="AlertLongRunningJobMultiplierBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertLongRunningJobCheckBox}" x:Name="AlertLongRunningJobMultiplierBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="x historical average" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
@@ -374,13 +381,13 @@
                                 <TextBlock x:Name="AlertExcludedDatabasesLabel" Text="Exclude databases from alerts (one name per line):"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,4" FontSize="12"/>
                                 <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertExcludedDatabasesLabel}" x:Name="AlertExcludedDatabasesBox" Margin="20,0,0,4" AcceptsReturn="True" TextWrapping="NoWrap" Height="60" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
-                                <TextBlock Text="e.g. DBAtools, msdb and tempdb on three lines; a name may hold a comma — applies to blocking, deadlock, and long-running query alerts"
+                                <TextBlock Text="e.g. DBAtools, msdb and tempdb on three lines; a name may hold a comma. It applies to blocking, deadlock, and long-running query alerts"
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
                                 <TextBlock x:Name="AlertExcludedVolumesLabel" Text="Exclude volumes from the Volume Free Space alert (one per line):"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,10,0,4" FontSize="12"/>
                                 <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertExcludedVolumesLabel}" x:Name="AlertExcludedVolumesBox" Margin="20,0,0,4" AcceptsReturn="True" TextWrapping="NoWrap" Height="60" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
-                                <TextBlock Text="e.g. S:\, T:\ and /mnt/scratch on three lines (a comma-separated paste also works) — the whole mount point, any case, a trailing \ or / is ignored; applies to every server"
+                                <TextBlock Text="e.g. S:\, T:\ and /mnt/scratch on three lines (a comma-separated paste also works). It matches the whole mount point, in any case, and ignores a trailing \ or /. It applies to every server"
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
@@ -413,8 +420,8 @@
                                     <TextBlock x:Name="AlertDeliveryModeLabel" TextWrapping="Wrap" Text="Deadlock/blocking delivery:" VerticalAlignment="Center" Margin="0,0,8,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <ComboBox AutomationProperties.LabeledBy="{Binding ElementName=AlertDeliveryModeLabel}" x:Name="AlertDeliveryModeBox" Width="260" VerticalAlignment="Center">
-                                        <ComboBoxItem Content="Summary — one card per cycle" Tag="Summary"/>
-                                        <ComboBoxItem Content="Per-event — one notification per incident" Tag="PerEvent"/>
+                                        <ComboBoxItem Content="Summary: one card per cycle" Tag="Summary"/>
+                                        <ComboBoxItem Content="Per-event: one notification per incident" Tag="PerEvent"/>
                                     </ComboBox>
                                     <TextBlock Text="max" VerticalAlignment="Center" Margin="8,0,4,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
@@ -523,8 +530,6 @@
                                              "Send Test Notification" before, which are three identical labels visible at
                                              once on one scrolling page and so could not carry distinct access keys. -->
                                         <Button x:Name="TestTeamsButton" Content="Send Test to _Teams" Click="TestTeamsButton_Click"/>
-                                        <TextBlock x:Name="TeamsStatusText" FontSize="11" FontStyle="Italic"
-                                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </WrapPanel>
                                 </Grid>
                                 <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
@@ -564,8 +569,6 @@
 
                                     <WrapPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
                                         <Button x:Name="TestSlackButton" Content="Send Test to Slac_k" Click="TestSlackButton_Click"/>
-                                        <TextBlock x:Name="SlackStatusText" FontSize="11" FontStyle="Italic"
-                                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </WrapPanel>
                                 </Grid>
                                 <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
@@ -579,7 +582,7 @@
                                 <!-- Generic webhook -->
                                 <TextBlock Text="Generic Webhook (HTTP POST)" FontSize="14" FontWeight="SemiBold"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="0,20,0,0"/>
-                                <TextBlock Text="POST alerts as JSON to any endpoint — PagerDuty, Opsgenie, n8n, or a GitHub repository_dispatch that re-runs a workflow. Use this to trigger automation when an alert fires (for example, re-adding your IP to an Azure SQL firewall rule after a connection is lost)."
+                                <TextBlock Text="POST alerts as JSON to any endpoint, for example PagerDuty, Opsgenie, n8n, or a GitHub repository_dispatch that re-runs a workflow. Use this to trigger automation when an alert fires (for example, re-adding your IP to an Azure SQL firewall rule after a connection is lost)."
                                            FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                 <CheckBox x:Name="GenericWebhookEnabledCheckBox" Content="Enable generic webhook" Margin="0,8,0,0"
                                           Foreground="{DynamicResource ForegroundBrush}" Checked="GenericWebhookEnabledCheckBox_Changed" Unchecked="GenericWebhookEnabledCheckBox_Changed"/>
@@ -604,7 +607,7 @@
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,8,4"/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=GenericWebhookHeadersLabel}" Grid.Row="1" Grid.Column="1" x:Name="GenericWebhookHeadersBox" Margin="0,0,0,4"
                                              AcceptsReturn="True" TextWrapping="Wrap" MinHeight="44" VerticalScrollBarVisibility="Auto"
-                                             ToolTip="A JSON object of request headers. Stored in Windows Credential Manager — it carries your token."/>
+                                             ToolTip="A JSON object of request headers. Stored in Windows Credential Manager, because it carries your token."/>
 
                                     <TextBlock x:Name="GenericWebhookBodyLabel" Grid.Row="2" Grid.Column="0" Text="Body (JSON):" VerticalAlignment="Top"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,8,4"/>
@@ -620,8 +623,6 @@
 
                                     <WrapPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
                                         <Button x:Name="TestGenericButton" Content="Send Test to _Webhook" Click="TestGenericButton_Click"/>
-                                        <TextBlock x:Name="GenericStatusText" FontSize="11" FontStyle="Italic"
-                                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </WrapPanel>
                                 </Grid>
                                 <!-- #6012: the signing key of the generic URL (Standard Webhooks headers). The key is shown once, here, and never again. -->
@@ -645,7 +646,7 @@
                                     <Run FontFamily="Consolas" Text="{}{{metric}} {{server}} {{value}} {{threshold}} {{severity}} {{context}} {{detail}} {{timestamp}} {{status}}"/>
                                 </TextBlock>
                                 <TextBlock Margin="20,4,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
-                                    <Run Text="Automation placeholders — the first two substitute RAW JSON values (use them unquoted, e.g. &quot;context&quot;: {{context_json}}): "/>
+                                    <Run Text="Automation placeholders: the first two substitute RAW JSON values (use them unquoted, e.g. &quot;context&quot;: {{context_json}}): "/>
                                     <Run FontFamily="Consolas" Text="{}{{context_json}} {{incidents_json}} {{dedup_key}} {{resource_name}} {{database}} {{triage_url}}"/>
                                 </TextBlock>
                                 <TextBlock Margin="20,4,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
@@ -653,7 +654,7 @@
                                     <Run Text=" : the investigation request an alert opened or joined, when an agent route covers the alert; empty when it opened none."/>
                                 </TextBlock>
                                 <TextBlock Margin="20,6,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
-                                    <Run FontWeight="SemiBold" Text="Example — re-run a GitHub Actions workflow when an alert fires:"/>
+                                    <Run FontWeight="SemiBold" Text="Example: re-run a GitHub Actions workflow when an alert fires:"/>
                                     <LineBreak/>
                                     <Run FontFamily="Consolas" Text="URL: https://api.github.com/repos/OWNER/REPO/dispatches"/>
                                     <LineBreak/>
@@ -706,8 +707,6 @@
 
                                     <WrapPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
                                         <Button x:Name="TestPagerDutyButton" Content="Send Test Notification" Click="TestPagerDutyButton_Click"/>
-                                        <TextBlock x:Name="PagerDutyStatusText" FontSize="11" FontStyle="Italic"
-                                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </WrapPanel>
                                 </Grid>
                                 <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
@@ -740,19 +739,19 @@
                                 <TextBlock Text="Alert Severity Colors" FontWeight="SemiBold" FontSize="12"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="0,16,0,4"/>
                                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                                    <Run Foreground="#DC2626" FontWeight="Bold" Text="&#x25A0; Red" /> — Critical (Deadlocks, Poison Waits, Runnable Queue and Client Timeouts at the Critical bar, Server Unreachable)
+                                    <Run Foreground="#DC2626" FontWeight="Bold" Text="&#x25A0; Red" />: Critical (Deadlocks, Poison Waits, Runnable Queue and Client Timeouts at the Critical bar, Server Unreachable)
                                 </TextBlock>
                                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                                    <Run Foreground="#D97706" FontWeight="Bold" Text="&#x25A0; Orange" /> — Alert / Warning (Blocking, Long-Running Queries, Runnable Queue, Client Timeouts, tempdb, Jobs)
+                                    <Run Foreground="#D97706" FontWeight="Bold" Text="&#x25A0; Orange" />: Alert / Warning (Blocking, Long-Running Queries, Runnable Queue, Client Timeouts, tempdb, Jobs)
                                 </TextBlock>
                                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                                    <Run Foreground="#F59E0B" FontWeight="Bold" Text="&#x25A0; Yellow" /> — Warning (High CPU)
+                                    <Run Foreground="#F59E0B" FontWeight="Bold" Text="&#x25A0; Yellow" />: Warning (High CPU)
                                 </TextBlock>
                                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                                    <Run Foreground="#16A34A" FontWeight="Bold" Text="&#x25A0; Green" /> — Resolved (Server Restored)
+                                    <Run Foreground="#16A34A" FontWeight="Bold" Text="&#x25A0; Green" />: Resolved (Server Restored)
                                 </TextBlock>
                                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
-                                    <Run Foreground="{DynamicResource InfoBrush}" FontWeight="Bold" Text="&#x25A0; Blue" /> — Info
+                                    <Run Foreground="{DynamicResource InfoBrush}" FontWeight="Bold" Text="&#x25A0; Blue" />: Info
                                 </TextBlock>
                             </StackPanel>
                         </Border>
@@ -765,9 +764,8 @@
                         <Border Background="{DynamicResource BackgroundLightBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,12">
                             <StackPanel>
                                 <!-- Mute Rules -->
-                                <TextBlock Text="Alert Muting" FontWeight="SemiBold" FontSize="12"
-                                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>
-                                <WrapPanel Orientation="Horizontal" Margin="20,0,0,4">
+                                <TextBlock Text="Alert Muting" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,4">
                                     <TextBlock x:Name="MuteRuleDefaultExpirationLabel" TextWrapping="Wrap" Text="Default expiration for new mute rules:" VerticalAlignment="Center" Margin="0,0,8,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <ComboBox AutomationProperties.LabeledBy="{Binding ElementName=MuteRuleDefaultExpirationLabel}" x:Name="MuteRuleDefaultExpirationCombo" Width="130" VerticalAlignment="Center">
@@ -796,11 +794,10 @@
                         <Border Background="{DynamicResource BackgroundLightBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,12">
                             <StackPanel>
                                 <!-- Automated Analysis -->
-                                <TextBlock Text="Automated Analysis" FontWeight="SemiBold" FontSize="12"
-                                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>
-                                <TextBlock Text="Periodically run the triage engine and record findings in the Alerts tab. Notifications below are optional — analysis runs and stores findings even with notifications off."
+                                <TextBlock Text="Automated Analysis" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <TextBlock Text="Periodically run the triage engine and record findings in the Alerts tab. Notifications below are optional. Analysis runs and stores findings even with notifications off."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                           Margin="20,0,0,4" TextWrapping="Wrap"/>
+                                           Margin="0,4,0,4" TextWrapping="Wrap"/>
                                 <CheckBox x:Name="AnalysisEnabledCheckBox" Content="Enable automated analysis"
                                           Margin="20,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <CheckBox x:Name="AnalysisNotificationsCheckBox" Content="Send scheduled analysis notifications"
@@ -837,7 +834,7 @@
                                 <CheckBox x:Name="AnalysisUncorroboratedDigestCheckBox"
                                           Content="Only notify on corroborated findings (a lone uncorroborated fact is recorded, not delivered)"
                                           Margin="20,6,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
-                                <TextBlock Text="Requires SMTP or a webhook configured below for delivery; findings are recorded in the Alerts tab either way."
+                                <TextBlock Text="Requires SMTP or a webhook configured on the Delivery tab for delivery; findings are recorded in the Alerts tab either way."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,4,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
@@ -931,7 +928,7 @@
                                     </ComboBox>
                                     <TextBlock TextWrapping="Wrap" Text="auto-detected from locale"
                                                FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                               VerticalAlignment="Center" Margin="6,0,0,0" x:Name="CsvSeparatorHint"/>
+                                               VerticalAlignment="Center" Margin="6,0,0,0"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="0,8,0,0">
                                     <TextBlock x:Name="TimeDisplayModeLabel" Text="Show timestamps in:" VerticalAlignment="Center"

@@ -495,7 +495,7 @@ public sealed class CollectedDatabasesSqlTests
     {
         var sql = CollectedDatabases.NamesSearchLimitedSql;
         var like = sql.IndexOf("database_name ILIKE $3 ESCAPE '\\'", StringComparison.Ordinal);
-        var order = sql.IndexOf("ORDER BY database_name", StringComparison.Ordinal);
+        var order = sql.IndexOf("ORDER BY lower(database_name), database_name", StringComparison.Ordinal);
         var limit = sql.IndexOf("LIMIT $2", StringComparison.Ordinal);
         Assert.True(like > 0 && like < order && order < limit, sql);
         Assert.DoesNotContain("$4", sql, StringComparison.Ordinal);

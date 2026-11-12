@@ -142,6 +142,59 @@ public sealed class QuerySpillsDistinctQueryCountLiveTests
         }
     }
 
+    /// <summary>
+    /// #7884: the fact carries the window it was summed over, <c>period_duration_ms</c> and <c>coverage_fraction</c>, the same
+    /// stamps the wait facts carry, so the scorer grades pages per observed hour rather than the window total.
+    /// </summary>
+    [Fact]
+    public async Task SpillsFact_CarriesThePeriodAndCoverage_LikeTheWaitFacts()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the QUERY_SPILLS period live test.");
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await DeleteRowsAsync(connection, ct);
+        }
+
+        try
+        {
+            var periodEnd = DateTime.SpecifyKind(new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
+            await using (var connection = new NpgsqlConnection(connectionString))
+            {
+                await connection.OpenAsync(ct);
+                await SeedAsync(connection, "0xSPILLA", periodEnd.AddMinutes(-90), 100, ct);
+            }
+
+            var context = new AnalysisContext
+            {
+                ServerId = TestServerId,
+                ServerName = TestServerName,
+                TimeRangeStart = periodEnd.AddHours(-4),
+                TimeRangeEnd = periodEnd,
+                ServerUtcOffset = TimeSpan.Zero,
+            };
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var facts = await new PgFactCollector(postgres).CollectFactsAsync(context);
+
+            var spills = Assert.Single(facts, f => f.Key == "QUERY_SPILLS");
+            Assert.True(spills.Metadata.TryGetValue("period_duration_ms", out var periodMs), "QUERY_SPILLS carries period_duration_ms");
+            Assert.Equal(TimeSpan.FromHours(4).TotalMilliseconds, periodMs);
+            Assert.Contains("coverage_fraction", spills.Metadata.Keys);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
     private static async Task SeedAsync(NpgsqlConnection c, string queryHash, DateTime at, long spills, CancellationToken ct, int maxDop = 1)
     {
         await using var command = new NpgsqlCommand(@"

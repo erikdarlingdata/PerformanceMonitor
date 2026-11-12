@@ -180,10 +180,12 @@ public sealed class ViewerServerSetSyncTests
             new Regex(@"\bUpdateServerCountText\s*\(\s*\)\s*=>[^;]*_fleet\s*\.\s*TotalCount\b", RegexOptions.Singleline),
             Stripped("MainWindow.xaml.cs"));
 
-        /* The Overview's total: the fleet's own count, not the cards that happened to load. */
+        /* The Overview's total: the fleet's own count, not the cards that happened to load. The Overview takes the
+           fleet through OverviewServers, which keeps the enabled servers (#7773: a disabled one gets no card), so the
+           total counts the enabled fleet the reload rebuilds; a pass over anything but _fleet.All does not match. */
         var overview = MethodBody("MainWindow.xaml.cs", "LoadOverviewAsync");
 
-        Assert.Matches(@"\bservers\s*=\s*_fleet\s*\.\s*All\b", overview);
+        Assert.Matches(@"\bservers\s*=\s*OverviewServers\s*\(\s*_fleet\s*\.\s*All\s*\)", overview);
         Assert.Matches(@"\blist\s*=\s*servers\s*\.\s*ToList\s*\(", overview);
         /* The roll-up goes through OverviewCardView.BuildRollup (the Overview search narrows it, D9): its registered
            count is still list.Count, and the count a search-box change rebuilds the roll-up with (the
@@ -454,6 +456,28 @@ public sealed class ViewerServerSetSyncTests
         var picked = ViewerServerSetSync.PickerSelectionAfterReload(servers, previousServerId: 2, sidebarServerId: 3);
 
         Assert.Equal(3, picked?.ServerId);
+    }
+
+    [Fact]
+    public void RenamedForOpenTabs_ReturnsTheReloadedServer_ForATabShowingTheOldName()
+    {
+        var open = new[] { new DarlingServer(1, "SQL01", "Old name", true, 16), new DarlingServer(2, "SQL02", "SQL02", true, 16) };
+        var loaded = new[] { new DarlingServer(1, "SQL01", "New name", true, 16), new DarlingServer(2, "SQL02", "SQL02", true, 16) };
+
+        var renamed = ViewerServerSetSync.RenamedForOpenTabs(open, loaded);
+
+        var only = Assert.Single(renamed);
+        Assert.Equal(1, only.ServerId);
+        Assert.Equal("New name", only.DisplayName);
+    }
+
+    [Fact]
+    public void RenamedForOpenTabs_LeavesARemovedServersTabAlone_AndIgnoresServersWithNoOpenTab()
+    {
+        var open = new[] { new DarlingServer(1, "SQL01", "Old name", true, 16) };
+        var loaded = new[] { new DarlingServer(2, "SQL02", "Other", true, 16) };
+
+        Assert.Empty(ViewerServerSetSync.RenamedForOpenTabs(open, loaded));
     }
 
     [Fact]

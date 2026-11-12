@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -1161,7 +1162,7 @@ WHERE NOT is_compressed";
             {
                 results.Add(new HostSettingProfile(
                     name, "(not visible on this connection)", 0,
-                    "unreadable — this connection's role, or this build of TimescaleDB, does not expose it",
+                    "unreadable. This connection's role, or this build of TimescaleDB, does not expose it",
                     derivedDisplay, derivedValue, HostSettingVerdict.NotManaged));
                 continue;
             }
@@ -1444,7 +1445,7 @@ WHERE NOT is_compressed";
         var sb = new StringBuilder();
         if (rows.Count == 0)
         {
-            sb.Append("Stored verdicts: none yet — no service-owned managed start has computed them.\n");
+            sb.Append("Stored verdicts: none yet. No service-owned managed start has computed them.\n");
             return sb.ToString();
         }
 
@@ -1679,7 +1680,7 @@ ORDER BY setting_name";
                 if (errorAttribution.File is not null)
                 {
                     attribution = new ConfSettingAttribution(attribution.Origin, errorAttribution.File, errorAttribution.Line ?? 0, attribution.RawValue);
-                    sourceDescription = FormattableString.Invariant($"{sourceDescription} — pending ({errorAttribution.File}:{errorAttribution.Line})");
+                    sourceDescription = FormattableString.Invariant($"{sourceDescription}. Pending ({errorAttribution.File}:{errorAttribution.Line})");
                 }
             }
             else if (verdict == HostSettingVerdict.OperatorOverride)

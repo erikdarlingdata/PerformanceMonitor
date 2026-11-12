@@ -66,13 +66,12 @@ public partial class ServerTab : UserControl
                 return;
             }
 
-            SavePlanFile(plan, $"QueryPlan_{row.QueryHash}");
-            btn.Content = $"Saved ({source})";
+            if (SavePlanFile(plan, $"QueryPlan_{row.QueryHash}")) btn.Content = $"Saved ({source})";
             return;
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not get the plan for server {_server.DisplayName} from the collected data or the live plan cache: {DuckDbMemoryLimitSetting.Describe(ex)}. A plan that has left the plan cache can no longer be fetched.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -121,13 +120,12 @@ public partial class ServerTab : UserControl
                 return;
             }
 
-            SavePlanFile(plan, $"ProcPlan_{row.FullName}");
-            btn.Content = $"Saved ({source})";
+            if (SavePlanFile(plan, $"ProcPlan_{row.FullName}")) btn.Content = $"Saved ({source})";
             return;
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not get the plan for server {_server.DisplayName} from the collected data or the live plan cache: {DuckDbMemoryLimitSetting.Describe(ex)}. A plan that has left the plan cache can no longer be fetched.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -143,11 +141,8 @@ public partial class ServerTab : UserControl
 
         if (!row.HasQueryPlan)
         {
-            MessageBox.Show(
-                "No estimated plan is available for this snapshot. The plan may have been evicted from the plan cache.",
-                "No Plan Available",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
+            InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
+                "No estimated plan is available for this snapshot. The plan may have been evicted from the plan cache.");
             return;
         }
 
@@ -160,11 +155,8 @@ public partial class ServerTab : UserControl
             var plan = await Task.Run(() => _dataService.ResolveSnapshotEstimatedPlanAsync(_serverId, row));
             if (plan == null)
             {
-                MessageBox.Show(
-                    "No estimated plan is available for this snapshot. The plan may have been evicted from the plan cache.",
-                    "No Plan Available",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Information);
+                InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
+                "No estimated plan is available for this snapshot. The plan may have been evicted from the plan cache.");
                 return;
             }
 
@@ -183,11 +175,8 @@ public partial class ServerTab : UserControl
 
         if (!row.HasLiveQueryPlan)
         {
-            MessageBox.Show(
-                "No live query plan is available for this snapshot. The query may have completed before the plan could be captured.",
-                "No Plan Available",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
+            InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
+                "No live query plan is available for this snapshot. The query may have completed before the plan could be captured.");
             return;
         }
 
@@ -199,11 +188,8 @@ public partial class ServerTab : UserControl
             var plan = await Task.Run(() => _dataService.ResolveSnapshotLivePlanAsync(_serverId, row));
             if (plan == null)
             {
-                MessageBox.Show(
-                    "No live query plan is available for this snapshot. The query may have completed before the plan could be captured.",
-                    "No Plan Available",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Information);
+                InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
+                "No live query plan is available for this snapshot. The query may have completed before the plan could be captured.");
                 return;
             }
 
@@ -235,17 +221,74 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// #1980: the Query Store grid's inline "View" button — the capability its two sibling grids
-    /// always had. Lite's QS rows already carry the stored plan text, so this opens it directly in
-    /// the Plan Viewer via <see cref="OpenPlanTab"/> (the history window's own path); the button is
-    /// gated on <c>HasQueryPlan</c> in XAML, so an empty row is never clickable.
+    /// The fetch behind the Query Store grid's inline View button, where something other than the monitored server answers
+    /// it. Null is the fetch from the monitored server's Query Store by the row's plan id.
     /// </summary>
-    private void ViewQueryStorePlanInline_Click(object sender, RoutedEventArgs e)
+    internal Func<QueryStoreRow, Task<string?>>? QueryStorePlanFetch { get; set; }
+
+    /// <summary>Shows the inline View button's message (text, title, icon): a message box, unless something else is set to take it.</summary>
+    internal Action<string, string, MessageBoxImage> PlanMessage { get; set; } =
+        (text, title, image) => MessageBox.Show(text, title, MessageBoxButton.OK, image);
+
+    /// <summary>The inline View click that ran last: complete once its plan is on screen or its message has been shown.</summary>
+    internal Task InlineQueryStorePlanView { get; private set; } = Task.CompletedTask;
+
+    private async Task<string?> FetchQueryStorePlanFromServerAsync(QueryStoreRow row)
+    {
+        var connStr = _credentialResolver.GetConnectionString(_server);
+        return await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryStorePlanAsync(connStr, row.DatabaseName, row.PlanId));
+    }
+
+    /// <summary>
+    /// #1980: the Query Store grid's inline "View" button — the capability its two sibling grids
+    /// always had. Lite's QS rows carry no plan text, so the plan is fetched from the monitored server's
+    /// Query Store by the row's plan id, as the row's context menu and the history window fetch it,
+    /// opened in the Plan Viewer via <see cref="OpenPlanTab"/>, and the Plan Viewer tab is shown. The
+    /// button is gated on <c>HasQueryPlan</c> in XAML, so a row that names no plan is never clickable.
+    /// A plan Query Store no longer holds gets the history window's "Plan Not Found" message. A fetch
+    /// that fails says why it failed, as the history window's download does, and leaves the grid showing.
+    /// </summary>
+    private async void ViewQueryStorePlanInline_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.DataContext is not QueryStoreRow row) return;
-        if (string.IsNullOrEmpty(row.QueryPlanText)) return;
+        if (row.PlanId <= 0) return;
+        // A second click while the fetch is running is dropped.
+        if (btn.Content is "...") return;
 
-        _ = OpenPlanTab(row.QueryPlanText, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
+        InlineQueryStorePlanView = ViewQueryStorePlanInlineAsync(btn, row);
+        await InlineQueryStorePlanView;
+    }
+
+    private async Task ViewQueryStorePlanInlineAsync(Button btn, QueryStoreRow row)
+    {
+        btn.Content = "...";
+        try
+        {
+            string? plan;
+            try
+            {
+                plan = await (QueryStorePlanFetch ?? FetchQueryStorePlanFromServerAsync)(row);
+            }
+            catch (Exception ex)
+            {
+                PlanMessage($"Could not get the plan for server {_server.DisplayName} from Query Store: {DuckDbMemoryLimitSetting.Describe(ex)}.", "Error", MessageBoxImage.Error);
+                return;
+            }
+
+            if (string.IsNullOrEmpty(plan))
+            {
+                PlanMessage("No query plan found in Query Store for this plan ID.", "Plan Not Found", MessageBoxImage.Information);
+                return;
+            }
+
+            var opened = OpenPlanTab(plan, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
+            PlanViewerTabItem.IsSelected = true;
+            await opened;
+        }
+        finally
+        {
+            btn.Content = "View";
+        }
     }
 
     // Returns a Task (not async void) so the Ctrl+V paste handler can await it inside its _pasteInProgress
@@ -262,6 +305,9 @@ public partial class ServerTab : UserControl
                read failure, same as GetServerMetadataForPlanAnalysisAsync's own contract). */
             /* #5457: off the UI thread, so a held store lock cannot freeze the window (see ServerTab.BlockChain). */
             viewer.ServerMetadata = await Task.Run(() => _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId));
+            /* The Server Context card names the server as the store knows it, else as this tab does. */
+            if (viewer.ServerMetadata is { ServerName: null } metadata)
+                metadata.ServerName = _server.DisplayName;
             /* LoadPlan parses+analyzes off the UI thread; it throws XmlException for malformed
                plan XML, replacing the redundant up-front XDocument.Parse validation. */
             await viewer.LoadPlan(planXml, label, queryText);
@@ -328,7 +374,7 @@ public partial class ServerTab : UserControl
 
     private void CancelPlanButton_Click(object sender, RoutedEventArgs e)
     {
-        _actualPlanCts?.Cancel();
+        _actualPlanRun.Cancel();
     }
 
     private async void ViewEstimatedPlan_Click(object sender, RoutedEventArgs e)
@@ -418,11 +464,8 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            MessageBox.Show(
-                "No query plan is available for this row. The plan may have been evicted from the plan cache since it was last collected.",
-                "No Plan Available",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
+            InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
+                "No query plan is available for this row. The plan may have been evicted from the plan cache since it was last collected.");
         }
     }
 
@@ -541,8 +584,7 @@ public partial class ServerTab : UserControl
 
             ShowPlanLoading(label);
 
-            _actualPlanCts?.Dispose();
-            _actualPlanCts = new CancellationTokenSource();
+            var actualPlanToken = _actualPlanRun.Begin();
 
             try
             {
@@ -557,8 +599,11 @@ public partial class ServerTab : UserControl
                     isolationLevel,
                     isAzureSqlDb: false,
                     timeoutSeconds: 0,
-                    _actualPlanCts.Token,
+                    actualPlanToken,
                     productName: "SQL Server Performance Monitor Lite"));
+
+                /* #7181: the tab closed while the query ran; there is no tab left to show a result or a message. */
+                if (_actualPlanRun.IsClosed) return;
 
                 if (!string.IsNullOrEmpty(actualPlanXml))
                 {
@@ -573,12 +618,14 @@ public partial class ServerTab : UserControl
             }
             catch (OperationCanceledException)
             {
+                if (_actualPlanRun.IsClosed) return;
                 MessageBox.Show("The query was cancelled or timed out.",
                     "Cancelled", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Failed to get actual plan:\n\n{ex.Message}",
+                if (_actualPlanRun.IsClosed) return;
+                MessageBox.Show($"Could not get the actual plan from server {_server.DisplayName}:\n\n{ex.Message}\n\nCheck that the query still runs on that server, then try Get Actual Plan again.",
                     "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
             finally
@@ -639,11 +686,10 @@ public partial class ServerTab : UserControl
         var frames = ExtractBlockedProcessFrames(row.BlockedProcessReportXml, blockingSide);
         if (frames.Count == 0)
         {
-            MessageBox.Show(
+            InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
                 $"The {sideLabel.ToLowerInvariant()} process report has no resolvable sql_handle. " +
-                "This usually means the query ran as dynamic SQL or a system context — " +
-                "SQL Server records a zero handle in that case and the plan can't be recovered.",
-                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+                "This usually means the query ran as dynamic SQL or a system context. " +
+                "SQL Server records a zero handle in that case and the plan can't be recovered.");
             return;
         }
 
@@ -667,10 +713,9 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            MessageBox.Show(
+            InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
                 $"The plan for the {sideLabel.ToLowerInvariant()} query is no longer in the plan cache on {_server.ServerName}. " +
-                "Blocked process reports only give us a sql_handle — if that plan has been evicted, we can't recover it.",
-                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+                "Blocked process reports only give us a sql_handle. If that plan has been evicted, we can't recover it.");
         }
     }
 
@@ -740,11 +785,10 @@ public partial class ServerTab : UserControl
         var frames = ExtractDeadlockProcessFrames(graphXml, processId);
         if (frames.Count == 0)
         {
-            MessageBox.Show(
+            InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
                 $"The process has no resolvable sql_handle in the deadlock graph. " +
-                "This usually means the query ran as dynamic SQL or a system context — " +
-                "SQL Server records a zero handle in that case and the plan can't be recovered.",
-                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+                "This usually means the query ran as dynamic SQL or a system context. " +
+                "SQL Server records a zero handle in that case and the plan can't be recovered.");
             return;
         }
 
@@ -768,10 +812,9 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            MessageBox.Show(
+            InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
                 $"The plan for this {sideLabel.ToLowerInvariant()} process is no longer in the plan cache on {_server.ServerName}. " +
-                "Deadlock graphs only give us a sql_handle — if that plan has been evicted, we can't recover it.",
-                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+                "Deadlock graphs only give us a sql_handle. If that plan has been evicted, we can't recover it.");
         }
     }
 

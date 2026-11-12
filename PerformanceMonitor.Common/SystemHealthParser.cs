@@ -546,11 +546,11 @@ namespace PerformanceMonitor.Common
             return null;
         }
 
-        /// <summary>Bytes -&gt; GB by integer division (÷1024³), matching sp_HealthParser's bigint arithmetic (truncating).</summary>
-        private static long? GbFromBytes(string? s) => ParseLong(s) is { } v ? v / 1024 / 1024 / 1024 : (long?)null;
+        /// <summary>Bytes -&gt; GB (÷1024³) kept to 2 decimals like <see cref="MbFromBytes"/>, so a server with under 1 GB available reads 0.88 and not 0 (#7465). sp_HealthParser's bigint division truncates here; matching it is not worth a zero on a low-memory row.</summary>
+        private static decimal? GbFromBytes(string? s) => ParseLong(s) is { } v ? Math.Round(v / 1073741824m, 2, MidpointRounding.AwayFromZero) : (decimal?)null;
 
-        /// <summary>KB -&gt; GB by integer division (÷1024²), matching sp_HealthParser's bigint arithmetic (truncating).</summary>
-        private static long? GbFromKb(string? s) => ParseLong(s) is { } v ? v / 1024 / 1024 : (long?)null;
+        /// <summary>KB -&gt; GB (÷1024²) kept to 2 decimals, for the same reason as <see cref="GbFromBytes"/> (#7465).</summary>
+        private static decimal? GbFromKb(string? s) => ParseLong(s) is { } v ? Math.Round(v / 1048576m, 2, MidpointRounding.AwayFromZero) : (decimal?)null;
 
         /// <summary>Bytes -&gt; MB (÷1,048,576) as decimal(19,2), matching sp_HealthParser's <c>CONVERT(decimal(19,2), bigint / 1048576.)</c> — real division, then rounded to 2 places (banker's rounding via decimal.Round, matching CONVERT's rounding behavior).</summary>
         private static decimal? MbFromBytes(string? s) => ParseLong(s) is { } v ? Math.Round(v / 1048576m, 2, MidpointRounding.AwayFromZero) : (decimal?)null;

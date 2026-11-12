@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Collectors;
 
@@ -59,9 +60,9 @@ public sealed class McpConfigHistoryTools
             var rows = await dataService.GetServerConfigChangesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_config", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("empty",
-                        $"No server configuration changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.",
-                        (await WindowNoticeAsync(dataService, QueryWindowRelation.ServerConfig, resolved.ServerId, hours_back, windowEnd, "server_config", emptyAnswer: true)).AsHints());
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
+                        $"No server configuration changes detected {McpHelpers.InTheLast($"{hours_back} hours")}. Config is captured on connect, so at least two snapshots are needed to detect a change.",
+                        (await WindowNoticeAsync(dataService, QueryWindowRelation.ServerConfig, resolved.ServerId, hours_back, windowEnd, "server_config", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, QueryWindowRelation.ServerConfig, resolved.ServerId, hours_back, windowEnd, "server_config");
 
@@ -86,6 +87,8 @@ public sealed class McpConfigHistoryTools
                     requires_restart = r.RequiresRestartDisplay,
                     is_dynamic = r.DynamicDisplay,
                     is_advanced = r.AdvancedDisplay,
+                    /* #7662: change_time is the first capture that held the new value; the change happened after this one. */
+                    previous_capture_time = r.PreviousCaptureTime?.ToString("o"),
                     change_description = r.ChangeDescription
                 })
             }, McpHelpers.JsonOptions);
@@ -96,7 +99,7 @@ public sealed class McpConfigHistoryTools
         }
     }
 
-    [McpServerTool(Name = "get_database_config_changes"), Description("Gets database configuration change history by diffing sys.databases snapshots. Shows which database settings changed (recovery model, RCSI, compatibility level, etc.) with old and new values; setting_name is the underlying column name. NOTE: config is captured on server connect (not on a fixed schedule), so changes are detected between connect snapshots and need at least two.")]
+    [McpServerTool(Name = "get_database_config_changes"), Description("Gets database configuration change history by diffing sys.databases snapshots. Shows which database settings changed (recovery model, RCSI, compatibility level, etc.) with old and new values; setting_name is the underlying column name. log_reuse_wait_desc is the engine's live reason the log cannot truncate, not a setting, so its flips are listed apart in status_changes and never in changes. NOTE: config is captured on server connect (not on a fixed schedule), so changes are detected between connect snapshots and need at least two.")]
     public static async Task<string> GetDatabaseConfigChanges(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -116,14 +119,18 @@ public sealed class McpConfigHistoryTools
             /* #5244: database_name appended LAST (H1). The reader filters the snapshots in SQL before the diff, the way Darling's
                does; a blank is "no filter". The empty answer names the database it looked at instead of speaking for the server. */
             var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
-            var rows = await dataService.GetDatabaseConfigChangesAsync(
-                resolved.ServerId, hours_back, databaseNames: database is null ? null : new[] { database }, asOfUtc: windowEnd);
-            if (rows.Count == 0)
+            var allRows = await dataService.GetDatabaseConfigChangesAsync(
+                resolved.ServerId, hours_back, databaseNames: database is null ? null : new[] { database }, asOfUtc: windowEnd, includeStatusColumns: true);
+            /* #7416 item 2: log_reuse_wait_desc is the engine's live reason the log cannot truncate, not a setting. It is reported apart in
+               status_changes so the history is kept without calling it a configuration change. */
+            var rows = allRows.Where(r => ConfigChangeAttribution.IsAttributableDatabaseSetting(r.SettingName)).ToList();
+            var statusRows = allRows.Where(r => !ConfigChangeAttribution.IsAttributableDatabaseSetting(r.SettingName)).ToList();
+            if (allRows.Count == 0)
                 return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_config", awsRdsKind: AwsRdsKind.None), database)
-                    ?? McpHelpers.StatusForDatabase("empty",
-                        $"No database configuration changes detected in the last {hours_back}h{McpDatabaseSelection.ForChosen(database is null ? null : new[] { database })}. Config is captured on connect, so at least two snapshots are needed to detect a change.",
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.StatusForDatabase("empty",
+                        $"No database configuration changes detected {McpHelpers.InTheLast($"{hours_back} hours")}{McpDatabaseSelection.ForChosen(database is null ? null : new[] { database })}. Config is captured on connect, so at least two snapshots are needed to detect a change.",
                         database,
-                        (await WindowNoticeAsync(dataService, QueryWindowRelation.DatabaseConfig, resolved.ServerId, hours_back, windowEnd, "database_config", emptyAnswer: true)).AsHints());
+                        (await WindowNoticeAsync(dataService, QueryWindowRelation.DatabaseConfig, resolved.ServerId, hours_back, windowEnd, "database_config", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, QueryWindowRelation.DatabaseConfig, resolved.ServerId, hours_back, windowEnd, "database_config");
 
@@ -145,7 +152,18 @@ public sealed class McpConfigHistoryTools
                     setting_name = r.SettingName,
                     old_value = r.OldValue,
                     new_value = r.NewValue,
+                    previous_capture_time = r.PreviousCaptureTime?.ToString("o"),
                     change_description = r.ChangeDescription
+                }),
+                status_change_count = statusRows.Count,
+                status_changes = statusRows.Select(r => new
+                {
+                    change_time = r.ChangeTime.ToString("o"),
+                    database_name = r.DatabaseName,
+                    setting_name = r.SettingName,
+                    old_value = r.OldValue,
+                    new_value = r.NewValue,
+                    previous_capture_time = r.PreviousCaptureTime?.ToString("o")
                 })
             }, McpHelpers.JsonOptions);
         }
@@ -162,7 +180,7 @@ public sealed class McpConfigHistoryTools
     {
         var none = runFacts.NoTraceFlagsEnabled();
         return none is null
-            ? $"No trace flag changes detected in the last {hoursBack}h. Config is captured on connect, so at least two snapshots are needed to detect a change."
+            ? $"No trace flag changes detected {McpHelpers.InTheLast($"{hoursBack} hours")}. Config is captured on connect, so at least two snapshots are needed to detect a change."
             : none + " A successful run that finds no flag stores no rows and counts as an empty capture, so a flag turned off shows as a change at that run's time; none falls in this window.";
     }
 
@@ -185,9 +203,9 @@ public sealed class McpConfigHistoryTools
             var rows = await dataService.GetTraceFlagChangesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "trace_flags", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("empty",
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
                         NoTraceFlagChangesMessage(await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "trace_flags", asOfUtc: windowEnd), hours_back),
-                        (await WindowNoticeAsync(dataService, QueryWindowRelation.TraceFlags, resolved.ServerId, hours_back, windowEnd, "trace_flags", emptyAnswer: true)).AsHints());
+                        (await WindowNoticeAsync(dataService, QueryWindowRelation.TraceFlags, resolved.ServerId, hours_back, windowEnd, "trace_flags", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, QueryWindowRelation.TraceFlags, resolved.ServerId, hours_back, windowEnd, "trace_flags");
 

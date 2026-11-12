@@ -10,14 +10,21 @@ import path from "node:path";
 /* isConnected is a plain flag here: true for a node that was built or put under a parent, false once removeChild took it
    out (the page throwing a cell away). */
 class FakeNode {
-  constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null; this._text = ""; this.className = ""; this.style = {}; this.isConnected = FakeNode.newConnected; }
+  constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.dataset = {}; this.listeners = {}; this.parent = null; this._text = ""; this.className = ""; this.style = {}; this.isConnected = FakeNode.newConnected; this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false }; }
   get firstChild() { return this.children[0] || null; }
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
   set textContent(v) { this._text = String(v); this.children = []; }
   setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
   appendChild(c) { if (c.parent) c.parent.children = c.parent.children.filter((x) => x !== c); c.parent = this; this.children.push(c); c.isConnected = true; return c; }
   removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parent = null; c.isConnected = false; }
+  replaceChild(next, old) { const i = this.children.indexOf(old); if (i >= 0) this.children[i] = next; return old; }
+  contains(n) { return n === this || this.children.some((c) => c.contains && c.contains(n)); }
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
+  removeEventListener() {}
+  setPointerCapture() {}
+  /* The real charts.js (the hover scenario) maps the pointer through the drawn svg's box: one viewBox unit is one CSS pixel. */
+  getBoundingClientRect() { return { left: 0, top: 0, width: Number(this.attrs.width) || 1000, height: Number(this.attrs.height) || 300 }; }
   click() { for (const fn of this.listeners.click || []) fn({ preventDefault() {}, target: this }); }
   all(pred, acc = []) { if (pred(this)) acc.push(this); for (const c of this.children) c.all && c.all(pred, acc); return acc; }
   byText(t) { return this.all((n) => n.tag === "button" && n.textContent === t)[0] || null; }
@@ -29,7 +36,7 @@ class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = 
 globalThis.Node = FakeNode;
 const body = new FakeNode("body");
 const downloads = [];
-globalThis.document = { body, createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
+globalThis.document = { body, createElement: (t) => new FakeNode(t), createElementNS: (ns, t) => new FakeNode(t), createTextNode: (t) => new FakeText(t), addEventListener() {}, removeEventListener() {} };
 URL.createObjectURL = (blob) => { downloads.push({ blob }); return "blob:fake"; };
 URL.revokeObjectURL = () => {};
 const origAppend = body.appendChild.bind(body);
@@ -347,6 +354,27 @@ const scenarios = {
     cell.byText("History").click();
     await flush();
     out.notices = cell.all((n) => n.className === "strip notice").map((n) => n.textContent);
+  },
+  /* #7920: two plans ran in the same snapshot. The chart gets one entry for that time carrying both plans' values, and a hover there
+     names both in the tooltip: the real charts.js reads every series from the one entry nearest the pointer. */
+  async twoPlansOneTime() {
+    respond(history({ points: [
+      { collection_time: "2026-03-04T05:00:00", plan_id: 7, execution_count: 10, avg_duration_ms: 100, avg_cpu_ms: 40 },
+      { collection_time: "2026-03-04T05:00:00", plan_id: 9, execution_count: 5, avg_duration_ms: 10, avg_cpu_ms: 5 },
+      { collection_time: "2026-03-04T06:00:00", plan_id: 7, execution_count: 12, avg_duration_ms: 120, avg_cpu_ms: 50 },
+    ] }));
+    const cell = col().render(row);
+    cell.byText("History").click();
+    await flush();
+    const spec = globalThis.__charts[globalThis.__charts.length - 1].spec;
+    out.points = spec.points.length;
+    out.atShared = spec.points.filter((p) => p.collection_time === "2026-03-04T05:00:00").map((p) => Object.keys(p).filter((k) => k !== "collection_time").sort());
+    /* The shipped charts.js, over the panel's own spec, with the axis set to the fixture's hour so the first snapshot sits at the plot's left edge. */
+    const charts = await import(pathToFileURL(root + "/charts.js").href);
+    const host = charts.renderLineChart({ ...spec, windowStart: Date.parse("2026-03-04T05:00:00Z"), windowEnd: Date.parse("2026-03-04T06:00:00Z") });
+    const overlay = host.all((n) => n.listeners.mousemove)[0];
+    overlay.listeners.mousemove[0]({ clientX: 58, clientY: 100 });
+    out.tooltip = Object.fromEntries(host.all((n) => n.className === "t-row").map((r) => [r.children[1].textContent, r.children[2].textContent]));
   },
   async noKey() {
     out.noDb = col().render({ query_id: 1 }).textContent;

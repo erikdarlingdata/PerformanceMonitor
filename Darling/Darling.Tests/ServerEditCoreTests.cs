@@ -176,6 +176,7 @@ public sealed class ServerEditCoreTests : IDisposable
     [InlineData("engine")]
     [InlineData("is_enabled")]
     [InlineData("excluded_databases")]
+    [InlineData("xe_session_databases")]
     [InlineData("server_id")]
     [InlineData("capture_plans")]
     [InlineData("alert_delivery_mode_override")]
@@ -224,6 +225,8 @@ public sealed class ServerEditCoreTests : IDisposable
     [InlineData("{\"encrypt_mode\":\"Sometimes\"}")]
     [InlineData("{\"monthly_cost_usd\":-1}")]
     [InlineData("{\"monthly_cost_usd\":\"lots\"}")]
+    [InlineData("{\"monthly_cost_usd\":\"120,50\"}")] // #7197: a thousands separator was accepted, so this stored 12050
+    [InlineData("{\"monthly_cost_usd\":\"$120\"}")]
     [InlineData("{\"expected_modified_at\":\"\"}")]
     public void ABadBody_IsInvalid_BeforeAnyStoreAccess(string json)
     {

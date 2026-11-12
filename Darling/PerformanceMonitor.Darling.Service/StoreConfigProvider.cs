@@ -776,7 +776,7 @@ public sealed class StoreConfigProvider
         using var command = new NpgsqlCommand(@"
 SELECT server_id, name, host, database, auth, username, encrypt_mode, trust_server_certificate,
        read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd,
-       alert_delivery_mode_override, engine, port, is_enabled, aws_role_arn, query_store_replica
+       alert_delivery_mode_override, engine, port, is_enabled, aws_role_arn, query_store_replica, xe_session_databases
 FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -805,6 +805,8 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
                     AwsRoleArn = reader.IsDBNull(16) ? null : reader.GetString(16),
                     /* V213 (#6254): compared, because it decides where Query Store is read and which saved password opens. */
                     QueryStoreReplica = reader.IsDBNull(17) ? null : reader.GetString(17),
+                    /* V247 (#7639): compared, so a darling.json list that differs from the store's is reported. */
+                    XeSessionDatabases = ReadTextArray(reader, 18),
                 },
                 /* NOT NULL DEFAULT TRUE in the table, so the guard is for a store mid-migration; an unknown
                    enablement reads as ENABLED, which is the direction that keeps the drift visible. */
@@ -1169,6 +1171,15 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
             nameComparison,
             false);
 
+        /* #7639: the databases that get Extended Events sessions. SQL Server compares names without case, so the set is compared that way on both engines. */
+        AddDrift(
+            drift,
+            "xeSessionDatabases",
+            NormalizeExcludedDatabases(file.XeSessionDatabases, false),
+            NormalizeExcludedDatabases(store.XeSessionDatabases, false),
+            StringComparison.OrdinalIgnoreCase,
+            false);
+
         if (file.MonthlyCostUsd != store.MonthlyCostUsd)
         {
             drift.Add(new SettingDrift(
@@ -1432,11 +1443,14 @@ INSERT INTO config_alert_settings (
     client_timeouts_warning_multiple, client_timeouts_critical_multiple,
     agent_alert_gaps_enabled, backup_overdue_enabled, log_backup_overdue_enabled, checkdb_overdue_enabled,
     identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent,
-    blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds)
+    blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds,
+    blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds,
+    daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title,
+    backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
         $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63,
-        $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90)
+        $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -1571,6 +1585,17 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         command.Parameters.AddWithValue(a.BlockingCriticalPerHour);
         command.Parameters.AddWithValue(a.BlockingWarnWaitSeconds);
         command.Parameters.AddWithValue(a.BlockingCriticalWaitSeconds);
+        /* #7028, bound last in the order the V230 columns were appended. RAW like every sibling. */
+        command.Parameters.AddWithValue(a.BlockingWarnSnapshotWaitSeconds);
+        command.Parameters.AddWithValue(a.BlockingCriticalSnapshotWaitSeconds);
+        /* #7041, bound last in the order the V232 columns were appended. The switch seeds FALSE: the report ships off. The send time seeds as a time of day; zone and title seed NULL when unset. */
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Boolean, Value = a.DailyReportEnabled });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Time, Value = Reports.DailyHealthReportSettings.ResolveSendAt(a.DailyReportSendAt).ToTimeSpan() });
+        AddNullableText(command, a.DailyReportTimeZone);
+        AddNullableText(command, a.DailyReportTitle);
+        command.Parameters.AddWithValue(a.BackupOverdueThresholdHours);
+        command.Parameters.AddWithValue(a.LogBackupOverdueThresholdMinutes);
+        command.Parameters.AddWithValue(a.CheckDbOverdueThresholdHours);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -1584,8 +1609,9 @@ INSERT INTO config_notification (
     smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy, modified_at,
     generic_url, generic_headers, generic_body_template, generic_proxy,
     pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve,
-    slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions)
-VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+    slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions,
+    slack_bot_token, slack_app_token)
+VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(s.Host);
         command.Parameters.AddWithValue(s.Port);
@@ -1616,6 +1642,9 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         command.Parameters.AddWithValue(w.TeamsSendResolutions);
         command.Parameters.AddWithValue(w.GenericSendResolutions);
         command.Parameters.AddWithValue(s.SendResolutions);
+        /* #7656: the Slack bot's tokens, raw like the URLs above; the start seal below seals a plain one. */
+        command.Parameters.AddWithValue(w.SlackBotToken);
+        command.Parameters.AddWithValue(w.SlackAppToken);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -1645,11 +1674,12 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            var v = new string?[9];
+            var v = new string?[11];
             bool signingSaved;
             await using (var select = new NpgsqlCommand(
                 "SELECT teams_url, teams_proxy, slack_url, slack_proxy, generic_url, generic_headers, generic_proxy, "
-                + "pagerduty_routing_key, pagerduty_proxy, COALESCE(signing_key, '') <> '' OR COALESCE(previous_signing_key, '') <> '' "
+                + "pagerduty_routing_key, pagerduty_proxy, slack_bot_token, slack_app_token, "
+                + "COALESCE(signing_key, '') <> '' OR COALESCE(previous_signing_key, '') <> '' "
                 + "FROM config_notification WHERE id = 1",
                 connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
             await using (var reader = await select.ExecuteReaderAsync(cancellationToken))
@@ -1664,11 +1694,15 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
                     v[i] = reader.IsDBNull(i) ? null : reader.GetString(i);
                 }
 
-                signingSaved = reader.GetBoolean(9);
+                signingSaved = reader.GetBoolean(11);
             }
 
             static bool IsPlain(string? value) => !string.IsNullOrWhiteSpace(value) && !PasswordSeal.IsSealed(value);
-            var plain = new (int Index, string Column)[] { (0, "teams_url"), (2, "slack_url"), (4, "generic_url"), (5, "generic_headers"), (7, "pagerduty_routing_key") }
+            var plain = new (int Index, string Column)[]
+                {
+                    (0, "teams_url"), (2, "slack_url"), (4, "generic_url"), (5, "generic_headers"), (7, "pagerduty_routing_key"),
+                    (9, "slack_bot_token"), (10, "slack_app_token"),
+                }
                 .Where(c => IsPlain(v[c.Index])).Select(c => c.Column).ToList();
             if (plain.Count == 0)
             {
@@ -1753,6 +1787,19 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
             }
 
             SealUrlOrKey("pagerduty_routing_key", "pagerduty_proxy", "pagerduty", v[7], v[8], "PagerDuty routing key");
+
+            /* #7656: the Slack bot's tokens have no proxy column: each is sealed to its slot and the row alone, and changes only while it
+               still holds what was read. */
+            void SealToken(string column, string slot, string? value, string label)
+            {
+                if (IsPlain(value) && Seal(column, slot, value!, null, null, label) is { } sealedText)
+                {
+                    writes.Add((column, sealedText, $"{column} = {P(value)}"));
+                }
+            }
+
+            SealToken("slack_bot_token", PasswordBinding.SlackBotTokenSlot, v[9], "Slack bot token");
+            SealToken("slack_app_token", PasswordBinding.SlackAppTokenSlot, v[10], "Slack app-level token");
 
             if (refused.Count > 0)
             {
@@ -1869,8 +1916,8 @@ INSERT INTO config_monitored_servers (
     trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
     monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, plan_force_bot_enabled,
     remediation_username, remediation_encrypted_password, aws_role_arn, aws_external_id,
-    hypothetical_index_username, hypothetical_index_encrypted_password, query_store_replica, created_at, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, FALSE, $18, $19, $20, $21, $22, $23, $24, $15, $15)
+    hypothetical_index_username, hypothetical_index_encrypted_password, query_store_replica, xe_session_databases, created_at, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, FALSE, $18, $19, $20, $21, $22, $23, $24, $25, $15, $15)
 ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             /* THE ALLOCATION SITE. A darling.json entry has no StoredServerId, so this is the derivation —
                and this is where it is minted and made permanent. When new rows stop being hash-keyed
@@ -1923,6 +1970,8 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
             /* V213 (#6254): the Query Store replica, trimmed with blank as NULL. NULL is every server nobody set one on: Query Store is then read
                from the server itself. A password sealed for this entry was sealed for this setting (PasswordBinding.ForServer). */
             AddNullableText(command, QueryStoreReplicaSetting.Normalize(server.QueryStoreReplica));
+            /* V247 (#7639): the databases that get Extended Events sessions; an empty list is every database. */
+            AddTextArray(command, server.XeSessionDatabases);
             await command.ExecuteNonQueryAsync(ct);
         }
 
@@ -2122,6 +2171,24 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
     internal static int ClampProcedureStatsPlanCycleInterval(int value) =>
         Math.Clamp(value, MinProcedureStatsPlanCycleInterval, MaxProcedureStatsPlanCycleInterval);
 
+    /// <summary>
+    /// The #8146 <c>xeRingBufferMaxEvents</c> setting, clamped to [1000, 10000] (unset is 1000). A given value that is not
+    /// used as written is logged once, naming the key, the value given and the value used, because the file is read once
+    /// at start and nobody would otherwise learn the setting was not honoured.
+    /// </summary>
+    internal static int ClampXeRingBufferMaxEvents(long? configured, ILogger? logger)
+    {
+        var used = RingBufferTarget.Clamp(configured);
+        if (configured is { } given && given != used)
+        {
+            logger?.LogWarning(
+                "darling.json xeRingBufferMaxEvents is {Given}, outside {Min} to {Max}; using {Used}",
+                given, RingBufferTarget.MinMaxEvents, RingBufferTarget.MaxMaxEvents, used);
+        }
+
+        return used;
+    }
+
     /// <summary>The V75 plan-content horizon clamps (#2316) — 0 (and any negative) means DISABLED
     /// (the fact-coupled dimension horizon stands alone); an enabled value clamps to [7,365], because a
     /// sub-week horizon would age plan XML out from under the viewer's default history windows.</summary>
@@ -2211,7 +2278,10 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        client_timeouts_warning_multiple, client_timeouts_critical_multiple,
        agent_alert_gaps_enabled, backup_overdue_enabled, log_backup_overdue_enabled, checkdb_overdue_enabled,
        identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent,
-       blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds
+       blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds,
+       blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds,
+       daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title,
+       backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours
 FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -2387,6 +2457,17 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
             BlockingCriticalPerHour = reader.GetDouble(87),
             BlockingWarnWaitSeconds = reader.GetDouble(88),
             BlockingCriticalWaitSeconds = reader.GetDouble(89),
+            /* #7028 (V230): the two blocking band snapshot wait tiers at 90-91. */
+            BlockingWarnSnapshotWaitSeconds = reader.GetDouble(90),
+            BlockingCriticalSnapshotWaitSeconds = reader.GetDouble(91),
+            /* #7041 (V232): the Daily Health Report switch, send time, zone and title at 92-95 (same reachability rule as every appended knob). The time arrives as a TimeSpan and is carried as "HH:mm". */
+            DailyReportEnabled = reader.GetBoolean(92),
+            DailyReportSendAt = Reports.DailyHealthReportSettings.FormatSendAt(TimeOnly.FromTimeSpan(reader.GetTimeSpan(93))),
+            DailyReportTimeZone = reader.IsDBNull(94) ? null : reader.GetString(94),
+            DailyReportTitle = reader.IsDBNull(95) ? null : reader.GetString(95),
+            BackupOverdueThresholdHours = reader.GetInt32(96),
+            LogBackupOverdueThresholdMinutes = reader.GetInt32(97),
+            CheckDbOverdueThresholdHours = reader.GetInt32(98),
         };
         var analysis = new AnalysisConfig
         {
@@ -2434,7 +2515,7 @@ SELECT smtp_host, smtp_port, smtp_use_ssl, smtp_username, smtp_encrypted_passwor
        generic_url, generic_headers, generic_body_template, generic_proxy,
        pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve,
        slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions,
-       signing_key, previous_signing_key, previous_signing_key_until
+       signing_key, previous_signing_key, previous_signing_key_until, slack_bot_token, slack_app_token
 FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -2477,6 +2558,9 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
             GenericSigning = new WebhookSigningKeys(
                 reader.GetString(24), reader.GetString(25), reader.IsDBNull(26) ? null : reader.GetFieldValue<DateTime>(26),
                 clockAhead),
+            /* V252 (#7656): the Slack bot's tokens, sealed. Appended last, like every addition to this row. */
+            SlackBotToken = reader.GetString(27),
+            SlackAppToken = reader.GetString(28),
         };
         return (smtp, webhooks);
     }
@@ -2499,7 +2583,7 @@ SELECT name, host, database, auth, username, encrypted_password, encrypt_mode, t
        read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override,
        engine, port, server_id, plan_force_bot_enabled, remediation_username, remediation_encrypted_password,
        aws_role_arn, aws_external_id, hypothetical_index_username, hypothetical_index_encrypted_password,
-       query_store_replica, capture_plans
+       query_store_replica, capture_plans, xe_session_databases
 FROM config_monitored_servers WHERE is_enabled = TRUE
 ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
@@ -2681,6 +2765,8 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             /* #6771: the per-server plan-capture setting. Nullable with no default: NULL is every server nobody has set, and it means
                the service-wide setting. Read through IsDBNull, never GetBoolean alone, so NULL does not become false. */
             CapturePlans = reader.IsDBNull(24) ? null : reader.GetBoolean(24),
+            /* V247 (#7639): the databases that get Extended Events sessions on Azure SQL Database. text[] NOT NULL DEFAULT '{}': empty is every database. */
+            XeSessionDatabases = ReadTextArray(reader, 25),
         };
 
         /* #5366: the identity a sealed password is bound to is the row's own text, read through the one raw-row mapping
@@ -2790,7 +2876,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     public const string NotificationRoutesSelectSql =
         "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, scope_server_id, scope_tag_id, "
         + "agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions, "
-        + NotificationRouteSigningColumns + ", fallback_route_id, severities "
+        + NotificationRouteSigningColumns + ", fallback_route_id, severities, report_notice, action_approval, approval_single_person, slack_bot_channel, slack_bot_channel_set_at "
         + "FROM config_notification_routes ORDER BY route_id";
 
     /// <summary>A route's signing key columns (V193, #5998), last in both the service's and the viewer's route SELECT.</summary>
@@ -2798,13 +2884,13 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
 
     /// <summary>The registry's server ids: every server a route's scope can name (#5750). The desired-state table, whose
     /// <c>server_id</c> is the key an alert carries as <c>AlertOutcome.ServerKey</c>.</summary>
-    public const string RouteScopeServersSql = "SELECT server_id FROM config_monitored_servers";
+    public const string RouteScopeServersSql = TagThresholdResolver.ServersSql;
 
     /// <summary>The tag tree (#5750): every tag and its parent (NULL for a root).</summary>
-    public const string RouteScopeTagsSql = "SELECT id, parent_id FROM server_tags";
+    public const string RouteScopeTagsSql = TagThresholdResolver.TagsSql;
 
     /// <summary>The server-to-tag assignments (#5750).</summary>
-    public const string RouteScopeTagMapSql = "SELECT server_id, tag_id FROM server_tag_map";
+    public const string RouteScopeTagMapSql = TagThresholdResolver.TagMapSql;
 
     /// <summary>
     /// The three inputs <see cref="NotificationRouteScopeExpander.Expand"/> needs, read from the store (#5750): the known server ids,
@@ -2915,6 +3001,15 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                     FallbackRouteId = reader.IsDBNull(19) ? null : reader.GetInt32(19),
                     /* V229 (#6928): the severity filter; a word this build does not know reads as both. */
                     Severities = NotificationRouteKinds.NormalizeSeverities(reader.GetString(20)),
+                    /* V233 (#6979): the report notice setting; a word this build does not know reads as off. */
+                    ReportNotice = NotificationRouteKinds.NormalizeReportNotice(reader.GetString(21)),
+                    /* V238 (#7109): the approval setting; a word this build does not know reads as required. */
+                    ActionApproval = NotificationRouteKinds.NormalizeActionApproval(reader.GetString(22)),
+                    ApprovalSinglePerson = reader.GetBoolean(23),
+                    /* V252 (#7656): the bot channel id the route's request threads go to; blank is none. The stamp says when the route got it,
+                       and the thread pass posts a request's parent only when the request opened at or after it. */
+                    SlackBotChannel = reader.GetString(24),
+                    SlackBotChannelSetAt = reader.IsDBNull(25) ? null : DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(25), DateTimeKind.Utc),
                 });
             }
         }

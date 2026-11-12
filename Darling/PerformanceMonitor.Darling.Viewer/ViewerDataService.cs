@@ -190,6 +190,22 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// </summary>
     public DateTime? RegisteredAt { get; }
 
+    /// <summary>#8464: whether any collector has run against this server, a failed attempt included, from the registry read and refreshed
+    /// by the status poll before <see cref="ApplyFreshness"/>. With no successful collection it tells a server the collectors reach and are
+    /// refused by (Offline) from one no collector has reached yet (awaiting its first collection).</summary>
+    public bool Attempted { get; set; }
+
+    /// <summary>When the service's connect to this server first failed in the current outage (UTC), from <c>servers.connect_down_since</c>
+    /// (#7590), or null while the last connect succeeded. Set by the status poll before <see cref="ApplyFreshness"/>; set, the server reads
+    /// Offline at once with the reason "Server unreachable since ...".</summary>
+    public DateTime? ConnectDownSince { get; set; }
+
+    /// <summary>The last connect error the service logged for this server while <see cref="ConnectDownSince"/> is set (#7590).</summary>
+    public string? LastConnectError { get; set; }
+
+    /// <summary>When the service will try the connect again while <see cref="ConnectDownSince"/> is set (UTC), from <c>servers.next_connect_attempt</c> (#7590); Collection Health names it.</summary>
+    public DateTime? NextConnectAttemptUtc { get; set; }
+
     // ── Runtime-only sidebar state (not from Postgres; drives the ported Lite server-row chrome) ──
 
     private bool _isFavorite;
@@ -266,6 +282,16 @@ public sealed class DarlingServer : INotifyPropertyChanged
         }
     }
 
+    /// <summary>Takes the dot back to the unclassified grey. The status pass calls this when its freshness read fails:
+    /// nothing was learned about this server this tick, so the last tick's answer must not keep standing as if it were
+    /// current.</summary>
+    public void ClearFreshness()
+    {
+        IsOnline = null;
+        CollectionStale = false;
+        AwaitingFirstCollection = false;
+    }
+
     /// <summary>
     /// The sidebar row's status, as a VALUE — the same <see cref="ServerCollectionStatus"/> the Overview card
     /// renders (#2473). This row used to derive its own copy of the status ladder from the same flags, on a
@@ -300,11 +326,29 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// third names the gesture THIS surface supports: <c>ServerList_MouseDoubleClick</c> opens the tab, and a
     /// single click only selects, so naming one would be naming a no-op.</para>
     /// </summary>
-    public string DotTooltip => string.Join(
-        "\n",
-        CardStatus.Headline(),
-        "Darling has no live ping: this is how old the newest collection is, not a connection check.",
-        "Double-click the row to open this server's tab");
+    public string DotTooltip => !IsEnabled
+        ? string.Join(
+            "\n",
+            DisplayName,
+            "Collection is disabled for this server",
+            "The service does not collect from a disabled server, so its silence is not an outage.",
+            DotTooltipAction)
+        : ConnectDownSince.HasValue
+        ? string.Join(
+            "\n",
+            DisplayName,
+            ServerCollectionStatus.Offline.Headline(),
+            ServerHealthClassifier.UnreachableReason(ConnectDownSince.Value, LastConnectError),
+            DotTooltipAction)
+        : string.Join(
+            "\n",
+            DisplayName,
+            CardStatus.Headline(),
+            "Darling has no live ping: this is how old the newest collection is, not a connection check.",
+            DotTooltipAction);
+
+    /// <summary>The tooltip's last line: the gesture the sidebar supports whether it shows rows or only dots, so it names no row.</summary>
+    private const string DotTooltipAction = "Double-click to open this server's tab";
 
     /// <summary>Raises the change notifications for everything derived from the three status flags. One
     /// helper rather than three call sites per setter: <see cref="DotTooltip"/> was added after
@@ -331,9 +375,25 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// </summary>
     public void ApplyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc)
     {
+        /* A disabled server collects nothing by the operator's choice, so the age of its newest collection says nothing about its
+           health: the freshness ladder would call it Offline for as long as it stays disabled. Its dot is the unclassified grey, and
+           DotTooltip says why. */
+        if (!IsEnabled)
+        {
+            IsOnline = null;
+            RaiseDotChanged();
+            CollectionStale = false;
+            AwaitingFirstCollection = false;
+            return;
+        }
+
+        /* #7590: a collection newer than the first failed connect proves a later connect worked, so the flag (whose clearing write the service may
+           have lost) stops counting here, before the dot, the tooltip, the tab header and Run all collectors now read it. */
+        ConnectDownSince = ServerHealthClassifier.EffectiveConnectDownSince(lastCollectionUtc, ConnectDownSince);
         var flags = ServerCollectionStatusRules.FlagsFor(
-            ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, RegisteredAt, nowUtc));
+            ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, RegisteredAt, nowUtc, ConnectDownSince, Attempted));
         IsOnline = flags.IsOnline;
+        RaiseDotChanged();
         CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;
     }
@@ -1386,7 +1446,112 @@ SELECT
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'blocking_warn_per_hour' AND NOT attisdropped),
     /* V229 (#6928) adds the severity filter to the notification routes. Found by catalog like the V225 column above. Named only in
        this probe line, never in prose, per the V71 finding. */
-    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_notification_routes') AND attname = 'severities' AND NOT attisdropped)";
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_notification_routes') AND attname = 'severities' AND NOT attisdropped),
+    /* V230 (#7028) adds the two snapshot wait tiers of the blocking band to the alert settings row. Found by catalog like the V228 column above. The
+       warn tier is the sentinel, the first of the two. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'blocking_warn_snapshot_wait_seconds' AND NOT attisdropped),
+    /* V231 (#7040) adds the recurring schedule to the mute rules. The start time column is the sentinel, found by catalog so the answer does
+       not depend on the connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_mute_rules') AND attname = 'recur_start_time' AND NOT attisdropped),
+    /* V232 (#7041) adds the Daily Health Report columns to the alert settings row. Found by catalog like the V228 column above. The enabled
+       column is the sentinel, the first of the four. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'daily_report_enabled' AND NOT attisdropped),
+    /* V233 (#6979) adds the report notice setting to the notification routes. Found by catalog like the V229 column. Named only in this probe
+       line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_notification_routes') AND attname = 'report_notice' AND NOT attisdropped),
+    /* V234 (#7076) adds the exact alert key to the alert log. Found by catalog like the V233 column. Named only in this probe line, never in
+       prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_log') AND attname = 'alert_key' AND NOT attisdropped),
+    /* V235 (#7083) moves the blocking count bar's column default from 1 to 3. Found by the column default like the V216 sentinel above. Named
+       only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attrdef AS d JOIN pg_attribute AS a ON a.attrelid = d.adrelid AND a.attnum = d.adnum WHERE d.adrelid = to_regclass('config.config_alert_settings') AND a.attname = 'blocking_count_threshold' AND NOT a.attisdropped AND pg_get_expr(d.adbin, d.adrelid) = '3'),
+    /* V236 (#7083) adds the action to the mute rules. Found by catalog like the V229 column. Named only in this probe line, never in prose,
+       per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_mute_rules') AND attname = 'action' AND NOT attisdropped),
+    /* V237 (#7107) adds the people, identity and grant tables. Found by catalog. Named only in this probe line, never in prose, per the
+       V71 finding. */
+    to_regclass('config.person_grant') IS NOT NULL,
+    /* V238 (#7109) adds the action proposals table. Found by catalog. Named only in this probe line, never in prose, per the V71 finding. */
+    to_regclass('config.agent_action_proposals') IS NOT NULL,
+    /* V239 (#7146) adds the fleet rollup of the Query Store compose stamp. Found by catalog. Named only in this probe line, never in prose,
+       per the V71 finding. */
+    to_regclass('collect.query_store_compose_fleet') IS NOT NULL,
+    /* V240 (#7169) adds the execution-weighted sums to the Query Store daily summary. Found by catalog so the answer does not depend on the
+       connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.query_store_top_daily') AND attname = 'avg_rowcount_wsum' AND NOT attisdropped),
+    /* V241 (#7497) adds the blocking process's open transaction count to the blocked process reports. Found by catalog so the answer does not depend on the
+       connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.blocked_process_reports') AND attname = 'blocking_open_transaction_count' AND NOT attisdropped),
+    /* V242 (#7567) adds the service-own entry list to the statement text lookup. Found by catalog so the answer does not depend on the
+       connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.pg_statement_text') AND attname = 'own_entries' AND NOT attisdropped),
+    /* V243 (#7573) adds the session's program name to the waiting tasks. Found by catalog so the answer does not depend on the
+       connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.waiting_tasks') AND attname = 'program_name' AND NOT attisdropped),
+    /* V244 (#7590) adds the connect-failure state to the server registry. Found by catalog so the answer does not depend on the
+       connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.servers') AND attname = 'next_connect_attempt' AND NOT attisdropped),
+    /* V245 (#7611) adds the three Database Protection thresholds to the alert settings. Found by catalog so the answer does not depend on the
+       connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'checkdb_overdue_threshold_hours' AND NOT attisdropped),
+    /* V246 (#7609) adds the (query_hash, bucket) index on the corrected hourly Query Store rollup. Found by catalog so the answer does not depend on the
+       connecting role's privileges. A store without that view (no TimescaleDB) has nothing to index, so it reads as done, but only once the rung below (V245's column) is there too: a store behind V245 has no view yet either, and must not read as the top rung. */
+    (EXISTS (SELECT 1 FROM pg_class WHERE relkind = 'i' AND relname = 'ix_qs_corrected_hourly_hash_bucket')
+        OR (to_regclass('collect.query_store_stats_corrected_hourly') IS NULL
+            AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'checkdb_overdue_threshold_hours' AND NOT attisdropped))),
+    /* V247 (#7639) adds the per-server list of databases that get Extended Events sessions to the server registry. Found by catalog so the
+       answer does not depend on the connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_monitored_servers') AND attname = 'xe_session_databases' AND NOT attisdropped),
+    /* V248 (#7730) makes the key trigger of the Query Store text table recognize the old statements. Found by catalog so the answer does not depend on the
+       connecting role's privileges: the trigger function's source carries the digest test. A store without the function (no key table yet) is behind V219. */
+    EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'query_store_self_keys_track' AND prosrc LIKE '%sha256%'),
+    /* V249 (#7731) adds the database name to the statement stats. Found by catalog so the answer does not depend on the
+       connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.pg_statement_stats') AND attname = 'database_name' AND NOT attisdropped),
+    /* V250 (#7691) adds the memory node to the memory pressure events. Found by catalog so the answer does not depend on the connecting role's
+       privileges. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.memory_pressure_events') AND attname = 'memory_node_id' AND NOT attisdropped),
+    /* V251 (#7762) moves the Query Store compose rollup's row trigger to the hour of the writer's clock. Found by catalog so the answer does not depend on the
+       connecting role's privileges: V173's function source has the one-hour subtraction in its threshold and V251's does not. A store without the function is
+       behind V173. */
+    EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'query_store_compose_stamp_mark_late' AND prosrc NOT LIKE '%- interval ''1 hour''%'),
+    /* V252 (#7656) adds the Slack request thread table. Found by catalog, as the line above is. */
+    to_regclass('config.investigation_request_threads') IS NOT NULL,
+    /* V253 (#7658) adds the Slack card table. Found by catalog, as the line above is. */
+    to_regclass('config.investigation_slack_posts') IS NOT NULL,
+    /* V254 (#7659) adds the chat requests' message table. Found by catalog, as the line above is. */
+    to_regclass('config.investigation_person_messages') IS NOT NULL,
+    /* V255 (#8106) adds the cadence wait baseline supply (a continuous aggregate where wait_stats is a hypertable, else the
+       plain fallback view). Found by catalog, as the line above is. */
+    to_regclass('collect.wait_stats_cadence_baseline') IS NOT NULL,
+    /* V256 (#7643) adds the schema tracking object table. Found by catalog, as the line above is. */
+    to_regclass('collect.schema_objects') IS NOT NULL,
+    /* V257 (#8464) adds the status-leading collection_log index. Probed in pg_indexes, as V142 is. */
+    EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_collection_log_status_time'),
+    /* V258 (#8567) adds the oversized-plan backlog's dropped-row index. Probed in pg_indexes, as the line above is. */
+    EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_oversized_plan_backlog_dropped'),
+    /* V259 (#8549) adds the daily wait totals (a continuous aggregate where wait_stats is a hypertable, else the plain view). Found by
+       catalog, as the V255 line above is. */
+    to_regclass('collect.wait_stats_daily') IS NOT NULL,
+    /* V260 (#8570) adds the oversized-plan backlog's median indexes. Probed in pg_indexes by the first of the two (the rung creates both in one
+       transaction), as V258's line above is. */
+    EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_oversized_plan_backlog_server_bytes'),
+    /* V261 (#7988): protected Viewer-managed web reader groups, visible by catalog even to a read-only seat. */
+    (to_regclass('config.web_access_groups') IS NOT NULL
+     AND to_regclass('config.web_access_group_tags') IS NOT NULL
+     AND to_regclass('config.web_access_group_events') IS NOT NULL
+     AND to_regprocedure('config.harden_web_access_groups()') IS NOT NULL),
+    /* V262 (#7988): the advanced web access switch. */
+    (to_regclass('config.web_access_advanced') IS NOT NULL AND to_regprocedure('config.set_web_access_advanced(boolean)') IS NOT NULL),
+    /* V263 (#8549) adds the oldest-run rollup under the Job History note (a continuous aggregate where job_history is a hypertable, else the
+       plain view). Found by catalog, as the V259 line above is. */
+    to_regclass('collect.job_history_oldest_daily') IS NOT NULL,
+    /* V264 (#8691) adds the oversized-plan backlog's per-hour drop counts. Found by catalog, as the V263 line above is. */
+    to_regclass('collect.oversized_plan_backlog_drops') IS NOT NULL,
+    /* V265 (#8549) adds the hourly summary of job_history's categories and its coverage table. Found by catalog, as the V264 line above is. */
+    (to_regclass('collect.job_history_category_hourly') IS NOT NULL AND to_regclass('collect.job_history_category_coverage') IS NOT NULL),
+    /* V266 (#8716) sets a fillfactor on the query-tag sightings table. Found by its reloptions in the catalog. */
+    COALESCE((SELECT bool_or(o LIKE 'fillfactor=%') FROM pg_class c CROSS JOIN LATERAL unnest(c.reloptions) AS o WHERE c.oid = to_regclass('collect.query_tag_sightings')), false)";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
@@ -1408,7 +1573,7 @@ SELECT
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
-                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60), reader.GetBoolean(61), reader.GetBoolean(62), reader.GetBoolean(63), reader.GetBoolean(64), reader.GetBoolean(65), reader.GetBoolean(66), reader.GetBoolean(67), reader.GetBoolean(68), reader.GetBoolean(69), reader.GetBoolean(70), reader.GetBoolean(71), reader.GetBoolean(72), reader.GetBoolean(73), reader.GetBoolean(74), reader.GetBoolean(75), reader.GetBoolean(76), reader.GetBoolean(77), reader.GetBoolean(78), reader.GetBoolean(79), reader.GetBoolean(80), reader.GetBoolean(81), reader.GetBoolean(82), reader.GetBoolean(83), reader.GetBoolean(84), reader.GetBoolean(85), reader.GetBoolean(86), reader.GetBoolean(87), reader.GetBoolean(88), reader.GetBoolean(89), reader.GetBoolean(90), reader.GetBoolean(91), reader.GetBoolean(92), reader.GetBoolean(93), reader.GetBoolean(94), reader.GetBoolean(95), reader.GetBoolean(96), reader.GetBoolean(97), reader.GetBoolean(98), reader.GetBoolean(99), reader.GetBoolean(100), reader.GetBoolean(101), reader.GetBoolean(102), reader.GetBoolean(103), reader.GetBoolean(104), reader.GetBoolean(105), reader.GetBoolean(106), reader.GetBoolean(107), reader.GetBoolean(108), reader.GetBoolean(109), reader.GetBoolean(110), reader.GetBoolean(111), reader.GetBoolean(112), reader.GetBoolean(113), reader.GetBoolean(114), reader.GetBoolean(115), reader.GetBoolean(116), reader.GetBoolean(117), reader.GetBoolean(118), reader.GetBoolean(119), reader.GetBoolean(120), reader.GetBoolean(121), reader.GetBoolean(122), reader.GetBoolean(123), reader.GetBoolean(124), reader.GetBoolean(125), reader.GetBoolean(126), reader.GetBoolean(127), reader.GetBoolean(128), reader.GetBoolean(129), reader.GetBoolean(130), reader.GetBoolean(131), reader.GetBoolean(132), reader.GetBoolean(133), reader.GetBoolean(134), reader.GetBoolean(135), reader.GetBoolean(136), reader.GetBoolean(137), reader.GetBoolean(138), reader.GetBoolean(139), reader.GetBoolean(140), reader.GetBoolean(141), reader.GetBoolean(142), reader.GetBoolean(143), reader.GetBoolean(144), reader.GetBoolean(145), reader.GetBoolean(146), reader.GetBoolean(147), reader.GetBoolean(148), reader.GetBoolean(149), reader.GetBoolean(150), reader.GetBoolean(151), reader.GetBoolean(152), reader.GetBoolean(153), reader.GetBoolean(154), reader.GetBoolean(155), reader.GetBoolean(156), reader.GetBoolean(157), reader.GetBoolean(158), reader.GetBoolean(159), reader.GetBoolean(160), reader.GetBoolean(161), reader.GetBoolean(162), reader.GetBoolean(163), reader.GetBoolean(164), reader.GetBoolean(165), reader.GetBoolean(166), reader.GetBoolean(167), reader.GetBoolean(168), reader.GetBoolean(169), reader.GetBoolean(170), reader.GetBoolean(171), reader.GetBoolean(172), reader.GetBoolean(173), reader.GetBoolean(174), reader.GetBoolean(175), reader.GetBoolean(176), reader.GetBoolean(177), reader.GetBoolean(178), reader.GetBoolean(179), reader.GetBoolean(180), reader.GetBoolean(181), reader.GetBoolean(182), reader.GetBoolean(183), reader.GetBoolean(184), reader.GetBoolean(185), reader.GetBoolean(186), reader.GetBoolean(187), reader.GetBoolean(188), reader.GetBoolean(189), reader.GetBoolean(190), reader.GetBoolean(191), reader.GetBoolean(192), reader.GetBoolean(193), reader.GetBoolean(194), reader.GetBoolean(195), reader.GetBoolean(196), reader.GetBoolean(197), reader.GetBoolean(198), reader.GetBoolean(199), reader.GetBoolean(200), reader.GetBoolean(201), reader.GetBoolean(202), reader.GetBoolean(203), reader.GetBoolean(204));
+                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60), reader.GetBoolean(61), reader.GetBoolean(62), reader.GetBoolean(63), reader.GetBoolean(64), reader.GetBoolean(65), reader.GetBoolean(66), reader.GetBoolean(67), reader.GetBoolean(68), reader.GetBoolean(69), reader.GetBoolean(70), reader.GetBoolean(71), reader.GetBoolean(72), reader.GetBoolean(73), reader.GetBoolean(74), reader.GetBoolean(75), reader.GetBoolean(76), reader.GetBoolean(77), reader.GetBoolean(78), reader.GetBoolean(79), reader.GetBoolean(80), reader.GetBoolean(81), reader.GetBoolean(82), reader.GetBoolean(83), reader.GetBoolean(84), reader.GetBoolean(85), reader.GetBoolean(86), reader.GetBoolean(87), reader.GetBoolean(88), reader.GetBoolean(89), reader.GetBoolean(90), reader.GetBoolean(91), reader.GetBoolean(92), reader.GetBoolean(93), reader.GetBoolean(94), reader.GetBoolean(95), reader.GetBoolean(96), reader.GetBoolean(97), reader.GetBoolean(98), reader.GetBoolean(99), reader.GetBoolean(100), reader.GetBoolean(101), reader.GetBoolean(102), reader.GetBoolean(103), reader.GetBoolean(104), reader.GetBoolean(105), reader.GetBoolean(106), reader.GetBoolean(107), reader.GetBoolean(108), reader.GetBoolean(109), reader.GetBoolean(110), reader.GetBoolean(111), reader.GetBoolean(112), reader.GetBoolean(113), reader.GetBoolean(114), reader.GetBoolean(115), reader.GetBoolean(116), reader.GetBoolean(117), reader.GetBoolean(118), reader.GetBoolean(119), reader.GetBoolean(120), reader.GetBoolean(121), reader.GetBoolean(122), reader.GetBoolean(123), reader.GetBoolean(124), reader.GetBoolean(125), reader.GetBoolean(126), reader.GetBoolean(127), reader.GetBoolean(128), reader.GetBoolean(129), reader.GetBoolean(130), reader.GetBoolean(131), reader.GetBoolean(132), reader.GetBoolean(133), reader.GetBoolean(134), reader.GetBoolean(135), reader.GetBoolean(136), reader.GetBoolean(137), reader.GetBoolean(138), reader.GetBoolean(139), reader.GetBoolean(140), reader.GetBoolean(141), reader.GetBoolean(142), reader.GetBoolean(143), reader.GetBoolean(144), reader.GetBoolean(145), reader.GetBoolean(146), reader.GetBoolean(147), reader.GetBoolean(148), reader.GetBoolean(149), reader.GetBoolean(150), reader.GetBoolean(151), reader.GetBoolean(152), reader.GetBoolean(153), reader.GetBoolean(154), reader.GetBoolean(155), reader.GetBoolean(156), reader.GetBoolean(157), reader.GetBoolean(158), reader.GetBoolean(159), reader.GetBoolean(160), reader.GetBoolean(161), reader.GetBoolean(162), reader.GetBoolean(163), reader.GetBoolean(164), reader.GetBoolean(165), reader.GetBoolean(166), reader.GetBoolean(167), reader.GetBoolean(168), reader.GetBoolean(169), reader.GetBoolean(170), reader.GetBoolean(171), reader.GetBoolean(172), reader.GetBoolean(173), reader.GetBoolean(174), reader.GetBoolean(175), reader.GetBoolean(176), reader.GetBoolean(177), reader.GetBoolean(178), reader.GetBoolean(179), reader.GetBoolean(180), reader.GetBoolean(181), reader.GetBoolean(182), reader.GetBoolean(183), reader.GetBoolean(184), reader.GetBoolean(185), reader.GetBoolean(186), reader.GetBoolean(187), reader.GetBoolean(188), reader.GetBoolean(189), reader.GetBoolean(190), reader.GetBoolean(191), reader.GetBoolean(192), reader.GetBoolean(193), reader.GetBoolean(194), reader.GetBoolean(195), reader.GetBoolean(196), reader.GetBoolean(197), reader.GetBoolean(198), reader.GetBoolean(199), reader.GetBoolean(200), reader.GetBoolean(201), reader.GetBoolean(202), reader.GetBoolean(203), reader.GetBoolean(204), reader.GetBoolean(205), reader.GetBoolean(206), reader.GetBoolean(207), reader.GetBoolean(208), reader.GetBoolean(209), reader.GetBoolean(210), reader.GetBoolean(211), reader.GetBoolean(212), reader.GetBoolean(213), reader.GetBoolean(214), reader.GetBoolean(215), reader.GetBoolean(216), reader.GetBoolean(217), reader.GetBoolean(218), reader.GetBoolean(219), reader.GetBoolean(220), reader.GetBoolean(221), reader.GetBoolean(222), reader.GetBoolean(223), reader.GetBoolean(224), reader.GetBoolean(225), reader.GetBoolean(226), reader.GetBoolean(227), reader.GetBoolean(228), reader.GetBoolean(229), reader.GetBoolean(230), reader.GetBoolean(231), reader.GetBoolean(232), reader.GetBoolean(233), reader.GetBoolean(234), reader.GetBoolean(235), reader.GetBoolean(236), reader.GetBoolean(237), reader.GetBoolean(238), reader.GetBoolean(239), reader.GetBoolean(240), reader.GetBoolean(241));
             }
 
             return null;
@@ -1433,7 +1598,7 @@ SELECT
     /// is unit-tested without a live store; any schema bump past the newest arm trips the pinning test that keeps
     /// this in step with <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
-    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false, bool hasTempDbMaxSize = false, bool hasServerEngineKind = false, bool hasPgDatabaseStats = false, bool hasPgIndexUsageStats = false, bool hasPgTableBloatStats = false, bool hasPgSessionStates = false, bool hasPgPlanCaptureReadiness = false, bool hasPgWriteStats = false, bool hasPgExtensionAvailability = false, bool hasPgLockStats = false, bool hasPgColumnStats = false, bool hasPgReplicationStats = false, bool hasPgBufferUsage = false, bool hasPgIndexBloat = false, bool hasPgPerDatabaseAttribution = false, bool hasPgWaitSampling = false, bool hasPgKernelStats = false, bool hasPgPredicateStats = false, bool hasPgPlanCapture = false, bool hasPgMajorVersion = false, bool hasPg18IoBytes = false, bool hasPgServerConfig = false, bool hasPgDeadlocks = false, bool hasPgDeadlockIdentity = false, bool hasCollectorCost = false, bool hasPgCpuUtilization = false, bool hasPlanForceActions = false, bool hasCollectionLogPhaseSplit = false, bool hasCollectionLogDrainForensics = false, bool hasCollectionLogFetchPhaseSums = false, bool hasStoreLogSelfMonitoring = false, bool hasCollectorStallProbes = false, bool hasRemediationCredentialAndActor = false, bool hasPgIndexBloatEstimate = false, bool hasPgCpuCapacityHeadroom = false, bool hasCustomAlertCore = false, bool hasMuteRuleReloadBeacon = false, bool hasBuiltinAlertPersistence = false, bool hasRetentionHoldRatioKnobs = false, bool hasDeadlockRateBandKnobs = false, bool hasOversizedPlanBacklog = false, bool hasPgAlertCountKnobs = false, bool hasFleetSweepState = false, bool hasFleetSweepCadenceKnobs = false, bool hasCollectorScheduleDatabases = false, bool hasSelfDiskWarnGbFloor = false, bool hasDeltaFamilyIntervalColumns = false, bool hasDeltaFamilyIntervalCompletion = false, bool hasPgLogEvents = false, bool hasPgLogEventMetrics = false, bool hasNotificationRoutes = false, bool hasPerfmonCounterType = false, bool hasPgNumbackendsAndSampledMs = false, bool hasTimeHonesty = false, bool hasLrqExclusionKnob = false, bool hasPgDatabaseSizeStatsAndHostMemory = false, bool hasQsCaptureModeRouteKnobToast = false, bool hasPgServerConfigDatabaseRoleOverrides = false, bool hasPostmasterStartTime = false, bool hasCheckpointsTimed = false, bool hasCollectionCaveats = false, bool hasIndexObjectStatsServerTimeIndex = false, bool hasQueryStoreIntervalLatest = false, bool hasRawChunkIntervalRungHistory = false, bool hasQueryStoreIntervalWide = false, bool hasManagedConfVerdicts = false, bool hasComposeTimeoutSixty = false, bool hasReadLatency = false, bool hasHotLivenessTouch = false, bool hasCollectionLogWatermarkAndJobHistoryIndexes = false, bool hasAgGroupId = false, bool hasCaggGroupIndexDrop = false, bool hasIntervalFirstExecIndexes = false, bool hasIntervalWideFirstExecIndex = false, bool hasQueryStoreIntervalEnd = false, bool hasCheckpointLongestSync = false, bool hasMuteRuleServerId = false, bool hasInstallId = false, bool hasInstallIdTableOid = false, bool hasCollectorRunAt = false, bool hasQueryStoreTopDaily = false, bool hasSlowReads = false, bool hasStoreStatementHistory = false, bool hasQueryStatsHourLedger = false, bool hasPasswordKey = false, bool hasPagerDutyAutoResolve = false, bool hasLegacyPinCandidates = false, bool hasPlanRegressionDaily = false, bool hasAwsRole = false, bool hasPgIoStatsHourly = false, bool hasQueryStoreIntervalWidePartitioned = false, bool hasQueryStoreIntervalLatestPartitioned = false, bool hasQueryStoreComposeStamp = false, bool hasServiceVersion = false, bool hasPlanRegressionDailyRowcount = false, bool hasProcedureStatsTotals = false, bool hasRunnableQueueSettings = false, bool hasQueryStoreWatermarks = false, bool hasClientTimeoutSettings = false, bool hasExternalAlerts = false, bool hasNotificationRouteScope = false, bool hasReadLatencyCapacityFields = false, bool hasReadCaller = false, bool hasInvestigations = false, bool hasPlanRegressionPartialDays = false, bool hasCollectionLogHourly = false, bool hasAlertResolutionDelivery = false, bool hasInvestigationAlertFacts = false, bool hasComposeStampFailures = false, bool hasStoreMetricsSizeEstimated = false, bool hasAgentLevel2Store = false, bool hasQueryTagsStore = false, bool hasPhaseCStore = false, bool hasQueryTagSightingsDatabaseKey = false, bool hasQueryStoreForcedPlans = false, bool hasServerActionSwitches = false, bool hasForceChecks = false, bool hasPseudonymKey = false, bool hasBlockingHeadEvidence = false, bool hasExcludedVolumes = false, bool hasForcedPlanVariantsAndGuides = false, bool hasAgPrimaryReplica = false, bool hasHypotheticalIndexLogin = false, bool hasCustomViewFolders = false, bool hasCustomAlertRuleExpiry = false, bool hasInheritableCollectorEnabled = false, bool hasChangeWatches = false, bool hasMuteRuleStartsAt = false, bool hasQueryStoreFetchTopN = false, bool hasAgentRouteTagGuard = false, bool hasClientTimeoutsMultiples = false, bool hasServerMachineIdentity = false, bool hasQueryStoreReplica = false, bool hasKnownPatterns = false, bool hasAgentTableIndexes = false, bool hasClientTimeoutsOnByDefault = false, bool hasQueryStoreHints = false, bool hasServerActionRecompile = false, bool hasQueryStoreSelfKeys = false, bool hasJobHistorySuccessIndex = false, bool hasQueryStoreHashHourly = false, bool hasAgentAlerts = false, bool hasDatabaseProtection = false, bool hasIdentityCapacity = false, bool hasServerAwsRds = false, bool hasServerAwsRdsWebOrExpress = false, bool hasThresholdOverrideTagScope = false, bool hasBlockingBands = false, bool hasRouteSeverities = false)
+    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false, bool hasTempDbMaxSize = false, bool hasServerEngineKind = false, bool hasPgDatabaseStats = false, bool hasPgIndexUsageStats = false, bool hasPgTableBloatStats = false, bool hasPgSessionStates = false, bool hasPgPlanCaptureReadiness = false, bool hasPgWriteStats = false, bool hasPgExtensionAvailability = false, bool hasPgLockStats = false, bool hasPgColumnStats = false, bool hasPgReplicationStats = false, bool hasPgBufferUsage = false, bool hasPgIndexBloat = false, bool hasPgPerDatabaseAttribution = false, bool hasPgWaitSampling = false, bool hasPgKernelStats = false, bool hasPgPredicateStats = false, bool hasPgPlanCapture = false, bool hasPgMajorVersion = false, bool hasPg18IoBytes = false, bool hasPgServerConfig = false, bool hasPgDeadlocks = false, bool hasPgDeadlockIdentity = false, bool hasCollectorCost = false, bool hasPgCpuUtilization = false, bool hasPlanForceActions = false, bool hasCollectionLogPhaseSplit = false, bool hasCollectionLogDrainForensics = false, bool hasCollectionLogFetchPhaseSums = false, bool hasStoreLogSelfMonitoring = false, bool hasCollectorStallProbes = false, bool hasRemediationCredentialAndActor = false, bool hasPgIndexBloatEstimate = false, bool hasPgCpuCapacityHeadroom = false, bool hasCustomAlertCore = false, bool hasMuteRuleReloadBeacon = false, bool hasBuiltinAlertPersistence = false, bool hasRetentionHoldRatioKnobs = false, bool hasDeadlockRateBandKnobs = false, bool hasOversizedPlanBacklog = false, bool hasPgAlertCountKnobs = false, bool hasFleetSweepState = false, bool hasFleetSweepCadenceKnobs = false, bool hasCollectorScheduleDatabases = false, bool hasSelfDiskWarnGbFloor = false, bool hasDeltaFamilyIntervalColumns = false, bool hasDeltaFamilyIntervalCompletion = false, bool hasPgLogEvents = false, bool hasPgLogEventMetrics = false, bool hasNotificationRoutes = false, bool hasPerfmonCounterType = false, bool hasPgNumbackendsAndSampledMs = false, bool hasTimeHonesty = false, bool hasLrqExclusionKnob = false, bool hasPgDatabaseSizeStatsAndHostMemory = false, bool hasQsCaptureModeRouteKnobToast = false, bool hasPgServerConfigDatabaseRoleOverrides = false, bool hasPostmasterStartTime = false, bool hasCheckpointsTimed = false, bool hasCollectionCaveats = false, bool hasIndexObjectStatsServerTimeIndex = false, bool hasQueryStoreIntervalLatest = false, bool hasRawChunkIntervalRungHistory = false, bool hasQueryStoreIntervalWide = false, bool hasManagedConfVerdicts = false, bool hasComposeTimeoutSixty = false, bool hasReadLatency = false, bool hasHotLivenessTouch = false, bool hasCollectionLogWatermarkAndJobHistoryIndexes = false, bool hasAgGroupId = false, bool hasCaggGroupIndexDrop = false, bool hasIntervalFirstExecIndexes = false, bool hasIntervalWideFirstExecIndex = false, bool hasQueryStoreIntervalEnd = false, bool hasCheckpointLongestSync = false, bool hasMuteRuleServerId = false, bool hasInstallId = false, bool hasInstallIdTableOid = false, bool hasCollectorRunAt = false, bool hasQueryStoreTopDaily = false, bool hasSlowReads = false, bool hasStoreStatementHistory = false, bool hasQueryStatsHourLedger = false, bool hasPasswordKey = false, bool hasPagerDutyAutoResolve = false, bool hasLegacyPinCandidates = false, bool hasPlanRegressionDaily = false, bool hasAwsRole = false, bool hasPgIoStatsHourly = false, bool hasQueryStoreIntervalWidePartitioned = false, bool hasQueryStoreIntervalLatestPartitioned = false, bool hasQueryStoreComposeStamp = false, bool hasServiceVersion = false, bool hasPlanRegressionDailyRowcount = false, bool hasProcedureStatsTotals = false, bool hasRunnableQueueSettings = false, bool hasQueryStoreWatermarks = false, bool hasClientTimeoutSettings = false, bool hasExternalAlerts = false, bool hasNotificationRouteScope = false, bool hasReadLatencyCapacityFields = false, bool hasReadCaller = false, bool hasInvestigations = false, bool hasPlanRegressionPartialDays = false, bool hasCollectionLogHourly = false, bool hasAlertResolutionDelivery = false, bool hasInvestigationAlertFacts = false, bool hasComposeStampFailures = false, bool hasStoreMetricsSizeEstimated = false, bool hasAgentLevel2Store = false, bool hasQueryTagsStore = false, bool hasPhaseCStore = false, bool hasQueryTagSightingsDatabaseKey = false, bool hasQueryStoreForcedPlans = false, bool hasServerActionSwitches = false, bool hasForceChecks = false, bool hasPseudonymKey = false, bool hasBlockingHeadEvidence = false, bool hasExcludedVolumes = false, bool hasForcedPlanVariantsAndGuides = false, bool hasAgPrimaryReplica = false, bool hasHypotheticalIndexLogin = false, bool hasCustomViewFolders = false, bool hasCustomAlertRuleExpiry = false, bool hasInheritableCollectorEnabled = false, bool hasChangeWatches = false, bool hasMuteRuleStartsAt = false, bool hasQueryStoreFetchTopN = false, bool hasAgentRouteTagGuard = false, bool hasClientTimeoutsMultiples = false, bool hasServerMachineIdentity = false, bool hasQueryStoreReplica = false, bool hasKnownPatterns = false, bool hasAgentTableIndexes = false, bool hasClientTimeoutsOnByDefault = false, bool hasQueryStoreHints = false, bool hasServerActionRecompile = false, bool hasQueryStoreSelfKeys = false, bool hasJobHistorySuccessIndex = false, bool hasQueryStoreHashHourly = false, bool hasAgentAlerts = false, bool hasDatabaseProtection = false, bool hasIdentityCapacity = false, bool hasServerAwsRds = false, bool hasServerAwsRdsWebOrExpress = false, bool hasThresholdOverrideTagScope = false, bool hasBlockingBands = false, bool hasRouteSeverities = false, bool hasBlockingSnapshotBands = false, bool hasMuteRecurrence = false, bool hasDailyReportSettings = false, bool hasReportNotice = false, bool hasAlertLogKey = false, bool hasBlockingBarsOnWaitTime = false, bool hasMuteRuleAction = false, bool hasPeopleGrants = false, bool hasActionProposals = false, bool hasComposeFleet = false, bool hasQueryStoreTopDailyWsum = false, bool hasBlockingOpenTranCount = false, bool hasStatementTextOwnEntries = false, bool hasWaitingTasksProgramName = false, bool hasServerConnectDownState = false, bool hasProtectionThresholds = false, bool hasQueryStoreHashIndex = false, bool hasXeSessionDatabases = false, bool hasSelfKeysOldStatements = false, bool hasStatementStatsDatabaseName = false, bool hasMemoryPressureNode = false, bool hasComposeStampLateMarkOffsetZero = false, bool hasSlackBotThreads = false, bool hasSlackCards = false, bool hasChatRequests = false, bool hasWaitStatsCadenceBaseline = false, bool hasSchemaTracking = false, bool hasCollectionLogStatusTimeIndex = false, bool hasOversizedPlanBacklogDroppedIndex = false, bool hasWaitStatsDaily = false, bool hasOversizedPlanBacklogMedianIndexes = false, bool hasWebAccessGroups = false, bool hasAdvancedWebAccess = false, bool hasJobHistoryOldestDaily = false, bool hasOversizedPlanBacklogDropCounts = false, bool hasJobHistoryCategoryHourly = false, bool hasQueryTagSightingsFillfactor = false)
     {
         /* V71 (the PostgreSQL blocking-edges rung): a table-existence sentinel and now the newest-first arm.
            A collector table would ordinarily get no arm at all — see the V63-V69 note below — but the TOP
@@ -1642,9 +1807,226 @@ SELECT
         /* V226 (#6893): the AWS RDS Web or Express fact on the server registry. Column-existence sentinel, newest-first, and the TOP rung, so a
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 225 and showing a spurious upgrade
            banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
+        /* V237 (#7107): the people, identity and grant tables. Table-existence sentinel, newest-first, and the TOP rung, so a fully-migrated
+           store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 236 and showing a spurious upgrade banner on a
+           store that is current. Named only in the probe line, not this prose, per the V71 finding. */
+        /* V238 (#7109): the action proposals table. Table-existence sentinel, newest-first, and the TOP rung, so a fully-migrated store maps
+           to EXACTLY StorageVersion.SchemaVersion rather than falling through to 237 and showing a spurious upgrade banner on a store that is
+           current. Named only in the probe line, not this prose, per the V71 finding. */
+        /* V239 (#7146): the fleet rollup of the Query Store compose stamp. Table-existence sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 238 and showing a spurious upgrade
+           banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
+        /* V240 (#7169): the execution-weighted sums on the Query Store daily summary. Column-existence sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 239 and showing a spurious upgrade
+           banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
+        /* V241 (#7497): the blocking process's open transaction count on the blocked process reports. Column-existence sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 240 and showing a spurious upgrade
+           banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
+        /* V244 (#7590): the connect-failure state on the server registry. Column-existence sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 243 and showing a spurious upgrade
+           banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
+        /* V245 (#7611): the Database Protection thresholds on the alert settings. Column-existence sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 244 and showing a spurious upgrade
+           banner on a store that is current. */
+        /* V266 (#8716): the query-tag sightings table's fillfactor. Reloptions sentinel, newest-first, and the TOP rung, so a fully-migrated store maps
+           to EXACTLY StorageVersion.SchemaVersion rather than falling through to 265 and showing a spurious upgrade banner on a store that is current. */
+        if (hasQueryTagSightingsFillfactor)
+        {
+            return 266;
+        }
+        /* V265 (#8549): the hourly summary of job_history's categories, with its coverage table. Table-existence sentinel (both tables, which the rung
+           creates together), and the rung below the newest. */
+        if (hasJobHistoryCategoryHourly)
+        {
+            return 265;
+        }
+        /* V264 (#8691): the oversized-plan backlog's per-hour drop counts. Table-existence sentinel, and the rung below the newest. */
+        if (hasOversizedPlanBacklogDropCounts)
+        {
+            return 264;
+        }
+        /* V263 (#8549): the oldest-run rollup under the Job History note. Relation sentinel (the aggregate or the plain view), newest-first, and
+           the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 262 and showing a
+           spurious upgrade banner on a store that is current. */
+        if (hasJobHistoryOldestDaily)
+        {
+            return 263;
+        }
+        /* V262 and V261 (#7988): the advanced web access switch, and the Viewer-managed web access groups. Catalog sentinels, newest first, below V263. */
+        if (hasAdvancedWebAccess) return 262;
+        if (hasWebAccessGroups) return 261;
+        /* V260 (#8570): the oversized-plan backlog's median indexes. Index sentinel, newest-first. */
+        if (hasOversizedPlanBacklogMedianIndexes)
+        {
+            return 260;
+        }
+        /* V259 (#8549): the daily wait totals. Relation sentinel (the aggregate or the plain view), newest-first. */
+        if (hasWaitStatsDaily)
+        {
+            return 259;
+        }
+        /* V258 (#8567): the oversized-plan backlog's dropped-row index. Index sentinel, newest-first. */
+        if (hasOversizedPlanBacklogDroppedIndex)
+        {
+            return 258;
+        }
+        /* V257 (#8464): the status-leading collection_log index. Index sentinel, newest-first. */
+        if (hasCollectionLogStatusTimeIndex)
+        {
+            return 257;
+        }
+        /* V256 (#7643): the schema tracking tables. Table-existence sentinel, newest-first. */
+        if (hasSchemaTracking)
+        {
+            return 256;
+        }
+        /* V255 (#8106): the cadence wait baseline supply. Catalog sentinel, newest-first. */
+        if (hasWaitStatsCadenceBaseline)
+        {
+            return 255;
+        }
+        /* V254 (#7659): the chat requests' message table. Table-existence sentinel, newest-first. */
+        if (hasChatRequests)
+        {
+            return 254;
+        }
+        /* V253 (#7658): the Slack card table. Table-existence sentinel, newest-first. */
+        if (hasSlackCards)
+        {
+            return 253;
+        }
+        /* V252 (#7656): the Slack request thread table. Table-existence sentinel, newest-first. */
+        if (hasSlackBotThreads)
+        {
+            return 252;
+        }
+        /* V251 (#7762): the Query Store compose rollup's row trigger marks from the hour of the writer's clock. Function-source sentinel, newest-first. */
+        if (hasComposeStampLateMarkOffsetZero)
+        {
+            return 251;
+        }
+        /* V250 (#7691): the memory node on the memory pressure events. Column-existence sentinel, newest-first, and the TOP rung, so a fully-migrated
+           store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 249 and showing a spurious upgrade banner on a store
+           that is current. */
+        if (hasMemoryPressureNode)
+        {
+            return 250;
+        }
+        /* V249 (#7731): the database name on the statement stats. Column-existence sentinel, newest-first. */
+        if (hasStatementStatsDatabaseName)
+        {
+            return 249;
+        }
+        /* V248 (#7730): the key trigger of the Query Store text table recognizes the old statements. Function-source sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 247. */
+        if (hasSelfKeysOldStatements)
+        {
+            return 248;
+        }
+        /* V247 (#7639): the per-server list of databases that get Extended Events sessions on the server registry. Column-existence sentinel,
+           newest-first, and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to
+           246 and showing a spurious upgrade banner on a store that is current. */
+        if (hasXeSessionDatabases)
+        {
+            return 247;
+        }
+        /* V246 (#7609): the (query_hash, bucket) index on the corrected hourly Query Store rollup. Index-existence sentinel (true when the view is absent), newest-first. */
+        if (hasQueryStoreHashIndex)
+        {
+            return 246;
+        }
+        if (hasProtectionThresholds)
+        {
+            return 245;
+        }
+        if (hasServerConnectDownState)
+        {
+            return 244;
+        }
+        /* V243 (#7573): the session's program name on the waiting tasks. Column-existence sentinel, newest-first. Named only in the probe line,
+           not this prose, per the V71 finding. */
+        if (hasWaitingTasksProgramName)
+        {
+            return 243;
+        }
+        /* V242 (#7567): the service-own entry list on the statement text lookup. Column-existence sentinel, newest-first. Named only in the
+           probe line, not this prose, per the V71 finding. */
+        if (hasStatementTextOwnEntries)
+        {
+            return 242;
+        }
+        if (hasBlockingOpenTranCount)
+        {
+            return 241;
+        }
+        if (hasQueryStoreTopDailyWsum)
+        {
+            return 240;
+        }
+        if (hasComposeFleet)
+        {
+            return 239;
+        }
+        if (hasActionProposals)
+        {
+            return 238;
+        }
+        if (hasPeopleGrants)
+        {
+            return 237;
+        }
+        /* V235 (#7083): the blocking count bar's column default is 3. Column-default sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 234 and showing a spurious upgrade
+           banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
+        /* V236 (#7083): the action on the mute rules. Column-existence sentinel, newest-first, and the TOP rung, so a fully-migrated store maps
+           to EXACTLY StorageVersion.SchemaVersion rather than falling through to 235 and showing a spurious upgrade banner on a store that is
+           current. Named only in the probe line, not this prose, per the V71 finding. */
+        if (hasMuteRuleAction)
+        {
+            return 236;
+        }
+        if (hasBlockingBarsOnWaitTime)
+        {
+            return 235;
+        }
+        /* V234 (#7076): the exact alert key on the alert log. Column-existence sentinel, newest-first, and the TOP rung, so a fully-migrated
+           store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 233 and showing a spurious upgrade banner on a
+           store that is current. Named only in the probe line, not this prose, per the V71 finding. */
+        if (hasAlertLogKey)
+        {
+            return 234;
+        }
+        /* V233 (#6979): the report notice setting on the notification routes. Column-existence sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 232 and showing a spurious upgrade
+           banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
+        if (hasReportNotice)
+        {
+            return 233;
+        }
+        /* V232 (#7041): the Daily Health Report columns on the alert settings row. Column-existence sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 231 and showing a spurious upgrade
+           banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
+        if (hasDailyReportSettings)
+        {
+            return 232;
+        }
+        /* V231 (#7040): the recurring schedule on the mute rules. Column-existence sentinel, newest-first, and the TOP rung, so a
+           fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through and showing a spurious upgrade
+           banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
+        if (hasMuteRecurrence)
+        {
+            return 231;
+        }
         /* V229 (#6928): the severity filter on the notification routes. Column-existence sentinel, newest-first, and the TOP rung, so a
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 226 and showing a spurious upgrade
            banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
+        /* V230 (#7028): the snapshot wait tiers of the blocking band on the alert settings row. Column-existence sentinel, newest-first, and the TOP
+           rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 229 and showing a spurious
+           upgrade banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
+        if (hasBlockingSnapshotBands)
+        {
+            return 230;
+        }
         if (hasRouteSeverities)
         {
             return 229;
@@ -3669,11 +4051,21 @@ LIMIT 1";
 /// </summary>
 public sealed class ViewerReadOnlyException : Exception
 {
+    /// <summary>
+    /// How to get a write-capable login, for each way a Viewer reaches its store (#7077). The text is shared by
+    /// every write the exception is thrown from, so it names no single operation. <c>postgres.connectAs</c> is
+    /// ignored on a bring-your-own store, so that case is sent to <c>postgres.connectionString</c> instead.
+    /// </summary>
+    internal const string HowToConnectAsAdmin =
+        "On the bundled store, set postgres.connectAs to \"admin\" in darling.json and restart the viewer. " +
+        "On a viewer that reaches the service over the network, set postgres.network.role to \"admin\" on the " +
+        "service host. Then restart the service and export the viewer config again. " +
+        "On your own PostgreSQL, put an admin login in postgres.connectionString and restart the viewer.";
+
     public ViewerReadOnlyException(Exception innerException)
         : base(
-            "This viewer is connected with a read-only role, so it can't change mute rules, dismiss alerts, " +
-            "or mute findings. Set postgres.connectAs to \"admin\" in darling.json and restart the viewer to " +
-            "enable these actions.",
+            "This viewer is connected with a read-only store login, so it cannot save this change. " +
+            HowToConnectAsAdmin,
             innerException)
     {
     }
@@ -3690,7 +4082,7 @@ public sealed class ViewerStoreUnreachableException : Exception
 {
     public ViewerStoreUnreachableException(Exception innerException)
         : base(
-            "Can't reach the Darling store — is the Darling service running? Check the postgres section of " +
+            "Can't reach the Darling store. Is the Darling service running? Check the postgres section of " +
             "darling.json (the host, port, and database must point at the running service's store). " +
             /* #2117: the swallowed detail cost a field operator hours — a TLS chain rejection, a wrong
                password, a pg_hba refusal, and a dead host all read identically without it. */

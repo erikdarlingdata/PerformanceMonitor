@@ -180,7 +180,7 @@ public sealed class DarlingAnomalyBaselineTests
 
             Assert.Equal(2, Regex.Matches(body, @"CountFamilyMetadata\.Build\(").Count);
             Assert.Matches(
-                @"CountFamilyMetadata\.Build\(\s*currentBlocking,\s*currentBlockingPerHour,\s*baselineBlockingRate,\s*blockingBaseline\s*\)\s*;\s*AddBaselineContext\(\s*metadata,\s*blockingBaseline\s*\)",
+                @"CountFamilyMetadata\.Build\(\s*currentBlocking,\s*currentBlockingPerHour,\s*baselineBlockingRate,\s*blockingBaseline(?:,\s*blockingFromDmv)?\s*\)\s*;\s*AddBaselineContext\(\s*metadata,\s*blockingBaseline\s*\)",
                 body);
             Assert.Matches(
                 @"CountFamilyMetadata\.Build\(\s*currentDeadlocks,\s*currentDeadlocksPerHour,\s*baselineDeadlockRate,\s*deadlockBaseline\s*\)\s*;\s*AddBaselineContext\(\s*metadata,\s*deadlockBaseline\s*\)",
@@ -193,10 +193,10 @@ public sealed class DarlingAnomalyBaselineTests
 
             /* The firing rule, verbatim in both products. */
             Assert.Matches(
-                @"currentBlocking\s*>=\s*5\s*&&\s*\(\s*!blockingTrust\s*\|\|\s*currentBlockingPerHour\s*/\s*Math\.Max\(\s*baselineBlockingRate,\s*1\s*\)\s*>=\s*DefaultEventRatioThreshold\s*\)",
+                @"currentBlocking\s*>=\s*BlockingSpikeMinEvents\s*&&\s*\(\s*!blockingTrust\s*\|\|\s*currentBlockingPerHour\s*/\s*Math\.Max\(\s*baselineBlockingRate,\s*EventBaselineRateEpsilon\s*\)\s*>=\s*DefaultEventRatioThreshold\s*\)",
                 body);
             Assert.Matches(
-                @"currentDeadlocks\s*>=\s*3\s*&&\s*\(\s*!deadlockTrust\s*\|\|\s*currentDeadlocksPerHour\s*/\s*Math\.Max\(\s*baselineDeadlockRate,\s*1\s*\)\s*>=\s*DefaultEventRatioThreshold\s*\)",
+                @"currentDeadlocks\s*>=\s*DeadlockSpikeMinEvents\s*&&\s*\(\s*!deadlockTrust\s*\|\|\s*currentDeadlocksPerHour\s*/\s*Math\.Max\(\s*baselineDeadlockRate,\s*EventBaselineRateEpsilon\s*\)\s*>=\s*DefaultEventRatioThreshold\s*\)",
                 body);
         }
     }
@@ -349,9 +349,19 @@ public sealed class DarlingAnomalyBaselineTests
             var legacy = PgBaselineProvider.GetLegacyBaselineQuery(gated[i].Metric)!;
 
             Assert.Contains(gated[i].Predicate, successor, StringComparison.Ordinal);
-            Assert.DoesNotContain(gated[i].Predicate, legacy, StringComparison.Ordinal);
-            Assert.Contains(ungated[i].Predicate, legacy, StringComparison.Ordinal);
             Assert.DoesNotContain(ungated[i].Predicate, successor, StringComparison.Ordinal);
+            if (gated[i].Metric == MetricNames.BatchRequests)
+            {
+                /* The pre-#3653 legacy text has no interval to gate on. */
+                Assert.DoesNotContain(gated[i].Predicate, legacy, StringComparison.Ordinal);
+                Assert.Contains(ungated[i].Predicate, legacy, StringComparison.Ordinal);
+            }
+            else
+            {
+                /* #8106: the wait pair's legacy supply is #3653's interval-honest aggregate, so its legacy text carries the gate too. */
+                Assert.Contains(gated[i].Predicate, legacy, StringComparison.Ordinal);
+                Assert.DoesNotContain(ungated[i].Predicate, legacy, StringComparison.Ordinal);
+            }
 
             /* The successor reads the successor relation and never the legacy one; the legacy text the reverse.
                The legacy name is a PREFIX of the successor's source line only in the other direction
@@ -375,9 +385,13 @@ public sealed class DarlingAnomalyBaselineTests
             }
         }
 
-        /* The rate arms read the STORED interval first and derive one from LAG only where it is NULL. */
+        /* The rate arms read the STORED interval first and derive one from LAG only where it is NULL; since #8106 the stored interval the
+           successor carries is the collection's cadence, so the successor and legacy texts differ only in the relation they read. */
         Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
-        Assert.DoesNotContain("sample_interval_seconds", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
+        Assert.Equal(
+            PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!.Replace(TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.WaitStatsCadenceBaselineView, StringComparison.Ordinal),
+            PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!);
         Assert.DoesNotContain("sample_interval_seconds", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.BatchRequests)!, StringComparison.Ordinal);
     }
 
@@ -426,9 +440,10 @@ public sealed class DarlingAnomalyBaselineTests
                write-only row a read sample (peak and mean NULL, read as 0), so the read gate admitted tiles and
                window_samples differed from Lite's. */
             "COUNT(*) FILTER (WHERE delta_reads > 0) AS read_sample_count",
-            "MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS peak_write_lat",
-            "AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat",
-            "COUNT(*) FILTER (WHERE delta_writes > 0) AS write_sample_count",
+            /* #6959: the three write columns carry the log-and-tempdb file filter, the read columns do not. */
+            "MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS peak_write_lat",
+            "AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS avg_write_lat",
+            "COUNT(*) FILTER (WHERE delta_writes > 0 AND (file_type = 'LOG' OR lower(database_name) = 'tempdb')) AS write_sample_count",
         };
         foreach (var column in expectedColumns)
             Assert.Contains(column, sql, StringComparison.Ordinal);
@@ -569,10 +584,12 @@ public sealed class DarlingAnomalyBaselineTests
         var sql = PgAnomalyDetector.WaitRateTileWindowSql;
         var expectedColumns = new[]
         {
-            "MAX(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS peak_ms_per_sec",
-            "AVG(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS avg_ms_per_sec",
+            /* #8106: the per-collection rate is computed in the CTE (the collection's positive-interval deltas over its cadence), so the
+               outer aggregates read ms_per_sec; a collection with no rate is NULL to all three and is not a sample. */
+            "MAX(ms_per_sec) AS peak_ms_per_sec",
+            "AVG(ms_per_sec) AS avg_ms_per_sec",
             "SUM(total_wait_ms) AS total_wait_ms",
-            "COUNT(*) FILTER (WHERE interval_sec IS NOT NULL) AS sample_count",
+            "COUNT(*) FILTER (WHERE ms_per_sec IS NOT NULL) AS sample_count",
         };
         foreach (var column in expectedColumns)
             Assert.Contains(column, sql, StringComparison.Ordinal);
@@ -859,8 +876,8 @@ public sealed class DarlingAnomalyBaselineTests
            itself); the shape pinned here holds for both the successor and the legacy text. */
         foreach (var (sql, supply) in new[]
         {
-            (PgBaselineProvider.GetBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_interval_baseline"),
-            (PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_baseline"),
+            (PgBaselineProvider.GetBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_cadence_baseline"),
+            (PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_interval_baseline"),
         })
         {
             Assert.DoesNotContain("QUALIFY", sql, StringComparison.OrdinalIgnoreCase);
@@ -1274,6 +1291,97 @@ public sealed class DarlingAnomalyBaselineTests
         }
     }
 
+    /// <summary>A provider whose I/O latency compute always faults (its statement does not exist) and counts how often it was asked to run.</summary>
+    private sealed class FaultingIoBaselineProvider(NpgsqlDataSource postgres) : PgBaselineProvider(postgres)
+    {
+        public int IoComputes;
+
+        protected override string? ResolveBaselineQuery(string metricName)
+        {
+            if (metricName != MetricNames.IoLatency)
+            {
+                return base.ResolveBaselineQuery(metricName);
+            }
+
+            Interlocked.Increment(ref IoComputes);
+            return "SELECT * FROM no_such_io_baseline_table";
+        }
+    }
+
+    /// <summary>
+    /// #7644: the I/O read gate reads the baseline key twice in one pass, the bucket map and then (the map is empty on a
+    /// fault) the <c>GetBaselineAsync</c> fallback. A compute that faults, a 60 s command timeout on the busy server, must run
+    /// ONCE for that pass: the fallback is a hit on the faulted entry the provider keeps for the pass, not a second timeout.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_IoGate_WhenTheBaselineComputeFaults_RunsItOncePerPass_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live I/O gate fault test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int ioServerId = TestServerId + 6; // own id - this test cleans its own rows
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var historyStart = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+            var analysisTime = historyStart.AddDays(7);
+
+            /* The gate's own witness: a row in the 30 days before the window, outside the window. */
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                500L, historyStart, ioServerId, "IO-FAULT-PASS", TestWaitType, 1L, 100L);
+
+            /* The window: reads over the 250 floor with a stall per read, so the gate reaches the baseline fallback. */
+            for (var i = 0; i < 3; i++)
+            {
+                await InsertAsync(connection,
+                    "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, delta_reads, delta_writes, delta_stall_read_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    (long)(510 + i), analysisTime.AddMinutes(5 * (i + 1)), ioServerId, "IO-FAULT-PASS", 400L, 0L, 40000L);
+            }
+
+            var provider = new FaultingIoBaselineProvider(postgres);
+            var detector = new PgAnomalyDetector(postgres, provider);
+            var context = new AnalysisContext
+            {
+                ServerId = ioServerId,
+                ServerName = "IO-FAULT-PASS",
+                TimeRangeStart = analysisTime,
+                TimeRangeEnd = analysisTime.AddMinutes(30),
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            await detector.DetectAnomaliesAsync(context);
+
+            Assert.Equal(1, provider.IoComputes);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using (var command = new NpgsqlCommand(
+                    $"DELETE FROM file_io_stats WHERE server_id = {ioServerId}; " +
+                    $"DELETE FROM wait_stats WHERE server_id = {ioServerId};", cleanup))
+                {
+                    await command.ExecuteNonQueryAsync(cleanupCt);
+                }
+                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
     /* ────────────────── #4298: every PgTargetBaselineProvider arm is a daily-cache arm ────────────────── */
 
     /// <summary>
@@ -1486,11 +1594,22 @@ public sealed class DarlingAnomalyBaselineTests
 
             /* Window A: one hot file row in an otherwise-baseline window. */
             for (var i = 0; i < 16; i++)
-                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(5 * (i + 1)), ioServerId, ioServerName, 10L, 0L, i == 7 ? 600L : 20L);
+                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(5 * (i + 1)), ioServerId, ioServerName, 20L, 0L, i == 7 ? 1200L : 40L); // #7417: 16 rows x 20 reads clears the 250-read floor, so the gate decides
 
             var quiet = await detector.DetectAnomaliesAsync(context);
             Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_READ_LATENCY");
             Assert.Empty(quiet);
+
+            /* #7417: the same 40 ms a read, but 16 rows of 5 reads is 80 I/Os in the window, under the 250 floor: it must not fire. */
+            await using (var clearSparse = new NpgsqlCommand(
+                $"DELETE FROM file_io_stats WHERE server_id = {ioServerId} AND collection_time > $1;", connection))
+            {
+                clearSparse.Parameters.AddWithValue(analysisTime);
+                await clearSparse.ExecuteNonQueryAsync(ct);
+            }
+            for (var i = 0; i < 16; i++)
+                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(5 * (i + 1)), ioServerId, ioServerName, 5L, 0L, 200L);
+            Assert.Empty(await detector.DetectAnomaliesAsync(context));
 
             /* Window B: the whole window ran high. */
             await using (var clearWindow = new NpgsqlCommand(
@@ -1500,7 +1619,7 @@ public sealed class DarlingAnomalyBaselineTests
                 await clearWindow.ExecuteNonQueryAsync(ct);
             }
             for (var i = 0; i < 16; i++)
-                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(5 * (i + 1)), ioServerId, ioServerName, 10L, 0L, i == 7 ? 600L : 400L);
+                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(5 * (i + 1)), ioServerId, ioServerName, 20L, 0L, i == 7 ? 1200L : 800L);
 
             var sustained = await detector.DetectAnomaliesAsync(context);
             var fact = Assert.Single(sustained);
@@ -1517,6 +1636,7 @@ public sealed class DarlingAnomalyBaselineTests
             var tileMean = ((tileRows - 1) * 40.0 + 60.0) / tileRows;
             Assert.Equal(tileMean, fact.Metadata["avg_latency_ms"], 0.001);
             Assert.Equal(16.0, fact.Metadata["window_samples_total"]);
+            Assert.Equal(320.0, fact.Metadata["window_io_ops"]); // #7417: I/Os (16 rows x 20 reads), not the 16 samples
             Assert.Equal(60.0, fact.Metadata["window_peak"], 0.001);
             Assert.Equal(0.0, fact.Metadata["baseline_low_quality"]);               // the z path
             Assert.Equal((60.0 - 2.0) / 2.5, fact.Metadata["deviation_sigma"], 0.001);         // 23.2σ, the peak's
@@ -1707,7 +1827,7 @@ public sealed class DarlingAnomalyBaselineTests
         const int ioServerId = TestServerId + 6; // own id — this test cleans its own rows
         const string ioServerName = "io-write-gate-e2e";
         const string insertIo =
-            "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, delta_reads, delta_writes, delta_stall_read_ms, delta_stall_write_ms) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
+            "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, delta_reads, delta_writes, delta_stall_read_ms, delta_stall_write_ms, file_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'LOG')";
 
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
@@ -1809,6 +1929,118 @@ public sealed class DarlingAnomalyBaselineTests
         }
     }
 
+    /// <summary>
+    /// #6959: one server, one user database with two data files whose background writes peak at 250 ms, and a log
+    /// file near 1 ms. The write-latency gate reads the log and tempdb rows only, so the data files do not fire it.
+    /// The seeded rows are the same ones Lite's twin test seeds (<c>WriteLatency_UserDataFilesAreIgnored_LogFileRises</c>
+    /// in <c>AnomalyDetectorTileBehaviourBatchSessionQueryMemoryTests</c>), so the two products are held to one
+    /// result. Then the log's write latency rises to 30 ms and the gate fires on the log row.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_WriteLatencyGate_IgnoresUserDataFiles_FiresOnLog_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live write-latency gate test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int ioServerId = TestServerId + 7; // own id — this test cleans its own rows
+        const string ioServerName = "io-write-gate-datafiles-e2e";
+        const string insertIo =
+            "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, delta_reads, delta_writes, delta_stall_read_ms, delta_stall_write_ms) VALUES ($1, $2, $3, $4, 'AppDb', $5, $6, 10, 10, 10, $7)";
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand(
+            $"DELETE FROM file_io_stats WHERE server_id = {ioServerId}; " +
+            $"DELETE FROM wait_stats WHERE server_id = {ioServerId};", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var lastHistoryMonday = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+            var analysisTime = lastHistoryMonday.AddDays(7);
+
+            var id = 900L;
+            async Task SeedHourAsync(DateTime hourStart, long logWriteMs)
+            {
+                for (var i = 0; i < 30; i++)
+                {
+                    var at = hourStart.AddMinutes(2 * i + 1);
+                    // Log: near 1 ms (a hair of spread), or the raised value. Two data files: 250 ms every row.
+                    await InsertAsync(connection, insertIo, id++, at, ioServerId, ioServerName, "AppDb_log", "LOG", (logWriteMs + i % 2) * 10);
+                    await InsertAsync(connection, insertIo, id++, at, ioServerId, ioServerName, "AppDb_data1", "ROWS", 250L * 10);
+                    await InsertAsync(connection, insertIo, id++, at, ioServerId, ioServerName, "AppDb_data2", "ROWS", 250L * 10);
+                }
+            }
+
+            foreach (var weeksBack in new[] { 3, 2, 1, 0 })
+                await SeedHourAsync(lastHistoryMonday.AddDays(-7 * weeksBack), 1L);
+
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                600L, lastHistoryMonday, ioServerId, ioServerName, TestWaitType, 1L, 100L);
+
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            var provider = new PgBaselineProvider(postgres);
+            var writeBaseline = await provider.GetBaselineAsync(ioServerId, MetricNames.IoWriteLatency, analysisTime);
+            Assert.Equal(120L, writeBaseline.SampleCount);          // the log rows only: 4 hours of 30
+            Assert.InRange(writeBaseline.Median, 0.5, 2.5);        // not the 250 ms data files
+
+            var detector = new PgAnomalyDetector(postgres, provider);
+            var context = new AnalysisContext
+            {
+                ServerId = ioServerId,
+                ServerName = ioServerName,
+                TimeRangeStart = analysisTime,
+                TimeRangeEnd = analysisTime.AddMinutes(60),
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            /* Window A: data files at 250 ms, log near 1 ms. */
+            await SeedHourAsync(analysisTime, 1L);
+            var quiet = await detector.DetectAnomaliesAsync(context);
+            Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_WRITE_LATENCY");
+
+            /* Window B: the log's write latency rises to 30 ms. */
+            await using (var clearWindow = new NpgsqlCommand(
+                $"DELETE FROM file_io_stats WHERE server_id = {ioServerId} AND collection_time > $1;", connection))
+            {
+                clearWindow.Parameters.AddWithValue(analysisTime);
+                await clearWindow.ExecuteNonQueryAsync(ct);
+            }
+            await SeedHourAsync(analysisTime, 30L);
+
+            var sustained = await detector.DetectAnomaliesAsync(context);
+            var fact = Assert.Single(sustained, f => f.Key == "ANOMALY_WRITE_LATENCY");
+            Assert.InRange(fact.Value, 30.0, 31.0);                 // the log row, not the 250 ms data files
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using (var command = new NpgsqlCommand(
+                    $"DELETE FROM file_io_stats WHERE server_id = {ioServerId}; " +
+                    $"DELETE FROM wait_stats WHERE server_id = {ioServerId};", cleanup))
+                {
+                    await command.ExecuteNonQueryAsync(cleanupCt);
+                }
+                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
     private static async Task InsertAsync(NpgsqlConnection connection, string sql, params object[] values)
     {
         using var command = new NpgsqlCommand(sql, connection);
@@ -1833,7 +2065,7 @@ public sealed class DarlingAnomalyBaselineTests
     /// </summary>
     private static async Task DropBaselineFallbackViewsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
-        foreach (var (_, view) in TimescaleSupport.BaselineAggregates)
+        foreach (var (_, view) in TimescaleSupport.BaselineAggregates.Concat(TimescaleSupport.PlainBaselineViews))
         {
             using var drop = new NpgsqlCommand(TimescaleSupport.DropBaselineFallbackViewSql(view), connection);
             await drop.ExecuteNonQueryAsync(ct);

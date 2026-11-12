@@ -289,7 +289,7 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
     [Fact]
     public async Task OnTheManagedStore_ASignedInAdminSeat_DecidesThroughTheArm_AsThePerson()
     {
-        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, _, Send, ct) =>
         {
             var list = await Send("GET", "/api/investigation-notes/pending", null);
             Assert.Equal(2, (int)list.Body!["notes_returned"]!);
@@ -312,12 +312,13 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
     [Fact]
     public async Task OnTheManagedStore_AViewerSeat_NeverOpensTheArm_AndAnswersAsToday()
     {
-        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, _, Send, ct) =>
         {
             var firstId = (long)(await Send("GET", "/api/investigation-notes/pending", null)).Body!["notes"]![0]!["note_id"]!;
             var refused = await Send("PUT", $"/api/investigation-notes/{firstId}/approve", "application/json");
             Assert.Equal(403, refused.Status);
             Assert.Equal(DarlingWebEndpoints.InvestigationWriteSignInMessage, (string)refused.Body!["error"]!);
+            Assert.Equal("sign_in_required", (string)refused.Body["reason"]!);
             Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_notes WHERE state = 'pending'", ct));
         }, arm: AdminArmShape.Refused, managedStore: true, seat: new PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat("viewer-person", false));
     }
@@ -326,13 +327,14 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
     [Fact]
     public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminStillGets403_NamingTheSwitch()
     {
-        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, _, Send, ct) =>
         {
             var firstId = (long)(await Send("GET", "/api/investigation-notes/pending", null)).Body!["notes"]![0]!["note_id"]!;
             var refused = await Send("PUT", $"/api/investigation-notes/{firstId}/approve", "application/json");
             Assert.Equal(403, refused.Status);
             Assert.Equal(DarlingWebEndpoints.NoteDecisionRefusedMessage(true, adminWritesOff: true), (string)refused.Body!["error"]!);
             Assert.Contains("web.allowAdminWrites", (string)refused.Body["error"]!, StringComparison.Ordinal);
+            Assert.Equal("admin_writes_off", (string)refused.Body["reason"]!);
             Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_notes WHERE state = 'pending'", ct));
         }, managedStore: true, seat: new PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat("alice", true));
     }
@@ -340,7 +342,7 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
     [Fact]
     public async Task TheWebRoutes_AsTheManagedViewerRole_ListNotes_ButRefuseADecision_With403_AndLeaveEveryNotePending()
     {
-        await WithWebRoutesAsync("viewer", async (owner, viewer, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, viewer, Send, ct) =>
         {
             var list = await Send("GET", "/api/investigation-notes/pending", null);
             Assert.Equal(200, list.Status);
@@ -366,6 +368,7 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
                 var answer = await Send("PUT", route, "application/json");
                 Assert.Equal(403, answer.Status);
                 Assert.Equal(DarlingWebEndpoints.NoteDecisionRefusedMessage(false), (string)answer.Body!["error"]!);
+                Assert.Equal("store_refused", (string)answer.Body["reason"]!);
             }
 
             Assert.Equal("pending|pending", await ScalarAsync(owner,

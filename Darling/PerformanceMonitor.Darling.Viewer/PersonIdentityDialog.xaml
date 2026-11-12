@@ -1,0 +1,47 @@
+<Window x:Class="PerformanceMonitor.Darling.Viewer.PersonIdentityDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Map an identity"
+        SizeToContent="Height" Width="520"
+        WindowStartupLocation="CenterOwner"
+        Icon="EDD.ico"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Background="{DynamicResource BackgroundLightBrush}"
+        Foreground="{DynamicResource ForegroundBrush}">
+    <!-- #7107: one identity of a person. Slack is a team id and a user id. Web is the 43-character sign-in key the person copies from the web page. -->
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="ViewerDarkTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+    <StackPanel Margin="20">
+        <TextBlock x:Name="HeaderText" Text="Map an identity" FontSize="18" FontWeight="Bold" Margin="0,0,0,6"/>
+        <TextBlock Text="An identity is how this person shows up: the Slack account they write from, or the web sign-in they use. One identity belongs to one person."
+                   Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+            <RadioButton x:Name="WebRadio" Content="Web sign-in" IsChecked="True" Margin="0,0,16,0" Checked="Kind_Changed"/>
+            <RadioButton x:Name="SlackRadio" Content="Slack" Checked="Kind_Changed"/>
+        </StackPanel>
+        <StackPanel x:Name="WebPanel">
+            <TextBlock Text="Web sign-in key" FontWeight="Bold" Margin="0,0,0,4"/>
+            <TextBox x:Name="WebKeyBox" MaxLength="64" FontFamily="Consolas"/>
+            <TextBlock x:Name="WebHelp" Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+        </StackPanel>
+        <StackPanel x:Name="SlackPanel" Visibility="Collapsed">
+            <TextBlock Text="Slack team id" FontWeight="Bold" Margin="0,0,0,4"/>
+            <TextBox x:Name="SlackTeamBox" MaxLength="32" Margin="0,0,0,8"/>
+            <TextBlock Text="Slack user id" FontWeight="Bold" Margin="0,0,0,4"/>
+            <TextBox x:Name="SlackUserBox" MaxLength="32"/>
+            <TextBlock Text="Slack shows the user id in the member's profile (Copy member ID). The team id is the T... id of the workspace."
+                       Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+        </StackPanel>
+        <TextBlock x:Name="ErrorText" Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+            <Button Content="_Add" Width="80" Height="28" Margin="0,0,8,0" IsDefault="True" Click="Ok_Click"/>
+            <Button Content="_Cancel" Width="80" Height="28" IsCancel="True"/>
+        </StackPanel>
+    </StackPanel>
+</Window>

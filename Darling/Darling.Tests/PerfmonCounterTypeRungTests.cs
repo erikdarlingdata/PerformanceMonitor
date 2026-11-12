@@ -57,12 +57,6 @@ public sealed class PerfmonCounterTypeRungTests
     private const string Table = "perfmon_stats";
     private const string Column = "cntr_type";
 
-    /// <summary>The one expression every trend read spells for the point's type: a type only where the instance
-    /// rows summed into the point agree on one, so a mixed-type family (the wait-statistics object's instances
-    /// are a rate, a gauge and an average under one counter name) reads NULL and falls to the proxy rather than
-    /// being classified by whichever instance's id sorts first.</summary>
-    private const string AgreedTypeExpression = "CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type";
-
     private static PgMigrations.Migration V132 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
     /* ---- the rung ------------------------------------------------------------------------------------ */
@@ -210,10 +204,10 @@ public sealed class PerfmonCounterTypeRungTests
     /* ---- the readers ----------------------------------------------------------------------------------- */
 
     /// <summary>
-    /// Every Darling perfmon read selects the type: the two trend reads (MCP and viewer) with the one agreed-type
-    /// expression, byte-identical to each other and to every copy in Lite's trend reads, and the latest-snapshot read
-    /// with the row's own, and after it the interval a rate row's per-second figure divides by, in the same order in
-    /// Lite's twin. The row types keep NULL as null — a gauge row stores no delta and no interval, and a 0
+    /// The latest-snapshot read selects the row's own type and, after it, the interval a rate row's per-second
+    /// figure divides by, in the same order in Lite's twin. Which type a trend point carries is pinned against a
+    /// live store (<see cref="PerfmonTotalInstanceLiveTests"/> and the live case below), not against the statement
+    /// text (#5833). The row types keep NULL as null — a gauge row stores no delta and no interval, and a 0
     /// manufactured in their place would be #3642's fabricated zero on a level that has no delta.
     /// </summary>
     [Fact]
@@ -221,40 +215,27 @@ public sealed class PerfmonCounterTypeRungTests
     {
         var mcpTrend = DarlingTrendReader.PerfmonTrendSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var viewerTrend = ViewerDataService.PerfmonTrendsSql(1).Replace("\r\n", "\n", StringComparison.Ordinal);
-        Assert.Contains(AgreedTypeExpression, mcpTrend, StringComparison.Ordinal);
-        Assert.Contains(AgreedTypeExpression, viewerTrend, StringComparison.Ordinal);
-
         var lite = RepoFile.ReadRepoFile("Lite", "Services", "LocalDataService.Perfmon.cs");
-        /* Lite's single-counter read holds it once; its bucketed batched read (#4234) holds it twice, per collection
-           inside and per bucket outside, as both Darling twins do. */
-        Assert.Equal(3, Regex.Matches(lite, Regex.Escape(AgreedTypeExpression)).Count);
 
         var latest = DarlingDataReader.LatestPerfmonStatsSql.Replace("\r\n", "\n", StringComparison.Ordinal);
-        Assert.Contains("collection_time,\n    cntr_type,\n    sample_interval_seconds\nFROM v_perfmon_stats", latest, StringComparison.Ordinal);
-        Assert.Contains("collection_time,\n    cntr_type,\n    sample_interval_seconds\nFROM v_perfmon_stats", lite.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Contains("collection_time,\n    cntr_type,\n    sample_interval_seconds,\n    object_name\nFROM v_perfmon_stats", latest, StringComparison.Ordinal);
+        Assert.Contains("collection_time,\n    cntr_type,\n    sample_interval_seconds,\n    object_name\nFROM {perfmonRelation}", lite.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 
-        /* #4476: both the MCP and the Viewer twins' per-collection SUMs exclude a Wait Statistics isolated
-           single-sample artifact — FILTER (WHERE NOT is_artifact) — while the MAX interval and the MIN=MAX
-           type rule keep reading every row (an artifact row's own type and interval are not themselves
-           suspect). The MCP twin (get_perfmon_trend, one counter at a time) carries its own per-collection
-           artifacts count; PerfmonTrendBucketedSql SUMs it into artifacts_set_aside the same way the
-           Viewer's outer bucket layer does. */
-        Assert.Contains("CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS cntr_value", mcpTrend, StringComparison.Ordinal);
-        Assert.Contains("CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS delta_cntr_value", mcpTrend, StringComparison.Ordinal);
+        /* #4476: in both the MCP and the Viewer twins the MAX interval and the MIN=MAX type rule read every row
+           (an artifact row's own type and interval are not themselves suspect), and each counts the rows it set
+           aside as a Wait Statistics isolated single-sample artifact. The MCP twin (get_perfmon_trend, one counter
+           at a time) carries that count per collection; PerfmonTrendBucketedSql SUMs it into artifacts_set_aside
+           the same way the Viewer's outer bucket layer does. Which rows the value and the delta sum is pinned
+           against a live store in PerfmonTotalInstanceLiveTests, not against the statement text. */
         Assert.Contains("CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds", mcpTrend, StringComparison.Ordinal);
         Assert.Contains("COUNT(*) FILTER (WHERE is_artifact) AS artifacts", mcpTrend, StringComparison.Ordinal);
         Assert.Contains("SUM(artifacts) AS artifacts_set_aside", DarlingTrendReader.PerfmonTrendBucketedSql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 
-        Assert.Contains("CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS cntr_value", viewerTrend, StringComparison.Ordinal);
-        Assert.Contains("CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS delta_cntr_value", viewerTrend, StringComparison.Ordinal);
         Assert.Contains("CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds", viewerTrend, StringComparison.Ordinal);
         Assert.Contains("COUNT(*) FILTER (WHERE is_artifact) AS artifacts", viewerTrend, StringComparison.Ordinal);
         Assert.Contains("SUM(artifacts) AS artifacts_set_aside", viewerTrend, StringComparison.Ordinal);
 
         /* The row shapes: nullable where a gauge stores nothing, the type nullable where the row predates it. */
-        Assert.Equal(typeof(long?), typeof(DarlingTrendReader.PerfmonTrendPoint).GetProperty("DeltaValue")!.PropertyType);
-        Assert.Equal(typeof(long?), typeof(DarlingTrendReader.PerfmonTrendPoint).GetProperty("SampleIntervalSeconds")!.PropertyType);
-        Assert.Equal(typeof(int?), typeof(DarlingTrendReader.PerfmonTrendPoint).GetProperty("CntrType")!.PropertyType);
         Assert.Equal(typeof(long?), typeof(DarlingDataReader.PerfmonRow).GetProperty("DeltaValue")!.PropertyType);
         Assert.Equal(typeof(int?), typeof(DarlingDataReader.PerfmonRow).GetProperty("CntrType")!.PropertyType);
         Assert.Equal(typeof(long?), typeof(PerfmonTrendPoint).GetProperty("DeltaValue")!.PropertyType);
@@ -264,7 +245,6 @@ public sealed class PerfmonCounterTypeRungTests
            whose delta columns are non-nullable and coerce legitimately): the delta ordinal is read null-or-value. */
         foreach (var (file, method, nullRead, coercion) in new[]
         {
-            ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingTrendReader.cs", "GetPerfmonTrendAsync(", "reader.IsDBNull(2) ? null : reader.GetInt64(2)", "reader.IsDBNull(2) ? 0 : reader.GetInt64(2)"),
             ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs", "GetLatestPerfmonStatsAsync(", "reader.IsDBNull(3) ? null : reader.GetInt64(3)", "reader.IsDBNull(3) ? 0 : reader.GetInt64(3)"),
             ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Perfmon.cs", "GetPerfmonTrendsByCountersAsync(", "reader.IsDBNull(3) ? null : reader.GetInt64(3)", "reader.IsDBNull(3) ? 0 : reader.GetInt64(3)"),
         })
@@ -436,13 +416,7 @@ public sealed class PerfmonCounterTypeLivePostgresTests
                 Assert.Equal(703, mixed.Value);
             }
 
-            /* The MCP trend read and the two tools. */
-            var mcpGauge = await DarlingTrendReader.GetPerfmonTrendAsync(postgres, ServerId, "Total Server Memory (KB)", t1.AddMinutes(-1), t3.AddMinutes(1), ct);
-            Assert.Equal(2, mcpGauge.Count);
-            Assert.All(mcpGauge, p => Assert.Equal(PerfmonCounterTypes.PerfCounterLargeRawCount, p.CntrType));
-            Assert.All(mcpGauge, p => Assert.Null(p.DeltaValue));
-            Assert.All(mcpGauge, p => Assert.Null(p.SampleIntervalSeconds));
-
+            /* The two MCP tools. */
             /* #3960: bucket_minutes: 1 pins per-collection granularity, since this test is about TYPE
                classification, not about bucketing — t1/t3 are 10 minutes apart and the default 24h window's
                auto-sized bucket (10 minutes) could otherwise fold them into one point depending on wall-clock

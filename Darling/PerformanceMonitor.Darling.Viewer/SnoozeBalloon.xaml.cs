@@ -12,6 +12,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using Hardcodet.Wpf.TaskbarNotification;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -39,6 +40,8 @@ public partial class SnoozeBalloon : UserControl
         Action closePopup)
     {
         InitializeComponent();
+        /* #8475: the card sits in a popup with no window above it, so a theme change has to be brought to it. */
+        WindowlessThemeFollower.Attach(this);
 
         _onSnooze = onSnooze ?? throw new ArgumentNullException(nameof(onSnooze));
         _closePopup = closePopup ?? throw new ArgumentNullException(nameof(closePopup));

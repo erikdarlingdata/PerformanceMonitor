@@ -168,7 +168,7 @@ public static partial class PgTargetScorer
                 [
                     new AmplifierDefinition
                     {
-                        Description = "PG_TEMP_SPILL co-fires — sorts and hashes are exceeding work_mem and writing temp files at or above the floor",
+                        Description = "PG_TEMP_SPILL co-fires: sorts and hashes are exceeding work_mem and writing temp files at or above the floor",
                         /* unmeasured: KnobCoFireBoost (see PgTargetScorer.Write.cs) — 0.4 × 1.25 = 0.5, the D5 line. */
                         Boost = KnobCoFireBoost,
                         Predicate = facts => facts.TryGetValue(PgTargetFactKeys.TempSpill, out var spill) && spill.BaseSeverity > 0,
@@ -180,14 +180,14 @@ public static partial class PgTargetScorer
                 [
                     new AmplifierDefinition
                     {
-                        Description = "CONFIG_PG_WORK_MEM co-fired — the per-sort budget these temp files exceeded is known for this host, and the knob is this story's leaf",
+                        Description = "CONFIG_PG_WORK_MEM co-fired: the per-sort budget these temp files exceeded is known for this host, and the knob is this story's leaf",
                         /* unmeasured: TempCauseBoost (see the constant). */
                         Boost = TempCauseBoost,
                         Predicate = facts => facts.TryGetValue(PgTargetFactKeys.ConfigWorkMem, out var knob) && knob.BaseSeverity > 0,
                     },
                     new AmplifierDefinition
                     {
-                        Description = "A top statement of the window (PG_BAD_ACTOR_*) wrote temp blocks — the spill has a named offender",
+                        Description = "A top statement of the window (PG_BAD_ACTOR_*) wrote temp blocks: the spill has a named offender",
                         /* unmeasured: TempCauseBoost (see the constant). */
                         Boost = TempCauseBoost,
                         Predicate = facts => facts.Values.Any(f =>

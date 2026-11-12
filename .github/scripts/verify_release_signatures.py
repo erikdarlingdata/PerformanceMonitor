@@ -32,9 +32,9 @@ WHAT IT CHECKS, AND WHAT IT DELIBERATELY DOES NOT
   signature file are all invisible to it.
 
   Executables inside a published archive are checked too, because the one that matters most is
-  inside one: the portable zip's ROOT `PerformanceMonitorLite.exe` is a 399 kB launcher shim,
-  while the signed 182 kB app sits in `current/`. A check that only looked at top-level assets
-  would have passed every affected release.
+  inside one: the portable zip's ROOT launcher, a 399 kB shim named after the Velopack pack
+  title (`Performance Monitor Lite.exe`), while the signed 182 kB app sits in `current/`. A check
+  that only looked at top-level assets would have passed every affected release.
 
   Two executables are allowed to be unsigned, and only in one place each: `lib/app/*_ExecutionStub.exe`
   and `lib/app/Squirrel.exe` INSIDE a `.nupkg`. `releases.<channel>.json` records a SHA256 and a
@@ -217,12 +217,12 @@ def script_is_signed(blob: bytes) -> bool:
 def is_darling_zip(name: str) -> bool:
     """True for the Darling service zip (PerformanceMonitorDarling-<version>.zip).
 
-    "darling" anywhere in a .zip name, except the Darling Viewer's: the Viewer's Velopack
-    Portable.zip (PerformanceMonitorDarlingViewer-*) sits in the same release directory and
-    carries no scripts, so a plain "contains Darling" rule would fail every release.
+    "darling" anywhere in a .zip name, except the Darling Viewer's and the export tool's: the Viewer's Velopack
+    Portable.zip (PerformanceMonitorDarlingViewer-*) and the export tool's zip (PerformanceMonitorDarlingExport-*)
+    sit in the same release directory and carry no scripts, so a plain "contains Darling" rule would fail every release.
     """
     base = name.replace("\\", "/").rsplit("/", 1)[-1].lower()
-    return base.endswith(".zip") and "darling" in base and "darlingviewer" not in base
+    return base.endswith(".zip") and "darling" in base and "darlingviewer" not in base and "darlingexport" not in base
 
 
 def darling_census(archive: str, members: list[str]) -> str | None:
@@ -1141,6 +1141,10 @@ def self_test() -> int:
     expect(
         "the Darling Viewer's Portable.zip was taken for the Darling zip",
         not is_darling_zip("PerformanceMonitorDarlingViewer-darlingviewer-Portable.zip"),
+    )
+    expect(
+        "the export tool's zip was taken for the Darling zip",
+        not is_darling_zip("PerformanceMonitorDarlingExport-1.0.0.zip"),
     )
     expect("Darling-test.zip was not taken for a Darling zip", is_darling_zip("Darling-test.zip"))
     expect(

@@ -22,7 +22,7 @@ namespace Darling.Tests;
 public class ComposeHourlyEdgesRunnerTests
 {
     private static string Source(params string[] relative) =>
-        File.ReadAllText(RepoFile.PathTo(relative)).Replace("\r\n", "\n");
+        RepoFile.ReadRepoFile(relative).Replace("\r\n", "\n");
 
     /* #6390 S2c: the run core moved to Storage; the rules read the endpoints and the runner as one text. */
     private static string Web() => Source("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs") + Source("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs");
@@ -158,7 +158,7 @@ public class ComposeHourlyEdgesRunnerTests
         var code = Web();
         Assert.Contains("DateTime? nowUtc = null)", code, StringComparison.Ordinal);
         Assert.Contains("var now = nowUtc ?? DateTime.UtcNow;", code, StringComparison.Ordinal);
-        Assert.Contains("includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, nowUtc);", code, StringComparison.Ordinal);
+        Assert.Contains("includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, authorizedServerIds, nowUtc);", code, StringComparison.Ordinal);
         Assert.DoesNotContain("nowUtc:", Source("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpCustomViewTools.cs"), StringComparison.Ordinal);
         Assert.Contains("internal static JsonValue? DbValueToJson(object value)", code, StringComparison.Ordinal);
     }

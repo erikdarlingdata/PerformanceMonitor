@@ -129,6 +129,64 @@ public sealed class QueryStatsModuleAttributionReaderTests : IClassFixture<Share
         Assert.Equal("TestDb.dbo.usp_New", only.ModuleName);
     }
 
+    /// <summary>
+    /// The module lookup reads all history, as Darling's does (#7000): a handle whose only procedure_stats row is before the
+    /// window still shows its module (a window bound would turn it into "ad hoc" when the procedure_stats collector is disabled
+    /// or failed for the window), and the newest row still wins.
+    /// </summary>
+    [Fact]
+    public async Task TopQueries_ModuleLookupReadsAllHistory_NewestRowWins()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        await SeedQueryStatsAsync("TestDb", "0xOLD", "0xOLDMOD", deltaExec: 4, deltaElapsedUs: 200_000, "SELECT old");
+        await SeedProcedureStatsAsync("TestDb", "dbo", "usp_Before", "PROCEDURE", "0xOLDMOD", collectedOverride: Collected.AddDays(-3));
+        await SeedQueryStatsAsync("TestDb", "0xIN", "0xINMOD", deltaExec: 4, deltaElapsedUs: 200_000, "SELECT in");
+        await SeedProcedureStatsAsync("TestDb", "dbo", "usp_Older", "PROCEDURE", "0xINMOD", collectedOverride: Collected.AddDays(-3));
+        await SeedProcedureStatsAsync("TestDb", "dbo", "usp_Newest", "PROCEDURE", "0xINMOD", collectedOverride: Collected);
+
+        var rows = await service.GetTopQueriesByCpuAsync(ServerId);
+
+        Assert.Equal("TestDb.dbo.usp_Before", rows.Single(r => r.QueryHash == "0xOLD").ModuleName);
+        Assert.Equal("TestDb.dbo.usp_Newest", rows.Single(r => r.QueryHash == "0xIN").ModuleName);
+    }
+
+    /// <summary>
+    /// #8549: the newest-row lookup is one aggregate, not a sort. Two rows of one handle collected at the same time: the one
+    /// collected last (the higher collection_id) wins, the rule the ROW_NUMBER's collection_id DESC tie-break set.
+    /// </summary>
+    [Fact]
+    public async Task TopQueries_ModuleLookup_TieOnCollectionTime_LastCollectedRowWins()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        await SeedQueryStatsAsync("TestDb", "0xTIE", "0xTIEMOD", deltaExec: 4, deltaElapsedUs: 200_000, "SELECT tie");
+        await SeedProcedureStatsAsync("TestDb", "dbo", "usp_First", "PROCEDURE", "0xTIEMOD", collectedOverride: Collected);
+        await SeedProcedureStatsAsync("TestDb", "dbo", "usp_Last", "PROCEDURE", "0xTIEMOD", collectedOverride: Collected);
+
+        var rows = await service.GetTopQueriesByCpuAsync(ServerId);
+
+        Assert.Equal("TestDb.dbo.usp_Last", Assert.Single(rows).ModuleName);
+    }
+
+    /// <summary>
+    /// #8549: a handle whose NEWEST procedure_stats row has NULL names answers NULL (ad hoc), not the older row's names. An
+    /// aggregate that skips NULL arguments (a bare arg_max over object_name) would fall back to the older row.
+    /// </summary>
+    [Fact]
+    public async Task TopQueries_ModuleLookup_NewestRowWithNullNames_AnswersAdHoc()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        await SeedQueryStatsAsync("TestDb", "0xNUL", "0xNULMOD", deltaExec: 4, deltaElapsedUs: 200_000, "SELECT nul");
+        await SeedProcedureStatsAsync("TestDb", "dbo", "usp_Older", "PROCEDURE", "0xNULMOD", collectedOverride: Collected.AddMinutes(-30));
+        await SeedProcedureStatsAsync("TestDb", null, null, "PROCEDURE", "0xNULMOD", collectedOverride: Collected);
+
+        var rows = await service.GetTopQueriesByCpuAsync(ServerId);
+
+        Assert.Equal("ad hoc", Assert.Single(rows).ModuleName);
+    }
+
     // ── Seeding helpers (column-list INSERT; unset columns default to NULL) ──
 
     private async Task SeedQueryStatsAsync(
@@ -157,7 +215,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     }
 
     private async Task SeedProcedureStatsAsync(
-        string databaseName, string schemaName, string objectName, string objectType, string sqlHandle,
+        string databaseName, string? schemaName, string? objectName, string objectType, string sqlHandle,
         DateTime? collectedOverride = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
@@ -173,8 +231,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = "TestSrv" });
         cmd.Parameters.Add(new DuckDBParameter { Value = databaseName });
-        cmd.Parameters.Add(new DuckDBParameter { Value = schemaName });
-        cmd.Parameters.Add(new DuckDBParameter { Value = objectName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)schemaName ?? DBNull.Value });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)objectName ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = objectType });
         cmd.Parameters.Add(new DuckDBParameter { Value = sqlHandle });
         await cmd.ExecuteNonQueryAsync();

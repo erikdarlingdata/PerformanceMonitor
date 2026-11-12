@@ -39,7 +39,7 @@ class FakeNode {
 }
 class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = t; } }
 globalThis.Node = FakeNode;
-globalThis.document = { createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
+globalThis.document = { querySelectorAll: () => [], createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
 globalThis.location = { hash: "#/server/SRV1/cpu" };
 
 const jsDir = process.argv[2];
@@ -459,6 +459,36 @@ try {
       out.message = popover.byClass("db-filter-message")[0].textContent;
       out.listed = boxes(popover).map((b) => b.attrs["aria-label"]);
       out.label = page.byClass("db-filter-button")[0].textContent;
+    },
+    /* #8550: a server whose id is negative (a server id is a 32-bit hash of the server's name). One database is ticked and
+       applied: the choice is stored under the id, the label counts it, and the next panel batch is built under it. */
+    async negativeServerId() {
+      card = { ...card, server_id: -1563402511 };
+      inventory = names(6);
+      const { page, builds } = await open();
+      const ctl = () => ({ button: page.byClass("db-filter-button")[0], popover: page.byClass("db-filter-popover")[0] });
+      out.labelAtStart = ctl().button.textContent;
+      ctl().button.fire("click");
+      await settle();
+      const box = boxes(ctl().popover).find((b) => b.attrs["aria-label"] === "db02");
+      box.checked = true;
+      box.fire("change");
+      const before = builds().length;
+      press(ctl().popover, "Apply");
+      await settle();
+      out.message = (ctl().popover.byClass("db-filter-message")[0] || { textContent: "" }).textContent;
+      out.storedKeys = Object.keys(stored());
+      out.stored = stored()["-1563402511"] ?? null;
+      out.labelAfterApply = ctl().button.textContent;
+      out.popoverClosed = ctl().popover.hidden;
+      out.redraws = builds().length - before;
+      out.filterAfterApply = builds().pop().filter;
+      // The page is drawn again from the stored value (a navigation back to the server): the filter is still the one chosen.
+      const server = await import(pathToFileURL(path.join(scratch, "pages", "server.js")).href);
+      server.renderServer(page, "SRV1", "cpu", {});
+      await settle();
+      out.filterAfterRedraw = builds().pop().filter;
+      out.labelAfterRedraw = ctl().button.textContent;
     },
   };
 

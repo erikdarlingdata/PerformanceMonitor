@@ -440,8 +440,8 @@ public sealed class DarlingPeerDisclosureTests
         var text = DarlingMcpInstructions.Build(TwoPeers());
 
         Assert.Contains(Use1Covers, text, StringComparison.Ordinal);
-        Assert.Contains("prod-sql-use2-monitor-01 — the readable replicas", text, StringComparison.Ordinal);
-        Assert.Contains("prod-sql-pg-monitor-01 — the Aurora PostgreSQL clusters", text, StringComparison.Ordinal);
+        Assert.Contains("prod-sql-use2-monitor-01: the readable replicas", text, StringComparison.Ordinal);
+        Assert.Contains("prod-sql-pg-monitor-01: the Aurora PostgreSQL clusters", text, StringComparison.Ordinal);
 
         /* The point of the section is that a peer is NAMED, never contacted — say so where the agent will
            read it, or it will try to route a query at the sibling. */
@@ -556,7 +556,7 @@ public sealed class DarlingPeerDisclosureTests
     /* ───────────────────────── the resolution miss ───────────────────────── */
 
     private const string MissWithoutPeers =
-        "Could not resolve server. Available servers:\nprod-sql-use1-beta-01";
+        "Could not resolve server. No monitored server matches 'prod-sql-use2-beta-01'. Available servers:\nprod-sql-use1-beta-01";
 
     /// <summary>The miss travels as the <c>invalid</c> envelope since #3739 (<c>McpHelpers.Refusal</c>, so the
     /// ~190 tools that <c>return error;</c> put a status word on the wire); these pins are about the SENTENCE,
@@ -570,7 +570,7 @@ public sealed class DarlingPeerDisclosureTests
     }
 
     [Fact]
-    public void ResolutionMiss_IsByteForByteUnchangedWithNothingDeclared()
+    public void ResolutionMiss_HasNoPeerDisclosureWithNothingDeclared()
     {
         var (resolved, error) = DarlingServerResolver.ResolveOrError(
             new[] { Registered("prod-sql-use1-beta-01") },
@@ -650,7 +650,7 @@ public sealed class DarlingPeerDisclosureTests
             new[] { Registered("prod-sql-use1-beta-01") }, "prod-sql-use2-beta-01", overlapping);
 
         var sentence = Sentence(error);
-        Assert.Contains("these peer stores: box2 — the replicas; box3 — the archive replicas", sentence, StringComparison.Ordinal);
+        Assert.Contains("these peer stores: box2: the replicas; box3: the archive replicas", sentence, StringComparison.Ordinal);
         Assert.Contains("Those are SEPARATE Darling stores", sentence, StringComparison.Ordinal);
         Assert.DoesNotContain("That is a SEPARATE Darling store", sentence, StringComparison.Ordinal);
     }
@@ -692,7 +692,7 @@ public sealed class DarlingPeerDisclosureTests
                 new[] { Registered("prod-sql-use1-beta-01") },
                 "prod-sql-use2-beta-01");
 
-            Assert.Contains("peer store box2 — the replicas", Sentence(error), StringComparison.Ordinal);
+            Assert.Contains("peer store box2: the replicas", Sentence(error), StringComparison.Ordinal);
         }
         finally
         {

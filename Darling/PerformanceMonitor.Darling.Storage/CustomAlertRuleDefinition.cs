@@ -223,8 +223,13 @@ public sealed record CustomAlertRuleDefinition(
     /// <summary>
     /// Parses and validates a rule definition JSON. Returns the typed definition, or a human-readable error
     /// (which the create/validate tools surface to the author and the evaluator logs as a broken rule).
+    /// <para><paramref name="enforcePerfmonRate"/> (#7565): the write paths (create, update, validate) leave it true, so a metric
+    /// on <c>perfmon_value_per_second</c> without an <c>eq</c> pin on counter_name and instance_name is refused (see
+    /// <see cref="PerfmonRate"/>). A path that LOADS an already-saved rule (the evaluator, the notebook builder, test-now) passes
+    /// false, so a rule saved before this check keeps evaluating instead of being dropped as broken; it is refused only when
+    /// someone next saves it.</para>
     /// </summary>
-    public static (CustomAlertRuleDefinition? Definition, string? Error) TryParse(string definitionJson)
+    public static (CustomAlertRuleDefinition? Definition, string? Error) TryParse(string definitionJson, bool enforcePerfmonRate = true)
     {
         JsonObject? root;
         try
@@ -287,6 +292,11 @@ public sealed record CustomAlertRuleDefinition(
         if (plan.Mode != PanelMode.Scalar)
         {
             return (null, "an alert metric must be a single value — remove 'timeBucket' and 'topN' from the metric.");
+        }
+
+        if (enforcePerfmonRate && PerfmonRate.Error(plan, Array.Empty<ComposeVariable>(), "metric", forAlert: true) is string rateError)
+        {
+            return (null, $"invalid metric: {rateError}");
         }
 
         // ---- predicate ----
@@ -464,13 +474,46 @@ public sealed record CustomAlertRuleDefinition(
         int? scopeTagId = null;
         if (root["scope"] is JsonObject scope)
         {
+            // #8077: every key in the scope has to fit its mode, so a servers list or a tagId is never accepted
+            // and then ignored. A key the scope does not know is refused by name, the way the compose validator
+            // refuses a stray metric key. A 'servers' or 'tagId' with no 'mode' is refused rather than guessed:
+            // the mode is the author's statement of intent, and a guess made on load could re-scope a saved rule
+            // without anyone asking for it. A key that belongs to another mode is refused by name as well. An
+            // empty scope object means every server, the same as no scope at all.
+            foreach (var (key, _) in scope)
+            {
+                if (key is not ("mode" or "servers" or "tagId"))
+                {
+                    return (null, $"'scope' has an unknown key '{key}'; the keys are 'mode', 'servers' and 'tagId'.");
+                }
+            }
+
+            var hasServers = scope["servers"] is not null;
+            var hasTagId = scope["tagId"] is not null;
+            if (scope["mode"] is null && (hasServers || hasTagId))
+            {
+                return (null, "'scope.mode' is required when 'scope.servers' or 'scope.tagId' is given: 'servers' for a servers list, 'tag' for a tagId.");
+            }
+
             var mode = (scope["mode"] as JsonValue)?.ToString() ?? "all";
             switch (mode.ToLowerInvariant())
             {
                 case "all":
+                    if (hasServers || hasTagId)
+                    {
+                        var strayKey = hasServers ? "scope.servers" : "scope.tagId";
+                        var fittingMode = hasServers ? "servers" : "tag";
+                        return (null, $"'{strayKey}' does not apply when scope.mode is 'all'; remove it, or set scope.mode to '{fittingMode}'.");
+                    }
+
                     scopeMode = CustomAlertScopeMode.All;
                     break;
                 case "servers":
+                    if (hasTagId)
+                    {
+                        return (null, "'scope.tagId' does not apply when scope.mode is 'servers'; remove it, or set scope.mode to 'tag'.");
+                    }
+
                     scopeMode = CustomAlertScopeMode.Servers;
                     if (scope["servers"] is not JsonArray serverArray || serverArray.Count == 0)
                     {
@@ -495,6 +538,11 @@ public sealed record CustomAlertRuleDefinition(
                     // resolved by the evaluator from config.server_tag_map each sweep; a tag that resolves to no
                     // servers (empty, deleted, or renamed away) matches nothing, so the rule never fires — and
                     // that 0-server case is surfaced by the #3304 never-firing self-health check.
+                    if (hasServers)
+                    {
+                        return (null, "'scope.servers' does not apply when scope.mode is 'tag'; remove it, or set scope.mode to 'servers'.");
+                    }
+
                     scopeMode = CustomAlertScopeMode.Tag;
                     if (scope["tagId"] is not JsonNode tagIdNode || !TryInt(tagIdNode, out var tagId))
                     {

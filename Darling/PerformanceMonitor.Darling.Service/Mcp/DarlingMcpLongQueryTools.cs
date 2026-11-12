@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -33,18 +34,32 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpLongQueryTools
 {
-    [McpServerTool(Name = "get_long_query_completions"), Description("Gets the SLOWEST long-running query completions in the window: rpc/batch completions over the trace's duration threshold, plus attentions (cancels/timeouts), ranked duration DESC, attentions (no duration) last. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: truncated means the window held more, none slower than the page; oldest/newest_returned_event_time bound the slowest runs' ages, NOT how far the read reached. Collector is opt-in, OFF by default: empty can mean none in the window, or the collector was off — enable 'long_query_completions' in the schedule. <<GUIDE>> Gets the SLOWEST long-running query completions in the window, captured by the opt-in long-query trace: rpc/batch completions whose duration exceeded the trace threshold, plus attentions (client cancels / query timeouts), ranked by duration DESC with attentions (no duration) last. Shows duration, CPU, reads/writes, row count, result (OK/Error/Abort — Abort means the long query was cancelled), the statement text, and the calling session/app/login. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: completions_returned is how many rows you got and truncated says the window held more than limit. Because the page is duration-RANKED, oldest_returned_event_time / newest_returned_event_time tell you how old the slowest runs are and say NOTHING about how far back the read reached — every row in the window was a candidate, so a truncated page still holds the window's slowest. query_identity is the key to group rows by: it is the engine's query_hash when the engine gave one (batch-level events carry none, so query_hash is null there), otherwise text: plus a fingerprint of the statement text that does not merge statements differing only in a literal. An attention row (client cancel or timeout) carries no statement text, so its query_identity is null and it cannot be grouped by it; a null query_identity is never a group key, so do not pool those rows under one. Both SKUs keep the same population. The collector is OFF by default; if it returns empty, enable the 'long_query_completions' collector in the schedule.")]
+    private const string NeverRanMessage =
+        "Long query completions have not been collected for this server: the long_query_completions collector has never run for it. It is off by default; " +
+        "turn it on with enable_collector (collector long_query_completions) and read again after its first pass.";
+
+    /* #8571: the never-ran state with the schedule ON: the collector was just enabled and has not had its first pass. It is not told to enable
+       itself, and it is not "empty" either, since nothing has been read yet. */
+    private const string NotRunYetMessage =
+        "Long query completions have not been collected for this server yet: the long_query_completions collector is enabled but has not run its first pass yet; " +
+        "read again after it does.";
+
+    [McpServerTool(Name = "get_long_query_completions"), Description("Gets the SLOWEST long-running query completions in the window: rpc/batch completions over the trace's duration threshold, plus attentions (cancels/timeouts), ranked duration DESC, attentions (no duration) last. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: truncated means the window held more, none slower than the page; oldest/newest_returned_event_time bound the slowest runs' ages, NOT how far the read reached. Collector is opt-in, OFF by default: not_collected means it never ran, empty means it ran and found none; enable 'long_query_completions' in the schedule. <<GUIDE>> Gets the SLOWEST long-running query completions in the window, captured by the opt-in long-query trace: rpc/batch completions whose duration exceeded the trace threshold, plus attentions (client cancels / query timeouts), ranked by duration DESC with attentions (no duration) last. Shows duration, CPU, reads/writes, row count, result (OK/Error/Abort, Abort means the long query was cancelled), the statement text, and the calling session/app/login. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: completions_returned is how many rows you got and truncated says the window held more than limit. Because the page is duration-RANKED, oldest_returned_event_time / newest_returned_event_time tell you how old the slowest runs are and say NOTHING about how far back the read reached: every row in the window was a candidate, so a truncated page still holds the window's slowest. query_identity is the key to group rows by: it is the engine's query_hash when the engine gave one (batch-level events carry none, so query_hash is null there), otherwise text: plus a fingerprint of the statement text that does not merge statements differing only in a literal. An attention row (client cancel or timeout) carries no statement text, so its query_identity is null and it cannot be grouped by it; a null query_identity is never a group key, so do not pool those rows under one. Both SKUs keep the same population. The collector is OFF by default; if it answers not_collected, enable the 'long_query_completions' collector in the schedule, and read again after its first pass. The monitor's own statements (program name starting PerformanceMonitor) are left out unless include_monitor is true, so an idle server answers empty." + McpHelpers.UtcStampsDescription)]
     public static Task<string> GetLongQueryCompletions(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows to return, slowest first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
+        [Description("Maximum rows to return, slowest first. Default 30. This is what bounds the page: read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
+        [Description(IncludeMonitorDescription)] bool include_monitor = false,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
-        => GetLongQueryCompletions(postgres, server_name, hours_back, limit, as_of, DatabaseFilter.One(database_name), logger, cancellationToken, tag);
+        => GetLongQueryCompletions(postgres, server_name, hours_back, limit, as_of, DatabaseFilter.One(database_name), logger, cancellationToken, tag, include_monitor);
+
+    /// <summary>The <c>include_monitor</c> parameter text, shared with the web grid's toggle (#7416 item 11).</summary>
+    public const string IncludeMonitorDescription = "Include the monitor's own statements (program name starts PerformanceMonitor). Default false: left out. Set true to see a slow collector run.";
 
     /// <summary>
     /// #5244: the get_long_query_completions read over a LIST of databases. The MCP tool passes
@@ -61,7 +76,8 @@ public sealed class DarlingMcpLongQueryTools
         DatabaseFilter databaseFilter,
         ILogger? logger,
         CancellationToken cancellationToken,
-        string? tag = null)
+        string? tag = null,
+        bool include_monitor = false)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -87,7 +103,7 @@ public sealed class DarlingMcpLongQueryTools
                The reader's own LIMIT 200 was invisible to the caller, and `total_completions` published it as
                the window's count. */
             var rows = await DarlingLongQueryReader.GetRecentLongQueryCompletionsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databaseFilter, tagFilter, cancellationToken);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databaseFilter, tagFilter, include_monitor, cancellationToken);
             if (rows.Count == 0)
             {
                 /* #5244 round 2 (L2): not_collected and precondition echo database_name like every other shape. */
@@ -110,17 +126,40 @@ public sealed class DarlingMcpLongQueryTools
                 var emptyNotice = await DarlingMcpWindowNotice.ReadEventAsync(
                     () => DarlingMcpWindowNotice.Probe(postgres, "long_query_completions", resolved.ServerName, windowStart, now, cancellationToken),
                     null, windowStart, now, "long_query_completions", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
+                /* #7684 item 1: the schedule's own resolution (a server's row, else the fleet's, else the shipped default OFF); a failed read of
+                   the rows gives no overrides, so the default answers. Read once: the never-ran answer and the empty answer's opt-in sentence both use it. */
+                var scheduleOverrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, resolved.ServerId, cancellationToken);
+                var collectorEnabled = StoreConfigProvider.ResolveSchedule("long_query_completions", resolved.ServerId, scheduleOverrides).Enabled;
+
+                /* #8571: a collector that has never run for this server read nothing, and "empty" is the word for a collector that ran and found
+                   none. The store holding no row in the window (a null floor) and no run of the collector ever logged is the never-ran state, answered
+                   as get_schema_changes answers it: not_collected, with the enable step when the schedule has the collector off and without it when
+                   the schedule has it on (just enabled, before its first pass). The chosen query tag rides on the answer. A failed probe gives no
+                   verdict, so the empty answer stands. */
+                if (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null
+                    && !await DarlingDataReader.CollectorEverRanAsync(postgres, resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, cancellationToken))
+                {
+                    return McpHelpers.StatusForDatabase("not_collected",
+                        (collectorEnabled ? NotRunYetMessage : NeverRanMessage) + (tagFilter.Active ? $" The read was for query tag '{tagFilter.Requested}'." : ""),
+                        databaseFilter.Describe());
+                }
+
                 /* #5244 round 2 (L3): the probe is not database-filtered, so a null floor means the store holds no long-query row for
                    this server in the window, and only then does the answer send the reader to the opt-in switch. With rows for other
                    databases the collector is on, and the answer is about the chosen databases. A failed probe gives no verdict, so a
                    filtered answer leaves the sentence off. */
-                var collectorMayBeOff = (databaseFilter.IsAll && !tagFilter.Active) || (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null);
-                return McpHelpers.StatusForDatabase("empty",
+                /* #7684 item 1: and only when the schedule says it is off (read above). */
+                var collectorMayBeOff = !collectorEnabled
+                    && ((databaseFilter.IsAll && !tagFilter.Active) || (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null));
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.StatusForDatabase("empty",
                     "No long-running query completions found in the specified time range" + DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)
                         + (tagFilter.Active ? $" for query tag '{tagFilter.Requested}'" : "")
-                        + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : "."),
+                        + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF): enable it in the collector schedule to capture data." : ".")
+                        + (include_monitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them."),
                     databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
-                    emptyNotice.AsHints());
+                    /* #8146: the long-query session's ring-buffer loss rides beside the window keys. */
+                    RingBufferLossAnswer.WithLoss(emptyNotice.AsHints(),
+                        await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, windowStart, now, cancellationToken), !databaseFilter.IsAll)), cancellationToken, windowStart);
             }
 
             var truncated = rows.Count > limit;
@@ -197,8 +236,10 @@ public sealed class DarlingMcpLongQueryTools
 
             var json = payloadNode.ToJsonString(McpHelpers.JsonOptions);
 
-            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
-            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). #8146: the window's ring-buffer loss is a top-level key when there was any. */
+            return RingBufferLossAnswer.Attach(
+                notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json,
+                await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, windowStart, now, cancellationToken), !databaseFilter.IsAll);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

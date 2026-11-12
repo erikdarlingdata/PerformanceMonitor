@@ -70,8 +70,8 @@ public sealed class AzureSiblingGridNoteTests
         var file = Row(1, "d_data");
         var sibling = Row(null, AzureSiblingDatabaseSize.FileName);
 
-        Assert.Equal("2 file(s). " + AzureSiblingDatabaseSize.GridCaption, DatabaseSizeRow.Caption([file, sibling]));
-        Assert.Equal("1 file(s)", DatabaseSizeRow.Caption([file]));
+        Assert.Equal("2 files. " + AzureSiblingDatabaseSize.GridCaption, DatabaseSizeRow.Caption([file, sibling]));
+        Assert.Equal("1 file", DatabaseSizeRow.Caption([file]));
         Assert.Equal("", DatabaseSizeRow.Caption([]));
     }
 

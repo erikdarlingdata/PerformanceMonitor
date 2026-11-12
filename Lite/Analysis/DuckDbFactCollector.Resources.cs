@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
 
@@ -25,6 +26,7 @@ public partial class DuckDbFactCollector
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("memory_stats", "collection_time", context.LatestValueStartFor(MemoryStatsCollector.Instance.Name), context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -43,6 +45,7 @@ AND   collection_time <= $3
 ORDER BY collection_time DESC
 LIMIT 1";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(MemoryStatsCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -100,6 +103,7 @@ FROM newest";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("cpu_scheduler_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -107,6 +111,7 @@ FROM newest";
             using var cmd = connection.CreateCommand();
             cmd.CommandText = RunnableTaskStatsSql;
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -147,6 +152,7 @@ FROM newest";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("memory_grant_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -161,9 +167,11 @@ SELECT
     SUM(forced_grant_count_delta) AS total_forced_grants
 FROM v_memory_grant_stats
 WHERE server_id = $1
+AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before the small-query row (id 1) was collected */
 AND   collection_time >= $2
 AND   collection_time <= $3";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -214,6 +222,7 @@ AND   collection_time <= $3";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("memory_clerks", "collection_time", context.LatestValueStartFor(MemoryClerksCollector.Instance.Name), context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -235,6 +244,7 @@ FROM latest WHERE rn = 1 AND memory_mb > 0
 ORDER BY memory_mb DESC
 LIMIT 10";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(MemoryClerksCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -284,6 +294,7 @@ LIMIT 10";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("cpu_utilization_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -301,6 +312,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -369,6 +381,7 @@ AND   collection_time <= $3";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("perfmon_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -393,6 +406,7 @@ WITH latest AS (
 SELECT counter_name, cntr_value, delta_cntr_value, sample_interval_seconds
 FROM latest WHERE rn = 1";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -454,7 +468,9 @@ FROM latest WHERE rn = 1";
     /// of the window's end (#3896 — the lookback start binds as $2; it was &lt;= TimeRangeEnd alone, which
     /// read the whole parquet archive); DENSE_RANK() picks every
     /// row of the newest collection (avoiding QUALIFY, which is DuckDB-only and banned in the shared PG
-    /// dialect). The fact is emitted whenever a real cache exists (total_plans &gt; 0); the FactScorer
+    /// dialect). The plan and single-use figures are over COMPILED plans only (#7445, <see cref="PlanCacheBloatRule"/>):
+    /// parse trees and extended procedures are not ad-hoc plans, and the live badges leave them out too. The fact is
+    /// emitted whenever a compiled plan exists (compiled plans &gt; 0); the FactScorer
     /// applies the &gt; 50/30/20% bloat tiers AND the single_use_size_mb &gt;= 100 noise guard, so a
     /// healthy or tiny cache stays context-only. Absent on an empty/uncollected cache.
     /// </summary>
@@ -462,14 +478,15 @@ FROM latest WHERE rn = 1";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("plan_cache_stats", "collection_time", context.LatestValueStartFor(PlanCacheStatsCollector.Instance.Name), context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
+            cmd.CommandText = $@"
 WITH ranked AS (
-    SELECT total_plans, single_use_plans, total_size_mb, single_use_size_mb,
+    SELECT cacheobjtype, total_plans, single_use_plans, total_size_mb, single_use_size_mb,
            DENSE_RANK() OVER (ORDER BY collection_time DESC) AS rnk
     FROM v_plan_cache_stats
     WHERE server_id = $1
@@ -477,13 +494,14 @@ WITH ranked AS (
     AND   collection_time <= $3
 )
 SELECT
-    COALESCE(SUM(total_plans), 0) AS total_plans,
-    COALESCE(SUM(single_use_plans), 0) AS single_use_plans,
     COALESCE(SUM(total_size_mb), 0) AS total_size_mb,
-    COALESCE(SUM(single_use_size_mb), 0) AS single_use_size_mb
+    COALESCE(SUM(total_plans) FILTER (WHERE {PlanCacheBloatRule.CompiledPredicateSql}), 0) AS compiled_plans,
+    COALESCE(SUM(single_use_plans) FILTER (WHERE {PlanCacheBloatRule.CompiledPredicateSql}), 0) AS compiled_single_use_plans,
+    COALESCE(SUM(single_use_size_mb) FILTER (WHERE {PlanCacheBloatRule.CompiledPredicateSql}), 0) AS compiled_single_use_size_mb
 FROM ranked
 WHERE rnk = 1";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(PlanCacheStatsCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -494,12 +512,14 @@ WHERE rnk = 1";
             // SUM(INTEGER) widens to HUGEINT — DuckDB hands it back boxed as BigInteger, which
             // Convert.ToDouble cannot take (no IConvertible); read every aggregate through the
             // BigInteger-tolerant ToInt64, then widen the MB sizes to double for the metadata.
-            var totalPlans = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
-            var singleUsePlans = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
-            var totalSizeMb = reader.IsDBNull(2) ? 0.0 : (double)ToInt64(reader.GetValue(2));
+            var totalSizeMb = reader.IsDBNull(0) ? 0.0 : (double)ToInt64(reader.GetValue(0));
+            var totalPlans = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
+            var singleUsePlans = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
             var singleUseSizeMb = reader.IsDBNull(3) ? 0.0 : (double)ToInt64(reader.GetValue(3));
 
-            // No cache collected (or an empty cache) — nothing to classify.
+            /* #7445: every figure but total_size_mb is over COMPILED plans only (PlanCacheBloatRule), so this card
+               and the live badge read one population. A parse tree is not an ad-hoc plan, and thousands of
+               single-use ones must not score as bloat. No compiled plan collected means nothing to classify. */
             if (totalPlans <= 0) return;
 
             var singleUsePercent = singleUsePlans * 100.0 / totalPlans;
@@ -545,6 +565,7 @@ WHERE rnk = 1";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("memory_pressure_events", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -552,7 +573,7 @@ WHERE rnk = 1";
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 SELECT
-    SUM(CASE WHEN memory_indicators_process >= 2 OR memory_indicators_system >= 2 THEN 1 ELSE 0 END) AS pressure_event_count,
+    COUNT(DISTINCT concat(CAST(date_trunc('second', sample_time) AS VARCHAR), '|', memory_notification)) FILTER (WHERE memory_indicators_process >= 2 OR memory_indicators_system >= 2) AS pressure_event_count,
     MAX(memory_indicators_process) AS max_process,
     MAX(memory_indicators_system) AS max_system
 FROM v_memory_pressure_events
@@ -560,6 +581,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });

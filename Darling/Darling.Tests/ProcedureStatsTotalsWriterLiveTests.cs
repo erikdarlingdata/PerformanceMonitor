@@ -59,8 +59,8 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
 
         public static async Task<Rig> OpenAsync(int serverId, string serverName, CancellationToken ct, bool timescale = false, bool plainStore = false)
         {
-            /* plainStore: the test's subject is a store WITHOUT TimescaleDB (the sweep run with its timescale flag off); CreateAsync enables the extension by default (#6317). */
-            var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, plainPostgres: plainStore);
+            /* plainStore: the test's subject is a store WITHOUT TimescaleDB (the sweep run with its timescale flag off); CreateAsync enables the extension by default (#6317). emptyStore: the test migrates (and, for timescale, converts) the store itself, and some tests stage a legacy schema first, so it must not start from the migrated template (#7097). */
+            var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, plainPostgres: plainStore, emptyStore: true);
             var connection = new NpgsqlConnection(scratch.ConnectionString);
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);
@@ -906,7 +906,10 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
     /// a server whose first batch has no anchor and once for a later batch with an anchor and an empty range.
     /// </summary>
     [Fact]
-    public async Task AnEmptyGap_CostsOneProbeStatement_NoSavepointNoTimeoutNoGapStatement()
+    public Task AnEmptyGap_CostsOneProbeStatement_NoSavepointNoTimeoutNoGapStatement()
+        => EmptyGapAsync(forcePass: false);
+
+    internal async Task EmptyGapAsync(bool forcePass)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
@@ -926,16 +929,26 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
                 Convert.ToInt64(await ScalarAsync(rig.Connection,
                     "SELECT COALESCE(SUM(calls), 0)::bigint FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND query LIKE '" + like + "'", ct));
 
-            await ExecAsync(rig.Connection, "SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)", ct);
+            /* The whole window, from the counter's reset to the last count, runs under PgStatementTable: the view is
+               cluster-wide, and an eviction pass from another session between the batches and the counts takes the entries
+               run once or twice first, the anchor probe's among them, which a run the pass landed in is voided and run
+               again for. A second run writes the same two batches again, which recompute the same rows and totals. */
+            var run = await PgStatementTable.RunAsync(rig.Connection, ct, async pass =>
+            {
+                await ExecAsync(rig.Connection, "SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)", ct);
 
-            /* The server's first batch (no totals row, so no anchor) and a second one (an anchor, an empty range between it and the batch). */
-            Assert.Equal(1, await rig.WriteAsync(T0, new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10, 1, 60) }, ct));
-            Assert.Equal(1, await rig.WriteAsync(T0.AddMinutes(1), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 11, 1, 60) }, ct));
+                /* The server's first batch (no totals row, so no anchor) and a second one (an anchor, an empty range between it and the batch). */
+                Assert.Equal(1, await rig.WriteAsync(T0, new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10, 1, 60) }, ct));
+                Assert.Equal(1, await rig.WriteAsync(T0.AddMinutes(1), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 11, 1, 60) }, ct));
 
-            Assert.Equal(2L, await CallsAsync("%a.anchor IS NOT NULL%"));
-            Assert.Equal(0L, await CallsAsync("%pst_gap%"));
-            Assert.Equal(0L, await CallsAsync("%set_config(%"));
-            Assert.Equal(0L, await CallsAsync("%s.collection_time > $3%"));
+                await pass.BeforeReadAsync(ct);
+
+                Assert.Equal(2L, await CallsAsync("%a.anchor IS NOT NULL%"));
+                Assert.Equal(0L, await CallsAsync("%pst_gap%"));
+                Assert.Equal(0L, await CallsAsync("%set_config(%"));
+                Assert.Equal(0L, await CallsAsync("%s.collection_time > $3%"));
+            }, forcePass, forcePassCallsAtMost: 2);
+            PgStatementTable.AssertNoPassInside(run);
 
             bodySucceeded = true;
         }
@@ -1157,4 +1170,81 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
             await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
         }
     }
+    /// <summary>
+    /// L5, plain raw tables in a database that carries the extension row: a store the service runs without TimescaleDB can still
+    /// hold <c>timescaledb</c> in <c>pg_extension</c> (a database created from a template that carries it does, and the TimescaleDB
+    /// image installs the extension into <c>template1</c>), while its raw tables are plain tables that were never converted. The
+    /// gated raw purge owns raw HYPERTABLES, whose chunks it drops; a plain table has no chunks, so the sweep's DELETE is the only
+    /// purge those rows ever get. The sweep therefore purges the raw rows past the horizon, and the totals follow the raw floor as
+    /// on any plain store, whichever way the worker's <c>timescaleAvailable</c> latch reads: true, as the service passes it once
+    /// its setup block has created the extension and found the row, or false, in the window after a failed setup block. A sweep
+    /// that left the raw table to the gated purge on the extension row alone, or held it behind the rollup coverage gate and
+    /// <c>drop_chunks</c> as if it were a hypertable, would hold both tables' rows past the horizon for good.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TheRealRetentionSweep_OnPlainRawTablesInADatabaseWithTheExtensionRow_PurgesTheRawRowsAndTheirTotals(bool timescaleAvailable)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var serverId = timescaleAvailable ? -945322 : -945321;
+
+        await using var rig = await Rig.OpenAsync(serverId, timescaleAvailable ? "ProcTotalsPurgeExtRowOn" : "ProcTotalsPurgeExtRow", ct, plainStore: true);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* The extension row alone, created AFTER the migration so the raw tables stay plain: the shape of a database cloned from a template that carries the extension. */
+            var extensionPresent = await LiveTimescaleProbe.TryEnableAsync(rig.Scratch.ConnectionString, ct);
+            Assert.SkipWhen(!extensionPresent, "This cluster cannot load the timescaledb library.");
+            Assert.False((bool)(await ScalarAsync(rig.Connection, "SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = 'procedure_stats')", ct))!,
+                "the raw table stays a plain table: only the extension row is present");
+
+            var now = NowToTheSecond();
+            foreach (var age in new[] { 60, 45, 1 })
+            {
+                Assert.Equal(1, await rig.WriteAsync(now.AddDays(-age), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10 + age, 1, 60) }, ct));
+            }
+
+            Assert.Equal(3L, await RawRowsAsync(rig.Connection, ct));
+            Assert.Equal(3L, (await TotalsAsync(rig.Connection, ct)).Totals);
+
+            var logger = new CapturingLogger();
+            await DarlingRetention.PurgeAsync(rig.DataSource, timescaleAvailable, logger, ct, retentionDaysFor: static _ => 40);
+
+            var rawWarnings = logger.Entries
+                .Where(static entry => entry.Level == Microsoft.Extensions.Logging.LogLevel.Warning && entry.Message.Contains("procedure_stats", StringComparison.Ordinal))
+                .Select(static entry => entry.Message)
+                .ToList();
+            Assert.True(rawWarnings.Count == 0, "no warning names the raw table or its totals: " + string.Join(" | ", rawWarnings));
+            Assert.Equal(1L, await RawRowsAsync(rig.Connection, ct));
+            var (count, oldest) = await TotalsAsync(rig.Connection, ct);
+            Assert.Equal(1L, count);
+            Assert.True(oldest > now.AddDays(-2), "only the recent collection's totals row is left");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    private static async Task<long> RawRowsAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.procedure_stats", ct));
+}
+
+/* pg-cluster-roles, not the parallel own-store shape: the fact fills pg_stat_statements until eviction passes have taken the
+   body's own entries, on purpose, and in the parallel collections those passes take the other sessions' entries run once
+   as well. The collection runs alone, after the parallel collections, so the fill takes nobody else's entries. The body
+   is the one ProcedureStatsTotalsWriterLiveTests runs without the forced pass, and it mints its own scratch database. */
+
+/// <summary>The forcing run of <see cref="ProcedureStatsTotalsWriterLiveTests"/>'s counting body: an eviction pass between the batches and the counts, and the counts are still of the probes the batches ran.</summary>
+[Collection("pg-cluster-roles")]
+public sealed class ProcedureStatsTotalsWriterForcedPassLiveTests
+{
+    [Fact]
+    public Task AnEmptyGap_CostsOneProbeStatement_NoSavepointNoTimeoutNoGapStatement_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => new ProcedureStatsTotalsWriterLiveTests().EmptyGapAsync(forcePass: true);
 }

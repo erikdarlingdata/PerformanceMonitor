@@ -32,7 +32,7 @@ internal static class ServerResolver
                 return ((RemoteCollectorService.GetDeterministicHashCode(storageName), storageName, AnswerNameOf(servers, s, storageName)), null);
             }
 
-            return (default, Miss(servers));
+            return (default, Miss(servers, serverName));
         }
 
         var match = MatchCandidates(servers, serverName, storageNameIgnoresCase: true);
@@ -45,7 +45,7 @@ internal static class ServerResolver
 
         if (match.Candidates.Count == 0)
         {
-            return (default, Miss(servers));
+            return (default, Miss(servers, serverName));
         }
 
         return (default, McpHelpers.Refusal(
@@ -74,8 +74,13 @@ internal static class ServerResolver
         return holders == 1 ? display : storageName;
     }
 
-    private static string Miss(IReadOnlyList<ServerConnection> servers) =>
-        McpHelpers.Refusal("server_name", $"Could not resolve server. Available servers:\n{ListAvailableServers(servers)}");
+    private static string Miss(IReadOnlyList<ServerConnection> servers, string? serverName) =>
+        McpHelpers.Refusal("server_name", MissSentence(servers, serverName));
+
+    /// <summary>The miss sentence (#7077): it names the server name the caller sent, or says a name is needed, then lists the servers.
+    /// Mirrors Darling's <c>DarlingServerResolver.MissSentence</c>, minus the peer disclosure Lite does not have.</summary>
+    internal static string MissSentence(IReadOnlyList<ServerConnection> servers, string? serverName) =>
+        $"{McpHelpers.ServerMissOpening(serverName, servers.Count)} Available servers:\n{ListAvailableServers(servers)}";
 
     private static string ListCandidates(IReadOnlyList<ServerCandidate> candidates) =>
         string.Join("\n", candidates.Select(c =>
@@ -223,6 +228,27 @@ internal static class ServerResolver
             .Where(s => RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)) == serverId)
             .Select(s => (DateTime?)s.RegisteredAtUtc)
             .FirstOrDefault();
+
+    /// <summary>
+    /// #7167: the display name of the enabled server whose storage identity is <paramref name="serverId"/> (its server name when it has none),
+    /// or null when none matches. It is how the offline answer names the server, as Darling's does.
+    /// </summary>
+    internal static string? DisplayNameByStorageId(ServerManager serverManager, int serverId) =>
+        serverManager.GetEnabledServers()
+            .Where(s => RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)) == serverId)
+            .Select(s => string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName)
+            .FirstOrDefault();
+
+    /// <summary>
+    /// #7167: the two lookups the offline answer reads off a <see cref="LocalDataService"/> (when each server was added, and what it is called),
+    /// set from the server list. The MCP host wires its own service with this, and so does every other service an MCP empty-answer path builds
+    /// for itself (the analysis tools' window probe), so a read answers the same way whichever service it ran on.
+    /// </summary>
+    internal static void WireOfflineLookups(LocalDataService dataService, ServerManager serverManager)
+    {
+        dataService.RegisteredAtUtcLookup = serverId => RegisteredAtUtc(serverManager, serverId);
+        dataService.ServerDisplayNameLookup = serverId => DisplayNameByStorageId(serverManager, serverId);
+    }
 
     /// <summary>
     /// The listing a miss carries, over a list the caller already holds. <c>internal</c> so

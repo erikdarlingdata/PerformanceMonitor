@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 
 namespace PerformanceMonitor.Common;
 
@@ -19,6 +20,110 @@ namespace PerformanceMonitor.Common;
 /// </summary>
 internal static class McpHelpers
 {
+    /// <summary>
+    /// A reply figure rounded to <paramref name="digits"/> places where the reply is built (#8572), so a difference or a sum of stored floats
+    /// does not reach the reader as 48.06999999999999. Null stays null. Only the written figure is rounded: nothing stored or compared goes through here.
+    /// </summary>
+    public static double? RoundTo(double? value, int digits) => value is { } v ? Math.Round(v, digits) : null;
+
+    /// <summary>The <see cref="RoundTo(double?, int)"/> form for a decimal figure.</summary>
+    public static decimal? RoundTo(decimal? value, int digits) => value is { } v ? Math.Round(v, digits) : null;
+
+    /// <summary>The most decimals a figure in a reply may carry (#8572). A double that prints with more is float noise (9.531238439784213), not a measurement.</summary>
+    internal const int MaxReplyDecimals = 6;
+
+    /// <summary>
+    /// A reply tree with its float noise rounded away (#8572): every number written with more than <see cref="MaxReplyDecimals"/> decimals is
+    /// rounded by the one rate rule (<see cref="TrendPayloads.RoundRate(double, int)"/>: two places, and two significant digits for a small figure),
+    /// so 9.531238439784213 reads 9.53 and 0.07894736842105263 reads 0.079. For the replies whose figures come out of a drill-down, a fact's
+    /// metadata or a stored document, where no single field is the one to round. A number with six decimals or fewer, an integer, a string and a
+    /// null are left as they are. The node is changed in place and returned.
+    /// </summary>
+    internal static System.Text.Json.Nodes.JsonNode? RoundFloatNoise(System.Text.Json.Nodes.JsonNode? node)
+    {
+        switch (node)
+        {
+            case System.Text.Json.Nodes.JsonObject obj:
+                foreach (var key in obj.Select(p => p.Key).ToList())
+                {
+                    var child = obj[key];
+                    if (RoundedFigure(child) is { } rounded)
+                    {
+                        obj[key] = rounded;
+                    }
+                    else
+                    {
+                        RoundFloatNoise(child);
+                    }
+                }
+
+                break;
+            case System.Text.Json.Nodes.JsonArray array:
+                for (var i = 0; i < array.Count; i++)
+                {
+                    if (RoundedFigure(array[i]) is { } rounded)
+                    {
+                        array[i] = rounded;
+                    }
+                    else
+                    {
+                        RoundFloatNoise(array[i]);
+                    }
+                }
+
+                break;
+        }
+
+        return node;
+    }
+
+    /// <summary><see cref="RoundFloatNoise(System.Text.Json.Nodes.JsonNode?)"/> for a reply that is already text. Text that is not a JSON document is returned as it came.</summary>
+    internal static string RoundFloatNoise(string json)
+    {
+        System.Text.Json.Nodes.JsonNode? root;
+        try
+        {
+            root = System.Text.Json.Nodes.JsonNode.Parse(json);
+        }
+        catch (JsonException)
+        {
+            return json;
+        }
+
+        if (root is not (System.Text.Json.Nodes.JsonObject or System.Text.Json.Nodes.JsonArray))
+        {
+            return json;
+        }
+
+        return RoundFloatNoise(root)!.ToJsonString();
+    }
+
+    /// <summary>The rounded replacement for a number node that carries float noise, or null when the node is not such a number.</summary>
+    private static System.Text.Json.Nodes.JsonValue? RoundedFigure(System.Text.Json.Nodes.JsonNode? node)
+    {
+        if (node is not System.Text.Json.Nodes.JsonValue value || !value.TryGetValue<double>(out var figure) || !double.IsFinite(figure))
+        {
+            return null;
+        }
+
+        var text = figure.ToString("R", CultureInfo.InvariantCulture);
+        var dot = text.IndexOf('.', StringComparison.Ordinal);
+        if (dot < 0)
+        {
+            return null;
+        }
+
+        var end = text.IndexOfAny(['E', 'e'], dot);
+        var decimals = (end < 0 ? text.Length : end) - dot - 1;
+        if (decimals <= MaxReplyDecimals && end < 0)
+        {
+            return null;
+        }
+
+        var rounded = TrendPayloads.RoundRate(figure, 2);
+        return rounded == figure ? null : System.Text.Json.Nodes.JsonValue.Create(rounded);
+    }
+
     /// <summary>
     /// Maximum hours of history allowed (7 days).
     /// </summary>
@@ -261,7 +366,7 @@ internal static class McpHelpers
 
         if (resolved < 2 * hoursBack)
         {
-            return Refusal("baseline_hours_back", $"The comparison window (the last {hoursBack} hours) and the baseline window (hours {resolved} to {resolved - hoursBack} back) would overlap: baseline_hours_back {resolved} is below 2 x hours_back ({2 * hoursBack}). Pass a baseline_hours_back of at least {2 * hoursBack}, or a smaller hours_back.");
+            return Refusal("baseline_hours_back", $"The comparison window (the last {CountText.Plural(hoursBack, "hour")}) and the baseline window (hours {resolved} to {resolved - hoursBack} back) would overlap: baseline_hours_back {resolved} is below 2 x hours_back ({2 * hoursBack}). Pass a baseline_hours_back of at least {2 * hoursBack}, or a smaller hours_back.");
         }
 
         return null;
@@ -377,7 +482,7 @@ internal static class McpHelpers
 
         if (hoursBack <= 0)
         {
-            return Refusal("hours_back", $"Invalid hours_back value '{hoursBack}'. Must be a positive integer — a negative or zero window has no meaning and is refused rather than read as its absolute value. This read has no upper bound on hours_back.");
+            return Refusal("hours_back", $"Invalid hours_back value '{hoursBack}'. Must be a positive integer. A negative or zero window has no meaning and is refused rather than read as its absolute value. This read has no upper bound on hours_back.");
         }
 
         return ResolveAsOf(asOf, out endUtc);
@@ -416,7 +521,7 @@ internal static class McpHelpers
                 DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
                 out var parsed))
         {
-            return Refusal("summary_date", $"Invalid summary_date value '{summaryDate}'. Expected an ISO-8601 calendar date, yyyy-MM-dd (e.g. 2026-07-09), read as a UTC day. Other spellings — including 07/09/2026 — are refused rather than guessed at, because 01/02/2026 reads as two different days depending on who wrote it.");
+            return Refusal("summary_date", $"Invalid summary_date value '{summaryDate}'. Expected an ISO-8601 calendar date, yyyy-MM-dd (e.g. 2026-07-09), read as a UTC day. Other spellings, including 07/09/2026, are refused rather than guessed at, because 01/02/2026 reads as two different days depending on who wrote it.");
         }
 
         date = DateTime.SpecifyKind(parsed, DateTimeKind.Utc).Date;
@@ -575,9 +680,40 @@ internal static class McpHelpers
     /// one it is still in the tools/list text.</para>
     /// </summary>
     public const string WindowTruncatedDescription =
-        " window_truncated is true when the store did not hold the start of the window; effective_start / " +
-        "effective_hours_back say where the answer begins. That is the window floor, not a page cut: no limit " +
+        " window_truncated is true when the first point served is later than the start of the window: the store holds nothing earlier in this window at this tier. " +
+        "It does not say why (retention, a query first seen later, a server that collected later); effective_start / " +
+        "effective_hours_back say where the answer begins. A trend that names the tier (get_query_trend and the duration trends) " +
+        "allows the first point 90 minutes of slack before it says truncated (an hourly bucket can begin up to an hour after a start that falls mid-hour, " +
+        "and a raw series a collection cadence or two late), so inside that slack effective_start is later than the start while window_truncated stays false. Such a trend " +
+        "adds start_older_than_tier, true only when the start is older than the tier that answered keeps (tier_keeps_days says how long): " +
+        "only then has the earlier part aged out of that tier. That is the window floor, not a page cut: no limit " +
         "changes it. WIRE CHANGE: formerly named truncated.";
+
+    /// <summary>
+    /// The clock sentence of a SQL Server read whose every stamp is the store's naive UTC: <c>collection_time</c>
+    /// and the bucket starts cut from it, the Extended Events <c>event_time</c> and <c>deadlock_time</c>, Query
+    /// Store's <c>interval_start_time_utc</c>, and a latest snapshot's <c>captured_at</c>. Leading space: it is
+    /// appended to the tool's own prose, ahead of the shared sentences that close a description, so on a split
+    /// description it sits in the guide tail. The one read stamped on the monitored server's clock, Lite's
+    /// <c>get_cpu_utilization</c>, carries its own sentence instead.
+    /// </summary>
+    public const string UtcStampsDescription =
+        " Every stamp here is UTC, not the monitored server's clock (get_server_properties has its utc_offset_minutes).";
+
+    /// <summary>The clock sentence of <c>get_daily_summary_range</c>, whose row is a calendar day cut from UTC
+    /// <c>collection_time</c>.</summary>
+    public const string UtcDayDescription =
+        " summary_date is a UTC day, not the monitored server's (get_server_properties has its utc_offset_minutes).";
+
+    /// <summary>The clock sentence of a PostgreSQL target's time series, whose points are stamped
+    /// <c>collection_time</c>; those targets have no <c>get_server_properties</c> offset to point at.</summary>
+    public const string UtcCollectionTimeDescription =
+        " collection_time is UTC, not the monitored server's clock.";
+
+    /// <summary>The clock sentence of a PostgreSQL target's series whose points are stamped <c>sample_time</c>
+    /// (get_pg_cpu_utilization's Performance Insights buckets).</summary>
+    public const string UtcSampleTimeDescription =
+        " sample_time is UTC, not the monitored server's clock.";
 
     /// <summary>
     /// #4966: <c>effective_start</c> as every window-floor payload prints it, always as UTC with the trailing Z, on
@@ -616,7 +752,7 @@ internal static class McpHelpers
     /// </summary>
     public static string SnapshotsWithoutDeltaMessage(string serverName, int hoursBack, long snapshots, DateTime? newestMeasuredDeltaAt, DateTime windowEnd)
     {
-        var message = $"{serverName} stored {snapshots} query_stats snapshot(s) in the last {hoursBack} hour(s), but none carries a measured delta, so no CPU can be attributed to a query in this window. "
+        var message = $"{serverName} stored {CountText.Plural(snapshots, "query_stats snapshot")} in the last {CountText.Plural(hoursBack, "hour")}, but none carries a measured delta, so no CPU can be attributed to a query in this window. "
             + "A CPU figure is the change in a plan's counters between two snapshots of the same plan; a plan sighted once, or sighted again with unmoved counters, stores zero deltas and is left out of the ranking. "
             + "This is not a collection gap, and collection health showing stored rows is consistent with it.";
         if (newestMeasuredDeltaAt is { } newest)
@@ -686,6 +822,7 @@ internal static class McpHelpers
     {
         var now = DateTime.UtcNow;
         endUtc = now;
+        s_asOfAnchor.Value = null;
 
         if (string.IsNullOrWhiteSpace(asOf))
         {
@@ -713,7 +850,68 @@ internal static class McpHelpers
         }
 
         endUtc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+        s_asOfAnchor.Value = endUtc;
         return null;
+    }
+
+    /// <summary>The anchor the current tool call's <c>as_of</c> resolved to, or null when the call named none.
+    /// Set by <see cref="ResolveAsOf"/> in the tool's own flow, so an empty-window sentence can say which window it
+    /// looked at without every reply builder carrying the anchor through its signature.</summary>
+    private static readonly AsyncLocal<DateTime?> s_asOfAnchor = new();
+
+    /// <summary>Sets the anchor <see cref="InTheLast"/> reads, for a reply builder whose own async frame did not resolve
+    /// <c>as_of</c> (the anchor <see cref="ResolveAsOf"/> sets in a nested async method does not flow back to its caller).</summary>
+    public static void AnchorAsOf(DateTime? anchor) => s_asOfAnchor.Value = anchor;
+
+    /// <summary>
+    /// "in the last 24 hours" for a read that ended now, and "in the 24 hours ending at 2026-11-10 12:00 UTC" for a
+    /// read anchored at <c>as_of</c>. An empty-window sentence that says "the last 24 hours" about a window that
+    /// ended at an earlier instant describes a window nobody asked for. <paramref name="span"/> is the counted span
+    /// ("24 hours", "7 days").
+    /// </summary>
+    public static string InTheLast(string span)
+    {
+        return s_asOfAnchor.Value is { } anchor
+            ? string.Create(CultureInfo.InvariantCulture, $"in the {span} ending at {anchor:yyyy-MM-dd HH:mm} UTC")
+            : $"in the last {span}";
+    }
+
+    /// <summary>
+    /// The clock a whole-day read rates its last day against (#7504). Such a read keeps only the anchor's UTC date,
+    /// so its counts cover that whole date whatever time the anchor names. Rating them over the hours from midnight
+    /// to the anchor gave no rate at all for a bare date and too high a rate for a mid-day stamp. So the clock is the
+    /// end of the anchor's date, or now while that date is still running. A read with no anchor is already at now.
+    /// </summary>
+    public static DateTime DayAnchorClock(string? asOf, DateTime endUtc)
+    {
+        if (string.IsNullOrWhiteSpace(asOf))
+        {
+            return endUtc;
+        }
+
+        var dayEnd = DateTime.SpecifyKind(endUtc.Date.AddDays(1), DateTimeKind.Utc);
+        var now = DateTime.UtcNow;
+        return dayEnd < now ? dayEnd : now;
+    }
+
+    /// <summary>
+    /// #7903: the name filter <c>get_perfmon_stats</c> applies to <c>counter_name</c> and <c>instance_name</c> on both
+    /// products. The rows whose name equals <paramref name="wanted"/>, ignoring case; when no row's name does, the rows
+    /// whose name contains it, ignoring case. So 'Transactions/sec' returns that one counter and not Write
+    /// Transactions/sec beside it, while a partial name still finds its counters. A null or empty
+    /// <paramref name="wanted"/> keeps every row; a row with a null name never matches a filter.
+    /// </summary>
+    public static IReadOnlyList<T> FilterByNameExactThenContains<T>(IEnumerable<T> rows, Func<T, string?> name, string? wanted)
+    {
+        var list = rows as IReadOnlyList<T> ?? rows.ToList();
+        if (string.IsNullOrEmpty(wanted))
+            return list;
+
+        var exact = list.Where(r => string.Equals(name(r), wanted, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (exact.Count > 0)
+            return exact;
+
+        return list.Where(r => name(r) is { } n && n.Contains(wanted, StringComparison.OrdinalIgnoreCase)).ToList();
     }
 
     /// <summary>
@@ -721,12 +919,19 @@ internal static class McpHelpers
     /// (<c>hints.parameter</c> is <paramref name="paramName"/>, so a tool that calls this for <c>top</c> refuses
     /// <c>top</c> by name).
     /// </summary>
-    public static string? ValidateTop(int top, string paramName = "limit")
+    public static string? ValidateTop(int top, string paramName = "limit") => ValidateTop(top, MaxTop, paramName);
+
+    /// <summary>
+    /// <see cref="ValidateTop(int, string)"/> against a tool's own ceiling, for a read whose page is smaller than
+    /// <see cref="MaxTop"/> (#7610: <c>find_queries_by_text</c> returns text excerpts, so its ceiling is 50). The
+    /// refusal reads the same, with <paramref name="max"/> where the shared ceiling would be.
+    /// </summary>
+    public static string? ValidateTop(int top, int max, string paramName = "limit")
     {
         if (top <= 0)
-            return Refusal(paramName, $"Invalid {paramName} value '{top}'. Must be a positive integer (1-{MaxTop}).");
-        if (top > MaxTop)
-            return Refusal(paramName, $"{paramName} value '{top}' exceeds maximum of {MaxTop}. Use a smaller value.");
+            return Refusal(paramName, $"Invalid {paramName} value '{top}'. Must be a positive integer (1-{max}).");
+        if (top > max)
+            return Refusal(paramName, $"{paramName} value '{top}' exceeds maximum of {max}. Use a smaller value.");
         return null;
     }
 
@@ -792,9 +997,9 @@ internal static class McpHelpers
     public static string? ValidateMinMs(double? minMs, string paramName)
     {
         if (minMs is { } value && !double.IsFinite(value))
-            return Refusal(paramName, $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor must be a finite number — NaN and Infinity parse but can never match a run, so the read would come back empty and duration-ranked with nothing to say the floor was unusable. Note that an oversized number overflows to Infinity rather than being rejected as too large.");
+            return Refusal(paramName, $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor must be a finite number. NaN and Infinity parse but can never match a run, so the read would come back empty and duration-ranked with nothing to say the floor was unusable. Note that an oversized number overflows to Infinity rather than being rejected as too large.");
         if (minMs is < 0)
-            return Refusal(paramName, $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor cannot be negative — use 0 to admit every row, or omit it entirely.");
+            return Refusal(paramName, $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor cannot be negative. Use 0 to admit every row, or omit it entirely.");
         return null;
     }
 
@@ -958,6 +1163,26 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// The sentence a server-name miss opens with, shared by Darling's and Lite's resolvers (#7077). It always begins
+    /// "Could not resolve server." because callers match on those words. Then it says what the caller did wrong: the name
+    /// it sent matched no monitored server, or it sent none and several servers are monitored. The caller appends
+    /// " Available servers:\n" and the list.
+    /// </summary>
+    /// <param name="serverName">The name the caller sent, or null or blank when it sent none.</param>
+    /// <param name="serverCount">How many servers are monitored.</param>
+    public static string ServerMissOpening(string? serverName, int serverCount)
+    {
+        if (!string.IsNullOrWhiteSpace(serverName))
+        {
+            return $"Could not resolve server. No monitored server matches '{serverName.Trim()}'.";
+        }
+
+        return serverCount > 1
+            ? $"Could not resolve server. server_name is required because {serverCount} servers are monitored."
+            : "Could not resolve server.";
+    }
+
+    /// <summary>
     /// The bytes every error envelope begins with. <see cref="Status"/> serializes its anonymous object with
     /// <see cref="JsonOptions"/> (compact) and <c>status</c> first, so <c>{"status":"error",</c> is exact against
     /// the one producer — the closing quote and comma are part of it so a data payload whose first key merely
@@ -1067,6 +1292,62 @@ internal static class McpHelpers
             : JsonSerializer.Serialize(new { status, message, hints }, JsonOptions);
     }
 
+    /// <summary>The first words of <see cref="CollectedThroughSentence"/>; a client or a product's own check can tell the answer by them.</summary>
+    public const string CollectedThroughOpening = "Nothing was recorded through the last collection at ";
+
+    /// <summary>
+    /// #7724: what an offline server's empty window says when part of it was collected: the newest collection, and that nothing after it is
+    /// known. The time is ISO-8601 UTC, which the web page shows in the viewer's local time.
+    /// </summary>
+    public static string CollectedThroughSentence(DateTime newestCollectionUtc) =>
+        CollectedThroughOpening
+        + DateTime.SpecifyKind(newestCollectionUtc, DateTimeKind.Utc).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture)
+        + ". Nothing after that is known.";
+
+    /// <summary>
+    /// #7724: the answer for an offline server whose window holds collected history up to <paramref name="newestCollectionUtc"/>. The word stays
+    /// <c>unavailable</c>, so no client reads it as an all-clear, and <c>collected_through</c> carries the newest collection. The <c>message</c>
+    /// opens with <paramref name="offlineLead"/> (the sentence that says the server is offline and why, so an MCP caller still learns it) and
+    /// then <see cref="CollectedThroughSentence"/>. <c>collected_through_note</c> is that second sentence alone: the web page prints it, because
+    /// its red strip already carries the lead. Shared by Lite and Darling.
+    /// </summary>
+    public static string CollectedThroughStatus(DateTime newestCollectionUtc, string? offlineLead = null)
+    {
+        var sentence = CollectedThroughSentence(newestCollectionUtc);
+        return JsonSerializer.Serialize(new
+        {
+            status = "unavailable",
+            message = string.IsNullOrWhiteSpace(offlineLead) ? sentence : offlineLead.TrimEnd() + " " + sentence,
+            collected_through = FormatEffectiveStart(newestCollectionUtc),
+            collected_through_note = sentence,
+        }, JsonOptions);
+    }
+
+    /// <summary>
+    /// #7724: what an empty read answers for a server already judged offline, from the newest collection and the window. A window that ends at or before
+    /// the newest collection lies inside collected history, so there is no offline answer (<c>null</c>: the read's own answer stands). A window that
+    /// starts at or before the newest collection holds collected history, so the answer says what was collected through
+    /// (<see cref="CollectedThroughStatus"/>). A window with no collection in it, or a caller that passes no start, gets <paramref name="offlineAnswerJson"/>,
+    /// the offline sentence as it was before. Shared by Lite and Darling so the boundary is one rule.
+    /// </summary>
+    public static string? OfflineEmptyAnswer(
+        string offlineLead, DateTime? newestCollectionUtc, DateTime windowEndUtc, DateTime? windowStartUtc, string offlineAnswerJson)
+    {
+        if (newestCollectionUtc is not { } through)
+        {
+            return offlineAnswerJson;
+        }
+
+        if (windowEndUtc <= through)
+        {
+            return null;
+        }
+
+        return windowStartUtc is { } start && through >= start
+            ? CollectedThroughStatus(through, offlineLead)
+            : offlineAnswerJson;
+    }
+
     /// <summary>True when <paramref name="answerJson"/> is a status envelope whose <c>status</c> is <c>empty</c> or <c>unavailable</c> (#6074).</summary>
     public static bool IsEmptyOrUnavailableStatus(string answerJson)
     {
@@ -1155,8 +1436,30 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// #7706: <paramref name="statusJson"/> (an <c>empty</c> envelope another helper built) with <see cref="PvsSecondaryNote.Key"/> beside
+    /// its message, so a database filter that picks only availability group secondary copies, which have no PVS row, still gets the
+    /// sentence that explains why. Null in, null out; unchanged when <paramref name="note"/> is null or the envelope already carries the key.
+    /// </summary>
+    public static string? WithSecondaryReplicaNote(string? statusJson, string? note)
+    {
+        if (statusJson is null || note is null)
+        {
+            return statusJson;
+        }
+
+        var node = System.Text.Json.Nodes.JsonNode.Parse(statusJson) as System.Text.Json.Nodes.JsonObject;
+        if (node is null || node.ContainsKey(PvsSecondaryNote.Key))
+        {
+            return statusJson;
+        }
+
+        node[PvsSecondaryNote.Key] = note;
+        return node.ToJsonString(JsonOptions);
+    }
+
+    /// <summary>
     /// #5633 review (finding D): <paramref name="statusJson"/> (an envelope another helper built) with the databases the read
-    /// left out beside it: <see cref="DatabasesLeftOut.NamesKey"/> (the names, capped) and
+    /// left out beside it: <see cref="DatabasesLeftOut.NamesKey"/> (the names, capped), <see cref="DatabasesLeftOut.CountKey"/> (how many in all) and
     /// <see cref="DatabasesLeftOut.NoteKey"/>. Null in, null out; an envelope returned unchanged
     /// when nothing was left out or when it already carries the key.
     /// </summary>
@@ -1175,6 +1478,7 @@ internal static class McpHelpers
 
         node[DatabasesLeftOut.NamesKey] =
             JsonSerializer.SerializeToNode(DatabasesLeftOut.Named(leftOut), JsonOptions);
+        node[DatabasesLeftOut.CountKey] = DatabasesLeftOut.Count(leftOut);
         node[DatabasesLeftOut.NoteKey] = DatabasesLeftOut.Note(leftOut);
         return node.ToJsonString(JsonOptions);
     }

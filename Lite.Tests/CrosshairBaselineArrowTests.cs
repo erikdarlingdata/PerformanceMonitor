@@ -51,4 +51,33 @@ public sealed class CrosshairBaselineArrowTests
         Assert.Equal("▲", CorrelatedCrosshairManager.BaselineArrowSymbol(8, 2, 0, true, 0, 20));
         Assert.Null(CorrelatedCrosshairManager.BaselineArrowSymbol(8, 2, 0, true, 1, 20));
     }
+
+    // #7624: a point above the band is a ▲ in the tooltip only when its reads reach the floor, as its red dot is only drawn then.
+    private static string? HoverIo(long[]? reads, long minReads, double hoverX)
+    {
+        string? arrow = null;
+        StaTestThread.Run(() =>
+        {
+            var chart = new ScottPlot.WPF.WpfPlot();
+            using var manager = new CorrelatedCrosshairManager();
+            manager.AddLane(chart, "I/O ms", "ms");
+            manager.SetLaneBaseline(chart, 0, 2, minAnomalyValue: 2);
+            var times = new[] { 100.0, 101.0, 102.0 };
+            manager.SetLaneData(chart, times, new[] { 5.0, 5.0, 5.0 }, reads: reads, minReads: minReads);
+            arrow = manager.HoverArrowAt(chart, hoverX);
+        });
+        return arrow;
+    }
+
+    [Fact]
+    public void IoPointAboveTheBandWithTooFewReads_GetsNoTooltipArrow()
+        => Assert.Null(HoverIo(new long[] { 1000, 10, 1000 }, 250, 101));
+
+    [Fact]
+    public void IoPointAboveTheBandWithEnoughReads_GetsTheTooltipArrow()
+        => Assert.Equal("▲", HoverIo(new long[] { 1000, 10, 1000 }, 250, 100));
+
+    [Fact]
+    public void IoPointWithNoEntryInTheReadsList_CountsAsZeroReads_AsTheDotDoes()
+        => Assert.Null(HoverIo(new long[] { 1000 }, 250, 102));
 }

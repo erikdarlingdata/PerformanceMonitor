@@ -134,13 +134,22 @@ rated AS (
     SELECT collection_time, xacts / interval_sec AS tps
     FROM per_collection
     WHERE interval_sec > 0
+),
+collected AS (
+    /* #8293: every collection the collector wrote, so the coverage columns count collector instants; a collection
+       without a rate (the window's first, with no previous sample) joins as NULL and is not a sample. */
+    SELECT DISTINCT collection_time
+    FROM pg_database_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(tps)                                                             AS peak_tps,
        AVG(tps)                                                             AS avg_tps,
-       COUNT(*)                                                             AS tps_samples,
-       (array_agg(collection_time ORDER BY tps DESC NULLS LAST, collection_time DESC))[1]                    AS peak_time
-FROM rated
+       COUNT(tps)                                                             AS tps_samples,
+       (array_agg(collection_time ORDER BY tps DESC NULLS LAST, collection_time DESC))[1]                    AS peak_time,
+       " + WindowTiles.CoverageColumnsSql + @"
+FROM collected
+LEFT JOIN rated USING (collection_time)
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;
 
@@ -223,14 +232,14 @@ WITH per_collection AS (
     SELECT collection_time, MAX(total_sessions)::DOUBLE PRECISION AS total_sessions
     FROM pg_session_states
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-    AND   total_sessions IS NOT NULL
     GROUP BY collection_time
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_sessions)                                  AS peak_sessions,
        AVG(total_sessions)                                  AS avg_sessions,
-       COUNT(*)                                              AS sample_count,
-       (array_agg(collection_time ORDER BY total_sessions DESC NULLS LAST, collection_time DESC))[1] AS peak_time
+       COUNT(total_sessions)                                              AS sample_count,
+       (array_agg(collection_time ORDER BY total_sessions DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
+       " + WindowTiles.CoverageColumnsSql + @"
 FROM per_collection
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;
@@ -271,7 +280,8 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        AVG(acu_utilization_percent)                                          AS avg_capacity_pct,
        COUNT(acu_utilization_percent)                                        AS sample_count,
        (array_agg(collection_time ORDER BY acu_utilization_percent DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
-       MAX(cpu_percent)                                                      AS peak_cpu_percent
+       MAX(cpu_percent)                                                      AS peak_cpu_percent,
+       " + WindowTiles.CoverageColumnsSql + @"
 FROM pg_cpu_utilization
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 GROUP BY " + WindowTiles.LocalHourSql + @"
@@ -292,19 +302,26 @@ ORDER BY " + WindowTiles.LocalHourSql;
 WITH per_collection AS (
     SELECT collection_time,
            CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu') AS DOUBLE PRECISION) / 1000.0 AS total_wait_ms,
+           /* #8106: each (wait_type, wait_event) row carries its own sample_interval_seconds, the seconds since that
+              event's previous sighting, so the collection credits every row measured over a positive interval whole
+              and rates the sum over its cadence, the shortest interval any of its rows measured (the total then equals
+              the sum of its parts). A row whose interval is 0 adds nothing; a collection whose every row is 0 (a
+              restart) has no cadence and is not a sample; a pre-V128 collection (no stored interval) rates its total
+              over the LAG. */
            CASE WHEN MAX(sample_interval_seconds) IS NULL
-                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                ELSE NULLIF(MAX(sample_interval_seconds), 0)
-           END AS interval_sec
+                THEN coalesce(CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu') AS DOUBLE PRECISION), 0) / 1000.0 / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
+                ELSE coalesce(CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu' AND sample_interval_seconds > 0) AS DOUBLE PRECISION), 0) / 1000.0
+                     / MIN(NULLIF(sample_interval_seconds, 0))
+           END AS ms_per_sec
     FROM pg_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
     GROUP BY collection_time
 )
-SELECT MAX(CASE WHEN interval_sec > 0 THEN coalesce(total_wait_ms, 0) / interval_sec END) AS peak_ms_per_sec,
-       AVG(CASE WHEN interval_sec > 0 THEN coalesce(total_wait_ms, 0) / interval_sec END) AS mean_ms_per_sec,
-       SUM(coalesce(total_wait_ms, 0)) FILTER (WHERE interval_sec > 0)                    AS total_wait_ms,
-       COUNT(*) FILTER (WHERE interval_sec > 0)                                          AS sample_count,
-       COUNT(*)                                                                          AS collection_count
+SELECT MAX(ms_per_sec)                                                  AS peak_ms_per_sec,
+       AVG(ms_per_sec)                                                  AS mean_ms_per_sec,
+       SUM(coalesce(total_wait_ms, 0)) FILTER (WHERE ms_per_sec IS NOT NULL) AS total_wait_ms,
+       COUNT(*) FILTER (WHERE ms_per_sec IS NOT NULL)                   AS sample_count,
+       COUNT(*)                                                         AS collection_count
 FROM per_collection";
 
     /// <summary>
@@ -319,21 +336,29 @@ FROM per_collection";
 WITH per_collection AS (
     SELECT collection_time,
            CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu') AS DOUBLE PRECISION) / 1000.0 AS total_wait_ms,
+           /* #8106: each (wait_type, wait_event) row carries its own sample_interval_seconds, the seconds since that
+              event's previous sighting, so the collection credits every row measured over a positive interval whole
+              and rates the sum over its cadence, the shortest interval any of its rows measured (the total then equals
+              the sum of its parts). A row whose interval is 0 adds nothing; a collection whose every row is 0 (a
+              restart) has no cadence and is not a sample; a pre-V128 collection (no stored interval) rates its total
+              over the LAG. */
            CASE WHEN MAX(sample_interval_seconds) IS NULL
-                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                ELSE NULLIF(MAX(sample_interval_seconds), 0)
-           END AS interval_sec
+                THEN coalesce(CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu') AS DOUBLE PRECISION), 0) / 1000.0 / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
+                ELSE coalesce(CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu' AND sample_interval_seconds > 0) AS DOUBLE PRECISION), 0) / 1000.0
+                     / MIN(NULLIF(sample_interval_seconds, 0))
+           END AS ms_per_sec
     FROM pg_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
     GROUP BY collection_time
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
-       MAX(CASE WHEN interval_sec > 0 THEN coalesce(total_wait_ms, 0) / interval_sec END) AS peak_ms_per_sec,
-       AVG(CASE WHEN interval_sec > 0 THEN coalesce(total_wait_ms, 0) / interval_sec END) AS mean_ms_per_sec,
-       SUM(coalesce(total_wait_ms, 0)) FILTER (WHERE interval_sec > 0)                    AS total_wait_ms,
-       COUNT(*) FILTER (WHERE interval_sec > 0)                                          AS sample_count,
-       COUNT(*)                                                                          AS collection_count,
-       (array_agg(collection_time ORDER BY (CASE WHEN interval_sec > 0 THEN coalesce(total_wait_ms, 0) / interval_sec END) DESC NULLS LAST, collection_time DESC))[1] AS peak_time
+       MAX(ms_per_sec)                                                  AS peak_ms_per_sec,
+       AVG(ms_per_sec)                                                  AS mean_ms_per_sec,
+       SUM(coalesce(total_wait_ms, 0)) FILTER (WHERE ms_per_sec IS NOT NULL) AS total_wait_ms,
+       COUNT(*) FILTER (WHERE ms_per_sec IS NOT NULL)                   AS sample_count,
+       COUNT(*)                                                         AS collection_count,
+       (array_agg(collection_time ORDER BY ms_per_sec DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
+       " + WindowTiles.CoverageColumnsSql + @"
 FROM per_collection
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;

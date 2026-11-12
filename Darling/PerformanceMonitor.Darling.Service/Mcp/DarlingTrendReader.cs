@@ -60,34 +60,16 @@ internal static class DarlingTrendReader
     /// in the same cycle, which is why the join is nearest-match rather than equality.</summary>
     public sealed record MemoryGrantTrendPoint(DateTime CollectionTime, double TotalGrantedMb);
 
-    /// <summary>One perfmon-trend point for a single counter: the counter value, the per-interval delta,
-    /// and the wall-clock seconds that delta covers, all summed across the counter's instances at that
-    /// collection (Lite's <c>PerfmonTrendPoint</c>, plus the interval Lite does not carry).
-    /// <para><c>SampleIntervalSeconds</c> is what makes a zero readable: the collector reports 0 in
-    /// exactly the cases where no delta was knowable (first sighting, counter reset, gap past the
-    /// policy), so (0, 0) is "unknown" while (0, n) is "genuinely idle". Without it the two are the same
-    /// number and a fabricated zero reads as quiet (#2234).</para>
-    /// <para>Rows written before that fix carry a hard-coded 60 regardless of the real gap, so a rate
-    /// derived over a window spanning the upgrade is only as good as its newest rows.</para>
-    /// <para>Since V132 (#3653 A7) <c>CntrType</c> is the counter's stored DMV type when every instance row
-    /// summed into the point agrees on one, else null (a pre-rung row, or a family whose instances mix
-    /// types); <c>DeltaValue</c> and <c>SampleIntervalSeconds</c> are nullable because a GAUGE row stores
-    /// neither — its <c>Value</c> is the reading — and a 0 manufactured in their place would be #3642's
-    /// fabricated zero on a level that has no delta.</para>
-    /// <para><c>Artifacts</c> (#4476) is how many of this point's instance rows were an isolated single-sample
-    /// Wait Statistics spike, excluded from <c>Value</c>/<c>DeltaValue</c> before they were summed. This
-    /// per-collection type is Darling's own (Lite's <c>PerfmonTrendPoint</c> is a different type in a different
-    /// namespace), so the field is appended here rather than defaulted.</para></summary>
-    public sealed record PerfmonTrendPoint(DateTime CollectionTime, long Value, long? DeltaValue, long? SampleIntervalSeconds, int? CntrType, long Artifacts = 0);
-
     /// <summary>
     /// One query-duration / execution-count trend point, shared by the three Performance-Trends siblings:
-    /// the per-second rate (elapsed ms/sec) plus executions/sec (Lite's <c>QueryTrendPoint</c> shape).
-    /// <para><c>ExecutionCount</c> and <c>ExecutionsPerSecond</c> are the SAME quantity - executions per
-    /// second - and both are here because the first one shipped truncated to a long. On a server doing
-    /// three executions a second that rounds harmlessly; on a quiet one doing 0.4 it reports ZERO, which
-    /// reads as an idle server rather than a slow one. The long is kept so a consumer reading it does not
-    /// break; new readers should take <c>ExecutionsPerSecond</c>.</para>
+    /// the per-second rate (elapsed ms/sec), executions/sec, and the executions themselves (Lite's
+    /// <c>QueryTrendPoint</c> shape).
+    /// <para><c>ExecutionCount</c> is a COUNT (#8073): the executions summed over the point, the numerator
+    /// <c>ExecutionsPerSecond</c> was built from, so a caller summing it over a window gets the executions that
+    /// ran, as the shared <c>aggregate_note</c> promises. On the plan-cache trends it sums the point's RATED
+    /// collections only (an unrated collection's deltas were never measured, so a point with no rated collection
+    /// carries null); a Query Store interval always stores its count, so that trend carries it even on an
+    /// unrated point. <c>ExecutionsPerSecond</c> is the rate, and the one to chart.</para>
     /// </summary>
     public sealed record QueryDurationTrendPoint(
         DateTime CollectionTime, double? Value, long? ExecutionCount, double? ExecutionsPerSecond)
@@ -115,15 +97,25 @@ internal static class DarlingTrendReader
         /// <summary>How many collections in the point had no knowable rate and were left out of its rates
         /// (#3897): at most one on an unbucketed point (the point itself), any number in a bucket.</summary>
         public long UnratedCollections { get; init; }
+
+        /// <summary>#8575: set only on a Query Store point whose interval was still OPEN when it was last captured: the seconds
+        /// its totals cover (the newest snapshot that stored one of its rows, less the interval's start), shorter than the interval's
+        /// length. The rates are over this, not over the whole interval, and are null when it is under
+        /// <see cref="DarlingMcpTrendTools.PartialIntervalMinSeconds"/>. Null on a closed interval, a rollup point and every plan-cache point.</summary>
+        public double? PartialCoveredSeconds { get; init; }
     }
 
-    /// <summary>One point of a single query's per-collection history (Lite's <c>QueryStatsHistoryRow</c>,
-    /// the columns get_query_trend surfaces): the interval deltas + DOP spread + the plan hash. Time metrics
-    /// are microseconds (converted to ms by the tool, matching Lite).</summary>
+    /// <summary>One point of a single query's history (Lite's <c>QueryStatsHistoryRow</c>, the columns get_query_trend
+    /// surfaces): the interval deltas + DOP spread + the plan hash, summed over the collections of one bucket (#8063),
+    /// <see cref="CollectionTime"/> the bucket's start. Time metrics are microseconds (converted to ms by the tool,
+    /// matching Lite). <see cref="FirstCollectionTime"/> is the earliest collection the bucket holds (the rollup's hour
+    /// on the hourly tier), and <see cref="CollectionCount"/> how many it holds, null on the hourly tier, whose rollup
+    /// does not count them.</summary>
     public sealed record QueryHistoryPoint(
         DateTime CollectionTime, long DeltaExecutions, long DeltaCpuUs, long DeltaElapsedUs,
         long DeltaLogicalReads, long DeltaLogicalWrites, long DeltaPhysicalReads, long DeltaRows,
-        long DeltaSpills, int MinDop, int MaxDop, string QueryPlanHash);
+        long DeltaSpills, int? MinDop, int? MaxDop, string? QueryPlanHash, int? PlanCount = null,
+        DateTime? FirstCollectionTime = null, int? CollectionCount = null);
 
     /// <summary>
     /// Which physical tier answered a query-history read, and over what window (#2353).
@@ -138,19 +130,28 @@ internal static class DarlingTrendReader
     /// instead of returning a short array under the requested window's label.</para>
     /// </summary>
     public sealed record QueryHistoryResult(
-        List<QueryHistoryPoint> Points, string Source, DateTime EffectiveStartUtc, bool Truncated);
+        List<QueryHistoryPoint> Points, string Source, DateTime EffectiveStartUtc, bool Truncated,
+        bool StartOlderThanTier = false, int? TierKeepsDays = null);
 
     /// <summary>
     /// The aggregate twin of <see cref="QueryHistorySql"/>, reading the hourly continuous aggregate (#2353).
     ///
-    /// <para>Shaped to the SAME reader ordinals as the raw query so one mapper serves both. The eight columns
-    /// the rollup does not carry — reads, writes, physical reads, rows, spills, the DOP pair and the plan hash —
+    /// <para>Shaped to the SAME reader ordinals as the raw query so one mapper serves both. The nine columns
+    /// the rollup does not carry — reads, writes, physical reads, rows, spills, the DOP pair, the plan hash and the plan count —
     /// are selected as typed NULLs and surface as NULL in the payload. That is the honest answer: an hour bucket
     /// has no single plan hash and no single DOP, and inventing a zero would read as "none observed".</para>
     ///
     /// <para>What survives the rollup is exactly what a trend is usually asked for: executions, CPU and elapsed
     /// time. <c>bucket</c> is projected as <c>collection_time</c> so the series column name does not change
     /// underneath a caller that got a raw answer last time.</para>
+    ///
+    /// <para><b>One point per bucket (#7608, #8063).</b> The rollup keeps one row per <c>sql_handle</c> per hour, so a
+    /// statement with many handles gave many rows under one <c>collection_time</c>, with nothing to tell them
+    /// apart. The three measures are summed per bucket of <c>$6</c> minutes (a whole number of hours) over the
+    /// rollup's <c>bucket</c>, so a window of N hours gives at most N points at 60 minutes and fewer at a wider
+    /// width. A stitched relation (<see cref="RollupCoverage.StitchedRelationSql"/>) splits at one bucket boundary
+    /// (<c>bucket &lt; F</c> / <c>bucket &gt;= F</c>), so each hour comes from one relation and the sum never
+    /// counts an hour twice.</para>
     /// </summary>
     public static readonly string QueryHistoryHourlySql = QueryHistoryHourlySqlFor(TimescaleSupport.QueryStatsHourlyView);
 
@@ -161,33 +162,8 @@ internal static class DarlingTrendReader
     /// caller resolves which through <see cref="RollupCoverage.HourlyRelationFor"/>; the constant above is this
     /// builder over the legacy name, which is what every pre-#3653 pin reads.
     /// </summary>
-    public static string QueryHistoryHourlySqlFor(string hourlyRelation)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(hourlyRelation);
-
-        return $"""
-        SELECT
-            bucket AS collection_time,
-            execution_count_sum AS delta_execution_count,
-            worker_time_sum AS delta_worker_time,
-            elapsed_time_sum AS delta_elapsed_time,
-            CAST(NULL AS bigint) AS delta_logical_reads,
-            CAST(NULL AS bigint) AS delta_logical_writes,
-            CAST(NULL AS bigint) AS delta_physical_reads,
-            CAST(NULL AS bigint) AS delta_rows,
-            CAST(NULL AS bigint) AS delta_spills,
-            CAST(NULL AS int) AS min_dop,
-            CAST(NULL AS int) AS max_dop,
-            CAST(NULL AS text) AS query_plan_hash
-        FROM {hourlyRelation}
-        WHERE server_id = $1
-        AND   database_name = $2
-        AND   query_hash = $3
-        AND   bucket >= $4
-        AND   bucket < $5
-        ORDER BY bucket
-        """;
-    }
+    public static string QueryHistoryHourlySqlFor(string hourlyRelation) =>
+        DurationTrendRouting.BuildQueryHistoryHourlySql(hourlyRelation);
 
     /* ─────────────────────────── memory trend ─────────────────────────── */
 
@@ -349,9 +325,14 @@ internal static class DarlingTrendReader
 
     /// <summary>
     /// A single counter's value + per-interval delta trend — Lite's <c>GetPerfmonTrendAsync</c> / the
-    /// viewer's perfmon read: SUM the counter's instances per collection. Postgres <c>SUM(bigint)</c> is
-    /// numeric, so both SUMs CAST back to bigint for the typed GetInt64 reader (the viewer's PerfmonTrendsSql
-    /// makes the same cast). $1 server_id, $2 counter_name, $3/$4 window (naive UTC).
+    /// viewer's perfmon read: per collection, SUM the counter's instances object by object. An object whose
+    /// instances include <c>_Total</c> (the Databases and Locks objects) contributes that row alone, since it
+    /// already is the sum of the object's other instances and adding them again doubles the point; an object with
+    /// no <c>_Total</c> row contributes the sum of its instances; the objects are then summed, so a counter name
+    /// two objects share (Transaction Delay on Database Replica and Database Mirroring, #7416) keeps both objects'
+    /// rows whichever of them carries <c>_Total</c>. Postgres <c>SUM(bigint)</c> is numeric, so the outer SUMs
+    /// CAST back to bigint for the typed GetInt64 reader (the viewer's PerfmonTrendsSql makes the same cast).
+    /// $1 server_id, $2 counter_name, $3/$4 window (naive UTC).
     /// <para>The interval is MAX, not SUM, and that distinction is load-bearing. cntr_value and
     /// delta_cntr_value are additive across a counter's instance rows — summing Transactions/sec over
     /// every database is a meaningful total — but the interval is the same measured sweep gap repeated
@@ -361,11 +342,14 @@ internal static class DarlingTrendReader
     /// the same silent corruption this read exists to expose, pointed the other way. MAX also ignores a
     /// 0 from an instance seen for the first time, while still reporting 0 when every instance is
     /// unknown.</para>
-    /// <para>The type column is <c>CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END</c>
-    /// (V132): a type only where the instance rows summed into the point agree on one. A pre-rung row has
+    /// <para>The type column (V132) is a type only where the instance rows summed into the point agree on one.
+    /// The per-object layer carries <c>MIN(cntr_type) AS min_type</c> and <c>MAX(cntr_type) AS max_type</c>, and
+    /// the per-collection layer reads <c>CASE WHEN MIN(min_type) = MAX(max_type) THEN MAX(max_type) END</c>
+    /// over the objects, so the equality spans every row under the counter name: an object whose own rows
+    /// disagree leaves the point NULL even beside a second object that agrees on a type. A pre-rung row has
     /// NULL and so does a mixed-type family (the wait-statistics object's instances are a rate, a gauge and
     /// an average under one counter name) — the equality is what stops a mixed sum being classified by
-    /// whichever instance's id sorts first. Byte-identical to the viewer's and Lite's expression.</para>
+    /// whichever instance's id sorts first. The type expression and the artifact-filtered per-object arms (<c>NOT is_artifact</c>, #4476) match Lite's batched <c>GetPerfmonTrendsByCountersAsync</c> and bucketed <c>GetPerfmonBucketsAsync</c> reads; Lite's single-counter <c>GetPerfmonTrendAsync</c> omits the <c>NOT is_artifact</c> filter (#4476).</para>
     /// <para>#4476: a raw-row layer sits under the per-collection SUM, carrying <c>lag</c>/<c>lead</c> of
     /// <c>cntr_value</c> per instance (<c>PARTITION BY object_name, instance_name ORDER BY collection_time</c>
     /// — this read is already scoped to one counter name by <c>$2</c>, unlike the viewer's several-counter
@@ -399,19 +383,25 @@ internal static class DarlingTrendReader
         return $$"""
             SELECT
                 collection_time,
-                CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS cntr_value,
-                CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS delta_cntr_value,
+                CAST(SUM(cntr_value) AS bigint) AS cntr_value,
+                CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
                 CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds,
-                CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
-                COUNT(*) FILTER (WHERE is_artifact) AS artifacts
+                CASE WHEN MIN(min_type) = MAX(max_type) THEN MAX(max_type) END AS cntr_type,
+                SUM(artifacts) AS artifacts
             FROM (
                 SELECT
                     collection_time,
-                    cntr_value,
-                    delta_cntr_value,
-                    sample_interval_seconds,
-                    cntr_type,
-                    {{isArtifact}} AS is_artifact
+                    object_name,
+                    CASE WHEN bool_or(instance_name = '_Total')
+                         THEN SUM(cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
+                         ELSE SUM(cntr_value) FILTER (WHERE NOT is_artifact) END AS cntr_value,
+                    CASE WHEN bool_or(instance_name = '_Total')
+                         THEN SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
+                         ELSE SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) END AS delta_cntr_value,
+                    MAX(sample_interval_seconds) AS sample_interval_seconds,
+                    MIN(cntr_type) AS min_type,
+                    MAX(cntr_type) AS max_type,
+                    COUNT(*) FILTER (WHERE is_artifact) AS artifacts
                 FROM (
                     SELECT
                         collection_time,
@@ -420,65 +410,52 @@ internal static class DarlingTrendReader
                         delta_cntr_value,
                         sample_interval_seconds,
                         cntr_type,
-                        lag(cntr_value) OVER w AS prev_value,
-                        lead(cntr_value) OVER w AS next_value
-                    FROM v_perfmon_stats
-                    WHERE server_id = $1
-                    AND   counter_name = $2
-                    AND   collection_time >= $3
-                    AND   collection_time <= $4
-                    AND   {{isWaitStatistics}}
-                    WINDOW w AS (PARTITION BY object_name, instance_name ORDER BY collection_time)
+                        instance_name,
+                        {{isArtifact}} AS is_artifact
+                    FROM (
+                        SELECT
+                            collection_time,
+                            object_name,
+                            instance_name,
+                            cntr_value,
+                            delta_cntr_value,
+                            sample_interval_seconds,
+                            cntr_type,
+                            lag(cntr_value) OVER w AS prev_value,
+                            lead(cntr_value) OVER w AS next_value
+                        FROM v_perfmon_stats
+                        WHERE server_id = $1
+                        AND   counter_name = $2
+                        AND   collection_time >= $3
+                        AND   collection_time <= $4
+                        AND   {{isWaitStatistics}}
+                        WINDOW w AS (PARTITION BY object_name, instance_name ORDER BY collection_time)
 
-                    UNION ALL
+                        UNION ALL
 
-                    SELECT
-                        collection_time,
-                        object_name,
-                        cntr_value,
-                        delta_cntr_value,
-                        sample_interval_seconds,
-                        cntr_type,
-                        NULL AS prev_value,
-                        NULL AS next_value
-                    FROM v_perfmon_stats
-                    WHERE server_id = $1
-                    AND   counter_name = $2
-                    AND   collection_time >= $3
-                    AND   collection_time <= $4
-                    AND   NOT ({{isWaitStatistics}})
-                ) AS raw
-            ) AS flagged
+                        SELECT
+                            collection_time,
+                            object_name,
+                            instance_name,
+                            cntr_value,
+                            delta_cntr_value,
+                            sample_interval_seconds,
+                            cntr_type,
+                            NULL AS prev_value,
+                            NULL AS next_value
+                        FROM v_perfmon_stats
+                        WHERE server_id = $1
+                        AND   counter_name = $2
+                        AND   collection_time >= $3
+                        AND   collection_time <= $4
+                        AND   NOT ({{isWaitStatistics}})
+                    ) AS raw
+                ) AS flagged
+                GROUP BY collection_time, object_name
+            ) AS objects
             GROUP BY collection_time
             ORDER BY collection_time
             """;
-    }
-
-    public static async Task<List<PerfmonTrendPoint>> GetPerfmonTrendAsync(
-        NpgsqlDataSource postgres, int serverId, string counterName, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-    {
-        var items = new List<PerfmonTrendPoint>();
-        await using var command = postgres.CreateCommand(PerfmonTrendSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddInt(command, serverId);
-        DarlingMcpReadParameters.AddText(command, counterName);
-        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
-        DarlingMcpReadParameters.AddTimestamp(command, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            items.Add(new PerfmonTrendPoint(
-                reader.GetDateTime(0),
-                reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                /* NULL stays NULL on both: a gauge's instance rows store neither (V132), and a pre-V132 row's
-                   NULL interval is #3540's third state; 0 is the marker and must not be manufactured. */
-                reader.IsDBNull(2) ? null : reader.GetInt64(2),
-                reader.IsDBNull(3) ? null : reader.GetInt64(3),
-                reader.IsDBNull(4) ? null : reader.GetInt32(4),
-                reader.GetInt64(5)));
-        }
-
-        return items;
     }
 
     /// <summary>
@@ -583,12 +560,12 @@ internal static class DarlingTrendReader
     /// <c>DistinctPerfmonCountersSql</c>). $1 server_id, $2/$3 window (naive UTC).
     /// </summary>
     public const string DistinctPerfmonCountersSql = """
-        SELECT DISTINCT counter_name
+        SELECT DISTINCT counter_name, lower(counter_name) AS name_key
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
-        ORDER BY counter_name
+        ORDER BY lower(counter_name), counter_name
         """;
 
     public static async Task<List<string>> GetDistinctPerfmonCountersAsync(
@@ -1059,7 +1036,8 @@ internal static class DarlingTrendReader
     /// name, the key says which of the two facts spelled <c>truncated</c> this one is).
     /// </summary>
     public sealed record DurationTrendResult(
-        List<QueryDurationTrendPoint> Points, DurationTrendRoute Route, DateTime EffectiveStartUtc, bool Truncated);
+        List<QueryDurationTrendPoint> Points, DurationTrendRoute Route, DateTime EffectiveStartUtc, bool Truncated,
+        bool StartOlderThanTier = false, int? TierKeepsDays = null);
 
     /// <summary>
     /// Resolves the route for the query-stats duration trend: raw <c>query_stats</c> or
@@ -1235,7 +1213,8 @@ internal static class DarlingTrendReader
                 interval_start_time_utc AS point_time,
                 interval_end_time_utc,
                 execution_count,
-                avg_duration_us
+                avg_duration_us,
+                snapshot_time
             FROM
             (
                 SELECT
@@ -1243,6 +1222,7 @@ internal static class DarlingTrendReader
                     interval_end_time_utc,
                     execution_count,
                     avg_duration_us,
+                    collection_time AS snapshot_time,
                     ROW_NUMBER() OVER
                     (
                         PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
@@ -1272,7 +1252,8 @@ internal static class DarlingTrendReader
                 collection_time AS point_time,
                 CAST(NULL AS timestamp) AS interval_end_time_utc,
                 execution_count,
-                avg_duration_us
+                avg_duration_us,
+                CAST(NULL AS timestamp) AS snapshot_time
             FROM query_store_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -1292,15 +1273,41 @@ internal static class DarlingTrendReader
                 COALESCE(
                     extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))),
                     extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))
-                ) AS interval_seconds
+                ) AS interval_seconds,
+                /* #8575: an interval whose end is still in the future is OPEN: it has run only until the newest snapshot that
+                   stored one of its rows, so that is the time its totals cover. NULL for a closed interval, whose own
+                   length stays the denominator. */
+                CASE WHEN date_trunc('second', MAX(interval_end_time_utc)) > date_trunc('second', timezone('UTC', now()))
+                     THEN extract(epoch FROM (date_trunc('second', MAX(snapshot_time)) - date_trunc('second', point_time)))
+                END AS open_covered_seconds
             FROM placed
             GROUP BY point_time
+        ),
+        rated AS
+        (
+            /* #8575: an open interval is partial when its covered time is under its whole length. It is then rated over that
+               covered time, and left unrated (NULL, so no rate below) when that is under 60 seconds: a rate over a few seconds is
+               noise. A closed interval has no covered time and keeps its own interval_seconds. */
+            SELECT
+                point_time,
+                total_duration_ms,
+                total_executions,
+                CASE WHEN open_covered_seconds < interval_seconds
+                     THEN CASE WHEN open_covered_seconds >= 60 THEN open_covered_seconds END
+                     ELSE interval_seconds
+                END AS interval_seconds,
+                CASE WHEN open_covered_seconds < interval_seconds THEN open_covered_seconds END AS covered_seconds
+            FROM raw
         )
         SELECT
             point_time AS collection_time,
             CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
-            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
-        FROM raw
+            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second,
+            /* #8073: the interval's stored executions, a count the store holds whether or not the interval's length is knowable. */
+            CAST(total_executions AS bigint) AS execution_count,
+            /* #8575: the seconds an OPEN interval's rates cover, null on a closed one. */
+            covered_seconds
+        FROM rated
         ORDER BY point_time
         """;
     }
@@ -1421,28 +1428,35 @@ internal static class DarlingTrendReader
 
         /* effective_start is the first COLLECTION the store held (#2353), not the first bucket's start (#3897):
            a bucket is stamped at its boundary, which can sit before the window's first collection. */
-        var (effectiveStart, truncated) = DescribeCoverage(points.Count > 0 ? points[0].FirstCollectionTime : null, startUtc);
-        return new DurationTrendResult(points, route, effectiveStart, truncated);
+        /* #7416 item 21: the aged-out reason only when the start is older than what the answering tier keeps. */
+        var (effectiveStart, truncated, startOlderThanTier) = DurationTrendRouting.DescribeCoverage(
+            points.Count > 0 ? points[0].FirstCollectionTime : null, startUtc,
+            DurationTrendRouting.TierFloorUtc(route.Tier, route.RawRetentionApplies, route.ResolvedAtUtc));
+        return new DurationTrendResult(
+            points, route, effectiveStart, truncated, startOlderThanTier,
+            DurationTrendRouting.TierKeepsDays(route.Tier, route.RawRetentionApplies));
     }
 
     /// <summary>
     /// Reads the bucketed duration shape both routed tiers project (#3897): the bucket's start, its two
     /// time-weighted rates (NULL when nothing in the bucket was rated — kept as an unrated point, #3541 A12),
-    /// the worst single collection's rate (the busiest hour on the hourly tier), the bucket's first collection, and how many
-    /// of its collections were left out of the rates.
+    /// the worst single collection's rate (the busiest hour on the hourly tier), the bucket's first collection, how many
+    /// of its collections were left out of the rates, and (#8073) the executions its rate was built from, read by name
+    /// because the raw tier projects a <c>collection_count</c> the hourly tier does not.
     /// </summary>
     private static async Task<List<QueryDurationTrendPoint>> ReadBucketedDurationPointsAsync(
         NpgsqlCommand command, CancellationToken cancellationToken)
     {
         var items = new List<QueryDurationTrendPoint>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var executionCount = reader.GetOrdinal("execution_count");
         while (await reader.ReadAsync(cancellationToken))
         {
             var executionsPerSecond = reader.IsDBNull(2) ? (double?)null : Convert.ToDouble(reader.GetValue(2));
             items.Add(new QueryDurationTrendPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1)),
-                executionsPerSecond is { } eps ? (long)eps : null,
+                reader.IsDBNull(executionCount) ? null : Convert.ToInt64(reader.GetValue(executionCount)),
                 executionsPerSecond)
             {
                 PeakElapsedMsPerSecond = reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3)),
@@ -1502,11 +1516,11 @@ internal static class DarlingTrendReader
     }
 
     /// <summary>
-    /// Executes a bound duration-trend command and reads the shared three-column point shape. All three duration
-    /// trends project the same three columns - point time, a per-second value, a per-second execution rate - which is
-    /// the viewer's own arrangement, kept so the three series cannot drift apart in how they are read. Summed bigint
-    /// deltas come back as Postgres numeric, so the values Convert tolerantly. (The unbound-command wrapper that stood
-    /// above this had no callers once every trend ran the filtered statements, #5244 review L1.)
+    /// Executes a bound Query Store duration-trend command and reads the per-interval point shape: point time, a
+    /// per-second value, a per-second execution rate (the viewer's own arrangement, kept so the two surfaces cannot
+    /// drift apart in how they are read), and (#8073) the interval's stored executions. Summed bigint deltas come back
+    /// as Postgres numeric, so the values Convert tolerantly. (The unbound-command wrapper that stood above this had no
+    /// callers once every trend ran the filtered statements, #5244 review L1.)
     /// </summary>
     private static async Task<List<QueryDurationTrendPoint>> ReadDurationPointsAsync(
         NpgsqlCommand command, CancellationToken cancellationToken)
@@ -1517,17 +1531,20 @@ internal static class DarlingTrendReader
         {
             /* NULL stays NULL (#3541 A12): no rate for the window's first collection, or for a collection whose
                stored interval was unknowable (a restart pass, #3540 V128) — either way the point is kept as
-               UNRATED rather than dropped or coerced to the fabricated quiet the SQL stopped producing. */
+               UNRATED rather than dropped or coerced to the fabricated quiet the SQL stopped producing. The
+               count is the interval's own and is there either way. */
             var executionsPerSecond = reader.IsDBNull(2) ? (double?)null : Convert.ToDouble(reader.GetValue(2));
             items.Add(new QueryDurationTrendPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1)),
-                executionsPerSecond is { } eps ? (long)eps : null,
+                reader.IsDBNull(3) ? null : Convert.ToInt64(reader.GetValue(3)),
                 executionsPerSecond)
             {
                 /* An unbucketed point is its own single interval: no peak finer than itself to report, and at
                    most one unrated collection — itself. */
                 UnratedCollections = reader.IsDBNull(1) ? 1 : 0,
+                /* #8575: the open interval's covered seconds, the statement's last column; null on a closed one. */
+                PartialCoveredSeconds = reader.FieldCount > 4 && !reader.IsDBNull(4) ? Convert.ToDouble(reader.GetValue(4)) : null,
             });
         }
 
@@ -1537,34 +1554,66 @@ internal static class DarlingTrendReader
     /* ─────────────────────────── single-query history trend ─────────────────────────── */
 
     /// <summary>
-    /// A single query's per-collection history — Lite's <c>GetQueryStatsHistoryAsync</c>, focused to the
-    /// columns get_query_trend surfaces: the interval deltas + DOP spread + plan hash for one
-    /// (database, query_hash) over the window, oldest first. Reads the base <c>query_stats</c> table because
-    /// it projects no text — a read that wanted <c>query_text</c> or <c>query_plan_xml</c> would have to go
-    /// through <c>v_query_stats</c> to resolve the #1767 payload dimensions. $1 server_id, $2 database_name,
-    /// $3 query_hash, $4/$5 window (naive UTC).
+    /// A single query's raw-tier history in time buckets — Lite's <c>GetQueryStatsHistoryAsync</c> folded by
+    /// <c>McpQueryTools.BucketPoints</c>, focused to the columns get_query_trend surfaces: the interval deltas + DOP
+    /// spread + plan hash for one (database, query_hash) over the window, oldest first. Reads the base
+    /// <c>query_stats</c> table because it projects no text — a read that wanted <c>query_text</c> or
+    /// <c>query_plan_xml</c> would have to go through <c>v_query_stats</c> to resolve the #1767 payload dimensions.
+    /// $1 server_id, $2 database_name, $3 query_hash, $4/$5 window (naive UTC), $6 the bucket width in minutes.
+    ///
+    /// <para><b>One point per bucket (#7608, #8063).</b> One <c>query_hash</c> can run under several
+    /// <c>sql_handle</c>s or plans, and the collector writes one row per handle per collection, so the rows are
+    /// grouped by the bucket their collection falls in — <c>date_bin</c> of <c>$6</c> minutes from the shared origin
+    /// (<see cref="TrendBuckets.OriginSql"/>), the first clamped to the window's start, as every bucketed trend's is
+    /// — and the deltas are summed across the bucket's collections and handles. <c>first_collection_time</c> is the
+    /// earliest collection the bucket holds, the coverage the tool reports, and <c>collection_count</c> how many
+    /// distinct collections it holds. The DOP pair (<c>MIN</c> of the minimums, <c>MAX</c> of the maximums),
+    /// <c>query_plan_hash</c> and <c>plan_count</c> (distinct hashes) come only from the rows that ran in the bucket
+    /// (<c>delta_execution_count &gt; 0</c>), so a stale plan's lifetime DOP does not ride along. When no row in the
+    /// bucket ran, the point still shows its plan from all its rows, but the DOP pair is NULL: the DOP describes an
+    /// execution and there was none. The hash is the one every such row carries, and NULL when they differ or one
+    /// has none.</para>
     /// </summary>
-    public const string QueryHistorySql = """
+    public const string QueryHistorySql = $"""
         SELECT
-            collection_time,
-            delta_execution_count,
-            delta_worker_time,
-            delta_elapsed_time,
-            delta_logical_reads,
-            delta_logical_writes,
-            delta_physical_reads,
-            delta_rows,
-            delta_spills,
-            min_dop,
-            max_dop,
-            query_plan_hash
-        FROM query_stats
-        WHERE server_id = $1
-        AND   database_name = $2
-        AND   query_hash = $3
-        AND   collection_time >= $4
-        AND   collection_time <= $5
-        ORDER BY collection_time
+            bucket_start AS collection_time,
+            CAST(SUM(delta_execution_count) AS bigint) AS delta_execution_count,
+            CAST(SUM(delta_worker_time) AS bigint) AS delta_worker_time,
+            CAST(SUM(delta_elapsed_time) AS bigint) AS delta_elapsed_time,
+            CAST(SUM(delta_logical_reads) AS bigint) AS delta_logical_reads,
+            CAST(SUM(delta_logical_writes) AS bigint) AS delta_logical_writes,
+            CAST(SUM(delta_physical_reads) AS bigint) AS delta_physical_reads,
+            CAST(SUM(delta_rows) AS bigint) AS delta_rows,
+            CAST(SUM(delta_spills) AS bigint) AS delta_spills,
+            MIN(min_dop) FILTER (WHERE delta_execution_count > 0) AS min_dop,
+            MAX(max_dop) FILTER (WHERE delta_execution_count > 0) AS max_dop,
+            CASE WHEN MIN(query_plan_hash) FILTER (WHERE ran) = MAX(query_plan_hash) FILTER (WHERE ran)
+                  AND COUNT(query_plan_hash) FILTER (WHERE ran) = COUNT(*) FILTER (WHERE ran)
+                 THEN MIN(query_plan_hash) FILTER (WHERE ran) END AS query_plan_hash,
+            CAST(COUNT(DISTINCT query_plan_hash) FILTER (WHERE ran) AS int) AS plan_count,
+            MIN(collection_time) AS first_collection_time,
+            CAST(COUNT(DISTINCT collection_time) AS int) AS collection_count
+        FROM
+        (
+            SELECT
+                q.*,
+                COALESCE(q.delta_execution_count, 0) > 0
+                OR NOT bool_or(COALESCE(q.delta_execution_count, 0) > 0) OVER (PARTITION BY q.bucket_start) AS ran
+            FROM
+            (
+                SELECT
+                    qs.*,
+                    GREATEST(date_bin(CAST($6 AS integer) * INTERVAL '1 minute', qs.collection_time, {TrendBuckets.OriginSql}), $4) AS bucket_start
+                FROM query_stats AS qs
+                WHERE qs.server_id = $1
+                AND   qs.database_name = $2
+                AND   qs.query_hash = $3
+                AND   qs.collection_time >= $4
+                AND   qs.collection_time <= $5
+            ) AS q
+        ) AS b
+        GROUP BY bucket_start
+        ORDER BY bucket_start
         """;
 
     /* The tier ladder — aliases of DurationTrendRouting since #3653; see the block comment above
@@ -1600,6 +1649,11 @@ internal static class DarlingTrendReader
     /// </summary>
     public static RetentionTier ResolveTier(DateTime startUtc, DateTime nowUtc, bool hourlyAvailable, TierCoverage coverage) =>
         DurationTrendRouting.ResolveTier(startUtc, nowUtc, hourlyAvailable, coverage);
+
+    /// <summary><see cref="ResolveTier(DateTime, DateTime, bool, TierCoverage)"/> at the WALL CLOCK, the "now" the rollup's lag is measured against
+    /// (never the window's end, see <see cref="ShouldUseRawTier"/>). For a tool that is anchored by <c>as_of</c> and so must not name the clock itself (#7609).</summary>
+    public static RetentionTier ResolveTierAtWallClock(DateTime startUtc, bool hourlyAvailable, TierCoverage coverage) =>
+        ResolveTier(startUtc, DateTime.UtcNow, hourlyAvailable, coverage);
 
     /// <summary>
     /// How far past the requested start the first served point may sit before the answer calls itself
@@ -1649,29 +1703,39 @@ internal static class DarlingTrendReader
     public static async Task<QueryHistoryResult> GetQueryHistoryAsync(
         NpgsqlDataSource postgres, int serverId, string databaseName, string queryHash, DateTime startUtc, DateTime endUtc,
         DateTime? nowUtc = null, bool hourlyAvailable = true, TierCoverage coverage = default, string? hourlyRelation = null,
-        CancellationToken cancellationToken = default)
+        int bucketMinutes = 1, CancellationToken cancellationToken = default)
     {
         var tier = ResolveTier(startUtc, nowUtc ?? DateTime.UtcNow, hourlyAvailable, coverage);
 
         /* #3653 (Q12): the caller that probed the store passes the hourly relation it resolved
            (RollupCoverage.HourlyRelationFor — the interval-honest successor where it reaches as far as the
-           legacy for this window); a caller that has not probed reads the legacy, which every store has. */
+           legacy for this window); a caller that has not probed reads the legacy, which every store has.
+           #8063: both tiers gather their rows into buckets of bucketMinutes; the tool resolves the width (TrendBuckets.Resolve,
+           raised to the rollup's hour on the hourly tier), and the default of one minute leaves each collection, or each
+           rollup hour, its own point. */
         var items = tier == RetentionTier.Raw
-            ? await ReadQueryHistoryAsync(postgres, QueryHistorySql, serverId, databaseName, queryHash, startUtc, endUtc, cancellationToken)
-            : await ReadQueryHistoryAsync(postgres, QueryHistoryHourlySqlFor(hourlyRelation ?? TimescaleSupport.QueryStatsHourlyView), serverId, databaseName, queryHash, startUtc, endUtc, cancellationToken);
+            ? await ReadQueryHistoryAsync(postgres, QueryHistorySql, serverId, databaseName, queryHash, startUtc, endUtc, bucketMinutes, cancellationToken)
+            : await ReadQueryHistoryAsync(postgres, QueryHistoryHourlySqlFor(hourlyRelation ?? TimescaleSupport.QueryStatsHourlyView), serverId, databaseName, queryHash, startUtc, endUtc, bucketMinutes, cancellationToken);
 
-        var (effectiveStart, truncated) = DescribeCoverage(items.Count > 0 ? items[0].CollectionTime : null, startUtc);
+        /* #7416 item 21: the aged-out reason only when the start is older than what the answering tier keeps. The coverage
+           begins at the first collection the store held (#8063), not at the first bucket's stamp, which is clamped to the
+           window's start. */
+        var (effectiveStart, truncated, startOlderThanTier) = DurationTrendRouting.DescribeCoverage(
+            items.Count > 0 ? items[0].FirstCollectionTime ?? items[0].CollectionTime : null, startUtc,
+            DurationTrendRouting.TierFloorUtc(tier, hourlyAvailable, nowUtc ?? DateTime.UtcNow));
 
         return new QueryHistoryResult(
             items,
             DurationTrendRouting.SourceWord(tier),
             effectiveStart,
-            truncated);
+            truncated,
+            startOlderThanTier,
+            DurationTrendRouting.TierKeepsDays(tier, hourlyAvailable));
     }
 
     private static async Task<List<QueryHistoryPoint>> ReadQueryHistoryAsync(
         NpgsqlDataSource postgres, string sql, int serverId, string databaseName, string queryHash,
-        DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
+        DateTime startUtc, DateTime endUtc, int bucketMinutes, CancellationToken cancellationToken)
     {
         var items = new List<QueryHistoryPoint>();
         await using var command = postgres.CreateCommand(sql);
@@ -1681,6 +1745,7 @@ internal static class DarlingTrendReader
         DarlingMcpReadParameters.AddText(command, queryHash);
         DarlingMcpReadParameters.AddTimestamp(command, startUtc);
         DarlingMcpReadParameters.AddTimestamp(command, endUtc);
+        DarlingMcpReadParameters.AddInt(command, bucketMinutes);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -1694,9 +1759,12 @@ internal static class DarlingTrendReader
                 reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
                 reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
                 reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
-                reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9)),
-                reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10)),
-                reader.IsDBNull(11) ? "" : reader.GetString(11)));
+                reader.IsDBNull(9) ? null : Convert.ToInt32(reader.GetValue(9)),
+                reader.IsDBNull(10) ? null : Convert.ToInt32(reader.GetValue(10)),
+                reader.IsDBNull(11) ? null : reader.GetString(11),
+                reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)),
+                reader.IsDBNull(13) ? null : reader.GetDateTime(13),
+                reader.IsDBNull(14) ? null : Convert.ToInt32(reader.GetValue(14))));
         }
 
         return items;

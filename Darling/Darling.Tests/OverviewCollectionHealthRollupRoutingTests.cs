@@ -21,11 +21,10 @@ namespace Darling.Tests;
 /// <see cref="ViewerDataService.GetFleetCollectionHealthByServerAsync"/>, not a raw <c>collection_log</c> scan
 /// per server (<c>ViewerDataService.GetCollectionHealthAsync</c>), a second raw fleet scan every 30 s tick
 /// (the viewer has no other fleet read now, see <see cref="TheViewerHasOneFleetHealthRead_TheStampedByServerRollup"/>),
-/// or the badge's own raw
-/// per-server-tab scan (<see cref="ViewerDataService.PermissionDeniedCollectorCountSql"/>) on every 1 min
-/// auto-refresh plus every tab activation. Source-text pins, deliberately: the regression this guards against
-/// COMPILES (the old reads still exist, for the Collection Health tab and for Lite's parity twin), so only
-/// reading the call sites catches a caller quietly routed back to raw.
+/// or a raw
+/// per-server-tab scan for the badge on every 1 min auto-refresh plus every tab activation. Source-text pins,
+/// deliberately: the regression this guards against COMPILES (the old read still exists, for the Collection
+/// Health tab), so only reading the call sites catches a caller quietly routed back to raw.
 /// </summary>
 public sealed class OverviewCollectionHealthRollupRoutingTests
 {
@@ -85,8 +84,7 @@ public sealed class OverviewCollectionHealthRollupRoutingTests
 
     /// <summary>
     /// #4226's second pass: the server-tab badge (<c>ViewerServerTab.UpdatePermissionDeniedBadgeAsync</c>) must
-    /// not issue <see cref="ViewerDataService.PermissionDeniedCollectorCountSql"/> itself — that scan is kept
-    /// only as the documented raw shape Lite's parity twin still runs and this pin still holds it to.
+    /// not scan <c>collection_log</c> itself: it takes its count from the shared fleet-by-server rollup read.
     /// </summary>
     [Fact]
     public void TheServerTabBadge_ReadsTheFleetByServerRollup_NotItsOwnRawScan()
@@ -100,7 +98,7 @@ public sealed class OverviewCollectionHealthRollupRoutingTests
         var methodBody = source.Substring(methodStart, methodEnd - methodStart);
 
         Assert.Contains("GetFleetCollectionHealthByServerAsync", methodBody, StringComparison.Ordinal);
-        Assert.DoesNotContain("CreateCommand(PermissionDeniedCollectorCountSql", methodBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("CreateCommand(", methodBody, StringComparison.Ordinal);
     }
 
     /// <summary>The new fleet-by-server raw statement is shaped for

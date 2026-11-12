@@ -32,6 +32,14 @@ public sealed class ViewerResourceSemaphoreGridRowTests
     }
 
     [Fact]
+    public void ThePoolColumn_NamesTheInternalAndDefaultPools_AndNumbersTheRest()
+    {
+        Assert.Equal("Default pool", ResourceSemaphorePressureGridRow.From(Window(0, 0)).PoolName);
+        Assert.Equal("Internal pool", ResourceSemaphorePressureGridRow.From(Window(0, 0) with { PoolId = 1 }).PoolName);
+        Assert.Equal("Pool 257", ResourceSemaphorePressureGridRow.From(Window(0, 0) with { PoolId = 257 }).PoolName);
+    }
+
+    [Fact]
     public void APoolThatNeverHadAWaiterOrAGrant_HasNoPeakInstant_AndAPoolThatDid_Has()
     {
         var quiet = ResourceSemaphorePressureGridRow.From(Window(0, 0));

@@ -33,15 +33,18 @@ internal sealed class DarlingWebFailureObserver
     private readonly RequestDelegate _next;
     private readonly ILogger _logger;
     private readonly DarlingHttpRefusalLog _preAuthThrottle;
+    private readonly bool _managedStore;
 
     /// <param name="preAuthThrottle">Round 2, L1: the throttle for the failure line of a request that has not passed the auth gate
     /// (<see cref="DarlingWebFailureLog.RequestTracking.PassedAuth"/>). The host passes the refusal log it created for this started
     /// server, so a rebind starts with a clean budget.</param>
-    public DarlingWebFailureObserver(RequestDelegate next, ILogger logger, DarlingHttpRefusalLog preAuthThrottle)
+    /// <param name="managedStore">Whether the host runs on the managed store; it picks the words of the 403 a refused write answers with.</param>
+    public DarlingWebFailureObserver(RequestDelegate next, ILogger logger, DarlingHttpRefusalLog preAuthThrottle, bool managedStore = false)
     {
         _next = next;
         _logger = logger;
         _preAuthThrottle = preAuthThrottle;
+        _managedStore = managedStore;
     }
 
     /// <summary>
@@ -56,6 +59,8 @@ internal sealed class DarlingWebFailureObserver
     {
         var stopwatch = Stopwatch.StartNew();
         var tracking = DarlingWebFailureLog.BeginRequestTracking();
+        tracking.IsWrite = !(HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method) || HttpMethods.IsOptions(context.Request.Method));
+        tracking.ManagedStore = _managedStore;
         try
         {
             await _next(context);

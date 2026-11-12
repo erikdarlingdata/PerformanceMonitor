@@ -20,18 +20,27 @@ namespace PerformanceMonitorLite.Services;
 internal static class WebhookChannelTrayNotice
 {
     /// <summary>The title and message for one edge, or null when <paramref name="notice"/> announces nothing.</summary>
-    internal static (string Title, string Message)? For(WebhookChannelNotice notice, string channel, int consecutiveFailures) =>
-        notice switch
+    internal static (string Title, string Message)? For(WebhookChannelNotice notice, string channel, int consecutiveFailures)
+    {
+        /* #8245: the Email entry is the SMTP relay, read from the same ledger as the webhook destinations. Its text says email,
+           and no more than the webhook text does: never the relay or an address. */
+        var email = channel == NotificationRouter.EmailChannel;
+        return notice switch
         {
             WebhookChannelNotice.Failing => (
                 "Notification Channel Failing",
-                $"The {channel} webhook has failed {consecutiveFailures} times in a row, so alerts sent to it are not arriving. Other channels are not affected. The log has the error."),
+                email
+                    ? $"Alert email has failed {consecutiveFailures} times in a row, so emailed alerts are not arriving. Other channels are not affected. The log has the error."
+                    : $"The {channel} webhook has failed {consecutiveFailures} times in a row, so alerts sent to it are not arriving. Other channels are not affected. The log has the error."),
             WebhookChannelNotice.Recovered => (
                 "Notification Channel Recovered",
-                $"The {channel} webhook is delivering again."),
+                email ? "Alert email is delivering again." : $"The {channel} webhook is delivering again."),
             WebhookChannelNotice.TurnedOff => (
                 "Notification Channel Turned Off",
-                $"The {channel} webhook was turned off (no destination is configured for it)."),
+                email
+                    ? "Alert email was turned off (SMTP is disabled or has no recipients)."
+                    : $"The {channel} webhook was turned off (no destination is configured for it)."),
             _ => null,
         };
+    }
 }

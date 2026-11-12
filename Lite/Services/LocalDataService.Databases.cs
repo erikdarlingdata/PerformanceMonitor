@@ -29,7 +29,7 @@ FROM (
 ) AS d
 WHERE database_name IS NOT NULL
 AND   database_name NOT IN ('master', 'model', 'msdb', 'tempdb')
-ORDER BY database_name";
+ORDER BY lower(database_name), database_name";
 
     /// <summary>
     /// The distinct user databases the store has collected for one server (empty when nothing has been

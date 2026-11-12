@@ -185,14 +185,14 @@ public class StoryNamedHopsTests
         var jobHeadline = FactAdvice.Compose("RUNNING_JOBS", byKey)!.Headline;
         var chainHeadline = FactAdvice.Compose("BLOCKING_CHAIN", byKey)!.Headline;
         Assert.Equal(
-            $" {FactIdentity.SentenceMarker} `RUNNING_JOBS` (severity 0.80) — Agent job `Nightly Index Maintenance`: {jobHeadline}." +
-            $" {FactIdentity.SentenceMarker} `BLOCKING_CHAIN` (severity 0.70) — lead-blocker session 57, sleeping: {chainHeadline}.",
+            $" {FactIdentity.SentenceMarker} `RUNNING_JOBS` (severity 0.80): Agent job `Nightly Index Maintenance`: {jobHeadline}." +
+            $" {FactIdentity.SentenceMarker} `BLOCKING_CHAIN` (severity 0.70): lead-blocker session 57, sleeping: {chainHeadline}.",
             appended);
 
         /* A hop with no composable advice gets the identity alone; a headline that already ends a sentence is not
            given a second full stop. */
-        Assert.Equal(" Behind it: `RUNNING_JOBS` (severity 0.80) — Agent job `X`.", FactIdentity.Sentence(new NamedHop("RUNNING_JOBS", "Agent job `X`", 0.8), null));
-        Assert.Equal(" Behind it: `RUNNING_JOBS` (severity 0.80) — Agent job `X`: Stuck?", FactIdentity.Sentence(new NamedHop("RUNNING_JOBS", "Agent job `X`", 0.8), " Stuck? "));
+        Assert.Equal(" Behind it: `RUNNING_JOBS` (severity 0.80): Agent job `X`.", FactIdentity.Sentence(new NamedHop("RUNNING_JOBS", "Agent job `X`", 0.8), null));
+        Assert.Equal(" Behind it: `RUNNING_JOBS` (severity 0.80): Agent job `X`: Stuck?", FactIdentity.Sentence(new NamedHop("RUNNING_JOBS", "Agent job `X`", 0.8), " Stuck? "));
     }
 
     [Fact]
@@ -237,7 +237,33 @@ public class StoryNamedHopsTests
 
         FactAdvice.PopulateStoryText([story], facts);
 
-        Assert.Contains($" {FactIdentity.SentenceMarker} `QUERY_SPILLS` (severity 0.40) — most spilled query `Sales/0xAB`: ", Investigation(story), StringComparison.Ordinal);
+        Assert.Contains($" {FactIdentity.SentenceMarker} `QUERY_SPILLS` (severity 0.40): most spilled query `Sales/0xAB`: ", Investigation(story), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #8572: a PARAMETER_SENSITIVITY root that walks to QUERY_SPILLS names "most spilled query X" and gives X's OWN pages (232,588),
+    /// not the window total the fact's value holds (274,106) as the sentence did before.
+    /// </summary>
+    [Fact]
+    public void ParameterSensitivityRootConsumingQuerySpills_GivesTheNamedQuerysOwnPages_NotTheWindowTotal()
+    {
+        var facts = new List<Fact>
+        {
+            new() { Source = "queries", Key = "PARAMETER_SENSITIVITY", Value = 12, BaseSeverity = 1.0, Severity = 1.0,
+                    Metadata = new() { ["worst_ratio"] = 12, ["spill_divergence"] = 1 } },
+            new() { Source = "queries", Key = "QUERY_SPILLS", Value = 274_106, BaseSeverity = 0.4, Severity = 0.4, ObjectName = "Sales/0xAB",
+                    Metadata = new() { ["total_spills"] = 274_106, ["spilling_query_count"] = 2 },
+                    Ranked = [new("Sales/0xAB", "Sales", 232_588), new("Sales/0xCD", "Sales", 41_518)] },
+        };
+        var story = Assert.Single(new InferenceEngine(new RelationshipGraph()).BuildStories(facts), s => s.RootFactKey == "PARAMETER_SENSITIVITY");
+        Assert.Contains("QUERY_SPILLS", story.Path);
+
+        FactAdvice.PopulateStoryText([story], facts);
+
+        var sentence = Investigation(story);
+        var hop = sentence[sentence.IndexOf("most spilled query `Sales/0xAB`", StringComparison.Ordinal)..];
+        Assert.Contains("232,588 pages", hop, StringComparison.Ordinal);
+        Assert.DoesNotContain("274,106", hop, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -272,7 +298,7 @@ public class StoryNamedHopsTests
 
         FactAdvice.PopulateStoryText([story], facts);
         var investigation = Investigation(story);
-        Assert.Contains($" {FactIdentity.SentenceMarker} `BLOCKING_CHAIN` (severity 0.70) — lead-blocker session 57, sleeping: ", investigation, StringComparison.Ordinal);
+        Assert.Contains($" {FactIdentity.SentenceMarker} `BLOCKING_CHAIN` (severity 0.70): lead-blocker session 57, sleeping: ", investigation, StringComparison.Ordinal);
         Assert.Contains("57", investigation, StringComparison.Ordinal);
         Assert.Equal(1, investigation.Split(FactIdentity.SentenceMarker).Length - 1);
     }

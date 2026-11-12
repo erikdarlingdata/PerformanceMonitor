@@ -25,7 +25,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// deadlock grids instead carry their best-effort plan XML in-row (see ViewerDataService.Blocking.cs /
 /// .Deadlock.cs), like they already carry the report / graph XML. These keyed lookups are keyed (server +
 /// object identity), not windowed, so there is no timestamp parameter and no naive-UTC concern —
-/// <c>ORDER BY collection_time DESC LIMIT 1</c> returns the most recently captured plan for that key. Plans
+/// <c>ORDER BY collection_time DESC LIMIT 1</c> returns the most recently captured plan for that key (a history row passes its own plan hash or handle, which sorts first, #7175). Plans
 /// can be large; they are read as text with no size games (the task's rule: TOAST handles storage, reading
 /// is fine).
 /// </summary>
@@ -34,10 +34,16 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// The latest captured query_stats plan for a Top-Queries row, keyed by (server, database, query_hash) —
     /// the grid groups by (database_name, query_hash), so the same key fetches the plan the row represents.
-    /// $1 server_id, $2 database_name, $3 query_hash.
+    /// $1 server_id, $2 database_name, $3 query_hash, $4 query_plan_hash (#7175).
+    /// <para>$4 is the plan a per-snapshot history row names. One query_hash can compile to several plans (the
+    /// regression the history window's Plan Hash column exists to show), and the newest snapshot holds the NEW
+    /// plan, so an old row's Download would save the wrong plan. A row whose hash matches $4 sorts first and the
+    /// newest of those wins. When none match (that plan's text was never stored) the read falls back to the
+    /// newest plan for the query, the same answer the parent grid gets. NULL $4 sorts everything equally, which
+    /// is the plain newest-first read the parent grid wants.</para>
     /// </summary>
     public const string QueryStatsPlanXmlSql = """
-        SELECT query_plan_xml, query_plan_gz
+        SELECT query_plan_xml, query_plan_gz, query_plan_hash, collection_time
         FROM v_query_stats
         WHERE server_id = $1
         AND   database_name = $2
@@ -46,16 +52,28 @@ public sealed partial class ViewerDataService
            NULL, so the presence guard and the projection must carry BOTH forms — the C# side
            resolves text-else-gz (PayloadDimensions.ResolveContent). */
         AND   (query_plan_xml IS NOT NULL OR query_plan_gz IS NOT NULL)
-        ORDER BY collection_time DESC
+        ORDER BY COALESCE(query_plan_hash = $4::text, false) DESC, collection_time DESC
         LIMIT 1
         """;
 
     /// <summary>
     /// The stored execution plan for a Top-Queries grid row, or null when no plan was captured for that
     /// (database, query_hash). Read as text — no length cap (the collector stored the whole plan).
+    /// <paramref name="queryPlanHash"/> is the plan a history row names (#7175): that plan is preferred, and the
+    /// newest plan for the query is the fallback. Leave it null for the Top-Queries row, which means the newest.
     /// </summary>
     public async Task<string?> GetQueryStatsPlanXmlAsync(
-        int serverId, string databaseName, string queryHash, CancellationToken cancellationToken = default)
+        int serverId, string databaseName, string queryHash, string? queryPlanHash = null, CancellationToken cancellationToken = default)
+        => (await GetQueryStatsPlanAsync(serverId, databaseName, queryHash, queryPlanHash, cancellationToken))?.PlanXml;
+
+    /// <summary>
+    /// <see cref="GetQueryStatsPlanXmlAsync"/> plus which plan the read picked (#7175): its plan hash and the
+    /// snapshot it came from, and whether that is NOT the plan the caller asked for. A history window names its
+    /// saved file and its viewer title from this, so a row whose own plan was never stored does not save the newest
+    /// plan under the row's hash.
+    /// </summary>
+    public async Task<StoredPlanRead?> GetQueryStatsPlanAsync(
+        int serverId, string databaseName, string queryHash, string? queryPlanHash = null, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(queryHash))
         {
@@ -68,11 +86,12 @@ public sealed partial class ViewerDataService
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = queryHash });
+            command.Parameters.Add(new NpgsqlParameter { Value = string.IsNullOrEmpty(queryPlanHash) ? DBNull.Value : queryPlanHash, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
 
             var captured = await ReadPlanTextOrGzipAsync(command, cancellationToken);
             if (captured is not null)
             {
-                return captured;
+                return StoredPlanRead.Of(captured.Value, queryPlanHash);
             }
         }
 
@@ -86,7 +105,8 @@ public sealed partial class ViewerDataService
         backlog.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         backlog.Parameters.Add(new NpgsqlParameter<string> { TypedValue = queryHash });
         backlog.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
-        return await ReadBacklogPlanXmlAsync(backlog, cancellationToken);
+        /* The backlog row names no plan hash or snapshot, so its identity is unknown. */
+        return StoredPlanRead.Of(await ReadBacklogPlanXmlAsync(backlog, cancellationToken), queryPlanHash);
     }
 
     /// <summary>
@@ -180,10 +200,14 @@ public sealed partial class ViewerDataService
     /// table (there is no v_procedure_stats view; TopProceduresSql already reads the base table), which also
     /// avoids the V7-column / pinned-view issue the blocked/deadlock reads sidestep — so unlike the
     /// query_stats twin above, this read resolves the #1767 plan dimension itself. $1 server_id, $2
-    /// database_name, $3 schema_name, $4 object_name.
+    /// database_name, $3 schema_name, $4 object_name, $5 plan_handle (#7175).
+    /// <para>$5 is the compiled plan a history row names. A procedure that recompiled has a row per plan_handle, and
+    /// the newest snapshot holds the new plan, so an old row's plan would otherwise read as the new one. A row
+    /// whose handle equals $5 sorts first and the newest of those wins. With no match the read falls back to the
+    /// newest plan for the object. NULL $5 is the plain newest-first read the parent grid wants.</para>
     /// </summary>
     public const string ProcedureStatsPlanXmlSql = """
-        SELECT COALESCE(ps.query_plan_xml, qpd.query_plan_xml), qpd.query_plan_gz
+        SELECT COALESCE(ps.query_plan_xml, qpd.query_plan_xml), qpd.query_plan_gz, ps.plan_handle, ps.collection_time
         FROM procedure_stats AS ps
         LEFT JOIN query_plan_dim AS qpd
           ON qpd.digest = ps.query_plan_digest
@@ -197,16 +221,26 @@ public sealed partial class ViewerDataService
            extends the same reasoning one step: dim rows written since V54 carry gzip bytes with the
            dim TEXT column NULL too, so the coalesced text alone would discard every post-V54 plan. */
         AND   (COALESCE(ps.query_plan_xml, qpd.query_plan_xml) IS NOT NULL OR qpd.query_plan_gz IS NOT NULL)
-        ORDER BY ps.collection_time DESC
+        ORDER BY COALESCE(ps.plan_handle = $5::text, false) DESC, ps.collection_time DESC
         LIMIT 1
         """;
 
     /// <summary>
     /// The stored execution plan for a Top-Procedures grid row, or null when no plan was captured for that
     /// (database, schema, object). Read as text — no length cap (the collector stored the whole plan).
+    /// <paramref name="planHandle"/> is the compiled plan a history row names (#7175): that plan is preferred, and
+    /// the newest plan for the object is the fallback. Leave it null for the Top-Procedures row.
     /// </summary>
     public async Task<string?> GetProcedureStatsPlanXmlAsync(
-        int serverId, string databaseName, string schemaName, string objectName, CancellationToken cancellationToken = default)
+        int serverId, string databaseName, string schemaName, string objectName, string? planHandle = null, CancellationToken cancellationToken = default)
+        => (await GetProcedureStatsPlanAsync(serverId, databaseName, schemaName, objectName, planHandle, cancellationToken))?.PlanXml;
+
+    /// <summary>
+    /// <see cref="GetProcedureStatsPlanXmlAsync"/> plus which plan the read picked (#7175): its plan handle and
+    /// snapshot time, and whether that is NOT the plan the caller asked for.
+    /// </summary>
+    public async Task<StoredPlanRead?> GetProcedureStatsPlanAsync(
+        int serverId, string databaseName, string schemaName, string objectName, string? planHandle = null, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(objectName))
         {
@@ -220,11 +254,12 @@ public sealed partial class ViewerDataService
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = schemaName ?? "" });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = objectName });
+            command.Parameters.Add(new NpgsqlParameter { Value = string.IsNullOrEmpty(planHandle) ? DBNull.Value : planHandle, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
 
             var captured = await ReadPlanTextOrGzipAsync(command, cancellationToken);
             if (captured is not null)
             {
-                return captured;
+                return StoredPlanRead.Of(captured.Value, planHandle);
             }
         }
 
@@ -238,7 +273,7 @@ public sealed partial class ViewerDataService
         backlog.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
         backlog.Parameters.Add(new NpgsqlParameter<string> { TypedValue = schemaName ?? "" });
         backlog.Parameters.Add(new NpgsqlParameter<string> { TypedValue = objectName });
-        return await ReadBacklogPlanXmlAsync(backlog, cancellationToken);
+        return StoredPlanRead.Of(await ReadBacklogPlanXmlAsync(backlog, cancellationToken), planHandle);
     }
 
     /// <summary>
@@ -253,10 +288,12 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// Executes a two-column (text, gzip bytea) plan read and resolves the form the row carries —
-    /// the #2069 read seam shared by both plan-dimension reads above. One row max (LIMIT 1).
+    /// Executes a plan read whose columns are (text, gzip bytea, plan id, collection time) and resolves the form
+    /// the row carries — the #2069 read seam shared by both plan-dimension reads above, with the picked row's
+    /// identity beside the text (#7175). One row max (LIMIT 1).
     /// </summary>
-    private static async Task<string?> ReadPlanTextOrGzipAsync(NpgsqlCommand command, CancellationToken cancellationToken)
+    private static async Task<(string Text, string? PlanId, DateTime? CollectionTime)?> ReadPlanTextOrGzipAsync(
+        NpgsqlCommand command, CancellationToken cancellationToken)
     {
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -264,8 +301,31 @@ public sealed partial class ViewerDataService
             return null;
         }
 
-        return PayloadDimensions.ResolveContent(
+        var text = PayloadDimensions.ResolveContent(
             reader.IsDBNull(0) ? null : reader.GetString(0),
             reader.IsDBNull(1) ? null : reader.GetFieldValue<byte[]>(1));
+        if (text is null)
+        {
+            return null;
+        }
+
+        return (text, reader.IsDBNull(2) ? null : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetDateTime(3));
     }
+}
+
+/// <summary>
+/// A stored plan and which one it is (#7175). <paramref name="PlanId"/> is the plan hash (query stats) or plan handle
+/// (procedures) of the snapshot the read picked, null when the plan came from the oversized-plan backlog, which names
+/// neither. <paramref name="CollectionTime"/> is that snapshot's time (naive UTC as stored), null for the backlog.
+/// <paramref name="IsFallback"/> is true when the caller asked for a specific plan and this is not it: the plan the
+/// row names was never stored, so the read handed back the newest plan instead.
+/// </summary>
+public sealed record StoredPlanRead(string PlanXml, string? PlanId, DateTime? CollectionTime, bool IsFallback)
+{
+    internal static StoredPlanRead Of((string Text, string? PlanId, DateTime? CollectionTime) picked, string? requestedPlanId)
+        => new(picked.Text, picked.PlanId, picked.CollectionTime,
+            !string.IsNullOrEmpty(requestedPlanId) && !string.Equals(picked.PlanId, requestedPlanId, StringComparison.Ordinal));
+
+    internal static StoredPlanRead? Of(string? backlogPlanXml, string? requestedPlanId)
+        => backlogPlanXml is null ? null : new(backlogPlanXml, null, null, !string.IsNullOrEmpty(requestedPlanId));
 }

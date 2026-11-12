@@ -150,6 +150,128 @@ public sealed class CollectorRunTimeSweepTests : IDisposable
         }
     }
 
+    /* #7215: the scheduled sweep, the run a newly opened tab starts and the tab's on-load re-collection share one
+       telemetry slot per server, so a server's runs take turns. The test holds the server's turn and starts both
+       entry points; nothing may run until the turn is released. Another server is not held back. */
+    [Fact]
+    public async Task TheSweep_AndTheTabOpenRun_WaitForTheServersTurn_AndOtherServersDoNot()
+    {
+        var (duckDb, servers, server) = await OpenAsync();
+        try
+        {
+            var other = new ServerConnection { ServerName = "sweep-test-other", DisplayName = "sweep-test-other" };
+            /* Not added to the server list, so the sweep does not run it and take its turn. */
+            var scheduler = NewScheduler(server, ("no_such_daily", 1440, null));
+            var service = new RemoteCollectorService(duckDb, servers, scheduler);
+
+            var turn = await service.AcquireServerRunAsync(server);
+            Task sweep;
+            Task tabOpen;
+            try
+            {
+                sweep = Task.Run(() => service.RunDueCollectorsAsync(DateTime.UtcNow, CancellationToken.None));
+                tabOpen = Task.Run(() => service.RunAllCollectorsForServerAsync(server));
+
+                await Task.Delay(500);
+                Assert.False(sweep.IsCompleted);
+                Assert.False(tabOpen.IsCompleted);
+                Assert.Equal(0, await RowsAsync(duckDb, server, "no_such_daily"));
+
+                using var otherTurn = await service.AcquireServerRunAsync(other).WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            finally
+            {
+                turn.Dispose();
+            }
+
+            await Task.WhenAll(sweep, tabOpen).WaitAsync(TimeSpan.FromSeconds(30));
+
+            /* Both runs finish once the turn is released, and the collector ran once. Which of the two gets the turn first is up to the
+               runner, so this does not pin #7269 on its own: the two orders test below does. */
+            Assert.Equal(1, await RowsAsync(duckDb, server, "no_such_daily"));
+        }
+        finally
+        {
+            duckDb.Dispose();
+        }
+    }
+
+    /* #7269: the sweep reads its due list at a cycle time taken before it gets the server's turn. Each order is driven on purpose by
+       running the first entry point to the end before the second starts. Tab-open first is the order that ran the daily collector
+       twice before the fix (the tab's stamp is after the cycle time, and a stamp ahead of the clock reads as a clock step, so the
+       collector was due again); sweep first holds the other side, the tab not running what the sweep just ran. */
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ADailyCollector_RunsOnce_WhicheverOfTheTabOpenAndTheSweepTakesTheTurnFirst(bool tabOpenFirst)
+    {
+        var (duckDb, servers, server) = await OpenAsync();
+        try
+        {
+            var scheduler = NewScheduler(server, ("no_such_daily", 1440, null));
+            var service = new RemoteCollectorService(duckDb, servers, scheduler);
+            var cycleStart = DateTime.UtcNow.AddSeconds(-5);
+
+            if (tabOpenFirst)
+            {
+                await service.RunAllCollectorsForServerAsync(server);
+                await service.RunDueCollectorsAsync(cycleStart, CancellationToken.None);
+            }
+            else
+            {
+                await service.RunDueCollectorsAsync(cycleStart, CancellationToken.None);
+                await service.RunAllCollectorsForServerAsync(server);
+            }
+
+            Assert.Equal(1, await RowsAsync(duckDb, server, "no_such_daily"));
+        }
+        finally
+        {
+            duckDb.Dispose();
+        }
+    }
+
+    /* #7269: the sweep's window for "ran since the cycle time" ends when it got the server's turn, not when it reads the list. A stamp
+       written after the turn, here during the XE reconcile that follows it, is ahead of the clock the window ends at: it is a clock
+       step (#4732), so the collector is due at once. With the window ending at the list read, that stamp fell inside it and the
+       collector was held back for a run that never happened. The reconcile's clock hook stands in for the time those steps take. */
+    [Fact]
+    public async Task AStampWrittenAfterTheSweepGotTheTurn_IsAClockStep_NotARunSinceTheCycleTime()
+    {
+        var (duckDb, servers, server) = await OpenAsync();
+        try
+        {
+            var scheduler = NewScheduler(server, ("no_such_hourly", 60, null));
+            var service = new RemoteCollectorService(duckDb, servers, scheduler);
+            var cycleStart = DateTime.UtcNow;
+            var stamped = false;
+            service.LongQueryTraceUtcNowForTests = () =>
+            {
+                if (!stamped)
+                {
+                    stamped = true;
+                    /* Let the clock move past the time the sweep took its turn, take the stamp, then move past the stamp. */
+                    var before = DateTime.UtcNow;
+                    SpinWait.SpinUntil(() => DateTime.UtcNow > before);
+                    var stamp = DateTime.UtcNow;
+                    SpinWait.SpinUntil(() => DateTime.UtcNow > stamp);
+                    scheduler.SeedLastRunsForServer(server.Id, new Dictionary<string, DateTime> { ["no_such_hourly"] = stamp });
+                }
+
+                return DateTime.UtcNow;
+            };
+
+            await service.RunDueCollectorsAsync(cycleStart, CancellationToken.None);
+
+            Assert.True(stamped);
+            Assert.Equal(1, await RowsAsync(duckDb, server, "no_such_hourly"));
+        }
+        finally
+        {
+            duckDb.Dispose();
+        }
+    }
+
     [Fact]
     public async Task OpeningATab_DoesNotRunADailyCollectorThatRanToday_OrOneWithARunTime_ButRunsTheOnLoadAndTheHourlyOnes()
     {

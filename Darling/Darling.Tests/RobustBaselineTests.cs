@@ -818,23 +818,23 @@ public sealed class RobustBaselineTests
         var story = Story(gateArm);
         Assert.Contains("peaked at about 3200 ms/sec", story, StringComparison.Ordinal);
         Assert.Contains("the window's mean of 1606.3 ms/sec sat 9.5 times its usual variation above its normal level", story, StringComparison.Ordinal);
-        Assert.Contains("fires only when the mean clears its bar as well", story, StringComparison.Ordinal);
+        Assert.Contains("(the average was high across the window, so this is not one hot collection)", story, StringComparison.Ordinal);
 
         var ratioArm = Profile(withMean: true, robust: false, isNew: false);
         var ratioStory = Story(ratioArm);
         Assert.Contains("the window's mean of 1606.3 ms/sec was roughly 8× that baseline", ratioStory, StringComparison.Ordinal);
-        Assert.Contains("fires only when the mean clears its bar as well", ratioStory, StringComparison.Ordinal);
+        Assert.Contains("(the average was high across the window, so this is not one hot collection)", ratioStory, StringComparison.Ordinal);
         Assert.DoesNotContain("times its usual variation", ratioStory, StringComparison.Ordinal);
 
         var isNewArm = Profile(withMean: true, robust: false, isNew: true);
         var isNewStory = Story(isNewArm);
         Assert.Contains("(the window's mean was about 1606.3 ms/sec)", isNewStory, StringComparison.Ordinal);
-        Assert.DoesNotContain("fires only when", isNewStory, StringComparison.Ordinal); // the bar is on the peak alone here
+        Assert.DoesNotContain("the average was high across the window", isNewStory, StringComparison.Ordinal); // the bar is on the peak alone here, so no mean claim
 
         var legacy = Profile(withMean: false, robust: true, isNew: false);
         var legacyStory = Story(legacy);
         Assert.DoesNotContain("window's mean", legacyStory, StringComparison.Ordinal);
-        Assert.Contains("peaked at about 3200 ms/sec this window — roughly 16× the 200 ms/sec normal", legacyStory, StringComparison.Ordinal);
+        Assert.Contains("peaked at about 3200 ms/sec this window, roughly 16× the 200 ms/sec normal", legacyStory, StringComparison.Ordinal);
 
         /* The grade is the peak's, before and after the pair. */
         Assert.Equal(Score(legacy), Score(gateArm));
@@ -1126,8 +1126,8 @@ public sealed class RobustBaselineTests
         /* The third advice shape: the quantity, that this hour saw NONE of it, the samples AND days the claim
            rests on — and no σ figure, because the stored one is a cap rather than a measurement. */
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBlocking, new Dictionary<string, Fact> { [PgTargetFactKeys.AnomalyBlocking] = extremity })!;
-        Assert.Equal("Blocked sessions per capture reached 92 sessions — against a month in which this hour saw none", block.Headline);
-        Assert.Contains("is not thin — it is a measured ZERO: 257 baseline samples across 30 distinct days, not one of them above zero", block.Investigation, StringComparison.Ordinal);
+        Assert.Equal("Blocked sessions per capture reached 92 sessions, against a month in which this hour saw none", block.Headline);
+        Assert.Contains("is not thin, it is a measured ZERO: 257 baseline samples across 30 distinct days, not one of them above zero", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("far outside its normal range", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("times its usual variation above", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("first occurrence", block.Investigation, StringComparison.Ordinal);
@@ -1150,7 +1150,7 @@ public sealed class RobustBaselineTests
             },
         };
         var trustedBlock = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBlocking, new Dictionary<string, Fact> { [PgTargetFactKeys.AnomalyBlocking] = trusted })!;
-        Assert.Equal("Blocked sessions per capture spiked to 12 sessions — 6.2 times its usual variation above its normal level for this time of week", trustedBlock.Headline);
+        Assert.Equal("Blocked sessions per capture spiked to 12 sessions: 6.2 times its usual variation above its normal level for this time of week", trustedBlock.Headline);
 
         var unstamped = new Fact { Source = trusted.Source, Key = trusted.Key, Value = trusted.Value, Metadata = new Dictionary<string, double>(trusted.Metadata) };
         unstamped.Metadata.Remove("baseline_zero_history");

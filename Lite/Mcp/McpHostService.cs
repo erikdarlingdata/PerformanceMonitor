@@ -74,6 +74,8 @@ public sealed class McpHostService : BackgroundService
            cadence it shipped with. Null leaves this instance on the app-wide answer every LocalDataService reads
            (LocalDataService.DefaultCollectorFrequencyMinutes), which is none when nothing set one, so every row
            then keeps its shipped cadence. */
+        /* #7167: an empty read for a server with no SUCCESS row is offline only when it was added before the log's retention horizon. */
+        ServerResolver.WireOfflineLookups(dataService, serverManager);
         dataService.CollectorFrequencyMinutes = scheduleManager is null
             ? null
             : (serverId, collector) => scheduleManager.GetFrequencyForStorageServer(serverManager, serverId, collector);
@@ -171,19 +173,34 @@ public sealed class McpHostService : BackgroundService
     /// when given, is read on every request, so a replaced token takes effect at once. A null or empty
     /// <paramref name="token"/> installs nothing (<c>mcp_allow_tokenless_loopback</c> is on, and only the read tools are served).
     /// </summary>
-    internal static void UseBearerTokenGate(IApplicationBuilder app, string? token, Func<string?>? currentToken = null)
+    internal static void UseBearerTokenGate(IApplicationBuilder app, string? token, Func<string?>? currentToken = null,
+        Action<string>? log = null, Func<DateTime>? utcNow = null)
     {
         if (string.IsNullOrEmpty(token))
         {
             return;
         }
 
+        /* #8611: one log line per refusal, as Darling's MCP host writes, rate-limited the same way. Created here, per started server, so a
+           restart starts with a clean budget. The line says which of three client states was refused, never the token or any part of it. */
+        var refusals = new McpTokenRefusalLog();
+        var clock = utcNow ?? (() => DateTime.UtcNow);
+        var write = log ?? (message => AppLogger.Warn("MCP", message));
+
         app.Use(async (context, next) =>
         {
             /* currentToken: the host's live token, which New token replaces while the server runs. Empty never authorizes. */
             var expected = currentToken?.Invoke() ?? token;
-            if (!McpTokenStore.IsAuthorized(context.Request.Headers.Authorization.ToString(), expected))
+            var authorization = context.Request.Headers.Authorization.ToString();
+            if (!McpTokenStore.IsAuthorized(authorization, expected))
             {
+                var state = DescribeBearerRefusal(authorization);
+                if (refusals.TryLog(clock(), state, out var held))
+                {
+                    write("MCP refused a request (HTTP 401): the access token gate rejected it, " + state
+                        + (held > 0 ? $". {held} further refusal(s) like this were not logged in the {(int)McpTokenRefusalLog.DefaultWindow.TotalMinutes} minute(s) after the previous line." : "."));
+                }
+
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                 context.Response.Headers.WWWAuthenticate = "Bearer";
                 return;
@@ -191,6 +208,25 @@ public sealed class McpHostService : BackgroundService
 
             await next(context);
         });
+    }
+
+    /// <summary>Which of three client states a refused request was in, as Darling's MCP host says it (<c>DescribeBearerRefusal</c>): no
+    /// header, a header that is not a well-formed Bearer, or a Bearer that does not match. Never says what the token is.</summary>
+    internal static string DescribeBearerRefusal(string? authorizationHeaderValue)
+    {
+        if (string.IsNullOrWhiteSpace(authorizationHeaderValue))
+        {
+            return "no 'Authorization: Bearer <token>' header was presented";
+        }
+
+        var value = authorizationHeaderValue.Trim();
+        const string prefix = "Bearer ";
+        if (!value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || value[prefix.Length..].Trim().Length == 0)
+        {
+            return "an Authorization header WAS presented but is not a 'Bearer <token>' (wrong scheme, or an empty token after 'Bearer')";
+        }
+
+        return "the presented bearer token does not match the MCP token";
     }
 
     /// <summary>
@@ -220,13 +256,14 @@ public sealed class McpHostService : BackgroundService
     /// host register the SAME tools and the SAME policy production does, not a hand-built set.
     /// </summary>
     internal static void RegisterMcpServer(IServiceCollection services, bool allowWrites,
-        bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full, IPseudonymKeySource? pseudonymKeys = null)
+        bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full, IPseudonymKeySource? pseudonymKeys = null,
+        McpServing? serving = null)
     {
         /* #6066: Lite's pseudonym key (Credential Manager), for the data-detail filter and the brief composer at metadataOnly. None: logins are numbered per answer. */
         if (pseudonymKeys is not null) services.AddSingleton<IPseudonymKeySource>(pseudonymKeys);
-        /* #5820: the four investigation tools are served only with mcp_allow_investigations on AND the writes off
-           (McpInvestigationPolicy). Registered BEFORE the write policy so its instructions census (built there) counts
-           only the tools this start offers. */
+        /* #5820, #8461: the tools that claim and report on investigation requests are served only with mcp_allow_investigations on
+           AND the writes off (McpInvestigationPolicy); the two investigation reads are ordinary reads. Registered BEFORE the write
+           policy so its instructions census (built there) counts only the tools this start offers. */
         services.AddMcpInvestigationPolicy(McpInvestigationPolicy.Served(allowInvestigations, allowWrites));
 
         /* #5820: mcp_data_detail, read once per start. McpDataDetailFilter (AddCallToolFilters) reads this singleton on
@@ -236,7 +273,7 @@ public sealed class McpHostService : BackgroundService
         /* The write switch (McpWritePolicy): once the SDK has gathered every registered tool, drop the writes
            unless mcp_allow_writes is on and stamp the annotation hints. Registered here, ahead of AddMcpServer,
            so it is a PostConfigure over the SDK's own options and sees the full tool set. */
-        services.AddMcpWritePolicy(allowWrites);
+        services.AddMcpWritePolicy(allowWrites, serving);
 
         /* Register MCP server with all tool classes */
         services
@@ -322,10 +359,12 @@ public sealed class McpHostService : BackgroundService
     }
 
     /// <summary>Makes <paramref name="newToken"/> the token every request must carry, from the next request on; the old one is refused
-    /// at once. False (nothing changes) when this host serves without a token or the new token is empty.</summary>
+    /// at once. False (nothing changes) when this host serves without a token or the new token is not usable
+    /// (<see cref="McpTokenStore.IsUsableToken"/>): what a start serves was decided against a usable token, and a weaker
+    /// one must never take its place in front of the write or investigation tools.</summary>
     internal bool ReplaceToken(string newToken)
     {
-        if (_serving.Token is null || string.IsNullOrEmpty(newToken))
+        if (_serving.Token is null || !McpTokenStore.IsUsableToken(newToken))
         {
             return false;
         }
@@ -442,7 +481,7 @@ public sealed class McpHostService : BackgroundService
 
             /* The write switch and the SDK's tool registration live in RegisterMcpServer, the method the tests that
                drive tools/call also use (see there). */
-            RegisterMcpServer(builder.Services, _serving.Writes, _serving.Investigations, _dataDetail, _pseudonymKeys);
+            RegisterMcpServer(builder.Services, _serving.Writes, _serving.Investigations, _dataDetail, _pseudonymKeys, _serving);
 
             _app = builder.Build();
 
@@ -473,7 +512,7 @@ public sealed class McpHostService : BackgroundService
         }
         catch (Exception ex)
         {
-            AppLogger.Error("MCP", $"MCP server failed: {ex.Message}");
+            AppLogger.Error("MCP", $"The MCP server on port {_port} stopped with an error: {ex.Message}. If another program uses that port, change the MCP port in Settings and restart Lite.", ex);
         }
     }
 

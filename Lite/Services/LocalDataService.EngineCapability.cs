@@ -39,9 +39,14 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of server_properties.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var propertiesRelation = await HotTableHasServerAsync(connection, "server_properties", serverId) ? "server_properties" : "v_server_properties";
+
+        command.CommandText = $@"
 SELECT engine_edition
-FROM v_server_properties
+FROM {propertiesRelation}
 WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";
@@ -86,5 +91,43 @@ GROUP BY server_id";
         }
 
         return editions;
+    }
+
+    /// <summary>
+    /// This server's SQL Server major version (13 is SQL Server 2016), from the <c>product_version</c> of the newest stored
+    /// <c>server_properties</c> row, the row <see cref="GetSqlEngineEditionAsync"/> reads. 0 when the store has no row or the version
+    /// does not parse, which the collector gates take as unknown and assume newest. Read from the store for the same reason the edition
+    /// is: a desktop tab and the MCP tools resolve a server by its storage id, not by a live connection.
+    /// </summary>
+    public async Task<int> GetSqlMajorVersionAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var propertiesRelation = await HotTableHasServerAsync(connection, "server_properties", serverId) ? "server_properties" : "v_server_properties";
+
+        command.CommandText = $@"
+SELECT product_version
+FROM {propertiesRelation}
+WHERE server_id = $1
+ORDER BY collection_time DESC
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+        return SqlMajorVersionOf(await command.ExecuteScalarAsync() as string);
+    }
+
+    /// <summary>The major version in a <c>SERVERPROPERTY('ProductVersion')</c> string ("13.0.5026.0" is 13), or 0 when it has none.</summary>
+    public static int SqlMajorVersionOf(string? productVersion)
+    {
+        if (string.IsNullOrEmpty(productVersion))
+        {
+            return 0;
+        }
+
+        var dot = productVersion.IndexOf('.', StringComparison.Ordinal);
+        var head = dot < 0 ? productVersion : productVersion[..dot];
+        return int.TryParse(head, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var major) ? major : 0;
     }
 }

@@ -115,7 +115,7 @@ public sealed class QueryStoreHealthCaptureModePublishTests : IClassFixture<Shar
     {
         await SeedThreeShapesAsync();
 
-        var json = await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager);
+        var json = await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager, runTimes: new McpCollectorRunTimes(null, _serverManager));
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
@@ -157,7 +157,7 @@ public sealed class QueryStoreHealthCaptureModePublishTests : IClassFixture<Shar
         Assert.Equal(96.4, rows["churny"].GetProperty("pct_of_cap").GetDouble(), 1);
 
         /* The database_name filter keeps the same shape on one row. */
-        var one = await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager, database_name: "legacy2016");
+        var one = await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager, runTimes: new McpCollectorRunTimes(null, _serverManager), database_name: "legacy2016");
         using var oneDoc = JsonDocument.Parse(one);
         var only = oneDoc.RootElement.GetProperty("databases").EnumerateArray().Single();
         Assert.Equal("AUTO", only.GetProperty("query_capture_mode").GetString());
@@ -219,7 +219,7 @@ public sealed class QueryStoreHealthCaptureModePublishTests : IClassFixture<Shar
             "CUSTOM (2019+) is AUTO with operator-set thresholds",
             "NONE stops capturing NEW queries",
             "wait_stats_capture_mode ON (the default) records per-plan wait statistics",
-            "null means the row predates the V137 rung or, for wait_stats_capture_mode, the engine is older than SQL Server 2017",
+            "null means the row was written by a build that did not record it or, for wait_stats_capture_mode, the engine is older than SQL Server 2017",
             "never OFF",
             /* #3898 D4: the issue ref that used to sit after this tool name came off the wire (head and tail);
                the sentence it named a source for is otherwise unchanged. */

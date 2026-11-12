@@ -112,8 +112,9 @@ public sealed partial class ViewerDataService
     /// The Query-Store-by-Duration read — Lite's <c>GetQueryStoreTopQueriesAsync</c> ported to Postgres
     /// against the base <c>query_store_stats</c> table (the store name; Lite reads its
     /// <c>v_query_store_stats</c> view). Group by (database, query_id, plan_id, query_hash), average the
-    /// per-interval metrics + carry min/max spreads, rank by <c>SUM(execution_count) *
-    /// AVG(avg_duration_us)</c> (total duration) descending, over-fetch by 5 for the WAITFOR trim, and cap
+    /// per-interval metrics + carry min/max spreads, rank by the plan's total duration,
+    /// <c>SUM(avg_duration_us * execution_count)</c>, descending (every avg column is averaged weighted by
+    /// execution_count), over-fetch by 5 for the WAITFOR trim, and cap
     /// at top. Viewer deviations: <c>SUM(execution_count)</c> CAST to bigint; the query_plan_text column
     /// is not selected (plan surfacing deferred); the forced-plan flag folds through Postgres
     /// <c>bool_or(is_forced_plan)</c> (Postgres has no <c>MAX(boolean)</c> aggregate, unlike DuckDB).
@@ -123,6 +124,14 @@ public sealed partial class ViewerDataService
     /// </summary>
     public const string QueryStoreTopSql = QueryStoreTopRawPrefix + QueryStoreTopSuffix;
 
+    /// <summary>#7776: the collection_time bounds beside the interval-start window on the raw top read and the slicer. The floor is the
+    /// clock-skew slack below the window and the ceiling is a day of engine maximum interval plus collector-outage allowance above it
+    /// (see <see cref="QueryStoreSlicerSql"/>). The top read's inline-text fallback uses the ceiling too, so it reaches the fact rows.</summary>
+    private const string CollectionFloorSlackSql = QueryStoreIntervalWide.CollectionFloorSlackSql;
+
+    /// <summary>The ceiling half of <see cref="CollectionFloorSlackSql"/>.</summary>
+    private const string CollectionCeilingSql = QueryStoreIntervalWide.CollectionCeilingSql;
+
     /// <summary>
     /// The raw read's head (#3953 split it off <see cref="QueryStoreTopSql"/>'s prior single-string form,
     /// byte-identical — the split itself changes nothing about the text a raw call sends): the interval dedupe
@@ -130,14 +139,14 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryStoreTopTableSql"/>, so the two reads cannot drift above <c>ranked</c>.
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top, $5 database filter.
     /// </summary>
-    private const string QueryStoreTopRawPrefix = """
+    private const string QueryStoreTopRawPrefix = $$"""
         WITH deduped AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
                per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
                cycle as its last_execution_time advances, so the SAME interval (same first_execution_time)
                is stored repeatedly with a growing execution_count. SUM(execution_count) over the raw rows
-               reports 10 + 25 + 40 for an interval that reached 40, and AVG(avg_*) becomes an avg-of-avgs
-               weighted by how many times each interval happened to be re-collected. Keep the LATEST
+               reports 10 + 25 + 40 for an interval that reached 40, and the execution-weighted
+               averages would count a re-collected interval again at its own execution count. Keep the LATEST
                snapshot per interval. Matches the dedup convention in PgFactCollector.QueryPerf and
                PgDrillDownCollector.Queries, and Lite's GetQueryStoreTopQueriesAsync.
 
@@ -161,7 +170,14 @@ public sealed partial class ViewerDataService
                7, so dropping one fails loudly and names the file. Both enumerate their files rather than
                globbing, so MOVING a read has to be re-declared instead of silently shrinking the guard. */
             SELECT
-                *,
+                database_name,
+                query_id,
+                plan_id,
+                query_hash,
+                execution_type_desc,
+                replica_role,
+                execution_count,
+                avg_duration_us,
                 ROW_NUMBER() OVER
                 (
                     PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
@@ -169,11 +185,29 @@ public sealed partial class ViewerDataService
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            {{QueryStoreTopRawWindow}}
         ),
 
+        """;
+
+    /// <summary>The raw read's window predicates, the one place both of its passes over <c>query_store_stats</c> take them from (#8549):
+    /// <c>deduped</c> (the narrow pass that ranks) and <c>wide</c> (the pass that fetches the kept keys' rows) read the same rows, so a
+    /// predicate changed in one cannot miss the other. The rows' source is <c>FROM query_store_stats WHERE server_id = $1</c> before it.
+    /// $2 window start, $3 window end (naive UTC), $5 database filter.</summary>
+    private const string QueryStoreTopRawWindow = $$"""
+        /* #7776: the window is the interval's own start, the expression the slicer's bars are keyed on (QueryStoreSlicerSql, #1892),
+           so a slice's grid rows are the intervals its bars draw. It was collection_time, which trails the interval by up to the
+           interval's length: an interval collected inside the slice but started before it showed here with no bar, and the slice's
+           last interval, collected after its end, was missing. Legacy rows have no interval start and keep collection_time.
+           The collection_time bounds below are chunk exclusion, not filters, with the slicer read's reasoning: the floor is implied
+           by the predicate (an interval is collected after it starts; the hour is clock-skew slack) and the ceiling is the
+           slicer's 30 days (a day of engine maximum interval, the rest collector-outage allowance). They keep the
+           (server_id, collection_time) index and the chunk pruning. */
+        AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+        AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+        AND   collection_time >= $2 - {{CollectionFloorSlackSql}}
+        AND   collection_time <= $3 + {{CollectionCeilingSql}}
+        AND   ($5::text[] IS NULL OR database_name = ANY($5))
         """;
 
     /// <summary>
@@ -183,8 +217,10 @@ public sealed partial class ViewerDataService
     /// <c>(collection_time DESC, execution_count DESC)</c> per identity) — so this reads it directly and sets
     /// <c>rn</c> to a literal 1 rather than computing a rank. $2 is the gate's own clamp,
     /// <c>max(window start, raw's chunk floor)</c> (review D4R H3): raw chunks drop whole, so bounding the table
-    /// read there returns exactly the raw read's own answer over the snapshots raw still holds, and reaches
-    /// further back only where raw has already dropped the chunk. $3 is nullable: NULL is an open end (a WPF
+    /// read there reaches further back only where raw has already dropped the chunk. The clamp is a
+    /// <c>collection_time</c> and the window is placed by the interval's start (#7776), so at the clamp itself the
+    /// table read leaves out the intervals that started before the floor and were collected after it, which raw still
+    /// holds: the one interval straddling the floor, at the edge of what raw retains. $3 is nullable: NULL is an open end (a WPF
     /// preset), which reads through whatever the table currently holds; a literal end (a custom range, MCP
     /// <c>as_of</c>) bounds it exactly as raw's own $3 does.
     /// <para><b>The <c>first_execution_time</c> floor (#4605).</b> Neither the unique key (it leads with
@@ -196,48 +232,37 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). A static readonly rather than a const
     /// because the interval literal is derived from that TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.</para>
-    /// <para><b>The upper bound (#5523).</b> A window with an end ($3 not NULL) also carries
-    /// <c>first_execution_time &lt;= $3 + </c><see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>, so the
+    /// <para><b>The upper bound (#5523, #7776).</b> A window with an end ($3 not NULL) also carries
+    /// <c>first_execution_time &lt;= $3 + </c><see cref="QueryStoreIntervalWide.IntervalStartFirstExecMarginSql"/>, so the
     /// <c>(server_id, first_execution_time)</c> btree scans a range finite at both ends instead of everything newer than
-    /// the window start. An open end (NULL) reads to now, as before. It drops a row only for a monitored-server clock more
-    /// than the slack (twelve hours) ahead of the service's, or a collection cycle longer than that
-    /// (<see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>'s summary).</para>
+    /// the window start. An open end (NULL) reads to now, as before. The window is placed by the interval's start
+    /// (<c>COALESCE(interval_start_time_utc, collection_time)</c>, #7776), so the margin is the one the duration trend's start-placed
+    /// arm uses: an interval that starts before $3 can have a first execution up to its own length (a day) after it. It was
+    /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/> while the window was placed by <c>collection_time</c>.</para>
     /// </summary>
     private static readonly string QueryStoreTopTablePrefix = $$"""
-        WITH deduped AS (
+        WITH deduped AS NOT MATERIALIZED (
             SELECT
                 *,
                 1 AS rn
             FROM query_store_interval_wide
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   ($3::timestamp IS NULL OR collection_time <= $3)
+            /* #7776: placed by the interval's start, as the raw read and the slicer's bars are (QueryStoreTopRawPrefix). The
+               first_execution_time range below is what the btree serves; this is a residual filter, and no collection_time
+               bound is added because none could drop a row here (an interval is collected after it starts). */
+            AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+            AND   ($3::timestamp IS NULL OR COALESCE(interval_start_time_utc, collection_time) <= $3)
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-            AND   ($3::timestamp IS NULL OR first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}})
+            AND   ($3::timestamp IS NULL OR first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}})
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
         ),
 
         """;
 
-    /// <summary>
-    /// The table twin of <see cref="QueryStoreTopSql"/> (#3953): <see cref="QueryStoreTopTablePrefix"/> reading
-    /// <c>query_store_interval_wide</c> instead of the raw dedupe, sharing <see cref="QueryStoreTopSuffix"/> so
-    /// the two reads cannot drift below <c>ranked</c>. Chosen per call by
-    /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>; never used for <see cref="QueryStoreComparisonSql"/>.
-    /// $1 server_id, $2 the gate's clamp (<c>max(window start, raw's chunk floor)</c>), $3 window end (naive
-    /// UTC, NULL for an open/preset end), $4 top, $5 database filter.
-    /// <para>A static readonly (#4605), declared AFTER <see cref="QueryStoreTopTablePrefix"/> on purpose: static
-    /// initializers run in textual order, so declared above it this would concatenate a null prefix.</para>
-    /// </summary>
-    public static readonly string QueryStoreTopTableSql = QueryStoreTopTablePrefix + QueryStoreTopSuffix;
-
-    /// <summary>Everything from <c>ranked</c> down, shared by <see cref="QueryStoreTopSql"/> and
-    /// <see cref="QueryStoreTopTableSql"/> — both prefixes above produce the same "one row per identity, every
-    /// column deduped's dedupe/the table's own upsert already kept" shape, so this aggregates either one
-    /// identically. References $1, $4 and $6, plus $2/$3 (#5420: the inline-text fallback's window bound, the same $2/$3 both prefixes bind), so both share it unchanged.</summary>
-    private const string QueryStoreTopSuffix = $$"""
-        ranked AS (
-            SELECT
+    /// <summary>The select list of <c>ranked</c>: the group keys and every aggregate, one row per identity. Shared by the raw
+    /// read's <see cref="QueryStoreTopSuffix"/> and the interval-table read's <see cref="QueryStoreTopTableRankedHead"/>, so the two
+    /// cannot drift in what they return.</summary>
+    private const string QueryStoreTopRankedColumns = $$"""
                 database_name,
                 query_id,
                 plan_id,
@@ -256,12 +281,12 @@ public sealed partial class ViewerDataService
                 execution_type_desc,
                 MAX(module_name) AS module_name,
                 CAST(SUM(execution_count) AS bigint) AS total_executions,
-                AVG(CAST(avg_duration_us AS double precision)) / 1000.0 AS avg_duration_ms,
-                AVG(CAST(avg_cpu_time_us AS double precision)) / 1000.0 AS avg_cpu_time_ms,
-                AVG(CAST(avg_logical_io_reads AS double precision)) AS avg_logical_reads,
-                AVG(CAST(avg_logical_io_writes AS double precision)) AS avg_logical_writes,
-                AVG(CAST(avg_physical_io_reads AS double precision)) AS avg_physical_reads,
-                AVG(CAST(avg_rowcount AS double precision)) AS avg_rowcount,
+                {{QueryStoreWeightedAverage.DurationUs}} / 1000.0 AS avg_duration_ms,
+                {{QueryStoreWeightedAverage.CpuTimeUs}} / 1000.0 AS avg_cpu_time_ms,
+                {{QueryStoreWeightedAverage.LogicalReads}} AS avg_logical_reads,
+                {{QueryStoreWeightedAverage.LogicalWrites}} AS avg_logical_writes,
+                {{QueryStoreWeightedAverage.PhysicalReads}} AS avg_physical_reads,
+                {{QueryStoreWeightedAverage.Rowcount}} AS avg_rowcount,
                 MIN(min_dop) AS min_dop,
                 MAX(max_dop) AS max_dop,
                 MAX(last_execution_time) AS last_execution_time,
@@ -269,9 +294,9 @@ public sealed partial class ViewerDataService
                 bool_or(is_forced_plan) AS is_forced_plan,
                 MAX(plan_forcing_type) AS plan_forcing_type,
                 MIN(first_execution_time) AS first_execution_time,
-                AVG(CAST(avg_clr_time_us AS double precision)) / 1000.0 AS avg_clr_time_ms,
-                AVG(CAST(avg_tempdb_space_used AS double precision)) AS avg_tempdb_space_used,
-                AVG(CAST(avg_log_bytes_used AS double precision)) AS avg_log_bytes_used,
+                {{QueryStoreWeightedAverage.ClrTimeUs}} / 1000.0 AS avg_clr_time_ms,
+                {{QueryStoreWeightedAverage.TempdbSpaceUsed}} AS avg_tempdb_space_used,
+                {{QueryStoreWeightedAverage.LogBytesUsed}} AS avg_log_bytes_used,
                 MAX(plan_type) AS plan_type,
                 MAX(force_failure_count) AS force_failure_count,
                 MAX(last_force_failure_reason) AS last_force_failure_reason,
@@ -294,19 +319,159 @@ public sealed partial class ViewerDataService
                 MAX(CAST(max_log_bytes_used AS double precision)) AS max_log_bytes_used,
                 MIN(CAST(min_tempdb_space_used AS double precision)) AS min_tempdb_space_used,
                 MAX(CAST(max_tempdb_space_used AS double precision)) AS max_tempdb_space_used,
-                AVG(CAST(avg_query_max_used_memory AS double precision)) * 8.0 / 1024.0 AS avg_memory_mb,
+                {{QueryStoreWeightedAverage.QueryMaxUsedMemory}} * 8.0 / 1024.0 AS avg_memory_mb,
                 MIN(CAST(min_query_max_used_memory AS double precision)) * 8.0 / 1024.0 AS min_memory_mb,
                 MAX(CAST(max_query_max_used_memory AS double precision)) * 8.0 / 1024.0 AS max_memory_mb,
-                AVG(CAST(avg_num_physical_io_reads AS double precision)) AS avg_num_physical_io_reads,
+                {{QueryStoreWeightedAverage.NumPhysicalIoReads}} AS avg_num_physical_io_reads,
                 MIN(CAST(min_num_physical_io_reads AS double precision)) AS min_num_physical_io_reads,
                 MAX(CAST(max_num_physical_io_reads AS double precision)) AS max_num_physical_io_reads
+        """;
+
+    /// <summary>The raw read's <c>keys</c>, <c>wide</c>, <c>ranked</c> and everything below them: <see cref="QueryStoreTopRawRankedHead"/>, then
+    /// <see cref="QueryStoreTopTail"/>. References $1, $4 and $6, plus $2/$3 (#5420: the inline-text fallback's window bound, the same $2/$3
+    /// the raw prefix binds). The interval-table read has its own head (<see cref="QueryStoreTopTableRankedHead"/>, #8549).</summary>
+    private const string QueryStoreTopSuffix = QueryStoreTopRawRankedHead + "\n" + QueryStoreTopTail;
+
+    /// <summary>
+    /// #8549: the raw read's <c>ranked</c>, in two steps so the window function sorts narrow rows, as <see cref="QueryStoreTopTableRankedHead"/>
+    /// does for the interval table. One step ranked the groups over a dedupe of <c>SELECT *</c>: the window sorted every row of the
+    /// window at its full width, and on a field store that sort wrote 136,690 temp blocks (about 1 GB) and took 10.1 s. <c>deduped</c>
+    /// (in <see cref="QueryStoreTopRawPrefix"/>) now carries the group key and the two columns the rank needs, <c>keys</c> ranks and keeps the
+    /// candidate limit ($6) with the self-statement slot and the tag filter before it (#7736), and <c>wide</c> dedupes the full rows of
+    /// the kept groups only. <c>wide</c> keeps a row's whole dedupe partition or none of it: its filter is on the partition's own columns
+    /// (database_name, query_id, plan_id, execution_type_desc, replica_role, matched NULL-safe), all in PARTITION BY, so every partition it
+    /// ranks has all the rows it has in <c>deduped</c> and <c>rn</c> picks the same row. <c>ranked</c> then matches each kept row to its group
+    /// on all six columns (<see cref="KeyMatch"/>, query_hash included). The rows, their groups and the candidate count are the one-step read's.
+    /// </summary>
+    private const string QueryStoreTopRawRankedHead = $$"""
+        keys AS (
+            SELECT
+                database_name,
+                query_id,
+                plan_id,
+                query_hash,
+                execution_type_desc,
+                replica_role
             FROM deduped
             WHERE rn = 1
+            /*SELFKEY:deduped*/
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
-            ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+            ORDER BY {{QueryStoreWeightedAverage.RankByDuration}} DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $6
         ),
+        wide AS (
+            /* The same dedupe as deduped above (QueryStoreTopRawPrefix explains it: #1841, #1907), over the rows of the kept groups. */
+            SELECT
+                *,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC, execution_count DESC
+                ) AS rn
+            FROM query_store_stats
+            WHERE server_id = $1
+            {{QueryStoreTopRawWindow}}
+            AND   EXISTS
+                  (
+                      SELECT 1
+                      FROM keys AS k
+                      WHERE COALESCE(k.database_name, '') = COALESCE(query_store_stats.database_name, '') AND (k.database_name IS NULL) = (query_store_stats.database_name IS NULL)
+                      AND   COALESCE(k.query_id, 0) = COALESCE(query_store_stats.query_id, 0) AND (k.query_id IS NULL) = (query_store_stats.query_id IS NULL)
+                      AND   COALESCE(k.plan_id, 0) = COALESCE(query_store_stats.plan_id, 0) AND (k.plan_id IS NULL) = (query_store_stats.plan_id IS NULL)
+                      AND   COALESCE(k.execution_type_desc, '') = COALESCE(query_store_stats.execution_type_desc, '') AND (k.execution_type_desc IS NULL) = (query_store_stats.execution_type_desc IS NULL)
+                      AND   COALESCE(k.replica_role, '') = COALESCE(query_store_stats.replica_role, '') AND (k.replica_role IS NULL) = (query_store_stats.replica_role IS NULL)
+                  )
+        ),
+        ranked AS (
+            SELECT
+        {{QueryStoreTopRankedColumns}}
+            FROM
+            (
+                SELECT
+                    deduped.*
+                FROM wide AS deduped
+                WHERE deduped.rn = 1
+                AND   EXISTS (SELECT 1 FROM keys AS k WHERE {{KeyMatch}})
+            ) AS deduped
+            GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+        ),
+        """;
+
+    /// <summary>The NULL-safe match of a <c>deduped</c> row to a <c>keys</c> row on the six group columns, written so PostgreSQL can
+    /// hash it: <c>IS NOT DISTINCT FROM</c> cannot be a hash condition, so each column is matched as its value under COALESCE plus
+    /// whether it is NULL. Equal to <c>IS NOT DISTINCT FROM</c> for every value, a stored empty string and 0 included.</summary>
+    private const string KeyMatch =
+        "COALESCE(k.database_name, '') = COALESCE(deduped.database_name, '') AND (k.database_name IS NULL) = (deduped.database_name IS NULL)" +
+        "\n                  AND   COALESCE(k.query_id, 0) = COALESCE(deduped.query_id, 0) AND (k.query_id IS NULL) = (deduped.query_id IS NULL)" +
+        "\n                  AND   COALESCE(k.plan_id, 0) = COALESCE(deduped.plan_id, 0) AND (k.plan_id IS NULL) = (deduped.plan_id IS NULL)" +
+        "\n                  AND   COALESCE(k.query_hash, '') = COALESCE(deduped.query_hash, '') AND (k.query_hash IS NULL) = (deduped.query_hash IS NULL)" +
+        "\n                  AND   COALESCE(k.execution_type_desc, '') = COALESCE(deduped.execution_type_desc, '') AND (k.execution_type_desc IS NULL) = (deduped.execution_type_desc IS NULL)" +
+        "\n                  AND   COALESCE(k.replica_role, '') = COALESCE(deduped.replica_role, '') AND (k.replica_role IS NULL) = (deduped.replica_role IS NULL)";
+
+    /// <summary>
+    /// #8549: the interval-table read's <c>ranked</c>, in two steps so the sort carries narrow rows. One step (the raw read's
+    /// shape) grouped the table's wide rows: on a field store the Query Store grid over 30 days sorted about 1.29 million
+    /// rows per worker, 453 bytes wide, into external merges that wrote 1.8 GB of temp files, for 115,093 groups of which 250
+    /// were kept, and took 32.7 s cold. <c>keys</c> groups and ranks on the group key and the columns the rank needs, so its
+    /// sort or hash aggregate is narrow, and keeps the candidate limit ($6); the self-statement slot and the tag filter stay
+    /// there, before that limit (#7736). <c>ranked</c> then reads the same rows again and aggregates only the groups <c>keys</c>
+    /// kept. The rows, their keys and the candidate count are the one-step read's: <c>keys</c> ranks by the same expression and
+    /// tie-breaks, and the match to a kept key is NULL-safe (<see cref="KeyMatch"/>), because replica_role is NULL off an
+    /// availability group. <c>deduped</c> is <c>NOT MATERIALIZED</c> in <see cref="QueryStoreTopTablePrefix"/>: this reads it
+    /// twice, and a materialized copy of every wide row is the temp file this exists to avoid.
+    /// </summary>
+    private const string QueryStoreTopTableRankedHead = $$"""
+        keys AS (
+            SELECT
+                database_name,
+                query_id,
+                plan_id,
+                query_hash,
+                execution_type_desc,
+                replica_role
+            FROM deduped
+            WHERE rn = 1
+            /*SELFKEY:deduped*/
+            /*TAG:hash:query_hash*/
+            GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+            ORDER BY {{QueryStoreWeightedAverage.RankByDuration}} DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+            LIMIT $6
+        ),
+        ranked AS (
+            SELECT
+        {{QueryStoreTopRankedColumns}}
+            FROM
+            (
+                /* #8549: the kept keys' rows are fetched by key, not found by reading the window again. A semi-join on KeyMatch alone
+                   could only hash, so this pass read every row of the window a second time: on a seeded store of 1.73 million intervals it
+                   was 5.7 s of a 10.3 s read, and on a cold field store it doubled the wide heap pages the first read loads. The two plain
+                   equalities in front of KeyMatch give the planner a second way to run the same semi-join: de-duplicate the kept keys (250
+                   narrow rows) and probe the (server_id, database_name, query_id, first_execution_time) index once per key. KeyMatch stays
+                   the exact NULL-safe test. It is a semi-join and not a join on purpose: with no such index (it is built in the background)
+                   the planner keeps hashing the narrow keys against one scan of the window, as it did before. An inner join on the same
+                   equalities let it hash the WIDE rows instead on a store without the index, which wrote the temp files the narrow ranking
+                   exists to avoid (QueryStoreGridNarrowRankLiveTests). A key with a NULL database_name or query_id cannot match a plain
+                   equality, so the second branch reads the window for those keys only, and only when such a key was kept (the uncorrelated
+                   EXISTS runs once, before the scan). A row matches at most one branch, so none is read twice. */
+                SELECT
+                    deduped.*
+                FROM deduped
+                WHERE EXISTS (SELECT 1 FROM keys AS k WHERE k.database_name = deduped.database_name AND k.query_id = deduped.query_id AND {{KeyMatch}})
+                UNION ALL
+                SELECT
+                    deduped.*
+                FROM deduped
+                WHERE EXISTS (SELECT 1 FROM keys AS n WHERE n.database_name IS NULL OR n.query_id IS NULL)
+                AND   EXISTS (SELECT 1 FROM keys AS k WHERE (k.database_name IS NULL OR k.query_id IS NULL) AND {{KeyMatch}})
+            ) AS deduped
+            WHERE rn = 1
+            GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+        ),
+        """;
+
+    /// <summary>The page and its candidate count, from <c>page AS (</c> down, shared by the raw and the interval-table reads.</summary>
+    private const string QueryStoreTopTail = $$"""
         page AS (
         SELECT
             p.database_name,
@@ -398,13 +563,16 @@ public sealed partial class ViewerDataService
                                WHERE s.server_id = $1
                                AND   s.query_id = r.query_id
                                AND   s.database_name = r.database_name
-                               /* #5420: bounded to the read's own window ($2 through $3, the same bound the fact rows
-                                  above were read with). Without it a query with no inline text anywhere walked every
+                               /* #5420: bounded to the read's own window ($2 through $3). Without it a query with no inline text anywhere walked every
                                   retained chunk of query_store_stats on the time index looking for one. A query whose
                                   only inline text is older than the window now shows none, as a query with no text
-                                  at all already did. Twins the other copy of this tail; keep them matching. */
+                                  at all already did. #7776: the ceiling is the one the fact rows above are read with (CollectionCeilingSql), not the
+                                  bare $3, because the fact rows are windowed by interval start and an interval started in the window
+                                  can be collected after $3; a bare $3 left its inline-only text blank. The floor stays $2: a fact row's
+                                  collection is never before its interval's start, and text only older than the window shows none. The Darling MCP copy of this tail (DarlingDataReader) keeps the bare window with its own
+                                  collection_time window (#7814 is the twin). */
                                AND   s.collection_time >= $2
-                               AND   ($3::timestamp IS NULL OR s.collection_time <= $3)
+                               AND   ($3::timestamp IS NULL OR s.collection_time <= $3 + {{CollectionCeilingSql}})
                                AND   s.query_text IS NOT NULL
                                ORDER BY s.collection_time DESC, s.collection_id DESC
                                LIMIT 1
@@ -431,11 +599,22 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
+    /// The table twin of <see cref="QueryStoreTopSql"/> (#3953): <see cref="QueryStoreTopTablePrefix"/> reading
+    /// <c>query_store_interval_wide</c> instead of the raw dedupe, with the two-step <see cref="QueryStoreTopTableRankedHead"/> (#8549)
+    /// and the <see cref="QueryStoreTopTail"/> the raw read shares, so the two reads cannot drift below <c>ranked</c>.
+    /// Chosen per call by <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>; never used for <see cref="QueryStoreComparisonSql"/>.
+    /// $1 server_id, $2 the gate's clamp (<c>max(window start, raw's chunk floor)</c>), $3 window end (naive
+    /// UTC, NULL for an open/preset end), $4 top, $5 database filter.
+    /// <para>A static readonly (#4605), declared AFTER <see cref="QueryStoreTopTablePrefix"/> on purpose: static
+    /// initializers run in textual order, so declared above it this would concatenate a null prefix.</para>
+    /// </summary>
+    public static readonly string QueryStoreTopTableSql = QueryStoreTopTablePrefix + QueryStoreTopTableRankedHead + "\n" + QueryStoreTopTail;
+
+    /// <summary>
     /// The store schema version <see cref="GetQueryStoreTopQueriesAsync"/> (the grid) requires before it will
     /// even attempt <c>query_store_interval_wide</c> (#3953 B4): must equal the version of the
-    /// <c>PgMigrations</c> migration that creates the table. The slicer never routes to this table (ruling
-    /// issuecomment-5840737421): it reads <see cref="QueryStoreSlicerSql"/> at every window, so it carries no
-    /// constant of its own here. B3a's separate <see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingDataReader"/>
+    /// <c>PgMigrations</c> migration that creates the table. The slicer (#8549) reads the same constant before it routes to the
+    /// table. B3a's separate <see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingDataReader"/>
     /// constant for the MCP top read is pinned the same way but stays its own symbol: that surface compares the
     /// compiled <see cref="PerformanceMonitor.Darling.Storage.StorageVersion.SchemaVersion"/> instead of probing
     /// the store live, for the reason documented on that constant.
@@ -499,8 +678,18 @@ public sealed partial class ViewerDataService
            at TopFill's final limit, not up to three rounds that each re-read the window; the tail looks up text only
            until the page is full, so the answer is the rounds' own (TopFill.FinalCandidates). */
         List<ViewerQueryStoreRow> rows;
-        await using (var command = _dataSource.CreateCommand(QueryTagReadJoin.Apply(QueryStoreTopSql, serverId, tags)))
+        /* #7736: the monitor's own statements leave ranked before its candidate limit once the key backfill has run, so the gate and
+           the read are one snapshot: one read-only REPEATABLE READ transaction, as the interval-table read below runs in. */
+        await using (var connection = await _dataSource.OpenConnectionAsync(cancellationToken))
+        await using (var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken))
         {
+            await using (var readOnly = new Npgsql.NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var rawSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, QueryTagReadJoin.Apply(QueryStoreTopSql, serverId, tags), cancellationToken);
+            await using var command = new Npgsql.NpgsqlCommand(rawSql, connection, transaction);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             AddServerWindowParameters(command, serverId, startUtc, endUtc);
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
@@ -512,6 +701,15 @@ public sealed partial class ViewerDataService
 
         return (rows, null);
     }
+
+    /// <summary>#7736: <paramref name="sql"/> with the self-statement test on the key table in <c>ranked</c>, ahead of its candidate limit,
+    /// once its backfill has run (<see cref="QueryStoreSelfKeys.ReadyAsync"/>, read in this read's snapshot, closed on a store without
+    /// the state table), else as it is. The tail's text test still removes the monitor's own statements from a store the backfill has
+    /// not reached. The MCP read's <c>DarlingDataReader.WithSelfKeysBeforeCandidateLimitAsync</c> is the same shape.</summary>
+    private static async Task<string> WithSelfKeysBeforeCandidateLimitAsync(Npgsql.NpgsqlConnection connection, Npgsql.NpgsqlTransaction transaction, string sql, CancellationToken cancellationToken) =>
+        await QueryStoreSelfKeys.ReadyAsync(connection, transaction, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken)
+            ? QueryStoreSelfStatement.WithRankedKeyTest(sql)
+            : sql;
 
     /// <summary>
     /// #3953's gate and table read, on ONE connection in ONE read-only REPEATABLE READ transaction (M1, ruling
@@ -526,6 +724,7 @@ public sealed partial class ViewerDataService
     private async Task<(List<ViewerQueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan)?> TryGetQueryStoreTopQueriesFromTableAsync(
         int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
@@ -543,6 +742,11 @@ public sealed partial class ViewerDataService
                 ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
             if (!plan.UseTable)
             {
+                if (plan.DecisionFailed)
+                {
+                    LogTableReadFallback("Query Store grid", elapsed, "the source decision failed", null);
+                }
+
                 return null;
             }
 
@@ -561,7 +765,11 @@ public sealed partial class ViewerDataService
             }
 
             topSql = QueryTagReadJoin.Apply(topSql, serverId, tags);
-            await using (var command = new Npgsql.NpgsqlCommand(topSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
+
+            /* #7736: the monitor's own statements leave ranked before its candidate limit, once the key backfill has run. */
+            topSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, topSql, cancellationToken);
+            /* #8549: the table read alone gets the longer deadline (ViewerCommandDeadlines.QueryStoreTableReadSeconds): a cold first read can run past 15 s and still beat the raw read it would otherwise fall back to. */
+            await using (var command = new Npgsql.NpgsqlCommand(topSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds })
             {
                 command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
                 command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
@@ -582,10 +790,25 @@ public sealed partial class ViewerDataService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* Review D4R M2: a permission failure here (a viewer role that can't SELECT the new table on an
-               upgraded store) must not fall back to raw forever with no trace anywhere. */
-            System.Diagnostics.Trace.TraceWarning($"#3953 grid table read fell back to raw: {ex.GetType().Name}: {ex.Message}");
+               upgraded store) must not fall back to raw forever with no trace anywhere. #8549: it goes to the Viewer's own log, with the
+               time spent, because a read cancelled at the deadline never reaches the store's statement history and a Trace line has no listener. */
+            LogTableReadFallback("Query Store grid", elapsed, "the interval-table read failed", ex);
             return null;
         }
+    }
+
+    /// <summary>
+    /// #8549: one Warning line in the Viewer's log each time an interval-table read gives up and the read starts again on raw history: which
+    /// read, how long the failed attempt took, why, and that raw is next. On a field store the first 30-day open spent about 15 s on a
+    /// table read that ran into the read deadline, then read raw; the cancelled statement is not in the store's statement history and
+    /// the fallback was a Trace line nobody listens to, so no log showed where the first 15 s went.
+    /// </summary>
+    private static void LogTableReadFallback(string read, System.Diagnostics.Stopwatch elapsed, string why, Exception? ex)
+    {
+        var detail = ex is null
+            ? ""
+            : $" ({ex.GetType().Name}: {ex.Message}{(ex.InnerException is { } inner ? $" / {inner.GetType().Name}" : "")})";
+        ViewerLogger.Warn("QueryStore", $"{read}: {why} after {elapsed.ElapsedMilliseconds} ms{detail}; retrying on raw history (#8549)");
     }
 
     /// <summary>The ordinal of <c>page_ord</c>, the column after <c>replica_role</c> (#5313): <c>candidate_count</c>
@@ -718,6 +941,7 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1
             AND   collection_time >= $2 AND collection_time <= $3
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
+            /*SELFKEY:stats*/
         ),
         deduped_baseline AS (
             SELECT
@@ -740,6 +964,7 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1
             AND   collection_time >= $4 AND collection_time <= $5
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
+            /*SELFKEY:stats*/
         ),
         top_current AS (
             SELECT database_name, query_hash
@@ -859,7 +1084,13 @@ public sealed partial class ViewerDataService
     {
         var items = new List<QueryStatsComparisonItem>();
 
-        await using var command = _dataSource.CreateCommand(QueryStoreComparisonSql);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        /* #7730: the key table's test ahead of each window's top-100 cut once its backfill has run; the tail's text test stays for the
+           marker texts of a store the backfill has not reached. */
+        var comparisonSql = await QueryStoreSelfKeys.ReadyAsync(connection, null, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken)
+            ? QueryStoreSelfStatement.WithComparisonKeyTest(QueryStoreComparisonSql)
+            : QueryStoreComparisonSql;
+        await using var command = new Npgsql.NpgsqlCommand(comparisonSql, connection);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddComparisonParameters(command, serverId, currentStart, currentEnd, baselineStart, baselineEnd);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
@@ -891,16 +1122,13 @@ public sealed partial class ViewerDataService
     /// <c>execution_count</c> (<c>SUM(avg_metric * execution_count)</c>). Same 7-column shape as the
     /// query/procedure slicers, so it shares <see cref="ReadQueryStatsSlicerAsync"/>.
     ///
-    /// The slicer reads this raw statement at every window (ruling issuecomment-5840737421, amending
-    /// issuecomment-5836972848 item 3): a per-interval table route (#3953) was built and measured
-    /// alongside the grid and MCP top reads, but at 6 h, 12 h and 24 h raw beat the table with
-    /// non-overlapping spreads, and at 7 d the two tied — a 24 h threshold would have made every
-    /// 24 h-to-7 d slicer read slower, not faster. The grid and MCP top read do route to the table
-    /// (<see cref="GetQueryStoreTopQueriesAsync"/>, <see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingDataReader"/>);
-    /// the slicer does not, and this is its only statement.
+    /// The slicer reads this raw statement below <see cref="QueryStoreIntervalWide.SlicerWideMinWindow"/>, and whenever the interval
+    /// table cannot serve the window (ruling issuecomment-5840737421, amending issuecomment-5836972848 item 3: at 6 h, 12 h and
+    /// 24 h raw beat the table with non-overlapping spreads, and at 7 d the two tied). From that window up it reads
+    /// <see cref="QueryStoreSlicerTableSql"/> instead (#8549: 30 days measured faster than this statement on a field-sized store).
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
-    public const string QueryStoreSlicerSql = """
+    public const string QueryStoreSlicerSql = $$"""
         WITH deduped AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. The rows are CUMULATIVE per-interval
                snapshots and the collector re-fetches the OPEN interval every cycle, so summing the raw
@@ -913,8 +1141,21 @@ public sealed partial class ViewerDataService
                kept beside it as the tier-1 proxy for rows collected before it existed — both in the key
                rather than a COALESCE, because the id is NULL on exactly the pre-tier-2 generation and
                non-NULL on exactly the post-tier-2 one, so the two can never collide and a legacy-only
-               window degrades to precisely tier 1's key. Twins Lite's GetQueryStoreSlicerDataAsync. */
-            SELECT
+               window degrades to precisely tier 1's key. Twins Lite's GetQueryStoreSlicerDataAsync.
+
+               #8549: the same rule, written so a compressed store reads it cheaply. On a field store of
+               3.5 million raw rows (12 compressed chunks, 5 raw, 30-day window) the window-function form took
+               14.5 s at work_mem 64MB. 7.9 s of that was the per-chunk sorts, on a key whose FIRST column was
+               database_name, a text column with a handful of values; with the integer columns first they took 2.9 s.
+               The key now leads with query_id, plan_id, runtime_stats_interval_id and first_execution_time, and
+               the text columns follow. A key is the same set of columns in any order, so the same rows are
+               grouped. DISTINCT ON keeps the FIRST row of each key
+               in the ORDER BY below, which is exactly what ROW_NUMBER() = 1 kept: the newest collection_time, then the
+               highest execution_count, a NULL count first because a descending sort puts NULLs first. It is also
+               a node the planner sizes from column statistics, where the window's rn = 1 filter was sized by a
+               default 0.5 percent guess (12,533 rows estimated, 1,767,500 returned) that made the bucket step a
+               1.77-million-row external sort. */
+            SELECT DISTINCT ON (query_id, plan_id, runtime_stats_interval_id, first_execution_time, database_name, execution_type_desc, replica_role)
                 collection_time,
                 interval_start_time_utc,
                 query_id,
@@ -923,12 +1164,7 @@ public sealed partial class ViewerDataService
                 avg_duration_us,
                 avg_logical_io_reads,
                 avg_logical_io_writes,
-                avg_physical_io_reads,
-                ROW_NUMBER() OVER
-                (
-                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-                    ORDER BY collection_time DESC, execution_count DESC
-                ) AS rn
+                avg_physical_io_reads
             FROM query_store_stats
             WHERE server_id = $1
             /* The window is filtered on the SAME expression the bars are keyed on (#1892). It used to filter
@@ -958,11 +1194,12 @@ public sealed partial class ViewerDataService
                and 29 of collector-outage allowance. A month-long outage that then back-collects an interval
                straddling an old window's edge could still omit that one bar; the data stays in the store,
                and the alternative (no ceiling) makes every historical window scan to the present. */
-            AND   collection_time >= $2 - interval '1 hour'
-            AND   collection_time <= $3 + interval '30 days'
+            AND   collection_time >= $2 - {{CollectionFloorSlackSql}}
+            AND   collection_time <= $3 + {{CollectionCeilingSql}}
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        )
-        SELECT
+            ORDER BY query_id, plan_id, runtime_stats_interval_id, first_execution_time, database_name, execution_type_desc, replica_role, collection_time DESC, execution_count DESC
+        ),
+        binned AS (
             /* The bar sits in the hour the work RAN, not the hour it was last COLLECTED (#1841 tier 2).
                Query Store's default interval is 60 minutes and the closing fetch lands in the cycle AFTER
                the interval ends, so a collection_time bucket was reliably one bar late.
@@ -970,22 +1207,199 @@ public sealed partial class ViewerDataService
                (the same clock as collection_time), so this is a placement fix and not a timezone trade.
                Legacy rows have no interval start and keep collection_time placement, so a window spanning
                the upgrade renders correctly on both sides and the lag disappears as those rows age out. */
-            date_trunc('hour', COALESCE(interval_start_time_utc, collection_time)) AS bucket,
-            COUNT(DISTINCT query_id) AS query_count,
-            COALESCE(SUM(CAST(avg_cpu_time_us AS double precision) * execution_count), 0) / 1000.0 AS total_cpu_ms,
-            COALESCE(SUM(CAST(avg_duration_us AS double precision) * execution_count), 0) / 1000.0 AS total_duration_ms,
-            COALESCE(SUM(CAST(avg_logical_io_reads AS double precision) * execution_count), 0) AS total_reads,
-            COALESCE(SUM(CAST(avg_logical_io_writes AS double precision) * execution_count), 0) AS total_writes,
-            COALESCE(SUM(CAST(avg_physical_io_reads AS double precision) * execution_count), 0) AS total_physical_reads
-        FROM deduped
-        WHERE rn = 1
-        GROUP BY date_trunc('hour', COALESCE(interval_start_time_utc, collection_time))
+            SELECT
+                query_id,
+                date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), {{TrendBucketSql.OriginSql}}) AS bucket,
+                CAST(avg_cpu_time_us AS double precision) * execution_count AS cpu,
+                CAST(avg_duration_us AS double precision) * execution_count AS dur,
+                CAST(avg_logical_io_reads AS double precision) * execution_count AS reads,
+                CAST(avg_logical_io_writes AS double precision) * execution_count AS writes,
+                CAST(avg_physical_io_reads AS double precision) * execution_count AS preads
+            FROM deduped
+        ),
+        flagged AS (
+            /* #8549: the bucket step used to be COUNT(DISTINCT query_id), an aggregate PostgreSQL can only run
+               over input sorted by (bucket, query_id) -- a 1.77-million-row external sort (128 MB of temp files)
+               on the field store, under a GROUP BY it could not hash. The deduped rows arrive sorted by query_id,
+               so numbering each query's rows within a bucket is a sort of about 100 rows at a time (an Incremental
+               Sort), and the bucket totals are then a plain hash aggregate over the bucket. qrn = 1 marks the
+               first row of each query_id inside a bucket, so counting those rows is COUNT(DISTINCT query_id):
+               a NULL query_id is never counted, as before. */
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY query_id, bucket) AS qrn
+            FROM binned
+        )
+        SELECT
+            bucket,
+            COUNT(query_id) FILTER (WHERE qrn = 1) AS query_count,
+            COALESCE(SUM(cpu), 0) / 1000.0 AS total_cpu_ms,
+            COALESCE(SUM(dur), 0) / 1000.0 AS total_duration_ms,
+            COALESCE(SUM(reads), 0) AS total_reads,
+            COALESCE(SUM(writes), 0) AS total_writes,
+            COALESCE(SUM(preads), 0) AS total_physical_reads
+        FROM flagged
+        GROUP BY bucket
         ORDER BY bucket
         """;
 
-    /// <summary>Hourly Query Store slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>].</summary>
+    /// <summary>
+    /// The interval-table twin of <see cref="QueryStoreSlicerSql"/> (#8549). <c>query_store_interval_wide</c> already holds one row per
+    /// interval identity, the newest snapshot (the rule the raw statement's DISTINCT ON applies), so there is no dedupe step: the rows
+    /// are binned on the same expression, and the same columns weighted the same way. The bucket totals are one aggregate over the binned rows, and the distinct-query
+    /// count is a separate narrow step over (bucket, query_id) pairs alone, where the raw statement counts first rows of a query in a bucket
+    /// over rows that arrive sorted by query_id. The window and the <c>first_execution_time</c> bounds are the grid's own
+    /// (<see cref="QueryStoreTopTablePrefix"/>), so the btree and the day partitions serve it.
+    /// $1 server_id, $2 the read plan's start (<see cref="QueryStoreIntervalWide.WideReadPlan.ReadStart"/>), $3 window end (naive UTC),
+    /// $4 database filter, $5 bucket minutes.
+    /// </summary>
+    public static readonly string QueryStoreSlicerTableSql = $$"""
+        WITH binned AS NOT MATERIALIZED (
+            /* Read twice below, once per aggregate. NOT MATERIALIZED scans the table twice, the second time from cache, instead of writing every binned row to a temp store (#8549). */
+            SELECT
+                query_id,
+                date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), {{TrendBucketSql.OriginSql}}) AS bucket,
+                CAST(avg_cpu_time_us AS double precision) * execution_count AS cpu,
+                CAST(avg_duration_us AS double precision) * execution_count AS dur,
+                CAST(avg_logical_io_reads AS double precision) * execution_count AS reads,
+                CAST(avg_logical_io_writes AS double precision) * execution_count AS writes,
+                CAST(avg_physical_io_reads AS double precision) * execution_count AS preads
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+            AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        ),
+        sums AS (
+            /* #8549: the bucket totals are added straight off the binned rows. They used to be summed per (bucket, query_id) first, which made
+               the sort or hash carry all five sums on a 2.5-million-group step: on a field store that was a sort of 2.77 million wide rows
+               (about 196 MB of temp files) and then two more aggregate steps. Only the distinct-query count needs the pairs. */
+            SELECT
+                bucket,
+                SUM(cpu) AS cpu,
+                SUM(dur) AS dur,
+                SUM(reads) AS reads,
+                SUM(writes) AS writes,
+                SUM(preads) AS preads
+            FROM binned
+            GROUP BY bucket
+        ),
+        counts AS (
+            /* One narrow row per (bucket, query_id): the grouping carries two columns and no sums. A NULL query_id is never counted, as
+               COUNT(DISTINCT) skips it, but its work is still in sums above. */
+            SELECT
+                bucket,
+                COUNT(*) AS query_count
+            FROM
+            (
+                SELECT bucket, query_id
+                FROM binned
+                WHERE query_id IS NOT NULL
+                GROUP BY bucket, query_id
+            ) AS pairs
+            GROUP BY bucket
+        ),
+        parts AS (
+            /* One row per bucket from each side, stacked and added up below. Joining the two aggregates instead made the planner sort the
+               2.7 million wide rows by bucket to feed a merge join (#8549). */
+            SELECT bucket, CAST(NULL AS bigint) AS query_count, cpu, dur, reads, writes, preads
+            FROM sums
+            UNION ALL
+            SELECT bucket, query_count, NULL, NULL, NULL, NULL, NULL
+            FROM counts
+        )
+        SELECT
+            bucket,
+            CAST(COALESCE(SUM(query_count), 0) AS bigint) AS query_count,
+            COALESCE(SUM(cpu), 0) / 1000.0 AS total_cpu_ms,
+            COALESCE(SUM(dur), 0) / 1000.0 AS total_duration_ms,
+            COALESCE(SUM(reads), 0) AS total_reads,
+            COALESCE(SUM(writes), 0) AS total_writes,
+            COALESCE(SUM(preads), 0) AS total_physical_reads
+        FROM parts
+        GROUP BY bucket
+        ORDER BY bucket
+        """;
+
+    /// <summary>Query Store slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>], at the width <see cref="SlicerBuckets"/> picks for it ($5 minutes).
+    /// #8549: a window of <see cref="QueryStoreIntervalWide.SlicerWideMinWindow"/> or more reads the interval table when the grid's gate
+    /// (<see cref="QueryStoreIntervalWide.ResolveReadAsync"/>, schema version, coverage, the raw chunk floor) lets it; any "no" or fault reads
+    /// <see cref="QueryStoreSlicerSql"/>, as before.</summary>
     public async Task<List<TimeSliceBucket>> GetQueryStoreSlicerDataAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
         CancellationToken cancellationToken = default)
-        => await ReadQueryStatsSlicerAsync(QueryStoreSlicerSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
+        => (await GetQueryStoreSlicerWithReachAsync(serverId, startUtc, endUtc, databaseNames, cancellationToken)).Buckets;
+
+    /// <summary>
+    /// <see cref="GetQueryStoreSlicerDataAsync"/> plus the read plan when the interval table served the buckets: the plan's
+    /// <see cref="QueryStoreIntervalWide.WideReadPlan.ReadStart"/> is where the slicer's points start, which reaches below raw's chunk
+    /// floor, so the grid banner names the slicer's start from the source that drew it. The plan is null when the read was raw.
+    /// </summary>
+    public async Task<(List<TimeSliceBucket> Buckets, QueryStoreIntervalWide.WideReadPlan? Plan)> GetQueryStoreSlicerWithReachAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (endUtc - startUtc >= QueryStoreIntervalWide.SlicerWideMinWindow)
+        {
+            var schemaVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+            if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
+            {
+                var served = await TryGetQueryStoreSlicerFromTableAsync(serverId, startUtc, endUtc, databaseNames, cancellationToken);
+                if (served is not null)
+                {
+                    return served.Value;
+                }
+            }
+        }
+
+        return (await ReadQueryStatsSlicerAsync(QueryStoreSlicerSql, serverId, startUtc, endUtc, databaseNames, cancellationToken), null);
+    }
+
+    /// <summary>The slicer's interval-table read, or null for "read raw instead" (the gate said no, or any fault except cancellation), as
+    /// <see cref="TryGetQueryStoreTopQueriesFromTableAsync"/> does. No literal window end is passed: the raw statement keeps the newest
+    /// snapshot of every interval that starts in the window, whatever the end, so the table's newer snapshots are the same answer.
+    /// The legacy-row probe is skipped (<see cref="QueryStoreIntervalWide.LegacyRows.Allow"/>) because one snapshot per identity is
+    /// what both statements keep for a legacy row too. The plan that served goes back with the buckets.</summary>
+    private async Task<(List<TimeSliceBucket> Buckets, QueryStoreIntervalWide.WideReadPlan? Plan)?> TryGetQueryStoreSlicerFromTableAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
+    {
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+            await using (var readOnly = new Npgsql.NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var plan = await QueryStoreIntervalWide.ResolveReadAsync(
+                connection, serverId, startUtc, endUtc, literalWindowEnd: null, QueryStoreIntervalWide.SlicerWideMinWindow,
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
+            if (!plan.UseTable)
+            {
+                if (plan.DecisionFailed)
+                {
+                    LogTableReadFallback("Query Store slicer", elapsed, "the source decision failed", null);
+                }
+
+                return null;
+            }
+
+            /* #8549: the table read alone gets the longer deadline, as the grid's does. */
+            await using var command = new Npgsql.NpgsqlCommand(QueryStoreSlicerTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds };
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
+            command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = SlicerBuckets.MinutesFor(startUtc, endUtc) });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return (await ReadSlicerBucketsAsync(reader, cancellationToken), plan);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogTableReadFallback("Query Store slicer", elapsed, "the interval-table read failed", ex);
+            return null;
+        }
+    }
 }

@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Hardcodet.Wpf.TaskbarNotification;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -95,7 +96,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         App.AlertFailedJobLookbackMinutes = 60;
         App.AlertCooldownMinutes = 5;
         App.AlertDeliveryMode = AlertNotificationMode.Summary;
-        App.AlertPerEventMaxPerCycle = 10;
+        App.AlertPerEventMaxPerCycle = AlertDefaults.PerEventMax;
     }
 
     /* ---------------- fakes (adapter/store/deliverer — the engine sees Lite's REAL settings) ---------------- */
@@ -286,6 +287,8 @@ public partial class LiteAlertForwardingTests : IDisposable
         public List<FailedJobInfo> FailedJobs { get; } = new();
         public bool Muted { get; set; }
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+        /// <summary>#7085: the alert-history reader the High CPU restart seed uses; null (the default) leaves the engine memory-only.</summary>
+        public Func<OpenFireQuery, CancellationToken, Task<AlertHistoryStanding>>? OpenFireReader { get; set; }
 
         public AlertEngine Build() => Build(Deliverer);
 
@@ -298,7 +301,8 @@ public partial class LiteAlertForwardingTests : IDisposable
             failedJobsFetcher: (_, _, _) => Task.FromResult(new List<FailedJobInfo>(FailedJobs)),
             resolutionCallback: (r, ct) => { Resolutions.Add(r); return ResolutionHook?.Invoke(r, ct) ?? Task.CompletedTask; },
             logger: null,
-            utcNow: () => Now);
+            utcNow: () => Now,
+            openFireReader: OpenFireReader);
 
         public DateTime? FailedJobWatermark() =>
             StateStore.FailedJobWatermarks.TryGetValue(Key, out var w) ? w : (DateTime?)null;
@@ -314,9 +318,15 @@ public partial class LiteAlertForwardingTests : IDisposable
         public static AlertServerSnapshot Snapshot(
             double? sqlCpu = null, double? totalCpu = null,
             bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false,
-            DateTime? cpuSampleTime = null) =>
-            new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed,
-                cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)));
+            DateTime? cpuSampleTime = null)
+        {
+            var sampleAt = cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick));
+
+            /* #7085: Lite's snapshot always carries the UTC twin (MainWindow.AlertEngine.cs), and the clear hold is measured on it. Only a
+               reading under the default 80 bar carries it here, so the card's sample-age line stays off the pins that assert it byte for byte. */
+            var snapshot = new AlertServerSnapshot(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed, sampleAt);
+            return (totalCpu ?? sqlCpu) < 80 ? snapshot with { CpuSampleUtcOnly = sampleAt } : snapshot;
+        }
     }
 
     /// <summary>Everything except the named check off, so a scenario pins exactly one alert.</summary>
@@ -339,7 +349,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         DatabaseName = "StackOverflow",
         BlockedSpid = blockedSpid,
         BlockingSpid = blockedSpid + 100,
-        WaitTimeMs = 12000,
+        WaitTimeMs = 20000,
         LockMode = "X",
         BlockedSqlText = "UPDATE Users SET x = 1",
         BlockingSqlText = "BEGIN TRAN UPDATE Users",
@@ -407,7 +417,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: 1, from: Harness.SampleBase);
         Assert.Empty(h.Deliverer.Outcomes);
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: AlertEngine.CpuBreachSamples - 1, from: Harness.SampleBase.AddMinutes(1));
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: AlertEngine.SqlCpuBreachSamples - 1, from: Harness.SampleBase.AddMinutes(1));
         Assert.Single(h.Deliverer.Outcomes);
     }
 
@@ -422,13 +432,71 @@ public partial class LiteAlertForwardingTests : IDisposable
         App.AlertCpuEnabled = true;
         var h = new Harness();
 
-        await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples - 1, from: Harness.SampleBase);
+        await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples - 1, from: Harness.SampleBase);
 
         var persisted = Assert.Single(h.StateStore.Persistence);
         Assert.Equal(AlertEngine.CpuPersistenceMetric, persisted.Key.Metric);
-        Assert.Equal(AlertEngine.CpuBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
+        Assert.Equal(AlertEngine.SqlCpuBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
         Assert.False(persisted.Value.State.Firing);
         Assert.NotNull(persisted.Value.LastObservedSampleUtc);
+    }
+
+    [Fact]
+    public async Task Cpu_AnOlderUnresolvedCriticalRow_DoesNotStandForAnIncidentOpenedUnderSuppression_OnLiteEither()
+    {
+        /* #7085: the incident's opening instant rides the Lite state store's edge watermark row, so a restart counts only this
+           incident's delivered rows. An older Critical row whose clear was suppressed (no CPU Resolved row) is not this incident's
+           page: the first unsuppressed breaching sample after the restart pages once. */
+        DisableAllChecks();
+        App.AlertCpuEnabled = true;
+        var h = new Harness();
+        h.OpenFireReader = (_, _) => Task.FromResult(new AlertHistoryStanding(
+            new List<AlertHistoryFire>
+            {
+                new(Harness.SampleBase.AddDays(-4), 97, AlertContextSerializer.Serialize(new AlertContext { SeverityOverride = AlertSeverityLevel.Critical })),
+            },
+            Array.Empty<AlertHistoryClear>()));
+
+        var at = await DriveCpuSuppressedAsync(h.Build(), sqlCpu: 70, totalCpu: 90, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+        var opened = Assert.Single(h.StateStore.EdgeWatermarks, w => w.Key.Metric == AlertEngine.CpuIncidentOpenedMetric);
+        Assert.Equal((int)(h.Now - DateTime.UnixEpoch).TotalMinutes, opened.Value);
+
+        await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 90, samples: 20, from: at);
+
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task Cpu_AMuteLiftedMidIncident_PagesOnceWithinACooldown_OnLiteEither()
+    {
+        /* #7085: a muted fire is a history row, not a page, and counts for one cooldown. The mute ends while CPU is still over the
+           bar: one page goes out once the cooldown after the muted fire has run out, then the incident is held. */
+        DisableAllChecks();
+        App.AlertCpuEnabled = true;
+        var h = new Harness { Muted = true };
+        var engine = h.Build();
+
+        var at = Harness.SampleBase;
+        async Task DriveAsync(int samples)
+        {
+            for (var i = 0; i < samples; i++)
+            {
+                at = at.AddMinutes(1);
+                h.Now = at;
+                await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 90, cpuSampleTime: at));
+            }
+        }
+
+        await DriveAsync(AlertEngine.SqlCpuBreachSamples);
+        Assert.True(Assert.Single(h.Deliverer.Outcomes).Muted);
+
+        h.Muted = false;
+        await DriveAsync(10);
+        Assert.Single(h.Deliverer.Outcomes, o => !o.Muted);
+
+        await DriveAsync(40);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
 
     /* ---------------- CPU: the #3744 identity rule, on the Lite path ---------------- */
@@ -463,10 +531,19 @@ public partial class LiteAlertForwardingTests : IDisposable
         var fallenBack = new DateTime(2026, 11, 1, 1, 0, 0);
         Assert.True(fallenBack < local, "the fixture must run the stamp backwards, or it tests nothing #3744 changed");
         await ObserveCpuAsync(engine, fallenBack, breaching: true);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(1), breaching: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: true);
         Assert.Single(h.Deliverer.Outcomes);
 
-        await ObserveCpuAsync(engine, fallenBack.AddMinutes(1), breaching: false);
-        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: false);
+        /* Fifteen minutes of samples under the bar (#7085), then the sixteenth resolves. */
+        for (var i = 3; i <= 17; i++)
+        {
+            await ObserveCpuAsync(engine, fallenBack.AddMinutes(i), breaching: false);
+        }
+
+        Assert.Empty(h.Resolutions);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(18), breaching: false);
         Assert.Single(h.Resolutions);
     }
 
@@ -491,6 +568,9 @@ public partial class LiteAlertForwardingTests : IDisposable
         Assert.Empty(h.Deliverer.Outcomes);
 
         await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(2), breaching: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(3), breaching: true);
         Assert.Single(h.Deliverer.Outcomes);
     }
 
@@ -519,10 +599,10 @@ public partial class LiteAlertForwardingTests : IDisposable
         var engine = h.Build();
 
         /* Fire: Total mode uses TotalCpuPercent (:65 CpuPercentForAlert → Total), after
-           AlertEngine.CpuBreachSamples distinct samples over the bar (#3282 — one is no longer an
+           AlertEngine.SqlCpuBreachSamples distinct samples over the bar (#3282 — one is no longer an
            incident, on either SKU). The delivered STRINGS are what this test is about and they are
            unchanged. */
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("High CPU", fired.MetricName);
@@ -548,9 +628,9 @@ public partial class LiteAlertForwardingTests : IDisposable
         Assert.False(fired.Muted);
 
         /* Resolve: :110-113 — exact title + message strings, Success-severity tray-only toast, after
-           AlertEngine.CpuClearSamples consecutive clears. */
+           fifteen minutes of clear samples. */
         h.Now = h.Now.AddMinutes(6);
-        await DriveCpuAsync(engine, sqlCpu: 10, totalCpu: 12, samples: AlertEngine.CpuClearSamples, from: at);
+        await DriveCpuAsync(engine, sqlCpu: 10, totalCpu: 12, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1), from: at);
 
         var res = Assert.Single(h.Resolutions);
         Assert.Equal("CPU Resolved", res.Title);
@@ -567,7 +647,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         var h = new Harness();
 
         /* SqlOnly compares CpuPercent (90), not Total (95) — :65 CpuPercentForAlert → SqlOnly. */
-        await DriveCpuAsync(h.Build(), sqlCpu: 90, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(h.Build(), sqlCpu: 90, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("90% (SQL CPU)", fired.CurrentValue);
@@ -697,13 +777,15 @@ public partial class LiteAlertForwardingTests : IDisposable
            suppression, exactly like the blocking gate, because suppression is evaluate-but-don't-deliver.
            Driving only one sample would leave this pin unable to distinguish "suppressed" from "the streak
            never reached the bar", which is the thing it exists to check). */
-        var at = await DriveCpuSuppressedAsync(engine, sqlCpu: 95, totalCpu: 99, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuSuppressedAsync(engine, sqlCpu: 95, totalCpu: 99, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.Resolutions);
         /* :143 — the gate is told about suppression, so the watermark stays 0 and nothing was
            persisted; when the user un-acknowledges, the same lingering report still alerts. */
-        Assert.Empty(h.StateStore.SavedEdge);
+        Assert.DoesNotContain(h.StateStore.SavedEdge, e => e.Metric == AlertEngine.BlockingWatermarkMetric);
+        /* #7085: the High CPU incident's opening instant is persisted when the gate opens, paged or not. */
+        Assert.Single(h.StateStore.SavedEdge, e => e.Metric == AlertEngine.CpuIncidentOpenedMetric);
 
         /* One UNsuppressed sample is enough for CPU now: the gate is already firing from the suppressed
            streak above, so this is the standing-condition delivery rather than a fresh rising edge — which
@@ -726,7 +808,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         var h = new Harness { Muted = true };
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.True(fired.Muted);
@@ -801,8 +883,8 @@ public partial class LiteAlertForwardingTests : IDisposable
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Failed Agent Job", fired.MetricName);
-        Assert.Equal("1 job failure in last 60m — NightlyETL", fired.CurrentValue); /* :703 */
-        Assert.Equal("1 job failure — NightlyETL", fired.ShortMessage);             /* :690 toast body */
+        Assert.Equal("1 job failure in last 60m: NightlyETL", fired.CurrentValue); /* :703 */
+        Assert.Equal("1 job failure: NightlyETL", fired.ShortMessage);             /* :690 toast body */
         /* :684 — the server-local watermark persisted the moment the alert fired. */
         Assert.Equal(runTime, h.FailedJobWatermark());
 
@@ -943,9 +1025,9 @@ public partial class LiteAlertForwardingTests : IDisposable
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("THREADPOOL (900s in 10m), RESOURCE_SEMAPHORE (600s in 10m)", fired.CurrentValue);
-        Assert.Equal("600s accumulated over 10m (an average of 1 task(s) continuously waiting)", fired.ThresholdValue);
+        Assert.Equal("600s accumulated over 10m (an average of 1 task continuously waiting)", fired.ThresholdValue);
         Assert.Equal(
-            "[THREADPOOL] 900s of wait accumulated in the last 10 minutes across 30,000 waits — on average 1.5 task(s) continuously stuck",
+            "[THREADPOOL] 900s of wait accumulated in the last 10 minutes across 30,000 waits. On average 1.5 tasks continuously stuck",
             fired.ShortMessage);
         Assert.Equal(900_000d, fired.NumericCurrentValue);
         Assert.Equal(600_000d, fired.NumericThresholdValue);
@@ -972,7 +1054,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         Assert.Equal("30m", fired.ThresholdValue);                            /* :388 */
         var expectedPreview = PerformanceMonitor.Alerting.AlertContextBuilders.TruncateText(longText, 80);
         Assert.EndsWith("...", expectedPreview);
-        Assert.Equal($"Session #55 running 45m — {expectedPreview}", fired.ShortMessage); /* :357-358, :374 */
+        Assert.Equal($"Session #55 running 45m: {expectedPreview}", fired.ShortMessage); /* :357-358, :374 */
     }
 
     [Fact]
@@ -1129,16 +1211,12 @@ public partial class LiteAlertForwardingTests : IDisposable
     }
 
     [Fact]
-    public async Task Deliverer_NonBlockingMetrics_SendOnce_WithNumerics()
+    public async Task Deliverer_NonBlockingMetrics_WithoutIncidents_SendOnce_WithNumerics()
     {
-        /* The old loop sent every non-blocking/deadlock metric directly (:312-322 poison,
-           :384-394 LRQ, ...) with its numeric values — never through the per-event split, even
-           when its context has incidents and the mode is PerEvent. */
+        /* A metric whose context carries no incidents is one direct send with its numeric values, in Per-event mode
+           too: the split is decided by the shared rule (#8246, PerEventNotification.Splits), which needs incidents. */
         App.AlertDeliveryMode = AlertNotificationMode.PerEvent;
-        var context = new AlertContext
-        {
-            Incidents = new List<AlertIncident> { new("a", new[] { "dbo.Users" }), new("b", new[] { "dbo.Posts" }) }
-        };
+        var context = new AlertContext();
         var (deliverer, _, sends) = BuildDeliverer();
 
         await deliverer.DeliverAsync(Outcome("Long-Running Query", current: "1 query, longest 45m", threshold: "30m", context: context, numCur: 45, numThr: 30));
@@ -1221,10 +1299,10 @@ public partial class LiteAlertForwardingTests : IDisposable
         Assert.Equal("3", sends[0].CurrentValue);   /* DescribeIncident = occurrence count */
         Assert.Equal("1", sends[1].CurrentValue);
         Assert.Equal("+1 more incident this cycle", sends[2].CurrentValue);
-        /* #1830: per-event sends carry per-incident numerics — occurrence counts, then the overflow
-           COUNT for the "+N more" trailer whose text is unparseable (it stored 0 before). The
-           threshold stays the outcome's on every send. */
-        Assert.Equal(new double?[] { 3, 1, 1 }, sends.Select(s => s.NumericCurrentValue).ToArray());
+        /* #8246: every per-event send carries the alert's measurement as its numeric (the engine reads the newest open row's
+           value back as the level it last announced), the overflow send included, so the "+N more" trailer whose text is
+           unparseable never stores 0 (#1830). The threshold stays the outcome's on every send. */
+        Assert.Equal(new double?[] { 6, 6, 6 }, sends.Select(s => s.NumericCurrentValue).ToArray());
         Assert.All(sends, s => Assert.Equal(1d, s.NumericThresholdValue));
         var overflowIncident = Assert.Single(sends[2].Context!.Incidents!);
         Assert.Equal("c", overflowIncident.DedupKey);
@@ -1354,6 +1432,55 @@ public partial class LiteAlertForwardingTests : IDisposable
             Assert.Equal(failedAt, await store.LoadFailedJobWatermarkAsync("101"));
             /* Per-key isolation: another server's rows don't bleed in. */
             Assert.Null(await store.LoadEdgeTriggerWatermarkAsync("202", AlertEngine.BlockingWatermarkMetric));
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task StateStore_AWatermarkTableThatCannotBeRead_Throws_NotNull()
+    {
+        /* #7295: null means "read, and no row". A database with no watermark table cannot be read, and the engine must be able to
+           tell that from an empty store, or it marks the server seeded at 0 and pages again what a page already carried. */
+        var tempDir = Path.Combine(Path.GetTempPath(), "LiteFwdTests_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            using var duckDb = new DuckDbInitializer(Path.Combine(tempDir, "uninitialized.duckdb"));
+            IAlertStateStore store = new LiteAlertStateStore(new DuckDbAlertHistoryStore(duckDb));
+
+            await Assert.ThrowsAnyAsync<Exception>(() => store.LoadEdgeTriggerWatermarkAsync("101", AlertEngine.BlockingWatermarkMetric));
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task StateStore_FailedJobAndPersistenceLoads_ThrowOnAnUnreadableStore_AndAnswerNullOnAnEmptyOne()
+    {
+        /* #7295: the failed-job watermark and the persistence record used to answer null for a failed read too, so the engine took
+           an unreadable store for an empty one. Positive control first: an initialized store with no row answers null. */
+        var tempDir = Path.Combine(Path.GetTempPath(), "LiteFwdTests_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            using (var readable = new DuckDbInitializer(Path.Combine(tempDir, "test.duckdb")))
+            {
+                await readable.InitializeFromTemplateAsync();
+                IAlertStateStore empty = new LiteAlertStateStore(new DuckDbAlertHistoryStore(readable));
+                Assert.Null(await empty.LoadFailedJobWatermarkAsync("101"));
+                Assert.Null(await empty.LoadAlertPersistenceAsync("101", AlertEngine.CpuPersistenceMetric));
+            }
+
+            using var duckDb = new DuckDbInitializer(Path.Combine(tempDir, "uninitialized.duckdb"));
+            IAlertStateStore store = new LiteAlertStateStore(new DuckDbAlertHistoryStore(duckDb));
+
+            await Assert.ThrowsAnyAsync<Exception>(() => store.LoadFailedJobWatermarkAsync("101"));
+            await Assert.ThrowsAnyAsync<Exception>(() => store.LoadAlertPersistenceAsync("101", AlertEngine.CpuPersistenceMetric));
         }
         finally
         {

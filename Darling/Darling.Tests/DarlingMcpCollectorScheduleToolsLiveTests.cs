@@ -39,13 +39,16 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
     private const string ShipsOff = "long_query_completions";
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+    /* Npgsql leaves the password out of the ConnectionString read back from a data source or an opened connection, so what the body opens by connection string comes from the scratch store's own string. */
+    private string _storeConnectionString = "";
 
-    private static async Task WithStoreAsync(Func<NpgsqlDataSource, NpgsqlConnection, CancellationToken, Task> body)
+    private async Task WithStoreAsync(Func<NpgsqlDataSource, NpgsqlConnection, CancellationToken, Task> body)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the collector schedule tool pins.");
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
         var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
+        _storeConnectionString = connectionString;
         await using var owner = new NpgsqlConnection(connectionString);
         await owner.OpenAsync(ct);
         await PgMigrations.MigrateAsync(owner, ct);
@@ -417,8 +420,7 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
     {
         await WithStoreAsync(async (source, owner, ct) =>
         {
-            var connectionString = new NpgsqlConnectionStringBuilder(owner.ConnectionString).ConnectionString;
-            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(connectionString);
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(_storeConnectionString);
             await viewer.ReplaceFleetSchedulesAsync(
                 new[] { new PerformanceMonitor.Darling.Viewer.CollectorScheduleRow(null, Daily, 720, 45, true, null) }, ct);
 

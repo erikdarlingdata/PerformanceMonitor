@@ -18,24 +18,6 @@ namespace PerformanceMonitorLite.Services;
 public partial class LocalDataService
 {
     /// <summary>
-    /// Gets the latest snapshot of running jobs for a server, and only while that snapshot is the
-    /// collector's CURRENT answer.
-    /// <para>The collector writes no row when no job is running, so "the newest snapshot ever written"
-    /// can be weeks old: the tab then listed a job that ended days ago as running now. The collector's own
-    /// latest SUCCESSFUL run (<c>v_collection_log</c>, which records a SUCCESS with zero rows for a run that
-    /// found nothing) decides: a run that stored rows means the newest snapshot is that run's, and a run that
-    /// stored none means nothing is running, unless a snapshot newer than that log row exists (a run whose
-    /// rows are stored but whose log row is not written yet). A store with no such log row (retention) keeps
-    /// the newest snapshot, as before. Darling's twin is <c>ViewerDataService.RunningJobsSql</c>.</para>
-    /// <para>The snapshot must also be recent: one older than the alert read's #1812 bound (<see cref="RunningJobsCurrency.Cutoff"/>,
-    /// three missed cycles at the effective running_jobs cadence) is not listed, whatever the log says. Without that, a server that
-    /// went offline while a job ran (only failed runs after it), a lost msdb login or a collector switched off left the job reading
-    /// as running for days.</para>
-    /// </summary>
-    public async Task<List<RunningJobRow>> GetRunningJobsAsync(int serverId)
-        => (await ReadRunningJobsAsync(serverId)).Jobs;
-
-    /// <summary>
     /// The running_jobs collector's schedule cadence for a server, in minutes: the schedule the app runs it on, else the shipped
     /// default. The #1812 freshness bound is taken at this cadence (<see cref="RunningJobsCurrency"/>).
     /// </summary>
@@ -77,15 +59,31 @@ FROM
 ) AS x";
 
     /// <summary>
-    /// <see cref="GetRunningJobsAsync"/> with the not-current verdict: when no job is listed because the collector's last good
-    /// collection is older than the freshness bound, <see cref="RunningJobsRead.LastGoodCollection"/> carries its time.
+    /// Gets the latest snapshot of running jobs for a server, and only while that snapshot is the
+    /// collector's CURRENT answer. When no job is listed because the collector's last good collection is older than the freshness
+    /// bound, <see cref="RunningJobsRead.LastGoodCollection"/> carries its time, so a tab or tool can say so.
+    /// <para>The collector writes no row when no job is running, so "the newest snapshot ever written"
+    /// can be weeks old: the tab then listed a job that ended days ago as running now. The collector's own
+    /// latest SUCCESSFUL run (<c>v_collection_log</c>, which records a SUCCESS with zero rows for a run that
+    /// found nothing) decides: a run that stored rows means the newest snapshot is that run's, and a run that
+    /// stored none means nothing is running, unless a snapshot newer than that log row exists (a run whose
+    /// rows are stored but whose log row is not written yet). A store with no such log row (retention) keeps
+    /// the newest snapshot, as before. Darling's twin is <c>ViewerDataService.RunningJobsSql</c>.</para>
+    /// <para>The snapshot must also be recent: one older than the alert read's #1812 bound (<see cref="RunningJobsCurrency.Cutoff"/>,
+    /// three missed cycles at the effective running_jobs cadence) is not listed, whatever the log says. Without that, a server that
+    /// went offline while a job ran (only failed runs after it), a lost msdb login or a collector switched off left the job reading
+    /// as running for days.</para>
     /// </summary>
     public async Task<RunningJobsRead> ReadRunningJobsAsync(int serverId)
     {
         var cutoff = RunningJobsCurrency.Cutoff(DateTime.UtcNow, RunningJobsCadenceMinutes(serverId));
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of running_jobs.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var jobsRelation = await HotTableHasServerAsync(connection, "running_jobs", serverId) ? "running_jobs" : "v_running_jobs";
+        command.CommandText = $@"
 SELECT
     collection_time,
     job_name,
@@ -98,11 +96,11 @@ SELECT
     successful_run_count,
     is_running_long,
     percent_of_average
-FROM v_running_jobs AS j
+FROM {jobsRelation} AS j
 WHERE server_id = $1
 AND   collection_time = (
     SELECT MAX(collection_time)
-    FROM v_running_jobs
+    FROM {jobsRelation}
     WHERE server_id = $1
 )
 AND   collection_time >= $2
@@ -185,7 +183,11 @@ ORDER BY current_duration_seconds DESC";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT MAX(collection_time) FROM v_running_jobs WHERE server_id = $1";
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of running_jobs.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var jobsRelation = await HotTableHasServerAsync(connection, "running_jobs", serverId) ? "running_jobs" : "v_running_jobs";
+        command.CommandText = $"SELECT MAX(collection_time) FROM {jobsRelation} WHERE server_id = $1";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
 
         var result = await command.ExecuteScalarAsync();
@@ -211,7 +213,14 @@ ORDER BY current_duration_seconds DESC";
 
         var thresholdPercent = (decimal)(multiplier * 100);
 
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of running_jobs.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var jobsRelation = await HotTableHasServerAsync(connection, "running_jobs", serverId) ? "running_jobs" : "v_running_jobs";
+        /* The same for the svr join: its "newest row with an offset" read is unbounded too (ServerPropertiesWithOffsetRelation). */
+        var propertiesRelation = await ServerPropertiesWithOffsetRelationAsync(connection, serverId);
+
+        command.CommandText = $@"
 SELECT
     job_name,
     job_id,
@@ -222,11 +231,11 @@ SELECT
     start_time,
     svr.utc_offset_minutes,
     svr.time_zone_id
-FROM v_running_jobs
+FROM {jobsRelation}
 LEFT JOIN
 (
     SELECT utc_offset_minutes, time_zone_id
-    FROM v_server_properties
+    FROM {propertiesRelation}
     WHERE server_id = $1
     AND   utc_offset_minutes IS NOT NULL
     ORDER BY collection_time DESC
@@ -234,7 +243,7 @@ LEFT JOIN
 ) AS svr
   ON 1 = 1
 WHERE server_id = $1
-AND collection_time = (SELECT MAX(collection_time) FROM v_running_jobs WHERE server_id = $1)
+AND collection_time = (SELECT MAX(collection_time) FROM {jobsRelation} WHERE server_id = $1)
 AND avg_duration_seconds >= 60
 AND percent_of_average >= $2
 ORDER BY percent_of_average DESC

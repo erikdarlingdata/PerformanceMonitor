@@ -53,10 +53,10 @@ DECLARE
         @flush_interval_seconds integer;
 
     SELECT /* PerformanceMonitorLite */
-        @flush_interval_seconds = qso.flush_interval_seconds
-    FROM sys.database_query_store_options AS qso;
+        @flush_interval_seconds = PerformanceMonitorLite.flush_interval_seconds
+    FROM sys.database_query_store_options AS PerformanceMonitorLite;
 
-    SELECT /* PerformanceMonitorLite */ ' + QUOTENAME(@db, '''') + N', @flush_interval_seconds;';
+    SELECT /* PerformanceMonitorLite */ ' + QUOTENAME(@db, '''') + N' AS PerformanceMonitorLite, @flush_interval_seconds;';
 
                 INSERT @facts (name, flush_interval_seconds)
                 EXECUTE @exec_sp @facts_sql;
@@ -154,12 +154,12 @@ BEGIN" + NoDatabaseAccessNote.LoopGuardDbCheck + @"
         @flush_interval_seconds integer;
 
     SELECT /* PerformanceMonitorLite */
-        @actual_state = qso.actual_state,
-        @readonly_reason = qso.readonly_reason,
-        @flush_interval_seconds = qso.flush_interval_seconds
-    FROM sys.database_query_store_options AS qso;
+        @actual_state = PerformanceMonitorLite.actual_state,
+        @readonly_reason = PerformanceMonitorLite.readonly_reason,
+        @flush_interval_seconds = PerformanceMonitorLite.flush_interval_seconds
+    FROM sys.database_query_store_options AS PerformanceMonitorLite;
 
-    SELECT /* PerformanceMonitorLite */ ' + QUOTENAME(@db, '''') + N', @actual_state, @readonly_reason, @flush_interval_seconds
+    SELECT /* PerformanceMonitorLite */ ' + QUOTENAME(@db, '''') + N' AS PerformanceMonitorLite, @actual_state, @readonly_reason, @flush_interval_seconds
     WHERE @actual_state IN (0, 1, 2, 4);';
 
         SET @exec_sp = QUOTENAME(@db) + N'.sys.sp_executesql';

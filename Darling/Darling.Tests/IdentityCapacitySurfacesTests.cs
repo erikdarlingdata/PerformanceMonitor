@@ -19,8 +19,10 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -29,8 +31,57 @@ namespace Darling.Tests;
 /// #6875 part 3b: the Viewer's Identity Capacity words as functions of the read. They are the words the web Configuration tab shows,
 /// so the assertions are on the drawn values.
 /// </summary>
-public sealed class ViewerIdentityCapacityTextTests
+[Collection("viewer-time-statics")]
+public sealed class ViewerIdentityCapacityTextTests : IDisposable
 {
+    /* #7343: the capture and scan times follow the display mode; these assertions are on the machine-local words, so the class runs in Local mode. */
+    private readonly TimeDisplayMode _savedMode = ViewerTimeHelper.CurrentDisplayMode;
+
+    public ViewerIdentityCapacityTextTests() => ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+
+    public void Dispose() => ViewerTimeHelper.CurrentDisplayMode = _savedMode;
+
+    public static TheoryData<TimeDisplayMode> Modes => new() { TimeDisplayMode.ServerTime, TimeDisplayMode.UTC, TimeDisplayMode.LocalTime };
+
+    /// <summary>The time of <paramref name="utc"/> as each display mode words it on the page's clock (#8576), to the second with its zone: UTC in
+    /// Server and UTC modes, as the refresh stamp beside it reads, and this machine's time with this machine's zone name in Local mode.</summary>
+    private static string Worded(DateTime utc, TimeDisplayMode mode) => mode switch
+    {
+        TimeDisplayMode.ServerTime or TimeDisplayMode.UTC => utc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture) + " UTC",
+        _ => LocalWorded(utc),
+    };
+
+    private static string LocalWorded(DateTime utc) =>
+        TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.Local).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture)
+        + " " + (TimeZoneInfo.Local.IsDaylightSavingTime(utc) ? TimeZoneInfo.Local.DaylightName : TimeZoneInfo.Local.StandardName);
+
+    [Theory]
+    [MemberData(nameof(Modes))]
+    public void TheScanTimes_FollowTheDisplayMode_OnTheRefreshStampsClock(TimeDisplayMode mode)
+    {
+        ViewerTimeHelper.CurrentDisplayMode = mode;
+        var read = ReadWithUnscanned([], [new IdentityNotYetScannedDatabase("Stale", Captured)], ("Clean", Captured));
+
+        var rows = ViewerIdentityCapacityText.ScanRows(read);
+
+        Assert.Equal([Worded(Captured, mode), Worded(Captured, mode)], rows.Select(r => r.LastScanned).ToArray());
+    }
+
+    /// <summary>#8576: a scan time is stamped to the second and names its zone, on the same clock as the tab's "Last refreshed" stamp. Server Time
+    /// has no server clock to apply to this page's stamps, so it reads UTC and says so, whatever the picked server's offset.</summary>
+    [Fact]
+    public void TheScanTimes_NameTheirZone_AndServerModeReadsUtcAsTheRefreshStampDoes()
+    {
+        var read = Read([], ("Clean", Captured));
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.Equal("2026-10-28 12:00:00 UTC", ViewerIdentityCapacityText.ScanRows(read).Single().LastScanned);
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+        Assert.Equal(LocalWorded(Captured), ViewerIdentityCapacityText.ScanRows(read).Single().LastScanned);
+    }
+
+
     private static readonly DateTime Captured = new(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc);
 
     private static IdentityColumnFact Int(string database, string table, long last, double stored, long? firstValue = null) =>
@@ -54,7 +105,7 @@ public sealed class ViewerIdentityCapacityTextTests
         /* 1,990,000,000 four days before the scan and 2,000,000,000 at it: 2,500,000 values a day against 147,483,647 left. */
         var rows = ViewerIdentityCapacityText.ColumnRows(Read([Int("Sales", "Audit", 2_000_000_000, 93.1, firstValue: 1_990_000_000)], ("Sales", Captured)));
 
-        Assert.Equal(new ViewerIdentityColumnRow("Sales", "dbo.Audit", "Id", "int", "93.1", "147,483,647", "2,500,000.0", "59.0", "critical"), rows.Single());
+        Assert.Equal(new ViewerIdentityColumnRow("Sales", "dbo.Audit", "Id", "int", "93.1", "147,483,647", "2,500,000.0", "59.0", "Critical"), rows.Single());
     }
 
     [Fact]
@@ -62,7 +113,7 @@ public sealed class ViewerIdentityCapacityTextTests
     {
         var rows = ViewerIdentityCapacityText.ColumnRows(Read([Int("Sales", "Warm", 1_600_000_000, 74.5)], ("Sales", Captured)));
 
-        Assert.Equal(new ViewerIdentityColumnRow("Sales", "dbo.Warm", "Id", "int", "74.5", "547,483,647", "-", "-", "warning"), rows.Single());
+        Assert.Equal(new ViewerIdentityColumnRow("Sales", "dbo.Warm", "Id", "int", "74.5", "547,483,647", "-", "-", "Warning"), rows.Single());
     }
 
     [Fact]
@@ -76,7 +127,7 @@ public sealed class ViewerIdentityCapacityTextTests
         Assert.Equal("decimal(38)", row.Type);
         Assert.Equal("9,999,999,999,999,999,999,999,999,999,876,543,210", row.ValuesRemaining);
         Assert.Equal("90.0", row.PercentUsed);
-        Assert.Equal("critical", row.Band);
+        Assert.Equal("Critical", row.Band);
     }
 
     [Fact]
@@ -86,7 +137,7 @@ public sealed class ViewerIdentityCapacityTextTests
 
         var row = ViewerIdentityCapacityText.ColumnRows(Read([fact], ("Big", Captured))).Single();
 
-        Assert.Equal(("96.5", "-", "-", "-", "critical"), (row.PercentUsed, row.ValuesRemaining, row.RatePerDay, row.DaysToExhaustion, row.Band));
+        Assert.Equal(("96.5", "-", "-", "-", "Critical"), (row.PercentUsed, row.ValuesRemaining, row.RatePerDay, row.DaysToExhaustion, row.Band));
     }
 
     [Fact]
@@ -123,7 +174,7 @@ public sealed class ViewerIdentityCapacityTextTests
         Assert.Equal(["Clean", "Fresh", "Stale"], rows.Select(r => r.Database).ToArray());
         Assert.Equal(["Scanned, clean", "Not yet scanned", "Not yet scanned"], rows.Select(r => r.State).ToArray());
         Assert.Equal("-", rows[1].LastScanned);
-        Assert.Equal(earlier.ToLocalTime().ToString("g", CultureInfo.CurrentCulture), rows[2].LastScanned);
+        Assert.Equal(LocalWorded(earlier), rows[2].LastScanned);
         Assert.Equal("Critical: 0   Warning: 0   Columns above 10 percent: 0   Databases scanned: 1   Not yet scanned: 2   Skipped: 0   " + ViewerIdentityCapacityText.BandsNote, ViewerIdentityCapacityText.StatusLine(read));
         Assert.Equal(ViewerIdentityCapacityRead.Data, read.Status);
     }
@@ -283,7 +334,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id','int',10,$7::numeric,1,1,$8)",
 
             var rows = ViewerIdentityCapacityText.ColumnRows(read);
             Assert.Equal(["dbo.Audit", "dbo.Warm"], rows.Select(r => r.Table).ToArray());
-            Assert.Equal(["critical", "warning"], rows.Select(r => r.Band).ToArray());
+            Assert.Equal(["Critical", "Warning"], rows.Select(r => r.Band).ToArray());
             Assert.Equal(["147,483,647", "547,483,647"], rows.Select(r => r.ValuesRemaining).ToArray());
             /* The rate and the days left are the same two numbers, whichever surface draws them. */
             Assert.Equal(webColumns[0].GetProperty("rate_per_day").GetDouble(), read.Read!.Columns[0].Exhaustion!.Value.StepsPerDay, 1);

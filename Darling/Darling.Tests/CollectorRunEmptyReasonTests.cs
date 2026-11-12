@@ -87,7 +87,10 @@ public sealed class CollectorRunEmptyReasonTests
         Assert.DoesNotContain("recorded nothing for it", message, StringComparison.Ordinal);
         Assert.DoesNotContain("matches this request", message, StringComparison.Ordinal);
         Assert.Contains("No procedure ran in the last 24h in a database this server still has", message, StringComparison.Ordinal);
-        Assert.Contains("3 database(s) the server no longer lists", message, StringComparison.Ordinal);
+        /* #7538: the count of left-out databases is stated once, in the reply's databases_left_out_count and the page's strip, so the
+           empty sentence does not say it again. */
+        Assert.DoesNotContain("left out", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("database(s)", message, StringComparison.Ordinal);
         Assert.Equal(new CollectorRunFacts(2, 0, Last, 0).ProcedureStatsEmpty(24).Message, new CollectorRunFacts(2, 0, Last, 0).ProcedureStatsEmpty(24, 3).Message);
         Assert.Equal(new CollectorRunFacts(1, 1, Last, 0).ProcedureStatsEmpty(24).Message, new CollectorRunFacts(1, 1, Last, 0).ProcedureStatsEmpty(24, 3).Message);
     }
@@ -106,6 +109,10 @@ public sealed class CollectorRunEmptyReasonTests
         var wrapped = McpHelpers.WithDatabasesLeftOut(McpHelpers.Status("empty", "m"), all)!;
         using var doc = JsonDocument.Parse(wrapped);
         Assert.Equal(20, doc.RootElement.GetProperty("databases_left_out").GetArrayLength());
+        /* #7538: the reply carries the true count, so a page says "and 5 more" without reading the note's words. */
+        Assert.Equal(25, doc.RootElement.GetProperty("databases_left_out_count").GetInt32());
+        Assert.Equal(25, DatabasesLeftOut.Count(all));
+        Assert.Null(DatabasesLeftOut.Count(null));
         Assert.Equal(McpHelpers.Status("empty", "m"), McpHelpers.WithDatabasesLeftOut(McpHelpers.Status("empty", "m"), null));
     }
 
@@ -116,6 +123,19 @@ public sealed class CollectorRunEmptyReasonTests
 
         Assert.Equal("unavailable", Field(json, "status"));
         Assert.Contains("no successful run inside the last 6h", Field(json, "message"), StringComparison.Ordinal);
+    }
+
+    /* #7690: a count in an empty text carries the thousands separator the tiles and grids on the same page use. */
+    [Fact]
+    public void RunCountsInTheEmptyTexts_CarryAThousandsSeparator()
+    {
+        var facts = new CollectorRunFacts(2862, 1433, Last, 0);
+        Assert.Contains("ran successfully 1,433 times", facts.ProcedureStatsEmpty(24).Message, StringComparison.Ordinal);
+        Assert.Contains("ran successfully 1,433 times", facts.ProcedureStatsEmpty(24, 3).Message, StringComparison.Ordinal);
+
+        var stamp = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
+        var stretch = new RingBufferTruncationNote.TruncatedStretch(1, stamp, stamp, "note");
+        Assert.StartsWith("1,152 ", RingBufferTruncationNote.HealthParserMessage("deadlock", "srv", 24, "x", stretch, eventsRead: 1152), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -158,12 +178,62 @@ public sealed class CollectorRunEmptyReasonTests
     [Fact]
     public void TraceFlags_EmptyReadAfterARunThatStoredNothing_SaysNoFlagIsEnabled()
     {
-        var after = Field(DarlingMcpConfigTools.EmptyTraceFlagsStatus(new CollectorRunFacts(1, null, Last, 0)), "message");
-        var never = Field(DarlingMcpConfigTools.EmptyTraceFlagsStatus(CollectorRunFacts.None), "message");
+        var afterJson = DarlingMcpConfigTools.EmptyTraceFlagsStatus(new CollectorRunFacts(1, null, Last, 0));
 
-        Assert.Contains("No trace flags are enabled as of", after, StringComparison.Ordinal);
-        Assert.Contains("config collector has not run yet", never, StringComparison.Ordinal);
+        Assert.Equal("empty", Field(afterJson, "status"));
+        Assert.Contains("No trace flags are enabled as of", Field(afterJson, "message"), StringComparison.Ordinal);
     }
+
+    /// <summary>#7459: "empty" means somebody looked. With no successful trace_flags run nobody did, and a newest run that did not record
+    /// finding none cannot say no flag is on either, so both answer unavailable.</summary>
+    [Fact]
+    public void TraceFlags_EmptyReadWithNoRunOrNoRecordedNothing_IsUnavailable_NotEmpty()
+    {
+        var never = DarlingMcpConfigTools.EmptyTraceFlagsStatus(CollectorRunFacts.None);
+        var storedRows = DarlingMcpConfigTools.EmptyTraceFlagsStatus(new CollectorRunFacts(1, null, Last, 3));
+
+        Assert.Equal("unavailable", Field(never, "status"));
+        Assert.Contains("has not completed a run yet", Field(never, "message"), StringComparison.Ordinal);
+        Assert.Equal("unavailable", Field(storedRows, "status"));
+        Assert.DoesNotContain("has not run yet", Field(storedRows, "message"), StringComparison.Ordinal);
+    }
+
+    /// <summary>#7459: get_running_jobs' last fallback. A good run on record is the look (empty, stating the run's time); no run is unavailable.</summary>
+    [Fact]
+    public void RunningJobs_EmptyRead_IsEmptyOnlyAfterAGoodRun()
+    {
+        var after = DarlingMcpJobTools.EmptyRunningJobsStatus(new CollectorRunFacts(1, null, Last, 0));
+        var never = DarlingMcpJobTools.EmptyRunningJobsStatus(CollectorRunFacts.None);
+
+        Assert.Equal("empty", Field(after, "status"));
+        Assert.Contains("as of the running_jobs collector's latest successful run (", Field(after, "message"), StringComparison.Ordinal);
+        Assert.DoesNotContain("has not run yet", Field(after, "message"), StringComparison.Ordinal);
+        Assert.Equal("unavailable", Field(never, "status"));
+        Assert.Contains("has not completed a run yet", Field(never, "message"), StringComparison.Ordinal);
+    }
+
+    /// <summary>#7459: get_pg_io_stats differences cumulative counters, so an empty window is a measurement only with two runs inside it.</summary>
+    [Theory]
+    [InlineData(2L, "empty")]
+    [InlineData(5L, "empty")]
+    [InlineData(1L, "unavailable")]
+    [InlineData(0L, "unavailable")]
+    public void PgIoStats_EmptyWindow_IsEmptyOnlyWithTwoRunsInIt(long runsInWindow, string expected)
+    {
+        var (status, finding) = DarlingMcpPgIoTools.EmptyWindowAnswer(new CollectorRunFacts(runsInWindow, runsInWindow, runsInWindow == 0 ? null : Last, 0), 24);
+
+        Assert.Equal(expected, status);
+        Assert.DoesNotContain("has not run yet", finding, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7459: the optimization idle_databases section says unavailable, not empty, when the query stats do not cover 7 days.</summary>
+    [Theory]
+    [InlineData(null, 0, false, "unavailable")]
+    [InlineData(null, 0, true, "empty")]
+    [InlineData(null, 2, true, "ok")]
+    [InlineData("gated", 0, false, "not_collected")]
+    public void IdleDatabasesSection_IsUnavailableWithoutCoverage(string? gate, int rows, bool covered, string expected) =>
+        Assert.Equal(expected, DarlingMcpFinOpsTools.IdleSectionStatus(gate, rows, covered));
 
     [Fact]
     public void RunFactsReaderSql_CountsOnlySuccessfulRuns()

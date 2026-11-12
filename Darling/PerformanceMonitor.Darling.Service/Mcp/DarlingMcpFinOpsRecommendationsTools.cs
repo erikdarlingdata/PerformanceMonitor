@@ -102,7 +102,7 @@ public sealed class DarlingMcpFinOpsRecommendationsTools
         confidence = r.Confidence,
         finding = r.Finding,
         detail = r.Detail,
-        est_savings_usd_month = r.EstMonthlySavings is decimal s ? Math.Round(s, 2, MidpointRounding.AwayFromZero) : (decimal?)null,
+        est_savings_usd_month = r.EstMonthlySavings is decimal s ? FinOpsWireFigures.Clean(Math.Round(s, 2, MidpointRounding.AwayFromZero)) : (decimal?)null,
     };
 
     /// <summary>The response envelope. Rows keep the composer's order.</summary>

@@ -154,8 +154,9 @@ public sealed class RollupWindowEndBoundLiveTests
                     Assert.True(buckets.SequenceEqual(bucketed), $"bucketed hourly duration trend over {rollup}, {label}: [{string.Join(", ", bucketed)}]");
                 }
 
+                /* #8063: $6 is the bucket width in minutes; at 60 each rollup hour is its own point, so the stamps are the hours. */
                 var history = await ReadFirstColumnTimesAsync(
-                    connection, DarlingTrendReader.QueryHistoryHourlySqlFor(queryRollup), ct, ServerId, Db, QueryHash, WindowStart, end);
+                    connection, DarlingTrendReader.QueryHistoryHourlySqlFor(queryRollup), ct, ServerId, Db, QueryHash, WindowStart, end, 60);
                 Assert.True(buckets.SequenceEqual(history), $"one-query hourly history, {label}: [{string.Join(", ", history)}]");
             }
 

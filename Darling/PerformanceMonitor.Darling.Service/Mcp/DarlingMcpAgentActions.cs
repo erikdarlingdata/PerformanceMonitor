@@ -31,8 +31,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingAgentActionSeat
 {
     internal DarlingAgentActionSeat(DarlingMcpWritePolicy.Effective policy, StoreOwnerSource? owner = null,
-        IReadOnlySet<string>? namedAgentNames = null)
+        IReadOnlySet<string>? namedAgentNames = null, bool agentMuteRulesAllowed = true)
     {
+        AgentMuteRulesAllowed = agentMuteRulesAllowed;
         Policy = policy;
         Owner = owner;
         NamedAgentNames = namedAgentNames ?? new HashSet<string>();
@@ -43,6 +44,9 @@ public sealed class DarlingAgentActionSeat
     internal IReadOnlySet<string> NamedAgentNames { get; }
 
     internal DarlingMcpWritePolicy.Effective Policy { get; }
+
+    /// <summary>False when <c>mcp.allowAgentMuteRules</c> is off in darling.json (#7414): the claim-free mute and digest path refuses. Levels 2 and 3 are not affected.</summary>
+    internal bool AgentMuteRulesAllowed { get; }
 
     /// <summary>The service's own (store owner) data source, which the gate runs a change on (#6569): the journal keeps the agent action rows to the owner,
     /// and the tools' own data source is the <c>mcp</c> login. Null (a test host) runs the change on the tool's data source.</summary>
@@ -75,7 +79,7 @@ internal static class DarlingMcpAgentActions
     internal const string SelfMonitorMetric = "self_monitor_metric";
     internal const string RuleScope = "rule_scope";
 
-    /// <summary>The self alerts an agent may still mute: the five availability group metrics, Agent Not Running, Agent Alert Gaps, the three database-protection overdue alerts (#6873), Identity Capacity (#6875) and the three report digests.</summary>
+    /// <summary>The self alerts an agent may still mute: the five availability group metrics, Agent Not Running, Agent Alert Gaps, the three database-protection overdue alerts (#6873), Identity Capacity (#6875) and the four scheduled report documents (the collector cost digest, the fleet sweep rollup, the analysis singles digest and the Daily Health Report).</summary>
     private static readonly HashSet<string> UnprotectedConstantNames = new(StringComparer.Ordinal)
     {
         nameof(DarlingSelfAlertEvaluator.AgFailoverMetric),
@@ -92,6 +96,7 @@ internal static class DarlingMcpAgentActions
         nameof(DarlingSelfAlertEvaluator.CollectorCostDigestMetric),
         nameof(DarlingSelfAlertEvaluator.FleetSweepRollupMetric),
         nameof(DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric),
+        nameof(DarlingSelfAlertEvaluator.DailyHealthReportMetric),
     };
 
     /// <summary>Every <c>*Metric</c> constant of <see cref="DarlingSelfAlertEvaluator"/> an agent may not mute (read by reflection, so a new one is protected without an edit here).</summary>
@@ -103,9 +108,25 @@ internal static class DarlingMcpAgentActions
             .Select(f => (string)f.GetRawConstantValue()!),
         StringComparer.OrdinalIgnoreCase));
 
-    /// <summary>True when an agent may not mute <paramref name="metric"/>: its family is self-monitor, or it is a protected self alert constant.</summary>
+    /// <summary>
+    /// Every self-monitor name the census knows, compared without regard to case: each <see cref="AlertFamily.MetricFamilies"/> key whose
+    /// family is self-monitor, and each <see cref="AlertFamily.RecoveryPairs"/> name on either side of a self-monitor pair. A mute rule
+    /// matches its metric case-insensitively (<see cref="MuteRule.NamesMetric"/>) and the store keeps the name as sent, so a spelling that
+    /// differs only in case would still silence the protected alert; the census lookup itself (<see cref="AlertFamily.Of"/>) is ordinal
+    /// and is left as it is for its other callers.
+    /// </summary>
+    private static readonly Lazy<HashSet<string>> SelfMonitorNames = new(() => new HashSet<string>(
+        AlertFamily.MetricFamilies.Where(pair => string.Equals(pair.Value, AlertFamily.SelfMonitor, StringComparison.Ordinal)).Select(pair => pair.Key)
+            .Concat(AlertFamily.RecoveryPairs
+                .Where(pair => string.Equals(AlertFamily.Of(pair.Key), AlertFamily.SelfMonitor, StringComparison.Ordinal)
+                    || string.Equals(AlertFamily.Of(pair.Value), AlertFamily.SelfMonitor, StringComparison.Ordinal))
+                .SelectMany(pair => new[] { pair.Key, pair.Value })),
+        StringComparer.OrdinalIgnoreCase));
+
+    /// <summary>True when an agent may not mute <paramref name="metric"/>: its family is self-monitor (in any spelling of the name), or it is a protected self alert constant.</summary>
     internal static bool IsProtectedMetric(string metric) =>
         string.Equals(AlertFamily.Of(metric), AlertFamily.SelfMonitor, StringComparison.Ordinal)
+        || SelfMonitorNames.Value.Contains(metric.Trim())
         || ProtectedConstants.Value.Contains(metric.Trim());
 
     private static AgentActionRefusal? MetricRefusal(string metric) => IsProtectedMetric(metric)
@@ -125,6 +146,21 @@ internal static class DarlingMcpAgentActions
             return new AgentActionRefusal(AgentActionCodes.OtherServer,
                 "A mute may name only the request's server. Level 2 changes only the request's server.");
         return MetricRefusal(after.MetricName!);
+    }
+
+    /// <summary>
+    /// #8473: the scope a silencing rule must have on the claim-free path too (<see cref="DarlingMcpAgentMuteDirect"/>): one server by id and a
+    /// metric that is not a protected self alert, judged by the same rules and with the same reason words as <see cref="MuteAfterImageRefusal"/>,
+    /// so leaving out <c>agent_action</c> never widens what a mute can silence. The request's-server rule is the claim path's alone. Null for a
+    /// digest, which bundles alerts rather than silencing them and keeps the scope an operator has (#7414), and for a mute inside the scope.
+    /// </summary>
+    internal static AgentActionRefusal? MuteScopeRefusal(MuteRule rule)
+    {
+        if (MuteRuleActions.Normalize(rule.Action) != MuteRuleActions.Mute)
+            return null;
+        if (rule.ServerId is null || string.IsNullOrWhiteSpace(rule.MetricName))
+            return NeedsMetric;
+        return MetricRefusal(rule.MetricName!);
     }
 
     /// <summary>The suffix every agent-written mute reason carries.</summary>
@@ -192,7 +228,7 @@ internal static class DarlingMcpAgentActions
             throw new AgentToolOutcomeException(answer);
     }
 
-    private static string? Serialize(MuteRule? rule) =>
+    internal static string? Serialize(MuteRule? rule) =>
         rule is null ? null : JsonSerializer.Serialize(DarlingMcpAlertTools.BuildMuteRulePayload(rule), McpHelpers.JsonOptions);
 
     private static async Task<AgentActionTarget> ServerTargetAsync(NpgsqlDataSource postgres, int serverId, string? id)
@@ -202,6 +238,14 @@ internal static class DarlingMcpAgentActions
     }
 
     /* ------------------------------------------------------------------ mute rules */
+
+    /// <summary>#7040: an agent's mute stays a one-off. A repeating schedule is a standing change to what an operator hears about, so it is left to a person.</summary>
+    internal const string RecurrenceRefusal =
+        "A repeat schedule (recur_days, recur_start, recur_end, recur_time_zone) is not available during an investigation: a mute made here is a one-off, and a rule that repeats is left to an operator. Nothing was written.";
+
+    /// <summary>#7083: what an investigating agent is told when it sends an <c>action</c>. A digest rule holds a matching alert back from paging, a standing change to what an operator hears about, so a mute made here stays a plain mute.</summary>
+    internal const string ActionRefusal =
+        "action is not available during an investigation: a mute made here always mutes, and a rule that sends matching alerts to the daily digest instead of paging is left to an operator. Nothing was written.";
 
     /// <summary>What an investigating agent is told when it sends a mute start (#6231): its mute applies at once.</summary>
     internal const string StartsAtRefusal =
@@ -220,7 +264,9 @@ internal static class DarlingMcpAgentActions
         if (parsed is null && (server_id is null || string.IsNullOrWhiteSpace(metric_name)))
             return await RefuseEarlyAsync(postgres, action!, tool, NeedsMetric, seat.Policy.AgentTokenName, seat.NamedAgentNames, ct);
 
-        var target = await ServerTargetAsync(postgres, server_id ?? -1, null);
+        var target = server_id is int named
+            ? await ServerTargetAsync(postgres, named, null)
+            : AgentActionTarget.NoServer("no server (the mute names no server_id)", null);
         return await RunAsync(seat, postgres, logger, tool, MuteRuleImage.Kind, agentAction, target,
             (_, _, _, _) => Task.FromResult(metric_name is null ? NeedsMetric : MetricRefusal(metric_name)),
             NoBefore,
@@ -245,7 +291,7 @@ internal static class DarlingMcpAgentActions
     private static Task<AgentActionTarget> MuteTargetAsync(NpgsqlDataSource postgres, MuteRule before) =>
         before.ServerId is int id
             ? ServerTargetAsync(postgres, id, before.Id)
-            : Task.FromResult(new AgentActionTarget(-1, "every server (the rule names no server_id)", before.Id, null));
+            : Task.FromResult(AgentActionTarget.NoServer("every server (the rule names no server_id)", before.Id));
 
     /// <summary>
     /// The write hook's recheck, in the gate's transaction: the stored rule is locked <c>FOR UPDATE</c> and is still the one the
@@ -281,6 +327,10 @@ internal static class DarlingMcpAgentActions
 
         if (body is not null && (body.ContainsKey("starts_at") || body.ContainsKey("starts_at_utc")))
             return DarlingMcpAlertTools.Outcome("invalid", StartsAtRefusal);
+        if (body is not null && body.Any(p => p.Key.StartsWith("recur_", StringComparison.Ordinal)))
+            return DarlingMcpAlertTools.Outcome("invalid", RecurrenceRefusal);
+        if (body is not null && body.ContainsKey("action"))
+            return DarlingMcpAlertTools.Outcome("invalid", ActionRefusal);
 
         var (before, notFound) = await FindMuteAsync(postgres, rule_id);
         var parsed = InvestigationToolCore.ParseAgentAction(agentAction, out var action);
@@ -301,9 +351,21 @@ internal static class DarlingMcpAgentActions
                 return DarlingMcpAlertTools.Outcome("invalid", error ?? "changes_json is invalid.");
         }
 
-        var target = before is null ? new AgentActionTarget(-1, "no such target", rule_id, null) : await MuteTargetAsync(postgres, before);
+        var target = before is null ? AgentActionTarget.NoServer("no such target", rule_id) : await MuteTargetAsync(postgres, before);
+        /* #7414: a digest rule is not this path's to change (it cannot make one, and clearing the expiry of a bounded one would leave an unbounded
+           digest rule that the stale check skips), and an agent-made rule's 7 days are a lifetime on this path too. */
+        AgentActionRefusal? bound = null;
+        if (after is not null && before is not null)
+        {
+            if (before.IsDigestAction)
+                bound = new AgentActionRefusal(DarlingMcpAgentMuteDirect.LifetimeCode,
+                    "A digest rule cannot be changed with a claim: it is an operator's rule, or an agent's bounded rule made without one. Nothing was written.");
+            else if (DarlingMcpAgentMuteDirect.IsAgentMade(before))
+                bound = DarlingMcpAgentMuteDirect.LifetimeRefusal(before, after);
+        }
+
         return await RunAsync(seat, postgres, logger, tool, MuteRuleImage.Kind, agentAction, target,
-            (_, _, ctx, _) => Task.FromResult(after is null ? null : MuteAfterImageRefusal(after, ctx.RequestServerId)),
+            (_, _, ctx, _) => Task.FromResult(after is null ? null : bound ?? MuteAfterImageRefusal(after, ctx.RequestServerId)),
             (_, _, _) => Task.FromResult(Serialize(before)),
             async (connection, transaction, token) =>
             {
@@ -322,7 +384,7 @@ internal static class DarlingMcpAgentActions
         var (before, notFound) = await FindMuteAsync(postgres, rule_id);
         if (before is null && InvestigationToolCore.ParseAgentAction(agentAction, out _) is null)
             return notFound!;
-        var target = before is null ? new AgentActionTarget(-1, "no such target", rule_id, null) : await MuteTargetAsync(postgres, before);
+        var target = before is null ? AgentActionTarget.NoServer("no such target", rule_id) : await MuteTargetAsync(postgres, before);
         return await RunAsync(seat, postgres, logger, tool, MuteRuleImage.Kind, agentAction, target, null,
             (_, _, _) => Task.FromResult(Serialize(before)),
             async (connection, transaction, token) =>
@@ -341,7 +403,7 @@ internal static class DarlingMcpAgentActions
         var (before, notFound) = await FindMuteAsync(postgres, rule_id);
         if (before is null && InvestigationToolCore.ParseAgentAction(agentAction, out _) is null)
             return notFound!;
-        var target = before is null ? new AgentActionTarget(-1, "no such target", rule_id, null) : await MuteTargetAsync(postgres, before);
+        var target = before is null ? AgentActionTarget.NoServer("no such target", rule_id) : await MuteTargetAsync(postgres, before);
         return await RunAsync(seat, postgres, logger, tool, MuteRuleImage.Kind, agentAction, target,
             /* Turning a mute ON is an after image that mutes: the same rule as a create. Turning it off is always allowed. */
             (_, _, ctx, _) => Task.FromResult(enabled && before is not null ? MuteAfterImageRefusal(before, ctx.RequestServerId) : null),
@@ -371,14 +433,15 @@ internal static class DarlingMcpAgentActions
                 return new AgentActionTarget(reader.GetInt32(0), reader.GetString(1), id, null);
         }
 
-        return new AgentActionTarget(-1, "no such target", id, null);
+        return AgentActionTarget.NoServer("no such target", id);
     }
 
     /// <summary>The rule_scope rule: the definition's scope is exactly the request's one server (by its storage name), never all servers, a tag or a list.</summary>
     internal static async Task<AgentActionRefusal?> RuleScopeRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
         string definitionJson, int requestServerId, string which, CancellationToken ct)
     {
-        var (definition, parseError) = CustomAlertRuleDefinition.TryParse(definitionJson);
+        /* Scope only: the rate check (#7565) runs where the definition is saved, so a stored rule or an unrelated edit is not judged here. */
+        var (definition, parseError) = CustomAlertRuleDefinition.TryParse(definitionJson, enforcePerfmonRate: false);
         /* A definition that does not parse has no scope to judge: refuse it as invalid, naming the field, so the agent fixes the
            JSON rather than rewriting a scope that was never the problem. (A stored rule that does not parse is rule_scope.) */
         if (definition is null && which == "after")
@@ -411,6 +474,9 @@ internal static class DarlingMcpAgentActions
                 var (parsed, error) = CustomAlertRuleDefinition.TryParse(definition);
                 if (parsed is null || error is not null)
                     throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("invalid", error ?? "definition is invalid."));
+                /* The registry check the dry run and the operator's create make, so a scope of display or partial names is never saved inert. */
+                if (await DarlingMcpCustomAlertTools.ScopeRefusalAsync(parsed, postgres, cancellationToken: token) is { } scopeRefusal)
+                    throw new AgentToolOutcomeException(scopeRefusal);
                 var (expiry, expiryError) = DarlingMcpCustomAlertTools.ResolveCreateExpiry(expiresAtUtc);
                 if (expiryError is not null)
                     throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("invalid", expiryError));

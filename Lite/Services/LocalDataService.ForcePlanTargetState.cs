@@ -17,21 +17,6 @@ using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitorLite.Services;
 
-public partial class LocalDataService
-{
-    /// <summary>The read-time forcing/APC state for a finding's force-plan targets (#3652) — the instance
-    /// entry point beside the other plan-correction readers; <see cref="ForcePlanTargetStateReader"/> holds
-    /// the statement so the analysis service (which owns no <see cref="LocalDataService"/>) reads the same
-    /// SQL through its own connection.</summary>
-    public async Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> GetForcePlanTargetStatesAsync(
-        int serverId, IReadOnlyList<ForcePlanTarget> targets, CancellationToken cancellationToken = default)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-        return await ForcePlanTargetStateReader.ReadAsync(command, serverId, targets, DateTime.UtcNow, cancellationToken);
-    }
-}
-
 /// <summary>
 /// The DuckDB read behind <c>FactRemediation.BuildStructuredRemediation</c>'s state-taking overload
 /// (#3652): for a list of (database, query_id, plan_id) force targets, what the store's two forcing-aware
@@ -227,9 +212,26 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
     /// back two identical rows for one key. <paramref name="nowUtc"/> is the caller's clock so a test can
     /// pin the window edge; production passes <see cref="DateTime.UtcNow"/>.
     /// </summary>
-    public static async Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(
+    public static Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(
         DuckDBCommand command, int serverId, IReadOnlyList<ForcePlanTarget> targets, DateTime nowUtc,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        ReadAsync(command, serverId, targets, nowUtc, table => "v_" + table, cancellationToken);
+
+    /// <summary>The two archived tables the statement reads, both over the same lookback on <c>collection_time</c>.</summary>
+    internal static readonly string[] ArchivedTables = ["query_store_stats", "plan_correction"];
+
+    /// <summary>The same read for a caller that planned its archive reads first (#7256), with the read lock held: each table
+    /// whose archive holds nothing in the lookback is read as the hot table.</summary>
+    internal static Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(
+        DuckDBCommand command, int serverId, IReadOnlyList<ForcePlanTarget> targets, DateTime nowUtc,
+        PerformanceMonitorLite.Database.ArchiveReadPlan plan, CancellationToken cancellationToken) =>
+        ReadAsync(command, serverId, targets, nowUtc, table => plan.IsHot(table) ? table : "v_" + table, cancellationToken);
+
+    /// <summary>The same read over the relation <paramref name="relationFor"/> names for each of <see cref="ArchivedTables"/>:
+    /// its <c>v_</c> view or its hot table (#7256, from the analysis service's read).</summary>
+    internal static async Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(
+        DuckDBCommand command, int serverId, IReadOnlyList<ForcePlanTarget> targets, DateTime nowUtc,
+        Func<string, string> relationFor, CancellationToken cancellationToken)
     {
         var result = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer);
         var keys = targets.Select(ForcePlanTargetKey.Of).Distinct(ForcePlanTargetKey.Comparer).ToList();
@@ -238,7 +240,7 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
             return result;
         }
 
-        command.CommandText = BuildSql(keys.Count);
+        command.CommandText = LocalDataService.SwapViews(BuildSql(keys.Count), ArchivedTables, relationFor);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = nowUtc - ForcePlanTargetState.Lookback });
         foreach (var key in keys)

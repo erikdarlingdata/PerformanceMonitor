@@ -52,13 +52,29 @@ function groupHeader(g) {
 }
 
 /**
- * Paints the view list into `container`. `views` is /api/views's list (empty when the read failed), `session` is
- * /api/session's answer, `activeId` the view the route shows (or null). The "New view" and "New notebook" links follow the
- * views, for a session that can edit.
+ * #7929: the kept view list after a /api/views answer. An answered list (a data answer carrying an array, an empty one included)
+ * replaces the kept one. Anything else (an error, a 429, a transport failure) keeps the last good views, or none when no list has
+ * answered yet, and marks the read failed so paintViewList says so instead of drawing "No views yet".
  */
-export function paintViewList(container, views, session, activeId) {
+export function viewListAfterRead(last, session, res) {
+  const answered = Boolean(res) && res.kind === "data" && Array.isArray(res.data);
+  const views = answered ? res.data : last && Array.isArray(last.views) ? last.views : [];
+  return { session, views, readFailed: !answered };
+}
+
+/**
+ * Paints the view list into `container`. `views` is /api/views's list (the last good one when the read failed), `session` is
+ * /api/session's answer, `activeId` the view the route shows (or null), and `readFailed` is true when the latest read was not an
+ * answered list. The "New view" and "New notebook" links follow the views, for a session that can edit. A failed read says the
+ * views are unavailable, above the kept list when there is one; only an answered empty list says "No views yet" (#7929).
+ */
+export function paintViewList(container, views, session, activeId, readFailed = false) {
   const rows = sidebarViewRows(views, isViewGroupCollapsed);
   const items = rows.map((r) => (r.kind === "group" ? groupHeader(r) : viewLink(r.view, r.depth, activeId)));
+
+  if (readFailed) {
+    items.unshift(el("div", { class: "muted view-list-note", style: "padding:0.35rem 1.25rem", text: rows.length ? "Views unavailable, showing the last list" : "Views unavailable" }));
+  }
 
   if (session && session.can_edit) {
     items.push(el("a", { class: "view-item new-view", href: storeHash("#/view/new"), text: "＋ New view" }));

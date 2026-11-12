@@ -43,7 +43,9 @@ services:
       - -c
       - logging_collector=on
       - -c
-      - log_line_prefix=%m [%p] %Q 
+      # Quoted on purpose: YAML drops trailing spaces from an unquoted item, and the plan readers need
+      # the one space after %Q (#7372).
+      - "log_line_prefix=%m [%p] %Q "
       # Sample every predicate rather than the default 1%, so a short verification run records something.
       - -c
       - pg_qualstats.sample_rate=1

@@ -32,7 +32,7 @@ SELECT configuration_name, value_configured, value_in_use, is_dynamic, is_advanc
 FROM v_server_config
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1)
-ORDER BY configuration_name";
+ORDER BY lower(configuration_name), configuration_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
 
@@ -75,7 +75,7 @@ SELECT database_name, state_desc, compatibility_level, collation_name, recovery_
 FROM v_database_config
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)" + dbClause + @"
-ORDER BY database_name";
+ORDER BY lower(database_name), database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         foreach (var db in dbValues)
@@ -146,7 +146,7 @@ SELECT database_name, actual_state, desired_state, readonly_reason, current_stor
 FROM v_query_store_health
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)" + dbClause + @"
-ORDER BY database_name";
+ORDER BY lower(database_name), database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         foreach (var db in dbValues)
@@ -192,7 +192,7 @@ SELECT database_name, configuration_name, value, value_for_secondary, capture_ti
 FROM v_database_scoped_config
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_database_scoped_config WHERE server_id = $1)" + dbClause + @"
-ORDER BY database_name, configuration_name";
+ORDER BY lower(database_name), database_name, lower(configuration_name), configuration_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         foreach (var db in dbValues)
@@ -369,7 +369,21 @@ public class QueryStoreHealthRow
 
     /// <summary>#4966: when this row's snapshot was captured, to the second, in the display zone (the grid's Collected column,
     /// which sorts by <see cref="CaptureTime"/>). Query Store health is captured hourly, so this is how old the shown value can be.</summary>
-    public string CaptureTimeLocal => ServerTimeHelper.FormatServerTime(CaptureTime);
+    public string CaptureTimeLocal => CollectedText(DateTime.UtcNow);
+
+    /// <summary>#8576: the interval in minutes the <c>query_store_health</c> collector runs at on this server, set by the loader. Zero
+    /// (not read) gives the Collected cell no age cue.</summary>
+    public int CollectorIntervalMinutes { get; set; }
+
+    /// <summary>#8576: <see cref="CaptureTimeLocal"/> as of <paramref name="nowUtc"/>: the capture time, with its age after it
+    /// ("2026-10-20 12:00:00 (20 days 21 hours old)") once the row is older than two cycles of its collector, as the Viewer's cell says it.</summary>
+    public string CollectedText(DateTime nowUtc)
+    {
+        var text = ServerTimeHelper.FormatServerTime(CaptureTime);
+        var cue = PerformanceMonitor.Common.QueryStoreSnapshotStaleness.AgeCue(
+            DateTime.SpecifyKind(CaptureTime, DateTimeKind.Utc), nowUtc, CollectorIntervalMinutes);
+        return cue is null ? text : $"{text} ({cue})";
+    }
     public string DatabaseName { get; set; } = "";
     public string ActualState { get; set; } = "";
     public string DesiredState { get; set; } = "";
@@ -396,10 +410,12 @@ public class QueryStoreHealthRow
     /// (pre-rung row, or a 2016 engine that has no such option — not <c>OFF</c>).</summary>
     public string WaitStatsCaptureModeDisplay => WaitStatsCaptureMode ?? "—";
 
+    /// <summary>#7675: an <c>ERROR</c> store reads "! ERROR", so the row is marked in the cell and not only in the reason column.</summary>
     public string StateDisplay =>
-        string.Equals(ActualState, DesiredState, StringComparison.OrdinalIgnoreCase)
+        (PerformanceMonitor.Common.QueryStoreReadonlyReason.IsErrorState(ActualState) ? "! " : "")
+        + (string.Equals(ActualState, DesiredState, StringComparison.OrdinalIgnoreCase)
             ? ActualState
-            : $"{ActualState} (wanted {DesiredState})";
+            : $"{ActualState} (wanted {DesiredState})");
 
     /// <summary>Percent of the storage cap in use; blank when the cap is 0 (unlimited/unknown).</summary>
     public double? PercentOfCap => MaxStorageMb > 0 ? 100.0 * CurrentStorageMb / MaxStorageMb : null;
@@ -409,7 +425,7 @@ public class QueryStoreHealthRow
         MaxStorageMb > 0 ? $"{100.0 * CurrentStorageMb / MaxStorageMb:F0}%" : "";
 
     /// <summary>The shared bit-by-bit decode — one label table for every surface that shows this value.</summary>
-    public string ReadonlyReasonDisplay => PerformanceMonitor.Common.QueryStoreReadonlyReason.Decode(ReadonlyReason);
+    public string ReadonlyReasonDisplay => PerformanceMonitor.Common.QueryStoreReadonlyReason.DecodeWithState(ActualState, ReadonlyReason);
 }
 
 public class DatabaseScopedConfigRow

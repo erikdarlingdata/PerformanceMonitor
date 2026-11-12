@@ -57,7 +57,7 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
     public void Dispose() => _conn?.Dispose();
 
     private static (string Metric, string Collector, string Key, string Noun) Family(string name) => name == "blocking"
-        ? (MetricNames.Blocking, "blocked_process_report", "ANOMALY_BLOCKING_SPIKE", "blocking events")
+        ? (MetricNames.Blocking, "blocked_process_report", "ANOMALY_BLOCKING_SPIKE", "blocked process reports")
         : (MetricNames.Deadlock, "deadlocks", "ANOMALY_DEADLOCK_SPIKE", "deadlocks");
 
     /* ───────────────────────── seeding ───────────────────────── */
@@ -194,7 +194,7 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
         Assert.Equal(1.0, fact.Metadata["is_new"]);
         Assert.Equal(30.0, fact.Metadata["baseline_samples"]);
         var block = Compose(fact);
-        Assert.Equal($"12 {noun} this window — against a month in which this hour saw none", block.Headline);
+        Assert.Equal($"12 {noun} this window, against a month in which this hour saw none", block.Headline);
         Assert.Contains("a measured ZERO: 30 baseline samples across 30 distinct days", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("first occurrence", block.Headline + block.Investigation + block.Remediation, StringComparison.Ordinal);
     }

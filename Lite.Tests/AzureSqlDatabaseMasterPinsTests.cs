@@ -24,7 +24,7 @@ namespace PerformanceMonitorLite.Tests;
 [Trait("Stage", "Guard")]
 public sealed class AzureSqlDatabaseMasterPinsTests
 {
-    internal static IDataReader FleetRow(int engineEdition, string edition, long cpuSamples = 288, int? totalMemoryMb = null, int? bufferPoolMb = null)
+    internal static IDataReader FleetRow(int engineEdition, string edition, long cpuSamples = 288, int? totalMemoryMb = null, int? bufferPoolMb = null, string? agReplicaRole = null)
     {
         var table = new DataTable();
         table.Columns.Add("server_id", typeof(int));
@@ -48,8 +48,9 @@ public sealed class AzureSqlDatabaseMasterPinsTests
         table.Columns.Add("free_mb", typeof(decimal));
         table.Columns.Add("cpu_samples", typeof(long));
         table.Columns.Add("total_server_memory_mb", typeof(int));
+        table.Columns.Add("ag_replica_role", typeof(string));
         table.Rows.Add(1, 6m, 20m, 1, 8m, 7m, DBNull.Value, DBNull.Value, 0L, 0L, 0L, 0m, engineEdition, edition,
-            (object?)totalMemoryMb ?? DBNull.Value, (object?)bufferPoolMb ?? DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, cpuSamples, (object?)totalMemoryMb ?? DBNull.Value);
+            (object?)totalMemoryMb ?? DBNull.Value, (object?)bufferPoolMb ?? DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, cpuSamples, (object?)totalMemoryMb ?? DBNull.Value, (object?)agReplicaRole ?? DBNull.Value);
         var reader = table.CreateDataReader();
         Assert.True(reader.Read());
         return reader;

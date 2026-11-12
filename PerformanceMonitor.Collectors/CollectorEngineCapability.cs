@@ -496,11 +496,15 @@ public static class CollectorEngineCapability
     /// <summary>
     /// The sentence appended to a permanent-gap message when <see cref="CoveredInsteadBy"/> names a sibling,
     /// and nothing at all when it does not.
+    /// <para>#8074: it sends the reader to the sibling's own panel, the window read, and says that a trend over the
+    /// same question follows whichever source the server collects. The sibling's window read has no time axis, so
+    /// a sentence that only said "check that panel" sent a trend caller to a read that cannot answer a trend.</para>
     /// </summary>
     private static string CoveredInsteadSuffix(string collectorName) =>
         CoveredInsteadBy.TryGetValue(collectorName, out var sibling)
             ? $" The same question IS answered on this server by the {sibling} collector, which reads a " +
-              $"different source for it. Check that panel rather than this one."
+              $"different source for it. Read that collector's panel rather than this one; the trend over the " +
+              $"same question is read from whichever source this server collects."
             : string.Empty;
 
     /// <summary>

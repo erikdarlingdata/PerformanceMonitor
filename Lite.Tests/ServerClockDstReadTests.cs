@@ -443,7 +443,9 @@ public sealed class ServerClockDstReadTests : IClassFixture<SharedDuckDbFixture>
         Assert.Contains("ServerClock.Resolve(", planCreation, StringComparison.Ordinal);
 
         var jobs = File.ReadAllText(RepoPath("Lite/Services/LocalDataService.RunningJobs.cs"));
-        Assert.Matches(zoneRead, jobs);
+        /* #7216: the jobs read names its relation in a variable (hot table or view), so only the relation token differs. */
+        var jobsZoneRead = new Regex(zoneRead.ToString().Replace("v_server_properties", @"\{propertiesRelation\}", StringComparison.Ordinal), RegexOptions.IgnoreCase);
+        Assert.Matches(jobsZoneRead, jobs);
         Assert.Contains("ServerClock.Resolve(", jobs, StringComparison.Ordinal);
 
         var analysis = File.ReadAllText(RepoPath("Lite/Analysis/AnalysisService.cs"));

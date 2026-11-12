@@ -61,10 +61,6 @@ const KINDS = {
   querystore: { read: "get_query_store_top", rowsKey: "queries", keyOf: (r) => [r.database_name, r.query_hash], nameOf: (r) => r.query_text, nameLabel: "Query", duration: "avg_duration_ms", cpu: "avg_cpu_ms" },
 };
 
-export function compareKind(kind) {
-  return KINDS[kind] || null;
-}
-
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
 /** One row per key: executions summed, each average weighted by executions (a row with no figure adds no weight to it). */
@@ -232,7 +228,7 @@ function deltaColumns(kind) {
       render: (r) => (r.status ? el("span", { class: "badge band-" + (r.status === "NEW" ? "Warning" : "Offline"), text: r.status }) : document.createTextNode("")),
       sortValue: (r) => r._group,
     },
-    { key: "database_name", label: "Database" },
+    { key: "database_name", label: "Database", name: true },
     { key: "name", label: k.nameLabel, valueList: false },
     { key: "execution_count", label: "Execs", format: "int" },
     { key: "baseline_execution_count", label: "Before Execs", format: "int" },

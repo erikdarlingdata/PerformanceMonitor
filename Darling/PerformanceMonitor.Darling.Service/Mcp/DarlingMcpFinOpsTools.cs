@@ -108,6 +108,30 @@ public sealed partial class DarlingMcpFinOpsTools
         ReadScope.NoteWindow(now.AddHours(-hoursBack), now);
     }
 
+    /// <summary>
+    /// The window-floor notice of a view that windows collected data over <paramref name="hoursBack"/> hours across several tables (#7010): the
+    /// LATEST of the tables' floors, because the view is only as complete as its least-covered table. One probe per relation, run one after the
+    /// other, scoped to the one server. A probe that fails costs the notice, never the rows (<see cref="DarlingMcpWindowNotice.ReadAsync"/>).
+    /// </summary>
+    private static Task<McpWindowNotice> ViewWindowNoticeAsync(
+        NpgsqlDataSource postgres, string serverName, int hoursBack, string[] tables, string label, bool emptyAnswer, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        var start = now.AddHours(-hoursBack);
+        return DarlingMcpWindowNotice.ReadAsync(
+            async () =>
+            {
+                DateTime? latest = null;
+                foreach (var table in tables)
+                {
+                    latest = DarlingMcpWindowNotice.Later(latest, await DarlingMcpWindowNotice.Probe(postgres, table, serverName, start, now, ct));
+                }
+
+                return latest;
+            },
+            start, now, label, emptyAnswer: emptyAnswer, cancellationToken: ct);
+    }
+
     [McpServerTool(Name = "get_finops"), Description(
         "FinOps views for one server, picked by view. Windowed over hours_back, UTC; no as_of." + SetAViewLines + SetBViewLines + " An unknown view is refused with the valid list. <<GUIDE>>" + SetAGuides + SetBGuides)]
     public static async Task<string> GetFinOps(
@@ -167,9 +191,9 @@ public sealed partial class DarlingMcpFinOpsTools
                 //
                 // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
                 case HighImpactView:
-                    return await ReadHighImpactAsync(postgres, resolved, hours_back, limit, cancellationToken);
+                    return await ReadHighImpactAsync(postgres, resolved, hours_back, limit, cancellationToken, logger);
                 case DatabaseResourcesView:
-                    return await ReadDatabaseResourcesAsync(postgres, resolved, hours_back, limit, cancellationToken);
+                    return await ReadDatabaseResourcesAsync(postgres, resolved, hours_back, limit, cancellationToken, logger);
                 case ApplicationConnectionsView:
                     return await ReadApplicationConnectionsAsync(postgres, resolved, hours_back, limit, cancellationToken);
                 case OptimizationView:

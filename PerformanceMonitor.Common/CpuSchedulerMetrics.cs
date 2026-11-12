@@ -63,7 +63,7 @@ public static class CpuSchedulerMetrics
             new("Active Parallel Threads", FormatLong(s.TotalActiveParallelThreadCount), false),
             new("Runnable Requests", FormatNullableInt(s.RunnableRequestCount), false),
             new("Total Requests", FormatNullableInt(s.TotalRequestCount), false),
-            new("Runnable %", s.RunnablePercent.HasValue ? s.RunnablePercent.Value.ToString("F2") : "N/A", false),
+            new("Runnable %", s.RunnablePercent.HasValue ? s.RunnablePercent.Value.ToString("F2") : "0.00", false, RunnablePercentHint),
             new("Total Physical Memory", FormatKbAsGb(s.TotalPhysicalMemoryKb), false),
             new("Available Physical Memory", FormatKbAsGb(s.AvailablePhysicalMemoryKb), s.PhysicalMemoryPressureWarning),
             new("System Memory State", string.IsNullOrEmpty(s.SystemMemoryStateDesc) ? "N/A" : s.SystemMemoryStateDesc, s.PhysicalMemoryPressureWarning),
@@ -74,11 +74,13 @@ public static class CpuSchedulerMetrics
     }
 
     /// <summary>
-    /// The rolled-up CPU-scheduler pressure classification, a pure client-side derivation mirroring
-    /// install/47's <c>report.cpu_scheduler_pressure</c> (pressure_level + recommendation). The banding is the
-    /// proc's own CASE, in the same order: runnable task queue &gt; 50 CRITICAL / &gt; 20 HIGH / &gt; 10 MEDIUM,
-    /// then worker-utilization &gt; 90% HIGH, then the collector's worker-exhaustion / runnable-tasks /
-    /// queued-requests warning flags.
+    /// The rolled-up CPU-scheduler pressure classification, a pure client-side derivation of install/47's
+    /// <c>report.cpu_scheduler_pressure</c> (pressure_level + recommendation). The banding is the proc's CASE with one
+    /// deliberate difference in order: runnable task queue &gt; 50 CRITICAL / &gt; 20 HIGH / &gt; 10 MEDIUM, then the
+    /// collector's worker-exhaustion flag CRITICAL, then worker-utilization &gt; 90% HIGH, then the runnable-tasks and
+    /// queued-requests warning flags. The proc tests the 90% arm before the flag; because the collector raises the flag
+    /// at 90% of max worker threads, that order makes the proc's CRITICAL reachable only at exactly 90%, and a server
+    /// at 95% reads HIGH there. Here the flag comes first, so above 90% the level is CRITICAL.
     /// </summary>
     public static CpuPressure ClassifyCpuPressure(ICpuSchedulerSnapshot s)
     {
@@ -90,8 +92,8 @@ public static class CpuSchedulerMetrics
             s.TotalRunnableTasksCount > 50 ? "CRITICAL - High runnable task queue" :
             s.TotalRunnableTasksCount > 20 ? "HIGH - Moderate runnable task queue" :
             s.TotalRunnableTasksCount > 10 ? "MEDIUM - Some runnable tasks queued" :
-            workerUtil > 90 ? "HIGH - Worker thread exhaustion" :
             s.WorkerThreadExhaustionWarning ? "CRITICAL - Worker thread exhaustion warning" :
+            workerUtil > 90 ? "HIGH - Worker thread exhaustion" :
             s.RunnableTasksWarning ? "HIGH - Runnable tasks warning" :
             s.QueuedRequestsWarning ? "MEDIUM - Queued requests warning" :
             "NORMAL";
@@ -109,6 +111,12 @@ public static class CpuSchedulerMetrics
 
     private static string FormatLong(long value) => value.ToString("N0");
 
+    /// <summary>
+    /// #7578: the collector stores no Runnable % when no other request was running, so a missing share is 0.00 and not "N/A".
+    /// The words match the web UI's tooltip on the same tile.
+    /// </summary>
+    public const string RunnablePercentHint = "The share of the other requests running at that moment that were waiting for a CPU. 0.0 means no other request was running.";
+
     private static string FormatNullableInt(int? value) => value.HasValue ? value.Value.ToString("N0") : "N/A";
 
     private static string FormatKbAsGb(long kb)
@@ -122,9 +130,9 @@ public static class CpuSchedulerMetrics
 /// cpu_scheduler_stats row, plus whether the collector flagged it as pressure (drives the row highlight). A
 /// single-row point-in-time collector has no natural top-N, so its "latest snapshot" is presented as this
 /// metric/value list.</summary>
-public sealed record CpuSchedulerMetricRow(string Metric, string Value, bool IsWarning);
+public sealed record CpuSchedulerMetricRow(string Metric, string Value, bool IsWarning, string? Hint = null);
 
 /// <summary>The rolled-up CPU-scheduler pressure classification for the metric grid's headline rows: the
-/// banded pressure level plus its paired recommendation, mirroring install/47's
+/// banded pressure level plus its paired recommendation, derived from install/47's
 /// report.cpu_scheduler_pressure.</summary>
 public sealed record CpuPressure(string Level, string Recommendation);

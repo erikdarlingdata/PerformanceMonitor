@@ -78,11 +78,12 @@ public sealed class DarlingWebSecurityHeadersTests
         return app.GetTestServer();
     }
 
-    private static Task<HttpContext> Get(TestServer server, bool networkMode, string path, string? hostHeader = null, string? token = null)
+    private static Task<HttpContext> Get(TestServer server, bool networkMode, string path, string? hostHeader = null, string? token = null, string scheme = "http")
     {
         return server.SendAsync(ctx =>
         {
             ctx.Request.Method = "GET";
+            ctx.Request.Scheme = scheme;
             ctx.Request.Path = path;
             if (token is not null)
             {
@@ -121,7 +122,79 @@ public sealed class DarlingWebSecurityHeadersTests
         /* Network mode answers a request with no session with the sign-in page, which sets its own policy. */
         Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
         AssertDefaultHeaders(ctx, expectDefaultPolicy: !networkMode);
-        Assert.Equal("same-origin", ctx.Response.Headers["Cross-Origin-Opener-Policy"].ToString());
+        /* #8096: the opener policy goes only where a browser honours it. The loopback request (localhost) gets it; the network request
+           here is plain http on a LAN address, which a browser ignores and reports on its console, so it is not sent. */
+        if (networkMode)
+        {
+            Assert.False(ctx.Response.Headers.ContainsKey("Cross-Origin-Opener-Policy"));
+        }
+        else
+        {
+            Assert.Equal("same-origin", ctx.Response.Headers["Cross-Origin-Opener-Policy"].ToString());
+        }
+    }
+
+    /// <summary>#8096: a browser honours <c>Cross-Origin-Opener-Policy</c> only on a trustworthy origin (https, or a loopback name such as
+    /// localhost); on a plain-http LAN address it ignores the header and logs an error on every navigation, so the HTML page served there
+    /// carries no opener policy. The same page over https on the same address does.</summary>
+    [Theory]
+    [InlineData("http", false)]
+    [InlineData("https", true)]
+    public async Task HtmlShell_OnANetworkAddress_CarriesTheOpenerPolicy_OnlyOverHttps(string scheme, bool expectOpenerPolicy)
+    {
+        using var server = await BuildServer(networkMode: true);
+        var ctx = await Get(server, true, "/", scheme: scheme);
+
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+        Assert.StartsWith("text/html", ctx.Response.ContentType, StringComparison.Ordinal);
+        AssertDefaultHeaders(ctx, expectDefaultPolicy: false);
+        if (expectOpenerPolicy)
+        {
+            Assert.Equal("same-origin", ctx.Response.Headers["Cross-Origin-Opener-Policy"].ToString());
+        }
+        else
+        {
+            Assert.False(ctx.Response.Headers.ContainsKey("Cross-Origin-Opener-Policy"));
+        }
+    }
+
+    /// <summary>#8096: the middleware on its own, on an HTML page under a named host. Plain http: no opener policy, because the browser would
+    /// ignore it and log an error. https on the same host: the policy is sent. The other page-wide headers are sent either way.</summary>
+    [Theory]
+    [InlineData("http", false)]
+    [InlineData("https", true)]
+    public async Task AnHtmlPage_OnANamedHost_CarriesTheOpenerPolicy_OnlyOverHttps(string scheme, bool expectOpenerPolicy)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        var app = builder.Build();
+        app.UseMiddleware<DarlingWebSecurityHeaders>(false);
+        app.Run(context => DarlingWebHostService.WriteSignedInLandingAsync(context, "/"));
+        await app.StartAsync();
+        using var server = app.GetTestServer();
+
+        var ctx = await server.SendAsync(c =>
+        {
+            c.Request.Method = "GET";
+            c.Request.Path = "/";
+            c.Request.Scheme = scheme;
+            c.Request.Host = new HostString("dashboard.example", 5153);
+        });
+
+        Assert.StartsWith("text/html", ctx.Response.ContentType, StringComparison.Ordinal);
+        Assert.Equal("DENY", ctx.Response.Headers.XFrameOptions.ToString());
+        Assert.Equal("no-referrer", ctx.Response.Headers["Referrer-Policy"].ToString());
+        if (expectOpenerPolicy)
+        {
+            Assert.Equal("same-origin", ctx.Response.Headers["Cross-Origin-Opener-Policy"].ToString());
+        }
+        else
+        {
+            Assert.False(ctx.Response.Headers.ContainsKey("Cross-Origin-Opener-Policy"));
+        }
+
+        await app.StopAsync();
     }
 
     /// <summary>The signed-in landing page (written after an SSO sign-in) goes through the same header middleware as every
@@ -497,4 +570,115 @@ public sealed class DarlingWebSecurityHeadersTests
     [InlineData("a.js", "const ns = \"http://www.w3.org/2000/svg\";")]
     public void TheGuardCheck_LeavesAllowedCodeAlone(string fileName, string text)
         => Assert.Empty(FindBlockedConstructs(fileName, text));
+
+    /// <summary>#8323: behind a reverse proxy that rewrites <c>Host</c> to the upstream's loopback address, the request alone
+    /// reads as trustworthy while the browser's origin is the proxy's plain-http LAN name. The configured public origin
+    /// (<c>web.publicBaseUrl</c>) decides with it: plain http on a named host is not trustworthy whatever <c>Host</c> says, and a
+    /// request that is itself plain http on a LAN address stays untrustworthy whatever the public origin says. https on both,
+    /// or no public origin at all, keeps the request's own verdict.</summary>
+    [Theory]
+    [InlineData("127.0.0.1", "http://dashboard.example:5153", false)]
+    [InlineData("127.0.0.1", "https://dashboard.example", true)]
+    [InlineData("127.0.0.1", "http://localhost:5153", true)]
+    [InlineData("127.0.0.1", null, true)]
+    [InlineData("192.168.1.5", "https://dashboard.example", false)]
+    [InlineData("192.168.1.5", null, false)]
+    public void IsTrustworthyOrigin_OverHttp_FollowsTheRequestAndTheConfiguredPublicOrigin(string host, string? publicOrigin, bool expected)
+    {
+        var method = typeof(DarlingWebSecurityHeaders)
+            .GetMethods(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public)
+            .FirstOrDefault(m => m.Name == "IsTrustworthyOrigin" && m.GetParameters().Length == 2 && m.GetParameters()[1].ParameterType == typeof(Uri));
+        if (method is null)
+        {
+            Assert.Fail("IsTrustworthyOrigin takes no public origin, so a browser behind a proxy that rewrites Host is judged by the upstream's loopback address.");
+        }
+
+        var context = new DefaultHttpContext();
+        context.Request.Scheme = "http";
+        context.Request.Host = new HostString(host, 5153);
+
+        var verdict = (bool)method!.Invoke(null, new object?[] { context.Request, publicOrigin is null ? null : new Uri(publicOrigin) })!;
+        Assert.Equal(expected, verdict);
+    }
+
+    /// <summary>#8323: the production pipeline with <c>web.publicBaseUrl</c> set and a request whose <c>Host</c> is the loopback
+    /// address a proxy's upstream call carries. A plain-http public origin: the HTML shell carries no opener policy, because
+    /// the browser at the proxy's address would ignore it and log an error on every page. An https public origin: the policy
+    /// is sent.</summary>
+    [Theory]
+    [InlineData("http://dashboard.example:5153", false)]
+    [InlineData("https://dashboard.example", true)]
+    public async Task HtmlShell_BehindAProxyThatRewritesHost_CarriesTheOpenerPolicy_OnlyForATrustworthyPublicOrigin(string publicOrigin, bool expectOpenerPolicy)
+    {
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Service"),
+            WebRootPath = "wwwroot",
+        });
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        builder.Services.AddSingleton(postgres);
+        DarlingWebHostService.ConfigureResponseCompression(builder.Services);
+        var app = builder.Build();
+        var host = new DarlingWebHostService(
+            NullLogger<DarlingWebHostService>.Instance,
+            new WebRuntimeState(),
+            new CollectorRuntimeState(),
+            new WebTlsCertificateState(),
+            new BaselineCache());
+
+        var configure = typeof(DarlingWebHostService).GetMethod("ConfigurePipeline", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public)!;
+        var parameters = configure.GetParameters();
+        var args = parameters.Select(p => p.HasDefaultValue
+            ? p.DefaultValue ?? (p.ParameterType.IsValueType ? Activator.CreateInstance(p.ParameterType) : null)
+            : null).ToArray();
+        void Set(string name, object? value)
+        {
+            var index = Array.FindIndex(parameters, p => p.Name == name);
+            if (index < 0)
+            {
+                Assert.Fail("ConfigurePipeline has no '" + name + "' parameter, so the header middleware never learns the public origin.");
+            }
+
+            args[index] = value;
+        }
+
+        var origin = new Uri(publicOrigin);
+        Set("app", app);
+        Set("postgres", postgres);
+        Set("networkMode", false);
+        Set("networkListenIp", null);
+        Set("allowedCidr", (PerformanceMonitor.Darling.Service.Hosting.CidrAllowList)IPNetwork.Parse("127.0.0.1/32"));
+        Set("accessToken", Token);
+        Set("oidcClient", null);
+        Set("publicBaseUrlHost", origin.Host);
+        Set("publicOrigin", origin);
+        configure.Invoke(host, args);
+        await app.StartAsync();
+        using var server = app.GetTestServer();
+
+        var ctx = await server.SendAsync(c =>
+        {
+            c.Request.Method = "GET";
+            c.Request.Scheme = "http";
+            c.Request.Path = "/";
+            c.Request.Headers.Host = "127.0.0.1:5153";
+            c.Connection.RemoteIpAddress = IPAddress.Loopback;
+        });
+
+        Assert.Equal(200, ctx.Response.StatusCode);
+        Assert.StartsWith("text/html", ctx.Response.ContentType, StringComparison.Ordinal);
+        AssertDefaultHeaders(ctx);
+        if (expectOpenerPolicy)
+        {
+            Assert.Equal("same-origin", ctx.Response.Headers["Cross-Origin-Opener-Policy"].ToString());
+        }
+        else
+        {
+            Assert.False(ctx.Response.Headers.ContainsKey("Cross-Origin-Opener-Policy"), "the opener policy was sent to a browser whose origin is a plain-http LAN name");
+        }
+
+        await app.StopAsync();
+    }
 }

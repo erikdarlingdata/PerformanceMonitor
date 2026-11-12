@@ -114,10 +114,14 @@ public static class ComparisonBanding
     public const string StatusWorse = "worse";
     public const string StatusBetter = "better";
     public const string StatusStable = "stable";
+    /// <summary>#7458: a row from a comparison where one side was never collected. It keeps its values and says
+    /// nothing about direction, because no verdict can rest on a window nobody observed.</summary>
+    public const string StatusNotCompared = "not_compared";
 
     public const string BandSourceBaseline = "baseline";
     public const string BandSourceAbsolute = "absolute";
     public const string BandSourcePresence = "presence";
+    public const string BandSourceNotCompared = "not_compared";
 
     public const string PresenceBoth = "both";
     public const string PresenceComparisonOnly = "comparison_only";
@@ -143,8 +147,8 @@ public static class ComparisonBanding
     /// </summary>
     public static object BandRulesPayload => new
     {
-        baseline = $"delta_sigma is the reading's delta in robust-sigma units (MAD-based) of this server's own hour-of-day x day-of-week baseline for the comparison window's hour; stable within ±{StableWithinRobustSigmas:0.#}σ, worse/better beyond. Used only when that baseline is trustworthy (baseline_confidence > 0); beyond_anomaly_cutoff says whether the move also clears the anomaly detector's own cutoff for the metric.",
-        absolute = $"no per-key dispersion is stored, so a status changes only when BOTH the value moved at least {MinimumRelativeMove:P0} of the larger side (relative_move) AND the larger side sits at least {MinimumLadderPosition:0.##} up the key's own base-severity ladder (ladder_position) — a move between two values the scorer grades as negligible is not a verdict.",
+        baseline = $"delta_sigma is the reading's delta in robust-sigma units (MAD-based) of this server's own hour-of-day x day-of-week baseline for the comparison window's hour; stable within ±{StableWithinRobustSigmas:0.#}σ, worse/better beyond. Used only when that baseline is trustworthy (baseline_confidence > 0); beyond_anomaly_cutoff says whether the move also clears the anomaly detector's own cutoff for the metric. A fact the scorer grades and rates negligible (severity 0) in BOTH windows gets no verdict (status stable), the same negligible-move rule the absolute band applies: delta_sigma and beyond_anomaly_cutoff stay on the row so the move is still visible, and the row is not counted in worse / better or in families_worse / families_better. A context fact the scorer never grades (SESSION_STATS, PG_TPS, PG_WAL_VOLUME_SHIFT) is banded on its baseline alone. A row banded on a reading other than the baseline_value / comparison_value it shows (PG_CONNECTION_SATURATION: peak sessions; PG_WAL_VOLUME_SHIFT: peak bytes per second) carries that reading for both windows in baseline_banded_value / comparison_banded_value, with banded_metric and banded_unit, and its verdict follows those readings, not the shown values.",
+        absolute = $"no per-key dispersion is stored, so a status changes only when BOTH the value moved at least {MinimumRelativeMove:P0} of the larger side (relative_move) AND the larger side sits at least {MinimumLadderPosition:0.##} up the key's own base-severity ladder (ladder_position): a move between two values the scorer grades as negligible is not a verdict.",
         presence = $"a key present in one window only is a new or resolved issue only when its base severity reaches {MinimumLadderPosition:0.##}; a noise-level appearance or disappearance is stable. BAD_ACTOR_* keys never take this path: their appearance is plan-cache identity churn, reported under plan_cache_churn and excluded from new_issues / resolved_issues."
     };
 
@@ -266,6 +270,22 @@ public static class ComparisonBanding
         _ => fact.Value
     };
 
+    /// <summary>#8574: the name and unit of the reading a row is banded on when that reading is not the fact's shown value.</summary>
+    public sealed record BandedReading(string Metric, string Unit);
+
+    /// <summary>
+    /// #8574: the reading <see cref="BaselinedValueFor"/> returns in place of <see cref="Fact.Value"/>, named, or null
+    /// for a key banded on the value the row shows. Kept beside <see cref="BaselinedValueFor"/> so a key that gains a
+    /// separate banded reading there is named here: a row whose verdict rests on a number the reply does not carry
+    /// reads as a contradiction (a fraction that fell 4.4% banded <c>worse</c> on a rise in peak sessions).
+    /// </summary>
+    public static BandedReading? BandedReadingFor(string key) => key switch
+    {
+        PgTargetFactKeys.ConnectionSaturation => new BandedReading(PgSessionPeakCountKey, "sessions"),
+        PgTargetFactKeys.WalVolumeShift => new BandedReading(PgWalPeakBytesPerSecKey, "bytes_per_second"),
+        _ => null
+    };
+
     /// <summary>
     /// The distinct baseline metrics the caller must look up for this pair of fact lists — only the
     /// metrics some present key is measured in, so a comparison with no CPU fact costs no CPU baseline
@@ -353,7 +373,8 @@ public static class ComparisonBanding
         IReadOnlyList<Fact> baselineFacts,
         IReadOnlyList<Fact> comparisonFacts,
         IReadOnlyDictionary<string, BaselineBucket> dispersionByMetric,
-        bool coverageCaveat)
+        bool coverageCaveat,
+        bool notCompared = false)
     {
         var baselineByKey = baselineFacts.ToFactLookup();
         var comparisonByKey = comparisonFacts.ToFactLookup();
@@ -364,6 +385,7 @@ public static class ComparisonBanding
         var rows = new List<ComparisonRow>(allKeys.Count);
         var appeared = new List<ChurnEntry>();
         var disappeared = new List<ChurnEntry>();
+        var churnSuppressed = 0;
 
         foreach (var key in allKeys)
         {
@@ -403,6 +425,21 @@ public static class ComparisonBanding
            magnitude alone would have made the improvement its worst member and dropped the family from
            families_worse. The old payload ordered by |severity_delta|, which put a saturated ladder's
            doubling last and a trace's formula slope first. */
+        /* #7458: a side the collector never observed has nothing to compare against, so every key present on only
+           one side is "new" or "resolved" purely because the other window is empty, and a key present on both
+           (a setting carried with no samples) is banded against a baseline that holds no measurement. No row
+           keeps a direction. The values stay, because a setting's current value is still true. Plan-cache churn
+           is the same artifact, so it reports nothing. */
+        if (notCompared)
+        {
+            rows = rows.Select(r => r.AsNotCompared()).ToList();
+            /* The churn is not reported, but it WAS collected: the reply must not become "no facts in either
+               window" because the only facts were plan-cache identities (ComparisonResult.IsEmpty). */
+            churnSuppressed = appeared.Count + disappeared.Count;
+            appeared.Clear();
+            disappeared.Clear();
+        }
+
         rows = rows
             .OrderBy(r => StatusRank(r.Status))
             .ThenByDescending(r => r.RelativeMove ?? 0)
@@ -423,7 +460,8 @@ public static class ComparisonBanding
                     members.Count(m => m.Status == StatusWorse),
                     members.Count(m => m.Status == StatusBetter),
                     members.Count(m => m.Status == StatusStable),
-                    coverageCaveat);
+                    coverageCaveat,
+                    members.Count(m => m.Status == StatusNotCompared));
             })
             .OrderBy(f => StatusRank(f.Status))
             .ThenByDescending(f => rows.First(r => r.Key == f.WorstKey).RelativeMove ?? 0)
@@ -436,7 +474,9 @@ public static class ComparisonBanding
             rows,
             families,
             new PlanCacheChurn(appeared, disappeared, presentInBoth, IsPostgresTargetFactSet(baselineFacts, comparisonFacts)),
-            coverageCaveat);
+            coverageCaveat,
+            notCompared,
+            churnSuppressed);
     }
 
     /// <summary>
@@ -502,7 +542,15 @@ public static class ComparisonBanding
            collapse either); a reader is given the values and the sigma to see it, and the two-sided reading is
            a v3 item on #3691, not something to fake here by inverting a key whose fall can be either an outage
            or a quiet hour. */
-        var status = !moved ? StatusStable : readingDelta > 0 ? StatusWorse : StatusBetter;
+        /* #8574: a move between two values the scorer GRADES and rates severity 0 on both sides is not a verdict, the
+           absolute band's negligible-move rule: a connection-saturation fraction under its bar in both windows is
+           not a "worse" family. The row keeps delta_sigma and beyond_anomaly_cutoff so the move stays visible. A fact
+           the scorer never grades (SESSION_STATS, PG_TPS, PG_WAL_VOLUME_SHIFT) is at severity 0 because it is
+           context, not because it was judged negligible, so the baseline stays its only band (#3691). */
+        var negligible = baseline.Severity <= 0 && comparison.Severity <= 0
+            && FactScorer.IsGraded(baseline) && FactScorer.IsGraded(comparison);
+        var status = !moved || negligible ? StatusStable : readingDelta > 0 ? StatusWorse : StatusBetter;
+        var banded = BandedReadingFor(key);
 
         return new ComparisonRow
         {
@@ -526,6 +574,10 @@ public static class ComparisonBanding
             BaselineConfidence = Math.Round(bucket.Confidence, 2),
             BaselineTier = bucket.Tier.ToString(),
             BaselineMetric = metric,
+            BaselineBandedValue = banded is null ? null : Math.Round(baselineReading, 6),
+            ComparisonBandedValue = banded is null ? null : Math.Round(comparisonReading, 6),
+            BandedMetric = banded?.Metric,
+            BandedUnit = banded?.Unit,
             BeyondAnomalyCutoff = Math.Abs(rawDeltaSigma) >= AnomalyThresholds.ModifiedZThresholdFor(metric),
             CoverageCaveat = coverageCaveat
         };
@@ -645,10 +697,71 @@ public sealed class ComparisonRow
     public double? BaselineConfidence { get; init; }
     public string? BaselineTier { get; init; }
     public string? BaselineMetric { get; init; }
+    /// <summary>#8574: the readings the row was banded on, set only when that is not the value the row shows
+    /// (<see cref="ComparisonBanding.BandedReadingFor"/>). Null on every other row, which then serializes with no
+    /// banded_* field.</summary>
+    public double? BaselineBandedValue { get; init; }
+    public double? ComparisonBandedValue { get; init; }
+    public string? BandedMetric { get; init; }
+    public string? BandedUnit { get; init; }
     public bool? BeyondAnomalyCutoff { get; init; }
     public bool CoverageCaveat { get; init; }
 
-    public object ToPayload() => new
+    /// <summary>
+    /// #7458: this row with no verdict. Values, severities and presence stay; everything a band decided
+    /// (status, move size, sigma and the baseline's reading) goes, because the band compared against a window
+    /// nobody collected.
+    /// </summary>
+    public ComparisonRow AsNotCompared() => new()
+    {
+        Key = Key,
+        Source = Source,
+        Family = Family,
+        Presence = Presence,
+        BaselineValue = BaselineValue,
+        ComparisonValue = ComparisonValue,
+        BaselineSeverity = BaselineSeverity,
+        ComparisonSeverity = ComparisonSeverity,
+        SeverityDelta = SeverityDelta,
+        ValueDelta = ValueDelta,
+        LadderPosition = LadderPosition,
+        Status = ComparisonBanding.StatusNotCompared,
+        BandSource = ComparisonBanding.BandSourceNotCompared,
+        CoverageCaveat = CoverageCaveat
+    };
+
+    public object ToPayload() => BandedMetric is null ? BaseShapePayload() : new
+    {
+        key = Key,
+        source = Source,
+        family = Family,
+        presence = Presence,
+        baseline_value = BaselineValue,
+        comparison_value = ComparisonValue,
+        baseline_severity = BaselineSeverity,
+        comparison_severity = ComparisonSeverity,
+        severity_delta = SeverityDelta,
+        value_delta = ValueDelta,
+        relative_move = RelativeMove,
+        ladder_position = LadderPosition,
+        status = Status,
+        band_source = BandSource,
+        delta_sigma = DeltaSigma,
+        baseline_sigma = BaselineSigma,
+        baseline_median = BaselineMedian,
+        baseline_confidence = BaselineConfidence,
+        baseline_tier = BaselineTier,
+        baseline_metric = BaselineMetric,
+        baseline_banded_value = BaselineBandedValue,
+        comparison_banded_value = ComparisonBandedValue,
+        banded_metric = BandedMetric,
+        banded_unit = BandedUnit,
+        beyond_anomaly_cutoff = BeyondAnomalyCutoff,
+        coverage_caveat = CoverageCaveat
+    };
+
+    /// <summary>The row's shape when it is banded on the value it shows: unchanged since before #8574.</summary>
+    private object BaseShapePayload() => new
     {
         key = Key,
         source = Source,
@@ -684,7 +797,8 @@ public sealed record ComparisonFamily(
     int Worse,
     int Better,
     int Stable,
-    bool CoverageCaveat)
+    bool CoverageCaveat,
+    int NotCompared = 0)
 {
     public object ToPayload() => new
     {
@@ -695,6 +809,7 @@ public sealed record ComparisonFamily(
         worse = Worse,
         better = Better,
         stable = Stable,
+        not_compared = NotCompared,
         coverage_caveat = CoverageCaveat
     };
 }
@@ -733,25 +848,37 @@ public sealed record ComparisonResult(
     IReadOnlyList<ComparisonRow> Rows,
     IReadOnlyList<ComparisonFamily> Families,
     PlanCacheChurn Churn,
-    bool CoverageCaveat)
+    bool CoverageCaveat,
+    bool NotCompared = false,
+    int ChurnSuppressed = 0)
 {
     public int Worse => Rows.Count(r => r.Status == ComparisonBanding.StatusWorse);
     public int Better => Rows.Count(r => r.Status == ComparisonBanding.StatusBetter);
     public int Stable => Rows.Count(r => r.Status == ComparisonBanding.StatusStable);
     public int NewIssues => Rows.Count(r => r.Presence == ComparisonBanding.PresenceComparisonOnly && r.Status == ComparisonBanding.StatusWorse);
     public int ResolvedIssues => Rows.Count(r => r.Presence == ComparisonBanding.PresenceBaselineOnly && r.Status == ComparisonBanding.StatusBetter);
+    public int NotComparedRows => Rows.Count(r => r.Status == ComparisonBanding.StatusNotCompared);
     public int FamiliesWorse => Families.Count(f => f.Status == ComparisonBanding.StatusWorse);
     public int FamiliesBetter => Families.Count(f => f.Status == ComparisonBanding.StatusBetter);
     public int FamiliesStable => Families.Count(f => f.Status == ComparisonBanding.StatusStable);
 
-    /// <summary>True when the union of both windows' keys (churn included) was empty — nothing to compare.</summary>
-    public bool IsEmpty => Rows.Count == 0 && Churn.Appeared.Count == 0 && Churn.Disappeared.Count == 0;
+    /// <summary>True when the union of both windows' keys (churn included) was empty — nothing to compare.
+    /// Churn that a not-compared reply withheld (#7458) still counts: those facts were collected.</summary>
+    public bool IsEmpty => Rows.Count == 0 && Churn.Appeared.Count == 0 && Churn.Disappeared.Count == 0 && ChurnSuppressed == 0;
+
+    /// <summary>The parenthesis of the tools' <c>size_note</c> naming what a cut-short fact list left off. Rows are
+    /// ranked worse, better, stable, so the stable tail goes first; a not-compared reply ranks every row 2 with
+    /// no move, so rows are in key order and the tail is alphabetical (#7458).</summary>
+    public string LeftOffNote => NotCompared
+        ? "no row has a direction in this reply, so rows are in key order and the last keys come off first"
+        : "the lowest-ranked: stable rows come last";
 
     public object SummaryPayload() => new
     {
         worse = Worse,
         better = Better,
         stable = Stable,
+        not_compared = NotComparedRows,
         new_issues = NewIssues,
         resolved_issues = ResolvedIssues,
         families_worse = FamiliesWorse,

@@ -65,9 +65,16 @@ public sealed class DarlingMcpAgentAlertTools
                 postgres, resolved.ServerId, start, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken);
             ReadScope.NoteSource(ReadScope.SourceRaw);
 
+            /* #7010: the window-floor notice of agent_alerts. The engine and precondition answers stay bare (they say their own cause, and a
+               collector that never ran here is not a quiet window); the generic unavailable answer carries it under hints, because a window the
+               store does not reach back to is not a true negative. */
+            Task<McpWindowNotice> NoticeAsync(bool emptyAnswer) => DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "agent_alerts", resolved.ServerName, start, windowEnd, cancellationToken),
+                start, windowEnd, "agent_alerts", emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
+
             if (!read.HasCapture)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "agent_alerts", cancellationToken)
+                var bare = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "agent_alerts", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "agent_alerts", cancellationToken)
                     /* #6874: the gate is !IsAzureSqlDb && !IsAwsRds && !IsAzureManagedInstance. The engine half is answered above, so AWS RDS
                        is the one candidate left. Since #6894 the registry records the RDS fact on every connect and the capability read above answers
@@ -75,17 +82,27 @@ public sealed class DarlingMcpAgentAlertTools
                        gated-off route is the one get_running_jobs uses for the same case. */
                     ?? await DarlingRuntimePrecondition.GatedOffStatusAsync(
                         postgres, resolved.ServerId, resolved.DisplayName, "agent_alerts",
-                        CollectorRuntimePrecondition.AgentAlertsPossibleCauses, cancellationToken)
-                    ?? McpHelpers.Status("unavailable",
-                        $"No SQL Server Agent alert capture in the {hours_back}-hour window ending {Format(windowEnd)}. The agent_alerts collector has not run in it.");
+                        CollectorRuntimePrecondition.AgentAlertsPossibleCauses, cancellationToken);
+                if (bare != null) return bare;
+
+                var unavailableNotice = await NoticeAsync(emptyAnswer: true);
+                return DarlingMcpWindowNotice.FinishEmpty(
+                    McpHelpers.Status("unavailable",
+                        $"No SQL Server Agent alert capture in the {hours_back}-hour window ending {Format(windowEnd)}. The agent_alerts collector has not run in it.",
+                        unavailableNotice.AsHints()),
+                    unavailableNotice);
             }
 
+            var notice = await NoticeAsync(emptyAnswer: false);
             var status = AgentAlertStatus.Evaluate(read.Alerts);
-            return JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 as_of = Format(windowEnd),
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 captured_at = Format(read.NewestCapture),
                 oldest_capture_in_window = Format(read.OldestCapture),
                 captures_in_window = read.Captures,
@@ -115,7 +132,7 @@ public sealed class DarlingMcpAgentAlertTools
                 }),
                 note = "captured_at, as_of and oldest_capture_in_window are UTC. last_occurrence, last_response and count_reset are the monitored server's own clock, the way msdb stores them. fired_in_window compares occurrence_count between the first and last capture in the window, so a firing before the first capture is not seen. "
                     + "A severity or error with a disabled alert is reported as alert_disabled, not as missing.",
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

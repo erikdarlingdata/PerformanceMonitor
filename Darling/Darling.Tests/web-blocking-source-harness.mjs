@@ -130,9 +130,15 @@ const BODIES = {
     trend: { source: null, trend: [] },
     stats: { status: "empty", message: "No blocking or deadlock data in the specified time range." },
     deadlockTrend: { status: "empty", message: "No deadlock was recorded for SRV1 in the last 24 hour(s). 288 collector run(s) DID execute." },
-    deadlocks: { status: "empty", message: "No deadlocks found in the specified time range." },
+    deadlocks: { status: "empty", message: "No deadlocks found in this window." },
   },
 };
+
+/* #7682: the CPU tab's CPU Utilization chart. A server that cannot report host CPU (SQL Server on Linux before 2025 CU1) answers null Other and Total on
+   every sample plus a host_cpu_note; a server that can answers numbers and no note. */
+const cpuSamples = (other) => [0, 1, 2].map((i) => ({ sample_time: "2026-01-01T0" + i + ":00:00.0000000Z", sql_server_cpu: 10 + i, other_process_cpu: other, total_cpu: other == null ? null : 10 + i + other }));
+BODIES.cpuLinux = { cpu: { samples: cpuSamples(null), host_cpu_note: "Only sql_server_cpu is measured: this server cannot report host CPU." } };
+BODIES.cpuMeasured = { cpu: { samples: cpuSamples(5) } };
 
 const settle = async () => {
   for (let i = 0; i < 200; i++) await new Promise((r) => setImmediate(r));
@@ -151,11 +157,15 @@ const panelsOf = (root) => {
     const h3 = node.children.find((c) => c.tag === "h3");
     const strips = [];
     const empties = [];
+    const notices = [];
     walk(node, (x) => {
+      if (hasClass(x, "notice")) notices.push(x.textContent);
       if (hasClass(x, "source")) strips.push(x.textContent);
       if (hasClass(x, "empty")) empties.push(x.textContent);
     });
-    found.push({ title: h3 && h3.children[0] ? h3.children[0].textContent : "", strips, empties });
+    /* #7543: the heading's subtitle spans (the h3's children after the title), where the source now sits beside the window label. */
+    const subtitles = h3 ? h3.children.slice(1).filter((c) => hasClass(c, "panel-sub") && c.textContent).map((c) => c.textContent) : [];
+    found.push({ title: h3 && h3.children[0] ? h3.children[0].textContent : "", strips, empties, notices, subtitles });
   });
   return found;
 };
@@ -164,7 +174,9 @@ const body = BODIES[scenario];
 if (!body) throw new Error("unknown scenario " + scenario);
 globalThis.fetch = async (url) => {
   const u = String(url);
-  const answer = u.includes("/get_blocking_trend")
+  const answer = u.includes("/get_cpu_utilization")
+    ? body.cpu || {}
+    : u.includes("/get_blocking_trend")
     ? body.trend
     : u.includes("/get_blocking_stats")
       ? body.stats

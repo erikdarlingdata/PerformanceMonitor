@@ -53,6 +53,42 @@ public sealed class LiteQueryTagStoreTests : IClassFixture<SharedDuckDbFixture>
         return Convert.ToInt64(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken));
     }
 
+    /// <summary>
+    /// #7200: created_at on a tag, an assignment and a rule, and the state row's updated_at, are UTC like every other Lite
+    /// timestamp, whatever zone the DuckDB session runs in. The session zone is forced to UTC+14 (a zone no CI machine uses),
+    /// so the old now()::TIMESTAMP writes land fourteen hours ahead.
+    /// </summary>
+    [Fact]
+    public async Task Writes_StampCreatedAtAndUpdatedAt_InUtc_WhateverTheSessionZone()
+    {
+        await ExecAsync("SET GLOBAL TimeZone = 'Pacific/Kiritimati'");
+        try
+        {
+            var before = DateTime.UtcNow.AddMinutes(-1);
+            var tag = await _service.CreateQueryTagAsync("Zoned", null);
+            await _service.AddQueryTagAssignmentAsync(new QueryTagAssignmentInput(tag, QueryTagKeyKind.Hash, QueryHash: "0xAA"));
+            await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Login, "app%", tag));
+            var after = DateTime.UtcNow.AddMinutes(1);
+
+            var stamps = new[]
+            {
+                (await _service.GetQueryTagsAsync()).Single().CreatedAt,
+                (await _service.GetQueryTagAssignmentsAsync()).Single().CreatedAt,
+                (await _service.GetQueryTagRulesAsync()).Single().CreatedAt,
+                (await _service.GetQueryTagStateAsync()).UpdatedAt ?? DateTime.MinValue,
+            };
+
+            foreach (var stamp in stamps)
+            {
+                Assert.InRange(stamp, before, after);
+            }
+        }
+        finally
+        {
+            await ExecAsync("RESET GLOBAL TimeZone");
+        }
+    }
+
     [Fact]
     public async Task Create_AssignsAscendingIds_AColourFromTheId_AndKeepsAGivenColour()
     {

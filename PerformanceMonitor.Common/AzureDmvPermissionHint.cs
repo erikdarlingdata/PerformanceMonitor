@@ -88,7 +88,7 @@ public static class AzureDmvPermissionHint
         && errorMessage.Contains("'tempdb'", StringComparison.OrdinalIgnoreCase);
 
     private const string ServerScopedHint =
-        " — On Azure SQL Database this is a SERVICE OBJECTIVE limit, not a missing grant: "
+        " On Azure SQL Database this is a SERVICE OBJECTIVE limit, not a missing grant: "
         + "VIEW SERVER STATE / VIEW SERVER PERFORMANCE STATE cannot be granted at the server there. "
         + "VIEW DATABASE STATE covers this DMV on every service objective EXCEPT Basic, S0, S1, and "
         + "any database in an elastic pool, where reading it requires the server admin, the Entra "
@@ -98,10 +98,10 @@ public static class AzureDmvPermissionHint
         + "unaffected and keep running.";
 
     private const string TempDbScopedHint =
-        " — This denial names TEMPDB, and on Azure SQL Database there is no grant to issue there: "
+        " This denial names TEMPDB, and on Azure SQL Database there is no grant to issue there: "
         + "tempdb permissions are not persistable, and in an elastic pool the database is not the "
-        + "permission boundary. Reach tempdb's space DMVs through server-level state access instead "
-        + "— the server admin, the Microsoft Entra admin, or a login added to the "
+        + "permission boundary. Reach tempdb's space DMVs through server-level state access instead: "
+        + "the server admin, the Microsoft Entra admin, or a login added to the "
         + "##MS_ServerStateReader## server role from the master database. A contained database user, "
         + "which is the setup the docs describe, cannot be put in that role and cannot be granted this at "
         + "all, so reading tempdb needs a separate server login in ##MS_ServerStateReader## (create it in "

@@ -320,6 +320,33 @@ public sealed class TimeRangeModelTests
         Assert.Equal(expected, TimeRangeNotes.SampleIntervalNote(TimeSpan.FromMinutes(spanMinutes), interval));
     }
 
+    /// <summary>#7940: a length that is not a whole number of minutes is named, identified and measured with one minute count, and its id reads
+    /// back as the range the name says. "7.5 minutes" is 450 seconds: 7 minutes in the name, the id and the length text alike.</summary>
+    [Fact]
+    public void AFractionalMinuteLength_IsNamedIdentifiedAndMeasuredAlike()
+    {
+        var typed = TimeRangeParser.Parse("7.5 minutes", Now, NewYork);
+        Assert.True(typed.Ok, typed.Error);
+        Assert.Equal(TimeSpan.FromSeconds(450), typed.Spec!.Span);
+
+        var seven = TimeRangeSpec.Relative(TimeSpan.FromSeconds(450));
+        Assert.Equal("7m", TimeRangeSpec.FormatLength(seven.Span));
+        Assert.Equal("Past 7 minutes", seven.Name);
+        Assert.Equal("7m", seven.Id);
+        Assert.True(TimeRangeSpec.TryFromId(seven.Id, out var back));
+        Assert.Equal(TimeSpan.FromMinutes(7), back!.Span);
+
+        var ninety = TimeRangeSpec.Relative(TimeSpan.FromSeconds(90));
+        Assert.Equal("1m", TimeRangeSpec.FormatLength(ninety.Span));
+        Assert.Equal("Past minute", ninety.Name);
+        Assert.Equal("1m", ninety.Id);
+
+        var whole = TimeRangeSpec.Relative(TimeSpan.FromMinutes(45));
+        Assert.Equal("45m", TimeRangeSpec.FormatLength(whole.Span));
+        Assert.Equal("Past 45 minutes", whole.Name);
+        Assert.Equal("45m", whole.Id);
+    }
+
     [Fact]
     public void FormatLength_FloorsAndDropsHoursPastADay()
     {

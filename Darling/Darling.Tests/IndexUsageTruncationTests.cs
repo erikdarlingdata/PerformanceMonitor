@@ -98,13 +98,15 @@ public sealed class IndexUsageTruncationTests
         foreach (var clause in new[]
         {
             "WHERE server_id = $1",
-            "collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)",
             "($2::text[] IS NULL OR database_name = ANY($2))",
         })
         {
             Assert.Contains(clause, ReaderSql, StringComparison.Ordinal);
             Assert.Contains(clause, DarlingObjectStatsReaderSource.IndexUsageMatchCountSql, StringComparison.Ordinal);
         }
+
+        /* That the count and the rows come from ONE capture, even when a newer one lands between the two reads, is
+           asserted by running the tool, in LatestSnapshotLookupLiveTests.IndexUsageTool_CountsTheCaptureItReturned_WhenANewerOneLandsBetweenTheReads. */
     }
 
     /// <summary>

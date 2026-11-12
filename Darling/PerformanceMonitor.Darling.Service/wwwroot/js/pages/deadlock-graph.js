@@ -16,6 +16,7 @@
  */
 
 import { el, disclosure } from "../util.js";
+import { withheldDisplayText } from "../mute-context.js";
 
 /* The W3C namespace identifier createElementNS needs. It is never fetched, and the self-containment test allows
    it. charts.js keeps the same constant; it is repeated here so this file does not import the chart code. */
@@ -101,7 +102,7 @@ export function deadlockGraphCell(server, row) {
   }
   if (graph.too_large) {
     const n = Number(graph.process_count) || 0;
-    return document.createTextNode(n + " processes — too many to draw here; use Save XML or the desktop viewer.");
+    return document.createTextNode(n + " processes: too many to draw here. Use Save XML or the desktop viewer.");
   }
 
   const processes = Array.isArray(graph.processes) ? graph.processes : [];
@@ -312,7 +313,7 @@ export function drawDeadlockGraph(graph, row) {
       side.appendChild(el("div", { class: "dlg-prop", text: "A handle covers a whole batch or procedure: find the statement in sys.dm_exec_query_stats by sql_handle plus statement_start_offset / statement_end_offset." }));
     }
     if (p.sql_text) {
-      side.appendChild(el("pre", { class: "code", text: p.sql_text }));
+      side.appendChild(el("pre", { class: "code", text: withheldDisplayText(p.sql_text) }));
       if (p.sql_text_cut) side.appendChild(el("div", { class: "dlg-prop", text: "The statement is cut here; the whole text is in the XML." }));
     } else {
       side.appendChild(el("div", { class: "dlg-prop", text: "No statement text was captured for this process." }));
@@ -333,7 +334,7 @@ export function drawDeadlockGraph(graph, row) {
       p.proc_name || "",
       p.contended_object || "",
       [p.lock_mode ? "lock " + p.lock_mode : "", p.wait_time_ms != null ? "wait " + p.wait_time_ms + " ms" : ""].filter(Boolean).join(" · "),
-      clip(p.sql_text, SQL_PREVIEW),
+      clip(withheldDisplayText(p.sql_text), SQL_PREVIEW),
     ];
     let y = 46;
     for (const line of lines) {

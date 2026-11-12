@@ -191,18 +191,18 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
         var floor = await service.GetJobHistoryDataStartAsync(serverId, Start, _end);
         var zone = serverId is int id ? clocks[id].AsTimeZone() : TimeZoneInfo.Utc;
 
-        return (BannerText(() => Task.FromResult(floor), Start, _end, read, zone, inUtc: serverId is null), read.Count);
+        return (BannerText(() => Task.FromResult(floor), Start, _end, read, zone, zoneWord: serverId is null ? "UTC" : null), read.Count);
     }
 
     /// <summary>The banner the tab's step leaves for these inputs, read off the control: its text, or null when it is hidden. Seeded
     /// visible with stale text, so a step that writes nothing cannot pass as a hidden banner.</summary>
     private static string? BannerText(
-        Func<Task<DateTime?>> probe, DateTime startUtc, DateTime endUtc, IReadOnlyCollection<JobHistoryRow> read, TimeZoneInfo zone, bool inUtc)
+        Func<Task<DateTime?>> probe, DateTime startUtc, DateTime endUtc, IReadOnlyCollection<JobHistoryRow> read, TimeZoneInfo zone, string? zoneWord)
     {
         return StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock { Visibility = System.Windows.Visibility.Visible, Text = "stale" };
-            JobHistoryTab.ShowJobHistoryDataStartAsync(banner, probe, startUtc, endUtc, read, zone, inUtc).GetAwaiter().GetResult();
+            JobHistoryTab.ShowJobHistoryDataStartAsync(banner, probe, startUtc, endUtc, read, zone, zoneWord).GetAwaiter().GetResult();
             return banner.Visibility == System.Windows.Visibility.Visible ? banner.Text : null;
         });
     }
@@ -536,7 +536,7 @@ VALUES
         var calls = 0;
         var oldest = Start.AddHours(8);
 
-        var note = BannerText(() => { calls++; return Task.FromResult<DateTime?>(Start); }, Start, _end, FakePage(oldest, JobHistoryTab.RowCap), TimeZoneInfo.Utc, inUtc: false);
+        var note = BannerText(() => { calls++; return Task.FromResult<DateTime?>(Start); }, Start, _end, FakePage(oldest, JobHistoryTab.RowCap), TimeZoneInfo.Utc, zoneWord: null);
 
         Assert.Equal(0, calls);
         Assert.Equal("Showing since " + Whole(oldest).ToString(Format, CultureInfo.InvariantCulture), note);
@@ -554,9 +554,9 @@ VALUES
         Func<Task<DateTime?>> covered = () => Task.FromResult<DateTime?>(Start);
 
         Assert.Equal("Showing since " + Whole(oldest).ToString(Format, CultureInfo.InvariantCulture),
-            BannerText(covered, Start, _end, FakePage(oldest, JobHistoryTab.RowCap), TimeZoneInfo.Utc, inUtc: false));
-        Assert.Null(BannerText(covered, Start, _end, FakePage(Start, JobHistoryTab.RowCap), TimeZoneInfo.Utc, inUtc: false));
-        Assert.Null(BannerText(covered, Start, _end, FakePage(oldest, JobHistoryTab.RowCap - 1), TimeZoneInfo.Utc, inUtc: false));
+            BannerText(covered, Start, _end, FakePage(oldest, JobHistoryTab.RowCap), TimeZoneInfo.Utc, zoneWord: null));
+        Assert.Null(BannerText(covered, Start, _end, FakePage(Start, JobHistoryTab.RowCap), TimeZoneInfo.Utc, zoneWord: null));
+        Assert.Null(BannerText(covered, Start, _end, FakePage(oldest, JobHistoryTab.RowCap - 1), TimeZoneInfo.Utc, zoneWord: null));
     }
 
     // ── A probe that fails, and a range too short to probe ──
@@ -569,8 +569,8 @@ VALUES
         await SeedRunAsync(ServerA, OffsetA, _end.AddHours(-2), _end.AddHours(-2));
         var read = await new LocalDataService(_duckDb).GetJobHistoryAsync(Start, JobHistoryTab.RowCap, ServerA);
 
-        string? faulted = BannerText(() => Task.FromException<DateTime?>(new InvalidOperationException("probe failed")), Start, _end, read, TimeZoneInfo.Utc, inUtc: false);
-        string? thrown = BannerText(() => throw new InvalidOperationException("probe failed"), Start, _end, read, TimeZoneInfo.Utc, inUtc: false);
+        string? faulted = BannerText(() => Task.FromException<DateTime?>(new InvalidOperationException("probe failed")), Start, _end, read, TimeZoneInfo.Utc, zoneWord: null);
+        string? thrown = BannerText(() => throw new InvalidOperationException("probe failed"), Start, _end, read, TimeZoneInfo.Utc, zoneWord: null);
 
         Assert.Single(read);
         Assert.Null(faulted);
@@ -587,7 +587,7 @@ VALUES
         var calls = 0;
         var start = _end.AddMinutes(-minutes);
 
-        var note = BannerText(() => { calls++; return Task.FromResult<DateTime?>(_end); }, start, _end, [], TimeZoneInfo.Utc, inUtc: false);
+        var note = BannerText(() => { calls++; return Task.FromResult<DateTime?>(_end); }, start, _end, [], TimeZoneInfo.Utc, zoneWord: null);
 
         Assert.Equal(expectedCalls, calls);
         if (expectedCalls == 0)
@@ -604,7 +604,7 @@ VALUES
         {
             var banner = new System.Windows.Controls.TextBlock { Visibility = System.Windows.Visibility.Collapsed, Text = "newer" };
             JobHistoryTab.ShowJobHistoryDataStartAsync(
-                banner, () => Task.FromResult<DateTime?>(_end.AddDays(-1)), Start, _end, [], TimeZoneInfo.Utc, inUtc: false, superseded: () => true).GetAwaiter().GetResult();
+                banner, () => Task.FromResult<DateTime?>(_end.AddDays(-1)), Start, _end, [], TimeZoneInfo.Utc, zoneWord: null, superseded: () => true).GetAwaiter().GetResult();
             return (banner.Visibility, banner.Text);
         });
 
@@ -723,7 +723,7 @@ VALUES
 
         var note = BannerText(
             () => LocalDataService.EarliestCoverageAsync([1, 2], id => id == 2 ? Task.FromException<DateTime?>(new InvalidOperationException("probe failed")) : Task.FromResult<DateTime?>(_end.AddDays(-1)), Start),
-            Start, _end, FakePage(_end.AddDays(-1), 3), TimeZoneInfo.Utc, inUtc: true);
+            Start, _end, FakePage(_end.AddDays(-1), 3), TimeZoneInfo.Utc, zoneWord: "UTC");
         Assert.Null(note);
     }
 
@@ -821,11 +821,11 @@ VALUES
         Assert.DoesNotContain("GetQueryWindowFloorAsync(", tab, StringComparison.Ordinal);
 
         var note = tab[tab.IndexOf("private async System.Threading.Tasks.Task ShowDataStartNoteAsync(", StringComparison.Ordinal)..start];
-        // One clock read for one server: the note takes the clock the read windowed on, and makes no second clock read.
-        Assert.Contains("readClocks.TryGetValue(one, out var clock) ? clock.AsTimeZone() : TimeZoneInfo.Utc", note, StringComparison.Ordinal);
+        // One clock read for one server: the note takes the clock the read windowed on, through the zone the picker shares, and makes no second clock read.
+        Assert.Contains("JobHistoryZone(serverId, mode, readClocks, null)", note, StringComparison.Ordinal);
         Assert.DoesNotContain("ReadJobHistoryClockAsync", note, StringComparison.Ordinal);
         Assert.DoesNotContain("ListedServerIds", tab, StringComparison.Ordinal);
-        Assert.Contains("inUtc: serverId is null", note, StringComparison.Ordinal);
+        Assert.Contains("zoneWord: serverId is null ? MultiServerTime.MixedZoneWord(mode) : null", note, StringComparison.Ordinal);
     }
 
     /// <summary>The banner sits in its own row above the grid, in the style of the other "Showing since" banners, and the shell hands the

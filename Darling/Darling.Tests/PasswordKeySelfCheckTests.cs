@@ -18,7 +18,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #5366: the hidden <c>--self-check-password-key</c> verb. The Unix file checks (owner, link count, file identity) run only
-/// on Linux, in the Linux build job, so what is pinned here is what can be checked on any platform: the verb is reachable
+/// on Linux, in the Linux store workflow, so what is pinned here is what can be checked on any platform: the verb is reachable
 /// and stays out of the usage text, the sealed-value check opens the committed vector and fails closed on a changed
 /// vector, and the workflow step runs the verb from the built image with the vector mounted read-only.
 /// </summary>
@@ -162,24 +162,72 @@ public sealed class PasswordKeySelfCheckTests : IDisposable
         Assert.DoesNotContain("passed", output.ToString(), StringComparison.Ordinal);
     }
 
+    /// <summary>#8006: the step moved from build.yml, where the Linux image job became release-only (#6656) and the step
+    /// was skipped on every run, to the Linux store workflow, which runs on a pull request touching the key code and nightly.
+    /// The step has no condition of its own, so nothing skips it inside the job. The original deadness was a condition
+    /// above the step, so the job header, the workflow's <c>workflow_call</c> trigger and the nightly's call to it are
+    /// pinned too, and the step's assertions read only the step itself.</summary>
     [Fact]
-    public void The_Linux_build_job_runs_the_verb_in_the_image_with_the_vector_mounted_read_only()
+    public void The_Linux_store_workflow_runs_the_verb_in_the_image_with_the_vector_mounted_read_only()
     {
-        var workflow = ReadRepoFileLf(".github", "workflows", "build.yml");
-        var start = workflow.IndexOf("\n  darling-linux:", StringComparison.Ordinal);
-        Assert.True(start >= 0, "the darling-linux job was not found");
-        var next = workflow.IndexOf("\n  darling-", start + 10, StringComparison.Ordinal);
-        var job = next < 0 ? workflow[start..] : workflow[start..next];
+        var workflow = ReadRepoFileLf(".github", "workflows", "darling-linux-store.yml");
+        var start = workflow.IndexOf("\n  linux-store:", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the linux-store job was not found");
+        var job = workflow[start..];
+
+        /* The job itself: no condition and no continue-on-error between its name and its steps. */
+        var stepsAt = job.IndexOf("\n    steps:", StringComparison.Ordinal);
+        Assert.True(stepsAt > 0, "the linux-store job's steps were not found");
+        var header = job[..stepsAt];
+        Assert.DoesNotMatch(@"(?m)^\s*if:", header);
+        Assert.DoesNotContain("continue-on-error", header, StringComparison.Ordinal);
+
+        /* The step, from its name to the next step, so nothing in a neighbouring step can satisfy an assertion; and it
+           must sit in this job, before any job declared after it. */
+        var stepStart = job.IndexOf("- name: Check the password key on Linux", StringComparison.Ordinal);
+        Assert.True(stepStart > stepsAt, "the password key step was not found in the linux-store job's steps");
+        var nextJob = System.Text.RegularExpressions.Regex.Match(job[1..], @"\n  [A-Za-z0-9_-]+:");
+        Assert.True(!nextJob.Success || stepStart < nextJob.Index + 1, "the password key step is not in the linux-store job");
+        var stepEnd = job.IndexOf("\n      - ", stepStart, StringComparison.Ordinal);
+        var window = stepEnd < 0 ? job[stepStart..] : job[stepStart..stepEnd];
 
         var step = job.IndexOf("--self-check-password-key", StringComparison.Ordinal);
-        Assert.True(step >= 0, "the darling-linux job does not run --self-check-password-key");
-        var window = job[Math.Max(0, step - 900)..Math.Min(job.Length, step + 300)];
+        Assert.True(step >= 0, "the linux-store job does not run --self-check-password-key");
+        Assert.Contains("--self-check-password-key", window, StringComparison.Ordinal);
         Assert.Contains("docker run", window, StringComparison.Ordinal);
         Assert.Contains("linux-self-check-vector.json", window, StringComparison.Ordinal);
         Assert.Contains(":ro", window, StringComparison.Ordinal);
-        Assert.Contains("performancemonitor-darling:pr", window, StringComparison.Ordinal);
+        Assert.Contains("\"${DARLING_IMAGE}\"", window, StringComparison.Ordinal);
         Assert.DoesNotContain("continue-on-error", window, StringComparison.Ordinal);
         Assert.DoesNotContain("|| true", window, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"(?m)^\s*if:", window);
+
+        var trigger = workflow.IndexOf("\n  pull_request:", StringComparison.Ordinal);
+        Assert.True(trigger >= 0, "the pull_request trigger was not found");
+        var triggerEnd = workflow.IndexOf("\npermissions:", trigger, StringComparison.Ordinal);
+        Assert.True(triggerEnd > trigger, "the end of the pull_request trigger was not found");
+        var paths = workflow[trigger..triggerEnd];
+        Assert.Contains("paths:", paths, StringComparison.Ordinal);
+        Assert.Contains("DarlingPasswordKey", paths, StringComparison.Ordinal);
+        Assert.Contains("DarlingSecretSource.cs", paths, StringComparison.Ordinal);
+        Assert.Contains("Fixtures/PasswordSeal", paths, StringComparison.Ordinal);
+        Assert.Contains("PerformanceMonitor.Darling.Service/DarlingOwnedSecrets.cs", paths, StringComparison.Ordinal);
+        Assert.Contains("PerformanceMonitor.Darling.Storage/PasswordSeal.cs", paths, StringComparison.Ordinal);
+        /* The vector group opens a sealed value bound to a connection: the binding's fields and canonical form. */
+        Assert.Contains("PerformanceMonitor.Darling.Storage/PasswordBinding.cs", paths, StringComparison.Ordinal);
+        Assert.Contains("PerformanceMonitor.Darling.Storage/ServerConnectionIdentity.cs", paths, StringComparison.Ordinal);
+
+        /* The nightly reaches this job only as a reusable workflow: the trigger and the call must both stay. The nightly
+           job's own has_changes/map_only gate is expected; it runs on every dev change. */
+        var onStart = workflow.IndexOf("\non:\n", StringComparison.Ordinal);
+        Assert.True(onStart >= 0, "the on: block was not found");
+        Assert.Contains("\n  workflow_call:", workflow[onStart..trigger], StringComparison.Ordinal);
+        Assert.Contains(
+            "uses: ./.github/workflows/darling-linux-store.yml",
+            ReadRepoFileLf(".github", "workflows", "nightly.yml"),
+            StringComparison.Ordinal);
+
+        Assert.DoesNotContain("--self-check-password-key", ReadRepoFileLf(".github", "workflows", "build.yml"), StringComparison.Ordinal);
     }
 
     private static JsonObject Vector() => JsonNode.Parse(File.ReadAllText(VectorPath))!.AsObject();

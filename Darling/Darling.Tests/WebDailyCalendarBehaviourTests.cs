@@ -163,6 +163,11 @@ public sealed class WebDailyCalendarBehaviourTests
         Assert.Equal(new[] { "refused" }, r.GetProperty("refusal").EnumerateArray().Select(e => e.GetString()).ToArray());
         Assert.True(r.GetProperty("noDataDetail").GetProperty("text").GetBoolean());
         Assert.Equal(0, r.GetProperty("noDataDetail").GetProperty("healthy").GetInt32());
+        // #7193: a gap day answers "unavailable" now, but without hints.data_state, so it keeps the page's words, not the service's sentence.
+        Assert.False(r.GetProperty("noDataDetail").GetProperty("serviceSentence").GetBoolean());
+        // A purged day (status "unavailable" with hints.data_state "purged") shows the service's horizon sentence instead.
+        Assert.True(r.GetProperty("purgedDetail").GetProperty("text").GetBoolean());
+        Assert.False(r.GetProperty("purgedDetail").GetProperty("gapWords").GetBoolean());
 
         var sept = r.GetProperty("sept");
         Assert.Equal(30, sept.GetProperty("days").GetInt32());
@@ -179,6 +184,6 @@ public sealed class WebDailyCalendarBehaviourTests
         Assert.Empty(r.GetProperty("tableSept").GetProperty("missing").EnumerateArray());
         Assert.Equal(new[] { "2026-10-03", "2026-10-04", "2026-10-05" }, r.GetProperty("tableOct").GetProperty("days").EnumerateArray().Select(e => e.GetString()).ToArray());
         Assert.Equal(new[] { "2026-10-04" }, r.GetProperty("tableOct").GetProperty("missing").EnumerateArray().Select(e => e.GetString()).ToArray());
-        Assert.Equal(3, r.GetProperty("totalReads").GetInt32());                  // the day detail twice and September once; October was never re-read
+        Assert.Equal(4, r.GetProperty("totalReads").GetInt32());                  // the day detail three times (a drawn day, a gap day, a purged day) and September once; October was never re-read
     }
 }

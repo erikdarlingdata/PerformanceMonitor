@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
@@ -900,5 +901,97 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
 
         var managedText = File.ReadAllText(Path.Combine(_dataDir, ManagedConfFile.FileName));
         Assert.Contains("maintenance_work_mem = '2048MB'", managedText, StringComparison.Ordinal);
+    }
+
+    /// <summary>The downgrade-shaped Legacy conf from docs/darling/managed-postgresql.md: the include is already there,
+    /// an older build appended its marker blocks below it, and the operator's own <c>random_page_cost</c> sits above
+    /// it (#7370).</summary>
+    private const string OperatorLine = "random_page_cost = 2.5";
+
+    private static string DowngradeShapedLegacyConf() =>
+        "# base conf\n" + OperatorLine + "\n" + ManagedConfFile.IncludeLine + "\n" +
+        DarlingManagedPostgres.BuildWalSizingConfAppend(
+            freeDiskBytesOnDataVolume: 100_000_000_000L,
+            totalDiskBytesOnDataVolume: 500_000_000_000L,
+            postgresMajor: 18);
+
+    private static Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> LegacySnapshot(
+        IReadOnlyDictionary<string, string> derived)
+    {
+        /* What the server reports on that conf, before and after: every derived key except the page cost, and the
+           operator's 2.5 for it (the managed file never carried it, so the older blocks did not either). */
+        var rows = new List<FileSettingRow>();
+        foreach (var kvp in derived)
+        {
+            if (kvp.Key != "random_page_cost")
+            {
+                rows.Add(Applied(kvp.Key, kvp.Value));
+            }
+        }
+
+        rows.Add(Applied("random_page_cost", "2.5", line: 2));
+        return _ => Task.FromResult<IReadOnlyList<FileSettingRow>>(rows);
+    }
+
+    private string? EffectiveRandomPageCost() =>
+        DarlingManagedPostgres.ReadConfAssignments(Path.Combine(_dataDir, "postgresql.conf"), "random_page_cost")
+            .Select(a => a.Value).LastOrDefault();
+
+    /// <summary>Legacy Step A is the second caller of the render inputs, run post-start against a live snapshot. With the
+    /// operator's line pinned, the key is not in <c>derived</c>, so rule 3 leaves the line where it is (above the
+    /// include) and the rewritten managed file carries no <c>random_page_cost</c>. Step A verifies, the operator's 2.5
+    /// is the value in force, and the file is what the next start renders, so that start writes nothing.</summary>
+    [Fact]
+    public async Task RunStepA_DowngradeShapedLegacyConf_OperatorPageCostPinned_StaysInForce_AndVerifies()
+    {
+        var confText = DowngradeShapedLegacyConf();
+        WriteConf(confText);
+        var pinned = ManagedConfFile.FindOperatorLinesAboveInclude(confText);
+        Assert.Equal(new ManagedConfFile.OperatorPinnedLine(2, "2.5"), pinned["random_page_cost"]);
+
+        var inputs = SampleInputs() with { OperatorPinned = pinned };
+        var derived = DerivedValues(inputs);
+        Assert.DoesNotContain("random_page_cost", derived.Keys);
+
+        var outcome = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, LegacySnapshot(derived), derived, inputs, inputs.Port, UtcNow, new CapturingTestLogger(), CancellationToken.None);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
+        Assert.Empty(outcome.MismatchedKeys);
+
+        var managed = File.ReadAllText(Path.Combine(_dataDir, ManagedConfFile.FileName));
+        Assert.DoesNotContain("random_page_cost", managed, StringComparison.Ordinal);
+        Assert.Equal("2.5", EffectiveRandomPageCost());
+
+        var rewritten = File.ReadAllText(Path.Combine(_dataDir, "postgresql.conf"));
+        Assert.True(
+            rewritten.IndexOf(OperatorLine, StringComparison.Ordinal) < rewritten.IndexOf(ManagedConfFile.IncludeLine, StringComparison.Ordinal),
+            "the operator line stays above the include, where the start path leaves it");
+        Assert.False(ManagedConfFile.IsHandEdited(managed));
+        Assert.False(ManagedConfFile.ShouldReplaceManagedConf(managed, ManagedConfFile.Render(inputs)));
+    }
+
+    /// <summary>The same conf with no pin (the render before #7370): <c>derived</c> carries the page cost, rule 3 moves
+    /// the operator's line below the include and the managed file carries the snapshot's 2.5. The operator's value is in
+    /// force and Step A verifies here too, so the pin changes where the line ends up, not what wins.</summary>
+    [Fact]
+    public async Task RunStepA_DowngradeShapedLegacyConf_NoPin_OperatorLineMovesBelowTheInclude_AndVerifies()
+    {
+        WriteConf(DowngradeShapedLegacyConf());
+        var inputs = SampleInputs();
+        var derived = DerivedValues(inputs);
+        Assert.Equal("1.1", derived["random_page_cost"]);
+
+        var outcome = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, LegacySnapshot(derived), derived, inputs, inputs.Port, UtcNow, new CapturingTestLogger(), CancellationToken.None);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
+        Assert.Equal("2.5", EffectiveRandomPageCost());
+
+        var rewritten = File.ReadAllText(Path.Combine(_dataDir, "postgresql.conf"));
+        Assert.True(
+            rewritten.IndexOf(OperatorLine, StringComparison.Ordinal) > rewritten.IndexOf(ManagedConfFile.IncludeLine, StringComparison.Ordinal),
+            "rule 3 moves the operator line below the include");
+        Assert.Contains("random_page_cost = '2.5'", File.ReadAllText(Path.Combine(_dataDir, ManagedConfFile.FileName)), StringComparison.Ordinal);
     }
 }

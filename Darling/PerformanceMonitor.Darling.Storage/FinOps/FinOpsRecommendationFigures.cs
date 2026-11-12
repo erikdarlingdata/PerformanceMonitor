@@ -9,6 +9,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using PerformanceMonitor.Common;
 
@@ -26,11 +27,6 @@ public sealed record FinOpsRecommendation(
 
 /// <summary>One database's collected encryption state.</summary>
 public sealed record DatabaseEncryptionFact(string DatabaseName, string StateDesc, bool IsEncrypted);
-
-/// <summary>One database's I/O totals over the storage-tier window.</summary>
-public sealed record StorageTierIo(
-    string DatabaseName, long TotalReads, long TotalStallReadMs, long TotalWrites, long TotalStallWriteMs,
-    DateTime? FirstSample, DateTime? LastSample, long WindowSamples);
 
 /// <summary>One maintenance job's recent and historical run durations.</summary>
 public sealed record MaintenanceJobRun(
@@ -223,7 +219,7 @@ public static class FinOpsRecommendationFigures
                 Category = "Licensing",
                 Severity = "Low",
                 Confidence = "High",
-                Finding = "Enterprise Edition — Availability Group secondary replica",
+                Finding = "Enterprise Edition: Availability Group secondary replica",
                 Detail = "This instance is currently a secondary replica in an Availability Group. " +
                          "Every replica in an AG must run the same SQL Server edition, so edition and " +
                          "licensing decisions apply to the whole group and should be evaluated on the " +
@@ -258,7 +254,7 @@ public static class FinOpsRecommendationFigures
                 Severity = "High",
                 Confidence = hasAdvancedAg ? "Medium" : "High",
                 Finding = hasAdvancedAg
-                    ? "Enterprise Edition — review Availability Group requirements before downgrading"
+                    ? "Enterprise Edition: review Availability Group requirements before downgrading"
                     : "Enterprise Edition with no Enterprise-only features detected",
                 Detail = "No databases use Transparent Data Encryption (TDE), the only feature " +
                          "still restricted to Enterprise Edition since SQL Server 2016 SP1. " +
@@ -274,7 +270,7 @@ public static class FinOpsRecommendationFigures
                 Category = "Licensing",
                 Severity = "Low",
                 Confidence = "High",
-                Finding = "TDE in use — Enterprise Edition downgrade blocker",
+                Finding = "TDE in use: Enterprise Edition downgrade blocker",
                 Detail = $"The following databases use Transparent Data Encryption: {string.Join(", ", tdeDbNames.Take(20))}" +
                          (tdeDbNames.Count > 20 ? $" and {tdeDbNames.Count - 20} more" : "") +
                          ". TDE must be removed before downgrading to Standard Edition."
@@ -329,7 +325,8 @@ public static class FinOpsRecommendationFigures
             Category = "Storage",
             Severity = totalGb > 50 ? "High" : totalGb > 10 ? "Medium" : "Low",
             Confidence = "High",
-            Finding = $"{candidates.Count} uncompressed object(s) >= 1GB ({totalGb:N1}GB total)",
+            // #7690: words written out, a space before the unit, and the singular for one object.
+            Finding = $"{candidates.Count} uncompressed {(candidates.Count == 1 ? "object" : "objects")} over 1 GB ({totalGb:N1} GB total)",
             Detail = $"Large uncompressed tables/indexes: {string.Join("; ", topItems)}" +
                      (candidates.Count > 5 ? $" and {candidates.Count - 5} more" : "") +
                      ". Consider PAGE or ROW compression to reduce storage and improve I/O."
@@ -388,10 +385,25 @@ public static class FinOpsRecommendationFigures
         return null;
     }
 
-    /// <summary>The VM right-sizing advice: up to two rows, one for the cores and one for the memory, each only when its own prescription qualifies.</summary>
-    public static List<FinOpsRecommendation> VmRightSizing(decimal p95Cpu24h, string cpuWindow, int cpuCount, int physMb,
-        int p95MemMb, long memSampleCount, string memWindow, decimal monthlyCost, bool includeCpuRow = true)
+    /// <summary>#7705: the one informational row an Availability Group secondary gets where the CPU and memory right-sizing rows would be. No savings figure.</summary>
+    public static FinOpsRecommendation SecondaryReplicaSizing() => new()
     {
+        Category = "Hardware",
+        Severity = "Low",
+        Confidence = "High",
+        Finding = ProvisioningVerdict.NotJudgedSecondaryFinding,
+        Detail = ProvisioningVerdict.NotJudgedSecondaryExplanation
+    };
+
+    /// <summary>The VM right-sizing advice: up to two rows, one for the cores and one for the memory, each only when its own prescription qualifies.
+    /// On an Availability Group secondary (<paramref name="isAgSecondary"/>, #7705) neither row is given and one informational row stands in: the
+    /// replica's load is only its work as a secondary, not the load it must carry after a failover.</summary>
+    public static List<FinOpsRecommendation> VmRightSizing(decimal p95Cpu24h, string cpuWindow, int cpuCount, int physMb,
+        int p95MemMb, long memSampleCount, string memWindow, decimal monthlyCost, bool includeCpuRow = true, bool isAgSecondary = false)
+    {
+        if (isAgSecondary)
+            return new List<FinOpsRecommendation> { SecondaryReplicaSizing() };
+
         var recommendations = new List<FinOpsRecommendation>();
         // CPU prescription: only if >= 4 cores. includeCpuRow is false when the compute row (or too short a window) already settled the CPU advice.
         if (includeCpuRow && VmCpuTargetCores(p95Cpu24h, cpuCount) is int targetCores)
@@ -453,7 +465,7 @@ public static class FinOpsRecommendationFigures
                     Category = "Cloud",
                     Severity = "Low",
                     Confidence = confidence,
-                    Finding = $"Stable CPU utilization (avg {avgCpu:N1}%, CV {cv:N2}) — reserved capacity candidate",
+                    Finding = $"Stable CPU utilization (avg {avgCpu:N1}%, CV {cv:N2}): reserved capacity candidate",
                     Detail = $"CPU utilization is consistently {avgCpu:N1}% with low variance (±{stddevCpu:N1}%). " +
                              "Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads."
                 };
@@ -482,7 +494,7 @@ public static class FinOpsRecommendationFigures
                 Category = "Databases",
                 Severity = idleDbs.Count >= 3 ? "High" : "Medium",
                 Confidence = "High",
-                Finding = $"{idleDbs.Count} idle database(s) consuming {totalSizeGb:N1}GB",
+                Finding = string.Create(CultureInfo.InvariantCulture, $"{CountText.Plural(idleDbs.Count, "idle database")} consuming {totalSizeGb:N1}GB"),
                 Detail = $"No query activity in 7 days: {dbNames}" +
                          (idleDbs.Count > 5 ? $" and {idleDbs.Count - 5} more" : "") +
                          ". Consider archiving or removing these databases.",
@@ -502,7 +514,7 @@ public static class FinOpsRecommendationFigures
                 Category = "Environment",
                 Severity = "Medium",
                 Confidence = "Low",
-                Finding = $"{devDbs.Count} possible dev/test database(s) on production server",
+                Finding = $"{CountText.Plural(devDbs.Count, "possible dev/test database")} on production server",
                 Detail = $"Databases matching dev/test patterns: {string.Join(", ", devDbs.Take(10))}" +
                          (devDbs.Count > 10 ? $" and {devDbs.Count - 10} more" : "") +
                          ". If these are non-production workloads, consider moving to a lower-cost tier or separate server."
@@ -532,52 +544,8 @@ public static class FinOpsRecommendationFigures
     }
 
     /// <summary>The storage-tier advice for the databases whose average read latency is under 5 ms and write latency under 3 ms, or null when none qualify. The window and sample totals cover the qualifying databases only.</summary>
-    public static FinOpsRecommendation? StorageTier(IEnumerable<StorageTierIo> rows)
-    {
-        var lowLatencyDbs = new List<(string Name, decimal AvgReadMs, decimal AvgWriteMs)>();
-        var storageMin = DateTime.MaxValue;
-        var storageMax = DateTime.MinValue;
-        long storageSamples = 0;
-
-        foreach (var row in rows)
-        {
-            var dbName = row.DatabaseName;
-            var totalReads = row.TotalReads;
-            var totalStallRead = row.TotalStallReadMs;
-            var totalWrites = row.TotalWrites;
-            var totalStallWrite = row.TotalStallWriteMs;
-
-            var avgReadMs = totalReads > 0 ? (decimal)totalStallRead / totalReads : 0m;
-            var avgWriteMs = totalWrites > 0 ? (decimal)totalStallWrite / totalWrites : 0m;
-
-            if (avgReadMs < 5m && avgWriteMs < 3m)
-            {
-                lowLatencyDbs.Add((dbName, avgReadMs, avgWriteMs));
-                storageSamples += row.WindowSamples;
-                if (row.FirstSample.HasValue && row.LastSample.HasValue)
-                {
-                    storageMin = row.FirstSample.Value < storageMin ? row.FirstSample.Value : storageMin;
-                    storageMax = row.LastSample.Value > storageMax ? row.LastSample.Value : storageMax;
-                }
-            }
-        }
-
-        if (lowLatencyDbs.Count > 0)
-        {
-            var storageWindow = RightSizingWindow.Describe(storageSamples, storageMax > storageMin ? storageMax - storageMin : TimeSpan.Zero);
-            var detail = string.Join("; ", lowLatencyDbs.Take(10)
-                .Select(d => $"{d.Name} (read {d.AvgReadMs:N1}ms, write {d.AvgWriteMs:N1}ms)"));
-            return new FinOpsRecommendation
-            {
-                Category = "Storage",
-                Severity = "Low",
-                Confidence = "Medium",
-                Finding = $"{lowLatencyDbs.Count} {(lowLatencyDbs.Count == 1 ? "database" : "databases")} with low IO latency, so standard storage may suffice",
-                Detail = $"These databases have avg read latency under 5ms and write under 3ms across {storageWindow}: {detail}" +
-                         (lowLatencyDbs.Count > 10 ? $" and {lowLatencyDbs.Count - 10} more" : "") +
-                         ". Premium/high-performance storage may not be needed."
-            };
-        }
-        return null;
-    }
+    public static FinOpsRecommendation? StorageTier(IEnumerable<StorageTierIo> rows) =>
+        StorageTierFigures.Evaluate(rows) is { } text
+            ? new FinOpsRecommendation { Category = "Storage", Severity = "Low", Confidence = "Medium", Finding = text.Finding, Detail = text.Detail }
+            : null;
 }

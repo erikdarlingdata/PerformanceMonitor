@@ -51,8 +51,12 @@
 
   // ---- Blocking ----------------------------------------------------------------------
   "alert_blocking_enabled": true,
-  "alert_blocking_threshold": 1,                    // blocked sessions
-  "alert_blocking_wait_seconds_threshold": 0,       // 0 = any wait duration qualifies
+  "alert_blocking_threshold": 3,                    // blocked events in the last hour; pages only when the worst wait is 15 s or more
+  "alert_blocking_wait_seconds_threshold": 60,      // one blocked event this long pages at once; also the total-wait alert. 0 = off
+
+  // The marker that makes the two blocking values above count. A settings.json without it loads a 1 / 0 as the new defaults (3 / 60),
+  // because a Settings save used to write the whole block and those were the old defaults, not choices. The Settings window writes it on every save.
+  "alert_blocking_defaults_applied": true,
 
   // ---- Deadlocks ---------------------------------------------------------------------
   "alert_deadlock_enabled": true,
@@ -158,7 +162,7 @@
   "alert_cooldown_minutes": 5,          // clamped 1-120
   "email_cooldown_minutes": 15,         // clamped 1-120
   "alert_delivery_mode": "Summary",     // "Summary" (one digest) or "PerEvent"
-  "alert_per_event_max_per_cycle": 10,  // PerEvent only; clamped 1-100
+  "alert_per_event_max_per_cycle": 5,   // PerEvent only; clamped 1-100
 
   // ---- Mute rules and dismissals -------------------------------------------------------------
   // Anything other than the four listed strings is ignored and the default kept.
@@ -168,6 +172,11 @@
   // ---- Connections ------------------------------------------------------------------------------
   // Out of range is IGNORED here rather than clamped: the value is kept only if 5-60.
   "connection_timeout_seconds": 5,
+
+  // ---- Extended Events ring buffers ---------------------------------------------------------------
+  // max_events_limit of the deadlock, blocked-process and long-query sessions (#8146). Clamped to 1000-10000.
+  // A session keeps the limit it was created with, so a changed value applies to sessions created afterwards.
+  "xe_ring_buffer_max_events": 1000,
 
   // ---- CSV export --------------------------------------------------------------------------------
   // "," | ";" | "\t". Anything else is ignored. The default follows the machine's locale, so
@@ -289,16 +298,19 @@
   // Set this to true to serve local clients with no token, as earlier builds did: only the read tools are served then, and the
   // write and investigation tools stay off. Import Settings never brings this value in. Change it, then restart Lite.
   "mcp_allow_tokenless_loopback": false,
-  // NO UI. Off by default. The MCP write tools (mute_analysis_finding and unmute_analysis_finding) are served only
-  // when this is true; with it off a call to one fails as an unknown tool. Change it, then restart Lite. Mutes that
-  // already exist stay in force while it is off; turn it on to remove one with unmute_analysis_finding.
+  // NO UI. Off by default. The twelve MCP write tools are served only when this is true: mute_analysis_finding,
+  // unmute_analysis_finding, set_notification_route_enabled, delete_notification_route, and the eight query tag tools
+  // (create, update, delete, assign and unassign for a tag, and create, update and delete for a tag rule). With it off a
+  // call to one fails as an unknown tool. Change it, then restart Lite. Mutes that already exist stay in force while it
+  // is off; turn it on to remove one with unmute_analysis_finding.
   // The write tools also need the MCP token: with mcp_allow_tokenless_loopback on they stay off whatever this says, and Lite
   // logs one Critical line. Import Settings never brings this value in.
   "mcp_allow_writes": false,
-  // NO UI. Off by default. Serves the four investigation tools (list_investigation_requests, claim_investigation_request,
-  // submit_investigation_report, get_investigation_reports) only when this is true AND mcp_allow_writes is false: with
-  // both on, the investigation tools stay off and Lite logs one Critical line. With it off a call to one fails as an
-  // unknown tool. Change it, then restart Lite. They also need the MCP token: with mcp_allow_tokenless_loopback on they stay off
+  // NO UI. Off by default. Serves the two tools that claim and report on investigation requests (claim_investigation_request,
+  // submit_investigation_report) only when this is true AND mcp_allow_writes is false: with both on, those two stay off and
+  // Lite logs one Critical line. With it off a call to one fails as an unknown tool. The two investigation reads
+  // (list_investigation_requests, get_investigation_reports) are ordinary reads, served in every configuration.
+  // Change it, then restart Lite. The two also need the MCP token: with mcp_allow_tokenless_loopback on they stay off
   // and Lite logs one Critical line. Import Settings never brings this value in.
   "mcp_allow_investigations": false,
   // NO UI. How much collected data the MCP answers hand out: "full" (the default), "maskLiterals" (statement text keeps

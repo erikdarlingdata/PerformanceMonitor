@@ -13,6 +13,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -219,14 +220,17 @@ public sealed class ThresholdOverrideAdminTabTests
     [Fact]
     public void TheAnswers_GetPlainWords_AndAViewerLoginsRefusalCarriesTheAdminLoginSentence_Pure()
     {
-        var refusal = "Changing a threshold override needs a store login with the admin role. Managed and compose stores connect the web dashboard as the viewer role.";
+        var refusal = DarlingWebThresholdOverrides.RefusedMessage(true);
         var results = AdminServerEditBehaviourTests.Run("pure", JsonSerializer.Serialize(new
         {
             calls = new object[]
             {
                 new { fn = "overrideOutcome", args = new object[] { "set", new { status = 200, body = new { status = "ok" } } } },
                 new { fn = "overrideOutcome", args = new object[] { "clear", new { status = 200, body = new { status = "cleared" } } } },
-                new { fn = "overrideOutcome", args = new object[] { "set", new { status = 403, body = new { error = refusal } } } },
+                new { fn = "overrideOutcome", args = new object[] { "set", new { status = 403, body = new { error = refusal, reason = "store_refused" } } } },
+                new { fn = "overrideOutcome", args = new object[] { "clear", new { status = 403, body = new { error = DarlingWebThresholdOverrides.RefusedMessage(true, adminWritesOff: true), reason = "admin_writes_off" } } } },
+                new { fn = "overrideOutcome", args = new object[] { "set", new { status = 403, body = new { error = DarlingWebEndpoints.ReadOnlyAccountText, reason = "read_only_seat" } } } },
+                new { fn = "overrideOutcome", args = new object[] { "set", new { status = 403, body = new { error = "Forbidden" } } } },
                 new { fn = "overrideOutcome", args = new object[] { "set", new { status = 400, body = new { error = "cpu.threshold_percent must be an integer between 1 and 100." } } } },
                 new { fn = "overrideOutcome", args = new object[] { "set", new { status = 500, body = new { error = "The store did not answer." } } } },
             },
@@ -238,9 +242,12 @@ public sealed class ThresholdOverrideAdminTabTests
         Assert.True(results[2].GetProperty("isError").GetBoolean());
         Assert.Equal(refusal, results[2].GetProperty("message").GetString());
         Assert.False(results[2].GetProperty("reread").GetBoolean());
-        Assert.Contains("between 1 and 100", results[3].GetProperty("message").GetString());
-        Assert.DoesNotContain("answered", results[3].GetProperty("message").GetString());
-        Assert.Contains("answered 500", results[4].GetProperty("message").GetString());
+        Assert.Equal(DarlingWebThresholdOverrides.RefusedMessage(true, adminWritesOff: true), results[3].GetProperty("message").GetString());
+        Assert.Equal(DarlingWebEndpoints.ReadOnlyAccountText, results[4].GetProperty("message").GetString());
+        Assert.Equal("This sign-in is read-only, so it cannot change overrides.", results[5].GetProperty("message").GetString());
+        Assert.Contains("between 1 and 100", results[6].GetProperty("message").GetString());
+        Assert.DoesNotContain("answered", results[6].GetProperty("message").GetString());
+        Assert.Contains("answered 500", results[7].GetProperty("message").GetString());
     }
 
     [Fact]

@@ -33,7 +33,7 @@ public sealed partial class ViewerDataService
         FROM v_server_config
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1)
-        ORDER BY configuration_name
+        ORDER BY lower(configuration_name), configuration_name
         """;
 
     /* 28 columns, then capture_time (#4966), in Lite's exact SELECT order — the database-config reader below maps them by
@@ -52,7 +52,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
-        ORDER BY database_name
+        ORDER BY lower(database_name), database_name
         """;
 
     public const string DatabaseScopedConfigSql = """
@@ -61,7 +61,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_database_scoped_config WHERE server_id = $1)
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
-        ORDER BY database_name, configuration_name
+        ORDER BY lower(database_name), database_name, lower(configuration_name), configuration_name
         """;
 
 
@@ -76,7 +76,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
-        ORDER BY database_name
+        ORDER BY lower(database_name), database_name
         """;
 
     /// <summary>
@@ -206,6 +206,27 @@ public sealed partial class ViewerDataService
         return items;
     }
 
+
+    /// <summary>
+    /// #8576: the interval in minutes the <c>query_store_health</c> collector runs at on this server (the server's schedule row, else the
+    /// fleet row, else the shipped one), which the Query Store grid's Collected cell judges a row's age by. Zero when it cannot be read: the
+    /// grid then shows no age cue rather than failing.
+    /// </summary>
+    public async Task<int> GetQueryStoreHealthIntervalMinutesAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var healthCollector = PerformanceMonitor.Collectors.QueryStoreHealthCollector.Instance.Name;
+            var scheduleRows = await ReadScheduleOverridesForHealthAsync(cancellationToken);
+            return PerformanceMonitor.Collectors.CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes(healthCollector, serverId, scheduleRows) is int minutes and > 0
+                ? minutes
+                : PerformanceMonitor.Collectors.CollectorScheduleDefaults.All[healthCollector].FrequencyMinutes;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return 0;
+        }
+    }
 
     /// <summary>Latest per-database Query Store health snapshot for one server (Query Store grid, #2319).</summary>
     public async Task<List<QueryStoreHealthRow>> GetLatestQueryStoreHealthAsync(int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
@@ -371,8 +392,23 @@ public class QueryStoreHealthRow
     /// <summary>#4966: when this row's snapshot was captured (UTC); every row of one snapshot shares it. The grid's Collected column sorts on it.</summary>
     public DateTime CaptureTime { get; set; }
 
-    /// <summary>#4966: <see cref="CaptureTime"/> to the second, in the display zone (the grid's Collected column).</summary>
-    public string CaptureTimeLocal => ViewerTimeHelper.FormatForDisplay(CaptureTime, "yyyy-MM-dd HH:mm:ss");
+    /// <summary>#8576: the interval in minutes the <c>query_store_health</c> collector runs at on this server, set by the loader. Zero
+    /// (not read) gives the Collected cell no age cue.</summary>
+    public int CollectorIntervalMinutes { get; set; }
+
+    /// <summary>#4966, #8576: <see cref="CaptureTime"/> to the second, in the display zone (the grid's Collected column), with its age
+    /// after it ("2026-10-20 12:00:00 (20 days 21 hours old)") once the row is older than two cycles of its collector. A readable
+    /// secondary takes no new capture, so its row can be weeks old and read as current without the cue.</summary>
+    public string CaptureTimeLocal => CollectedText(DateTime.UtcNow);
+
+    /// <summary><see cref="CaptureTimeLocal"/> as of <paramref name="nowUtc"/>, so a test names the instant.</summary>
+    public string CollectedText(DateTime nowUtc)
+    {
+        var text = ViewerTimeHelper.FormatForDisplay(CaptureTime, "yyyy-MM-dd HH:mm:ss");
+        var cue = PerformanceMonitor.Common.QueryStoreSnapshotStaleness.AgeCue(
+            DateTime.SpecifyKind(CaptureTime, DateTimeKind.Utc), nowUtc, CollectorIntervalMinutes);
+        return cue is null ? text : $"{text} ({cue})";
+    }
 
     public string DatabaseName { get; set; } = "";
     public string ActualState { get; set; } = "";
@@ -400,10 +436,12 @@ public class QueryStoreHealthRow
     /// (pre-rung row, or a 2016 engine that has no such option — not <c>OFF</c>).</summary>
     public string WaitStatsCaptureModeDisplay => WaitStatsCaptureMode ?? "—";
 
+    /// <summary>#7675: an <c>ERROR</c> store reads "! ERROR", so the row is marked in the cell and not only in the reason column.</summary>
     public string StateDisplay =>
-        string.Equals(ActualState, DesiredState, StringComparison.OrdinalIgnoreCase)
+        (PerformanceMonitor.Common.QueryStoreReadonlyReason.IsErrorState(ActualState) ? "! " : "")
+        + (string.Equals(ActualState, DesiredState, StringComparison.OrdinalIgnoreCase)
             ? ActualState
-            : $"{ActualState} (wanted {DesiredState})";
+            : $"{ActualState} (wanted {DesiredState})");
 
     /// <summary>Percent of the storage cap in use; blank when the cap is 0 (unlimited/unknown).</summary>
     public double? PercentOfCap => MaxStorageMb > 0 ? 100.0 * CurrentStorageMb / MaxStorageMb : null;
@@ -413,7 +451,7 @@ public class QueryStoreHealthRow
         MaxStorageMb > 0 ? $"{100.0 * CurrentStorageMb / MaxStorageMb:F0}%" : "";
 
     /// <summary>The shared bit-by-bit decode — one label table for every surface that shows this value.</summary>
-    public string ReadonlyReasonDisplay => PerformanceMonitor.Common.QueryStoreReadonlyReason.Decode(ReadonlyReason);
+    public string ReadonlyReasonDisplay => PerformanceMonitor.Common.QueryStoreReadonlyReason.DecodeWithState(ActualState, ReadonlyReason);
 }
 
 public class DatabaseScopedConfigRow

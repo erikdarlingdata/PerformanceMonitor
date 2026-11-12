@@ -231,7 +231,7 @@ SELECT
 FROM
 (
     SELECT TOP ({IdentityCapacityMath.MaxColumnsPerDatabase})
-        schema_name = s.name,
+        schema_name = PerformanceMonitorLite.name,
         table_name = o.name,
         column_name = ic.name,
         data_type = TYPE_NAME(ic.system_type_id),
@@ -243,8 +243,8 @@ FROM
     FROM sys.identity_columns AS ic
     JOIN sys.objects AS o
         ON o.object_id = ic.object_id
-    JOIN sys.schemas AS s
-        ON s.schema_id = o.schema_id
+    JOIN sys.schemas AS PerformanceMonitorLite
+        ON PerformanceMonitorLite.schema_id = o.schema_id
     CROSS APPLY
     (
         SELECT
@@ -281,7 +281,7 @@ FROM
     AND   100 * u.used / NULLIF(u.total, 0) > {CandidatePercentFloor}
     ORDER BY
         percent_used DESC,
-        s.name,
+        PerformanceMonitorLite.name,
         o.name,
         ic.name
 ) AS c

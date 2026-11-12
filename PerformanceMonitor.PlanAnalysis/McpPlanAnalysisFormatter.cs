@@ -26,25 +26,54 @@ public static class McpPlanAnalysisFormatter
     /// <summary>
     /// How many operators <c>top_operators</c> carries per statement. A fixed cut rather than a caller knob
     /// (the plan tools take no <c>limit</c>, and #3653 A15/A16 is about STATING the cut, not adding a knob):
-    /// ten operators is enough to hold the expensive spine of any plan an LLM can reason about in one
-    /// payload, and the rest of the plan is still reachable through the warnings (every node's warnings are
+    /// ten operators is enough to hold the operators that own the time in any plan an LLM can reason about in
+    /// one payload, and the rest of the plan is still reachable through the warnings (every node's warnings are
     /// in <c>warnings</c>, uncut) and the viewer. Published on every statement as <c>operators_cap</c> beside
     /// <c>operators_returned</c> / <c>total_operators</c> / <c>truncated</c>, so the cut is never silent.
     /// </summary>
     public const int TopOperatorCap = 10;
 
     /// <summary>
-    /// The two <c>top_operators</c> ranking bases, published per statement as <c>operators_ranked_by</c>
-    /// (#3653 A15/A16). A plan with runtime statistics ranks by measured elapsed time; an estimated plan has
-    /// no measurement and ranks by the optimizer's cost SHARE. The switch was silent before: the same key
-    /// carried a measurement in one payload and an estimate in the next, and only <c>has_actual_stats</c>
-    /// hinted at which — a caller comparing two payloads' top operators was comparing a stopwatch to a
-    /// guess without being told.
+    /// How many statistics <c>statistics_loaded</c> carries per statement (#8147), published beside
+    /// <c>statistics_returned</c> / <c>total_statistics</c> / <c>statistics_truncated</c> so the cut is never silent.
     /// </summary>
-    public const string RankedByActualElapsed = "actual_elapsed_ms";
+    public const int StatisticsLoadedCap = 10;
 
-    /// <inheritdoc cref="RankedByActualElapsed"/>
+    /// <summary>
+    /// The <c>statistics_note</c> of a statement whose plan carries a QueryPlan but no OptimizerStatsUsage element
+    /// (<c>statistics_status</c> = <c>not_in_plan</c>, #8147).
+    /// </summary>
+    public const string StatisticsNotInPlanNote = "This plan has no record of the statistics it loaded (SQL Server before 2017 / 2016 SP2, or a plan that loaded none), so their state at compile is unknown.";
+
+    /// <summary>
+    /// The two <c>top_operators</c> ranking bases, published per statement as <c>operators_ranked_by</c>
+    /// (#3653 A15/A16). A plan with runtime statistics ranks by each operator's OWN measured elapsed time
+    /// (#7887): a row-mode operator's <c>ActualElapsedMs</c> is cumulative over its subtree, so a parent is
+    /// never below its child and a rank on it lists the root path while the leaf that did the work falls
+    /// outside the cut. <see cref="PlanAnalyzer.GetOperatorOwnElapsedMs"/> takes the children off (per
+    /// thread in a parallel plan, nothing in batch mode where showplan's value is already standalone), and
+    /// the result rides on every row as <c>self_elapsed_ms</c> beside the cumulative <c>actual_elapsed_ms</c>.
+    /// An exchange has no own time: its elapsed is time spent waiting on the operators that feed and drain
+    /// it (#4690, the reason rule 35 skips exchanges), so its row carries a null <c>self_elapsed_ms</c>, the
+    /// <see cref="ExchangeSelfElapsedNote"/>, and ranks after every operator that has an own time.
+    /// An estimated plan has no measurement and ranks by the optimizer's cost SHARE. The switch was silent
+    /// before: the same key carried a measurement in one payload and an estimate in the next, and only
+    /// <c>has_actual_stats</c> hinted at which — a caller comparing two payloads' top operators was comparing
+    /// a stopwatch to a guess without being told.
+    /// </summary>
+    public const string RankedBySelfElapsed = "self_elapsed_ms";
+
+    /// <inheritdoc cref="RankedBySelfElapsed"/>
     public const string RankedByEstimatedCostPercent = "cost_percent (optimizer estimate)";
+
+    /// <summary>
+    /// What an exchange row's <c>self_elapsed_note</c> says in place of an own-time figure (#7887). A Gather,
+    /// Distribute or Repartition Streams operator's elapsed time is time spent waiting on the operators that
+    /// feed and drain it, not work of its own, so the figure that subtracting its children would leave is
+    /// wait, and ranking on it names the exchange beside a spilling sort as the expensive operator (#4690).
+    /// The row keeps its cumulative <c>actual_elapsed_ms</c>; every other row carries this key as null.
+    /// </summary>
+    public const string ExchangeSelfElapsedNote = "exchange: its elapsed time is time spent waiting on the operators that feed and drain it, not work of its own, so it has no self_elapsed_ms and ranks after every operator that has one";
 
     /// <summary>
     /// What <c>missing_indexes[].impact</c> IS, published as <c>impact_basis</c> beside it (#3653 A15/A16): the
@@ -88,7 +117,7 @@ public static class McpPlanAnalysisFormatter
     /// honesty ("corroboration, with caveats"); <c>impact_basis</c> — the real A15/A16 item, an unlabelled
     /// statement-scoped percent — stays.</para>
     /// </summary>
-    public const string MissingIndexCaveat = "Missing-index requests are weak evidence: uses are plan-cache-bounded and \"impact\" is one operator's estimated cost. A request corroborates a measured-slow plan; it never drives a finding. Any new index can regress other statements and adds write cost — test it.";
+    public const string MissingIndexCaveat = "Missing-index requests are weak evidence: uses are plan-cache-bounded and \"impact\" is one operator's estimated cost. A request corroborates a measured-slow plan; it never drives a finding. Any new index can regress other statements and adds write cost: test it.";
 
     /// <summary>
     /// Parses plan XML, runs the analyzer, and builds a structured JSON result.
@@ -164,29 +193,87 @@ public static class McpPlanAnalysisFormatter
 
                 var hasActuals = allNodes.Any(n => n.HasActualStats);
                 /* #3653 A15/A16: the cut and the basis are published, not silent — see TopOperatorCap and
-                   RankedByActualElapsed. truncated is OBSERVED against the whole population (every node is in
-                   hand), never inferred from the page size. */
+                   RankedBySelfElapsed. truncated is OBSERVED against the whole population (every node is in
+                   hand), never inferred from the page size. #7887: with runtime statistics the rank is each
+                   operator's own time, so a deep scan outranks the cheap ancestors whose cumulative elapsed
+                   contains it; operators with equal own time keep cumulative-elapsed order. An exchange's
+                   own time is null (ExchangeSelfElapsedNote), so every operator that has one ranks above it,
+                   exchanges keep cumulative order among themselves, and the synthetic statement node, with
+                   no runtime stats at all, ranks last. */
+                var ranked = allNodes.Select(n =>
+                {
+                    var exchange = n.HasActualStats && IsExchange(n);
+                    return (Node: n, Exchange: exchange, SelfMs: n.HasActualStats && !exchange ? PlanAnalyzer.GetOperatorOwnElapsedMs(n) : (long?)null);
+                });
                 var topOps = (hasActuals
-                        ? allNodes.OrderByDescending(n => n.ActualElapsedMs)
-                        : allNodes.OrderByDescending(n => n.CostPercent))
+                        ? ranked.OrderByDescending(r => r.SelfMs ?? -1).ThenByDescending(r => r.Node.ActualElapsedMs)
+                        : ranked.OrderByDescending(r => r.Node.CostPercent))
                     .Take(TopOperatorCap)
-                    .Select(n => new
+                    .Select(r =>
                     {
-                        node_id = n.NodeId,
-                        physical_op = n.PhysicalOp,
-                        logical_op = n.LogicalOp,
-                        cost_percent = n.CostPercent,
-                        estimated_rows = n.EstimateRows,
-                        actual_rows = n.HasActualStats ? n.ActualRows : (long?)null,
-                        actual_elapsed_ms = n.HasActualStats ? n.ActualElapsedMs : (long?)null,
-                        actual_cpu_ms = n.HasActualStats ? n.ActualCPUMs : (long?)null,
-                        logical_reads = n.HasActualStats ? n.ActualLogicalReads : (long?)null,
-                        object_name = n.ObjectName,
-                        index_name = n.IndexName,
-                        predicate = McpHelpers.Truncate(n.Predicate, 500),
-                        seek_predicates = McpHelpers.Truncate(n.SeekPredicates, 500),
-                        warning_count = n.Warnings.Count
+                        var n = r.Node;
+                        return new
+                        {
+                            node_id = n.NodeId,
+                            physical_op = n.PhysicalOp,
+                            logical_op = n.LogicalOp,
+                            cost_percent = n.CostPercent,
+                            /* #8377: EstimateRows is the optimizer's estimate for one execution and ActualRows is the
+                               total across every execution, so the pair alone reads an inner-side operator as a
+                               misestimate. expected_rows is the figure to set beside actual_rows:
+                               RowEstimateHelper.GetExpectedRows, the arithmetic the plan viewer's node label, edge
+                               colour and rules 5, 16 and 26 share (the estimate times ActualExecutions on the inner
+                               side of a Nested Loops join, where the executions are a true loop count; the estimate
+                               itself everywhere else). estimated_rows stays per execution, the figure the viewer's
+                               Properties panel shows as "Estimated Number of Rows Per Execution". expected_rows and
+                               actual_executions are null, not 0, without runtime statistics (#3541 A12). */
+                            estimated_rows = n.EstimateRows,
+                            expected_rows = n.HasActualStats ? RowEstimateHelper.GetExpectedRows(n) : (double?)null,
+                            actual_rows = n.HasActualStats ? n.ActualRows : (long?)null,
+                            actual_executions = n.HasActualStats ? n.ActualExecutions : (long?)null,
+                            actual_elapsed_ms = n.HasActualStats ? n.ActualElapsedMs : (long?)null,
+                            self_elapsed_ms = r.SelfMs,
+                            self_elapsed_note = r.Exchange ? ExchangeSelfElapsedNote : null,
+                            actual_cpu_ms = n.HasActualStats ? n.ActualCPUMs : (long?)null,
+                            logical_reads = n.HasActualStats ? n.ActualLogicalReads : (long?)null,
+                            object_name = n.ObjectName,
+                            index_name = n.IndexName,
+                            predicate = McpHelpers.Truncate(n.Predicate, 500),
+                            seek_predicates = McpHelpers.Truncate(n.SeekPredicates, 500),
+                            warning_count = n.Warnings.Count
+                        };
                     });
+
+                var statsStatus = !s.HasQueryPlan ? "no_query_plan" : s.HasStatsUsage ? "recorded" : "not_in_plan";
+                var statsRows = s.StatsUsage
+                    .OrderByDescending(i => i.ModificationCount)
+                    .ThenBy(i => i.DatabaseName, StringComparer.Ordinal)
+                    .ThenBy(i => i.SchemaName, StringComparer.Ordinal)
+                    .ThenBy(i => i.TableName, StringComparer.Ordinal)
+                    .ThenBy(i => i.StatisticsName, StringComparer.Ordinal)
+                    .Take(StatisticsLoadedCap)
+                    .Select(i =>
+                    {
+                        var tableRows = TableRowsFor(i, allNodes);
+                        return new
+                        {
+                            database = i.DatabaseName,
+                            schema = i.SchemaName,
+                            table = i.TableName,
+                            statistic = i.StatisticsName,
+                            modification_count = i.ModificationCount,
+                            table_rows = tableRows,
+                            modified_percent = tableRows is > 0 ? Math.Round(i.ModificationCount * 100.0 / tableRows.Value, 1) : (double?)null,
+                            /* A lead about the statistic's state at compile: the modification count is past the
+                               2016+ automatic update threshold (compat 130+: 500 up to 500 rows, else the smaller
+                               of 500 + 20% of rows and sqrt(1000 x rows)), rows from the plan's TableCardinality.
+                               Not a cause of the estimate. */
+                            stale_at_compile = tableRows == null ? (bool?)null : i.ModificationCount > AutoUpdateThreshold(tableRows.Value),
+                            last_update = i.LastUpdate,
+                            sampling_percent = i.SamplingPercent
+                        };
+                    })
+                    .ToList();
 
                 return new
                 {
@@ -262,12 +349,21 @@ public static class McpPlanAnalysisFormatter
                         grant_wait_ms = s.MemoryGrant.GrantWaitTimeMs,
                         feedback = s.MemoryGrant.IsMemoryGrantFeedbackAdjusted
                     },
-                    operators_ranked_by = hasActuals ? RankedByActualElapsed : RankedByEstimatedCostPercent,
+                    operators_ranked_by = hasActuals ? RankedBySelfElapsed : RankedByEstimatedCostPercent,
                     operators_cap = TopOperatorCap,
                     operators_returned = Math.Min(allNodes.Count, TopOperatorCap),
                     total_operators = allNodes.Count,
                     truncated = allNodes.Count > TopOperatorCap,
-                    top_operators = topOps
+                    top_operators = topOps,
+                    /* #8147: the statistics the optimizer loaded while compiling (the plan does not say which drove the estimates). Ordered by modification
+                       count, truncation observed against the whole list. */
+                    statistics_status = statsStatus,
+                    statistics_note = statsStatus == "not_in_plan" ? StatisticsNotInPlanNote : null,
+                    statistics_cap = StatisticsLoadedCap,
+                    statistics_returned = Math.Min(s.StatsUsage.Count, StatisticsLoadedCap),
+                    total_statistics = s.StatsUsage.Count,
+                    statistics_truncated = s.StatsUsage.Count > StatisticsLoadedCap,
+                    statistics_loaded = statsRows
                 };
             })
             .ToList();
@@ -295,10 +391,47 @@ public static class McpPlanAnalysisFormatter
         return JsonSerializer.Serialize(result, McpHelpers.JsonOptions);
     }
 
+    /// <summary>
+    /// The SQL Server 2016+ automatic update threshold at compatibility level 130 or higher (#8147): 500 for 500 rows
+    /// or fewer, otherwise the smaller of 500 + 20% of the rows and sqrt(1000 x rows).
+    /// </summary>
+    private static double AutoUpdateThreshold(double rows) =>
+        rows <= 500 ? 500 : Math.Min(500 + 0.2 * rows, Math.Sqrt(1000.0 * rows));
+
+    /// <summary>
+    /// The row count of the statistic's table as the plan saw it (#8147): the largest <c>TableCardinality</c> among
+    /// the operators that read that table and recorded one, or null when none does.
+    /// </summary>
+    private static double? TableRowsFor(OptimizerStatsUsageItem item, IReadOnlyList<PlanNode> nodes)
+    {
+        var qualified = $"{item.SchemaName}.{item.TableName}";
+        double? rows = null;
+        foreach (var n in nodes)
+        {
+            if (n.HasTableCardinality
+                && string.Equals(n.DatabaseName, item.DatabaseName, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(n.ObjectName, qualified, StringComparison.OrdinalIgnoreCase))
+            {
+                rows = rows is null ? n.TableCardinality : Math.Max(rows.Value, n.TableCardinality);
+            }
+        }
+
+        return rows;
+    }
+
     private static void CollectNodes(PlanNode node, List<PlanNode> nodes)
     {
         nodes.Add(node);
         foreach (var child in node.Children)
             CollectNodes(child, nodes);
     }
+
+    /// <summary>
+    /// True for a parallelism exchange (Gather, Distribute or Repartition Streams): the same shape
+    /// <c>PlanAnalyzer.IsExchangeOperator</c> tests when rule 35 skips exchanges (#4690), whose timings are
+    /// time spent waiting on the operators around them rather than work of their own.
+    /// </summary>
+    private static bool IsExchange(PlanNode node) =>
+        node.PhysicalOp == "Parallelism"
+        || node.LogicalOp is "Gather Streams" or "Distribute Streams" or "Repartition Streams";
 }

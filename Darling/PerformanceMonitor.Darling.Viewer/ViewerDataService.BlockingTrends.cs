@@ -208,7 +208,8 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// Blocked-session count per (collection, database) — Lite's <c>GetBlockedSessionTrendAsync</c>
     /// ported to Postgres, then bucketed (#4349). Reads the base <c>waiting_tasks</c> table (no v_ view
-    /// exists), counting rows whose <c>blocking_session_id</c> is set. A blocked-session count is a
+    /// exists), counting DISTINCT sessions with a waiting task blocked by ANOTHER session
+    /// (<c>blocking_session_id &lt;> session_id</c>; a parallel query's exchange threads wait on their own session and are not blocked, #7577). A blocked-session count is a
     /// PER-SNAPSHOT gauge, not a delta — a bucket's value is the AVERAGE of the per-collection counts it
     /// covers (rounded, matching the CPU tab's gauge-averaging idiom, #4234), never their SUM: summing
     /// would double (or N-tuple) the count purely because a wide bucket merged N snapshots, with no more
@@ -223,10 +224,11 @@ public sealed partial class ViewerDataService
             SELECT
                 collection_time,
                 database_name,
-                COUNT(*) AS blocked_count
+                COUNT(DISTINCT session_id) AS blocked_count
             FROM waiting_tasks
             WHERE server_id = $1
             AND   blocking_session_id > 0
+            AND   blocking_session_id <> session_id
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($4::text[] IS NULL OR database_name = ANY($4))

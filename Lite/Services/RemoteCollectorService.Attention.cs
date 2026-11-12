@@ -21,8 +21,14 @@ public partial class RemoteCollectorService
     /// <see cref="ReadXeSessionAsync"/> turns that into <see cref="XeSessionEnsureException"/>, so the run never records a
     /// SUCCESS over a source it could not read.
     /// </summary>
-    private Task<int> CollectAttentionAsync(ServerConnection server, CancellationToken cancellationToken)
-        => ReadXeSessionAsync(
+    private async Task<int> CollectAttentionAsync(ServerConnection server, CancellationToken cancellationToken)
+    {
+        var rows = await ReadXeSessionAsync(
             "attention",
             () => RunCollectorDefinitionAsync(AttentionCollector.Instance, server, cancellationToken));
+
+        /* #7639: some databases were refused their session while others were ensured: the run's note says which and why. */
+        ApplyXeEnsurePartialNote(server, XeSessionEnsureWarnedKey(server, AttentionXeSessionName));
+        return rows;
+    }
 }

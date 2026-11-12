@@ -32,7 +32,7 @@ public sealed class MemoryGrantsCollector : CollectorDefinitionBase<MemoryGrants
         short ResourceSemaphoreId,
         int PoolId,
         decimal TargetMb,
-        decimal MaxTargetMb,
+        decimal? MaxTargetMb,
         decimal TotalMb,
         decimal AvailableMb,
         decimal GrantedMb,
@@ -71,7 +71,6 @@ SELECT /* PerformanceMonitorLite */
     timeout_error_count = ISNULL(deqrs.timeout_error_count, 0),
     forced_grant_count = ISNULL(deqrs.forced_grant_count, 0)
 FROM sys.dm_exec_query_resource_semaphores AS deqrs
-WHERE deqrs.max_target_memory_kb IS NOT NULL
 OPTION(RECOMPILE);";
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
@@ -109,7 +108,9 @@ OPTION(RECOMPILE);";
                 Convert.ToInt16(reader.GetValue(0), CultureInfo.InvariantCulture),
                 Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
                 reader.IsDBNull(2) ? 0m : reader.GetDecimal(2),
-                reader.IsDBNull(3) ? 0m : reader.GetDecimal(3),
+                /* #7676: NULL stays NULL. The DMV has no max target for the small-query semaphore (id 1), and a stored 0 would
+                   read as a zero ceiling to every reader that does not know to skip that id. */
+                reader.IsDBNull(3) ? null : reader.GetDecimal(3),
                 reader.IsDBNull(4) ? 0m : reader.GetDecimal(4),
                 reader.IsDBNull(5) ? 0m : reader.GetDecimal(5),
                 reader.IsDBNull(6) ? 0m : reader.GetDecimal(6),
@@ -120,8 +121,12 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11), CultureInfo.InvariantCulture)));
         }
 
-        return rows;
+        return DeltaBaselineRollbackRows.Capture(rows, context, BaselineGroups, r => $"{r.PoolId}_{r.ResourceSemaphoreId}");
     }
+
+    /* The delta groups WritePayload advances for each row, captured at the end of the read so a write that fails
+       before the rows are stored can hand them back (DeltaBaselineRollbackRows). */
+    private static readonly string[] BaselineGroups = { "memory_grants_timeouts", "memory_grants_forced" };
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {

@@ -221,7 +221,7 @@ internal static class StatementFilterCensus
     /// serves for this call (#5632), set back to <c>full</c> afterwards; one host serves one call at a time here.</summary>
     public static async Task<(string Text, bool IsError)> FilterThroughHostAsync(
         TestServer server, string rawToolText, bool isError = false, string path = "/",
-        McpDataDetail dataDetail = McpDataDetail.Full)
+        McpDataDetail dataDetail = McpDataDetail.Full, string? bearerToken = null)
     {
         string key = Guid.NewGuid().ToString("N");
         s_payloads[key] = (rawToolText, isError);
@@ -229,7 +229,7 @@ internal static class StatementFilterCensus
         setting.Mode = dataDetail;
         try
         {
-            return await CallRealToolAsync(server, ProbeName, new JsonObject { ["key"] = key }, path);
+            return await CallRealToolAsync(server, ProbeName, new JsonObject { ["key"] = key }, path, bearerToken);
         }
         finally
         {

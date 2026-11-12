@@ -46,7 +46,7 @@
                       SelectionMode="Single"
                       SelectionChanged="RunsDataGrid_SelectionChanged">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Header="Swept at" Binding="{Binding SweptAtLocal}" SortMemberPath="SweptAtUtc" Width="150"/>
+                    <DataGridTextColumn Header="Swept at" Binding="{Binding SweptAtLocal}" SortMemberPath="SweptAtUtc" Width="Auto" MinWidth="150"/>
                     <DataGridTextColumn Header="Flags" Binding="{Binding Flags}" Width="170"/>
                     <DataGridTextColumn Header="Servers" Binding="{Binding ServersText}" Width="120"/>
                     <DataGridTextColumn Header="Bands" Binding="{Binding BandsText}" Width="*" MinWidth="160"/>
@@ -83,7 +83,7 @@
                            Text="✕ Instruments dead: this sweep could not prove its data sources were alive, so its quiet is unproven, not clean. The liveness tab names the dead instrument."/>
                 <TextBlock x:Name="RestartNotice" Visibility="Collapsed" TextWrapping="Wrap" Padding="8,4" Margin="0,0,0,4"
                            Background="#22FFAA00" Foreground="{DynamicResource ForegroundBrush}"
-                           Text="This sweep ran inside the post-restart settle window — fleet staleness here is classified startup-transient, not an outage, except for a server that was already offline before the restart, which stays offline."/>
+                           Text="This sweep ran inside the post-restart settle window. Fleet staleness here is classified startup-transient, not an outage, except for a server that was already offline before the restart, which stays offline."/>
             </StackPanel>
             <TextBlock x:Name="NoDetailMessage" Grid.Row="0" Grid.RowSpan="2" TextWrapping="Wrap" TextAlignment="Center"
                        FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
@@ -118,7 +118,7 @@
                         <TextBlock x:Name="WouldHavePagedEmpty" TextWrapping="Wrap" TextAlignment="Center"
                                    HorizontalAlignment="Center" VerticalAlignment="Center" Margin="20"
                                    Foreground="{DynamicResource ForegroundMutedBrush}"
-                                   Text="Muted, and nothing crossed a critical trigger in this span — the mute cost nothing this sweep."/>
+                                   Text="Muted, and nothing crossed a critical trigger in this span. The mute cost nothing this sweep."/>
                     </Grid>
                 </TabItem>
                 <TabItem Header="Per-server verdicts">
@@ -169,9 +169,9 @@
                         <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="150"/>
                         <DataGridTextColumn Header="Item" Binding="{Binding Item}" Width="180"/>
                         <DataGridTextColumn Header="State" Binding="{Binding State}" Width="80"/>
-                        <DataGridTextColumn Header="Position" Binding="{Binding Position}" Width="170"/>
-                        <DataGridTextColumn Header="First seen" Binding="{Binding FirstSeen}" SortMemberPath="FirstSeenUtc" Width="140"/>
-                        <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeen}" SortMemberPath="LastSeenUtc" Width="140"/>
+                        <DataGridTextColumn Header="Position" Binding="{Binding Position}" Width="Auto" MinWidth="170"/>
+                        <DataGridTextColumn Header="First ever seen" Binding="{Binding FirstSeen}" SortMemberPath="FirstSeenUtc" Width="Auto" MinWidth="140"/>
+                        <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeen}" SortMemberPath="LastSeenUtc" Width="Auto" MinWidth="140"/>
                         <DataGridTextColumn Header="Condition / evidence" Binding="{Binding Condition}" Width="*" MinWidth="200">
                             <DataGridTextColumn.ElementStyle>
                                 <Style TargetType="TextBlock">

@@ -26,14 +26,10 @@
     <!-- .NET Analyzers for code quality -->
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
-    <!-- Suppress noisy/false-positive rules (inherited from Dashboard):
-         CA1849: IsDBNull sync - micro-optimization not needed for desktop app
-         CA2007: ConfigureAwait - not needed for WPF UI apps
-         CA1508: Dead code - false positives on nullable DateTime parameters
-         CA2201: Generic exception - acceptable for global error handlers
+    <!-- The shared suppressions live in Directory.Build.props (#6978). Only the two this project needs on top:
          NU1701: CredentialManagement package has no .NET 10 version
          CA1001: App/MainWindow live for process lifetime - disposal handled by exit -->
-    <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;NU1701;CA1001;CA1848;CA1852;CA1305;CA1860;CA1707;CA1507;CA1806;CA2254</NoWarn>
+    <NoWarn>$(NoWarn);NU1701;CA1001</NoWarn>
     <!-- CS4014 is an error: un-awaited async must be an explicit discard (_ = FooAsync())
          or awaited. Intentional fire-and-forget = discard. Guards against silently
          shipping fire-and-forget calls (as the E3b snooze handler did). -->

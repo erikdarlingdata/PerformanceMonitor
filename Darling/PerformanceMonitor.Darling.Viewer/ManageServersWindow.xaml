@@ -12,6 +12,7 @@
                 <MenuItem Header="_Edit" Click="EditMenuItem_Click"/>
                 <MenuItem Header="E_nable / Disable Collection" Click="ToggleEnabledMenuItem_Click"/>
                 <MenuItem Header="E_xcluded Databases" Click="ExcludedDatabases_Click"/>
+                <MenuItem Header="Databases for _XE Sessions" Click="XeSessionDatabases_Click"/>
                 <MenuItem Header="_Delete" Click="DeleteMenuItem_Click"
                           Foreground="{DynamicResource ErrorBrush}"/>
                 <Separator/>
@@ -58,8 +59,8 @@
                   MouseDoubleClick="ServersGrid_MouseDoubleClick"
                   ContextMenu="{StaticResource DataGridContextMenu}">
             <DataGrid.Columns>
-                <DataGridTextColumn Header="Display Name" Binding="{Binding DisplayNameWithIntent}" Width="150"/>
-                <DataGridTextColumn Header="Server" Binding="{Binding ServerNameDisplay}" Width="200"/>
+                <DataGridTextColumn Header="Display Name" Binding="{Binding DisplayNameWithIntent}" Width="*" MinWidth="110"/>
+                <DataGridTextColumn Header="Server" Binding="{Binding ServerNameDisplay}" Width="1.5*" MinWidth="150"/>
                 <DataGridTextColumn Header="Auth" Binding="{Binding AuthenticationDisplay}" Width="100"/>
                 <DataGridTextColumn Header="Status" Binding="{Binding StatusDisplay}" Width="80"/>
                 <DataGridTextColumn Header="Monthly Cost ($)" Binding="{Binding MonthlyCostUsd, StringFormat='{}{0:N0}'}" Width="120">
@@ -71,7 +72,7 @@
                 </DataGridTextColumn>
                 <!-- "Added" (creation time), not Lite's "Last Connected": the viewer never connects to a
                      monitored server. -->
-                <DataGridTextColumn Header="Added" Binding="{Binding CreatedDate, StringFormat=yyyy-MM-dd HH:mm}" Width="140"/>
+                <DataGridTextColumn Header="Added" Binding="{Binding CreatedDisplay}" Width="140" SortMemberPath="CreatedAtUtc"/>
                 <!-- "Last Collected" (not "Last Connected"): the Darling SERVICE connects + collects, not the
                      viewer. Reuses the sidebar dots' MAX(collection_time) freshness read; "Never" until first collect,
                      "None retained" once retention has dropped a dark server's whole history (#3967). -->
@@ -84,6 +85,8 @@
             <Button Content="_Add Server" Click="AddButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
             <Button Content="_Edit" Click="EditButton_Click" Margin="0,0,8,0"/>
             <Button Content="E_xcluded Databases" Click="ExcludedDatabases_Click" Margin="0,0,8,0"/>
+            <Button Content="Databases for XE Sessions" Click="XeSessionDatabases_Click" Margin="0,0,8,0"
+                    ToolTip="Azure SQL Database only: choose which databases get Extended Events sessions (deadlock, blocked process, client timeout, long query completions). Empty means every database."/>
             <Button Content="Credential _Profiles…" Click="CredentialProfiles_Click" Margin="0,0,8,0"
                     ToolTip="Manage named, reusable credentials that many servers can share."/>
             <Button Content="_Delete" Click="DeleteButton_Click" Margin="0,0,8,0"/>

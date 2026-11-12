@@ -656,6 +656,46 @@ public sealed class DarlingWebOidcTests
     public void IsRequestAllowed_Matrix(bool canEdit, string method, string path, bool expected)
         => Assert.Equal(expected, DarlingWebSeat.IsRequestAllowed(new DarlingWebSeat("who", canEdit), method, path));
 
+    /* #7109: a viewer-role sign-in with an owner key reaches exactly the two proposal presses, so a person mapped to it can use an approve
+       grant. The endpoint then presses only as that mapped person. Every near miss, every other method and a seat with no owner key stay
+       refused. The edit seat is unchanged. */
+    private const string PressId = "0f8fad5b-d9cb-469f-a165-70867728950e";
+
+    [Theory]
+    [InlineData(false, true, "POST", "/api/proposals/" + PressId + "/first-press", true)]
+    [InlineData(false, true, "POST", "/api/proposals/" + PressId + "/confirm", true)]
+    [InlineData(false, true, "POST", "/API/Proposals/" + PressId + "/Confirm", true)]   // routing ignores case, so the gate does too
+    [InlineData(false, false, "POST", "/api/proposals/" + PressId + "/first-press", false)] // no owner key: names nobody
+    [InlineData(false, false, "POST", "/api/proposals/" + PressId + "/confirm", false)]
+    [InlineData(false, true, "PUT", "/api/proposals/" + PressId + "/confirm", false)]
+    [InlineData(false, true, "PATCH", "/api/proposals/" + PressId + "/confirm", false)]
+    [InlineData(false, true, "DELETE", "/api/proposals/" + PressId + "/confirm", false)]
+    [InlineData(false, true, "DELETE", "/api/proposals/" + PressId, false)]
+    [InlineData(false, true, "POST", "/api/proposals/" + PressId + "/confirm/", false)]          // trailing slash
+    [InlineData(false, true, "POST", "/api/proposals/" + PressId + "/confirm/x", false)]         // trailing segment
+    [InlineData(false, true, "POST", "/api/proposals/" + PressId + "/first-press/confirm", false)]
+    [InlineData(false, true, "POST", "/api/proposals/" + PressId + "/approve", false)]           // another verb
+    [InlineData(false, true, "POST", "/api/proposals/" + PressId + "/confirmx", false)]
+    [InlineData(false, true, "POST", "/api/proposals/" + PressId, false)]                        // no verb
+    [InlineData(false, true, "POST", "/api/proposals/" + PressId + "/", false)]
+    [InlineData(false, true, "POST", "/api/proposals", false)]
+    [InlineData(false, true, "POST", "/api/proposals/not-a-guid/confirm", false)]                // not a well-formed id
+    [InlineData(false, true, "POST", "/api/proposals/0f8fad5bd9cb469fa16570867728950e/confirm", false)] // a GUID, but not the hyphenated form
+    [InlineData(false, true, "POST", "/api/proposals/" + PressId + "x/confirm", false)]
+    [InlineData(false, true, "POST", "/api/proposals//confirm", false)]
+    [InlineData(false, true, "POST", "/x/api/proposals/" + PressId + "/confirm", false)]         // a prefix
+    [InlineData(false, true, "POST", "/api/proposals/" + PressId + "/../people/1/confirm", false)]
+    [InlineData(false, true, "POST", "/api/people", false)]                                      // the key opens no other write
+    [InlineData(false, true, "POST", "/api/server-actions/7/kill_session", false)]
+    [InlineData(false, true, "PUT", "/api/agent-actions-enabled", false)]
+    [InlineData(false, true, "POST", "/api/compose/run", true)]                                  // the existing exception stands
+    [InlineData(false, true, "GET", "/api/proposals/" + PressId, true)]
+    [InlineData(true, false, "POST", "/api/proposals/" + PressId + "/confirm", true)]            // the edit seat is unchanged
+    [InlineData(true, true, "DELETE", "/api/proposals/" + PressId, true)]
+    public void IsRequestAllowed_ProposalPressException(bool canEdit, bool hasOwnerKey, string method, string path, bool expected)
+        => Assert.Equal(expected, DarlingWebSeat.IsRequestAllowed(
+            new DarlingWebSeat("who", canEdit, hasOwnerKey ? new string('k', DarlingWebSeat.OwnerKeyLength) : null), method, path));
+
     /* ---- THE TRANSACTION COOKIE ---- */
 
     private static readonly byte[] SessionKey = RandomNumberGenerator.GetBytes(32);

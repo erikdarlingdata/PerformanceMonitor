@@ -59,6 +59,9 @@ public partial class ViewerServerTab
         try
         {
             viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_server.ServerId, databaseName);
+            /* The Server Context card names the server as the store knows it, else as this tab does. */
+            if (viewer.ServerMetadata is { ServerName: null } metadata)
+                metadata.ServerName = _server.DisplayName;
             await viewer.LoadPlan(planXml, label, queryText);
         }
         catch (System.Xml.XmlException ex)
@@ -167,7 +170,7 @@ public partial class ViewerServerTab
                 if (string.IsNullOrEmpty(stats.QueryHash)) return;
                 label = $"Stored Plan - {stats.QueryHash}";
                 queryText = stats.QueryText;
-                fetch = ct => _dataService.GetQueryStatsPlanXmlAsync(_server.ServerId, stats.DatabaseName, stats.QueryHash, ct);
+                fetch = ct => _dataService.GetQueryStatsPlanXmlAsync(_server.ServerId, stats.DatabaseName, stats.QueryHash, cancellationToken: ct);
                 break;
             case ViewerQueryStoreRow qs:
                 label = $"Stored Plan - QS {qs.QueryId}";
@@ -178,7 +181,7 @@ public partial class ViewerServerTab
                 if (string.IsNullOrEmpty(proc.ObjectName)) return;
                 label = $"Stored Plan - {proc.FullName}";
                 queryText = null; /* the procedure grid carries no statement text; the plan XML holds its own */
-                fetch = ct => _dataService.GetProcedureStatsPlanXmlAsync(_server.ServerId, proc.DatabaseName, proc.SchemaName, proc.ObjectName, ct);
+                fetch = ct => _dataService.GetProcedureStatsPlanXmlAsync(_server.ServerId, proc.DatabaseName, proc.SchemaName, proc.ObjectName, cancellationToken: ct);
                 break;
             default:
                 /* Comparison items / anything else: no stored plan keyed on the row — deferred. */
@@ -195,13 +198,10 @@ public partial class ViewerServerTab
             if (string.IsNullOrEmpty(planXml))
             {
                 HidePlanLoading();
-                MessageBox.Show(
-                    "No execution plan was captured for this row. The plan may not have been collected yet, " +
+                InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
+                "No execution plan was captured for this row. The plan may not have been collected yet, " +
                     "or it aged out of the store's retention window. A Query Store plan outside its database-hour's top N " +
-                    "(Settings, Query Store fetch top N) is not fetched until a later run ranks it.",
-                    "No Plan Available",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Information);
+                    "(Settings, Query Store fetch top N) is not fetched until a later run ranks it.");
                 return;
             }
 
@@ -257,7 +257,7 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not read the plan for this query from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -295,7 +295,7 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not read this Query Store plan from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -332,7 +332,7 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not read the plan for this procedure from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {

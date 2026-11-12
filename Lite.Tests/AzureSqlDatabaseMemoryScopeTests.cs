@@ -310,7 +310,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
     {
         var tab = ReadRepoFile("Lite/Controls/FinOpsTab.xaml.cs");
 
-        Assert.Contains("MemoryRatioText.Text = $\"{bpPct:N0}%\";", tab, StringComparison.Ordinal);
+        Assert.Contains("MemoryRatioText.Text = $\"{bpPct:N1}%\";", tab, StringComparison.Ordinal);
         Assert.Contains("SetBar(MemoryRatioBar, MemRatioFilled, MemRatioEmpty, bpPct);", tab, StringComparison.Ordinal);
         Assert.Contains("PhysicalMemoryText.Text = $\"{data.PhysicalMemoryMb:N0} MB\";", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("ServerHardwareScope.NotApplicable", tab, StringComparison.Ordinal);
@@ -350,7 +350,6 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
         Assert.True(start > 0, "the mem_latest CTE is missing");
         var memLatest = read[start..read.IndexOf("),", start, StringComparison.Ordinal)];
 
-        Assert.Contains("FROM v_memory_stats", memLatest, StringComparison.Ordinal);
         Assert.Contains("total_physical_memory_mb", memLatest, StringComparison.Ordinal);
         Assert.DoesNotContain("server_properties", memLatest, StringComparison.Ordinal);
         /* The one CTE that reads server_properties takes the CPU count and the edition, and nothing about memory. */
@@ -492,7 +491,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
         Assert.True(start > 0, "GetLatestMemoryStatsAsync is missing");
         var memoryRead = service[start..service.IndexOf("GetMemoryTrendAsync(", start, StringComparison.Ordinal)];
 
-        Assert.Contains("FROM v_memory_stats", memoryRead, StringComparison.Ordinal);
+        Assert.Contains("v_memory_stats", memoryRead, StringComparison.Ordinal);
         Assert.DoesNotContain("server_properties", memoryRead, StringComparison.Ordinal);
         Assert.DoesNotContain("engine_edition", memoryRead, StringComparison.Ordinal);
         Assert.Null(typeof(MemoryStatsRow).GetProperty("EngineEdition"));

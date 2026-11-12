@@ -60,32 +60,38 @@ public partial class FinOpsTab
     }
 
     /// <summary>Refresh-aware load: reloads whichever drill level is currently showing (server tab timer / Refresh).</summary>
-    private async Task LoadFinOpsStorageGrowthActiveAsync()
+    private async Task LoadFinOpsStorageGrowthActiveAsync() => await LoadFinOpsStorageGrowthActiveAsync(null);
+
+    /// <summary>#8549: each drill level books its reads on the load's clock by name.</summary>
+    private async Task LoadFinOpsStorageGrowthActiveAsync(ViewerLoadTimer? timer)
     {
         switch (_finopsStorageLevel)
         {
             case FinOpsStorageDrillLevel.Objects when !string.IsNullOrEmpty(_finopsObjDrillDb):
-                await LoadFinOpsObjectGrowthAsync(_finopsObjDrillDb);
+                await LoadFinOpsObjectGrowthTimedAsync(_finopsObjDrillDb, timer);
                 break;
             case FinOpsStorageDrillLevel.Indexes when !string.IsNullOrEmpty(_finopsObjDrillTable):
-                await LoadFinOpsObjectIndexDetailAsync(_finopsObjDrillDb, _finopsObjDrillSchema, _finopsObjDrillTable);
+                await LoadFinOpsObjectIndexDetailTimedAsync(_finopsObjDrillDb, _finopsObjDrillSchema, _finopsObjDrillTable, timer);
                 break;
             default:
-                await LoadFinOpsStorageGrowthAsync();
+                await LoadFinOpsStorageGrowthAsync(timer);
                 break;
         }
     }
 
-    private async Task LoadFinOpsStorageGrowthAsync()
+    private async Task LoadFinOpsStorageGrowthAsync(ViewerLoadTimer? timer)
     {
-        var data = await _dataService.GetStorageGrowthAsync(_server.ServerId, SelectedDatabaseFilter);
-        _finopsStorageGrowthFilterMgr!.UpdateData(data);
-        FinOpsNoStorageGrowthMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsStorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
+        var data = await ViewerServerTab.Timed(timer, "storage growth read", _dataService.GetStorageGrowthAsync(_server.ServerId, SelectedDatabaseFilter));
+        ViewerServerTab.ClientStep(timer, "storage growth bind", () =>
+        {
+            _finopsStorageGrowthFilterMgr!.UpdateData(data);
+            FinOpsNoStorageGrowthMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            FinOpsStorageGrowthCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "database") : "";
 
-        /* The Note column holds words only for a database whose size leaves its log out, so a server with none gets no
-           empty column. */
-        FinOpsStorageGrowthNoteColumn.Visibility = data.Any(r => r.Note != null) ? Visibility.Visible : Visibility.Collapsed;
+            /* The Note column holds words only for a database whose size leaves its log out, so a server with none gets no
+               empty column. */
+            FinOpsStorageGrowthNoteColumn.Visibility = data.Any(r => r.Note != null) ? Visibility.Visible : Visibility.Collapsed;
+        });
     }
 
     /// <summary>Refresh button — reloads whichever drill level is showing (mirrors Lite's RefreshStorageGrowth_Click).</summary>
@@ -114,7 +120,7 @@ public partial class FinOpsTab
 
     private async void FinOpsStorageGrowthGrid_DoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (FinOpsStorageGrowthDataGrid.SelectedItem is StorageGrowthRow row)
+        if (DataGridRowHit.IsOnRow(e.OriginalSource) && FinOpsStorageGrowthDataGrid.SelectedItem is StorageGrowthRow row)
             await DrillFinOpsToObjectsAsync(row.DatabaseName);
     }
 
@@ -126,7 +132,7 @@ public partial class FinOpsTab
 
     private async void FinOpsObjectGrowthGrid_DoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (FinOpsObjectGrowthDetailGrid.SelectedItem is ObjectSizeGrowthRow row)
+        if (DataGridRowHit.IsOnRow(e.OriginalSource) && FinOpsObjectGrowthDetailGrid.SelectedItem is ObjectSizeGrowthRow row)
             await DrillFinOpsToIndexesAsync(row.DatabaseName, row.SchemaName, row.TableName);
     }
 
@@ -162,11 +168,23 @@ public partial class FinOpsTab
         await RunFinOpsLoad(() => LoadFinOpsObjectIndexDetailAsync(databaseName, schemaName, tableName));
     }
 
-    private async Task LoadFinOpsObjectGrowthAsync(string databaseName)
+    /// <summary>The unclocked load. Its name stays the one callers (and tests that reach it by name) know; the clocked form is
+    /// <see cref="LoadFinOpsObjectGrowthTimedAsync"/> (#8549).</summary>
+    private async Task LoadFinOpsObjectGrowthAsync(string databaseName) => await LoadFinOpsObjectGrowthTimedAsync(databaseName, null);
+
+    private async Task LoadFinOpsObjectGrowthTimedAsync(string databaseName, ViewerLoadTimer? timer)
     {
         var days = GetFinOpsObjectHeatmapDaysBack();
-        var (objects, samples) = await _dataService.GetObjectGrowthHeatmapDataAsync(_server.ServerId, databaseName, days);
+        /* The heatmap's columns are days of the selected time display on this server's clock, the days the FinOps day tables count. The
+           heatmap read needs the zone, so these two reads follow each other. */
+        var dayZone = await ViewerServerTab.Timed(timer, "display zone read", _dataService.DisplayDayZoneAsync(_server.ServerId));
+        var (objects, samples) = await ViewerServerTab.Timed(timer, "object growth read", _dataService.GetObjectGrowthHeatmapDataAsync(_server.ServerId, databaseName, dayZone, days));
 
+        ViewerServerTab.ClientStep(timer, "object growth grid and heatmap", () => BindFinOpsObjectGrowth(databaseName, objects, samples));
+    }
+
+    private void BindFinOpsObjectGrowth(string databaseName, List<ObjectSizeGrowthRow> objects, List<FinOpsObjectDaySample> samples)
+    {
         /* One canonical, deterministic top-of-chart-first ranking drives BOTH the companion grid and the
            heatmap rows, so they can never disagree (and stay identical across Dashboard/Lite). */
         var orderedKeys = FinOpsHeatmapBuilder.RankTopGrowers(
@@ -175,7 +193,7 @@ public partial class FinOpsTab
         var orderedObjects = orderedKeys.Select(k => byKey[k]).ToList();
 
         FinOpsObjectGrowthDetailGrid.ItemsSource = orderedObjects;
-        FinOpsStorageGrowthCountIndicator.Text = orderedObjects.Count > 0 ? $"{orderedObjects.Count} object(s)" : "";
+        FinOpsStorageGrowthCountIndicator.Text = orderedObjects.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(orderedObjects.Count, "object") : "";
         FinOpsObjectGrowthNoDataMessage.Visibility = orderedObjects.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
         /* Heatmap rows are bottom-to-top: the renderer flips vertically (row 0 = bottom), so reverse the
@@ -186,17 +204,25 @@ public partial class FinOpsTab
             FinOpsObjectGrowthHeatmapChart,
             _finopsObjHeatmapMatrix,
             "Reserved (MB)",
-            $"{databaseName} — Object Reserved Footprint",
+            $"{databaseName}: Object Reserved Footprint",
             _finopsObjHeatmapHandle);
         _finopsObjHeatmapPlottable = _finopsObjHeatmapHandle.Plottable;
+        /* The hover reads the matrix the chart drew, whose columns include the days with no sample. */
+        _finopsObjHeatmapMatrix = _finopsObjHeatmapHandle.Matrix ?? _finopsObjHeatmapMatrix;
     }
 
     private async Task LoadFinOpsObjectIndexDetailAsync(string databaseName, string schemaName, string tableName)
+        => await LoadFinOpsObjectIndexDetailTimedAsync(databaseName, schemaName, tableName, null);
+
+    private async Task LoadFinOpsObjectIndexDetailTimedAsync(string databaseName, string schemaName, string tableName, ViewerLoadTimer? timer)
     {
-        var data = await _dataService.GetObjectIndexDetailAsync(_server.ServerId, databaseName, schemaName, tableName);
-        FinOpsObjectIndexDetailGrid.ItemsSource = data;
-        FinOpsStorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} index(es)" : "";
-        FinOpsObjectIndexNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        var data = await ViewerServerTab.Timed(timer, "index detail read", _dataService.GetObjectIndexDetailAsync(_server.ServerId, databaseName, schemaName, tableName));
+        ViewerServerTab.ClientStep(timer, "index detail bind", () =>
+        {
+            FinOpsObjectIndexDetailGrid.ItemsSource = data;
+            FinOpsStorageGrowthCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "index", "indexes") : "";
+            FinOpsObjectIndexNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        });
     }
 
     /// <summary>Finds the row a FinOps context-menu item was opened on (menu placed on the DataGridRow via its RowStyle).</summary>
@@ -273,15 +299,24 @@ public partial class FinOpsTab
         }
 
         double mb = _finopsObjHeatmapMatrix.Intensities[row, col];
+        var day = _finopsObjHeatmapMatrix.Days[col];
         if (mb <= 0)
         {
-            _finopsObjHeatmapPopup.IsOpen = false;
-            return;
-        }
+            /* A blank cell on a day some object has a sample for says nothing. A day with no sample for any object is a
+               collection gap, and the popup says so. */
+            if (!FinOpsHeatmapBuilder.IsGapDay(_finopsObjHeatmapMatrix, col))
+            {
+                _finopsObjHeatmapPopup.IsOpen = false;
+                return;
+            }
 
-        var label = row < _finopsObjHeatmapMatrix.RowLabels.Length ? _finopsObjHeatmapMatrix.RowLabels[row] : "?";
-        var day = _finopsObjHeatmapMatrix.Days[col];
-        _finopsObjHeatmapPopupText.Text = $"{label}  |  {day:M/d}  |  {mb:N1} MB reserved";
+            _finopsObjHeatmapPopupText.Text = $"{day:M/d}  |  no sample collected";
+        }
+        else
+        {
+            var label = row < _finopsObjHeatmapMatrix.RowLabels.Length ? _finopsObjHeatmapMatrix.RowLabels[row] : "?";
+            _finopsObjHeatmapPopupText.Text = $"{label}  |  {day:M/d}  |  {mb:N1} MB reserved";
+        }
 
         _finopsObjHeatmapPopup.HorizontalOffset = pos.X + 15;
         _finopsObjHeatmapPopup.VerticalOffset = pos.Y + 15;

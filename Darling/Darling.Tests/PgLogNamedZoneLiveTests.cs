@@ -63,69 +63,70 @@ public sealed class PgLogNamedZoneLiveTests
 
         /* The true UTC instant, read from the server's own clock either side of the error, so the window is the
            server's and not this machine's. */
-        await using (var clock = new NpgsqlCommand(
-            "SELECT pg_catalog.clock_timestamp() AT TIME ZONE 'UTC'", connection))
+        await using var clock = new NpgsqlCommand("SELECT pg_catalog.clock_timestamp() AT TIME ZONE 'UTC'", connection);
+        var before = DateTime.MinValue;
+        var after = DateTime.MinValue;
+
+        var resolverCalls = 0;
+        var context = new CollectorContext
         {
-            var before = (DateTime)(await clock.ExecuteScalarAsync(ct))!;
-
-            await using (var fail = new NpgsqlCommand("SELECT 1 / 0 AS named_zone_6866", connection))
+            LogHashKey = TestLogHashKeys.Fixed,
+            ServerId = 1,
+            ServerName = "named-zone-6866",
+            CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+            Deltas = new CollectorDeltaCalculator(),
+            Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
+            PgLogUsesCsvlog = usesCsvlog,
+            PgLogZoneResolver = async (zone, pairs, token) =>
             {
-                await Assert.ThrowsAsync<PostgresException>(async () => await fail.ExecuteScalarAsync(ct));
-            }
+                Interlocked.Increment(ref resolverCalls);
+                /* The connection the service gives its own resolver: type loading off, search_path pinned. */
+                await using var own = PostgresTargetProvider.CreatePinnedConnection(PgLogNamedZoneTests.PinnedConnectionString(target!));
+                await own.OpenAsync(token);
+                return await PgLogNamedZone.ResolveAsync(own, zone, pairs, 30, token);
+            },
+        };
 
-            var after = (DateTime)(await clock.ExecuteScalarAsync(ct))!;
-
-            var resolverCalls = 0;
-            var context = new CollectorContext
+        /* #8205: the error, the wait and the read go through the rotation-aware helper, so a log rotation between the write and
+           the read (midnight, log_rotation_size) has the error raised again into the file the collector tails. The ERROR record
+           carries its statement, so the alias is the marker; the stderr route's newest file ends in .log, the csvlog route's in .csv. */
+        List<PgLogEvent> mine = new();
+        await PgLogLiveWait.ReadOwnRecordAcrossRotationAsync(connection, usesCsvlog ? "csv" : "log", "named_zone_6866",
+            write: async () =>
             {
-                LogHashKey = TestLogHashKeys.Fixed,
-                ServerId = 1,
-                ServerName = "named-zone-6866",
-                CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
-                Deltas = new CollectorDeltaCalculator(),
-                Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
-                PgLogUsesCsvlog = usesCsvlog,
-                PgLogZoneResolver = async (zone, pairs, token) =>
+                before = (DateTime)(await clock.ExecuteScalarAsync(ct))!;
+
+                await using (var fail = new NpgsqlCommand("SELECT 1 / 0 AS named_zone_6866", connection))
                 {
-                    Interlocked.Increment(ref resolverCalls);
-                    /* The connection the service gives its own resolver: type loading off, search_path pinned. */
-                    await using var own = PostgresTargetProvider.CreatePinnedConnection(PgLogNamedZoneTests.PinnedConnectionString(target!));
-                    await own.OpenAsync(token);
-                    return await PgLogNamedZone.ResolveAsync(own, zone, pairs, 30, token);
-                },
-            };
+                    await Assert.ThrowsAsync<PostgresException>(async () => await fail.ExecuteScalarAsync(ct));
+                }
 
-            /* The syslogger flushes asynchronously, so read until this run's own error is on disk. */
-            List<PgLogEvent> mine = new();
-            var deadline = DateTime.UtcNow.AddSeconds(30);
-            while (DateTime.UtcNow < deadline)
+                after = (DateTime)(await clock.ExecuteScalarAsync(ct))!;
+            },
+            read: async () =>
             {
                 var events = await ReadAsync(connection, context, ct);
                 mine = events.Where(e => e.Severity == "ERROR"
                                          && e.Message.Contains("division by zero", StringComparison.Ordinal)
                                          && e.OccurredAtUtc >= before.AddHours(-12)
                                          && e.OccurredAtUtc <= after.AddHours(12)).ToList();
-                if (mine.Any(e => Math.Abs((e.OccurredAtUtc - before).TotalSeconds) < 120))
-                {
-                    break;
-                }
 
-                await Task.Delay(300, ct);
-            }
+                /* No such error within half a day of this run's clock means the read saw none: the record is not in the file the
+                   read tailed. One stamped away from the true instant is one the assertions below report, not a miss. */
+                return mine.Count > 0;
+            }, ct);
 
-            Assert.True(resolverCalls > 0, "the read never asked the target to prove a stamp");
-            Assert.NotEmpty(mine);
+        Assert.True(resolverCalls > 0, "the read never asked the target to prove a stamp");
 
-            /* The local text is one to nine hours away from UTC, so landing inside this window cannot be a
-               stamp read as UTC or as the wrong offset. Earlier runs' errors stay in the log and are older. */
-            var ours = mine.Where(e => e.OccurredAtUtc >= before.AddSeconds(-2)).ToList();
-            Assert.NotEmpty(ours);
-            Assert.All(ours, e =>
-            {
-                Assert.Equal(DateTimeKind.Utc, e.OccurredAtUtc.Kind);
-                Assert.InRange(e.OccurredAtUtc, before.AddSeconds(-2), after.AddSeconds(2));
-            });
-        }
+        /* The local text is one to nine hours away from UTC, so landing inside this window cannot be a
+           stamp read as UTC or as the wrong offset. Earlier runs' errors stay in the log and are older. */
+        var ours = mine.Where(e => e.OccurredAtUtc >= before.AddSeconds(-2)).ToList();
+        Assert.NotEmpty(ours);
+        Assert.All(ours, e =>
+        {
+            Assert.Equal(DateTimeKind.Utc, e.OccurredAtUtc.Kind);
+            Assert.InRange(e.OccurredAtUtc, before.AddSeconds(-2), after.AddSeconds(2));
+        });
     }
 
     private static async Task<List<PgLogEvent>> ReadAsync(NpgsqlConnection connection, CollectorContext context, CancellationToken ct)

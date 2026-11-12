@@ -343,7 +343,7 @@ public sealed class PgFileSettingsCapabilityTests : IDisposable
     {
         Assert.Equal("PERMISSIONS", DarlingWorker.PostgresFaultOutcome(Pg("42501"), "pg_server_config").Status);
 
-        var worker = File.ReadAllText(Path.Combine(
+        var worker = RepoFile.ReadRepoFile(Path.Combine(
             RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
         var arm = worker.IndexOf("is { Status: not \"ERROR\" } outcome)", StringComparison.Ordinal);
         Assert.True(arm >= 0, "the PostgreSQL PERMISSIONS arm moved; re-point this pin");

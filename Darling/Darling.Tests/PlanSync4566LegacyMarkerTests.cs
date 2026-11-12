@@ -54,6 +54,7 @@ public sealed class PlanSync4566LegacyMarkerTests
             PhysicalOp = "Table Scan",
             LogicalOp = "Table Scan",
             HasActualStats = true,
+            ActualRows = 1_000_000,
             ActualElapsedMs = 50,
             OutputColumns = "[dbo].[t].[a],[dbo].[t].[b]"
         };
@@ -143,7 +144,7 @@ public sealed class PlanSync4566LegacyMarkerTests
 
         var header = PlanWarningDisplay.PlanWarningHeader(legacyWarning);
 
-        Assert.Equal("\u26A0 Local Variables [legacy] \u2014 up to 25.0% benefit", header);
+        Assert.Equal("\u26A0 Local Variables [legacy]: up to 25.0% benefit", header);
     }
 
     [Fact]

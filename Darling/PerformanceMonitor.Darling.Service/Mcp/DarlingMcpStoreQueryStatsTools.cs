@@ -353,13 +353,13 @@ LIMIT $2";
     internal static string? PreconditionReason(StatsState state)
     {
         const string Cadence = "The service builds the store's statement statistics at every start and again every hour.";
-        const string ByoSetup = "A store you run yourself needs pg_stat_statements in shared_preload_libraries with pg_stat_statements.track_utility = off (a restart loads it), then CREATE EXTENSION pg_stat_statements run by a superuser in this database; Darling/tools/provision-roles.sql carries the steps.";
+        const string ByoSetup = "A store you run yourself needs pg_stat_statements in shared_preload_libraries with pg_stat_statements.track_utility = off (a restart loads it), then CREATE EXTENSION pg_stat_statements run by a superuser in this database; " + DarlingManagedRoles.ProvisionRolesScriptPath + " carries the steps.";
 
         if (state.ExtensionVersion is null)
         {
             return state.ReaderExists
                 ? "pg_stat_statements is no longer installed in this database: it was dropped after the service built its reader. The service creates it again on its next pass when it connects as a superuser; otherwise run CREATE EXTENSION pg_stat_statements as a superuser in this database. " + Cadence
-                : "Statement statistics are not set up on this store: pg_stat_statements is not installed in this database. A managed store installs it itself once its conf preloads it (from its first service-owned start of a build carrying #3899). " + ByoSetup + " " + Cadence;
+                : "Statement statistics are not set up on this store: pg_stat_statements is not installed in this database. A managed store installs it itself once its conf preloads it (from its first service-owned start of a build that has this read). " + ByoSetup + " " + Cadence;
         }
 
         if (!StoreStatementStats.ExtensionVersionAtLeast(state.ExtensionVersion, StoreStatementStats.MinimumReaderVersion))
@@ -404,7 +404,7 @@ LIMIT $2";
 
         if (hiddenText > 0)
         {
-            parts.Add($"{hiddenText.ToString(CultureInfo.InvariantCulture)} statement(s) read as {InsufficientPrivilegeText}, with no query_id: the store owner, whose rights the reader runs with, is neither a superuser nor a member of pg_read_all_stats. Granting pg_read_all_stats to the owner role shows their text, and also lets that login read every session's query text and every database's statements on the cluster, and a bring-your-own store's web viewer and MCP tools run as that login unless they have logins of their own (#3914), so on a cluster shared with other applications leave it hidden.");
+            parts.Add($"{CountText.Plural(hiddenText, "statement")} {(hiddenText == 1 ? "reads" : "read")} as {InsufficientPrivilegeText}, with no query_id: the store owner, whose rights the reader runs with, is neither a superuser nor a member of pg_read_all_stats. Granting pg_read_all_stats to the owner role shows their text, and also lets that login read every session's query text and every database's statements on the cluster, and a bring-your-own store's web viewer and MCP tools run as that login unless they have logins of their own, so on a cluster shared with other applications leave it hidden.");
         }
 
         if (state.ExtensionVersion is { } version

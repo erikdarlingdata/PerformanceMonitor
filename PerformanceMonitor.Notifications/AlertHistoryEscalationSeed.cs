@@ -24,6 +24,13 @@ public static class AlertHistoryEscalationSeed
     /// </summary>
     public const string KeepUnlessEveryChannelFailedFilter = "\nAND   (alert_sent OR send_error IS NULL)";
 
+    /// <summary>
+    /// #7086: SQL that drops digest rows from the standing-fire read. A fire an evaluator held back from paging
+    /// (<see cref="AlertHold"/>) is written with the <c>digest</c> disposition and paged nobody, so after a restart it must
+    /// seed neither an escalation tier nor an open fire. <c>notification_type</c> is NOT NULL in both stores.
+    /// </summary>
+    public const string ExcludeDigestFilter = "\nAND   notification_type <> '" + AlertDelivery.ChannelDigest + "'";
+
     /// <summary>SQL that drops muted rows, for a family whose engine fire site does not record a muted fire's tier.</summary>
     public const string ExcludeMutedFilter = "\nAND   NOT muted";
 
@@ -33,6 +40,10 @@ public static class AlertHistoryEscalationSeed
     /// (<see cref="Resolve"/>) is decided by stored instants alone.
     /// </summary>
     public static DateTime TruncateToMicroseconds(DateTime value) => new(value.Ticks - (value.Ticks % 10), value.Kind);
+
+    /// <summary>A fire is open unless a resolution row is as new as it or newer (a tie closes it). The one tie rule, shared by
+    /// the tier seed above and <see cref="IAlertHistoryStore.GetOpenFireAsync"/> in both stores.</summary>
+    public static bool IsOpen(DateTime fireAtUtc, DateTime? resolvedAtUtc) => resolvedAtUtc is not { } resolved || resolved < fireAtUtc;
 
     /// <summary>
     /// The tier to seed: the tier of the newest fire row (<paramref name="fireAtUtc"/>, read from its
@@ -54,7 +65,7 @@ public static class AlertHistoryEscalationSeed
             return null;
         }
 
-        if (resolvedAtUtc is { } resolved && resolved >= fired)
+        if (!IsOpen(fired, resolvedAtUtc))
         {
             return null;
         }

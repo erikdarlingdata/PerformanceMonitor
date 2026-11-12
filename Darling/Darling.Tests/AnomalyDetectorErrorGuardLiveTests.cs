@@ -515,7 +515,7 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
 
     private static async Task DropBaselineFallbackViewsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
-        foreach (var (_, view) in TimescaleSupport.BaselineAggregates)
+        foreach (var (_, view) in TimescaleSupport.BaselineAggregates.Concat(TimescaleSupport.PlainBaselineViews))
         {
             using var drop = new NpgsqlCommand(TimescaleSupport.DropBaselineFallbackViewSql(view), connection);
             await drop.ExecuteNonQueryAsync(ct);

@@ -32,4 +32,15 @@ public static class TimeSeriesPlotExtensions
         var (gapXs, gapYs) = TimeSeriesGaps.BreakAtGaps(xs, ys);
         return add.Scatter(gapXs, gapYs);
     }
+
+    /// <summary>
+    /// <see cref="TimeSeries(PlottableAdder, double[], double[])"/> for a series that changes grain at
+    /// <paramref name="seamX"/> (an OADate; #7508), each side judged against its own spacing. Only the Query
+    /// Store Duration Trend passes one.
+    /// </summary>
+    public static Scatter TimeSeries(this PlottableAdder add, double[] xs, double[] ys, double? seamX)
+    {
+        var (gapXs, gapYs) = TimeSeriesGaps.BreakAtGaps(xs, ys, seamX);
+        return add.Scatter(gapXs, gapYs);
+    }
 }

@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using System.Windows.Controls;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -100,6 +101,67 @@ public partial class ServerTab : UserControl
         }
     }
 
+    /// <summary>When the server was first collected (#7386): the start the charts' X axis may not go before. Null when it is not
+    /// known, and then the axis stays as picked.</summary>
+    internal DateTime? ServerDataStartUtc { get; set; }
+
+    /// <summary>The oldest instant the store holds data from for this server (<see cref="LocalDataService.GetOldestRetainedAsync"/>):
+    /// its oldest <c>collection_log</c> row, archived or hot, which is what the time range picker's "Data starts" note names. Null
+    /// until the first read, or when the server has no row yet, and the note then falls back to the archive's static retention
+    /// edge.</summary>
+    internal DateTime? OldestRetainedUtc { get; set; }
+
+    /// <summary>Reads the server's data start for the charts (#7386) and the oldest instant the store holds data from for the
+    /// picker's note, once for the whole tab, with the refresh that is about to draw them. Both reads are kept per server for
+    /// <see cref="LocalDataService.ServerDataStartMaxAge"/>. The charts' read never opens the Parquet archive
+    /// (<see cref="LocalDataService.GetServerDataStartAsync"/>); the note's read opens it once per archive view generation
+    /// (<see cref="LocalDataService.GetOldestRetainedAsync"/>). A failed read leaves the axis as picked and the note at the
+    /// retention edge.</summary>
+    private async System.Threading.Tasks.Task RefreshServerDataStartAsync(int hoursBack, DateTime? fromDate)
+    {
+        try
+        {
+            var windowStartUtc = fromDate ?? DateTime.UtcNow.AddHours(-hoursBack);
+            ServerDataStartUtc = await Task.Run(() => _dataService.GetServerDataStartAsync(_serverId, windowStartUtc));
+            CorrelatedLanes.ServerDataStartUtc = ServerDataStartUtc;
+            OldestRetainedUtc = await Task.Run(() => _dataService.GetOldestRetainedAsync(_serverId));
+        }
+        catch (Exception ex)
+        {
+            ServerDataStartUtc = null;
+            CorrelatedLanes.ServerDataStartUtc = null;
+            OldestRetainedUtc = null;
+            AppLogger.Debug("ServerTab", $"[{_server.DisplayName}] server data start read failed, the charts keep the picked range: {ex.Message}");
+        }
+
+        ApplyDataStart();
+        RangePicker.Refresh();
+    }
+
+    /// <summary>The X axis start of a time chart over [start, end] (#7386), in the charts' OLE automation dates.</summary>
+    internal double ChartXStart(double startOa, double endOa) => ChartAxisStart.XStart(startOa, endOa, ServerDataStartUtc);
+
+    /// <summary><see cref="ChartXStart(double, double)"/> for a window held as instants.</summary>
+    internal double ChartXStart(DateTime startUtc, DateTime endUtc) => ChartXStart(startUtc.ToOADate(), endUtc.ToOADate());
+
+    /// <summary>The X axis start of a chart whose series are already on <paramref name="plot"/> (#7386): never later than the earliest
+    /// point it drew, whichever relation fed it (an hourly tier, a collector with its own retention), so no plotted point is hidden.</summary>
+    internal double ChartXStart(ScottPlot.Plot plot, double startOa, double endOa) => ChartAxisStart.XStart(startOa, endOa, ServerDataStartUtc, plot);
+
+    /// <summary><see cref="ChartXStart(ScottPlot.Plot, double, double)"/> for a window held as instants.</summary>
+    internal double ChartXStart(ScottPlot.Plot plot, DateTime startUtc, DateTime endUtc) => ChartXStart(plot, startUtc.ToOADate(), endUtc.ToOADate());
+
+    /// <summary>For a chart a shared renderer drew with the axis start it was given up front: moves the left edge back when the
+    /// renderer plotted a point older than that start (#7386), and refreshes the chart.</summary>
+    internal void KeepPlottedInView(ScottPlot.WPF.WpfPlot chart, DateTime startUtc, DateTime endUtc)
+    {
+        MarkAllZero(chart); // #8144: the shared renderers do not go through ShowChartLegend here
+        if (ChartAxisStart.WidenToPlotted(chart.Plot, startUtc.ToOADate(), endUtc.ToOADate(), ServerDataStartUtc))
+        {
+            chart.Refresh();
+        }
+    }
+
     /// <summary>Shows the shared note above a master target's Blocking or Deadlocks list when it has separately monitored
     /// sibling databases; the lists keep master's server-wide rows while the counts skip them. Hidden otherwise.</summary>
     private void ApplySeparatelyMonitoredListNote(System.Windows.Controls.TextBlock noteText)
@@ -162,14 +224,34 @@ public partial class ServerTab : UserControl
             /* The window and the selected tab are read now, at the pass's own start, so a replay loads whatever is
                selected when it runs, not what was selected when the request was made. */
             var (tabHoursBack, tabFromDate, tabToDate) = GetCurrentWindowUtc();
-            await RefreshVisibleTabAsync(tabHoursBack, tabFromDate, tabToDate, subTabOnly: true, ct);
+            var failedReads = await RefreshVisibleTabAsync(tabHoursBack, tabFromDate, tabToDate, subTabOnly: true, ct);
+            /* #8647: when this read is the first half of a split Full replay, the chrome half that follows words the status line,
+               so it needs to know which Overview lanes this read could not read. */
+            _tabHalfFailedReads = ct.IsCancellationRequested ? null : failedReads;
+            /* A tab switch writes no "Last refresh" stamp, but an Overview lane that did not read is still named on the status
+               line. A superseded pass leaves the line to its replay. */
+            if (failedReads is not null && !ct.IsCancellationRequested)
+                ConnectionStatusText.Text = $"Error: {failedReads}";
             return;
         }
 
+        if (scope == RefreshScope.Surround)
+        {
+            /* #8647: the chrome half of a Full replay whose tab read already ran: clock, range picker, badges, status line. */
+            var tabHalfFailedReads = _tabHalfFailedReads;
+            _tabHalfFailedReads = null;
+            await RefreshEverythingAsync(ct, readVisibleTab: false, tabHalfFailedReads);
+            return;
+        }
+
+        _tabHalfFailedReads = null;
         await RefreshEverythingAsync(ct);
     }
 
-    private async Task RefreshEverythingAsync(CancellationToken ct)
+    /// <summary>The Overview lanes the last tab-only read could not read, held for the chrome half of a split replay (#8647).</summary>
+    private string? _tabHalfFailedReads;
+
+    private async Task RefreshEverythingAsync(CancellationToken ct, bool readVisibleTab = true, string? tabHalfFailedReads = null)
     {
         /* _isRefreshing now only means "this pass is repainting": the grids' selection handlers read it so a refresh
            does not clear a slicer overlay. It no longer
@@ -192,40 +274,13 @@ public partial class ServerTab : UserControl
 
             using var _profiler = Helpers.MethodProfiler.StartTiming($"ServerTab-{_server?.DisplayName}");
 
-            /* When this server tab isn't the selected one, its charts/grids aren't on screen —
-               skip the heavy sub-tab data refresh and just keep the alert badge current. Mark
-               dirty so the sub-tab is refreshed when the tab is selected again (IsVisibleChanged). */
-            if (IsVisible)
-            {
-                await RefreshVisibleTabAsync(hoursBack, fromDate, toDate, subTabOnly: true, ct);
-            }
-            else
-            {
-                _refreshPendingWhileHidden = true;
-            }
-
-            /* A newer request superseded this pass (a tab switch, a range change): it carries this pass's scope, so the
-               badges and the status line below are done by its replay, and writing them now would only be stale. */
-            if (ct.IsCancellationRequested) return;
-
-            /* Always keep the alert badge current even when the Blocking tab is not visible.
-               RefreshAlertCountsAsync reads this tab's own held UTC window (GetCurrentWindowUtc). */
-            if (MainTabControl.SelectedIndex != BlockingTabIndex)
-                await RefreshAlertCountsAsync();
-
-            /* #1591: same reasoning as the alert badge above — a permission-denied collector is only visible on the Collection
-               Health tab, which is precisely why it went unnoticed. Badge it from every tab. */
-            await RefreshPermissionDeniedBadgeAsync();
-            if (ct.IsCancellationRequested) return;
-
-            /* #4766: the time is the refresh instant read in the tab's display zone, and the label beside it names that
-               zone at that same instant on the TAB's own clock, so the two agree in all three display modes and on
-               either side of a daylight-saving change (DateTime.Now is this machine's zone, whatever the label, and
-               the active clock follows whichever tab is selected). */
-            var refreshedUtc = DateTime.UtcNow;
-            var tz = ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode, _serverClock, refreshedUtc);
-            var refreshedAt = PerformanceMonitor.Ui.DisplayZone.ToDisplay(refreshedUtc, GetPickerZone());
-            ConnectionStatusText.Text = $"Last refresh: {refreshedAt:HH:mm:ss} ({tz})";
+            var status = await RefreshStagesAsync(
+                () => readVisibleTab ? RefreshVisibleTabIfShownAsync(hoursBack, fromDate, toDate, ct) : Task.FromResult(tabHalfFailedReads),
+                RefreshBadgesAsync,
+                LastRefreshText,
+                ct);
+            if (status is not null)
+                ConnectionStatusText.Text = _awaitingFirstCollection && !status.StartsWith("Error", StringComparison.Ordinal) ? ConnectingStatusText : status;
         }
         catch (Exception ex)
         {
@@ -236,6 +291,67 @@ public partial class ServerTab : UserControl
         {
             _isRefreshing = false;
         }
+    }
+
+    /// <summary>
+    /// The stages of a full refresh pass, in order: the visible tab's reads, then the alert and permission badges, then the
+    /// status line. The badges run whether or not an Overview lane read failed, so a failed lane costs its own chart and the
+    /// "Last refresh" stamp, never the badges. The status line is the failed reads as an error, or otherwise the stamp, which
+    /// <paramref name="lastRefreshText"/> reads after the badges so it is the pass's end. Null when a newer request superseded
+    /// this pass (a tab switch, a range change): it carries this pass's scope, so the badges and the status line are done by
+    /// its replay, and writing them now would only be stale. internal (not private) so the ordering is pinned without a WPF
+    /// control or a store.
+    /// </summary>
+    internal static async Task<string?> RefreshStagesAsync(
+        Func<Task<string?>> refreshVisibleTab, Func<Task> refreshBadges, Func<string> lastRefreshText, CancellationToken ct)
+    {
+        var failedReads = await refreshVisibleTab();
+        if (ct.IsCancellationRequested) return null;
+
+        await refreshBadges();
+        if (ct.IsCancellationRequested) return null;
+
+        return failedReads is null ? lastRefreshText() : $"Error: {failedReads}";
+    }
+
+    /// <summary>
+    /// When this server tab isn't the selected one, its charts/grids aren't on screen: skip the heavy sub-tab data refresh and
+    /// mark it dirty so the sub-tab is refreshed when the tab is selected again (IsVisibleChanged). Returns the Overview lane
+    /// reads that failed, named for the status line, and otherwise null.
+    /// </summary>
+    private async Task<string?> RefreshVisibleTabIfShownAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, CancellationToken ct)
+    {
+        if (IsVisible)
+            return await RefreshVisibleTabAsync(hoursBack, fromDate, toDate, subTabOnly: true, ct);
+
+        _refreshPendingWhileHidden = true;
+        return null;
+    }
+
+    /// <summary>The two badges every full pass keeps current, whichever tab is visible.</summary>
+    private async Task RefreshBadgesAsync()
+    {
+        /* Always keep the alert badge current even when the Blocking tab is not visible.
+           RefreshAlertCountsAsync reads this tab's own held UTC window (GetCurrentWindowUtc). */
+        if (MainTabControl.SelectedIndex != BlockingTabIndex)
+            await RefreshAlertCountsAsync();
+
+        /* #1591: same reasoning as the alert badge above — a permission-denied collector is only visible on the Collection
+           Health tab, which is precisely why it went unnoticed. Badge it from every tab. */
+        await RefreshPermissionDeniedBadgeAsync();
+    }
+
+    /// <summary>
+    /// #4766: the time is the refresh instant read in the tab's display zone, and the label beside it names that zone at that
+    /// same instant on the TAB's own clock, so the two agree in all three display modes and on either side of a daylight-saving
+    /// change (DateTime.Now is this machine's zone, whatever the label, and the active clock follows whichever tab is selected).
+    /// </summary>
+    private string LastRefreshText()
+    {
+        var refreshedUtc = DateTime.UtcNow;
+        var tz = ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode, _serverClock, refreshedUtc);
+        var refreshedAt = PerformanceMonitor.Ui.DisplayZone.ToDisplay(refreshedUtc, GetPickerZone());
+        return $"Last refresh: {refreshedAt:HH:mm:ss} ({tz})";
     }
 
     /// <summary>
@@ -261,40 +377,54 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// Fills in the engine edition when the connection check could not read it (<see cref="ResolveEngineEditionAsync"/>).
-    /// Awaited before every tab load, so the Azure SQL Database texts never depend on that one check, and a no-op once
-    /// the edition is known.
+    /// Fills in the engine edition when the connection check could not read it (<see cref="ResolveEngineEditionAsync"/>), then the
+    /// server's major version, and words the plan-correction grids once both are known. Awaited before every tab load, so the Azure SQL
+    /// Database texts never depend on that one check, and a no-op once both facts are known.
     /// </summary>
     private async System.Threading.Tasks.Task RefreshEngineEditionAsync()
     {
-        if (_engineEdition != CollectorEngineCapability.UnknownEngineEdition)
+        var knownEdition = _engineEdition;
+        var knownVersion = _sqlMajorVersion;
+
+        if (_engineEdition == CollectorEngineCapability.UnknownEngineEdition)
         {
-            return;
+            _engineEdition = await ResolveEngineEditionAsync(_engineEdition, () => Task.Run(() => _dataService.GetSqlEngineEditionAsync(_serverId)));
+
+            /* The constructor decided the msdb warning from the connection check's edition, which was unknown. */
+            RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _awsRdsKind);
         }
 
-        _engineEdition = await ResolveEngineEditionAsync(_engineEdition, () => Task.Run(() => _dataService.GetSqlEngineEditionAsync(_serverId)));
+        /* The version is the other engine fact the plan-correction grids word themselves by, read from the same stored row. The grids
+           are worded after both reads: an Azure SQL Database or Managed Instance stores product version 12.0.x, so a tab opened while
+           its connection check failed would otherwise take the version alone for SQL Server 2014, and nothing re-words the grids later. */
+        await RefreshSqlMajorVersionAsync();
 
-        /* The constructor decided the msdb warning from the connection check's edition, which was unknown. */
-        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _awsRdsKind);
+        if (_engineEdition != knownEdition || _sqlMajorVersion != knownVersion)
+        {
+            ApplyPlanCorrectionEmptyTexts(PlanCorrectionTarget());
+        }
     }
 
-    private async System.Threading.Tasks.Task RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false, CancellationToken ct = default)
+    /// <summary>Reads the tab now showing. Returns the Overview lane reads that failed, named for the status line, and otherwise null.</summary>
+    private async System.Threading.Tasks.Task<string?> RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false, CancellationToken ct = default)
     {
         await RefreshEngineEditionAsync();
+        await RefreshServerDataStartAsync(hoursBack, fromDate);
 
         /* #5371: the token is the pass's "a newer request superseded me" signal. The tab loaders below take none, so the
            stage boundaries are where a superseded pass stops: it does not start a read for a tab nobody is looking at. */
-        if (ct.IsCancellationRequested) return;
+        if (ct.IsCancellationRequested) return null;
 
         if (TabReadsCollectorRuns(MainTabControl.SelectedIndex))
         {
             await RefreshCollectorRunsAsync();
-            if (ct.IsCancellationRequested) return;
+            if (ct.IsCancellationRequested) return null;
         }
 
+        string? failedReads = null;
         switch (MainTabControl.SelectedIndex)
         {
-            case 0: await RefreshOverviewAsync(hoursBack, fromDate, toDate); break;
+            case 0: failedReads = await RefreshOverviewAsync(hoursBack, fromDate, toDate); break;
             case 1: await RefreshWaitStatsAsync(hoursBack, fromDate, toDate); break;
             case QueriesTabIndex: await RefreshQueriesAsync(hoursBack, fromDate, toDate, subTabOnly); break;
             case 3: break; // Plan Viewer — no queries
@@ -308,14 +438,16 @@ public partial class ServerTab : UserControl
             case 11: await RefreshConfigurationAsync(hoursBack, fromDate, toDate); break;
             case 12: await RefreshDailySummaryAsync(hoursBack, fromDate, toDate); break;
             case 13: await RefreshLatchSpinlockAsync(hoursBack, fromDate, toDate); break;
-            case 14: await RefreshCpuSchedulerAsync(hoursBack, fromDate, toDate); break;
-            case 15: await RefreshPlanCacheAsync(hoursBack, fromDate, toDate); break;
-            case 16: await RefreshSessionStatsAsync(hoursBack, fromDate, toDate); break;
-            case 17: await RefreshCollectionHealthAsync(hoursBack, fromDate, toDate, ct); break;
-            case 18: await RefreshSystemEventsAsync(hoursBack, fromDate, toDate); break;
-            case 19: await RefreshConfigChangesAsync(hoursBack, fromDate, toDate); break;
-            case 20: await RefreshLongQueriesAsync(hoursBack, fromDate, toDate); break;
+            case 14: await RefreshSessionStatsAsync(hoursBack, fromDate, toDate); break;
+            case 15: await RefreshCollectionHealthAsync(hoursBack, fromDate, toDate, ct); break;
+            case 16: await RefreshSystemEventsAsync(hoursBack, fromDate, toDate); break;
+            case 17: await RefreshConfigChangesAsync(hoursBack, fromDate, toDate); break;
+            case 18: await RefreshLongQueriesAsync(hoursBack, fromDate, toDate); break;
         }
+
+        /* #8647: a read that ended without being superseded has had its say; whatever still says "Loading..." never got an answer. */
+        if (!ct.IsCancellationRequested) ResolveFirstPaintLoading();
+        return failedReads;
     }
 
     /// <summary>
@@ -343,7 +475,7 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// #1591: badges the Collection Health tab header with the number of collectors that were permission-denied.
+    /// #1591: badges the Collection Health tab header with the number of collectors refused on their latest attempt after their last success (#7241).
     /// Runs on every refresh, like the alert badge, so an empty tab caused by a missing grant is discoverable
     /// without knowing to go looking for it. Never throws — a failed badge must not break the refresh.
     /// </summary>
@@ -362,7 +494,12 @@ public partial class ServerTab : UserControl
 
         try
         {
-            var denied = await Task.Run(() => _dataService.GetPermissionDeniedCollectorCountAsync(_serverId));
+            /* #7241: a collector this server's engine does not run is never counted, the rule the grid and Darling's badge follow. */
+            var engineEdition = _engineEdition;
+            var awsRdsKind = _awsRdsKind;
+            var displayName = _server.DisplayName;
+            var denied = await Task.Run(() => _dataService.GetPermissionDeniedCollectorCountAsync(_serverId,
+                name => CollectorEngineCapability.NotCollectedMessage(displayName, engineEdition, engineKind: null, name, awsRdsKind) is not null));
             CollectionHealthTab.Header = denied > 0
                 ? $"Collection Health ({denied} no permission)"
                 : "Collection Health";
@@ -414,7 +551,8 @@ public partial class ServerTab : UserControl
                         UpdateExecutionCountTrendChart(ect.Result, hoursBack, fromDate, toDate, disc.Result);
                         break;
                     case ActiveQueriesSubTabIndex: // Active Queries
-                        var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
+                        var includeMonitor = ActiveQueriesIncludeMonitor;
+                        var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter, includeMonitor: includeMonitor));
                         _querySnapshotsFilterMgr!.UpdateData(snapshots);
                         LiveSnapshotIndicator.Text = "";
                         _ = LoadActiveQueriesSlicerAsync();
@@ -426,15 +564,17 @@ public partial class ServerTab : UserControl
                         }
                         break;
                     case TopQueriesByDurationSubTabIndex: // Top Queries by Duration
-                        var queryStats = await Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, ServerClock, SelectedDatabaseFilter, tags: tags)));
+                        /* One pair of instants for the grid read, the strip load, the comparison and the banner. */
+                        var (topQueriesStart, topQueriesEnd) = QueriesWindowUtc(hoursBack, fromDate, toDate, DateTime.UtcNow);
+                        var queryStats = await ReadTopQueriesAsync(0, topQueriesStart, topQueriesEnd);
                         _queryStatsFilterMgr!.UpdateData(queryStats);
+                        UpdateQueryStatsEmptyMessage(queryStats.Count);
                         SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
-                        _ = LoadQueryStatsSlicerAsync();
+                        _ = LoadQueryStatsSlicerAsync(topQueriesStart, topQueriesEnd);
                         {
                             /* #4284: the comparison and the banner both read UTC collection_time, so they
-                               share the SAME UTC window GetTopQueriesByCpuAsync just read
-                               (LocalDataService.GetQueriesTabWindowUtc) -- computed once and handed to both. */
-                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                               share the SAME UTC window GetTopQueriesByCpuAsync just read -- computed once and handed to both. */
+                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(0, topQueriesStart, topQueriesEnd);
                             await RefreshQueryStatsComparisonAsync(windowStart, windowEnd);
                             await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, windowStart, windowEnd);
                         }
@@ -487,8 +627,11 @@ public partial class ServerTab : UserControl
             }
 
             /* Full refresh: load all sub-tabs */
-            var snapshotsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Snapshots", () => Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter)));
-            var queryStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStats", () => Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, ServerClock, SelectedDatabaseFilter, tags: tags))));
+            var includeMonitorSnapshots = ActiveQueriesIncludeMonitor;
+            var snapshotsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Snapshots", () => Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter, includeMonitor: includeMonitorSnapshots)));
+            /* One pair of instants for the Top Queries grid read, its strip load, its comparison and its banner. */
+            var (queryStatsStart, queryStatsEnd) = QueriesWindowUtc(hoursBack, fromDate, toDate, DateTime.UtcNow);
+            var queryStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStats", () => ReadTopQueriesAsync(0, queryStatsStart, queryStatsEnd));
             var procStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcStats", () => ReadTopProceduresAsync(hoursBack, fromDate, toDate));
             var queryStoreTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStore", () => Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate, SelectedDatabaseFilter, tags: tags))));
             var planCorrectionTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.PlanCorrections", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetPlanCorrectionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
@@ -521,12 +664,13 @@ public partial class ServerTab : UserControl
             }
 
             _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
+            UpdateQueryStatsEmptyMessage(queryStatsTask.Result.Count);
             SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
-            _ = LoadQueryStatsSlicerAsync();
+            _ = LoadQueryStatsSlicerAsync(queryStatsStart, queryStatsEnd);
             {
                 /* #4284: UTC comparison and banner window, computed once -- see the twin comment on the
                    sub-tab-switch case above. */
-                var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(0, queryStatsStart, queryStatsEnd);
                 await RefreshQueryStatsComparisonAsync(windowStart, windowEnd);
                 await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, windowStart, windowEnd);
             }
@@ -614,10 +758,6 @@ public partial class ServerTab : UserControl
             () => Task.Run(() => _dataService.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc, includeAlsoCovered: includeAlsoCovered, cancellationToken: ct)),
             $"[{_server.DisplayName}] {relation}", startUtc, endUtc, ct);
         ApplyWindowFloorToBanner(banner, EarlierOfFloorAndRowShown(floor, earliestRowShownUtc), startUtc, GetPickerZone());
-
-        /* #5562 R7: the picker's 'Data starts ...' note takes its start from the probe this site already awaited, for the page
-           on screen (every relation, not only the Queries grid's), else the archive's static retention edge. No new query. */
-        FeedDataStart(LiteTimeRange.CollectorOfRelation(relation), floor);
     }
 
     /// <summary>
@@ -797,10 +937,12 @@ public partial class ServerTab : UserControl
             : string.Empty;
     }
 
-    /// <summary>Tab 0 — Overview (Correlated Timeline Lanes)</summary>
-    private async System.Threading.Tasks.Task RefreshOverviewAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    /// <summary>Tab 0 — Overview (Correlated Timeline Lanes). Returns the lane reads that failed, named for the status line, and
+    /// otherwise null: a lane that did not read is drawn as failed, and the pass puts the failed reads on the status line in place
+    /// of "Last refresh" once the badges have run, so the failure costs the badges nothing.</summary>
+    private async System.Threading.Tasks.Task<string?> RefreshOverviewAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
-        try
+        return await ReadOverviewAsync(() =>
         {
             /* #4296, #4766: the lanes plot the UTC instant, and the comparison is "the same wall-clock hours N days
                earlier" on the clock of the server THIS tab monitors -- read once, so the range and the refresh use
@@ -813,11 +955,32 @@ public partial class ServerTab : UserControl
                 ? null
                 : CorrelatedTimelineLanesControl.GetOverviewComparisonRange(
                     CompareToCombo.SelectedIndex, hoursBack, fromDate, toDate, DateTime.UtcNow, clock);
-            await CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate, clock, comparison);
+            return CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate, clock, comparison);
+        }, ex => AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshOverviewAsync failed: {ex}"));
+    }
+
+    /// <summary>
+    /// #7837: runs the Overview's refresh and names a failure for the status line. The lanes control handles each lane read's
+    /// own failure and returns the lanes that did not read; an exception that leaves it anyway (the setup before the reads, the
+    /// axis and plot code after them) can leave the lanes part drawn, and returning null for it made the pass call the tab
+    /// refreshed and write "Last refresh". It returns the failure instead, so the status line shows an error. A cancellation is
+    /// not a failure: it is logged and returns null, as before. internal (not private) so it is tested without a WPF control.
+    /// </summary>
+    internal static async System.Threading.Tasks.Task<string?> ReadOverviewAsync(Func<System.Threading.Tasks.Task<string?>> refreshLanes, Action<Exception> log)
+    {
+        try
+        {
+            return await refreshLanes();
+        }
+        catch (OperationCanceledException ex)
+        {
+            log(ex);
+            return null;
         }
         catch (Exception ex)
         {
-            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshOverviewAsync failed: {ex.Message}");
+            log(ex);
+            return $"Overview lanes did not refresh: {ex.Message}";
         }
     }
 
@@ -829,6 +992,8 @@ public partial class ServerTab : UserControl
             var cpuTask = Task.Run(() => _dataService.GetCpuUtilizationAsync(_serverId, hoursBack, fromDate, toDate, frame: CpuTimeFrame.Utc));
             await cpuTask;
             UpdateCpuChart(cpuTask.Result, hoursBack, fromDate, toDate);
+            /* #8169: CPU Scheduler is a sub-tab of CPU now; both sub-tabs load when CPU is shown, as in the Viewer. */
+            await RefreshCpuSchedulerAsync(hoursBack, fromDate, toDate);
         }
         catch (Exception ex)
         {
@@ -868,6 +1033,9 @@ public partial class ServerTab : UserControl
                         /* #4966: where the stored events start, over the SAME UTC window the chart read. */
                         await RefreshMemoryPressureEventsBannerAsync(hoursBack, fromDate, toDate);
                         break;
+                    case 4: // Plan Cache (#8169: under Memory, as in the Viewer)
+                        await RefreshPlanCacheAsync(hoursBack, fromDate, toDate);
+                        break;
                 }
                 return;
             }
@@ -890,6 +1058,7 @@ public partial class ServerTab : UserControl
             await RefreshMemoryPressureEventsBannerAsync(hoursBack, fromDate, toDate);
             PopulateMemoryClerkPicker(memoryClerkTypesTask.Result);
             await UpdateMemoryClerksChartFromPickerAsync();
+            await RefreshPlanCacheAsync(hoursBack, fromDate, toDate);
         }
         catch (Exception ex)
         {
@@ -1118,7 +1287,7 @@ public partial class ServerTab : UserControl
             if (data.Count == 0)
                 BlockingSlicer.ShowEmpty("No blocked process reports in the selected time window.");
             else
-                BlockingSlicer.LoadData(data, "Blocking Events", slicerStart, slicerEnd);
+                BlockingSlicer.LoadData(data, "Blocking Events", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
         }
         catch (Exception ex)
         {
@@ -1142,7 +1311,7 @@ public partial class ServerTab : UserControl
             if (data.Count == 0)
                 DeadlockSlicer.ShowEmpty("No deadlocks in the selected time window.");
             else
-                DeadlockSlicer.LoadData(data, "Deadlocks", slicerStart, slicerEnd);
+                DeadlockSlicer.LoadData(data, "Deadlocks", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
         }
         catch (Exception ex)
         {
@@ -1198,14 +1367,23 @@ public partial class ServerTab : UserControl
             if (read.Jobs.Count == 0 && !bannerShows && read.LastGoodCollection is DateTime lastGood
                 && RunningJobsNoDataMessage.Tag is string ownText && RunningJobsNoDataMessage.Text == ownText)
             {
-                RunningJobsNoDataMessage.Text = RunningJobsCurrency.NotCurrentNote(lastGood);
-                RunningJobsNoDataMessage.Visibility = System.Windows.Visibility.Visible;
+                ShowRunningJobsNotCurrent(lastGood);
             }
         }
         catch (Exception ex)
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshRunningJobsAsync failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The Running Jobs empty text when the collector has not collected within its freshness bound: the last good collection, worded
+    /// the way the tab words its other times (#8307: the Collection Health format on the tab's server clock), in place of the jobs.
+    /// </summary>
+    internal void ShowRunningJobsNotCurrent(DateTime lastGoodCollectionUtc)
+    {
+        RunningJobsNoDataMessage.Text = RunningJobsCurrency.NotCurrentNote(lastGoodCollectionUtc, utc => CollectionHealthTime.Format(utc, _serverClock));
+        RunningJobsNoDataMessage.Visibility = System.Windows.Visibility.Visible;
     }
 
     /// <summary>Tab 11 — Configuration</summary>
@@ -1226,6 +1404,15 @@ public partial class ServerTab : UserControl
             ShowEngineGap(ServerConfigNoDataMessage, "server_config", serverConfigTask.Result.Count);
             _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
             _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
+            /* #8576: each Query Store row says how old it is once it is older than its collector's cadence. */
+            var healthInterval = _queryStoreHealthSchedule()?.FrequencyMinutes is int healthMinutes and > 0
+                ? healthMinutes
+                : PerformanceMonitor.Collectors.CollectorScheduleDefaults.All["query_store_health"].FrequencyMinutes;
+            foreach (var healthRow in queryStoreHealthTask.Result)
+            {
+                healthRow.CollectorIntervalMinutes = healthInterval;
+            }
+
             _queryStoreHealthFilterMgr!.UpdateData(queryStoreHealthTask.Result);
             _automaticTuningFilterMgr!.UpdateData(automaticTuningTask.Result);
             _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
@@ -1282,6 +1469,13 @@ public partial class ServerTab : UserControl
             foreach (var row in collectionLogTask.Result) row.Clock = tabClock;
 
             SkippedCyclesSummary.Text = (await skippedCyclesTask)?.SummaryLine(tabClock) ?? "Skipped cycles in 24 h: could not be read";
+            /* #8101: one connection failure that reached several collectors in one cycle is worded once above the grid, in the
+               rows' own zone, rather than left as one ERROR on each of their rows with nothing to join them. */
+            var connectionFailureLine = CollectionConnectionFailures.SummaryLine(
+                collectionHealthTask.Result.Select(row => new CollectorErrorSample(row.CollectorName, row.LastErrorTime, row.LastError, row.ErrorCount)),
+                utc => CollectionHealthTime.Format(utc, tabClock));
+            ConnectionFailureSummary.Text = connectionFailureLine ?? string.Empty;
+            ConnectionFailureSummary.Visibility = connectionFailureLine is null ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
             _collectionHealthFilterMgr!.UpdateData(collectionHealthTask.Result);
             _collectionLogFilterMgr!.UpdateData(collectionLogTask.Result);
             UpdateCollectorDurationChart(collectorDurationTask.Result, hoursBack, fromDate, toDate);
@@ -1295,7 +1489,7 @@ public partial class ServerTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshCollectionHealthAsync failed: {ex.Message}");
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshCollectionHealthAsync failed: {ex}");
         }
     }
 

@@ -46,7 +46,7 @@ namespace PerformanceMonitor.Darling.Service;
 public sealed class ReadAdmission
 {
     /// <summary>The default of <c>reads.maxHeavyReads</c>.</summary>
-    public const int DefaultMaxHeavyReads = 2;
+    public const int DefaultMaxHeavyReads = 4;
 
     /// <summary>How many heavy reads may wait for a slot.</summary>
     internal const int QueueLimit = 16;
@@ -100,6 +100,8 @@ public sealed class ReadAdmission
     internal static readonly IReadOnlyDictionary<string, string> AlwaysHeavyRoutes = new Dictionary<string, string>(StringComparer.Ordinal)
     {
         [DarlingWebEndpoints.InvestigationExportRoute] = "reads up to 2,000 cases with their reports, briefs and feedback into one file",
+        /* #7643: the tool is keyed by name, so every call is heavy, not only the definition text search: that one reads every definition of a database with no index. */
+        ["find_schema_objects"] = "searches the text of a database's view, computed column, default, check and index filter definitions with no index",
     };
 
     /// <summary>
@@ -127,11 +129,52 @@ public sealed class ReadAdmission
     /// the fastest collector, but a reload or a second user more than a minute after the read finished would pay the cold read again,
     /// and the page itself re-renders every 60 s, so the entry would expire about as each poll arrives. A write (the tag map, a rule)
     /// moves the cache's generation and drops the entry at once.</para>
+    ///
+    /// <para><b><c>get_finops_inventory</c> (#8323)</b> is the FinOps Server Inventory grid: one row per server from fixed
+    /// windows inside the read (a 24-hour CPU percentile and 24 hours of memory grants per server, 7 days of idle
+    /// databases), scanned over the whole fleet on every call. It takes no window and no server, so it is a fleet read
+    /// every time (<see cref="WindowlessFleetRoutes"/>), and the same 5 minutes apply for the same reasons: the grid
+    /// changes once per collection, a 24-hour figure moves by under 1/288th in 5 minutes, and a write (a registry edit,
+    /// a rule) moves the generation and drops the entry at once.</para>
     /// </summary>
     internal static readonly IReadOnlyDictionary<string, TimeSpan> FleetCachedRoutes = new Dictionary<string, TimeSpan>(StringComparer.Ordinal)
     {
         ["get_resource_use_by_tag"] = TimeSpan.FromMinutes(5),
+        ["get_finops_inventory"] = TimeSpan.FromMinutes(5),
     };
+
+    /// <summary>#8323: the routes in <see cref="FleetCachedRoutes"/> whose window is fixed inside the read and so take no
+    /// hours argument at all. There is nothing to measure against <see cref="FleetMinWindowHours"/>, and a call that names no
+    /// server is the fleet form whatever else it sends.</summary>
+    internal static readonly IReadOnlySet<string> WindowlessFleetRoutes = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get_finops_inventory",
+    };
+
+    /// <summary>
+    /// The routes whose ONE-SERVER form is kept for the TTL in the table when the call's view is the one named, held from the
+    /// moment the answer is stored (<c>ReadCacheKey</c> <c>heldFromStore</c>, as a fleet entry is), whatever the window asked for and
+    /// whether or not the pair is heavy. <c>get_finops</c> with <c>view=optimization</c> reads a fixed 7 days of idle-database coverage and
+    /// 24 hours each of tempdb, wait, query and memory-grant rows for the server on every call, and a server's first visit on a large
+    /// store took 12 to 17 s cold. Under the band's rule the answer was kept for 30 s in a wall-clock bucket the read itself outlived, so
+    /// the next visit paid the read again and only the one after that was a hit. The 5 minutes are the fleet routes' for the same reasons:
+    /// every section is a 24-hour or 7-day figure that moves by under 1/288th in 5 minutes, the tempdb current value is at most five
+    /// collection cycles old, and a write moves the generation and drops the entry at once. The key is the route and the view as the
+    /// tool itself matches it (trimmed, lower-cased); a different server, window or limit is its own entry, as the cache key carries them.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<(string Route, string View), TimeSpan> ServerHeldRoutes = new Dictionary<(string Route, string View), TimeSpan>
+    {
+        [("get_finops", "optimization")] = TimeSpan.FromMinutes(5),
+    };
+
+    /// <summary>Whether a read of <paramref name="route"/> is the one-server form of a view in <see cref="ServerHeldRoutes"/>: a server named
+    /// (not null, empty or blank) and <paramref name="view"/>, trimmed and lower-cased as the tool reads it, in the table with the route.</summary>
+    internal static bool IsServerHeldRead(string route, string? server, string? view) =>
+        !string.IsNullOrWhiteSpace(server) && ServerHeldTtl(route, view) is not null;
+
+    /// <summary>The TTL of <see cref="ServerHeldRoutes"/> for <paramref name="route"/> and <paramref name="view"/>, null when the pair is not held.</summary>
+    internal static TimeSpan? ServerHeldTtl(string route, string? view) =>
+        view is not null && ServerHeldRoutes.TryGetValue((route, view.Trim().ToLowerInvariant()), out var ttl) ? ttl : null;
 
     /// <summary>The shortest window, in hours, whose whole-fleet read takes the route's own TTL (#6800). A window under it keeps the
     /// band's TTL and the band's rule for whether it is cached at all. It is where the by-tag rollup's Query Store section starts
@@ -147,9 +190,11 @@ public sealed class ReadAdmission
     /// <summary>Whether a read of <paramref name="route"/> is the whole-fleet form of a route in <see cref="FleetCachedRoutes"/> over a
     /// window of at least <see cref="FleetMinWindowHours"/>: no server named (null, empty or blank), and <paramref name="hours"/>, the
     /// window the read asks for or its declared default (<see cref="ReadWindowBand.HoursOf"/>), at least <see cref="FleetMinWindowHours"/>. No window, or one that is
-    /// not a number, is not long enough.</summary>
+    /// not a number, is not long enough, except on a route in <see cref="WindowlessFleetRoutes"/>, which has no window to send.</summary>
     internal static bool IsFleetRead(string route, string? server, double? hours) =>
-        FleetCachedRoutes.ContainsKey(route) && string.IsNullOrWhiteSpace(server) && hours >= FleetMinWindowHours;
+        FleetCachedRoutes.ContainsKey(route)
+        && string.IsNullOrWhiteSpace(server)
+        && (hours >= FleetMinWindowHours || WindowlessFleetRoutes.Contains(route));
 
     /// <summary>Whether a tool or web read goes through admission: not a health read (<see cref="SkippedRoutes"/>) and not
     /// an MCP write tool (writes never wait).</summary>
@@ -204,14 +249,16 @@ public sealed class ReadAdmission
     /// served from and stored in <see cref="Cache"/>: a cacheable route (<see cref="ReadResultCache.IsCacheableRoute"/>)
     /// whose pair is heavy, or a whole-fleet read of a route in <see cref="FleetCachedRoutes"/>
     /// over a window of <see cref="FleetMinWindowHours"/> or more (<paramref name="fleetRead"/>, from <see cref="IsFleetRead"/>,
-    /// <see cref="FleetTtlApplies"/>). It does not depend
-    /// on the limit: with admission off, heavy answers are still cached. Caching a fleet read takes no slot: whether
+    /// <see cref="FleetTtlApplies"/>), or the one-server form of a view in <see cref="ServerHeldRoutes"/>
+    /// (<paramref name="serverHeld"/>, from <see cref="IsServerHeldRead"/>). It does not depend
+    /// on the limit: with admission off, heavy answers are still cached. Caching a fleet or a held read takes no slot: whether
     /// the read waits for one stays with <see cref="IsHeavy"/> (<see cref="AdmitAsync"/>).</summary>
-    internal bool IsCached(ReadSurface surface, string route, string? band, bool fleetRead = false) =>
+    internal bool IsCached(ReadSurface surface, string route, string? band, bool fleetRead = false, bool serverHeld = false) =>
         Cache.Enabled
         && !string.IsNullOrEmpty(route)
         && ReadResultCache.IsCacheableRoute(route)
         && (FleetTtlApplies(route, fleetRead)
+            || serverHeld
             || IsHeavy(surface, route, string.IsNullOrEmpty(band) ? ReadWindowBand.None : band, out _));
 
     /// <summary>The limit in force (0 = off).</summary>

@@ -111,7 +111,7 @@ public sealed class DarlingMcpCustomAlertTools
         "here is accepted there too. A count-aggregate predicate that can fire when the count is 0 is always rejected: it " +
         "cannot tell zero events from a stalled collector. " +
         "<<GUIDE>> " +
-        "Dry-run: validates a custom-alert-rule definition WITHOUT persisting anything. Returns {valid:true} or " +
+        "Dry-run: validates a custom-alert-rule definition WITHOUT persisting anything. A servers scope is checked against the registry: an entry that is not an enabled server's registry name (a display name, a partial name, a typo) answers valid:false with unmatched_servers naming each entry and the registry name it resolves to (registry_name), or the candidate registry names when several servers answer to it (registry_names), because the sweep matches registry names only and such an entry never evaluates. Returns {valid:true} or " +
         "{valid:false, error:\"...\"} naming the first problem. This is the exact authority " +
         "create_custom_alert_rule / update_custom_alert_rule run before saving AND the evaluator applies when " +
         "it loads a rule, so use it to iterate on a generated definition until it is valid. The definition is a " +
@@ -133,19 +133,150 @@ public sealed class DarlingMcpCustomAlertTools
         "rejected because it cannot tell zero events from a stalled collector: a scalar '<'/'<=' (use '>=' " +
         "instead), or a 'between'/'outside' band whose firing region includes 0 (set the bounds so a count of 0 " +
         "does not fire).")]
-    public static Task<string> ValidateCustomAlertRule(
-        [Description("The rule definition JSON to validate (NOT persisted).")] string definition)
+    public static async Task<string> ValidateCustomAlertRule(
+        NpgsqlDataSource postgres,
+        [Description("The rule definition JSON to validate (NOT persisted).")] string definition,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var (parsed, error) = CustomAlertRuleDefinition.TryParse(definition);
-            return Task.FromResult(JsonSerializer.Serialize(
-                new { valid = parsed is not null && error is null, error }, McpHelpers.JsonOptions));
+            if (parsed is null || error is not null || parsed.ScopeMode != CustomAlertScopeMode.Servers)
+            {
+                return ValidationAnswer(parsed, error, registry: null);
+            }
+
+            /* A servers-scoped rule is matched against registry names at sweep time, so its list is checked against the registry
+               here, as create and update check it before saving. The whole registry, enabled or not: a disabled server is still a
+               registered one, and the sweep matches it again when it is re-enabled. A registry read that fails makes no claim: the
+               rule validates on its shape alone. */
+            var registry = await LoadRegistryOrNullAsync(postgres, cancellationToken);
+            return ValidationAnswer(parsed, error, registry);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return Task.FromResult(McpHelpers.FormatError("validate_custom_alert_rule", ex));
+            return McpHelpers.FormatError("validate_custom_alert_rule", ex);
         }
+    }
+
+    /// <summary>The validation over an in-memory registry (null: no scope check), so the answer's shape and words test without a store.</summary>
+    internal static Task<string> ValidateCustomAlertRule(string definition, IReadOnlyList<RegisteredServer>? registry = null)
+    {
+        var (parsed, error) = CustomAlertRuleDefinition.TryParse(definition);
+        return Task.FromResult(ValidationAnswer(parsed, error, registry));
+    }
+
+    private static string ValidationAnswer(CustomAlertRuleDefinition? parsed, string? error, IReadOnlyList<RegisteredServer>? registry)
+    {
+        var unmatched = parsed is not null && error is null && registry is not null ? UnmatchedScopeServers(parsed, registry) : [];
+        if (unmatched.Count > 0)
+        {
+            return JsonSerializer.Serialize(new
+            {
+                valid = false,
+                error = UnmatchedScopeSentence(unmatched, parsed!.ScopeServers.Count),
+                unmatched_servers = UnmatchedNodes(unmatched),
+            }, McpHelpers.JsonOptions);
+        }
+
+        return JsonSerializer.Serialize(new { valid = parsed is not null && error is null, error }, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// The <c>invalid</c> answer a save refuses a servers-scoped definition with when an entry is not a registered server's name
+    /// (the same <c>error</c> and <c>unmatched_servers</c> the dry run gives), or null when every entry is one, when the rule is
+    /// not servers-scoped, and when the registry read fails: then the save makes no claim and the definition stands on its shape alone,
+    /// as validate_custom_alert_rule answers in that case. Entries in <paramref name="alreadyInScope"/> (the stored rule's own scope,
+    /// on an update) are not judged: a server disabled or removed since the save never blocks an edit to the rule that names it.
+    /// One check for create_custom_alert_rule, update_custom_alert_rule and the agent arm's create, so a save and its dry run agree.
+    /// </summary>
+    internal static async Task<string?> ScopeRefusalAsync(
+        CustomAlertRuleDefinition parsed, NpgsqlDataSource postgres, IReadOnlyCollection<string>? alreadyInScope = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (parsed.ScopeMode != CustomAlertScopeMode.Servers) return null;
+        var registry = await LoadRegistryOrNullAsync(postgres, cancellationToken);
+        if (registry is null) return null;
+        var unmatched = UnmatchedScopeServers(parsed, registry)
+            .Where(u => alreadyInScope is null || !alreadyInScope.Any(e => string.Equals(e, u.Entry, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        if (unmatched.Count == 0) return null;
+        return JsonSerializer.Serialize(new
+        {
+            status = "invalid",
+            message = UnmatchedScopeSentence(unmatched, parsed.ScopeServers.Count),
+            unmatched_servers = UnmatchedNodes(unmatched),
+        }, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>Every registered server, enabled or not, by id; the population a <c>scope.servers</c> entry is judged against.</summary>
+    internal const string RegistrySql = "SELECT server_id, server_name, display_name FROM servers ORDER BY server_id";
+
+    /// <summary>The whole registry (<see cref="RegistrySql"/>), or null when the read fails: the scope check then makes no claim.</summary>
+    private static async Task<IReadOnlyList<RegisteredServer>?> LoadRegistryOrNullAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var servers = new List<RegisteredServer>();
+            await using var command = postgres.CreateCommand(RegistrySql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                servers.Add(new RegisteredServer(reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2)));
+            }
+            return servers;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>A <c>scope.servers</c> entry no registered server carries as its registry name. <paramref name="RegistryName"/> is the one
+    /// server it resolves to the way <c>server_name</c> does (exact, then partial, display names included); <paramref name="RegistryNames"/>
+    /// are the candidates when several servers answer to it; both are null when it matches nothing.</summary>
+    internal sealed record UnmatchedScopeServer(string Entry, string? RegistryName, IReadOnlyList<string>? RegistryNames);
+
+    /// <summary>
+    /// The <c>scope.servers</c> entries of a servers-scoped rule that the sweep would never match. The sweep compares each entry to
+    /// the registry name alone (<see cref="CustomAlertRuleDefinition.AppliesTo"/>), so a display name or a partial name validates,
+    /// saves, and never fires. Each miss is matched as a <c>server_name</c> argument would be, so the answer can name the registry
+    /// name to use, or the candidates when the entry is a prefix several servers share. Empty for a rule that is not servers-scoped.
+    /// </summary>
+    internal static List<UnmatchedScopeServer> UnmatchedScopeServers(CustomAlertRuleDefinition definition, IReadOnlyList<RegisteredServer> registry)
+    {
+        var misses = new List<UnmatchedScopeServer>();
+        if (definition.ScopeMode != CustomAlertScopeMode.Servers) return misses;
+        foreach (var entry in definition.ScopeServers)
+        {
+            if (registry.Any(s => string.Equals(s.ServerName, entry, StringComparison.OrdinalIgnoreCase))) continue;
+            var match = ServerNameMatcher.Match(registry, entry, storageNameIgnoresCase: true, nameClash: NameClash.StoredNameWins);
+            misses.Add(match.Candidates.Count switch
+            {
+                0 => new UnmatchedScopeServer(entry, null, null),
+                1 => new UnmatchedScopeServer(entry, match.Candidates[0].ServerName, null),
+                _ => new UnmatchedScopeServer(entry, null, match.Candidates.Select(c => c.ServerName).ToList()),
+            });
+        }
+        return misses;
+    }
+
+    private static IEnumerable<object> UnmatchedNodes(IReadOnlyList<UnmatchedScopeServer> unmatched) =>
+        unmatched.Select(u => new { entry = u.Entry, registry_name = u.RegistryName, registry_names = u.RegistryNames });
+
+    private static string UnmatchedScopeSentence(List<UnmatchedScopeServer> unmatched, int scopeEntries)
+    {
+        var parts = unmatched.Select(u =>
+            u.RegistryNames is { } several ? $"'{u.Entry}' matches several servers ({string.Join(", ", several)}): pass one of those registry names"
+            : u.RegistryName is { } one ? $"'{u.Entry}' is not a registry name (it resolves to '{one}': use that)"
+            : $"'{u.Entry}' matches no registered server");
+        var consequence = unmatched.Count >= scopeEntries
+            ? "saved as written this rule would never fire"
+            : "saved as written this rule will not evaluate on those servers";
+        return "scope.servers names servers the rule would never evaluate: " + string.Join("; ", parts)
+            + ". The sweep matches each entry against the registry name alone (not a display name or a partial name), so "
+            + consequence + ". unmatched_servers lists each entry with the registry name it points at, or the candidates when several match.";
     }
 
     [McpServerTool(Name = "create_custom_alert_rule"), Description(
@@ -157,7 +288,7 @@ public sealed class DarlingMcpCustomAlertTools
         "fleet-wide, an enabled create is refused as {status:\"invalid\", ...}; paused rules do not count, so " +
         "enabled=false still saves. Optional expires_at_utc (a future ISO-8601 UTC instant) makes it a short-term watch that stops " +
         "evaluating on its own; the answer says when it expires, and a past expiry is refused. " +
-        "Server scope is part of the definition, not a separate argument (#6455): with no 'scope' the rule applies to EVERY monitored server; " +
+        "Server scope is part of the definition, not a separate argument: with no 'scope' the rule applies to EVERY monitored server; " +
         "to limit it, put {\"scope\":{\"mode\":\"servers\",\"servers\":[\"<server name>\"]}} (or mode 'tag' with a fleet-tag 'tagId') in the definition.")]
     public static async Task<string> CreateCustomAlertRule(
         NpgsqlDataSource postgres,
@@ -165,7 +296,7 @@ public sealed class DarlingMcpCustomAlertTools
         [Description("The rule definition JSON (metric + predicate, plus optional hysteresis/scope/cadence). Validate it with validate_custom_alert_rule first.")] string definition,
         [Description("Optional human-readable description.")] string? description = null,
         [Description("Whether the rule is active. Default true (it evaluates on the next sweep); false stages it paused.")] bool enabled = true,
-        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when the write tools are served.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null,
         [Description("Optional expiry: an ISO-8601 UTC instant in the future (for example 2026-08-01T00:00:00Z). After it the rule stops evaluating. Omit for a rule that does not expire.")] string? expires_at_utc = null)
@@ -187,6 +318,11 @@ public sealed class DarlingMcpCustomAlertTools
             if (parsed is null || error is not null)
             {
                 return Outcome("invalid", error ?? "definition is invalid.");
+            }
+            /* The registry check the dry run makes, so a scope of display or partial names is refused here too and never saved inert. */
+            if (await ScopeRefusalAsync(parsed, postgres) is { } scopeRefusal)
+            {
+                return scopeRefusal;
             }
 
             var store = new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds);
@@ -232,7 +368,7 @@ public sealed class DarlingMcpCustomAlertTools
         "its expiry is EXPIRED: it is not evaluated and does not fire, and enabled:true on its own does not revive it. Turn it " +
         "back on by sending a later expires_at_utc, or \"\", with the rule's current version; the answer to any update of an " +
         "expired rule says this and repeats the call. The answer also carries previous (the values before the change) and undo (the update_custom_alert_rule call, at the new version, that restores the fields this call changed). " +
-        "Server scope is part of the definition, not a separate argument (#6455): a rule with no 'scope' applies to EVERY monitored server, " +
+        "Server scope is part of the definition, not a separate argument: a rule with no 'scope' applies to EVERY monitored server, " +
         "and a new definition replaces the old one whole, so to keep or set a limit include {\"scope\":{\"mode\":\"servers\",\"servers\":[\"<server name>\"]}} " +
         "(or mode 'tag' with a fleet-tag 'tagId') in it.")]
     public static async Task<string> UpdateCustomAlertRule(
@@ -243,7 +379,7 @@ public sealed class DarlingMcpCustomAlertTools
         [Description("New rule definition JSON. Validate it with validate_custom_alert_rule first. Omit to keep the current definition.")] string? definition = null,
         [Description("New human-readable description. Omit to keep the current description; send an empty string \"\" to clear it.")] string? description = null,
         [Description("Whether the rule is active. Omit to keep the current enabled state; false pauses it, true resumes it.")] bool? enabled = null,
-        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when the write tools are served.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null,
         [Description("Expiry: an ISO-8601 UTC instant in the future moves it, \"\" clears it (never expires), omit keeps it. Moving or clearing it turns an expired rule back on.")] string? expires_at_utc = null)
@@ -260,17 +396,21 @@ public sealed class DarlingMcpCustomAlertTools
                 return Outcome("invalid", "Provide at least one field to change (name, description, definition, enabled, or expires_at_utc).");
             }
 
-            /* A new definition is validated BEFORE any store hit (TryParse is pure), so a bad one returns
-               'invalid' without opening a connection. A definition that is NOT being changed is passed through
-               unchanged and NOT re-validated: it was validated when stored, and a rename or a pause must not be
+            /* A new definition's shape is checked first (TryParse is pure, no store hit), then the rule is fetched, then a servers
+               scope's entries that are NEW to the stored scope are checked against the registry: an entry the rule already carried
+               is never re-judged, so a server disabled or removed since the save cannot block an edit to the same rule, while an
+               added entry that matches nothing is refused as a create would refuse it. A definition that is NOT being changed is
+               passed through unchanged and NOT re-validated: it was validated when stored, and a rename or a pause must not be
                blocked by a measure that has since drifted out of the catalog. */
+            CustomAlertRuleDefinition? parsed = null;
             if (definition is not null)
             {
-                var (parsed, error) = CustomAlertRuleDefinition.TryParse(definition);
-                if (parsed is null || error is not null)
+                var (parsedNew, error) = CustomAlertRuleDefinition.TryParse(definition);
+                if (parsedNew is null || error is not null)
                 {
                     return Outcome("invalid", error ?? "definition is invalid.");
                 }
+                parsed = parsedNew;
             }
 
             var store = new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds);
@@ -281,6 +421,15 @@ public sealed class DarlingMcpCustomAlertTools
             }
 
             var row = currentOk.Rule;
+            if (parsed is not null)
+            {
+                var (stored, _) = CustomAlertRuleDefinition.TryParse(row.DefinitionJson, enforcePerfmonRate: false);
+                var alreadyInScope = stored is { ScopeMode: CustomAlertScopeMode.Servers } ? stored.ScopeServers : [];
+                if (await ScopeRefusalAsync(parsed, postgres, alreadyInScope: alreadyInScope) is { } scopeRefusal)
+                {
+                    return scopeRefusal;
+                }
+            }
             var (expiry, expiryError) = ResolveUpdateExpiry(expires_at_utc, row.ExpiresAtUtc);
             if (expiryError is not null)
             {
@@ -320,7 +469,7 @@ public sealed class DarlingMcpCustomAlertTools
     public static async Task<string> DeleteCustomAlertRule(
         NpgsqlDataSource postgres,
         [Description("The id of the rule to delete (from list_custom_alert_rules).")] long rule_id,
-        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when the write tools are served.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null)
     {
@@ -447,7 +596,7 @@ public sealed class DarlingMcpCustomAlertTools
                     return Outcome("not_found", $"No custom alert rule with id {rule_id.Value}.");
                 }
 
-                var (parsedSaved, savedError) = CustomAlertRuleDefinition.TryParse(ok.Rule.DefinitionJson);
+                var (parsedSaved, savedError) = CustomAlertRuleDefinition.TryParse(ok.Rule.DefinitionJson, enforcePerfmonRate: false);
                 if (parsedSaved is null || savedError is not null)
                 {
                     // A drifted saved rule: surface the validator error rather than throwing (test-now on a
@@ -487,12 +636,15 @@ public sealed class DarlingMcpCustomAlertTools
                 .ToList();
             if (inScope.Count == 0)
             {
+                /* A servers list that matched none says which entries missed, and the registry name each one points at. */
+                var unmatched = UnmatchedScopeServers(def, servers);
                 return JsonSerializer.Serialize(new
                 {
                     status = "no_in_scope_servers",
                     rule_id = resolvedId,
                     name = ruleName,
-                    note = HysteresisNote,
+                    note = unmatched.Count > 0 ? UnmatchedScopeSentence(unmatched, def.ScopeServers.Count) + " " + HysteresisNote : HysteresisNote,
+                    unmatched_servers = unmatched.Count > 0 ? UnmatchedNodes(unmatched) : null,
                     results = Array.Empty<object>(),
                 }, McpHelpers.JsonOptions);
             }
@@ -556,7 +708,7 @@ public sealed class DarlingMcpCustomAlertTools
         "once per step, so with breachSamples above 1 a sustained breach takes breachSamples x step_seconds here against " +
         "breachSamples x evaluationIntervalSeconds live - read a replay of a multi-sample rule as a floor on the live fires, and " +
         "do the arithmetic from step_seconds and breach_samples in the answer. " +
-        "ANSWER: {status, rule_id, name, span_hours, start_utc, end_utc, breach_samples, clear_samples, queries_run, elapsed_ms, servers:[{server, status, reason, " +
+        "ANSWER: {status, rule_id, name, span_hours, start_utc, end_utc, effective_start, window_truncated, truncation_note, breach_samples, clear_samples, queries_run, elapsed_ms, servers:[{server, status, reason, " +
         "step_seconds, steps, steps_run, samples_evaluated, no_data_steps, breaching_samples, fire_count, clear_count, fires:[{at_utc, " +
         "value, severity}], clears:[{at_utc, value}], firing_at_end, covered_from_utc, covered_to_utc}]}. status is ok when every " +
         "step of every server ran. partial when a cap stopped it: stopped_at {cap: servers|queries|time|error, at_utc, reason} names " +
@@ -566,7 +718,8 @@ public sealed class DarlingMcpCustomAlertTools
         "samples for it in the span (or the metric no longer compiles), which is not the same as zero fires. A read that FAILS " +
         "(a statement timeout, a dropped connection) ends only that server's replay and keeps its steps already replayed: that " +
         "server is partial (unavailable when nothing was replayed) with the error as its reason, and when no cap stopped the call " +
-        "stopped_at.cap is error. Top-level " +
+        "stopped_at.cap is error. window_truncated is true when the span reaches back before the store's raw samples of the rule's source " +
+        "(effective_start is where they start, for the least-covered server; the keys are absent when no coverage probe could run). Top-level " +
         "status is unavailable when every server is; empty when no monitored server is in scope; invalid for a bad input or a " +
         "span over 168 hours.")]
     public static async Task<string> BacktestCustomAlertRule(
@@ -617,7 +770,7 @@ public sealed class DarlingMcpCustomAlertTools
                     return Outcome("not_found", $"No custom alert rule with id {rule_id.Value}.");
                 }
 
-                var (parsedSaved, savedError) = CustomAlertRuleDefinition.TryParse(ok.Rule.DefinitionJson);
+                var (parsedSaved, savedError) = CustomAlertRuleDefinition.TryParse(ok.Rule.DefinitionJson, enforcePerfmonRate: false);
                 if (parsedSaved is null || savedError is not null)
                 {
                     return Outcome("invalid", $"The saved rule no longer validates: {savedError}");
@@ -713,7 +866,10 @@ public sealed class DarlingMcpCustomAlertTools
                 CustomAlertBacktest.MaxElapsed,
                 cancellationToken);
 
-            return FormatBacktest(def, resolvedId, ruleName, span, windowEnd, run, notCovered);
+            /* #7015: where the store's raw samples of the rule's source start, in the three window-floor keys the other
+               windowed tools write. Probed on the collector table the rule's metric reads, once per replayed server. */
+            var notice = await ReadBacktestNoticeAsync(postgres, def.Plan.Measure.SourceTable, run, windowEnd - span, windowEnd, cancellationToken);
+            return FormatBacktest(def, resolvedId, ruleName, span, windowEnd, run, notCovered, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -721,10 +877,60 @@ public sealed class DarlingMcpCustomAlertTools
         }
     }
 
+    /// <summary>
+    /// The window-floor notice of a backtest (#7015): one coverage probe per replayed server on <paramref name="sourceTable"/>, the
+    /// collector the rule's metric reads, over [<paramref name="start"/>, <paramref name="end"/>]. A server that returned no sample
+    /// in the span is probed as an empty answer (its null floor reads as "no collection in this window"). The answer says ONE thing,
+    /// from the least-covered server: a truncated server beats a covered one, and the later start beats the earlier. Null (no keys)
+    /// when nothing was replayed, the table is not one the probe reads by index, or every probe failed: a failed probe costs the
+    /// notice, never the replay.
+    /// </summary>
+    internal static async Task<McpWindowNotice?> ReadBacktestNoticeAsync(
+        NpgsqlDataSource postgres, string sourceTable, CustomAlertBacktest.Run run, DateTime start, DateTime end, CancellationToken cancellationToken)
+    {
+        if (!DataWindowFloor.Source.TryForCollectorTable(sourceTable, out var source))
+        {
+            return null;
+        }
+
+        var notices = new List<McpWindowNotice>();
+        foreach (var server in run.Servers.Where(s => !s.Failed))
+        {
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, source, server.Target.StorageName, start, end, cancellationToken),
+                start, end, sourceTable, emptyAnswer: server.SamplesEvaluated == 0, cancellationToken: cancellationToken);
+            if (!notice.IsUnavailable)
+            {
+                notices.Add(notice);
+            }
+        }
+
+        if (notices.Count == 0)
+        {
+            return null;
+        }
+
+        return LeastCovered(notices);
+    }
+
+    /// <summary>
+    /// The one notice a backtest answers with, out of one per replayed server: a truncated server beats a covered one, a server with no
+    /// start at all (no coverage anywhere in the span) is the least covered, and otherwise the later start beats the earlier. An ordinal
+    /// descending sort alone would put the null start (read as "") last (#7015).
+    /// </summary>
+    internal static McpWindowNotice LeastCovered(IReadOnlyList<McpWindowNotice> notices)
+    {
+        var truncated = notices.Where(n => n.WindowTruncated).ToList();
+        return (truncated.Count > 0 ? truncated : notices.ToList())
+            .OrderBy(n => n.EffectiveStart is null ? 0 : 1)
+            .ThenByDescending(n => n.EffectiveStart, StringComparer.Ordinal)
+            .First();
+    }
+
     /// <summary>The backtest's answer (#5911), split out so a test can hold its shape over a run it built itself.</summary>
     internal static string FormatBacktest(
         CustomAlertRuleDefinition def, long? ruleId, string? ruleName, TimeSpan span, DateTime endUtc,
-        CustomAlertBacktest.Run run, IReadOnlyList<string> serversNotCovered)
+        CustomAlertBacktest.Run run, IReadOnlyList<string> serversNotCovered, McpWindowNotice? notice = null)
     {
         static string Utc(DateTime? value) => value is DateTime v
             ? DateTime.SpecifyKind(v, DateTimeKind.Utc).ToString("o", System.Globalization.CultureInfo.InvariantCulture)
@@ -800,7 +1006,7 @@ public sealed class DarlingMcpCustomAlertTools
             _ => null,
         };
 
-        return JsonSerializer.Serialize(new
+        var json = JsonSerializer.Serialize(new
         {
             status,
             message = status == "unavailable" && firstFailed is not null
@@ -813,6 +1019,9 @@ public sealed class DarlingMcpCustomAlertTools
             span_hours = span.TotalHours,
             start_utc = Utc(endUtc - span),
             end_utc = Utc(endUtc),
+            effective_start = notice?.EffectiveStart,
+            window_truncated = notice?.WindowTruncated,
+            truncation_note = notice?.TruncationNote,
             breach_samples = def.BreachSamples,
             clear_samples = def.ClearSamples,
             queries_run = run.QueriesRun,
@@ -821,6 +1030,7 @@ public sealed class DarlingMcpCustomAlertTools
             servers_not_covered = serversNotCovered.Count > 0 ? serversNotCovered : null,
             servers,
         }, McpHelpers.JsonOptions);
+        return notice is null ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
     }
 
     [McpServerTool(Name = "list_custom_alert_templates"), Description(

@@ -17,12 +17,7 @@ namespace PerformanceMonitor.Ui
     {
         /// <summary>"Time (UTC)", "Time (local)" or "Time (server)". In Server mode every row reads on ITS server's
         /// own clock, so a list of several servers shows each server's hour, and the header says so.</summary>
-        public static string For(string name, TimeDisplayMode mode) => mode switch
-        {
-            TimeDisplayMode.UTC => name + " (UTC)",
-            TimeDisplayMode.LocalTime => name + " (local)",
-            _ => name + " (server)",
-        };
+        public static string For(string name, TimeDisplayMode mode) => name + " (" + MultiServerTime.ZoneWord(mode) + ")";
 
         /// <summary>
         /// The header of a time column in a grid that may list several servers (#6137): <see cref="For(string, TimeDisplayMode)"/>

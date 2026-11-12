@@ -193,10 +193,10 @@ public sealed class AwsPerServerRoleRungTests
         var wrapperAt = batch.IndexOf(wrapper, StringComparison.Ordinal);
         Assert.True(functionAt >= 0 && wrapperAt > functionAt, "the wrapper must be created after the function it calls");
         Assert.Contains(
-            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO viewer, mcp;",
+            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO web, mcp;",
             batch, StringComparison.Ordinal);
         Assert.Contains(
-            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO viewer, mcp;",
+            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO web, mcp;",
             batch, StringComparison.Ordinal);
     }
 
@@ -209,10 +209,10 @@ public sealed class AwsPerServerRoleRungTests
         Assert.Contains(
             NormalizeSql(DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config")), NormalizeSql(script), StringComparison.Ordinal);
         Assert.Contains(
-            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO viewer, mcp;",
+            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO web, mcp;",
             script, StringComparison.Ordinal);
         Assert.Contains(
-            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO viewer, mcp;",
+            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO web, mcp;",
             script, StringComparison.Ordinal);
 
         var rules = DarlingManagedRoles.BuildServerPasswordRulesSql("config");
@@ -234,12 +234,16 @@ public sealed class AwsPerServerRoleRungTests
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp));
         var script = NormalizeSql(RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql"));
 
-        Assert.Contains($"GRANT UPDATE ({DarlingManagedRoles.McpMonitoredServerUpdateColumns}) ON config.config_monitored_servers TO mcp;", script, StringComparison.Ordinal);
+        /* The script grants xe_session_databases (V247) in its own statement guarded on the column, so a store behind V247 still runs it (#7639). */
+        var scriptColumns = string.Join(", ", columns.Where(column => column != "xe_session_databases"));
+        Assert.Contains($"GRANT UPDATE ({scriptColumns}) ON config.config_monitored_servers TO mcp;", script, StringComparison.Ordinal);
+        Assert.Contains("GRANT UPDATE (xe_session_databases) ON config.config_monitored_servers TO mcp;", script, StringComparison.Ordinal);
         Assert.Contains("REVOKE UPDATE ON config.config_monitored_servers FROM mcp;", script, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT, DELETE ON config.config_monitored_servers TO mcp;", script, StringComparison.Ordinal);
         Assert.DoesNotContain("GRANT INSERT, UPDATE, DELETE ON config.config_monitored_servers", script, StringComparison.Ordinal);
 
-        Assert.Contains($"GRANT UPDATE ({DarlingManagedRoles.McpMonitoredServerUpdateColumns}) ON", batch, StringComparison.Ordinal);
+        Assert.Contains($"GRANT UPDATE ({DarlingManagedRoles.McpMonitoredServerBaseUpdateColumns}) ON", batch, StringComparison.Ordinal);
+        Assert.Contains("GRANT UPDATE (xe_session_databases) ON config.config_monitored_servers TO mcp;", batch, StringComparison.Ordinal);
         Assert.Contains("REVOKE UPDATE ON", batch, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT, DELETE ON config.config_monitored_servers TO", batch, StringComparison.Ordinal);
         Assert.DoesNotContain("GRANT INSERT, UPDATE, DELETE ON config.config_monitored_servers", batch, StringComparison.Ordinal);

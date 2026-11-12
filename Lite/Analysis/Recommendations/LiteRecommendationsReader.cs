@@ -30,8 +30,8 @@ namespace PerformanceMonitorLite.Analysis.Recommendations;
 /// <see cref="PerformanceMonitor.Analysis.RemediationAction"/> (built at analysis time from the
 /// drill-down, serialized into <c>remediation_action_json</c>, deserialized on read) rendered by the
 /// SHARED <see cref="FactRemediation.RenderCopyPasteCommand"/> — the SAME source the Darling viewer's
-/// Copy-fix delegates to, so Lite and Darling produce byte-identical commands for all seven remediation
-/// shapes (the two destructive ones carry a two-sided risk-disclosure header). The live
+/// Copy-fix delegates to, so Lite and Darling produce byte-identical commands for all five remediation
+/// shapes (the destructive RCSI one carries a two-sided risk-disclosure header). The live
 /// <see cref="FactRemediation.GenerateForFinding"/> path is kept only as a fallback for a finding still
 /// carrying its ephemeral drill-down (no persisted action). Findings with no execution shape carry a
 /// null action and render advise-only.
@@ -64,7 +64,27 @@ public sealed class LiteRecommendationsReader
         /* #3712: the two knobs the notification path applied when these findings fired, so the grid's
            not-paged marker and the gate's decision read the same settings. */
         var lens = new FindingRoutingLens(App.AnalysisNotifySeverity, App.AnalysisUncorroboratedRoute);
-        return MapFindings(findings, serverName, lens);
+        return await MapWithForcePlanStateAsync(
+            findings, serverName, lens, batch => _findingStore.TryGetForcePlanTargetStatesAsync(serverId, batch));
+    }
+
+    /// <summary>
+    /// Reads the forcing state behind the shown batch's force-plan targets, once and now, and maps the
+    /// findings to cards over it (#8542), so a card gives no force statement for a plan the store blocks.
+    /// A failed read withholds nothing, and its reason rides to the card, whose command then opens by
+    /// saying no target was checked. Both ways the tab builds cards go through here: the stored load
+    /// (<see cref="GetRecommendationsAsync"/>) and Generate now, which maps the findings its own analysis
+    /// returned.
+    /// </summary>
+    /// <param name="readForcePlanStates">The state read for a set of findings: the dictionary and a null
+    /// reason, or null and why the read failed.</param>
+    internal static async Task<List<LiteRecommendationItem>> MapWithForcePlanStateAsync(
+        IReadOnlyList<AnalysisFinding> findings, string serverName, FindingRoutingLens? lens,
+        Func<IReadOnlyList<AnalysisFinding>, Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)>> readForcePlanStates)
+    {
+        ArgumentNullException.ThrowIfNull(readForcePlanStates);
+        var (forcePlanStates, forcePlanStateNote) = await readForcePlanStates(LatestBatchOnly(findings));
+        return MapFindings(findings, serverName, lens, forcePlanStates, forcePlanStateNote);
     }
 
     /// <summary>
@@ -72,9 +92,13 @@ public sealed class LiteRecommendationsReader
     /// to the sorted advise-only card list. Pure over the inputs — no DB, no UI — so the banding,
     /// advice composition, latest-batch trim, and sort are unit-testable directly. Exposed
     /// <c>internal</c> for tests; the public entry point is <see cref="GetRecommendationsAsync"/>.
+    /// The forcing state and the reason it could not be read are required, so a caller that builds cards
+    /// says what it read (#8542); <see cref="MapWithForcePlanStateAsync"/> reads and passes them.
     /// </summary>
     internal static List<LiteRecommendationItem> MapFindings(
-        IReadOnlyList<AnalysisFinding> findings, string serverName, FindingRoutingLens? lens = null)
+        IReadOnlyList<AnalysisFinding> findings, string serverName, FindingRoutingLens? lens,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates,
+        string? forcePlanStateUnavailableReason)
     {
         var latest = LatestBatchOnly(findings);
 
@@ -83,7 +107,7 @@ public sealed class LiteRecommendationsReader
         {
             if (finding is null)
                 continue;
-            items.Add(MapFinding(finding, serverName, lens));
+            items.Add(MapFinding(finding, serverName, lens, forcePlanStates, forcePlanStateUnavailableReason));
         }
 
         items.Sort(CompareForDisplay);
@@ -148,7 +172,14 @@ public sealed class LiteRecommendationsReader
     /// </summary>
     /// <param name="lens">#3712: the notify floor and routing knob to judge the not-paged marker by; null
     /// (the pure-mapping tests' default) computes no marker.</param>
-    internal static LiteRecommendationItem MapFinding(AnalysisFinding finding, string serverName, FindingRoutingLens? lens = null)
+    /// <param name="forcePlanStates">#8542: the read-time forcing state of the finding's force-plan targets;
+    /// null (the pure-mapping tests' default) withholds no statement.</param>
+    /// <param name="forcePlanStateUnavailableReason">Why that state could not be read, when it could not: the
+    /// command then opens by saying no target was checked.</param>
+    internal static LiteRecommendationItem MapFinding(
+        AnalysisFinding finding, string serverName, FindingRoutingLens? lens = null,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates = null,
+        string? forcePlanStateUnavailableReason = null)
     {
         // Value-stated advice frozen into StoryText at analysis time (current MAXDOP/CTFP/etc.),
         // with the static block as the fallback for legacy findings. StoryText now holds advice
@@ -164,8 +195,8 @@ public sealed class LiteRecommendationsReader
             AdviceText = ComposeAdvice(advice),
             // Persisted-action render is the PRIMARY source (mirrors the Darling viewer); the live
             // drill-down generator is only a fallback when no action was persisted (see class remarks).
-            CopyPasteSql = NullIfEmpty(BuildCopyPasteSql(finding.Remediation))
-                        ?? NullIfEmpty(FactRemediation.GenerateForFinding(finding)),
+            CopyPasteSql = NullIfEmpty(BuildCopyPasteSql(finding.Remediation, forcePlanStates, forcePlanStateUnavailableReason))
+                        ?? NullIfEmpty(FactRemediation.GenerateForFinding(finding, forcePlanStates, forcePlanStateUnavailableReason)),
             IncidentId = finding.IncidentId,
             ServerName = serverName ?? string.Empty,
             WindowStartUtc = AsUtc(finding.TimeRangeStart),
@@ -180,15 +211,18 @@ public sealed class LiteRecommendationsReader
     /// Rebuilds the copy-paste T-SQL for a card from the finding's PERSISTED
     /// <see cref="RemediationAction"/> by delegating to the shared
     /// <see cref="FactRemediation.RenderCopyPasteCommand"/> — the SAME renderer the Darling viewer's
-    /// Copy-fix uses, so a Lite card and a Darling card produce byte-identical commands for all seven
-    /// remediation shapes (force-plan, clear-plan, server-config, RCSI, safe DB-config, file-growth,
-    /// missing-index; the two destructive shapes carry a two-sided risk-disclosure comment header).
+    /// Copy-fix uses, so a Lite card and a Darling card produce byte-identical commands for all five
+    /// remediation shapes (force-plan, RCSI, safe DB-config, file-growth, missing-index; the
+    /// destructive RCSI shape carries a two-sided risk-disclosure comment header).
     /// Lite has NO in-app executor — this is a copyable command only. A thin <c>internal</c> seam over
     /// the shared renderer so the reader can be unit-tested directly and cannot drift from the viewer.
     /// Null when the action is null or carries no renderable target.
     /// </summary>
-    internal static string? BuildCopyPasteSql(RemediationAction? action) =>
-        FactRemediation.RenderCopyPasteCommand(action);
+    internal static string? BuildCopyPasteSql(
+        RemediationAction? action,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates = null,
+        string? forcePlanStateUnavailableReason = null) =>
+        FactRemediation.RenderCopyPasteCommand(action, forcePlanStates, forcePlanStateUnavailableReason);
 
     /// <summary>
     /// Maps an engine finding's <c>double</c> severity (0–~2.0) onto the canonical band. Cutoffs

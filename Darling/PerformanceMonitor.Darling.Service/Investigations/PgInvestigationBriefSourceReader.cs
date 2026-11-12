@@ -200,18 +200,49 @@ ORDER BY CASE WHEN p.scope_server_id IS NOT NULL THEN 0 WHEN p.scope_tag_id IS N
        #5632: config.service_version keeps one row per host (the version and start of its latest run), so a start inside
        the window is all it can give: an upgrade shows as a start on the new version, and the version before is not kept.
        Alert thresholds give nothing here: config_alert_settings keeps no change time. */
-    internal const string ChangesSql = @"
+    /* #7414: a reason an agent wrote ends in the suffix the write path appends: [agent:<id>] (a direct write) or
+       [agent:<id> request <uuid>] (a claimed one), more than once if two agents updated the rule. */
+    internal const string AgentReasonSuffixPattern = @"(\s*\[agent:[^\]\s]+( request [0-9a-fA-F-]{36})?\])+\s*$";
+
+    /// <summary>#7414: how many characters of an agent-written rule reason a brief carries. The agent's text goes into every investigation
+    /// request's brief for the whole change window, so it is kept short and labelled; the full reason stays in the rule and the journal.</summary>
+    public const int AgentReasonChars = 100;
+
+    /// <summary>#7414: how many agent-written mute rules a brief names at most (the newest). Together with <see cref="AgentReasonChars"/>
+    /// they cannot fill the recent changes section's budget, so an operator's change is never cut for them.</summary>
+    public const int MaxAgentMuteRules = 3;
+
+    /// <summary>#7414: the control characters, line breaks and line or paragraph separators an agent-written reason may carry. Each run is replaced
+    /// with one space before the reason is cut, so the brief shows the reason as one line, as the digest hold line does (<c>MuteRule.OneLine</c>).</summary>
+    internal const string AgentReasonControlPattern = @"[\x01-\x1f\x7f-\x9f\u2028\u2029]+";
+
+    /// <summary>#7414: the invisible Format code points an agent-written reason may carry (zero-width characters, bidi controls, tag characters). Each is deleted,
+    /// as <c>MuteRule.OneLine</c> deletes them, so a reason cannot hide text or reverse the order the brief displays in.</summary>
+    internal const string AgentReasonFormatPattern = @"[\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]+";
+
+    /// <summary>The agent-written reason with its attribution suffix cut, its Format code points deleted, its control characters turned into spaces and its ends trimmed, before it is cut to length.</summary>
+    private const string AgentReasonOneLineSql = @"btrim(regexp_replace(regexp_replace(regexp_replace(m.reason, '" + AgentReasonSuffixPattern + @"', ''), '" + AgentReasonFormatPattern + @"', '', 'g'), '" + AgentReasonControlPattern + @"', ' ', 'g'))";
+
+    internal static readonly string ChangesSql = @"
 SELECT at, kind, text, pattern
 FROM (
     SELECT m.created_at_utc AS at, 'mute_rule' AS kind,
            concat_ws(' ', CASE WHEN m.enabled THEN 'enabled' ELSE 'disabled' END, 'mute rule',
                      'for ' || coalesce(m.metric_name, 'every metric'),
                      CASE WHEN m.expires_at_utc IS NOT NULL THEN 'until ' || to_char(m.expires_at_utc, 'YYYY-MM-DD""T""HH24:MI:SS""Z""') END,
-                     CASE WHEN m.reason IS NOT NULL THEN 'reason: ' || m.reason END) AS text,
+                     CASE WHEN m.recur_start_time IS NOT NULL THEN 'repeating window ' || to_char(m.recur_start_time, 'HH24:MI') || '-' || to_char(m.recur_end_time, 'HH24:MI') || ' ' || m.recur_time_zone END,
+                     CASE WHEN m.reason IS NULL THEN NULL
+                          WHEN m.agent_written
+                          THEN 'agent-written reason: ' || left(" + AgentReasonOneLineSql + @", " + AgentReasonChars + @")
+                               || CASE WHEN length(" + AgentReasonOneLineSql + @") > " + AgentReasonChars + @" THEN '...' ELSE '' END
+                          ELSE 'reason: ' || m.reason END) AS text,
            m.query_text_pattern AS pattern
-    FROM config_mute_rules AS m
-    WHERE (m.server_name IS NULL OR m.server_name = $2)
-      AND m.created_at_utc >= $3
+    FROM (SELECT r.*, COALESCE(r.reason ~ '" + AgentReasonSuffixPattern + @"', false) AS agent_written,
+                 row_number() OVER (PARTITION BY COALESCE(r.reason ~ '" + AgentReasonSuffixPattern + @"', false) ORDER BY r.created_at_utc DESC) AS recency
+          FROM config_mute_rules AS r
+          WHERE (r.server_name IS NULL OR r.server_name = $2)
+            AND r.created_at_utc >= $3) AS m
+    WHERE NOT m.agent_written OR m.recency <= " + MaxAgentMuteRules + @"
     UNION ALL
     SELECT am.muted_date, 'analysis_mute',
            concat_ws(' ', 'analysis finding muted:', am.story_path, CASE WHEN am.reason IS NOT NULL THEN 'reason: ' || am.reason END),
@@ -261,10 +292,10 @@ LIMIT $5";
        earlier fires of the same rise sit just before the anchor); a fire about 24 hours earlier still counts. One index seek per
        metric (idx_config_alert_log_time on server_id, metric_name, alert_time); the clock test filters inside the Days days. A
        metric with no rows still comes back (day NULL), so the brief says zero.
-       #6261: k is the whole day number the fire counts toward (1 = 24 hours before the anchor), the streak's unit
-       (InvestigationAlertStreak.DaysAgo is the same rule in C#). It is not the date: a 23:50 anchor's window holds a 00:10 fire
-       of the anchor's own date, and a 00:10 anchor's holds a 23:50 fire of the day before the one it counts toward. A date can
-       so hold two k values, and a (day, muted) two rows; the reader adds a date once.
+       The SQL bounds the rows (one day more than Days, so a fire a DST change moved an hour past the look-back is read); the clock
+       test (which fire counts, and toward which whole day) is InvestigationAlertRecurrence.FromFires over
+       InvestigationAlertStreak.DaysAgo in the server's zone, the one rule Lite's reader and get_alert_history share, so a DST change
+       the SQL cannot see still reaches it.
        Types: config.investigation_request_alerts.alert_time is timestamptz and config_alert_log.alert_time is naive UTC, so the
        anchor is taken AT TIME ZONE 'UTC' (as AlertsSql does for the same pair): every comparison and the ::date are then naive
        UTC and none rides the session TimeZone. Past rows do not change, so this is read at compose time. $1 request, $2 server. */
@@ -274,21 +305,18 @@ WITH anchor AS (
 ), m AS (
     SELECT DISTINCT metric_name FROM config.investigation_request_alerts WHERE request_id = $1
 )
-SELECT m.metric_name, a.t, f.day, f.muted, f.n, f.k
+SELECT m.metric_name, a.t, f.alert_time, f.muted
 FROM m
 CROSS JOIN anchor AS a
 LEFT JOIN LATERAL (
-    SELECT cal.alert_time::date AS day, cal.muted, round(extract(epoch FROM a.t - cal.alert_time) / 86400)::int AS k, count(*) AS n
+    SELECT cal.alert_time, cal.muted
     FROM config_alert_log AS cal
-    CROSS JOIN LATERAL (SELECT mod(mod(extract(epoch FROM cal.alert_time - a.t)::numeric, 86400) + 86400, 86400) AS d) AS o
     WHERE cal.server_id = $2
       AND cal.metric_name = m.metric_name
-      AND cal.alert_time >= a.t - interval '" + InvestigationAlertRecurrence.Days + @" days'
+      AND cal.alert_time >= a.t - interval '" + (InvestigationAlertRecurrence.Days + 1) + @" days'
       AND cal.alert_time < a.t - interval '" + InvestigationAlertRecurrence.WindowMinutes + @" minutes'
-      AND least(o.d, 86400 - o.d) <= " + (InvestigationAlertRecurrence.WindowMinutes * 60) + @"
-    GROUP BY cal.alert_time::date, cal.muted, 3
 ) AS f ON true
-ORDER BY m.metric_name, f.day DESC";
+ORDER BY m.metric_name, f.alert_time DESC";
 
     /// <summary>How far back <c>prior_links</c> reaches (#5914).</summary>
     public const int PriorLinkDays = 30;
@@ -508,25 +536,23 @@ ORDER BY m.metric_name, f.day DESC";
             }
         }
 
+        /* The server's own clock (its newest server_properties row), so a schedule kept in its local time keeps its streak across
+           a DST change; a server with no stored clock, or a fixed offset, is read in UTC. */
+        var clocks = await DarlingServerClocksReader.GetAsync(_postgres, request.ServerId, CommandTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+        var zone = DarlingServerClocksReader.ClockFor(clocks, request.ServerId).AsTimeZone();
+
         var recurrence = new List<InvestigationAlertRecurrence>();
         await using (var command = Command(connection, RecurrenceSql, requestId, request.ServerId))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
             string? metric = null;
             DateTime around = default;
-            int fired = 0, muted = 0;
-            var firedDates = new List<DateOnly>();
-            var mutedDates = new List<DateOnly>();
-            var daysAgo = new List<int>();
+            var fires = new List<(DateTime FireUtc, bool Muted)>();
             void Flush()
             {
                 if (metric is not null)
-                    recurrence.Add(new InvestigationAlertRecurrence(metric, around, fired, muted, firedDates, mutedDates, daysAgo));
-                firedDates = new List<DateOnly>();
-                mutedDates = new List<DateOnly>();
-                daysAgo = new List<int>();
-                fired = 0;
-                muted = 0;
+                    recurrence.Add(InvestigationAlertRecurrence.FromFires(metric, around, fires, zone));
+                fires = new List<(DateTime FireUtc, bool Muted)>();
             }
 
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -540,22 +566,7 @@ ORDER BY m.metric_name, f.day DESC";
                 }
 
                 if (reader.IsDBNull(2)) continue;
-                var count = (int)reader.GetInt64(4);
-                var date = DateOnly.FromDateTime(reader.GetFieldValue<DateTime>(2));
-                /* Rows come newest day first, so each list is newest first. A date can come on two rows (#6261: one per day
-                   number k), so it is added once. */
-                if (reader.GetBoolean(3))
-                {
-                    muted += count;
-                    if (!mutedDates.Contains(date)) mutedDates.Add(date);
-                }
-                else
-                {
-                    fired += count;
-                    if (!firedDates.Contains(date)) firedDates.Add(date);
-                }
-
-                daysAgo.Add(reader.GetInt32(5));
+                fires.Add((DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(2), DateTimeKind.Utc), reader.GetBoolean(3)));
             }
 
             Flush();
@@ -626,7 +637,7 @@ ORDER BY m.metric_name, f.day DESC";
             .ToList();
 
         var (states, stateNote) = await DarlingForcePlanTargetStateReader.TryReadAsync(
-            _postgres, request.ServerId, groups.Select(g => g.Latest), logger: _logger, cancellationToken: cancellationToken).ConfigureAwait(false);
+            _postgres, request.ServerId, groups.Select(g => g.Latest), McpCommandDeadlines.ReadSeconds, logger: _logger, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var result = new List<InvestigationBriefFinding>(groups.Count);
         foreach (var g in groups)

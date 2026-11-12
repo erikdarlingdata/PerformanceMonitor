@@ -42,6 +42,12 @@ public sealed class BenefitScorerWiringTests
             if (fileName is "PlanAnalysisPipeline.cs" or "BenefitScorer.cs")
                 continue; // BenefitScorer.cs's own doc comment names PlanAnalyzer.Analyze() in prose, not a call
 
+            // The Darling export tool writes the analyzer's findings to Parquet as plan_features rows. It calls the
+            // analyzer without the scorer on purpose: scoring would fill max_benefit_percent and change rows already
+            // exported under the same feature_version. Moving it to the pipeline is a feature_version bump.
+            if (fileName == "PlanFeatureExtractor.cs" && file.Replace('\\', '/').Contains("/Exporter/PerformanceMonitor.Exporter/"))
+                continue;
+
             var code = File.ReadAllText(file);
             if (code.Contains("PlanAnalyzer.Analyze("))
                 offenders.Add(file);

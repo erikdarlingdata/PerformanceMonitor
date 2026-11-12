@@ -37,14 +37,14 @@ public static class LowDiskAlertGate
     /// grow data/log files, so transactions fail and the database can go into recovery/suspect; that
     /// warrants CRITICAL, not the WARNING the normal breach renders.
     /// </summary>
-    public const double CriticalFreePercent = 3.0;
+    public const double CriticalFreePercent = PerformanceMonitor.Common.DiskCriticalCut.FreePercent;
 
     /// <summary>
     /// Free-space GB at or below which a breach is "critically low" regardless of percentage — a
     /// large volume sitting at a few GB free has no room for a single autogrow. See
     /// <see cref="CriticalFreePercent"/>.
     /// </summary>
-    public const double CriticalFreeGb = 2.0;
+    public const double CriticalFreeGb = PerformanceMonitor.Common.DiskCriticalCut.FreeGb;
 
     /// <summary>
     /// True when the worst breached volume is critically low on EITHER dimension (mirrors the OR
@@ -59,7 +59,7 @@ public static class LowDiskAlertGate
     /// parameterless overload keeps the shipped constants for callers with no settings in reach
     /// (and for the tests pinning the defaults).</summary>
     public static bool IsCriticallyLow(double freePercent, double freeGb, double criticalFreePercent, double criticalFreeGb) =>
-        freePercent <= criticalFreePercent || freeGb <= criticalFreeGb;
+        PerformanceMonitor.Common.DiskCriticalCut.IsCriticallyLow(freePercent, freeGb, criticalFreePercent, criticalFreeGb);
 
     /// <summary>
     /// Returns true when a low-disk alert should fire this cycle.

@@ -56,6 +56,7 @@ public sealed class AlertNotebookTemplateRunnableQueueTests
         Assert.Equal("panel", (string)runnable["type"]!);
         Assert.Equal("cpu_scheduler_stats", (string)runnable["source"]!);
         Assert.Equal("scheduler_runnable_tasks", (string)runnable["measure"]!);
+        Assert.Equal("max", (string)runnable["aggregate"]!);
 
         var scheduler = Assert.IsType<JsonObject>(cells[3]);
         Assert.Equal("read", (string)scheduler["type"]!);
@@ -64,6 +65,7 @@ public sealed class AlertNotebookTemplateRunnableQueueTests
         var cpu = Assert.IsType<JsonObject>(cells[4]);
         Assert.Equal("cpu_utilization_stats", (string)cpu["source"]!);
         Assert.Equal("sqlserver_cpu_utilization", (string)cpu["measure"]!);
+        Assert.Equal("max", (string)cpu["aggregate"]!);
 
         var topQueries = Assert.IsType<JsonObject>(cells[5]);
         Assert.Equal("get_top_queries_by_cpu", (string)topQueries["read"]!);

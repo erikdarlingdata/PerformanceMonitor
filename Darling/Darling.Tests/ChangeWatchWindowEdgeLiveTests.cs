@@ -59,20 +59,20 @@ public sealed class ChangeWatchWindowEdgeLiveTests
     private static async Task<JsonNode> ResultAsync(NpgsqlConnection c, CancellationToken ct) =>
         JsonNode.Parse((await TextAsync(c, "SELECT result_json FROM config.change_watches", ct))!)!;
 
-    /// <summary>One wait collection of a SQL Server target: <paramref name="deltaMs"/> over <paramref name="intervalSeconds"/>, stored at <paramref name="at"/>.</summary>
-    private static Task WaitRowAsync(NpgsqlConnection c, DateTime at, long deltaMs, int intervalSeconds, CancellationToken ct) =>
+    /// <summary>One wait row of a SQL Server target: <paramref name="deltaMs"/> over <paramref name="intervalSeconds"/>, stored at <paramref name="at"/>.</summary>
+    private static Task WaitRowAsync(NpgsqlConnection c, DateTime at, long deltaMs, int intervalSeconds, CancellationToken ct, string waitType = "PAGEIOLATCH_SH") =>
         SeedAsync(c, "wait_stats", new Dictionary<string, object>
         {
-            ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(at), ["wait_type"] = "PAGEIOLATCH_SH",
+            ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(at), ["wait_type"] = waitType,
             ["delta_wait_time_ms"] = deltaMs, ["sample_interval_seconds"] = intervalSeconds,
         }, ct);
 
-    /// <summary>One wait collection of an Aurora target, in microseconds as the collector stores it.</summary>
-    private static Task PgWaitRowAsync(NpgsqlConnection c, DateTime at, long deltaMs, int intervalSeconds, CancellationToken ct) =>
+    /// <summary>One wait row of an Aurora target, in microseconds as the collector stores it.</summary>
+    private static Task PgWaitRowAsync(NpgsqlConnection c, DateTime at, long deltaMs, int intervalSeconds, CancellationToken ct, string waitEvent = "DataFileRead") =>
         SeedAsync(c, "pg_wait_stats", new Dictionary<string, object>
         {
             ["server_id"] = PgServerId, ["server_name"] = PgServerName, ["collection_time"] = Naive(at),
-            ["wait_type"] = "IO", ["wait_event"] = "DataFileRead", ["delta_waits"] = 100L, ["delta_wait_time_us"] = deltaMs * 1000, ["sample_interval_seconds"] = intervalSeconds,
+            ["wait_type"] = "IO", ["wait_event"] = waitEvent, ["delta_waits"] = 100L, ["delta_wait_time_us"] = deltaMs * 1000, ["sample_interval_seconds"] = intervalSeconds,
         }, ct);
 
     private static async Task PgWaitsAsync(NpgsqlConnection c, DateTime start, double msPerSecond, CancellationToken ct)
@@ -137,6 +137,91 @@ public sealed class ChangeWatchWindowEdgeLiveTests
 
             var after = (double)Measure(await ResultAsync(h.Connection, ct), "total_wait_ms_per_second")["after"]!;
             Assert.InRange(after, 120, 145);
+            Assert.Equal("flat", await TextAsync(h.Connection, "SELECT result FROM config.change_watches", ct));
+        });
+    }
+
+    /// <summary>#8078: <c>sample_interval_seconds</c> is a per-row figure. A wait type that returns after missing some passes stores the
+    /// seconds since its own previous sighting, several cadences, while its siblings in the same collection store one cadence. The measure
+    /// credits each collection's whole stored wait over the collection's cadence, so the returning type's longer interval never re-rates
+    /// its siblings and none of its wait is lost: two steady types at 500 and 100 ms/s and a third seen every fifth minute (600 ms over its
+    /// own 300 s, 2 ms/s) read the sum of their three per-type hour rates, 602 ms/s, over the window's 3,600 s.</summary>
+    [Fact]
+    public async Task AWaitTypeThatReturnsAfterMissingPasses_DoesNotDeflateTheWindowsWaitRate()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var change = h.Now.AddMinutes(-90);
+            await SeedWaitsAsync(h.Connection, change.AddMinutes(-60), 600, ct);
+            for (var minute = 1; minute <= 60; minute++)
+            {
+                await WaitRowAsync(h.Connection, change.AddMinutes(minute), 500L * 60, 60, ct, "SOS_SCHEDULER_YIELD");
+                await WaitRowAsync(h.Connection, change.AddMinutes(minute), 100L * 60, 60, ct);
+                if (minute % 5 == 0)
+                {
+                    await WaitRowAsync(h.Connection, change.AddMinutes(minute), 600, 300, ct, "CXCONSUMER");
+                }
+            }
+
+            await h.Store.RecordChangesAsync(ServerId, ServerName, await OneChange(change, "max degree of parallelism"), ct);
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            /* Each type alone over the after-window through the per-type read, as one bucket: 500, 100 and 2 ms/s. */
+            var parts = 0.0;
+            foreach (var waitType in new[] { "SOS_SCHEDULER_YIELD", "PAGEIOLATCH_SH", "CXCONSUMER" })
+            {
+                await using var command = new NpgsqlCommand(DarlingDataReader.WaitTrendBucketedSql, h.Connection);
+                command.Parameters.Add(new NpgsqlParameter { Value = ServerId });
+                command.Parameters.Add(new NpgsqlParameter { Value = waitType });
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = Naive(change.AddSeconds(1)) });
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = Naive(change.AddMinutes(60)) });
+                command.Parameters.Add(new NpgsqlParameter { Value = 100_000_000 });
+                parts += await ScalarRateAsync(command, ct);
+            }
+
+            Assert.Equal(602.0, parts, 2);
+            var wait = Measure(await ResultAsync(h.Connection, ct), "total_wait_ms_per_second");
+            Assert.Equal(600.0, (double)wait["before"]!, 1);
+            Assert.Equal(parts, (double)wait["after"]!, 2);
+            Assert.Equal("flat", await TextAsync(h.Connection, "SELECT result FROM config.change_watches", ct));
+        });
+    }
+
+    /// <summary>The second column of one bucketed wait-trend row: the bucket's rate.</summary>
+    private static async Task<double> ScalarRateAsync(NpgsqlCommand command, CancellationToken ct)
+    {
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        return reader.GetDouble(1);
+    }
+
+    /// <summary>The Aurora twin of the test above: the wait collector there also stores each (wait_type, wait_event) row's own interval,
+    /// and the measure reads the sum of the three per-event rates, 500 + 100 + 2.</summary>
+    [Fact]
+    public async Task AnAuroraWaitEventThatReturnsAfterMissingPasses_DoesNotDeflateTheWindowsWaitRate()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            await AddServerAsync(h.Connection, PgServerId, PgServerName, "postgres", ct);
+            var change = h.Now.AddMinutes(-90);
+            await PgWaitsAsync(h.Connection, change.AddMinutes(-60), 600, ct);
+            for (var minute = 1; minute <= 60; minute++)
+            {
+                await PgWaitRowAsync(h.Connection, change.AddMinutes(minute), 500L * 60, 60, ct, "DataFileWrite");
+                await PgWaitRowAsync(h.Connection, change.AddMinutes(minute), 100L * 60, 60, ct);
+                if (minute % 5 == 0)
+                {
+                    await PgWaitRowAsync(h.Connection, change.AddMinutes(minute), 600, 300, ct, "WALSync");
+                }
+            }
+
+            await h.Store.RecordChangesAsync(PgServerId, PgServerName,
+                new[] { new ChangeWatchChange("pg_config:work_mem", "pg_config", change, "work_mem") }, ct);
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            var wait = Measure(await ResultAsync(h.Connection, ct), "total_wait_ms_per_second");
+            Assert.Equal(600.0, (double)wait["before"]!, 1);
+            Assert.Equal(602.0, (double)wait["after"]!, 2);
             Assert.Equal("flat", await TextAsync(h.Connection, "SELECT result FROM config.change_watches", ct));
         });
     }

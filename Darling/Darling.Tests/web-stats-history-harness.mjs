@@ -42,7 +42,7 @@ const fetches = [];
 let reply = { status: 200, body: "{}" };
 globalThis.fetch = async (url) => {
   fetches.push(String(url));
-  return { status: reply.status, ok: reply.status < 400, text: async () => reply.body };
+  return { status: reply.status, ok: reply.status < 400, url: new URL(String(url), "http://viewer.test").href, text: async () => reply.body };
 };
 
 /* ResizeObserver stand-in that counts the observers still connected (plan-row.js: a closed panel must leave none). */
@@ -107,6 +107,35 @@ const scenarios = {
     Object.assign(out, query(0));
     out.chart = chartsNow();
     out.selects = cell.all((n) => n.tag === "select").length;
+  },
+  /* #7586: a page with its own Query picker passes pickRow: the History button hands the row to it, reads nothing and opens no panel. */
+  async pickerRoute() {
+    respond({ hours_back: 24, trend: [{ collection_time: "2026-03-04T05:00:00", avg_cpu_ms: 40, avg_elapsed_ms: 100 }] });
+    const picked = [];
+    const cell = mod.statsHistoryColumn("queries", "srv-a", 24, (row) => picked.push(row)).render(queryRow);
+    cell.byText("History").click();
+    await flush();
+    out.picked = picked;
+    out.fetches = fetches.length;
+    out.charts = chartsNow().length;
+    out.hideButton = cell.byText("Hide history") !== null;
+    out.panels = cell.all((n) => String(n.className).includes("stats-history")).length;
+    const dash = mod.statsHistoryColumn("queries", "srv-a", 24, () => {}).render({ database_name: "Orders" });
+    out.noHashStillDash = dash.textContent;
+  },
+  /* #7586: the per-query history chart prints durations in the grid's format, from the largest tick, with no ms caption. */
+  async queryAxis() {
+    respond({ hours_back: 24, trend: [{ collection_time: "2026-03-04T05:00:00", avg_cpu_ms: 33700, avg_elapsed_ms: 31000 }] });
+    mod.statsHistoryColumn("queries", "srv-a", 24).render(queryRow).byText("History").click();
+    await flush();
+    const spec = globalThis.__charts[0].spec;
+    const util = await import(pathToFileURL(scratch + "/util.js").href);
+    const ticks = [0, 10000, 20000, 30000, 40000];
+    out.axisUnit = spec.unit ?? null;
+    out.sizeUnit = spec.sizeUnit;
+    out.labels = ticks.map((t) => spec.formatValue(t, { step: 10000, axisMax: 40000 }));
+    out.perAtTop = util.sizeAxisPer(spec.sizeUnit, 40000);
+    out.tooltip = spec.formatValue(33700);
   },
   async rebuild() {
     respond(procTrend());
@@ -191,9 +220,58 @@ const scenarios = {
     util.setActiveRange(null);
     out.presetNote = (util.widenedWindowNote?.(1) ?? null);
   },
+  /* #7416 item 21: the History panel names a cause for a late first point only when the read says the start is older than the tier keeps. */
+  async headNote() {
+    const notices = async (kind, row, payload) => {
+      respond(payload);
+      const cell = mod.statsHistoryColumn(kind, "srv-a", 24).render(row);
+      cell.byText("History").click();
+      await flush();
+      return cell.all((n) => n.className === "strip notice").map((n) => n.textContent);
+    };
+    const proc = { ...procTrend(), window_truncated: true, effective_hours_back: 4.9 };
+    const qry = { hours_back: 24, window_truncated: true, effective_hours_back: 4.9, trend: [{ collection_time: "2026-03-04T05:00:00", avg_cpu_ms: 40, avg_elapsed_ms: 100 }] };
+    const old = { start_older_than_tier: true, tier_keeps_days: 4, hours_back: 168, effective_hours_back: 90 };
+    out.lateProcedure = await notices("procedures", procRow, { ...proc, start_older_than_tier: false, tier_keeps_days: 4 });
+    out.oldProcedure = await notices("procedures", { ...procRow, full_name: "dbo.usp_Ship2" }, { ...proc, ...old });
+    out.lateQuery = await notices("queries", queryRow, { ...qry, start_older_than_tier: false, tier_keeps_days: 90 });
+    out.oldQuery = await notices("queries", { ...queryRow, query_hash: "0xDEF" }, { ...qry, ...old, tier_keeps_days: 90 });
+    out.oldQueryNoDays = await notices("queries", { ...queryRow, query_hash: "0x123" }, { ...qry, ...old, tier_keeps_days: null });
+  },
   async points() {
     out.points = mod.procedurePoints(procTrend().trend);
     out.none = mod.procedurePoints(null);
+  },
+  /* #7945: a failed read whose answer carries no sentence of its own names the path it asked for. */
+  async failedReadNamesPath() {
+    reply = { status: 500, body: "" };
+    const cell = mod.statsHistoryColumn("procedures", "srv-a", 24).render(procRow);
+    cell.byText("History").click();
+    await flush();
+    out.error = cell.all((n) => n.className === "strip error").map((n) => n.textContent);
+  },
+  /* #7933: the rate measures' formatter as a tooltip calls it (the value alone) and as an axis tick calls it (with the tick step). */
+  async tooltipRates() {
+    respond(procTrend());
+    const cell = mod.statsHistoryColumn("procedures", "srv-a", 24).render(procRow);
+    cell.byText("History").click();
+    await flush();
+    const select = cell.all((n) => n.tag === "select")[0];
+    const formatterFor = (metric) => {
+      select.value = metric;
+      select.listeners.change[0]();
+      return globalThis.__charts.slice(-1)[0].spec.formatValue;
+    };
+    const msPerSecond = formatterFor("elapsed_ms_per_second");
+    out.msPerSecond = {
+      tooltip: [msPerSecond(0.17), msPerSecond(0), msPerSecond(200)],
+      ticks: [0, 0.2, 0.4].map((t) => msPerSecond(t, { step: 0.2, axisMax: 0.4 })),
+    };
+    const perSecond = formatterFor("executions_per_second");
+    out.perSecond = {
+      tooltip: [perSecond(0.00028), perSecond(0), perSecond(4)],
+      ticks: [0, 0.2, 0.4].map((t) => perSecond(t, { step: 0.2, axisMax: 0.4 })),
+    };
   },
 };
 await scenarios[process.argv[3]]();

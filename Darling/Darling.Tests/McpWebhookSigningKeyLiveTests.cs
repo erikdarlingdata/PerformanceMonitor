@@ -83,7 +83,7 @@ public sealed class McpWebhookSigningKeyLiveTests
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
             {
-                await using var drop = new NpgsqlCommand("DROP OWNED BY admin, viewer, mcp; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS mcp", cleanup);
+                await using var drop = new NpgsqlCommand($"{LiveCleanupBatch.DropOwnedByExistingProductRolesSql} DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS web; DROP ROLE IF EXISTS mcp", cleanup);
                 await drop.ExecuteNonQueryAsync(cleanupCt);
             });
         }
@@ -121,8 +121,7 @@ public sealed class McpWebhookSigningKeyLiveTests
     /// <summary>The route's keys as the service's webhook sender opens them (<see cref="WebhookSigningKeys.LiveKeys"/> is what it signs with).</summary>
     private static async Task<WebhookSigningKeys> OpenedRouteKeysAsync(Store store, int routeId, CancellationToken ct)
     {
-        await using var connection = new NpgsqlConnection(store.Owner.ConnectionString);
-        await connection.OpenAsync(ct);
+        await using var connection = await store.Owner.OpenConnectionAsync(ct);
         var routes = await StoreConfigProvider.ReadNotificationRoutesAsync(connection, null, ct);
         return DarlingWebhookSecrets.Open(new WebhooksConfig(), routes, store.Ring).Routes.Single(r => r.RouteId == routeId).GenericSigning!;
     }

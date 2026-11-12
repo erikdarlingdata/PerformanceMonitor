@@ -100,8 +100,8 @@ public static class RingBufferTruncationNote
 
         return string.Format(
             CultureInfo.InvariantCulture,
-            "the Extended Events ring buffer this collector reads is truncated (SQL Server cuts its XML at about 4 MB and drops the NEWEST events): {0} event(s) are hidden from the read and the newest visible event is {1} old, so newer events are not being collected",
-            hidden,
+            "the Extended Events ring buffer this collector reads is truncated (SQL Server cuts its XML at about 4 MB and drops the NEWEST events): {0} hidden from the read and the newest visible event is {1} old, so newer events are not being collected",
+            $"{CountText.Plural(hidden, "event")} {(hidden == 1 ? "is" : "are")}",
             FormatAge(ageSeconds));
     }
 
@@ -121,27 +121,15 @@ public static class RingBufferTruncationNote
         int eventsRead = 0, string? noneQualifiedBecause = null)
     {
         var first = eventsRead > 0
-            ? string.Format(
-                CultureInfo.InvariantCulture,
-                "{0} {1} event(s) were read for {2} in the last {3} hour(s), and {4}",
-                eventsRead,
-                eventType,
-                serverName,
-                hoursBack,
-                noneQualifiedBecause ?? "none qualified")
-            : string.Format(
-                CultureInfo.InvariantCulture,
-                "No {0} events were found for {1} in the last {2} hour(s)",
-                eventType,
-                serverName,
-                hoursBack);
+            ? $"{CountText.Plural(eventsRead, eventType + " event")} {(eventsRead == 1 ? "was" : "were")} read for {serverName} in the last {CountText.Plural(hoursBack, "hour")}, and {noneQualifiedBecause ?? "none qualified"}"
+            : $"No {eventType} events were found for {serverName} in the last {CountText.Plural(hoursBack, "hour")}";
 
         /* #6827: a read over a window answers for the runs that read it, not for the collector's newest run today. */
         var who = stretch.Count == 1
             ? string.Format(CultureInfo.InvariantCulture, "the system_health collection run at {0}, which read events of this window,", FormatStamp(stretch.First))
             : string.Format(
                 CultureInfo.InvariantCulture,
-                "{0} system_health collection runs that read events of this window (the first at {1}, the last at {2})",
+                "{0:N0} system_health collection runs that read events of this window (the first at {1}, the last at {2})",
                 stretch.Count, FormatStamp(stretch.First), FormatStamp(stretch.Last));
 
         return first + string.Format(
@@ -225,6 +213,6 @@ public static class RingBufferTruncationNote
             return string.Format(CultureInfo.InvariantCulture, "{0} h {1} min", hours, minutes % 60);
         }
 
-        return string.Format(CultureInfo.InvariantCulture, "{0} d {1} h", hours / 24, hours % 24);
+        return string.Format(CultureInfo.InvariantCulture, "{0:N0} d {1} h", hours / 24, hours % 24);
     }
 }

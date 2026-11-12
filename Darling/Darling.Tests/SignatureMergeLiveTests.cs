@@ -170,7 +170,7 @@ public sealed class SignatureMergeLiveTests
         {
             Assert.Equal("merged", (string?)Parse(await Merge(c, SigA, SigB))["status"]);
 
-            var read = await c.Undo.ReadAsync(200, c.Ct);
+            var read = await c.Undo.ReadAsync(200, cancellationToken: c.Ct);
             var change = Assert.Single(read.Changes, ch => ch.Tool == "merge_deadlock_signatures");
             Assert.Equal(AgentChangeKinds.SignatureMerge, change.Kind);
             Assert.Equal("agent:agent-a", change.Actor);
@@ -182,6 +182,58 @@ public sealed class SignatureMergeLiveTests
             /* The table row carries the same reason and the agent. */
             Assert.Equal("same tables, same lock order", await ScalarAsync(c, "SELECT reason FROM config.investigation_signature_merges"));
             Assert.Equal("agent:agent-a", await ScalarAsync(c, "SELECT merged_by FROM config.investigation_signature_merges"));
+        });
+    }
+
+    private static Task<string> WritesMerge(Ctx c, string signature, string into, bool withOwner)
+    {
+        var owner = new StoreOwnerSource();
+        if (withOwner)
+            owner.Publish(c.Source);
+        var seat = new DarlingAgentActionSeat(new DarlingMcpWritePolicy.Effective(true, false), owner);
+        return DarlingMcpSignatureMergeTools.MergeAsync(c.Source, seat, null, "srv-7", signature, into, "same tables, same lock order", null, c.Ct);
+    }
+
+    /* #7185: the writes arm said "undo it from Agent changes" but wrote no journal row, so nothing listed the merge and no undo existed. */
+    [Fact]
+    public async Task AWritesArmMerge_IsJournaled_ListedInAgentChanges_AndCanBeUndone()
+    {
+        await RunAsync(2, async c =>
+        {
+            var answer = Parse(await WritesMerge(c, SigA, SigB, withOwner: true));
+            Assert.Equal("merged", (string?)answer["status"]);
+            Assert.Contains("Agent changes", (string?)answer["undo_note"], StringComparison.Ordinal);
+
+            var read = await c.Undo.ReadAsync(200, cancellationToken: c.Ct);
+            var change = Assert.Single(read.Changes, ch => ch.Tool == "merge_deadlock_signatures");
+            Assert.Equal("mcp", change.Actor);
+            Assert.Null(change.RequestId);
+            Assert.Equal("same tables, same lock order", change.Reason);
+            Assert.Equal(AgentChangeResult.Done, change.Result);
+            Assert.True(change.CanTryUndo(DateTime.UtcNow));
+
+            var undone = await c.Undo.UndoAsync(change.CalledId, Login, c.Ct);
+            Assert.True(undone.Undone, undone.Words);
+            Assert.Equal(new Dictionary<string, int> { [SigA] = 3, [SigB] = 5, [SigC] = 1 }, await TodayAsync(c));
+            Assert.Equal("1", await ScalarAsync(c, "SELECT count(*) FROM config.investigation_signature_merges WHERE undone_at IS NOT NULL AND undone_by = 'person:erik'"));
+
+            /* The list now shows it undone: the undo row has no request either. */
+            var after = Assert.Single((await c.Undo.ReadAsync(200, cancellationToken: c.Ct)).Changes, ch => ch.Tool == "merge_deadlock_signatures");
+            Assert.NotNull(after.UndoneAtUtc);
+            Assert.False(after.CanTryUndo(DateTime.UtcNow));
+        });
+    }
+
+    [Fact]
+    public async Task AWritesArmMerge_WithNoOwnerConnection_SaysItHasNoUndo()
+    {
+        await RunAsync(2, async c =>
+        {
+            var answer = Parse(await WritesMerge(c, SigA, SigB, withOwner: false));
+            Assert.Equal("merged", (string?)answer["status"]);
+            Assert.DoesNotContain("journaled there", (string?)answer["undo_note"], StringComparison.Ordinal);
+            Assert.Contains("no undo", (string?)answer["message"], StringComparison.Ordinal);
+            Assert.Equal("0", await ScalarAsync(c, "SELECT count(*) FROM config.investigation_journal WHERE event = 'action_called'"));
         });
     }
 

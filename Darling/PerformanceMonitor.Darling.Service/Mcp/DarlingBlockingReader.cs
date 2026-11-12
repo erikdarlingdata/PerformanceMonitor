@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -127,8 +128,9 @@ internal static class DarlingBlockingReader
         public int BlockedPriority { get; set; }
         public int BlockingPriority { get; set; }
 
-        /// <summary>#5632, DMV-snapshot rows only (the report XML carries none of the four, so it is null on an XE report row unless a
-        /// same-minute DMV row for the pair was folded into it by BlockedProcessReportMerge): when the head blocker's session signed in,
+        /// <summary>#5632, DMV-snapshot rows only (the report XML carries none of these three, so it is null on an XE report row unless a
+        /// same-minute DMV row for the pair was folded into it by BlockedProcessReportMerge; the fourth, the open transaction count, is
+        /// also on a report row, #7497): when the head blocker's session signed in,
         /// converted from the monitored server's clock to UTC at the read. A later kill step compares it with the server's own value. On a
         /// folded row it is the login time of the session the DMV snapshot saw in that minute, which is the session a kill would match.</summary>
         public DateTime? BlockingLoginTimeUtc { get; set; }
@@ -136,7 +138,9 @@ internal static class DarlingBlockingReader
         /// <summary>#5632: when the head blocker's last request ended, in UTC. For an idle (<c>sleeping</c>) head it is how long it has been idle.</summary>
         public DateTime? BlockingLastRequestEndTimeUtc { get; set; }
 
-        /// <summary>#5632: the head blocker's open transaction count (<c>sys.dm_exec_sessions.open_transaction_count</c>).</summary>
+        /// <summary>#5632: the head blocker's open transaction count (<c>sys.dm_exec_sessions.open_transaction_count</c>). On a report row
+        /// it is the report's own <c>trancount</c> for the blocking process (#7497), null when the report has none or the row was stored
+        /// before V241; a folded DMV row's value fills it only when it is null.</summary>
         public int? BlockingOpenTransactionCount { get; set; }
 
         /// <summary>#5632: exact bytes of transaction log the head blocker's open transactions have used, summed over every database.
@@ -147,6 +151,7 @@ internal static class DarlingBlockingReader
         public override void FillHeadEvidenceFrom(BlockedProcessAlertRow dmvRow)
         {
             if (dmvRow is not BlockedProcessReadRow dmv) return;
+            BlockingLastTranStartedUtc ??= dmv.BlockingLastTranStartedUtc;
             BlockingLoginTimeUtc ??= dmv.BlockingLoginTimeUtc;
             BlockingLastRequestEndTimeUtc ??= dmv.BlockingLastRequestEndTimeUtc;
             BlockingOpenTransactionCount ??= dmv.BlockingOpenTransactionCount;
@@ -219,7 +224,7 @@ internal static class DarlingBlockingReader
     public static readonly string BlockedProcessReportsSql = $$"""
         {{BlockedProcessReportsBody}}
         {{DatabaseFilter.All.Clause("database_name", 6)}}
-        ORDER BY event_time DESC
+        ORDER BY event_time DESC, collection_time DESC, blocked_report_id DESC
         LIMIT $4
         """;
 
@@ -232,7 +237,7 @@ internal static class DarlingBlockingReader
         {{DatabaseFilter.All.Clause("database_name", 6)}}
         AND   blocked_process_report_xml IS NOT NULL
         AND   blocked_process_report_xml <> ''
-        ORDER BY event_time DESC
+        ORDER BY event_time DESC, collection_time DESC, blocked_report_id DESC
         LIMIT $4
         """;
 
@@ -242,7 +247,7 @@ internal static class DarlingBlockingReader
     /// collected late (after an outage) still lists. Private so the
     /// executable statements stay the two public consts the tests pin.
     ///
-    /// <para>The last two columns (#5236) are the row's store key, <c>collection_time</c> and <c>blocked_report_id</c>. The plan
+    /// <para>Columns 35 and 36 (#5236) are the row's store key, <c>collection_time</c> and <c>blocked_report_id</c>; <c>blocking_open_transaction_count</c> (#7497) is last. The plan
     /// columns are deliberately NOT in this projection. In a compressed chunk every column a statement names is
     /// decompressed for each batch it scans, and the list scans every row from the floor to now (there is no
     /// <c>event_time</c> index) and sorts. A flag computed here was evaluated only after the per-chunk sorts, so each row's whole
@@ -289,7 +294,8 @@ internal static class DarlingBlockingReader
             blocked_process_report_xml,
             contentious_object,
             collection_time,
-            blocked_report_id
+            blocked_report_id,
+            blocking_open_transaction_count
         FROM blocked_process_reports
         WHERE server_id = $1
         AND   event_time >= $2
@@ -467,12 +473,12 @@ internal static class DarlingBlockingReader
     }
 
     /// <summary>Maps one row of <see cref="BlockedProcessReportsSql"/> / <see cref="BlockedProcessReportsWithXmlSql"/>
-    /// (37 columns, in the SELECT's order; the last two are the row's store key, #5236, and the plan flags stay false until
+    /// (38 columns, in the SELECT's order; columns 35 and 36 are the row's store key, #5236, and the plan flags stay false until
     /// <see cref="ReadBlockedPlanFlagsAsync"/> fills them for a page). One mapper for both, so the with-XML
     /// variant cannot drift a column from the unfiltered one.</summary>
     internal static BlockedProcessReadRow MapXeRow(DbDataReader reader, ServerClock clock)
     {
-        return new BlockedProcessReadRow
+        var row = new BlockedProcessReadRow
         {
             EventTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
             DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
@@ -511,7 +517,26 @@ internal static class DarlingBlockingReader
             ContentiousObject = reader.IsDBNull(34) ? "" : reader.GetString(34),
             CollectionTime = reader.IsDBNull(35) ? null : reader.GetDateTime(35),
             BlockedReportId = reader.IsDBNull(36) ? null : reader.GetInt64(36),
+            /* #7497: the report's own trancount for the blocking process. NULL on a row stored before V241 and on a report without the attribute. */
+            BlockingOpenTransactionCount = reader.IsDBNull(37) ? null : reader.GetInt32(37),
         };
+        ClearSentinelStamps(row);
+        return row;
+    }
+
+    /// <summary>
+    /// The report writes 1900-01-01T00:00:00, in the server's clock, for a session with no last batch or no open transaction
+    /// (<see cref="BlockedProcessReportSentinel"/>). Shifted to UTC it is still a day inside the floor, so each of the six stamps
+    /// is nulled here rather than answered as a date near 1900 that reads as measured.
+    /// </summary>
+    private static void ClearSentinelStamps(BlockedProcessReadRow row)
+    {
+        row.BlockedLastTranStartedUtc = BlockedProcessReportSentinel.OrNull(row.BlockedLastTranStartedUtc);
+        row.BlockingLastTranStartedUtc = BlockedProcessReportSentinel.OrNull(row.BlockingLastTranStartedUtc);
+        row.BlockedLastBatchStartedUtc = BlockedProcessReportSentinel.OrNull(row.BlockedLastBatchStartedUtc);
+        row.BlockingLastBatchStartedUtc = BlockedProcessReportSentinel.OrNull(row.BlockingLastBatchStartedUtc);
+        row.BlockedLastBatchCompletedUtc = BlockedProcessReportSentinel.OrNull(row.BlockedLastBatchCompletedUtc);
+        row.BlockingLastBatchCompletedUtc = BlockedProcessReportSentinel.OrNull(row.BlockingLastBatchCompletedUtc);
     }
 
     /// <summary>

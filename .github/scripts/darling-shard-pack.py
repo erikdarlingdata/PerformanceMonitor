@@ -23,14 +23,18 @@ A weight is the wall-clock cost of a class in one shard, in seconds, not its raw
 The hash cut left the chain at 95 to 375 s per shard, which is what made one shard 4 to 6 minutes slower than the mean.
 
 `refresh` rebuilds the table from the per-test timings the Darling PG shards upload on every run
-(`darling-tests-timing-N`, xUnit `-xml`, kept a week). Use FULL runs (a push to dev runs every class; a pull request
+(since #6656 the `ci-test-results-N` artifacts of a PR CI run hold `darling-timing-*.xml` and `lite-timing-*.xml`, xUnit `-xml`, kept a week). Use FULL runs (a push to dev runs every class; a pull request
 runs the test map's selection, so its timings cover part of the suite), the more the steadier (a class's seconds swing
 with what runs beside it); the table holds the mean over the runs given:
 
   for id in <run id> <run id> <run id>; do gh run download $id -R erikdarlingdata/PerformanceMonitor \\
-      -p 'darling-tests-timing-*' -D <scratch>/$id; done
+      -p 'ci-test-results-*' -D <scratch>/$id; done
   python .github/scripts/darling-shard-pack.py refresh --timings <scratch>/<id> <scratch>/<id> ... \\
       --out .github/scripts/darling-shard-weights.json
+Each --timings dir must hold one kind only: copy the darling-timing-*.xml files of a run into <scratch>/darling/<id> and the
+lite-timing-*.xml files into <scratch>/lite/<id>. The Lite table is the same command over the lite dirs with
+--tests-dir Lite.Tests --out .github/scripts/lite-shard-weights.json. Then replay the new tables against runs left out of the
+mean (pack each suite's classes into the leg count, sum the measured weights per leg) before committing them.
 
 Refresh when the shards drift apart again (the slowest shard more than about 20 % over the mean), after a large batch
 of new live classes, or about once a month. A stale table only costs balance, never a class: a renamed or new class

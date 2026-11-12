@@ -75,7 +75,7 @@ public sealed class PlanCorrectionsWebDefaultTests
 
         Assert.True(File.Exists(path), $"#4257 scan target not found: {path}");
 
-        return File.ReadAllText(path);
+        return RepoFile.ReadRepoFile(relative);
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

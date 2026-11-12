@@ -33,6 +33,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed class ViewerQueryStatsRow : QueryTagRowBase
 {
     public string DatabaseName { get; set; } = "";
+    /// <summary>#7725: true for a row from a database the server no longer lists. The ranking puts the databases the server still lists
+    /// first and fills what the limit leaves from the dropped ones, which carry this mark (the Top Procedures grid's rule).</summary>
+    public bool IsDropped { get; set; }
+    /// <summary>#7725: what the grid's database cell shows: the name, with " (dropped)" after a database the server no longer lists.</summary>
+    public string DatabaseDisplay => DroppedDatabaseMark.Display(DatabaseName, IsDropped);
     public string QueryHash { get; set; } = "";
     public DateTime? LastExecutionTime { get; set; }
     public DateTime? CreationTime { get; set; }
@@ -128,6 +133,94 @@ public sealed class ViewerQueryStatsRow : QueryTagRowBase
 public sealed partial class ViewerDataService
 {
     /// <summary>
+    /// The <c>module</c> CTE of <see cref="TopQueriesSql"/> (#1568 module attribution): one <c>procedure_stats</c> identity per ranked
+    /// <c>sql_handle</c>. Its own constant so a live test can run it against a stand-in <c>ranked</c> CTE (#8549).
+    /// $1 server_id, $2 the window start (the read's own lower bound); reads <c>ranked.sql_handle</c>.
+    /// </summary>
+    public static readonly string TopQueriesModuleCte = """
+        module AS MATERIALIZED (
+            /* #1568 module attribution: one procedure_stats identity per sql_handle (latest
+               collection_time wins) so a statement whose sql_handle matches a cached
+               procedure/function/trigger inherits its db.schema.object and the query_stats row never
+               fans out. Both stores persist the SAME normalized CONVERT(varchar(130), ..., 1) handle
+               text, so the join key lines up; unmatched -> ad hoc. MATERIALIZED so the page joins to one run of it, not one per ranked row.
+               #6804: only the handles of the ranked groups, and no upper bound on the newest row. A handle whose newest row is older
+               than the window still names its module, which a bound would turn into 'ad hoc' (#7256: the newest row over all history).
+               #8549: this was a ROW_NUMBER over every row of the ranked handles (a sort), then a hash aggregate joined back to the
+               whole table, which a planner with 10x-high group estimates ran as a hash join over every row of the server: on a
+               field store, 4.2 million rows read twice, 14.0 s of a 17.1 s statement. Now the newest row of each handle is found
+               in the RECENT rows first (collection_time >= the window start, no upper bound): a handle with any row since the window
+               start has its newest row there, so the answer is the same, and the recent rows are a few chunks, not the server.
+               Only the handles with no recent row take the read over the older history (collection_time < the window start), and
+               that read is limited to them and gated by an EXISTS, so with none of them it reads nothing. A handle with no row at all
+               (an ad hoc statement) can only be proved absent by reading the history, because this table has no (server_id,
+               sql_handle) index (#4247 dropped it for its WAL cost); that read is one filtered aggregate pass, with no join back
+               to the server. Each winner's row is then fetched by a LATERAL probe of idx_procedure_stats_time (server_id,
+               collection_time) with ORDER BY collection_id DESC LIMIT 1, a nested loop the planner cannot turn into a hash join
+               over the table. The tie-break is the row collected last (the higher collection_id), the rule Lite's module lookup
+               uses; the ROW_NUMBER left a tie unspecified. A module whose newest row has NULL names answers NULL, as before. Both
+               columns of the time key are NOT NULL, so no NULL ordering applies.
+               idx_procedure_stats_time is part of the schema, not the tuning pass, so every store has it. */
+            WITH handles AS MATERIALIZED (
+                SELECT DISTINCT sql_handle
+                FROM ranked
+                WHERE sql_handle IS NOT NULL
+                AND   sql_handle <> ''
+            ),
+            recent AS MATERIALIZED (
+                SELECT
+                    sql_handle,
+                    MAX(collection_time) AS newest
+                FROM procedure_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   sql_handle IN (SELECT sql_handle FROM handles)
+                GROUP BY sql_handle
+            ),
+            missing AS MATERIALIZED (
+                SELECT h.sql_handle
+                FROM handles AS h
+                WHERE NOT EXISTS (SELECT 1 FROM recent AS r WHERE r.sql_handle = h.sql_handle)
+            ),
+            older AS MATERIALIZED (
+                SELECT
+                    sql_handle,
+                    MAX(collection_time) AS newest
+                FROM procedure_stats
+                WHERE server_id = $1
+                AND   collection_time < $2
+                AND   sql_handle IN (SELECT sql_handle FROM missing)
+                AND   EXISTS (SELECT 1 FROM missing)
+                GROUP BY sql_handle
+            )
+            SELECT
+                w.sql_handle,
+                p.object_name,
+                p.schema_name,
+                p.database_name
+            FROM
+            (
+                SELECT sql_handle, newest FROM recent
+                UNION ALL
+                SELECT sql_handle, newest FROM older
+            ) AS w
+            CROSS JOIN LATERAL
+            (
+                SELECT
+                    ps.object_name,
+                    ps.schema_name,
+                    ps.database_name
+                FROM procedure_stats AS ps
+                WHERE ps.server_id = $1
+                AND   ps.collection_time = w.newest
+                AND   ps.sql_handle = w.sql_handle
+                ORDER BY ps.collection_id DESC
+                LIMIT 1
+            ) AS p
+        )
+        """;
+
+    /// <summary>
     /// The Top-Queries-by-Duration read — Lite's <c>GetTopQueriesByCpuAsync</c> (despite the name it
     /// ranks by summed <c>delta_elapsed_time</c>, matching the grid's default TotalElapsedMs-descending
     /// sort) ported to Postgres against <c>v_query_stats</c> (the view resolves the #1767 payload
@@ -150,10 +243,45 @@ public sealed partial class ViewerDataService
     /// for this row", which is what the on-demand fetch can act on; it has never promised the fetch will
     /// find content, since a digest can outlive the dimension row the GC pruned.
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top, $5 database filter, $6 the candidate
-    /// limit (#5313: top + 5 first, larger on a refill round).
+    /// limit (#5313: top + 5 first, larger on a refill round), $7 the databases to leave out (#7725: the ones the server dropped; NULL
+    /// leaves out none).
     /// </summary>
-    public const string TopQueriesSql = """
-        WITH ranked AS MATERIALIZED (
+    public static readonly string TopQueriesSql = $"""
+        WITH winners AS MATERIALIZED (
+            /* #8549 pass 1 of 2: rank every group of the window on NARROW columns, as the MCP reader's TopQueriesSql does (#5226). The
+               wide row below (forty aggregates, a plan flag and the newest text pick) shares one GROUP BY with the ranking when it is
+               built in the same pass, so a busy server's hash aggregate over hundreds of thousands of groups carried that row for every
+               group and spilled to disk (95,272 temp blocks, about 745 MB, on a field store's day window: 8.3 s at the worst call).
+               Here the pass keeps only the grouping key and the ranking sum; pass 2 builds the wide row for the survivors. Everything
+               that decides which groups exist or survive is the shipped statement's, unchanged: the window, the database filters, the
+               tag join, the grouping key, the HAVING and the ordering with its tie-break, so the same groups win in the same order. */
+            SELECT
+                database_name AS win_database_name,
+                query_hash AS win_query_hash,
+                host_object_name AS win_host_object_name
+            FROM query_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+           {DatabaseFilter.ExcludeClause("database_name", 7)}
+            /*TAG:hash:query_hash*/
+            GROUP BY database_name, query_hash, host_object_name
+            HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
+            ORDER BY SUM(delta_elapsed_time) DESC, database_name, query_hash, host_object_name
+            /* #5313: $6 is the candidate limit, not a fixed over-fetch of five. The caller starts at top plus five and, when the
+               WAITFOR trim below leaves fewer than top rows while more candidates exist, asks again with a
+               larger $6 (TopFill, at most three rounds). The final LIMIT stays $4. */
+            LIMIT $6
+        ),
+        ranked AS MATERIALIZED (
+            /* #8549 pass 2 of 2: the wide row, built only for pass 1's winners over the same window. The rows come from the winners'
+               query hashes through idx_query_stats_server_hash_time (server_id, query_hash, collection_time) where a store has it, the
+               way the MCP reader's pass 2 reads them (#8570); the equality is plain, so a hash two winners share is read once, and it
+               cannot match a NULL hash, so the second arm reads the NULL-hash rows, and only when a winner has one. The join stays the
+               exact NULL-safe match, so every group and figure is what the single pass produced. The COALESCE equality is only the
+               hashable pre-filter: PostgreSQL cannot hash an IS NOT DISTINCT FROM, so alone it would nested-loop every row against every
+               winner. */
             SELECT
                 database_name,
                 query_hash,
@@ -208,30 +336,82 @@ public sealed partial class ViewerDataService
                    inline plan nor a digest is one the size cap declined. Those are exactly the rows
                    the backlog goes back for, and GetQueryStatsPlanXmlAsync reads it. */
                 bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL OR query_plan_xml_bytes IS NOT NULL) AS has_query_plan,
+                /* #8136: the group's newest text-bearing row, picked in this one pass over the window so latest_text below
+                   is a lookup on the capped rows and not a second read of the window. The pick is a MAX over a byte key
+                   that sorts the way the lookup used to: collection_time first (timestamp_send is its microseconds,
+                   big-endian, positive for any collection date), then collection_id (the row collected last wins a tie;
+                   int8send of a positive id), then the row's text as a flag byte and payload: 0x00 and the inline text
+                   when the row carries one (pre-dimension rows only; v_query_stats' COALESCE prefers it), else 0x01 and
+                   the 32-byte digest. Only rows that carry a text or a digest take part, which is the row the view
+                   gives a text for. A MAX keeps one value per group and has a combine step, so the aggregate stays
+                   partial and parallel; an ordered array aggregate here lost both and ran slower than the second scan. */
+                MAX(timestamp_send(q.collection_time) || int8send(q.collection_id)
+                    || CASE WHEN q.query_text IS NOT NULL THEN '\x00'::bytea || convert_to(q.query_text, 'UTF8') ELSE '\x01'::bytea || q.query_text_digest END)
+                    FILTER (WHERE q.query_text IS NOT NULL OR q.query_text_digest IS NOT NULL) AS latest_text_key,
                 host_object_name
-            FROM query_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
-            /*TAG:hash:query_hash*/
+            FROM
+            (
+                SELECT * FROM query_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                AND   query_hash IN (SELECT win_query_hash FROM winners)
+                UNION ALL
+                SELECT * FROM query_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                AND   query_hash IS NULL
+                AND   EXISTS (SELECT 1 FROM winners WHERE win_query_hash IS NULL)
+            ) AS q
+            JOIN winners AS w
+                ON  COALESCE(q.query_hash, '') = COALESCE(w.win_query_hash, '')
+                AND q.database_name IS NOT DISTINCT FROM w.win_database_name
+                AND q.query_hash IS NOT DISTINCT FROM w.win_query_hash
+                AND q.host_object_name IS NOT DISTINCT FROM w.win_host_object_name
             GROUP BY database_name, query_hash, host_object_name
-            HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-            ORDER BY SUM(delta_elapsed_time) DESC, database_name, query_hash, host_object_name
-            /* #5313: $6 is the candidate limit, not a fixed over-fetch of five. The caller starts at top plus five and, when the
-               WAITFOR trim below leaves fewer than top rows while more candidates exist, asks again with a
-               larger $6 (TopFill, at most three rounds). The final LIMIT stays $4. */
-            LIMIT $6
         ),
         latest_text AS MATERIALIZED (
-            /* #5309: the representative text of EVERY ranked group in ONE lookup. This was a lateral
-               lookup of the newest row, one per ranked row, which on a store without TimescaleDB scanned the
-               raw table once per row. One pass reads the window's rows for the ranked keys and keeps the
-               newest row per key; the text is resolved from the dimension for that one row afterwards, so the
-               sort never carries a wide text. A row counts as having text when its inline text or its
-               dimension row exists, the rule v_query_stats' COALESCE gives. The key match is NULL-safe (ad-hoc
-               rows carry a NULL host object) with the COALESCE equality as the hashable pre-filter. The
-               group's own host object keeps one caller's text from labelling another's (#2012). */
+            /* #5309, #8136: the representative text of EVERY ranked group, resolved for the capped rows only. ranked
+               carries each group's newest text-bearing row out of the window's one pass (latest_text_key: 8 bytes of
+               time, 8 of collection id, a flag byte at offset 16, then the payload from byte 18), so this reads at most
+               $6 rows and the dimension: the inline text when that row has one (flag 0x00, pre-dimension rows only),
+               else its digest (flag 0x01) resolved from query_text_dim, the rule v_query_stats' COALESCE gives.
+               A digest resolves here unless its dimension row is missing, which the collector allows (#7419: a
+               fact row is committed before its dimension row, and a failed dimension write is not retried);
+               orphans and fallback_text below cover that key the way the lookup did. The group's own host object
+               keeps one caller's text from labelling another's (#2012). MATERIALIZED, because the join to it below is
+               NULL-safe (IS NOT DISTINCT FROM), which PostgreSQL cannot hash: left plain it is inlined into a nested
+               loop and re-run per ranked row. */
+            SELECT
+                k.database_name,
+                k.query_hash,
+                k.host_object_name,
+                COALESCE(CASE WHEN get_byte(k.latest_text_key, 16) = 0 THEN convert_from(substring(k.latest_text_key FROM 18), 'UTF8') END, d.query_text) AS query_text
+            FROM ranked AS k
+            LEFT JOIN query_text_dim AS d ON d.digest = CASE WHEN get_byte(k.latest_text_key, 16) = 1 THEN substring(k.latest_text_key FROM 18) END
+        ),
+        orphans AS MATERIALIZED (
+            /* #7419: the collector commits a fact row whose text digest has no dimension row (the dimension write follows
+               the facts, and a failed one is not retried), so a pick can carry a digest the dimension cannot resolve.
+               These are the capped rows whose pick did not resolve: a key that has a pick but no text. */
+            SELECT k.database_name, k.query_hash, k.host_object_name
+            FROM ranked AS k
+            JOIN latest_text AS t
+                ON  t.database_name IS NOT DISTINCT FROM k.database_name
+                AND t.query_hash IS NOT DISTINCT FROM k.query_hash
+                AND t.host_object_name IS NOT DISTINCT FROM k.host_object_name
+            WHERE k.latest_text_key IS NOT NULL
+            AND   t.query_text IS NULL
+        ),
+        fallback_text AS MATERIALIZED (
+            /* The lookup latest_text replaced, run for the orphan keys only: the newest row of each whose inline text or
+               dimension row exists, the rule v_query_stats' COALESCE gives. The EXISTS over orphans is an init plan that
+               gates the window scan (a one-time filter in the plan), so with no orphans the window is not read at all;
+               with one, this reads the window for that key's rows, as every read did before #8136. MATERIALIZED for
+               the same reason latest_text is. */
             SELECT
                 l.database_name,
                 l.query_hash,
@@ -246,55 +426,21 @@ public sealed partial class ViewerDataService
                     q.query_text,
                     q.query_text_digest
                 FROM query_stats AS q
-                JOIN ranked AS rk
-                    ON  COALESCE(q.query_hash, '') = COALESCE(rk.query_hash, '')
-                    AND q.database_name IS NOT DISTINCT FROM rk.database_name
-                    AND q.query_hash IS NOT DISTINCT FROM rk.query_hash
-                    AND q.host_object_name IS NOT DISTINCT FROM rk.host_object_name
+                JOIN orphans AS o
+                    ON  COALESCE(q.query_hash, '') = COALESCE(o.query_hash, '')
+                    AND q.database_name IS NOT DISTINCT FROM o.database_name
+                    AND q.query_hash IS NOT DISTINCT FROM o.query_hash
+                    AND q.host_object_name IS NOT DISTINCT FROM o.host_object_name
                 WHERE q.server_id = $1
                 AND   q.collection_time >= $2
                 AND   q.collection_time <= $3
+                AND   EXISTS (SELECT 1 FROM orphans)
                 AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
                 ORDER BY q.database_name, q.query_hash, q.host_object_name, q.collection_time DESC, q.collection_id DESC
             ) AS l
             LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
         ),
-        module AS (
-            /* #1568 module attribution: one procedure_stats identity per sql_handle (latest
-               collection_time wins) so a statement whose sql_handle matches a cached
-               procedure/function/trigger inherits its db.schema.object and the query_stats row never
-               fans out. Both stores persist the SAME normalized CONVERT(varchar(130), ..., 1) handle
-               text, so the join key lines up; unmatched -> ad hoc. */
-            SELECT
-                sql_handle,
-                object_name,
-                schema_name,
-                database_name
-            FROM
-            (
-                SELECT
-                    sql_handle,
-                    object_name,
-                    schema_name,
-                    database_name,
-                    ROW_NUMBER() OVER (PARTITION BY sql_handle ORDER BY collection_time DESC) AS rn
-                FROM procedure_stats
-                WHERE server_id = $1
-                AND   sql_handle IS NOT NULL
-                AND   sql_handle <> ''
-                /* #6804: only the handles of the ranked groups. Without this the ROW_NUMBER below ranked EVERY
-                   procedure_stats row the server retains (2.9 million rows in, 2,302 out, 10 to 12 s of a 13 s read on a large
-                   server): the cost grew with retention, not with the window. The page joins on r.sql_handle alone, so a handle
-                   outside the ranked groups was never used, and a handle inside them keeps the same newest row: the answer is
-                   exactly what the unfiltered read gave, including a handle whose newest procedure_stats row is older than the
-                   window. There is deliberately no collection_time bound. It would be faster still, but it would turn that
-                   handle into 'ad hoc', and this table has no (server_id, sql_handle) index to look a handle up by (#4247
-                   dropped it for its WAL cost), so the read cannot skip the other handles' rows and instead stops them before
-                   the sort. */
-                AND   sql_handle IN (SELECT sql_handle FROM ranked)
-            ) AS ranked_modules
-            WHERE rn = 1
-        ),
+        {TopQueriesModuleCte},
         page AS (
         SELECT
             r.database_name,
@@ -337,7 +483,7 @@ public sealed partial class ViewerDataService
             r.total_clr_time,
             r.plan_generation_num,
             r.worker_time_per_second,
-            t.query_text,
+            COALESCE(t.query_text, f.query_text) AS query_text,
             r.has_query_plan,
             m.object_name AS module_object_name,
             m.schema_name AS module_schema_name,
@@ -351,8 +497,12 @@ public sealed partial class ViewerDataService
             ON  t.database_name IS NOT DISTINCT FROM r.database_name
             AND t.query_hash IS NOT DISTINCT FROM r.query_hash
             AND t.host_object_name IS NOT DISTINCT FROM r.host_object_name
+        LEFT JOIN fallback_text AS f
+            ON  f.database_name IS NOT DISTINCT FROM r.database_name
+            AND f.query_hash IS NOT DISTINCT FROM r.query_hash
+            AND f.host_object_name IS NOT DISTINCT FROM r.host_object_name
         LEFT JOIN module AS m ON m.sql_handle = r.sql_handle
-        WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
+        WHERE COALESCE(t.query_text, f.query_text) IS NULL OR COALESCE(t.query_text, f.query_text) NOT LIKE 'WAITFOR%'
         ORDER BY r.total_elapsed_us DESC, r.database_name, r.query_hash, r.host_object_name
         LIMIT $4
         )
@@ -419,21 +569,49 @@ public sealed partial class ViewerDataService
     private async Task<ViewerRoutedRead<ViewerQueryStatsRow>> GetTopQueriesByCpuRoutedUntaggedAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
+        /* #7725 (the Top Procedures grid's order): with no database chosen, the databases the server still lists rank first, with the
+           dropped ones excluded in the statement ($7 raw, $6 hourly), so a dropped database's rows never push out a listed row. What the
+           limit leaves is filled from the dropped databases, ranked the same way and marked IsDropped (the grid shows "(dropped)"). A
+           database the user names is read as asked, and an unknown set (no recent snapshot) leaves out nothing. The window is anchored
+           as the Procedures read anchors it. */
+        var now = DateTime.UtcNow;
+        var databases = await CurrentDatabaseScope.NarrowAsync(
+            _dataSource, serverId, DatabaseFilter.Of(databaseNames), nowUtc: now, asOfUtc: endUtc < now ? endUtc : null,
+            windowStartUtc: startUtc, logger: ViewerStoreLogger.Instance, cancellationToken: cancellationToken);
+        var leftOut = DatabasesLeftOut.Distinct(databases.ExcludedNames);
+
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var routedTier = RetentionTierRouter.Resolve(
-            DateTime.UtcNow, startUtc, rollups.QueryGrainHourly, dailyAvailable: false,
+            now, startUtc, rollups.QueryGrainHourly, dailyAvailable: false,
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
         if (routedTier == RetentionTier.Daily)
         {
             routedTier = RetentionTier.Hourly;
         }
 
-        if (routedTier == RetentionTier.Hourly)
+        var read = routedTier == RetentionTier.Hourly
+            ? await GetTopQueriesByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, databases, tags, cancellationToken)
+            : new ViewerRoutedRead<ViewerQueryStatsRow>(await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, databases, tags, cancellationToken), "raw", null);
+
+        if (leftOut is { Count: > 0 } && read.Rows.Count < top)
         {
-            return await GetTopQueriesByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken);
+            var fillTop = top - read.Rows.Count;
+            var leftOutNames = leftOut.ToList();
+            var fill = routedTier == RetentionTier.Hourly
+                ? (await GetTopQueriesByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, fillTop, leftOutNames, DatabaseFilter.All, tags, cancellationToken)).Rows
+                : await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, fillTop, leftOutNames, DatabaseFilter.All, tags, cancellationToken);
+            if (fill.Count > 0)
+            {
+                foreach (var row in fill)
+                {
+                    row.IsDropped = true;
+                }
+
+                read = read with { Rows = [.. read.Rows, .. fill] };
+            }
         }
 
-        return new ViewerRoutedRead<ViewerQueryStatsRow>(await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken), "raw", null);
+        return read;
     }
 
     /// <summary>#4231 stage 3: the hourly-rollup arm — builds its FROM clause ONLY through
@@ -442,7 +620,7 @@ public sealed partial class ViewerDataService
     /// <c>query_text</c> with a follow-up lookup mirroring <see cref="DarlingDataReader"/>'s MCP twin.</summary>
     private async Task<ViewerRoutedRead<ViewerQueryStatsRow>> GetTopQueriesByCpuHourlyAsync(
         RollupAvailability rollups, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
-        IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
+        IReadOnlyList<string>? databaseNames, DatabaseFilter databases, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         /* #5329: when the io hourly rollup reaches the window's start, read it instead of the interval rollup (it
            carries every column the interval one does) and fill reads, physical reads and writes from its three sums.
@@ -471,6 +649,7 @@ public sealed partial class ViewerDataService
                 AddServerWindowParameters(command, serverId, startUtc, endUtc);
                 command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
                 command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+                command.Parameters.Add(databases.ExcludeParameter());
                 AddHourlyCeilingParameter(command, ceiling);
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
@@ -584,7 +763,7 @@ public sealed partial class ViewerDataService
 
     /// <summary>The hourly-rollup arm's SQL over <paramref name="fromClause"/>. A rollup bucket is stamped at
     /// its START, so the window end is EXCLUSIVE (<c>bucket &lt; $3</c>), and (#5329) a known materialization
-    /// <paramref name="ceiling"/> adds <c>bucket &lt; $6</c> (see <see cref="HourlyCeilingSql"/>): a range whose To is 14:00 sums the
+    /// <paramref name="ceiling"/> adds <c>bucket &lt; $7</c> (see <see cref="HourlyCeilingSql"/>; $6 is the dropped-database exclusion, #7725): a range whose To is 14:00 sums the
     /// hours up to 13:00-14:00 and does not add the 14:00-15:00 hour that only begins at the end. (The raw arm
     /// stamps a sample when it was taken, so it keeps <c>&lt;=</c> on <c>collection_time</c>.) Split out so a
     /// test can read the text.</summary>
@@ -598,8 +777,8 @@ public sealed partial class ViewerDataService
         FROM {fromClause}
         WHERE server_id = $1
         AND   bucket >= $2
-        AND   bucket < $3{HourlyCeilingSql(ceiling)}
-        AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        AND   bucket < $3{HourlyCeilingSql(ceiling, 7)}
+        AND   ($5::text[] IS NULL OR database_name = ANY($5)){DatabaseFilter.ExcludeClause("database_name", 6)}
         /*TAG:hash:query_hash*/
         GROUP BY database_name, query_hash
         HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
@@ -610,7 +789,7 @@ public sealed partial class ViewerDataService
     /// <summary>The Raw-tier read, unchanged — what <see cref="GetTopQueriesByCpuAsync"/> ran before #4231
     /// stage 3 added the hourly arm.</summary>
     private async Task<List<ViewerQueryStatsRow>> GetTopQueriesByCpuRawAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
+        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, DatabaseFilter databases, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger candidate limit ($6)
            while more candidates exist, under its bound. */
@@ -625,6 +804,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = candidates });
+        command.Parameters.Add(databases.ExcludeParameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -864,16 +1044,17 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// Hourly query-stats buckets for the Top-Queries slicer — Lite's <c>GetQueryStatsSlicerDataAsync</c>
-    /// ported. Buckets by <c>date_trunc('hour', collection_time)</c> into the shared
+    /// Query-stats buckets for the Top-Queries slicer — Lite's <c>GetQueryStatsSlicerDataAsync</c>
+    /// ported. Buckets at the width <see cref="SlicerBuckets"/> picks for the window ($5 minutes, on the grid every
+    /// width of it divides: a minute over a short window, an hour over a day) into the shared
     /// <see cref="TimeSliceBucket"/>; the columns feed the slicer's sort-driven metric overlay
     /// (CPU / duration / reads / writes / physical reads). PG dialect: <c>COUNT(DISTINCT …)</c> is bigint
     /// and <c>SUM(…)/1000.0</c> is numeric, so the reads go through <c>Convert</c> tolerantly.
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
-    public const string QueryStatsSlicerSql = """
+    public const string QueryStatsSlicerSql = $"""
         SELECT
-            date_trunc('hour', collection_time) AS bucket,
+            date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}) AS bucket,
             COUNT(DISTINCT query_hash) AS query_count,
             COALESCE(SUM(delta_worker_time), 0) / 1000.0 AS total_cpu_ms,
             COALESCE(SUM(delta_elapsed_time), 0) / 1000.0 AS total_elapsed_ms,
@@ -885,30 +1066,38 @@ public sealed partial class ViewerDataService
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        GROUP BY date_trunc('hour', collection_time)
+        GROUP BY 1
         ORDER BY bucket
         """;
 
-    /// <summary>Hourly query-stats slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>].</summary>
+    /// <summary>Query-stats slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>], at the width <see cref="SlicerBuckets"/> picks for it.</summary>
     public async Task<List<TimeSliceBucket>> GetQueryStatsSlicerDataAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
         => await ReadQueryStatsSlicerAsync(QueryStatsSlicerSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
 
     /// <summary>
-    /// Shared reader for the query-stats / procedure-stats hourly slicer buckets (same column shape:
-    /// bucket, count, cpu_ms, elapsed_ms, reads, writes, physical_reads). The default slicer metric is
+    /// Shared reader for the query-stats / procedure-stats / Query Store slicer buckets (same column shape:
+    /// bucket, count, cpu_ms, elapsed_ms, reads, writes, physical_reads). $5 is the bucket width in minutes,
+    /// <see cref="SlicerBuckets.MinutesFor(DateTime, DateTime)"/> for the window. The default slicer metric is
     /// total CPU (Value = TotalCpu), matching Lite's initial "Total CPU (ms)" label.
     /// </summary>
     internal async Task<List<TimeSliceBucket>> ReadQueryStatsSlicerAsync(
         string sql, int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
-        var items = new List<TimeSliceBucket>();
-
         await using var command = _dataSource.CreateCommand(sql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = SlicerBuckets.MinutesFor(startUtc, endUtc) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await ReadSlicerBucketsAsync(reader, cancellationToken);
+    }
+
+    /// <summary>The 7-column slicer rows (bucket, count, cpu_ms, elapsed_ms, reads, writes, physical_reads) as buckets. Shared by
+    /// <see cref="ReadQueryStatsSlicerAsync"/> and the Query Store slicer's interval-table read (#8549).</summary>
+    internal static async Task<List<TimeSliceBucket>> ReadSlicerBucketsAsync(System.Data.Common.DbDataReader reader, CancellationToken cancellationToken)
+    {
+        var items = new List<TimeSliceBucket>();
         while (await reader.ReadAsync(cancellationToken))
         {
             var cpu = reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2));

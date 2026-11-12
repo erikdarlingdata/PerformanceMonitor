@@ -60,6 +60,8 @@ public static partial class SensitiveStatements
     /// <param name="placeholder">What a withheld value, or a withheld document, becomes.</param>
     /// <param name="chargeParse">Receives the time spent parsing and writing (everything outside
     /// <paramref name="isNamed"/>), so a budget can count it.</param>
+    /// <param name="clock">The clock the parse time is read from; the budget's own clock, so a budget on a fake clock is
+    /// charged on that clock alone and never real elapsed time (#7348). The real clock when null.</param>
     /// <param name="maxOutputChars">The caller will cut the result at this length: work stops once nothing before
     /// the cut can change (P3, L-I).</param>
     /// <param name="depth">How deeply this document is nested in a plan held by an <c>EdcShowplanXml</c> attribute
@@ -72,12 +74,13 @@ public static partial class SensitiveStatements
         string placeholder,
         Action<TimeSpan>? chargeParse = null,
         int maxOutputChars = int.MaxValue,
-        int depth = 0)
+        int depth = 0,
+        Func<TimeSpan>? clock = null)
     {
         if (string.IsNullOrEmpty(xml))
             return xml;
 
-        var run = new XmlRun(isNamed, budgetSpent, placeholder, chargeParse, depth);
+        var run = new XmlRun(isNamed, budgetSpent, placeholder, chargeParse, depth, clock);
         long cut = maxOutputChars == int.MaxValue ? long.MaxValue : (long)maxOutputChars + XmlCutSlack;
 
         XmlPassOutcome outcome;
@@ -170,7 +173,7 @@ public static partial class SensitiveStatements
             var precheck = s_prefilter.Value;
             if (precheck is null)
                 return false;
-            var started = Stopwatch.GetTimestamp();
+            var started = budget.Clock();
             bool matched;
             try
             {
@@ -182,7 +185,7 @@ public static partial class SensitiveStatements
             }
             finally
             {
-                budget.AddElapsed(Stopwatch.GetElapsedTime(started));
+                budget.AddElapsed(budget.Clock() - started);
             }
             if (matched)
                 return false;
@@ -210,7 +213,8 @@ public static partial class SensitiveStatements
         private readonly Func<bool> _budgetSpent;
         private readonly string _placeholder;
         private readonly Action<TimeSpan>? _chargeParse;
-        private long _mark;
+        private readonly Func<TimeSpan> _clock;
+        private TimeSpan _mark;
 
         /// <summary>The nesting depth of this document (0 for a caller's document); see <see cref="XmlCore"/>.</summary>
         private readonly int _depth;
@@ -228,8 +232,9 @@ public static partial class SensitiveStatements
         private long _passOneStop = long.MaxValue;
         private bool _pastVetted;
 
-        public XmlRun(Func<string, bool> isNamed, Func<bool> budgetSpent, string placeholder, Action<TimeSpan>? chargeParse, int depth = 0)
+        public XmlRun(Func<string, bool> isNamed, Func<bool> budgetSpent, string placeholder, Action<TimeSpan>? chargeParse, int depth = 0, Func<TimeSpan>? clock = null)
         {
+            _clock = clock ?? (static () => Stopwatch.GetElapsedTime(0));
             _depth = depth;
             _isNamed = isNamed;
             _budgetSpent = budgetSpent;
@@ -298,8 +303,8 @@ public static partial class SensitiveStatements
         {
             if (_chargeParse is null)
                 return;
-            long now = Stopwatch.GetTimestamp();
-            _chargeParse(Stopwatch.GetElapsedTime(_mark, now));
+            var now = _clock();
+            _chargeParse(now - _mark);
             _mark = now;
         }
 
@@ -322,9 +327,9 @@ public static partial class SensitiveStatements
             if (_depth >= MaxNestedPlanDepth)
                 return value.Length == 0 ? value : _placeholder;
             ChargeParse();
-            string? nested = XmlCore(value, _isNamed, _budgetSpent, _placeholder, depth: _depth + 1);
+            string? nested = XmlCore(value, _isNamed, _budgetSpent, _placeholder, depth: _depth + 1, clock: _clock);
             if (_chargeParse is not null)
-                _mark = Stopwatch.GetTimestamp();
+                _mark = _clock();
             return nested ?? value;
         }
 
@@ -343,7 +348,7 @@ public static partial class SensitiveStatements
             ChargeParse();
             bool named = _isNamed(value);
             if (_chargeParse is not null)
-                _mark = Stopwatch.GetTimestamp();
+                _mark = _clock();
             return named;
         }
 
@@ -594,7 +599,7 @@ public static partial class SensitiveStatements
             _passOneStop = long.MaxValue;
             bool readOn = MayNeedProbe(xml);
             bool hit = false;
-            _mark = Stopwatch.GetTimestamp();
+            _mark = _clock();
             _stmtOrdinal = 0;
             _probeNamed.Clear();
             var open = new Stack<OpenElement>();
@@ -751,7 +756,7 @@ public static partial class SensitiveStatements
                 CloseOutput = false,
                 CheckCharacters = false,
             });
-            _mark = Stopwatch.GetTimestamp();
+            _mark = _clock();
             _stmtOrdinal = 0;
             var open = new Stack<string>();
             int scopeDepth = -1;

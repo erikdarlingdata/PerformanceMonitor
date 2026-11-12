@@ -68,6 +68,15 @@ public partial class ViewerServerTab : IDisposable
     /// MainWindow when the server tab closes.</summary>
     public void Dispose()
     {
+        /* #8367: let go of the window too, or a tab closed on its own stays reachable from the window's Closed list, and with it
+           every chart and grid it holds, until the window closes. Unhooking inside HostWindow_Closed is safe: the invocation
+           list is a snapshot. */
+        if (_hostWindow is not null)
+        {
+            _hostWindow.Closed -= HostWindow_Closed;
+            _hostWindow = null;
+        }
+
         /* Stop the toolbar's auto-refresh timer so a closed tab's timer can't fire against a torn-down UI. */
         if (_autoRefreshTimer != null)
         {
@@ -140,7 +149,10 @@ public partial class ViewerServerTab : IDisposable
             TempDbFileIoGapState(_server.DisplayName, _server.EngineEdition, fileIo.Count);
     }
 
-    private void RenderCpuChart(List<CpuUtilizationSample> data, DateTime startUtc, DateTime endUtc)
+    /// <summary>The line under the CPU chart when no sample carries other-process CPU (#7682).</summary>
+    internal const string CpuHostUnknownNote = "This server cannot report host CPU (SQL Server on Linux before 2025 CU1), so only SQL Server CPU is drawn.";
+
+    internal void RenderCpuChart(List<CpuUtilizationSample> data, DateTime startUtc, DateTime endUtc)
     {
         ClearChart(CpuChart);
         _cpuHover?.Clear();
@@ -152,7 +164,7 @@ public partial class ViewerServerTab : IDisposable
         if (data.Count == 0)
         {
             CpuChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-            CpuChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+            CpuChart.Plot.Axes.SetLimitsX(ChartXStart(CpuChart.Plot, rangeStart, rangeEnd), rangeEnd);
             ReapplyAxisColors(CpuChart);
             CpuChart.Refresh();
             return;
@@ -166,7 +178,10 @@ public partial class ViewerServerTab : IDisposable
            server-local sample_time by its per-server ServerTimeHelper offset.) */
         var times = data.Select(d => d.SampleTime.ToOADate()).ToArray();
         var sqlCpu = data.Select(d => (double)d.SqlServerCpu).ToArray();
-        var otherCpu = data.Select(d => (double)d.OtherProcessCpu).ToArray();
+        var otherCpu = data.Select(d => d.OtherProcessCpu ?? double.NaN).ToArray();
+        /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so the store holds NULL for other-process
+           CPU. A flat line at 0 would claim the host is idle; draw the SQL line alone and say why under the chart. */
+        var hostCpuKnown = data.Any(d => d.OtherProcessCpu.HasValue);
 
         var sqlPlot = CpuChart.Plot.Add.TimeSeries(times, sqlCpu);
         sqlPlot.LegendText = "SQL Server";
@@ -174,16 +189,23 @@ public partial class ViewerServerTab : IDisposable
         ChartStyle.StyleScatter(sqlPlot);
         _cpuHover?.Add(sqlPlot, "SQL Server");
 
-        var otherPlot = CpuChart.Plot.Add.TimeSeries(times, otherCpu);
-        otherPlot.LegendText = "Other";
-        otherPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("OtherCpu"));
-        ChartStyle.StyleScatter(otherPlot);
-        _cpuHover?.Add(otherPlot, "Other");
+        if (hostCpuKnown)
+        {
+            var otherPlot = CpuChart.Plot.Add.TimeSeries(times, otherCpu);
+            otherPlot.LegendText = "Other";
+            otherPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("OtherCpu"));
+            ChartStyle.StyleScatter(otherPlot);
+            _cpuHover?.Add(otherPlot, "Other");
+        }
 
         CpuChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        CpuChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        CpuChart.Plot.Axes.SetLimitsX(ChartXStart(CpuChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(CpuChart);
-        CpuChart.Plot.YLabel("CPU %");
+        CpuChart.Plot.YLabel("%");
+        if (!hostCpuKnown)
+        {
+            CpuChart.Plot.XLabel(CpuHostUnknownNote);
+        }
         CpuChart.Plot.Axes.SetLimitsY(0, 105);
 
         ShowChartLegend(CpuChart);
@@ -202,7 +224,7 @@ public partial class ViewerServerTab : IDisposable
         if (data.Count == 0)
         {
             TempDbChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-            TempDbChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+            TempDbChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbChart.Plot, rangeStart, rangeEnd), rangeEnd);
             ReapplyAxisColors(TempDbChart);
             TempDbChart.Refresh();
             return;
@@ -232,7 +254,7 @@ public partial class ViewerServerTab : IDisposable
         _tempDbHover?.Add(vsPlot, "Version Store");
 
         TempDbChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        TempDbChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        TempDbChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(TempDbChart);
         TempDbChart.Plot.YLabel("MB");
 
@@ -245,7 +267,7 @@ public partial class ViewerServerTab : IDisposable
 
     // Dedicated chart for tempdb TOTAL allocated size (used + unallocated free space) over time — the
     // growth trend, on its own scale (AutoScaleY) so it doesn't flatten the usage series above. Mirror
-    // of Lite's UpdateTempDbSizeChart (single series, no legend).
+    // of Lite's UpdateTempDbSizeChart (single series).
     private void RenderTempDbSizeChart(List<TempDbSample> data, DateTime startUtc, DateTime endUtc)
     {
         ClearChart(TempDbSizeChart);
@@ -258,7 +280,7 @@ public partial class ViewerServerTab : IDisposable
         if (data.Count == 0)
         {
             TempDbSizeChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-            TempDbSizeChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+            TempDbSizeChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbSizeChart.Plot, rangeStart, rangeEnd), rangeEnd);
             ReapplyAxisColors(TempDbSizeChart);
             TempDbSizeChart.Refresh();
             return;
@@ -269,15 +291,21 @@ public partial class ViewerServerTab : IDisposable
         var totals = sorted.Select(d => d.TotalReservedMb + d.UnallocatedMb).ToArray();
 
         var sizePlot = TempDbSizeChart.Plot.Add.TimeSeries(times, totals);
+        sizePlot.LegendText = "Allocated MB";
         sizePlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("UnallocatedTempdb"));
         ChartStyle.StyleScatter(sizePlot);
         _tempDbSizeHover?.Add(sizePlot, "Allocated MB");
 
         TempDbSizeChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ReapplyAxisColors(TempDbSizeChart);
-        TempDbSizeChart.Plot.YLabel("Allocated MB");
+        TempDbSizeChart.Plot.YLabel("MB");
         TempDbSizeChart.Plot.Axes.AutoScaleY();
-        TempDbSizeChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        /* A near-flat allocation (the file sizes rarely move) would otherwise fit an axis a hundredth of a megabyte tall. */
+        ChartYSpan.ApplyMinimum(TempDbSizeChart.Plot, totals);
+        TempDbSizeChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbSizeChart.Plot, rangeStart, rangeEnd), rangeEnd);
+        /* #8307: the chart group gives every plot the same bottom, so without a legend of its own this chart kept an empty band
+           under its time axis the height of its siblings' legends. */
+        ShowChartLegend(TempDbSizeChart);
         TempDbSizeChart.Refresh();
     }
 
@@ -293,7 +321,7 @@ public partial class ViewerServerTab : IDisposable
         if (data.Count == 0)
         {
             TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-            TempDbFileIoChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+            TempDbFileIoChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbFileIoChart.Plot, rangeStart, rangeEnd), rangeEnd);
             ReapplyAxisColors(TempDbFileIoChart);
             TempDbFileIoChart.Refresh();
             return;
@@ -329,9 +357,9 @@ public partial class ViewerServerTab : IDisposable
         }
 
         TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        TempDbFileIoChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        TempDbFileIoChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbFileIoChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(TempDbFileIoChart);
-        TempDbFileIoChart.Plot.YLabel("tempdb latency ms");
+        TempDbFileIoChart.Plot.YLabel("ms");
         SetChartYLimitsWithLegendPadding(TempDbFileIoChart, 0, maxLatency > 0 ? maxLatency : 10);
         ShowChartLegend(TempDbFileIoChart);
         TempDbFileIoChart.Refresh();

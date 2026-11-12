@@ -170,7 +170,6 @@ public class XeSessionHealthTests
     /// </summary>
     [Theory]
     [InlineData("RemoteCollectorService.BlockedProcessReport.cs", "CollectBlockedProcessReportsAsync", "\"blocked process\"", "BlockedProcessReportCollector.Instance")]
-    [InlineData("RemoteCollectorService.Deadlocks.cs", "CollectDeadlocksAsync", "\"deadlock\"", "DeadlocksCollector.Instance")]
     [InlineData("RemoteCollectorService.LongQueryCompletions.cs", "CollectLongQueryCompletionsAsync", "\"long query completions\"", "LongQueryCompletionsCollector.Instance")]
     public void TheReadArms_GoThroughTheSharedRead_AndNeverReturnZeroRows(string file, string method, string kind, string definition)
     {

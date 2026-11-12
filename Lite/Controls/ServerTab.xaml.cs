@@ -43,8 +43,16 @@ public partial class ServerTab : UserControl
     private readonly int _serverId;
     public int ServerId => _serverId;
     public ServerConnection Server => _server;
+
+    /// <summary>The server name line at the top of the tab (#7212). Only the text: the tab keeps its server record and its store key.</summary>
+    public void ShowServerName(ServerConnection server)
+    {
+        ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
+    }
     private readonly CredentialResolver _credentialResolver;
     private readonly DispatcherTimer _refreshTimer;
+    /* #8367: the window whose Closed event stops _refreshTimer; see HookHostWindowClosed. */
+    private Window? _hostWindow;
     private bool _refreshPendingWhileHidden;
     private bool _isRefreshing;
     /* Re-entrancy latch for the Ctrl+V plan-paste handler (#2870). #2837's async clipboard retry keeps the UI
@@ -59,6 +67,9 @@ public partial class ServerTab : UserControl
     // the drill-down loads next (async race).
     private bool _suppressActiveQueriesAutoRefresh;
     private readonly ChartRenderHelper _chartHelper = new();
+    private FirstPaintLoading? _firstPaint;
+    /// <summary>#8647: puts "Loading..." where a sub-tab's empty-state sentence goes until its first read returns, and takes it away when that pass ends.</summary>
+    private FirstPaintLoading FirstPaint => _firstPaint ??= new FirstPaintLoading(_chartHelper, ApplyTheme);
     private List<SelectableItem> _waitTypeItems = new();
     private List<SelectableItem> _perfmonCounterItems = new();
     /* #1319: per-server global database filter (display-only). Empty set = "All" (unfiltered). */
@@ -138,7 +149,8 @@ public partial class ServerTab : UserControl
     private DataGridFilterManager<ServerConfigChangeRow>? _serverConfigChangesFilterMgr;
     private DataGridFilterManager<DatabaseConfigChangeRow>? _databaseConfigChangesFilterMgr;
     private DataGridFilterManager<TraceFlagChangeRow>? _traceFlagChangesFilterMgr;
-    private CancellationTokenSource? _actualPlanCts;
+    /* #7181: owns the Get Actual Plan token so closing the tab stops a re-run that has no command timeout. */
+    private readonly ActualPlanRunScope _actualPlanRun = new();
     private bool _actualPlanRequestOpen;
 
     /// <summary>
@@ -153,6 +165,31 @@ public partial class ServerTab : UserControl
     /// converts each time through <see cref="ServerClock"/> instead of adding this one value to all of them.</summary>
     public int UtcOffsetMinutes => _serverClock.OffsetMinutesAt(DateTime.UtcNow);
 
+    /// <summary>
+    /// The header's status line from the moment the tab opens until its server's first collection has run. It says the first
+    /// collection is still pending, so an Overview chart that finds no rows in the window meanwhile reads as loading, not as an empty
+    /// server. It does not say the charts are empty: they may already show the data the store holds (#8621). The refresh passes that show stored data in that time keep this line; an error replaces it.
+    /// </summary>
+    internal const string ConnectingStatusText = "Connecting... waiting for the first collection";
+
+    private bool _awaitingFirstCollection = true;
+
+    /// <summary>The host's word that the first collection for this tab has run (or will not). The header is worded from the refresh at
+    /// once, so a collection that fails with auto-refresh off does not leave it saying "Connecting".</summary>
+    internal void FirstCollectionFinished()
+    {
+        _awaitingFirstCollection = false;
+        if (ConnectionStatusText.Text == ConnectingStatusText)
+            ConnectionStatusText.Text = LastRefreshText();
+    }
+
+    /// <summary>
+    /// The Queries tab's window as two UTC instants, resolved once per refresh pass from <paramref name="nowUtc"/> and handed to the
+    /// grid read and the strip load alike, so the strip's window is the grid's window whatever the clock says when each read runs.
+    /// </summary>
+    internal static (DateTime StartUtc, DateTime EndUtc) QueriesWindowUtc(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime nowUtc)
+        => LocalDataService.GetTimeRange(hoursBack, fromDate, toDate, nowUtc);
+
     private readonly bool _hasMsdbAccess;
     /* The connection check's AWS RDS flag (the rdsadmin database exists). It stays false when that check failed. */
     private readonly AwsRdsKind _awsRdsKind;
@@ -165,6 +202,10 @@ public partial class ServerTab : UserControl
        Queries tab shows an explicit "trace is OFF" empty-state banner when it is disabled — read fresh
        each refresh so toggling it in the schedule editor updates the banner without reopening the tab. */
     private readonly Func<bool> _isLongQueryTraceEnabled;
+    /* #8541: the query_store_health collector's schedule on this server (null when the schedules do not hold it), read fresh
+       each time the Query Store panel's window comes back empty, so the panel says whether a newer health capture is coming and
+       at what cadence. */
+    private readonly Func<CollectorSchedule?> _queryStoreHealthSchedule;
 
     /// <summary>
     /// Raised after each data refresh with alert counts for tab badge display.
@@ -174,9 +215,22 @@ public partial class ServerTab : UserControl
     public event Func<Task>? ManualRefreshRequested;
     public event Action<ServerConnection>? PersistServerRequested; /* #1319: persist ViewFilterDatabases via ServerManager */
 
-    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null, AwsRdsKind awsRdsKind = AwsRdsKind.None)
+    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null, AwsRdsKind awsRdsKind = AwsRdsKind.None, Func<CollectorSchedule?>? queryStoreHealthSchedule = null)
     {
         InitializeComponent();
+        PerformanceMonitor.Ui.ChartPairLayout.Attach(CurrentWaitsScroll, CurrentWaitsGrid, CurrentWaitsFirstCard, CurrentWaitsSecondCard, CurrentWaitsGrid.RowDefinitions[2]); // #8219: side by side when the tab is too short for both stacked
+        DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
+        // #7385: the chart groups scroll below their floor; the wheel over a chart stays that chart's zoom.
+        ChartLayout.KeepWheelOnPlot(
+            QueryDurationTrendChart, ProcDurationTrendChart, QueryStoreDurationTrendChart, ExecutionCountTrendChart,
+            MemoryGrantSizingChart, MemoryGrantActivityChart, FileIoReadChart, FileIoWriteChart,
+            FileIoReadThroughputChart, FileIoWriteThroughputChart, TempDbChart, TempDbSizeChart, TempDbFileIoChart,
+            LockWaitTrendChart, BlockingTrendChart, DeadlockTrendChart,
+            BlockingDurationChart, BlockingTotalDurationChart, DeadlockWaitChart, DeadlockTotalWaitChart,
+            CurrentWaitsDurationChart, CurrentWaitsBlockedChart, LatchStatsChart, SpinlockStatsChart,
+            BadPagesChart, DumpRequestsChart, AccessViolationsChart, WriteAccessViolationsChart,
+            NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart,
+            MemoryChart, CpuSchedulerChart, CpuChart);
         QueryTagFilterCombo.ItemsSource = new[] { PerformanceMonitorLite.Helpers.QueryTagGrid.AllChoice };
         QueryTagFilterCombo.SelectedIndex = 0;
         SetupBarCellMaxes();
@@ -187,6 +241,9 @@ public partial class ServerTab : UserControl
         /* Default to "enabled" when no probe is supplied so the empty-state banner never falsely claims
            the trace is off; MainWindow always wires the live schedule probe. */
         _isLongQueryTraceEnabled = isLongQueryTraceEnabled ?? (() => true);
+        /* No schedule when no probe is supplied, which the panel reads as the shipped one (enabled, hourly); MainWindow wires
+           the live schedule probe. */
+        _queryStoreHealthSchedule = queryStoreHealthSchedule ?? (() => null);
         foreach (var db in _server.ViewFilterDatabases)
             _selectedDatabases.Add(db);
         _dataService = new LocalDataService(duckDb);
@@ -198,8 +255,8 @@ public partial class ServerTab : UserControl
         _engineEdition = sqlEngineEdition;
         ServerTimeHelper.ActiveServerClock = _serverClock;
 
-        ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
-        ConnectionStatusText.Text = "Connecting...";
+        ShowServerName(server);
+        ConnectionStatusText.Text = ConnectingStatusText;
 
         /* Apply default time range from settings */
         /* #5562: the shared picker. The zone is read lazily (display mode, this tab's own server clock), so a mode switch
@@ -235,6 +292,11 @@ public partial class ServerTab : UserControl
         {
             _refreshTimer.Start();
         }
+
+        /* #8367: a DispatcherTimer is rooted by its dispatcher, so a tab whose window has closed would otherwise keep polling on
+           that thread for the life of the process. Unloaded cannot tell that apart from a tab switch (a TabControl unloads the
+           tab it switches away from, and the tab stays in its window), so the window's own Closed event is what stops it. */
+        Loaded += HookHostWindowClosed;
 
         /* When this tab isn't selected the timer skips its data refresh (see RefreshAllDataAsync);
            refresh once when it becomes visible again so it isn't showing stale data on return. */
@@ -278,6 +340,7 @@ public partial class ServerTab : UserControl
 
         /* Apply theme immediately so charts don't flash white before data loads */
         ApplyTheme(WaitStatsChart);
+        _chartHelper.RefreshLoadingChart(WaitStatsChart, "Wait Stats", ""); // #8086, #8647: not the default -10 to 10 axes before the first read, and not "No data" before a read found none
         ApplyTheme(QueryDurationTrendChart);
         ApplyTheme(ProcDurationTrendChart);
         ApplyTheme(QueryStoreDurationTrendChart);
@@ -305,7 +368,6 @@ public partial class ServerTab : UserControl
 
         /* Chart hover tooltips */
         CorrelatedLanes.Initialize(_dataService, _serverId, GetPickerZone);
-        CorrelatedLanes.DataStartFound += start => FeedDataStart("overview", start); /* #5562 R7: the Overview lanes' blocking note */
         /* #4766: the six slicers word their time axis and range caption in the tab's display zone. */
         foreach (var slicer in new[] { ActiveQueriesSlicer, QueryStatsSlicer, ProcStatsSlicer, QueryStoreSlicer, BlockingSlicer, DeadlockSlicer })
             slicer.DisplayZone = GetPickerZone;
@@ -327,7 +389,7 @@ public partial class ServerTab : UserControl
         _queryStoreDurationTrendHover = new ChartHoverHelper(QueryStoreDurationTrendChart, "ms/sec", displayZone: GetPickerZone);
         _executionCountTrendHover = new ChartHoverHelper(ExecutionCountTrendChart, "/sec", displayZone: GetPickerZone);
         _lockWaitTrendHover = new ChartHoverHelper(LockWaitTrendChart, "ms/sec", displayZone: GetPickerZone);
-        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, "incidents", displayZone: GetPickerZone);
+        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit, displayZone: GetPickerZone);
         _deadlockTrendHover = new ChartHoverHelper(DeadlockTrendChart, "deadlocks", displayZone: GetPickerZone);
         _memoryClerksHover = new ChartHoverHelper(MemoryClerksChart, "MB", displayZone: GetPickerZone);
         _memoryGrantSizingHover = new ChartHoverHelper(MemoryGrantSizingChart, "MB", displayZone: GetPickerZone);
@@ -529,10 +591,14 @@ public partial class ServerTab : UserControl
            instead of starting a second read. Programmatic selection changes are still skipped below by
            _suppressActiveQueriesAutoRefresh, the only flag that was ever meant to silence this handler. */
         if (e.Source != MainTabControl && e.Source != QueriesSubTabControl
-            && e.Source != MemorySubTabControl && e.Source != BlockingSubTabControl
+            && e.Source != CpuSubTabControl && e.Source != MemorySubTabControl && e.Source != BlockingSubTabControl
             && e.Source != SystemEventsSubTabControl && e.Source != ConfigChangesSubTabControl) return;
 
         UpdateCompareDropdownState();
+
+        /* #8647: the tab just picked says "Loading..." where its empty-state sentence goes until its first read returns. Before the
+           request below, so the first frame the tab paints already has it, and before the drill-down return, which loads its own tab. */
+        ShowFirstPaintLoading((e.Source as TabControl)?.SelectedItem as TabItem);
 
         // A drill-down navigates here programmatically and loads its own filtered snapshot;
         // skip the auto-refresh so it doesn't clobber that data via an async race. The flag is
@@ -570,7 +636,7 @@ public partial class ServerTab : UserControl
             command.CommandTimeout = 30;
 
             using var reader = await command.ExecuteReaderAsync();
-            var results = await ReadLiveSnapshotRowsAsync(reader, DateTime.UtcNow);
+            var results = await ReadLiveSnapshotRowsAsync(reader, DateTime.UtcNow, ActiveQueriesIncludeMonitor);
 
             _querySnapshotsFilterMgr!.UpdateData(results);
             /* #4953: the grid now holds the live rows, not the range the "Showing since" banner described, so the banner
@@ -585,7 +651,7 @@ public partial class ServerTab : UserControl
         catch (Exception ex)
         {
             LiveSnapshotIndicator.Text = $"Error: {DuckDbMemoryLimitSetting.Describe(ex)}";
-            AppLogger.Error("ServerTab", $"Live snapshot failed: {ex.Message}");
+            AppLogger.Error("ServerTab", $"Live snapshot failed: {ex.Message}", ex);
         }
         finally
         {
@@ -597,15 +663,24 @@ public partial class ServerTab : UserControl
     /// The whole live snapshot read, on a thread-pool thread (#5554). This read is the button's own, not the collector's,
     /// so the statement text and both plans are judged here (#4348), one session (one shared budget) for the whole read;
     /// the judge parses every plan and can spend up to the session budget, so the loop never runs on the dispatcher.
+    /// <paramref name="includeMonitor"/> false (#7573) leaves out the monitor's own sessions.
     /// </summary>
-    internal static Task<List<QuerySnapshotRow>> ReadLiveSnapshotRowsAsync(DbDataReader reader, DateTime snapshotTime)
+    internal static Task<List<QuerySnapshotRow>> ReadLiveSnapshotRowsAsync(DbDataReader reader, DateTime snapshotTime, bool includeMonitor = false)
         => Task.Run(async () =>
         {
             var results = new List<QuerySnapshotRow>();
             var scrub = new SensitiveStatements.Session();
             while (await reader.ReadAsync().ConfigureAwait(false))
             {
-                results.Add(ReadLiveSnapshotRow(reader, snapshotTime, scrub));
+                var row = ReadLiveSnapshotRow(reader, snapshotTime, scrub);
+                /* #7573: the collector's query no longer drops the monitor's other sessions, so the live bar follows the Active Queries
+                   page's Monitor statements switch (left out by default, by the same program-name prefix rule). */
+                if (!includeMonitor && PerformanceMonitor.Common.MonitorApplicationNames.MatchesSqlProgramNamePattern(row.ProgramName))
+                {
+                    continue;
+                }
+
+                results.Add(row);
             }
 
             return results;
@@ -629,7 +704,7 @@ public partial class ServerTab : UserControl
         {
             SessionId = Convert.ToInt32(reader.GetValue(0)),
             DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-            ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
+            ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : PerformanceMonitor.Common.ElapsedTimeText.WithoutZeroDays(reader.GetString(2)),
             QueryText = reader.IsDBNull(3) ? "" : scrub.Text(reader.GetString(3)) ?? "",
             QueryPlan = liveQueryPlan,
             LiveQueryPlan = liveActualPlan,
@@ -677,17 +752,43 @@ public partial class ServerTab : UserControl
         }
     }
 
+    /* #8367: Loaded fires again on every switch back to this tab, so the window is hooked once; a tab that moves to another
+       window lets go of the first. */
+    private void HookHostWindowClosed(object sender, RoutedEventArgs e)
+    {
+        var window = Window.GetWindow(this);
+        if (window is null || ReferenceEquals(window, _hostWindow)) return;
+        if (_hostWindow is not null) _hostWindow.Closed -= HostWindow_Closed;
+        _hostWindow = window;
+        window.Closed += HostWindow_Closed;
+    }
+
+    private void HostWindow_Closed(object? sender, EventArgs e) => StopRefresh();
+
     /// <summary>
-    /// Stops the refresh timer when the tab is removed.
+    /// Stops the refresh timer when the tab is removed, or when its window closes.
     /// </summary>
     public void StopRefresh()
     {
+        /* #8367: let go of the window too, or a tab closed on its own stays reachable from the window's Closed list, and with it
+           every chart and grid it holds, until the window closes. Unhooking inside HostWindow_Closed is safe: the invocation
+           list is a snapshot. */
+        if (_hostWindow is not null)
+        {
+            _hostWindow.Closed -= HostWindow_Closed;
+            _hostWindow = null;
+        }
+
         _refreshTimer.Stop();
+        /* #7181: a Get Actual Plan re-run runs with no command timeout; closing the tab (or removing the
+           server) is the last chance to stop it on the monitored server. */
+        _actualPlanRun.CancelForClose();
     }
 
     public void DisposeChartHelpers()
     {
         ThemeManager.ThemeChanged -= OnThemeChanged;
+        _barCellMaxesWatch?.Release();
         /* Closing the server tab with plan tabs still open would leak each PlanViewerControl via the
            static ThemeChanged event — clean them up here too (ClosePlanTab_Click only handles the
            per-tab close-button path). */

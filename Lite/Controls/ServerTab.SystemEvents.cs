@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 
@@ -105,7 +106,7 @@ public partial class ServerTab : UserControl
         var data = await Task.Run(() => _dataService.GetSchedulerIssuesAsync(_serverId, hoursBack, fromDate, toDate));
         _seSchedulerFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(SchedulerIssuesNoDataMessage, data.Count);
-        SchedulerIssuesCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        SchedulerIssuesCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "event") : "";
         await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, SchedulerIssuesWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
@@ -114,7 +115,7 @@ public partial class ServerTab : UserControl
         var data = await Task.Run(() => _dataService.GetSevereErrorsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
         _seSevereErrorFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(SevereErrorsNoDataMessage, data.Count);
-        SevereErrorsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        SevereErrorsCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "event") : "";
         await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, SevereErrorsWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
@@ -123,7 +124,7 @@ public partial class ServerTab : UserControl
         var data = await Task.Run(() => _dataService.GetMemoryConditionsAsync(_serverId, hoursBack, fromDate, toDate));
         _seMemoryConditionsFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(MemoryConditionsNoDataMessage, data.Count);
-        MemoryConditionsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        MemoryConditionsCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "event") : "";
         await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, MemoryConditionsWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
@@ -132,7 +133,7 @@ public partial class ServerTab : UserControl
         var data = await Task.Run(() => _dataService.GetMemoryBrokerAsync(_serverId, hoursBack, fromDate, toDate));
         _seMemoryBrokerFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(MemoryBrokerNoDataMessage, data.Count);
-        MemoryBrokerCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        MemoryBrokerCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "event") : "";
         await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, MemoryBrokerWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
@@ -141,7 +142,7 @@ public partial class ServerTab : UserControl
         var data = await Task.Run(() => _dataService.GetMemoryNodeOomAsync(_serverId, hoursBack, fromDate, toDate));
         _seMemoryNodeOomFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(MemoryNodeOomNoDataMessage, data.Count);
-        MemoryNodeOomCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        MemoryNodeOomCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "event") : "";
         await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, MemoryNodeOomWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
@@ -150,7 +151,7 @@ public partial class ServerTab : UserControl
         var data = await Task.Run(() => _dataService.GetSignificantWaitsAsync(_serverId, hoursBack, fromDate, toDate));
         _seSignificantWaitsFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(SignificantWaitsNoDataMessage, data.Count);
-        SignificantWaitsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        SignificantWaitsCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "event") : "";
         await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, SignificantWaitsWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
@@ -159,7 +160,7 @@ public partial class ServerTab : UserControl
         var data = await Task.Run(() => _dataService.GetCpuTasksAsync(_serverId, hoursBack, fromDate, toDate));
         _seCpuTasksFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(CpuTasksNoDataMessage, data.Count);
-        CpuTasksCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        CpuTasksCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "event") : "";
         await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, CpuTasksWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
@@ -168,7 +169,7 @@ public partial class ServerTab : UserControl
         var data = await Task.Run(() => _dataService.GetIoIssuesAsync(_serverId, hoursBack, fromDate, toDate));
         _seIoIssuesFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(IoIssuesNoDataMessage, data.Count);
-        IoIssuesCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        IoIssuesCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "event") : "";
         await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, IoIssuesWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
@@ -179,7 +180,7 @@ public partial class ServerTab : UserControl
         if (DefaultTraceGapNote(_server.DisplayName, _isAzureSqlDatabase) is { } gap)
             DefaultTraceNoDataMessage.Text = gap;
         DefaultTraceNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        DefaultTraceCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        DefaultTraceCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "event") : "";
         await RefreshStoredWindowBannerAsync(QueryWindowRelation.DefaultTraceEvents, DefaultTraceWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 

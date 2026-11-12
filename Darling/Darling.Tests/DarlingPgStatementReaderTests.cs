@@ -100,9 +100,10 @@ public class DarlingPgStatementReaderTests
     }
 
     /// <summary>
-    /// A series with one sample in the window has no measurable interval — its increment happened before
-    /// the window began — so it must report 0, not its lifetime total. coalesce on the SUM, never on the
-    /// cumulative column.
+    /// A series with one sample in the window and no row before it has no measurable interval, so it must
+    /// report 0, not its lifetime total. coalesce on the SUM, never on the cumulative column. The seeded
+    /// differencing and the delta_calls classification are behaviour, pinned by <c>DarlingPgTopQueriesLiveTests</c>
+    /// against a real store rather than by the statement's wording.
     /// </summary>
     [Fact]
     public void ASingleSampleSeriesReportsZeroRatherThanItsLifetimeTotal()

@@ -82,6 +82,34 @@ public sealed class WebTimeRangeTests
         Assert.Equal(rows, r.GetProperty("passed").GetInt32());
     }
 
+    /// <summary>#7940: a typed length that is not a whole number of minutes ("7.5 minutes", 450 seconds) is named, identified and measured with one
+    /// minute count, and its id reads back as the range the name says. A whole number of minutes is untouched.</summary>
+    [Fact]
+    public void AFractionalMinuteLength_IsNamedIdentifiedAndMeasuredAlike_InTheWebModule()
+    {
+        var fixturePath = PathTo("Darling", "Darling.Tests", "Fixtures", "time-range-cases.json");
+        if (!TryRunNode("time-range-harness.mjs", out var r, s_jsDir, fixturePath)) return;
+
+        var fractional = r.GetProperty("fractional");
+        Assert.Equal(450_000, fractional.GetProperty("typedSpanMs").GetInt64());
+
+        var seven = fractional.GetProperty("sevenAndAHalf");
+        Assert.Equal("7m", seven.GetProperty("length").GetString());
+        Assert.Equal("Past 7 minutes", seven.GetProperty("name").GetString());
+        Assert.Equal("7m", seven.GetProperty("id").GetString());
+        Assert.Equal(7 * 60_000, seven.GetProperty("idSpanMs").GetInt64());
+
+        var ninety = fractional.GetProperty("ninetySeconds");
+        Assert.Equal("1m", ninety.GetProperty("length").GetString());
+        Assert.Equal("Past minute", ninety.GetProperty("name").GetString());
+        Assert.Equal("1m", ninety.GetProperty("id").GetString());
+
+        var whole = fractional.GetProperty("whole");
+        Assert.Equal("45m", whole.GetProperty("length").GetString());
+        Assert.Equal("Past 45 minutes", whole.GetProperty("name").GetString());
+        Assert.Equal("45m", whole.GetProperty("id").GetString());
+    }
+
     private static string[] Strings(JsonElement node, string name) =>
         node.GetProperty(name).EnumerateArray().Select(e => e.GetString()!).ToArray();
 
@@ -284,6 +312,23 @@ public sealed class WebTimeRangeTests
         /* The five rows run 06:00 to 11:00; the picked 10:00 to 10:30 holds the 10:00 row only. */
         Assert.Equal(1, found.GetProperty("rows").GetInt32());
         Assert.Contains("totals and rankings aggregate from", found.GetProperty("label").GetString());
+    }
+
+    /// <summary>#7932: a picked range whose end has not arrived is read live up to now, and the page draws it to now as well: the context's end
+    /// and the chart window end at now, the label says "to now", and the range key still names the picked pair.</summary>
+    [Fact]
+    public void ARangeThatEndsLaterToday_IsDrawnToNow_NotToItsFutureEnd()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("pickerFutureEnd", out var r)) return;
+
+        var found = r.GetProperty("found");
+        Assert.Equal(JsonValueKind.Null, found.GetProperty("err").ValueKind);
+        var now = found.GetProperty("now").GetInt64();
+        Assert.Equal(6, found.GetProperty("hours").GetInt32());
+        Assert.Equal(now, found.GetProperty("endMs").GetInt64());
+        Assert.Equal(now, found.GetProperty("axisEnd").GetInt64());
+        Assert.EndsWith(" to now", found.GetProperty("label").GetString());
+        Assert.Equal(found.GetProperty("pickedKey").GetString(), found.GetProperty("rangeKey").GetString());
     }
 
     /// <summary>Every preset and calendar period, held for a server: the whole-hour presets within the reach are the page's own range

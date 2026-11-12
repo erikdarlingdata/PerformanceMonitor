@@ -239,7 +239,7 @@ public sealed class ScratchPostgresExitDrainTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the live exit-drain test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var stopped = StoppedClusterConnectionString(ClosedPort());
 
         /* A deadline as long as one drop's command timeout: this pins the dead-and-live mix, not the deadline, and a drop
@@ -288,7 +288,7 @@ public sealed class ScratchPostgresExitDrainTests
         {
             for (var i = 0; i < Leaked; i++)
             {
-                scratches[i] = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+                scratches[i] = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
             }
 
             var clock = Stopwatch.StartNew();

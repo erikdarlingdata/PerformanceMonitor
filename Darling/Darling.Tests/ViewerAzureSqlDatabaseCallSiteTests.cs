@@ -155,30 +155,6 @@ public sealed class ViewerAzureSqlDatabaseCallSiteTests
         return count;
     }
 
-    /// <summary>
-    /// The web Memory tiles (the server page and the Memory pressure custom-view template) show the server's note where
-    /// the state is null, through the stat tile's nullKey, the table cell's rule. The page writes no sentence of its
-    /// own: the text arrives in the payload.
-    /// </summary>
-    [Fact]
-    public void TheWebMemoryTiles_ShowTheServersNote_WhereTheStateIsNull()
-    {
-        const string Tile = "{ key: \"system_memory_state\", label: \"System state\", format: \"text\", small: true, nullKey: \"system_memory_state_note\" }";
-
-        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
-        Assert.Contains(Tile, Slice(tabs, "const MEMORY_STATS = [", "];"), StringComparison.Ordinal);
-
-        var templates = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "view-templates.js");
-        Assert.Contains(Tile, Slice(templates, "read: \"get_memory_stats\"", "]"), StringComparison.Ordinal);
-
-        var panels = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js");
-        var stat = Slice(panels, "function vizStat(", "function vizLine(");
-        Assert.Contains("const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;", stat, StringComparison.Ordinal);
-        Assert.Contains("text: why != null && why !== \"\" ? String(why) : shownValue", stat, StringComparison.Ordinal); /* #6159: shownValue is applyFormat plus the optional appended field */
-
-        Assert.DoesNotContain("memory-state source", tabs + templates + panels, StringComparison.Ordinal);
-    }
-
     private static string MethodBody(string[] file, string anchor)
     {
         var code = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile(file));
@@ -186,14 +162,5 @@ public sealed class ViewerAzureSqlDatabaseCallSiteTests
         Assert.True(at >= 0, $"{anchor} not found in {string.Join('/', file)}");
 
         return CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
-    }
-
-    private static string Slice(string source, string start, string end)
-    {
-        var from = source.IndexOf(start, StringComparison.Ordinal);
-        Assert.True(from >= 0, $"anchor not found: {start}");
-        var to = source.IndexOf(end, from + start.Length, StringComparison.Ordinal);
-        Assert.True(to > from, $"anchor not found after {start}: {end}");
-        return source[from..to];
     }
 }

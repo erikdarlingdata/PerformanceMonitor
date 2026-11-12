@@ -36,7 +36,7 @@ public sealed class QueryStoreForcedPlansCollectorTests
     {
         var body = QueryStoreForcedPlansCollector.BuildPayloadBody(Context(16));
 
-        Assert.Contains("WHERE qsp.is_forced_plan = 1", body, StringComparison.Ordinal);
+        Assert.Contains("WHERE PerformanceMonitorLite.is_forced_plan = 1", body, StringComparison.Ordinal);
         Assert.Equal(1, body.Split("is_forced_plan", StringSplitOptions.None).Length - 1);
         Assert.Contains("UNION ALL", body, StringComparison.Ordinal);
         Assert.Contains("sys.database_query_store_options", body, StringComparison.Ordinal);

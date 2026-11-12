@@ -21,8 +21,7 @@ namespace Darling.Tests;
 /// #4226 lane V1b job 3: against a seeded, rollup-usable store, the new shared
 /// <see cref="ViewerDataService.FleetCollectionHealthByServerSql"/> (rollup-composed) must produce, per
 /// (server, collector), the SAME numbers the OLD reads it replaced produced —
-/// <see cref="ViewerDataService.CollectionHealthSql"/> (the Overview card's old per-server raw scan) and
-/// <see cref="ViewerDataService.PermissionDeniedCollectorCountSql"/> (the badge's old raw scan) — over a window
+/// <see cref="ViewerDataService.CollectionHealthSql"/> (the Overview card's old per-server raw scan) — over a window
 /// that straddles a partial leading hour AND holds rows in the still-open current hour, so both the raw head
 /// slice and the composed union get exercised, not just the fully-materialized middle.
 /// </summary>
@@ -198,26 +197,6 @@ CROSS JOIN generate_series((now() AT TIME ZONE 'UTC') - INTERVAL '7 days 37 minu
                 Assert.True(composedCollectors.TryGetValue(collector, out var newSnapshot), $"server {serverId} collector {collector} missing from composed read");
                 Assert.Equal(oldSnapshot, newSnapshot);
             }
-
-            var newBadge = 0;
-            foreach (var snapshot in composedCollectors.Values)
-            {
-                if (snapshot.PermissionDeniedCount > 0)
-                {
-                    newBadge++;
-                }
-            }
-
-            int oldBadge;
-            await using (var badge = new NpgsqlCommand(ViewerDataService.PermissionDeniedCollectorCountSql, connection))
-            {
-                badge.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-                badge.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
-                var scalar = await badge.ExecuteScalarAsync(ct);
-                oldBadge = scalar is null or DBNull ? 0 : Convert.ToInt32(scalar);
-            }
-
-            Assert.Equal(oldBadge, newBadge);
         }
 
         /* Server 1 / collector_0 was seeded PERMISSIONS for the newest 90 minutes — well inside the still-open

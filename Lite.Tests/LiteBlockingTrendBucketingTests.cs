@@ -156,14 +156,42 @@ public sealed class LiteBlockingTrendBucketingLiveTests : IClassFixture<SharedDu
         var t2 = t1.AddMinutes(5);
 
         /* t1: two blocked rows in AppDb. t2: one blocked row in AppDb. */
-        await SeedWaitingTaskAsync(t1, "LCK_M_X", waitDurationMs: 100, blockingSessionId: 90, databaseName: "AppDb");
-        await SeedWaitingTaskAsync(t1, "LCK_M_X", waitDurationMs: 100, blockingSessionId: 90, databaseName: "AppDb");
-        await SeedWaitingTaskAsync(t2, "LCK_M_X", waitDurationMs: 100, blockingSessionId: 91, databaseName: "AppDb");
+        await SeedWaitingTaskAsync(t1, "LCK_M_X", waitDurationMs: 100, blockingSessionId: 90, databaseName: "AppDb", sessionId: 71);
+        await SeedWaitingTaskAsync(t1, "LCK_M_X", waitDurationMs: 100, blockingSessionId: 90, databaseName: "AppDb", sessionId: 72);
+        await SeedWaitingTaskAsync(t2, "LCK_M_X", waitDurationMs: 100, blockingSessionId: 91, databaseName: "AppDb", sessionId: 73);
 
         var rows = await _dataService.GetBlockedSessionTrendAsync(ServerId, fromDate: t1.AddMinutes(-1), toDate: t2.AddMinutes(1));
 
         Assert.Equal(new[] { t1, t2 }, rows.Select(r => r.CollectionTime).ToArray());
         Assert.Equal(new[] { 2, 1 }, rows.Select(r => r.BlockedCount).ToArray());
+    }
+
+    /// <summary>#7577: a parallel query's exchange threads wait on their OWN session (blocking_session_id = session_id), which is
+    /// not blocking, and the count is sessions, not threads. t1 holds session 75 blocked on three threads (one blocked session) beside
+    /// session 74's four parallel threads. t2 holds only the parallel threads, so it draws no point: the gap stays a gap.</summary>
+    [Fact]
+    public async Task BlockedSessionTrend_ParallelQuerysOwnThreads_AreNotBlockedSessions()
+    {
+        var t1 = new DateTime(2026, 3, 12, 9, 0, 37);
+        var t2 = t1.AddMinutes(5);
+
+        for (var thread = 0; thread < 3; thread++)
+        {
+            await SeedWaitingTaskAsync(t1, "LCK_M_X", waitDurationMs: 100, blockingSessionId: 90, databaseName: "AppDb", sessionId: 75);
+        }
+
+        foreach (var at in new[] { t1, t2 })
+        {
+            for (var thread = 0; thread < 4; thread++)
+            {
+                await SeedWaitingTaskAsync(at, "CXCONSUMER", waitDurationMs: 100, blockingSessionId: 74, databaseName: "AppDb", sessionId: 74);
+            }
+        }
+
+        var rows = await _dataService.GetBlockedSessionTrendAsync(ServerId, fromDate: t1.AddMinutes(-1), toDate: t2.AddMinutes(1));
+
+        Assert.Equal(new[] { t1 }, rows.Select(r => r.CollectionTime).ToArray());
+        Assert.Equal(new[] { 1 }, rows.Select(r => r.BlockedCount).ToArray());
     }
 
     /// <summary>The defect this lane found and fixed: two blocked-session collections merged into one
@@ -232,7 +260,7 @@ public sealed class LiteBlockingTrendBucketingLiveTests : IClassFixture<SharedDu
         _nextId -= (long)(end - start).TotalMinutes + 2;
     }
 
-    private async Task SeedWaitingTaskAsync(DateTime at, string waitType, long waitDurationMs, int blockingSessionId, string databaseName)
+    private async Task SeedWaitingTaskAsync(DateTime at, string waitType, long waitDurationMs, int blockingSessionId, string databaseName, int sessionId = 55)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var conn = await SeedConnectionAsync();
@@ -241,7 +269,7 @@ public sealed class LiteBlockingTrendBucketingLiveTests : IClassFixture<SharedDu
             (collection_id, collection_time, server_id, server_name,
              session_id, wait_type, wait_duration_ms, blocking_session_id, resource_description, database_name)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
-        foreach (var v in new object[] { _nextId--, at, ServerId, ServerName, 55, waitType, waitDurationMs, blockingSessionId, "keylock", databaseName })
+        foreach (var v in new object[] { _nextId--, at, ServerId, ServerName, sessionId, waitType, waitDurationMs, blockingSessionId, "keylock", databaseName })
         {
             cmd.Parameters.Add(new DuckDBParameter { Value = v });
         }

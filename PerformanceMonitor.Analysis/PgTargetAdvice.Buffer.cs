@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -72,13 +73,13 @@ public static partial class PgTargetAdvice
             if (top is not null && top.ShareOfPool >= BufferCompositionDominantRelationShare)
             {
                 sb.Append(DescribeResident(top)).Append(" holds ").Append(KnobPct(top.ShareOfPool))
-                  .Append(" of the pool on its own — before the knob, look at what reads it (get_pg_top_queries — the shape whose shared_blks_read dwarfs its shared_blks_hit) and at its bloat: one sequential scanner or one bloated relation can churn a cache no size would satisfy, and fixing the statement or the bloat is the cheaper move. ");
+                  .Append(" of the pool on its own, before the knob, look at what reads it (get_pg_top_queries, the shape whose shared_blks_read dwarfs its shared_blks_hit) and at its bloat: one sequential scanner or one bloated relation can churn a cache no size would satisfy, and fixing the statement or the bloat is the cheaper move. ");
             }
 
             if (summary.ColdShare is { } cold)
             {
                 sb.Append(cold >= BufferCompositionColdMajority
-                    ? $"{KnobPct(cold)} of resident buffers sit in relations whose average usage count is at or below 1 — pages the clock sweep evicts first and nobody re-read — so a larger shared_buffers would mostly hold more of the same; raising it buys little here and still pays the counter-objective named above. "
+                    ? $"{KnobPct(cold)} of resident buffers sit in relations whose average usage count is at or below 1 (pages the clock sweep evicts first and nobody re-read), so a larger shared_buffers would mostly hold more of the same; raising it buys little here and still pays the counter-objective named above. "
                     : $"Only {KnobPct(cold)} of resident buffers are cold (average usage count at or below 1), so what is in the cache is being re-read and a larger shared_buffers would hold pages that earn their place. ");
             }
 
@@ -86,7 +87,7 @@ public static partial class PgTargetAdvice
                 sb.Append("The pool is only ").Append(KnobPct(fill)).Append(" full: shared_buffers is not the constraint while it has room, and the pressure counters are better read as a scan pattern than a size. ");
 
             if (summary.HitRatioSuppressed)
-                sb.Append("On Aurora the hit ratio is stated but not graded — a read outside shared_buffers may be a hit in the local storage tier — and this composition is the honest read there: what pg_buffercache says is resident is resident, whatever the community hit-ratio arithmetic says.");
+                sb.Append("On Aurora the hit ratio is stated but not graded (a read outside shared_buffers may be a hit in the local storage tier), and this composition is the honest read there: what pg_buffercache says is resident is resident, whatever the community hit-ratio arithmetic says.");
 
             remediation = sb.ToString().TrimEnd();
         }
@@ -124,11 +125,11 @@ public static partial class PgTargetAdvice
         {
             case PgTargetBufferCompositionStatus.ExtensionAbsent:
                 return CompositionSentenceMarker +
-                       "what the cache holds cannot be shown — pg_buffercache is not offered by this server (pg_extension_availability reports it absent), so pg_buffer_usage has nothing to capture; " +
+                       "what the cache holds cannot be shown: pg_buffercache is not offered by this server (pg_extension_availability reports it absent), so pg_buffer_usage has nothing to capture; " +
                        "the pressure counters above stand on their own. On a managed service it is a parameter-group or a menu question, not a CREATE EXTENSION.";
             case PgTargetBufferCompositionStatus.ExtensionAvailable:
                 return CompositionSentenceMarker +
-                       "what the cache holds cannot be shown yet — pg_buffercache is offered by this server but not installed (pg_extension_availability reports it available), " +
+                       "what the cache holds cannot be shown yet: pg_buffercache is offered by this server but not installed (pg_extension_availability reports it available), " +
                        "one CREATE EXTENSION pg_buffercache away; the next hourly pg_buffer_usage capture after that fills this drill-down.";
             case PgTargetBufferCompositionStatus.NoCapture:
             {
@@ -168,11 +169,11 @@ public static partial class PgTargetAdvice
             text.Append("; ").Append(KnobPct(dirty)).Append(" of the pool is dirty");
 
         if (summary.ColdShare is { } coldShare)
-            text.Append("; ").Append(KnobPct(coldShare)).Append(" of resident buffers sit in relations whose average usage count is at or below 1 — the clock sweep evicts those first");
+            text.Append("; ").Append(KnobPct(coldShare)).Append(" of resident buffers sit in relations whose average usage count is at or below 1: the clock sweep evicts those first");
 
         text.Append('.');
         if (summary.CapturedAt is { } at)
-            text.Append(" Captured at ").Append(at.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)).Append(" UTC — a level, not the window's counters; pg_buffer_usage collects hourly.");
+            text.Append(" Captured at ").Append(at.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)).Append(" UTC: a level, not the window's counters; pg_buffer_usage collects hourly.");
         if (summary.RelationsInCapture > summary.TopRelations.Count)
             text.Append(" The drill-down carries the top ").Append(KnobNum(summary.TopRelations.Count)).Append(" of ").Append(KnobNum(summary.RelationsInCapture)).Append(" resident relations; get_pg_buffer_usage lists the rest.");
         return text.ToString();
@@ -197,8 +198,8 @@ public static partial class PgTargetAdvice
     private static string KnobHours(double hours) => hours switch
     {
         < 1 => $"{hours * 60:0} minutes",
-        < 48 => $"{hours:0.#} h",
-        _ => $"{hours / 24:0.#} days",
+        < 48 => $"{hours:#,##0.#} h",
+        _ => $"{hours / 24:#,##0.#} days",
     };
 
     private static partial AdviceBlock? ComposeBuffer(string key, IReadOnlyDictionary<string, Fact> factsByKey)
@@ -219,7 +220,7 @@ public static partial class PgTargetAdvice
         if (pressure is null)
         {
             return new AdviceBlock(
-                Headline: "Buffer cache under pressure — the working set does not fit in shared_buffers",
+                Headline: "Buffer cache under pressure: the working set does not fit in shared_buffers",
                 Investigation:
                     "Three counters say the same thing three ways when shared_buffers is too small for the working set: block " +
                     "requests leave the cache (pg_stat_database blks_read against blks_hit), pages are evicted from " +
@@ -241,14 +242,22 @@ public static partial class PgTargetAdvice
         var knob = KnobFact(facts, PgTargetFactKeys.ConfigSharedBuffers);
         var pressure = KnobFact(facts, PgTargetFactKeys.BufferCachePressure);
 
+        /* #8322: on Aurora the service sizes the knob, so neither the headline nor the story names initdb. */
+        var managedByService = (KnobMeta(knob, "not_applicable_on_aurora") ?? 0) > 0;
         var stated = knob is null
             ? "at the initdb default of 128 MB"
-            : KnobMb(knob.Value) + (knob.Value <= PgTargetScorer.SharedBuffersInitdbDefaultMb ? " — the initdb default" : string.Empty);
+            : KnobMb(knob.Value) + (managedByService
+                ? ": set by the service from the instance's capacity"
+                : (knob.Value <= PgTargetScorer.SharedBuffersInitdbDefaultMb ? ": the initdb default" : string.Empty));
 
         var sb = new StringBuilder(720);
-        sb.Append("`shared_buffers` is PostgreSQL's own page cache. initdb writes 128 MB into every new cluster's postgresql.conf " +
-                  "regardless of the host, so 128 MB means nobody sized it — a 64 GB host caching 128 MB of its data itself and " +
-                  "relying on the operating system's page cache for the rest. ");
+        sb.Append(managedByService
+            ? "`shared_buffers` is PostgreSQL's own page cache. On Aurora the service sets it from the instance's capacity (a " +
+              "parameter-group formula over the instance class's memory, or the current capacity units on Serverless, which " +
+              "moves it as the capacity moves), so the value is not a default nobody sized, and it is not graded here. "
+            : "`shared_buffers` is PostgreSQL's own page cache. initdb writes 128 MB into every new cluster's postgresql.conf " +
+              "regardless of the host, so 128 MB means nobody sized it: a 64 GB host caching 128 MB of its data itself and " +
+              "relying on the operating system's page cache for the rest. ");
 
         if (pressure is not null && pressure.BaseSeverity > 0)
         {
@@ -287,10 +296,10 @@ public static partial class PgTargetAdvice
         var turnovers = KnobMeta(pressure, "cache_turnovers_per_hour");
 
         if (!suppressed)
-            return $"Buffer cache under pressure — {KnobPct(pressure.Value)} of block requests left shared_buffers";
+            return $"Buffer cache under pressure: {KnobPct(pressure.Value)} of block requests left shared_buffers";
         if (evictionsTracked && turnovers is not null)
-            return $"Buffer cache under pressure — shared_buffers turned over {KnobNum(turnovers.Value)} times per hour";
-        return $"Buffer cache under pressure — the background writer is halting on its page limit";
+            return $"Buffer cache under pressure: shared_buffers turned over {KnobNum(turnovers.Value)} times per hour";
+        return $"Buffer cache under pressure: the background writer is halting on its page limit";
     }
 
     /// <summary>The per-arm evidence, each arm saying whether it was graded and why not when it was not.</summary>
@@ -305,9 +314,9 @@ public static partial class PgTargetAdvice
         sb.Append(KnobNum(blocks)).Append(" block requests (").Append(KnobNum(perSec)).Append("/s), of which ")
           .Append(KnobPct(pressure.Value)).Append(" were served from outside shared_buffers");
         if (suppressed)
-            sb.Append(" — stated but not graded on Aurora, where a read outside shared_buffers may be a hit in the local storage tier and the community hit-ratio arithmetic misleads");
+            sb.Append(": stated but not graded on Aurora, where a read outside shared_buffers may be a hit in the local storage tier and the community hit-ratio arithmetic misleads");
         else if (perSec < PgTargetScorer.BufferHitArmMinimumBlocksPerSec)
-            sb.Append(" — below the block-rate floor, so the hit-ratio arm is not graded");
+            sb.Append(", below the block-rate floor, so the hit-ratio arm is not graded");
         sb.Append(". ");
 
         /* eviction arm */
@@ -324,9 +333,9 @@ public static partial class PgTargetAdvice
             var turnovers = KnobMeta(pressure, "cache_turnovers_per_hour");
             var sharedBytes = KnobMeta(pressure, "shared_buffers_bytes");
             if (turnovers is not null && sharedBytes is not null)
-                sb.Append(" — the whole ").Append(KnobBytes(sharedBytes.Value)).Append(" cache replaced about ").Append(KnobNum(turnovers.Value)).Append(" times per hour");
+                sb.Append(": the whole ").Append(KnobBytes(sharedBytes.Value)).Append(" cache replaced about ").Append(KnobNum(turnovers.Value)).Append(" times per hour");
             else
-                sb.Append(" — shared_buffers was not in the config snapshot, so turnover could not be computed and this arm is not graded");
+                sb.Append(": shared_buffers was not in the config snapshot, so turnover could not be computed and this arm is not graded");
             sb.Append("). ");
         }
 
@@ -357,7 +366,7 @@ public static partial class PgTargetAdvice
 
         var resets = (KnobMeta(pressure, "db_reset_count") ?? 0) + (KnobMeta(pressure, "io_reset_count") ?? 0) + (KnobMeta(pressure, "bg_reset_count") ?? 0);
         if (resets > 0)
-            sb.Append("Statistics were reset ").Append(KnobNum(resets)).Append(" time(s) inside the window, so these totals are a floor. ");
+            sb.Append("Statistics were reset ").Append(CountText.Plural((long)resets, "time")).Append(" inside the window, so these totals are a floor. ");
 
         return sb;
     }
@@ -365,15 +374,29 @@ public static partial class PgTargetAdvice
     private static string SharedBuffersRemediation(Fact? knob, Fact? pressure)
     {
         var sb = new StringBuilder(720);
-        var current = knob is null ? "128 MB (assumed — no config snapshot)" : KnobMb(knob.Value);
+        var current = knob is null ? "128 MB (assumed: no config snapshot)" : KnobMb(knob.Value);
         var atDefault = knob is null || knob.Value <= PgTargetScorer.SharedBuffersInitdbDefaultMb;
         var fired = pressure is not null && pressure.BaseSeverity > 0;
+        /* #8322: the collector's stamp for an Aurora target, where the service sizes the knob. */
+        var managedByService = (KnobMeta(knob, "not_applicable_on_aurora") ?? 0) > 0;
+
+        if (managedByService)
+        {
+            sb.Append("shared_buffers is ").Append(current)
+              .Append(", and on Aurora the service sets it from the instance's capacity: a parameter-group formula over the " +
+                      "instance class's memory, or the current capacity units on Serverless, which moves it as the capacity moves. " +
+                      "Nobody left it unsized, so raising the number is not the move. Read the capacity figures first " +
+                      "(get_pg_cpu_utilization's acu_utilization_percent and the instance class): a cache that is measurably short " +
+                      "on a capacity-sized instance is an instance too small for its working set, or a working set worth shrinking " +
+                      "(get_pg_buffer_usage: one large sequential scanner or a bloated table can churn a cache no size would satisfy).");
+            return sb.ToString();
+        }
 
         if (atDefault)
         {
             sb.Append("shared_buffers is ").Append(current)
-              .Append(". Raise it toward a quarter of the host's RAM — the community starting point, and a judgment: this product " +
-                      "does not collect host memory, so the number is yours — then re-check the composite on the next pass. " +
+              .Append(". Raise it toward a quarter of the host's RAM, the community starting point, and a judgment: this product " +
+                      "does not collect host memory, so the number is yours. Then re-check the buffer cache pressure finding on the next pass. " +
                       "It is a postmaster setting: the change takes a restart, and on Linux a large value may need huge_pages " +
                       "and kernel shared-memory limits set with it; on a managed service it is a parameter-group change. ");
         }
@@ -385,10 +408,10 @@ public static partial class PgTargetAdvice
                 : ". ");
         }
 
-        sb.Append("Counter-objectives: every byte given to shared_buffers is taken from the operating system's page cache " +
+        sb.Append("Counter-objectives: every byte given to shared_buffers comes out of the operating system's page cache " +
                   "(past roughly 40 % of RAM the two cache the same pages twice) and from the memory available to work_mem × " +
-                  "connections; a larger cache also holds more dirty pages, so checkpoints write more and take longer — " +
-                  "raise checkpoint_completion_target's headroom and watch the checkpoint-pressure card with it.");
+                  "connections; a larger cache also holds more dirty pages, so checkpoints write more and take longer, " +
+                  "raise checkpoint_completion_target's headroom and watch the checkpoint pressure finding with it.");
 
         return sb.ToString();
     }

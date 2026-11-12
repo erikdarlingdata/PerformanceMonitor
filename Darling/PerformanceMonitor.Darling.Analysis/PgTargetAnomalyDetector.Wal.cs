@@ -72,7 +72,8 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        CAST(coalesce(SUM(GREATEST(raw_wal_records, 0)), 0) AS bigint) AS wal_records,
        CAST(count(*) FILTER (WHERE wal_reset_here) AS integer) AS wal_reset_count,
        coalesce(bool_or(wal_tracked), false) AS wal_tracked,
-       (array_agg(collection_time ORDER BY bytes_per_sec DESC NULLS LAST, collection_time DESC))[1] AS peak_time
+       (array_agg(collection_time ORDER BY bytes_per_sec DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
+       " + WindowTiles.CoverageColumnsSql + @"
 FROM rated
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;
@@ -93,10 +94,11 @@ ORDER BY " + WindowTiles.LocalHourSql;
     /// PostgreSQL target the fleet monitors today WAL is not reported (Aurora types <c>wal_bytes</c> NULL;
     /// calibration §A7 measured fifty clusters at zero for fourteen days), and a detector that fetched a thirty-day
     /// bucket before discovering the window had nothing to judge would run the largest read in the family for
-    /// nothing on every pass. So the four-hour window is read first; an untracked window (no non-NULL
-    /// <c>wal_bytes</c>, or zero bytes AND zero records across every sample — the collector's rule, same read)
-    /// returns without asking for the bucket and without a fact: the context fact already carries
-    /// <c>unavailable</c> and its reason, and an anomaly about an unreported quantity would be a claim about
+    /// nothing on every pass. So the four-hour window is read first; a window with no non-NULL <c>wal_bytes</c>, or
+    /// zero bytes AND zero records across every sample, returns without asking for the bucket and without a fact. The
+    /// collector tells those apart (#7457: NULL is a flavour gap, zero beside checkpoint buffers is counters not
+    /// populated, zero with nothing written is a quiet server) and the context fact carries which; the detector needs
+    /// only what they share, that there is no volume to judge, and an anomaly about one would be a claim about
     /// nothing. Only a tracked window with at least one rated collection reaches the baseline.</para>
     /// </summary>
     private async partial Task DetectWalVolumeAnomalies(AnalysisContext context, List<Fact> anomalies)

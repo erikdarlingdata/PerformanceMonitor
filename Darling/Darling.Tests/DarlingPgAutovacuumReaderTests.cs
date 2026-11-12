@@ -127,8 +127,9 @@ public class DarlingPgAutovacuumReaderTests
         Assert.Contains("e.database_name IS NOT DISTINCT FROM l.database_name", Sql, StringComparison.Ordinal);
         Assert.Contains("e.schema_name   IS NOT DISTINCT FROM l.schema_name", Sql, StringComparison.Ordinal);
         Assert.Contains("e.table_name    IS NOT DISTINCT FROM l.table_name", Sql, StringComparison.Ordinal);
-        Assert.Equal(2, Sql.Split("server_id = $1").Length - 1);
-        Assert.Equal(2, Sql.Split("collection_time >= $2").Length - 1);
+        /* #7878, #7910: the capture-window CTE reads the same window as the two branches, so three predicates, not two. */
+        Assert.Equal(3, Sql.Split("server_id = $1").Length - 1);
+        Assert.Equal(3, Sql.Split("collection_time >= $2").Length - 1);
     }
 
     [Fact]

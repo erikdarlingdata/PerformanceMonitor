@@ -45,7 +45,7 @@ public sealed partial class DarlingMcpFinOpsTools
     internal static decimal? DatabaseSizeCostShare(decimal? sizeMb, decimal totalMb, decimal monthly)
     {
         if (monthly <= 0m || totalMb <= 0m || sizeMb is null) return null;
-        return Math.Round(FinOpsCost.StorageShare(sizeMb.Value, totalMb, monthly), 2, MidpointRounding.AwayFromZero);
+        return FinOpsWireFigures.Clean(Math.Round(FinOpsCost.StorageShare(sizeMb.Value, totalMb, monthly), 2, MidpointRounding.AwayFromZero));
     }
 
     private static async Task<string> ReadDatabaseSizesAsync(
@@ -100,19 +100,19 @@ public sealed partial class DarlingMcpFinOpsTools
             ["database_name"] = f.DatabaseName,
             ["file_name"] = f.FileName,
             ["file_type"] = f.FileTypeDesc,
-            ["total_size_mb"] = f.TotalSizeMb,
-            ["used_size_mb"] = f.UsedSizeMb,
-            ["free_space_mb"] = f.UsedSizeMb.HasValue && f.TotalSizeMb.HasValue ? f.TotalSizeMb.Value - f.UsedSizeMb.Value : null,
-            ["used_pct"] = f.UsedSizeMb.HasValue && f.TotalSizeMb > 0 ? Math.Round(f.UsedSizeMb.Value * 100m / f.TotalSizeMb.Value, 1) : null,
-            ["max_size_mb"] = f.MaxSizeMb,
-            ["auto_growth_mb"] = f.AutoGrowthMb,
+            ["total_size_mb"] = FinOpsWireFigures.Mb(f.TotalSizeMb),
+            ["used_size_mb"] = FinOpsWireFigures.Mb(f.UsedSizeMb),
+            ["free_space_mb"] = f.UsedSizeMb.HasValue && f.TotalSizeMb.HasValue ? FinOpsWireFigures.Mb(f.TotalSizeMb.Value - f.UsedSizeMb.Value) : null,
+            ["used_pct"] = f.UsedSizeMb.HasValue && f.TotalSizeMb > 0 ? FinOpsWireFigures.Pct(f.UsedSizeMb.Value * 100m / f.TotalSizeMb.Value) : null,
+            ["max_size_mb"] = FinOpsWireFigures.Mb(f.MaxSizeMb),
+            ["auto_growth_mb"] = FinOpsWireFigures.Mb(f.AutoGrowthMb),
             ["is_percent_growth"] = f.IsPercentGrowth,
             ["growth_pct"] = f.GrowthPct,
             ["recovery_model"] = f.RecoveryModel,
             ["vlf_count"] = isLog ? f.VlfCount : null,
             ["volume_mount_point"] = f.VolumeMountPoint,
-            ["volume_total_mb"] = f.VolumeTotalMb,
-            ["volume_free_mb"] = f.VolumeFreeMb,
+            ["volume_total_mb"] = FinOpsWireFigures.Mb(f.VolumeTotalMb),
+            ["volume_free_mb"] = FinOpsWireFigures.Mb(f.VolumeFreeMb),
             ["monthly_cost_usd"] = DatabaseSizeCostShare(f.TotalSizeMb, totalMb, monthly),
         };
         if (AzureSiblingDatabaseSize.IsSiblingRow(f.FileId, f.FileName))

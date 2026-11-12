@@ -380,19 +380,99 @@ SELECT
     /// <para>Convergence is judged ONCE, at the end, against the only target that means anything — raw's oldest
     /// row (<see cref="RepairAsync"/>). That is the same shape #1762 settled on: re-probe coverage after
     /// refreshing and escalate only on a MEASURED shortfall.</para>
+    ///
+    /// <para><paramref name="force"/> (#7981) runs the slice as a forced refresh from the start. The caller sets
+    /// it for a slice the engine already counts as built (<see cref="CountedAsBuilt"/>): a plain refresh over
+    /// such a slice does nothing, so running it plain only to escalate at the end wastes every slice.</para>
     /// </summary>
     public static async Task<DateTime?> RunSliceAsync(
         NpgsqlConnection connection, string view, DateTime fromUtc, DateTime toUtc,
         RefreshDisclosure disclosure, CancellationToken cancellationToken,
-        int concurrentRefreshAttempts = ConcurrentRefreshAttempts)
+        int concurrentRefreshAttempts = ConcurrentRefreshAttempts, bool force = false)
     {
         if (connection is null)
         {
             throw new ArgumentNullException(nameof(connection));
         }
 
-        await RefreshAsync(connection, view, fromUtc, toUtc, force: false, disclosure, cancellationToken, concurrentRefreshAttempts);
+        await RefreshAsync(connection, view, fromUtc, toUtc, force, disclosure, cancellationToken, concurrentRefreshAttempts);
         return await ReadCoverageFloorAsync(connection, view, cancellationToken);
+    }
+
+    /* ─────────────────────────── what the engine counts as built ─────────────────────────── */
+
+    /// <summary>
+    /// The ranges TimescaleDB still has to materialize for <paramref name="view"/>: the entries of its
+    /// materialization invalidation log, in the engine's internal time (microseconds since the Unix epoch),
+    /// each closed at both ends. A plain <c>refresh_continuous_aggregate</c> materializes only the part of its
+    /// window these entries cover, so a window no entry overlaps is one the engine counts as built, and a plain
+    /// refresh over it does nothing (#7981).
+    ///
+    /// <para>The log, not the chunks, because the chunks cannot tell a range that was never built from one that
+    /// was built and then dropped: both are empty. The log can. Creation writes one [-infinity, +infinity]
+    /// entry, every refresh cuts its window out of the entries it overlaps, and dropping the materialization's
+    /// chunks writes nothing back. So a range the rollup's own retention dropped has no entry, and only a forced
+    /// refresh rebuilds it. Measured on TimescaleDB 2.30.1 and 2.31.0: after the retention run, a plain refresh
+    /// over the dropped range left the floor where it was, and the forced form rebuilt every bucket.</para>
+    ///
+    /// <para><c>_timescaledb_catalog</c>, because no information view exposes the log. Both tables are readable
+    /// by PUBLIC, as <c>continuous_agg</c> already is for <see cref="TimescaleSupport.WatermarkSql"/>.</para>
+    /// </summary>
+    public static string InvalidationLogSql(string view) => $@"
+SELECT l.lowest_modified_value, l.greatest_modified_value
+FROM _timescaledb_catalog.continuous_agg AS ca
+JOIN _timescaledb_catalog.continuous_aggs_materialization_invalidation_log AS l
+  ON l.materialization_id = ca.mat_hypertable_id
+WHERE ca.user_view_schema = 'collect'
+AND   ca.user_view_name = '{view}'";
+
+    /// <summary>Reads <see cref="InvalidationLogSql"/>. Empty when the rollup has no entry at all, which the
+    /// caller treats as unknown rather than as built.</summary>
+    public static async Task<IReadOnlyList<(long Lowest, long Greatest)>> ReadInvalidationLogAsync(
+        NpgsqlConnection connection, string view, CancellationToken cancellationToken)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var entries = new List<(long Lowest, long Greatest)>();
+        using var command = new NpgsqlCommand(InvalidationLogSql(view), connection) { CommandTimeout = ProbeTimeoutSeconds };
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            entries.Add((reader.GetInt64(0), reader.GetInt64(1)));
+        }
+
+        return entries;
+    }
+
+    /// <summary>A naive-UTC instant in the engine's internal time: microseconds since the Unix epoch, which is
+    /// how the invalidation log records a <c>timestamp</c> column (#7981).</summary>
+    public static long ToInternalMicroseconds(DateTime utc) => (utc - DateTime.UnixEpoch).Ticks / 10;
+
+    /// <summary>
+    /// Does the engine count [<paramref name="fromUtc"/>, <paramref name="toUtc"/>) as built? True when no entry
+    /// of <paramref name="invalidations"/> (see <see cref="ReadInvalidationLogAsync"/>) overlaps the window. For a
+    /// slice below the rollup's coverage floor that means its buckets were built and then dropped, by the
+    /// rollup's own retention or by an earlier run cut short, and a plain refresh over it does nothing (#7981).
+    /// </summary>
+    public static bool CountedAsBuilt(IReadOnlyList<(long Lowest, long Greatest)> invalidations, DateTime fromUtc, DateTime toUtc)
+    {
+        ArgumentNullException.ThrowIfNull(invalidations);
+
+        var from = ToInternalMicroseconds(fromUtc);
+        var to = ToInternalMicroseconds(toUtc);
+        foreach (var (lowest, greatest) in invalidations)
+        {
+            /* A closed entry against a half-open window. */
+            if (lowest < to && greatest >= from)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>

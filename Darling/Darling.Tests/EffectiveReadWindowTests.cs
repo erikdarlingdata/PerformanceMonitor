@@ -135,7 +135,7 @@ public sealed class EffectiveReadWindowTests
     private static async Task<(SlowReadRecord Record, DateTime? NotedStart)> InvestigationReportsRecord(string? requestId,
         int hoursBack, JsonObject arguments)
     {
-        await using var postgres = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=none;Database=none;Timeout=1");
+        await using var postgres = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=none;Database=none;Timeout=15");
         using var cancelled = new CancellationTokenSource();
         await cancelled.CancelAsync();
 

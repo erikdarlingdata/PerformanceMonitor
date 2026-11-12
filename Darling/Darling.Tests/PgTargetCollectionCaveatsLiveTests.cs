@@ -138,7 +138,7 @@ FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 300 })
                 var prose = status == "empty"
                     ? doc.RootElement.GetProperty("message").GetString()
                     : doc.RootElement.GetProperty("caveat").GetString();
-                Assert.Contains("1 of 20 fact families could not be read (vacuum (missing_schema)) — the absence of findings is not evidence", prose, StringComparison.Ordinal);
+                Assert.Contains("1 of 20 fact families could not be read (vacuum (missing_schema)), the absence of findings is not evidence", prose, StringComparison.Ordinal);
                 if (status == "empty")
                 {
                     Assert.Contains(" COLLECTION CAVEAT: ", prose, StringComparison.Ordinal);

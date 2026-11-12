@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -111,7 +112,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   capture_time <= $2
         AND   ($3::text[] IS NULL OR database_name = ANY($3))
-        ORDER BY database_name, capture_time
+        ORDER BY lower(database_name), database_name, capture_time
         """;
 
     /// <summary>Every trace-flag snapshot for a server up to the window end (a row exists only while a flag is
@@ -150,7 +151,16 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         var snapshots = await ReadDatabaseConfigSnapshotsAsync(serverId, endUtc, databaseNames, cancellationToken);
-        return ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, startUtc, endUtc)
+        /* #7416 item 2: log_reuse_wait_desc is the engine's live reason the log cannot truncate, not a setting an operator changed.
+           The grid lists settings only (Change Watch and the analysis engine drop it the same way). */
+        var diffed = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, startUtc, endUtc);
+        /* #7662: a state_desc change takes the minute database_states first saw the new state, not the next config snapshot. */
+        var dated = ConfigChangeDiff.ApplyDatabaseStateTimes(
+            diffed,
+            await DatabaseStateReadings.ReadAsync(_dataSource, serverId, diffed, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken),
+            startUtc, endUtc);
+        return dated
+            .Where(c => ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName))
             .Select(c => new DatabaseConfigChangeRow(c))
             .ToList();
     }
@@ -309,7 +319,8 @@ public sealed class ServerConfigChangeRow(ConfigChangeDiff.ServerConfigChange ch
     public bool? IsDynamic => change.IsDynamic;
     public bool? IsAdvanced => change.IsAdvanced;
 
-    public string ChangeTimeDisplay => ViewerTimeHelper.FormatForDisplay(change.ChangeTime, "yyyy-MM-dd HH:mm:ss");
+    /// <summary>#7662: the first capture that held the new value, with the capture before it when there is one (the change happened between the two).</summary>
+    public string ChangeTimeDisplay => ConfigChangeRowText.FirstSeen(change.ChangeTime, change.PreviousCaptureTime);
     public string DynamicDisplay => change.DynamicDisplay;
     public string AdvancedDisplay => change.AdvancedDisplay;
     public bool RequiresRestart => change.RequiresRestart;
@@ -324,11 +335,25 @@ public sealed class DatabaseConfigChangeRow(ConfigChangeDiff.DatabaseConfigChang
     public DateTime ChangeTime => change.ChangeTime;
     public string DatabaseName => change.DatabaseName;
     public string SettingName => change.SettingName;
-    public string? OldValue => change.OldValue;
-    public string? NewValue => change.NewValue;
+    /* #7416 item 3: a pair that differs only in whitespace shows it, so the two cells never read the same. */
+    public string? OldValue => ConfigValueText.Shown(change.OldValue, change.NewValue);
+    public string? NewValue => ConfigValueText.Shown(change.NewValue, change.OldValue);
 
-    public string ChangeTimeDisplay => ViewerTimeHelper.FormatForDisplay(change.ChangeTime, "yyyy-MM-dd HH:mm:ss");
+    /// <summary>#7662: as the server grid: a state_desc row dated from database_states has no earlier capture and shows its one time.</summary>
+    public string ChangeTimeDisplay => ConfigChangeRowText.FirstSeen(change.ChangeTime, change.PreviousCaptureTime);
     public string ChangeDescription => change.ChangeDescription;
+}
+
+/// <summary>#7662: the Config Changes time column's text.</summary>
+public static class ConfigChangeRowText
+{
+    public static string FirstSeen(DateTime changeTime, DateTime? previousCaptureTime)
+    {
+        var seen = ViewerTimeHelper.FormatForDisplay(changeTime, "yyyy-MM-dd HH:mm:ss");
+        return previousCaptureTime is null
+            ? seen
+            : "between " + ViewerTimeHelper.FormatForDisplay(previousCaptureTime.Value, "yyyy-MM-dd HH:mm:ss") + " and " + seen;
+    }
 }
 
 /// <summary>One trace-flag change (Trace Flag Changes grid). Wraps

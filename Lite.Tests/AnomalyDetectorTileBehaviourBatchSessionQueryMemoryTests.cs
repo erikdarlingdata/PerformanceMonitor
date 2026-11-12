@@ -96,7 +96,7 @@ public sealed class AnomalyDetectorTileBehaviourBatchSessionQueryMemoryTests : I
 INSERT INTO file_io_stats
     (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb,
      delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds)
-SELECT -8100000 - (d * 100000 + h * 1000 + i), {time}, $2, 'TileServer', 'AppDb', 'AppDb_data', 'ROWS', 'D:\AppDb.mdf', 100,
+SELECT -8100000 - (d * 100000 + h * 1000 + i), {time}, $2, 'TileServer', 'AppDb', 'AppDb_log', 'LOG', 'D:\AppDb.ldf', 100,
        10, 10, 81920, 81920, 8 + i % 5, ({writeMs}) * 10, 60
 FROM {rangeOfDays}
 CROSS JOIN range(0, 4) AS hh(h)
@@ -137,6 +137,61 @@ CROSS JOIN range(0, 30) AS ii(i)";
         Assert.Equal(300.0, write.Value);
         Assert.InRange(write.Metadata["baseline_median"], 8.0, 14.0); // the write history, not the read series
         Assert.DoesNotContain(sustained, f => f.Key == "ANOMALY_READ_LATENCY");
+    }
+
+    /// <summary>One seeded hour for a multi-file database: a log file at <paramref name="logWriteMs"/> (plus 0 or 1 ms) and two data files at 250 ms.</summary>
+    private async Task SeedMultiFileDatabaseAsync(int serverId, string time, string rangeOfDays, string logWriteMs)
+    {
+        var fileIndex = 0;
+        foreach (var (fileName, fileType, writeMs) in new[]
+        {
+            ("AppDb_log", "LOG", $"({logWriteMs}) + i % 2"),
+            ("AppDb_data1", "ROWS", "250"),
+            ("AppDb_data2", "ROWS", "250"),
+        })
+        {
+            var sql = $@"
+INSERT INTO file_io_stats
+    (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb,
+     delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds)
+SELECT -8200000 - (d * 100000 + h * 1000 + i) * 10 - {fileIndex}, {time}, $2, 'TileServer', 'AppDb', '{fileName}', '{fileType}', 'D:\{fileName}', 100,
+       10, 10, 81920, 81920, 10, ({writeMs}) * 10, 60
+FROM {rangeOfDays}
+CROSS JOIN range(0, 4) AS hh(h)
+CROSS JOIN range(0, 30) AS ii(i)";
+            await ExecuteSeedAsync(sql, WindowStartT, serverId);
+            fileIndex++;
+        }
+    }
+
+    /// <summary>
+    /// #6959: one multi-file user database. Its data files write at 250 ms (checkpoint and lazy-writer work no session
+    /// waits on) and its log file near 1 ms. The write gate reads log and tempdb rows only, so the 250 ms data files
+    /// do not fire it. Then the log's write latency rises to 30 ms and the gate fires on the log. The seeded rows are
+    /// the ones Darling's <c>EndToEnd_WriteLatencyGate_IgnoresUserDataFiles_FiresOnLog_AgainstDevPostgres</c> seeds,
+    /// so the two products are held to one result.
+    /// </summary>
+    [Fact]
+    public async Task WriteLatency_UserDataFilesAreIgnored_LogFileRises()
+    {
+        const int serverId = -8302;
+        await SeedMultiFileDatabaseAsync(serverId, "$1 - to_days(d) + to_hours(h) + to_minutes(2 * i + 1)", "range(1, 22) AS dd(d)", "1");
+        await SeedCanaryAsync(serverId, WindowStartT);
+
+        var writeBaseline = await _baselineProvider.GetBaselineAsync(serverId, MetricNames.IoWriteLatency, WindowStartT);
+        Assert.InRange(writeBaseline.Median, 0.5, 2.5);   // the log rows, not the 250 ms data files
+
+        await SeedMultiFileDatabaseAsync(serverId, "$1 + to_hours(h) + to_minutes(2 * i + 1)", "range(0, 1) AS dd(d)", "1");
+        var quiet = await _detector.DetectAnomaliesAsync(FourHourContext(serverId, WindowStartT));
+        Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_WRITE_LATENCY");
+
+        await ExecuteSeedAsync("DELETE FROM file_io_stats WHERE server_id = $1 AND collection_time >= $2", serverId, WindowStartT);
+        _baselineProvider.ClearCache();
+        await SeedMultiFileDatabaseAsync(serverId, "$1 + to_hours(h) + to_minutes(2 * i + 1)", "range(0, 1) AS dd(d)", "30");
+
+        var sustained = await _detector.DetectAnomaliesAsync(FourHourContext(serverId, WindowStartT));
+        var write = Assert.Single(sustained, f => f.Key == "ANOMALY_WRITE_LATENCY");
+        Assert.InRange(write.Value, 30.0, 31.0);           // the log row, not the 250 ms data files
     }
 
     /* ───────────────────────── Batch requests: scenarios 1, 3 and 4 ───────────────────────── */
@@ -434,6 +489,111 @@ FROM s";
         Assert.Equal(4, fact.Metadata["tiles_scored"]);
         Assert.Equal(2, fact.Metadata["tiles_fired"]);
         Assert.Equal(referenceCutoff, fact.Metadata["fire_threshold"], precision: 6);
+    }
+
+    /// <summary>#8293: an hour the collector ran every minute is a covered hour even when queries ran for only 25 of
+    /// those minutes. The collector keeps only statements run in the last ten minutes, so the other 35 collections
+    /// write no query_stats row at all, only their SUCCESS run in collection_log; coverage counts the collector's runs,
+    /// so the tile is scored, and its 25 active samples, all at the shift, fire.</summary>
+    [Fact]
+    public async Task QueryDuration_QueriesRunOnlyTwentyFiveMinutesOfAFullyCollectedHour_TileIsStillScored_AndFires()
+    {
+        const int serverId = -8006;
+        const double bigMu = 900_000.0;
+        const double bigSigma = 40_000.0;
+        const double bigShift = bigMu + 6 * bigSigma; // 1,140,000 us, above QueryDurationFloorUs (1,000,000)
+        const string historySql = @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name,
+     execution_count, total_elapsed_time, total_worker_time,
+     total_logical_reads, total_logical_writes, total_physical_reads,
+     delta_execution_count, delta_elapsed_time, delta_worker_time,
+     delta_logical_reads, delta_logical_writes, delta_physical_reads, delta_rows, delta_spills)
+SELECT -9300000 - (d * 10000 + h * 100 + i), $1 - to_days(d) + to_hours(h) + to_minutes(i * 5), $2, 'TileServer',
+       100, 0, 0, 0, 0, 0,
+       100, GREATEST(0, ROUND($3 + $4 * sin(d * 4 + h * 12 + i))), 0, 0, 0, 0, 0, 0
+FROM range(1, 22) AS d(d)
+CROSS JOIN range(0, 4) AS hh(h)
+CROSS JOIN range(0, 12) AS ii(i)";
+        await ExecuteSeedAsync(historySql, WindowStartT, serverId, bigMu, bigSigma);
+
+        // The window: the collector runs once a minute and logs every run. Hours 0 to 2 are active at the baseline; in
+        // hour 3 only the first 25 minutes carry executions, at the shift, and the other 35 runs write no query_stats row.
+        const string runsSql = @"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status)
+SELECT -9900000 - (h * 100 + i), $2, 'TileServer', 'query_stats', $1 + to_hours(h) + to_minutes(i), 5, 'SUCCESS'
+FROM range(0, 4) AS hh(h)
+CROSS JOIN range(0, 60) AS ii(i)";
+        await ExecuteSeedAsync(runsSql, WindowStartT, serverId);
+        const string windowSql = @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name,
+     execution_count, total_elapsed_time, total_worker_time,
+     total_logical_reads, total_logical_writes, total_physical_reads,
+     delta_execution_count, delta_elapsed_time, delta_worker_time,
+     delta_logical_reads, delta_logical_writes, delta_physical_reads, delta_rows, delta_spills)
+SELECT -9800000 - (h * 100 + i), $1 + to_hours(h) + to_minutes(i), $2, 'TileServer',
+       100, 0, 0, 0, 0, 0,
+       100, CASE WHEN h = 3 THEN $5 ELSE GREATEST(0, ROUND($3 + $4 * sin(h * 12 + i))) END, 0, 0, 0, 0, 0, 0
+FROM range(0, 4) AS hh(h)
+CROSS JOIN range(0, 60) AS ii(i)
+WHERE NOT (h = 3 AND i >= 25)";
+        await ExecuteSeedAsync(windowSql, WindowStartT, serverId, bigMu, bigSigma, bigShift);
+        await SeedCanaryAsync(serverId, WindowStartT);
+
+        var facts = await _detector.DetectAnomaliesAsync(FourHourContext(serverId, WindowStartT));
+        var fact = Assert.Single(facts, f => f.Key == "ANOMALY_QUERY_DURATION");
+        Assert.Equal(13, fact.Metadata["tile_local_hour"]);
+        Assert.Equal(4, fact.Metadata["tiles_scored"]);
+        Assert.Equal(1, fact.Metadata["tiles_fired"]);
+    }
+
+    /// <summary>#8293: the session collector groups by program name and leaves its own sessions out, so a collection
+    /// with no other user session writes no session_stats row at all, only its SUCCESS run in collection_log. An hour the
+    /// collector ran every minute is still a covered hour, so a sustained rise in its first 25 minutes scores and fires.</summary>
+    [Fact]
+    public async Task Sessions_NoOtherSessionsForMostOfAFullyCollectedHour_TileIsStillScored_AndFires()
+    {
+        const int serverId = -8007;
+        const double mu = 200.0;
+        const double sigma = 20.0;
+        const double shift = mu + 6 * sigma; // 320, clears SessionCountFloor (50)
+        const string historySql = @"
+INSERT INTO session_stats
+    (collection_id, collection_time, server_id, server_name, program_name,
+     connection_count, running_count, sleeping_count, dormant_count)
+SELECT -9400000 - (d * 10000 + h * 100 + i), $1 - to_days(d) + to_hours(h) + to_minutes(i * 5), $2, 'TileServer', 'App1',
+       GREATEST(0, ROUND($3 + $4 * sin(d * 4 + h * 12 + i))), 0, 0, 0
+FROM range(1, 22) AS d(d)
+CROSS JOIN range(0, 4) AS hh(h)
+CROSS JOIN range(0, 12) AS ii(i)";
+        await ExecuteSeedAsync(historySql, WindowStartT, serverId, mu, sigma);
+
+        // The collector runs once a minute and logs every run; hours 0 to 2 hold sessions at the baseline, and in hour 3
+        // only the first 25 minutes hold any, at the shift. The other 35 runs write no session_stats row.
+        const string runsSql = @"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status)
+SELECT -9910000 - (h * 100 + i), $2, 'TileServer', 'session_stats', $1 + to_hours(h) + to_minutes(i), 5, 'SUCCESS'
+FROM range(0, 4) AS hh(h)
+CROSS JOIN range(0, 60) AS ii(i)";
+        await ExecuteSeedAsync(runsSql, WindowStartT, serverId);
+        const string windowSql = @"
+INSERT INTO session_stats
+    (collection_id, collection_time, server_id, server_name, program_name,
+     connection_count, running_count, sleeping_count, dormant_count)
+SELECT -9810000 - (h * 100 + i), $1 + to_hours(h) + to_minutes(i), $2, 'TileServer', 'App1',
+       CASE WHEN h = 3 THEN $5 ELSE GREATEST(0, ROUND($3 + $4 * sin(h * 12 + i))) END, 0, 0, 0
+FROM range(0, 4) AS hh(h)
+CROSS JOIN range(0, 60) AS ii(i)
+WHERE NOT (h = 3 AND i >= 25)";
+        await ExecuteSeedAsync(windowSql, WindowStartT, serverId, mu, sigma, shift);
+        await SeedCanaryAsync(serverId, WindowStartT);
+
+        var facts = await _detector.DetectAnomaliesAsync(FourHourContext(serverId, WindowStartT));
+        var fact = Assert.Single(facts, f => f.Key == "ANOMALY_SESSION_SPIKE");
+        Assert.Equal(13, fact.Metadata["tile_local_hour"]);
+        Assert.Equal(4, fact.Metadata["tiles_scored"]);
+        Assert.Equal(1, fact.Metadata["tiles_fired"]);
     }
 
     /* ───────────────────────── Memory: scenario 1 only ───────────────────────── */

@@ -38,6 +38,69 @@ public sealed class QueryStoreSelfStatementReadersLiveTests
     private const long Normal = 20;
     private const long Own = 23;
 
+    /// <summary>
+    /// #7730: a statement the monitor sent before #7463 carries no marker. With the key backfill not yet run, the aborts read and the
+    /// Viewer's comparison still list it (the marker-only text test, not vacuous); once the backfill has stamped the key table, both
+    /// leave it out and keep the ordinary query.
+    /// </summary>
+    [Fact]
+    public async Task AnOldUnmarkedStatement_IsListedUntilTheBackfill_ThenLeftOutOfTheAbortsReadAndTheComparison()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")), "Set DARLING_TEST_PG to a Postgres connection string to run the #7730 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var now = LiveClock.Now();
+        await using var rig = await QueryStoreRegressionsFailureGroupsLiveTests.OpenAsync(async (runner, server, context, today, start) =>
+        {
+            long id = 9700;
+            foreach (var query in new[] { Normal, Own })
+            {
+                foreach (var type in new[] { "Regular", "Aborted" })
+                {
+                    id++;
+                    await QueryStoreRegressionsFailureGroupsLiveTests.WriteAsync(runner, server, context, type, id, now.AddHours(-3), query, 100, 2_000, 4_000, ct);
+                }
+            }
+        }, ct);
+
+        await using (var blank = new NpgsqlCommand("UPDATE query_store_stats SET query_text = NULL WHERE server_id = $1", rig.Connection))
+        {
+            blank.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+            await blank.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var production = new NpgsqlCommand(
+            "INSERT INTO query_store_text (server_id, database_name, query_id, query_sql_text, last_seen) VALUES ($1, $2, $3, 'SELECT normal', $5), ($1, $2, $4, $6, $5)",
+            rig.Connection))
+        {
+            production.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+            production.Parameters.Add(new NpgsqlParameter<string> { TypedValue = Db });
+            production.Parameters.Add(new NpgsqlParameter<long> { TypedValue = Normal });
+            production.Parameters.Add(new NpgsqlParameter<long> { TypedValue = Own });
+            production.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(now, DateTimeKind.Unspecified) });
+            production.Parameters.Add(new NpgsqlParameter<string> { TypedValue = SqlServerOwnStatement.OldTexts[1] });
+            await production.ExecuteNonQueryAsync(ct);
+        }
+
+        var start = now.AddHours(-24);
+        var end = now.AddMinutes(1);
+        var hashes = new[] { Normal, Own }.Select(q => "0x" + q.ToString("X8", System.Globalization.CultureInfo.InvariantCulture)).Order().ToList();
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+
+        Assert.False(await QueryStoreSelfKeys.ReadyAsync(rig.Connection, null, 30, ct));
+        var abortsBefore = await DarlingQueryStoreAbortsReader.ReadAsync(rig.Postgres, ServerId, start, end, 10, DatabaseFilter.All, ct);
+        Assert.Equal([Normal, Own], abortsBefore.Rows.Select(r => r.QueryId).Order().ToList());
+        var comparisonBefore = await viewer.GetQueryStoreComparisonAsync(ServerId, start, end, start.AddHours(-24), start, null, ct);
+        Assert.Equal(hashes, comparisonBefore.Select(r => r.QueryHash).Order().ToList());
+
+        Assert.NotNull(await QueryStoreSelfKeys.BackfillAsync(rig.Connection, ct));
+        Assert.True(await QueryStoreSelfKeys.ReadyAsync(rig.Connection, null, 30, ct));
+
+        var abortsAfter = await DarlingQueryStoreAbortsReader.ReadAsync(rig.Postgres, ServerId, start, end, 10, DatabaseFilter.All, ct);
+        Assert.Equal([Normal], abortsAfter.Rows.Select(r => r.QueryId).ToList());
+        var comparisonAfter = await viewer.GetQueryStoreComparisonAsync(ServerId, start, end, start.AddHours(-24), start, null, ct);
+        Assert.Equal([hashes.Single(h => h.EndsWith(Normal.ToString("X8", System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal))], comparisonAfter.Select(r => r.QueryHash).ToList());
+    }
+
     [Fact]
     public async Task TheMonitorsOwnStatement_StoredOnlyInTheTextTable_IsHiddenFromEveryRankedQueryStoreReader()
     {

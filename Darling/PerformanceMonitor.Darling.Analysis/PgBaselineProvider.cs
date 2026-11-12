@@ -136,6 +136,13 @@ public class PgBaselineProvider
     /// <summary>Cache TTL — baselines are recomputed after this interval.</summary>
     public static TimeSpan CacheTtl { get; set; } = TimeSpan.FromHours(1);
 
+    /// <summary>#7644: how long a FAULTED compute (a command timeout or a connection fault) is kept in the provider's own cache.
+    /// The detectors read one key twice in a pass, back to back: the bucket map, then the <c>GetBaselineAsync</c> fallback when
+    /// the map came back empty. Two minutes covers that pair on a pass that is busy with other gates, and is under the
+    /// 5 minute floor of the analysis interval, so the next pass computes again and a timeout is never "no baseline" for the
+    /// hour. The shared web read (<see cref="GetOrComputeSharedAsync"/>) ignores a faulted entry and always computes.</summary>
+    internal static readonly TimeSpan FaultedEntryTtl = TimeSpan.FromMinutes(2);
+
     private readonly ConcurrentDictionary<string, CachedBaseline> _cache = new();
 
     /* #3941: the process's shared tier (see BaselineCache for the invalidation rule), or null for a private cache. */
@@ -362,17 +369,38 @@ public class PgBaselineProvider
     {
         var cacheKey = CacheKeyFor(serverId, metricName, key: null);
         var roundedHour = RoundedKeyTime(metricName, analysisTime);
+        return await GetOrComputeUnsharedAsync(
+            serverId, cacheKey, roundedHour, () => BuildEntryAsync(serverId, metricName, analysisTime, roundedHour, cancellationToken));
+    }
 
+    /// <summary>The cache half of <see cref="GetOrComputeBaselinesAsync"/>, with the compute passed in. A faulted entry is kept
+    /// in this provider's own cache for <see cref="FaultedEntryTtl"/> only (#7644): long enough that the detector's second read of
+    /// the same key in the same pass (the bucket map, then the <c>GetBaselineAsync</c> fallback) is a hit and not a second 60 s
+    /// timeout, short enough that the next pass computes again. Stored for the whole <see cref="CacheTtl"/> it would read as
+    /// "no baseline" for the hour, and it never reaches the shared tier. A genuine "no data" entry is stored for the hour.</summary>
+    internal async Task<CachedBaseline> GetOrComputeUnsharedAsync(
+        int serverId, string cacheKey, DateTime roundedHour, Func<Task<CachedBaseline>> build)
+    {
         if (TryGetFresh(serverId, cacheKey, roundedHour, out var cached))
         {
             return cached;
         }
 
-        var (byMember, clock, utcOffsetMinutes, timeZoneId) = await ComputeBaselinesAsync(serverId, metricName, keys: null, analysisTime, cancellationToken);
+        var entry = await build();
+        Store(serverId, cacheKey, entry);
+        return entry;
+    }
+
+    /// <summary>The compute half of <see cref="GetOrComputeBaselinesAsync"/>, without the cache: one unkeyed series,
+    /// built and not yet stored.</summary>
+    private async Task<CachedBaseline> BuildEntryAsync(
+        int serverId, string metricName, DateTime analysisTime, DateTime roundedHour, CancellationToken cancellationToken)
+    {
+        var (byMember, clock, utcOffsetMinutes, timeZoneId, faulted) = await ComputeBaselinesAsync(serverId, metricName, keys: null, analysisTime, cancellationToken);
 
         var buckets = BucketsOf(byMember, UnkeyedMember);
         var realTime = DateTime.UtcNow;
-        var entry = new CachedBaseline
+        return new CachedBaseline
         {
             ComputedAt = roundedHour,
             RealTime = realTime,
@@ -380,11 +408,142 @@ public class PgBaselineProvider
             FreshUntilUtc = buckets is not null && IsDailyCacheArm(metricName) ? realTime.AddDays(1) : null,
             Clock = clock,
             UtcOffsetMinutes = utcOffsetMinutes,
-            TimeZoneId = timeZoneId
+            TimeZoneId = timeZoneId,
+            Faulted = faulted
         };
-        Store(serverId, cacheKey, entry);
+    }
 
-        return entry;
+    /// <summary>#7644: the longest a shared compute (<see cref="GetBaselineSharedAsync"/>) may run. It is the compute's
+    /// own limit, not a caller's: the busiest server's I/O arm took 16 to 23 s, and the statement's own command timeout
+    /// is <see cref="DarlingAnalysisService.AnalysisCommandTimeoutSeconds"/> seconds, so this only has to cover that
+    /// plus the connection and the clock read.</summary>
+    internal static readonly TimeSpan SharedComputeTimeout = TimeSpan.FromSeconds(DarlingAnalysisService.AnalysisCommandTimeoutSeconds + 30);
+
+    /// <summary>#7644: the computes this provider has started for <see cref="GetBaselineSharedAsync"/> and that have not
+    /// finished, one per (cache key, key time). A caller joins the running one instead of starting another.</summary>
+    private readonly ConcurrentDictionary<(string CacheKey, DateTime KeyTime), Lazy<Task<CachedBaseline?>>> _flights = new();
+
+    /// <summary>
+    /// #7644: the web Overview's read. The series is computed and cached at <paramref name="computeTime"/> (the web
+    /// passes "now", so a daily-cache arm lands on today's key, the same one the worker's pass uses and the shared tier
+    /// holds), and the bucket is picked at <paramref name="lookupTime"/> (the window start). The answer holds all 168
+    /// hour-of-week buckets, so any lookup instant is served by the one entry; a read at now minus 24 hours used to key
+    /// on yesterday and compute on the first load of each UTC day.
+    ///
+    /// <para>The compute does not belong to the caller. One compute runs at a time per key, on its own token with
+    /// <see cref="SharedComputeTimeout"/>; a caller that gives up (the browser aborted, the user switched server) stops
+    /// waiting and the compute finishes and stores its result for the next load. A compute that fails or times out
+    /// answers <see cref="BaselineBucket.Empty"/>, as <see cref="GetBaselineAsync(int, string, DateTime, CancellationToken)"/>
+    /// does for a failed one, but that answer is not stored: the next request starts a compute again (the callers
+    /// that were waiting on the failed one share its answer). A store that really has no rows for the key is stored
+    /// and served like any other result.</para>
+    /// </summary>
+    public async Task<BaselineBucket> GetBaselineSharedAsync(
+        int serverId, string metricName, DateTime lookupTime, DateTime computeTime, CancellationToken cancellationToken = default)
+    {
+        var entry = await GetSharedEntryAsync(serverId, metricName, computeTime, cancellationToken);
+        return entry is null ? BaselineBucket.Empty : LookUp(entry, lookupTime);
+    }
+
+    private Task<CachedBaseline?> GetSharedEntryAsync(int serverId, string metricName, DateTime computeTime, CancellationToken cancellationToken)
+    {
+        var cacheKey = CacheKeyFor(serverId, metricName, key: null);
+        var roundedKey = RoundedKeyTime(metricName, computeTime);
+        return GetOrComputeSharedAsync(
+            serverId, cacheKey, roundedKey,
+            ct => BuildEntryAsync(serverId, metricName, computeTime, roundedKey, ct),
+            SharedComputeTimeout, cancellationToken);
+    }
+
+    /// <summary>#7644: one local hour of a window and the bucket that hour's local hour-of-week key picks. <c>FromUtc</c> is the
+    /// start of the local hour (before the window start for the first step), <c>ToUtc</c> its end.</summary>
+    public sealed record BaselineStep(DateTime FromUtc, DateTime ToUtc, BaselineBucket Bucket);
+
+    /// <summary>
+    /// #7644: the band the web Overview draws, one step per local hour the window crosses, from the same shared entry
+    /// <see cref="GetBaselineSharedAsync"/> reads. Steps include hours whose bucket is empty: the caller decides which are usable.
+    /// </summary>
+    public async Task<IReadOnlyList<BaselineStep>> GetBaselineStepsSharedAsync(
+        int serverId, string metricName, DateTime windowStartUtc, DateTime windowEndUtc, DateTime computeTime, CancellationToken cancellationToken = default)
+    {
+        var entry = await GetSharedEntryAsync(serverId, metricName, computeTime, cancellationToken);
+        return entry is null ? [] : StepsFor(entry, windowStartUtc, windowEndUtc, _localClock);
+    }
+
+    /// <summary>The local-hour walk of <see cref="GetBaselineStepsSharedAsync"/>. Hours are the zone's: the walk goes through
+    /// <see cref="LocalClockWindow.ToLocal"/>, so a +5:30 zone steps at :30 UTC, and a step ends where the clock's offset changes.
+    /// The clock is re-resolved over the window being drawn from the entry's own zone id and offset, as <see cref="GetBucketMapAsync"/>
+    /// does (#7644), never the entry's <see cref="CachedBaseline.Clock"/>: that one covers the compute window, which ends at the
+    /// rounded key time (today's UTC midnight on a daily arm) and starts 30 days before, so a window drawn past its end or before its
+    /// start would walk on a fixed offset and cut every step after a daylight-saving change an hour off.</summary>
+    internal static List<BaselineStep> StepsFor(CachedBaseline entry, DateTime windowStartUtc, DateTime windowEndUtc, BaselineLocalClock localClock)
+    {
+        var steps = new List<BaselineStep>();
+        if (entry.Buckets is null || entry.Buckets.Count == 0 || windowEndUtc <= windowStartUtc)
+            return steps;
+
+        var clock = localClock.Resolve(entry.TimeZoneId, entry.UtcOffsetMinutes, AsNaive(windowStartUtc), AsNaive(windowEndUtc));
+        // The lookups key on the same re-resolved clock as the cuts, through an entry that carries it.
+        var walked = new CachedBaseline { Buckets = entry.Buckets, Clock = clock };
+        var t = windowStartUtc;
+        while (t < windowEndUtc)
+        {
+            var local = clock.ToLocal(t);
+            var intoHour = TimeSpan.FromTicks(local.Ticks % TimeSpan.TicksPerHour);
+            var next = t + (TimeSpan.FromHours(1) - intoHour);
+            var transition = DateTime.SpecifyKind(clock.TransitionAtUtc, t.Kind);
+            if (clock.HasTransition && t < transition && transition < next)
+                next = transition;
+            var from = steps.Count == 0 ? t - intoHour : t;
+            steps.Add(new BaselineStep(from, next, LookUp(walked, t)));
+            t = next;
+        }
+
+        return steps;
+    }
+
+    /// <summary>The single-flight body of <see cref="GetBaselineSharedAsync"/>, with the compute passed in. A fresh entry
+    /// is returned as it is; otherwise the caller joins the running compute for the key or starts it. The compute runs on
+    /// a token the caller cannot cancel, and stores its entry before it completes. Null when the compute timed out or
+    /// threw; the caller's own cancellation throws from the wait and leaves the compute running.</summary>
+    internal async Task<CachedBaseline?> GetOrComputeSharedAsync(
+        int serverId, string cacheKey, DateTime roundedKey,
+        Func<CancellationToken, Task<CachedBaseline>> compute, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        if (TryGetFresh(serverId, cacheKey, roundedKey, out var cached) && !cached.Faulted)
+        {
+            return cached;
+        }
+
+        var flightKey = (cacheKey, roundedKey);
+        var flight = _flights.GetOrAdd(flightKey, newKey => new Lazy<Task<CachedBaseline?>>(() => Task.Run(async () =>
+        {
+            try
+            {
+                using var own = new CancellationTokenSource(timeout);
+                var entry = await compute(own.Token);
+                /* A faulted compute (the statement's own command timeout fires at 60 s, before this token's 90 s) is
+                   answered to the callers waiting on it and not kept: stored, it would read as "no baseline" for the
+                   whole CacheTtl on the busiest server. The next request starts a compute again. */
+                if (!entry.Faulted)
+                {
+                    Store(serverId, cacheKey, entry);
+                }
+
+                return (CachedBaseline?)entry;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("[PgBaselineProvider] Shared baseline compute for {CacheKey} did not finish: {Message}", cacheKey, ex.Message);
+                return null;
+            }
+            finally
+            {
+                _flights.TryRemove(flightKey, out _);
+            }
+        }, CancellationToken.None)));
+
+        return await flight.Value.WaitAsync(cancellationToken);
     }
 
     /// <summary>
@@ -404,8 +563,19 @@ public class PgBaselineProvider
     /// with its compute's clock and time, so the next call for any one key is a hit on its own entry exactly as a
     /// per-member compute's was.
     /// </summary>
-    private async Task<Dictionary<string, CachedBaseline>> GetOrComputeKeyedBaselinesAsync(
+    private Task<Dictionary<string, CachedBaseline>> GetOrComputeKeyedBaselinesAsync(
         int serverId, string metricName, IReadOnlyCollection<string> keys, DateTime analysisTime, CancellationToken cancellationToken)
+        => GetOrComputeKeyedBaselinesAsync(
+            serverId, metricName, keys, analysisTime,
+            set => ComputeBaselinesAsync(serverId, metricName, set, analysisTime, cancellationToken));
+
+    /// <summary>One chunk's compute result, the shape <see cref="ComputeBaselinesAsync"/> returns.</summary>
+    internal delegate Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId, bool Faulted)> KeyedChunkCompute(string[] set);
+
+    /// <summary>The keyed read with the chunk compute passed in. A member of a faulted chunk is answered and not stored (#7644), so the
+    /// next call computes it again; a member of a chunk that answered with no rows is stored.</summary>
+    internal async Task<Dictionary<string, CachedBaseline>> GetOrComputeKeyedBaselinesAsync(
+        int serverId, string metricName, IReadOnlyCollection<string> keys, DateTime analysisTime, KeyedChunkCompute computeChunk)
     {
         var roundedHour = RoundedKeyTime(metricName, analysisTime);
         var entries = new Dictionary<string, CachedBaseline>(StringComparer.Ordinal);
@@ -439,7 +609,7 @@ public class PgBaselineProvider
 
         foreach (var set in misses.Chunk(KeyedSetWidth))
         {
-            var (byMember, clock, utcOffsetMinutes, timeZoneId) = await ComputeBaselinesAsync(serverId, metricName, set, analysisTime, cancellationToken);
+            var (byMember, clock, utcOffsetMinutes, timeZoneId, faulted) = await computeChunk(set);
 
             var computedAt = DateTime.UtcNow;
             for (var member = 1; member <= set.Length; member++)
@@ -455,8 +625,10 @@ public class PgBaselineProvider
                     Clock = clock,
                     UtcOffsetMinutes = utcOffsetMinutes,
                     TimeZoneId = timeZoneId,
-                    Key = key
+                    Key = key,
+                    Faulted = faulted
                 };
+                /* A faulted chunk is kept for FaultedEntryTtl only (see IsFresh): the second read of the key in this pass is a hit. */
                 Store(serverId, CacheKeyFor(serverId, metricName, key), entry);
                 entries[key] = entry;
             }
@@ -494,7 +666,7 @@ public class PgBaselineProvider
     /// side is what makes them daily arms. This is the BASE class's own answer; <see cref="IsDailyCacheArm"/> is the
     /// seam a derived provider reads instead, and need not agree with it.</summary>
     internal static bool IsDailyCacheMetric(string metricName)
-        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoWriteLatency or MetricNames.Blocking or MetricNames.Deadlock;
+        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoWriteLatency or MetricNames.IoLatencyChart or MetricNames.Blocking or MetricNames.BlockingSnapshot or MetricNames.Deadlock;
 
     /// <summary>The fourth seam a derived provider overrides (#4298, after <see cref="ResolveBaselineQuery"/>,
     /// <see cref="ReadServerClockAsync"/> and <see cref="ResolveKeyedBaselineQuery"/>): does <paramref
@@ -524,8 +696,9 @@ public class PgBaselineProvider
     /// <summary>
     /// A fresh entry for the analysis hour, from this provider's own cache or, on a miss there, the process's shared
     /// tier (#3941). Precedence: a local SUCCESS; then a shared one (copied into the local cache, so the rest of this
-    /// provider's life is a local hit); then a local FAILURE — "no baseline this pass", exactly as before #3941. A
-    /// shared success beats a local failure because it is the answer the failed compute was trying to get.
+    /// provider's life is a local hit); then a local FAILURE — "no baseline this pass". The local failure is a faulted
+    /// entry kept for <see cref="FaultedEntryTtl"/> (#7644), so the detector's second read of a key in one pass is a hit.
+    /// A shared success beats a local failure because it is the answer the failed compute was trying to get.
     /// </summary>
     private bool TryGetFresh(int serverId, string cacheKey, DateTime roundedHour, [NotNullWhen(true)] out CachedBaseline? cached)
     {
@@ -556,14 +729,17 @@ public class PgBaselineProvider
     /// <see cref="TryGetFresh"/> and <see cref="BaselineCache.TryGet"/>) already stops matching the instant the
     /// requested day rolls over, which is what actually bounds an entry to "the rest of the UTC day it was computed
     /// in" — the whole point, two calls an hour or more apart on the same day share the one compute. Every
-    /// hourly-cache metric, and a FAILED compute of ANY metric (<see cref="CachedBaseline.FreshUntilUtc"/> null — a
-    /// failure never earns the day-long trust), keep the original rolling <see cref="CachedBaseline.RealTime"/> plus
-    /// <see cref="CacheTtl"/> bound, so a timeout still retries within the hour. Shared by <see cref="BaselineCache"/>'s
+    /// hourly-cache metric keeps the original rolling <see cref="CachedBaseline.RealTime"/> plus
+    /// <see cref="CacheTtl"/> bound. A FAULTED entry (<see cref="CachedBaseline.Faulted"/>, #7644; it never earns the day-long
+    /// trust) is fresh for <see cref="FaultedEntryTtl"/> only: the provider's own cache keeps it that long so one pass's second
+    /// read of the key is a hit, then the next pass computes again. Shared by <see cref="BaselineCache"/>'s
     /// live check and sweep, so the shared tier never evicts a still-fresh daily entry early.</summary>
     internal static bool IsFresh(CachedBaseline entry, DateTime nowUtc)
-        => entry.FreshUntilUtc is DateTime freshUntil
-            ? nowUtc < freshUntil
-            : (nowUtc - entry.RealTime) < CacheTtl;
+        => entry.Faulted
+            ? (nowUtc - entry.RealTime) < FaultedEntryTtl
+            : entry.FreshUntilUtc is DateTime freshUntil
+                ? nowUtc < freshUntil
+                : (nowUtc - entry.RealTime) < CacheTtl;
 
     /// <summary>Files a compute in this provider's cache and, when it SUCCEEDED, in the shared tier (#3941). A failed
     /// compute (null buckets) is this caller's "no baseline this pass" and nobody else's.</summary>
@@ -638,18 +814,18 @@ public class PgBaselineProvider
         }
 
         _logger?.LogWarning(
-            "[PgBaselineProvider] {KeyedEntries} keyed baseline series are cached (bar {WarnCount}; latest server {ServerId}, metric {MetricName}) — each is a month of per-member buckets computed per cache period, so a consumer of the keyed overload is not bounding itself to its window's top-N (#3691 lane 33). Noted once per cache period.",
+            "[PgBaselineProvider] {KeyedEntries} keyed baseline series are cached (bar {WarnCount}; latest server {ServerId}, metric {MetricName}): each is a month of per-member buckets computed per cache period, so a consumer of the keyed overload is not bounding itself to its window's top-N (#3691 lane 33). Noted once per cache period.",
             keyedEntries, KeyedBaselineCacheWarnCount, serverId, metricName);
     }
 
-    private async Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId)> ComputeBaselinesAsync(
+    private async Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId, bool Faulted)> ComputeBaselinesAsync(
         int serverId, string metricName, IReadOnlyList<string>? keys, DateTime analysisTime, CancellationToken cancellationToken)
     {
         /* Two seams, never one: a keyed lookup resolves ONLY through the keyed seam, so a metric with an unkeyed arm
            and no keyed one answers "no baseline" to a keyed call rather than the population's buckets under a member's
            name — and the reverse, so lane 27's server-wide arm keeps answering the unkeyed call it always answered. */
         var query = keys is null ? ResolveBaselineQuery(metricName) : ResolveKeyedBaselineQuery(metricName);
-        if (query == null) return (null, LocalClockWindow.Utc(analysisTime), null, null);
+        if (query == null) return (null, LocalClockWindow.Utc(analysisTime), null, null, false);
 
         return await ComputeBucketsAsync(serverId, metricName, keys, analysisTime, query, cancellationToken);
     }
@@ -773,7 +949,8 @@ LIMIT 1";
     internal static (string Legacy, string Successor)? SupersededSupplyFor(string metricName) => metricName switch
     {
         MetricNames.BatchRequests => (TimescaleSupport.LegacyPerfmonBaselineView, TimescaleSupport.PerfmonIntervalBaselineView),
-        MetricNames.WaitStats or MetricNames.WaitMsPerSec => (TimescaleSupport.LegacyWaitStatsBaselineView, TimescaleSupport.WaitStatsIntervalBaselineView),
+        /* #8106: the wait pair's legacy is now #3653's interval-honest aggregate, superseded by the cadence supply. */
+        MetricNames.WaitStats or MetricNames.WaitMsPerSec => (TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.WaitStatsCadenceBaselineView),
         _ => null,
     };
 
@@ -862,6 +1039,8 @@ LIMIT 1";
     {
         MetricNames.Blocking => ("blocked_process_report", TimescaleSupport.BlockedProcessBaselineView),
         MetricNames.Deadlock => ("deadlocks", TimescaleSupport.DeadlockBaselineView),
+        /* #7588: the snapshot arm's view is plain on every store, so it always needs the clamp. */
+        MetricNames.BlockingSnapshot => ("dmv_blocking_snapshot", TimescaleSupport.DmvBlockingBaselineView),
         _ => null,
     };
 
@@ -930,7 +1109,7 @@ LIMIT 1";
     /// eight robust ones — the 1-based position in <paramref name="keys"/> of the key the row belongs to (#3901, see
     /// <see cref="PerMemberScaffold"/>). Null on failure, through the one classified catch.
     /// </summary>
-    private async Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId)> ComputeBucketsAsync(
+    private async Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId, bool Faulted)> ComputeBucketsAsync(
         int serverId, string metricName, IReadOnlyList<string>? keys, DateTime analysisTime, string query, CancellationToken cancellationToken)
     {
         var absStdDevFloor = BaselineMath.AbsStdDevFloorFor(metricName);
@@ -975,6 +1154,7 @@ LIMIT 1";
             {
                 windowStart = supplyFloor;
             }
+
 
             /* #3653 Q6: the target's clock over this window, read on the same connection and INSIDE this try on
                purpose — a store that cannot answer a one-row indexed read of server_properties cannot answer the
@@ -1059,7 +1239,7 @@ LIMIT 1";
                 };
             }
 
-            return (byMember, clock, rawUtcOffsetMinutes, rawTimeZoneId);
+            return (byMember, clock, rawUtcOffsetMinutes, rawTimeZoneId, false);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
@@ -1078,7 +1258,7 @@ LIMIT 1";
             if (IsCommandTimeout(ex))
             {
                 _logger?.LogError(
-                    "[PgBaselineProvider] Baseline query for {MetricName} did not finish within its command timeout — gave up after {Seconds:F1}s, so this metric has NO baseline this pass and its anomaly detection is silent (the collected data is unaffected). The store side logs this as 'canceling statement due to user request'. If it repeats, the window this query scans has outgrown the timeout: {Message}",
+                    "[PgBaselineProvider] Baseline query for {MetricName} did not finish within its command timeout: gave up after {Seconds:F1}s, so this metric has NO baseline this pass and its anomaly detection is silent (the collected data is unaffected). The store side logs this as 'canceling statement due to user request'. If it repeats, the window this query scans has outgrown the timeout: {Message}",
                     metricName, elapsed.Elapsed.TotalSeconds, ex.Message);
             }
             else
@@ -1088,7 +1268,7 @@ LIMIT 1";
                     metricName, elapsed.Elapsed.TotalSeconds, ex.Message);
             }
 
-            return (null, clock, rawUtcOffsetMinutes, rawTimeZoneId);
+            return (null, clock, rawUtcOffsetMinutes, rawTimeZoneId, true);
         }
     }
 
@@ -1414,7 +1594,7 @@ clean AS (
             MetricNames.WaitStats => @"
 WITH per_collection AS (
     SELECT collection_time, total_wait_ms, sample_interval_seconds
-    FROM wait_stats_interval_baseline
+    FROM wait_stats_cadence_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 ),
 with_lag AS (
@@ -1491,19 +1671,35 @@ WITH clean AS (
     AND   (delta_reads > 0 OR delta_writes > 0)
 )," + RobustTierScaffold,
 
+            /* #7644: the Overview strip's unit. The arm above judges each FILE ROW, so a file with ten slow reads weighs as much as the
+               busy file with ten thousand fast ones, and the band sat far from the line the strip draws (reads-weighted per collection:
+               the files' stall summed over their reads summed). Same source, same DOUBLE PRECISION cast, and rows with reads only, so v is
+               never null and sample_count is the number of collections that read. */
+            MetricNames.IoLatencyChart => @"
+WITH clean AS (
+    SELECT collection_time, SUM(delta_stall_read_ms)::DOUBLE PRECISION / SUM(delta_reads) AS v
+    FROM file_io_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   delta_reads > 0
+    GROUP BY collection_time
+)," + RobustTierScaffold,
+
             /* #6696: the WRITE-latency twin of the arm above, for the ANOMALY_WRITE_LATENCY gate. That gate used to score
                write windows against the read series (delta_stall_read_ms / delta_reads), whose median sits near 1 ms with
                a narrow MAD, so a nightly write window that matched its own history scored tens of robust sigma. Same
                source, same DOUBLE PRECISION cast (the STDDEV_SAMP-overflows-System.Decimal note above applies verbatim)
                and same scaffold, over the rows that wrote. WHERE delta_writes > 0 keeps v non-null here, so sample_count
                is the count of write-bearing file rows: the detector's write tiles count the same rows
-               (write_sample_count). */
+               (write_sample_count).
+
+               #6959: the write side reads log files and tempdb data files only. User data files take background checkpoint and lazy-writer writes that no session waits on, so a multi-file database's data rows (a small high group) were the window peak against a baseline median they sat far above. The baseline reads the raw table at each recompute, so history is re-read through the filter with no migration. */
             MetricNames.IoWriteLatency => @"
 WITH clean AS (
     SELECT collection_time, delta_stall_write_ms::DOUBLE PRECISION / NULLIF(delta_writes, 0) AS v
     FROM file_io_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_writes > 0
+    AND   (file_type = 'LOG' OR lower(database_name) = 'tempdb')
 )," + RobustTierScaffold,
 
             // Event-based (#4731) — mean = events per COVERED day for this bucket, sample_count = covered days: the days
@@ -1517,6 +1713,11 @@ WITH clean AS (
                run without complaint and key on UTC; the local-clock census in LocalClockBucketKeyTests is what
                forbids it. */
             MetricNames.Blocking => EventBaselineSql("blocked_process_report", "collection_log", "blocked_process_baseline", "SUM(event_count)"),
+
+            /* #7588: the DMV snapshot arm of the blocking spike. Its window counts dmv_blocking_snapshots rows, so its history is
+               the same rows (dmv_blocking_baseline, a plain view over the raw table with the same self-wait filter, read through the same
+               purge-horizon clamp as the report arm, EventSupplyFor), covered by the snapshot collector's own runs. */
+            MetricNames.BlockingSnapshot => EventBaselineSql("dmv_blocking_snapshot", "collection_log", "dmv_blocking_baseline", "SUM(event_count)"),
 
             // Event-based — same approach as blocking; the deadlocks collector's own runs cover the hours.
             MetricNames.Deadlock => EventBaselineSql("deadlocks", "collection_log", "deadlock_baseline", "SUM(event_count)"),
@@ -1591,6 +1792,11 @@ WITH clean AS (
                collections, one pair in the same second: old text count 3 / mean 66.7, END alone count 3 /
                mean 100, this text count 2 / mean 100. The same-second row is unknowable, not idle, and a
                baseline has no honest bucket for it. */
+            /* #8106: the supply is wait_stats_cadence_baseline, whose sample_interval_seconds is the collection's CADENCE, the
+               shortest interval any of its rows measured, where wait_stats_interval_baseline carried the longest. The summed
+               delta over the cadence credits a wait type that returned after missing some passes whole, on the collection that
+               observed it, so its longer interval no longer divides its siblings' deltas and the baseline's total equals the
+               sum of its parts. The text is #3653's, FROM apart. */
             MetricNames.WaitMsPerSec => @"
 WITH per_collection AS (
     SELECT collection_time,
@@ -1600,7 +1806,7 @@ WITH per_collection AS (
                 THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
                 ELSE sample_interval_seconds
            END AS interval_sec
-    FROM wait_stats_interval_baseline
+    FROM wait_stats_cadence_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 ),
 with_rate AS (
@@ -1620,7 +1826,7 @@ clean AS (
     WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100 AND sample_interval_seconds IS NULL)
 )," + RobustTierScaffold,
 
-            // Blocking events per minute (chart shows event bars bucketed by minute)
+            // Blocked-process reports per minute (the chart shows report bars bucketed by minute)
             MetricNames.BlockingPerMinute => @"
 WITH per_minute AS (
     SELECT DATE_TRUNC('minute', collection_time) AS minute_bucket,
@@ -1639,7 +1845,9 @@ clean AS (
     }
 
     /// <summary>
-    /// The pre-#3653 text of the three arms whose supply was superseded, VERBATIM but for one spelling, against
+    /// The text each superseded arm reads its LEGACY supply with. For WaitStats and WaitMsPerSec (#8106) that supply is
+    /// <c>wait_stats_interval_baseline</c>, so their text here is #3653's interval-honest text over it, gate included; the paragraphs
+    /// below describe the BatchRequests arm, the pre-#3653 text of the arm whose supply was superseded, VERBATIM but for one spelling, against
     /// the legacy relations (<c>perfmon_baseline</c>, <c>wait_stats_baseline</c>). Run by <see cref="ChooseSupplyAsync"/> only while a
     /// legacy relation still reaches further back into a server's window than its successor — on a store
     /// upgraded with the default 30-day raw horizon, roughly the first day after the upgrade — and never on a
@@ -1681,46 +1889,53 @@ clean AS (
     AND   interval_sec > 0
 )," + RobustTierScaffold,
 
+            /* #8106: the wait pair's legacy supply is wait_stats_interval_baseline, #3653's interval-honest aggregate, so these
+               two legacy texts are #3653's successor texts over it, NULL-interval gate included. The pre-#3653 texts over
+               wait_stats_baseline are gone with the provider's read of that relation; the drop sweep still retires it. */
             MetricNames.WaitStats => @"
 WITH per_collection AS (
-    SELECT collection_time, total_wait_ms
-    FROM wait_stats_baseline
+    SELECT collection_time, total_wait_ms, sample_interval_seconds
+    FROM wait_stats_interval_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 ),
 with_lag AS (
-    SELECT collection_time, total_wait_ms,
+    SELECT collection_time, total_wait_ms, sample_interval_seconds,
            COALESCE(LAG(total_wait_ms) OVER (ORDER BY collection_time), 0) AS prior_total_wait_ms
     FROM per_collection
 ),
 clean AS (
     SELECT collection_time, total_wait_ms AS v
     FROM with_lag
-    WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000)
+    WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000 AND sample_interval_seconds IS NULL)
 )," + RobustTierScaffold,
 
             MetricNames.WaitMsPerSec => @"
 WITH per_collection AS (
     SELECT collection_time,
            total_wait_ms::DOUBLE PRECISION AS total_wait_ms,
-           extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_sec
-    FROM wait_stats_baseline
+           sample_interval_seconds,
+           CASE WHEN sample_interval_seconds IS NULL
+                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                ELSE sample_interval_seconds
+           END AS interval_sec
+    FROM wait_stats_interval_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 ),
 with_rate AS (
-    SELECT collection_time,
+    SELECT collection_time, sample_interval_seconds,
            CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END AS ms_per_sec
     FROM per_collection
     WHERE interval_sec IS NOT NULL AND interval_sec > 0
 ),
 with_lag AS (
-    SELECT collection_time, ms_per_sec,
+    SELECT collection_time, ms_per_sec, sample_interval_seconds,
            COALESCE(LAG(ms_per_sec) OVER (ORDER BY collection_time), 0) AS prior_ms_per_sec
     FROM with_rate
 ),
 clean AS (
     SELECT collection_time, ms_per_sec AS v
     FROM with_lag
-    WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100)
+    WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100 AND sample_interval_seconds IS NULL)
 )," + RobustTierScaffold,
 
             _ => null
@@ -1766,6 +1981,12 @@ clean AS (
         /// <summary>The raw time zone id <see cref="ReadServerClockAsync"/> read for this compute, beside
         /// <see cref="UtcOffsetMinutes"/> — see its remarks.</summary>
         public string? TimeZoneId { get; init; }
+
+        /// <summary>#7644: the compute ended in a fault (a command timeout or a connection error), as distinct from a
+        /// store that has no rows for the key or a metric with no arm. Both leave <see cref="Buckets"/> null; only this
+        /// one is worth asking the store again, so the shared read (<see cref="GetOrComputeSharedAsync"/>) neither
+        /// stores nor serves it.</summary>
+        public bool Faulted { get; init; }
 
         /// <summary>The member key this series is scoped to (#3691 lane 33); null for the population-wide series.
         /// Read only by <see cref="KeyedEntryCount"/> — the entry's identity is the cache key string.</summary>

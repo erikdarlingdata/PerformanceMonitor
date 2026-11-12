@@ -8,6 +8,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -164,8 +165,9 @@ ORDER BY
 
     /// <summary>
     /// The single sentence for the online user databases the login cannot enter (the rule <see cref="UserDatabaseIds"/> and <see cref="NotVendorControlled"/> state), or null when none did.
-    /// On Amazon RDS it adds the statement that fixes it, because RDS refuses <c>CONNECT ANY DATABASE</c> and a user in each
-    /// database is the only way in.
+    /// On Amazon RDS it adds the step that fixes it, because RDS refuses <c>CONNECT ANY DATABASE</c> and a user in each
+    /// database is the only way in. The step is named, not spelled as a statement: the note is stored on the collection-log
+    /// row and served through the statement filter (#4348), which withholds any CREATE USER it sees.
     /// </summary>
     public static string? Sentence(IReadOnlyList<string> databases, bool awsRds)
     {
@@ -179,10 +181,10 @@ ORDER BY
 
         var text = string.Create(
             CultureInfo.InvariantCulture,
-            $"{databases.Count} online user database(s) not collected: the monitoring login has no user in {named}, so nothing was collected from them");
+            $"{CountText.Plural(databases.Count, "online user database")} not collected: the monitoring login has no user in {named}, so nothing was collected from {(databases.Count == 1 ? "it" : "them")}");
 
         return awsRds
-            ? text + ". Amazon RDS has no CONNECT ANY DATABASE, so create a user in each: CREATE USER [login] FOR LOGIN [login]"
+            ? text + $". Amazon RDS has no CONNECT ANY DATABASE, so give the monitoring login a user in {(databases.Count == 1 ? "it" : "each of them")}"
             : text;
     }
 }

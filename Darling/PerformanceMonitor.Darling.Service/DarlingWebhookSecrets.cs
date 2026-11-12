@@ -71,6 +71,10 @@ internal static class DarlingWebhookSecrets
             TeamsProxy = stored.TeamsProxy,
             SlackUrl = OpenValue(stored.SlackUrl, "slack", row, stored.SlackProxy, null, NotificationRouter.SlackChannel, "Slack webhook URL", ring, failures),
             SlackProxy = stored.SlackProxy,
+            /* #7656: the bot's tokens are bound to no proxy. One that will not open is reported under the Slack channel's name and leaves
+               the webhook URL as it is: the bot posts nothing, the webhook still delivers. */
+            SlackBotToken = OpenValue(stored.SlackBotToken, PasswordBinding.SlackBotTokenSlot, row, null, null, NotificationRouter.SlackChannel, "Slack bot token", ring, failures),
+            SlackAppToken = OpenValue(stored.SlackAppToken, PasswordBinding.SlackAppTokenSlot, row, null, null, NotificationRouter.SlackChannel, "Slack app-level token", ring, failures),
             GenericUrl = OpenValue(stored.GenericUrl, "generic", row, stored.GenericProxy, null, NotificationRouter.GenericChannel, "generic webhook URL", ring, failures),
             GenericHeaders = OpenValue(stored.GenericHeaders, "generic_headers", row, stored.GenericProxy, stored.GenericUrl, NotificationRouter.GenericChannel, "generic webhook headers", ring, failures),
             GenericBodyTemplate = stored.GenericBodyTemplate,
@@ -305,6 +309,8 @@ internal static class DarlingWebhookSecrets
         Add(w.TeamsProxy);
         Add(w.SlackUrl);
         Add(w.SlackProxy);
+        Add(w.SlackBotToken);
+        Add(w.SlackAppToken);
         Add(w.GenericUrl);
         Add(w.GenericHeaders);
         Add(w.GenericBodyTemplate);
@@ -352,6 +358,19 @@ internal static class DarlingWebhookSecrets
 
             /* #6928: the severity filter. Delivery reads it from the cached route, so an edit of only this member must reopen the cache. */
             Add(r.Severities);
+
+            /* #6979: the report notice setting. Notice delivery reads it from the cached route, so an edit of only this member must reopen the cache. */
+            Add(r.ReportNotice);
+
+            /* #7109: the approval setting and the single-person flag. Approval reads the routes it applies to, and the route page and the
+               proposal notice read them from the cached route, so an edit of only one of these must reopen the cache. */
+            Add(r.ActionApproval);
+            Add(r.ApprovalSinglePerson ? "1" : "0");
+
+            /* #7656: the bot channel and the time the route got it. The thread poster reads the channel and the thread pass gates the parent
+               post on the stamp, both from the cached route, so a change to either alone must reopen the cache. */
+            Add(r.SlackBotChannel);
+            Add(r.SlackBotChannelSetAt?.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
 
         return text.ToString();

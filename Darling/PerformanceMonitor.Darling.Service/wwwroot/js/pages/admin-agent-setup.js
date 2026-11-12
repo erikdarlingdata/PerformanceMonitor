@@ -21,7 +21,7 @@
    Self-contained: admin.js hands this file its helpers. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, errorStrip, emptyStrip, noticeStrip, listOnlyNote, apiGet, apiWrite } from "../util.js";
+import { el, mount, errorStrip, emptyStrip, noticeStrip, captionStrip, adminListOnlyNote, apiGet, apiWrite } from "../util.js";
 
 export const AGENT_LEVEL_CHOICES = [
   { value: "", label: "Inherit" },
@@ -31,12 +31,46 @@ export const AGENT_LEVEL_CHOICES = [
   { value: "3", label: "Act on servers (Level 3)" },
 ];
 
+/** #6979: the report notice setting of a route, in the order the editor offers it. */
+export const REPORT_NOTICE_CHOICES = [
+  { value: "off", label: "Off" },
+  { value: "needs_person_or_change", label: "Needs a person or made a change" },
+  { value: "all", label: "All reports" },
+];
+
 export const AGENT_LIMIT_DEFAULTS = { perHour: "20", perDay: "100", lease: "15", expiry: "240" };
 
-export const routesListOnly = (managed, adminWritesOff) => listOnlyNote(managed, "routes are listed only", "To add, edit or delete a route", adminWritesOff);
+/** #7656: the shape of a Slack channel id, as the service checks it: C or G, then capital letters and digits. The value is trimmed first. */
+export const SLACK_CHANNEL_ID_SHAPE = /^[CG][A-Z0-9]{1,31}$/;
+export const SLACK_CHANNEL_ID_REFUSAL =
+  "The Slack bot channel is a channel id: C or G, then capital letters and digits (for example C0123ABCDEF), or blank for none. Not the channel's name.";
+
+/** Whether a bot channel box holds a channel id or nothing (blank is none, and fine). */
+export const slackChannelIdOk = (text) => String(text ?? "").trim() === "" || SLACK_CHANNEL_ID_SHAPE.test(String(text).trim());
+
+/** #7656: the bot setup text shown under the Slack bot channel box, one paragraph each, in the order a person does the work. */
+export const SLACK_BOT_SETUP_TEXT = [
+  "The bot posts one Slack thread per investigation request into this channel, as the bot, not through the alert webhook. Leave the box blank and this route opens no threads.",
+  "Requests that opened before you set the channel get no thread. A post not sent within 7 days of its event is never sent.",
+  "Make one Slack app and install it once with every scope it needs, so nobody reinstalls it later. Bot token scopes: chat:write, app_mentions:read, channels:history and groups:history. App-level token scope: connections:write. Save the bot token and the app-level token in the Slack bot tokens form under the routes here, or in the desktop Settings window.",
+  "Invite the bot to the channel. The bot posts only in channels it belongs to; a post to a channel it is not in fails with not_in_channel. A private channel works once the bot is invited.",
+  "Store the channel id, not the channel name. Names change; ids do not. An id starts with C or G and is shown in the channel's details in Slack.",
+  "Use a channel of its own for the bot. During an alert storm the alert webhook posts in bursts of 40 to 86 messages a minute, and request threads are hard to follow next to them. A shared channel still works.",
+  "After the app is reinstalled with new scopes, check every alert webhook still posts.",
+  "The data detail setting decides what the thread shows. Full, the default, posts literals such as names and values into the thread, and every member of the channel can read them.",
+  "One Slack app per store for buttons and mentions: Socket Mode hands each event to one of the app's open connections, so two stores listening on one app acknowledge and lose each other's events, and Slack never retries an acknowledged event. On a shared app, set the app-level token on one store only; the other stores post threads, with no buttons or mentions. A store still acts only on events from channels set on its own routes, and warns when events keep arriving for channels it does not own.",
+  "The app-level token turns the listener on: saved, the service holds two Socket Mode connections and hears presses and mentions in its channels; blank, it does not listen. Generate it on the app's Basic Information page under App-Level Tokens with the connections:write scope, and save it only here or in the desktop Settings window, never through an agent or an MCP call, where it would sit in the agent's transcript. The app manifest and the full setup are in docs/darling/slack-bot.md.",
+];
+
+export const routesListOnly = (managed, adminWritesOff) => adminListOnlyNote(managed, "routes are listed only", "To add, edit or delete a route", adminWritesOff);
 export const ROUTES_EDITING_NOTE =
   "Add, edit and delete a route's agent channel, match, scope and destinations here. A webhook URL or key is sealed when saved and never " +
   "shown again: a box left blank keeps the saved one, and Remove deletes it. Email recipients are shown and edited as plain text.";
+
+/** #7949: shown above the scope picker when the server list or the tag list could not be read as the tab painted. */
+export const SCOPES_UNREAD_NOTE =
+  "The list of servers or tags could not be read, so a server or tag may be missing from the scope list. A route or profile that already has " +
+  "a scope keeps it when saved. Reload the tab to read the lists again.";
 
 /** The webhook destinations a route can carry: the body field, the label, the box key and the name configured_channels uses. */
 export const WEBHOOK_DESTINATIONS = [
@@ -53,12 +87,20 @@ export function routeUseText(r) {
   return `${r.agent_requests_last_hour} of ${r.agent_max_per_hour} this hour, ${r.agent_requests_last_day} of ${r.agent_max_per_day} today`;
 }
 
+/** #7109: one strip for each route where nobody can approve a proposal (GET /api/notification-routes/nobody-can-approve answers
+    {route_ids, message}). A failed read shows nothing: the routes below are the page. */
+export function nobodyCanApproveNodes(res) {
+  if (!res || res.kind !== "data" || !res.data || !Array.isArray(res.data.route_ids)) return [];
+  return res.data.route_ids.map((id) => noticeStrip("Route " + id + ": " + res.data.message));
+}
+
 /** The editor's entries for a route, from a routes read row (or the defaults for a new one). */
 export function entriesFromRoute(r) {
   if (!r) {
     return {
       id: null, match: "", scope: "", enabled: true, level: "", perHour: AGENT_LIMIT_DEFAULTS.perHour, perDay: AGENT_LIMIT_DEFAULTS.perDay,
-      lease: AGENT_LIMIT_DEFAULTS.lease, expiry: AGENT_LIMIT_DEFAULTS.expiry, resolutions: "", fallback: "", severities: "both",
+      lease: AGENT_LIMIT_DEFAULTS.lease, expiry: AGENT_LIMIT_DEFAULTS.expiry, resolutions: "", fallback: "", severities: "both", reportNotice: "off",
+      approval: "required", singlePerson: "false", botChannel: "",
       saved: [], hooks: {}, removes: {}, recipients: "", recipientsWas: "", modifiedAt: null,
     };
   }
@@ -78,6 +120,13 @@ export function entriesFromRoute(r) {
     fallback: r.fallback_route_id != null ? String(r.fallback_route_id) : "",
     /* #6928: a route read without the field, or with a word this page does not know, edits as Both. */
     severities: r.severities === "critical" || r.severities === "warning" ? r.severities : "both",
+    /* #6979: a route read without the field, or with a word this page does not know, edits as Off. */
+    reportNotice: r.report_notice === "needs_person_or_change" || r.report_notice === "all" ? r.report_notice : "off",
+    /* #7109: a route read without the field, or with a word this page does not know, edits as Required, the safe side. */
+    approval: r.action_approval === "off" ? "off" : "required",
+    singlePerson: r.approval_single_person === true ? "true" : "false",
+    /* #7656: the bot channel id; a route read without the field edits as none. */
+    botChannel: typeof r.slack_bot_channel === "string" ? r.slack_bot_channel : "",
     saved: Array.isArray(r.configured_channels) ? r.configured_channels : [],
     hooks: {},
     removes: {},
@@ -108,6 +157,8 @@ export function destinationPayload(entries) {
 export function routePayload(entries) {
   /* A blank match is refused by the service with this sentence (a 400); said here it costs no request. */
   if (String(entries.match).trim() === "") return { error: "Choose a family or enter an exact metric name." };
+  /* #7656: a bot channel that is not a channel id is refused by the service with this sentence; said here it costs no request. */
+  if (!slackChannelIdOk(entries.botChannel)) return { error: SLACK_CHANNEL_ID_REFUSAL };
   const whole = (label, text) => {
     const t = String(text).trim();
     return /^\d+$/.test(t) ? { value: Number(t) } : { error: label + " must be a whole number." };
@@ -141,6 +192,10 @@ export function routePayload(entries) {
       send_resolutions: entries.resolutions === "" ? null : entries.resolutions === "true",
       fallback_route_id: fallback,
       severities: entries.severities === "critical" || entries.severities === "warning" ? entries.severities : "both",
+      report_notice: entries.reportNotice === "needs_person_or_change" || entries.reportNotice === "all" ? entries.reportNotice : "off",
+      action_approval: entries.approval === "off" ? "off" : "required",
+      approval_single_person: entries.singlePerson === "true",
+      slack_bot_channel: String(entries.botChannel ?? "").trim(),
       ...(entries.id != null ? { expected_modified_at: entries.modifiedAt } : {}),
     },
   };
@@ -165,9 +220,11 @@ let routeBusy = false;
 
 const statusNode = (status) => (status ? (status.isError ? errorStrip(status.message) : noticeStrip(status.message)) : null);
 
-async function sendRoute(verb, entries, repaint) {
+/** `button` is the one pressed: it is disabled while the write runs, so a second press sends nothing, and enabled again before the repaint. */
+async function sendRoute(verb, entries, repaint, button) {
   if (routeBusy) return;
   routeBusy = true;
+  if (button) button.disabled = true;
   let out;
   try {
     if (verb === "delete") {
@@ -178,16 +235,36 @@ async function sendRoute(verb, entries, repaint) {
         out = { message: built.error, isError: true };
       } else {
         const path = entries.id == null ? "/api/notification-routes" : "/api/notification-routes/" + entries.id;
-        out = routeOutcome(verb, await apiWrite(entries.id == null ? "POST" : "PUT", path, built.payload));
+        const res = await apiWrite(entries.id == null ? "POST" : "PUT", path, built.payload);
+        out = routeOutcome(verb, res);
+        /* #7952: a 409 means the route was changed elsewhere since Edit was pressed, so the entries hold a stale version and every Save
+           sent from them is refused again. Dropping the entries makes the next draw read the current route and its version, as the profile
+           save does; the service's sentence stays in the status line, so the person sees the change and makes theirs again. */
+        if (res && res.status === 409) routeEntries = null;
       }
     }
   } catch (e) {
     out = { message: "Could not change the route: " + (e && e.message ? e.message : String(e)), isError: true };
   }
   routeBusy = false;
+  if (button) button.disabled = false;
   if (out.message) routeStatus = { message: out.message, isError: out.isError };
   if (out.isError === false) routeEntries = null;
   await repaint();
+}
+
+/** #7949: a scope picker's choices: the "all" choice, every server and every tag, then one choice for each stored scope ("s<id>" or "t<id>") the
+    lists do not hold (a server whose list could not be read, a tag or server removed since). A select shows and reads back "" for a value it has no
+    option for, so without that choice a stored scope would be saved as All servers. */
+export function scopeChoices(allLabel, servers, tags, stored) {
+  const choices = [{ value: "", label: allLabel }]
+    .concat(servers.map((s) => ({ value: "s" + s.id, label: "Server: " + s.name })))
+    .concat(tags.map((t) => ({ value: "t" + t.id, label: "Tag: " + t.name })));
+  for (const v of stored) {
+    if (!v || choices.some((c) => c.value === v)) continue;
+    choices.push({ value: v, label: (v.startsWith("s") ? "Current scope: server id " : "Current scope: tag id ") + v.slice(1) });
+  }
+  return choices;
 }
 
 function routeForm(options) {
@@ -203,13 +280,15 @@ function routeForm(options) {
     c.value = value;
     return c;
   };
-  const scopeChoices = [{ value: "", label: "All servers" }]
-    .concat(options.servers.map((s) => ({ value: "s" + s.id, label: "Server: " + s.name })))
-    .concat(options.tags.map((t) => ({ value: "t" + t.id, label: "Tag: " + t.name })));
+  const scopeOptions = scopeChoices("All servers", options.servers, options.tags, [entries.scope]);
   const controls = {
-    match: text("match", entries.match, { placeholder: "family, 'Analysis: <category>', exact metric or *" }),
-    scope: select("scope", scopeChoices, entries.scope),
+    match: text("match", entries.match, { placeholder: "family, 'Analysis: *', 'Analysis: <category>', exact metric or *" }),
+    scope: select("scope", scopeOptions, entries.scope),
     severities: select("severities", [{ value: "both", label: "Both (Warning and Critical)" }, { value: "critical", label: "Critical only" }, { value: "warning", label: "Warning only" }], entries.severities || "both"),
+    reportNotice: select("reportNotice", REPORT_NOTICE_CHOICES, entries.reportNotice || "off"),
+    /* #7109: whether a Level 3 action waits for a person's approval, and whether the person who asked may approve it. An admin seat sets any value. */
+    approval: select("approval", [{ value: "required", label: "Required (a person approves each Level 3 action)" }, { value: "off", label: "Off (Level 3 actions run without approval)" }], entries.approval || "required"),
+    singlePerson: select("singlePerson", [{ value: "false", label: "No (a second person approves)" }, { value: "true", label: "Yes (the person who asked may approve)" }], entries.singlePerson || "false"),
     level: select("level", AGENT_LEVEL_CHOICES, entries.level),
     perHour: text("perHour", entries.perHour, { inputmode: "numeric" }),
     perDay: text("perDay", entries.perDay, { inputmode: "numeric" }),
@@ -217,9 +296,26 @@ function routeForm(options) {
     expiry: text("expiry", entries.expiry, { inputmode: "numeric" }),
     resolutions: select("resolutions", [{ value: "", label: "Follow each channel" }, { value: "true", label: "Always send" }, { value: "false", label: "Never send" }], entries.resolutions),
     fallback: text("fallback", entries.fallback, { placeholder: "route number, blank = none" }),
+    /* #7656: the Slack channel id the bot posts the route's request threads into. The setup text sits under the box. */
+    botChannel: text("botChannel", entries.botChannel || "", { placeholder: "channel id such as C0123ABCDEF, blank = no threads", autocomplete: "off", spellcheck: "false" }),
   };
+  const botSetup = el("div", { class: "slack-bot-setup", "data-slack-bot-setup": "1" },
+    SLACK_BOT_SETUP_TEXT.map((line) => el("p", { class: "mute-label", text: line })));
   const enabled = el("input", { type: "checkbox", "data-field": "enabled" });
   enabled.checked = entries.enabled;
+  /* #6979: a report notice fires for a request of this route, and only a route with its own agent level (Investigate, Act or Act on servers)
+     owns requests. While the level is Inherit or Off the setting is disabled, with a hint; the stored value is kept and still saved. */
+  const noticeHint = el("span", { class: "mute-label", text: " Applies once the Agent level is Investigate, Act or Act on servers." });
+  const syncNoticeEnabled = () => {
+    const owns = controls.level.value === "1" || controls.level.value === "2" || controls.level.value === "3";
+    controls.reportNotice.disabled = !owns;
+    /* The author rule `.mute-label { display: block }` outranks the browser's [hidden] rule, so the attribute alone leaves the hint on screen
+       (as setShown in admin.js notes); the inline display is what hides it. */
+    noticeHint.hidden = owns;
+    noticeHint.style.display = owns ? "none" : "";
+  };
+  syncNoticeEnabled();
+  controls.level.addEventListener("input", syncNoticeEnabled);
   /* The webhook boxes never hold a saved value (the page is never given one): a box is for a NEW value, and Remove is for a saved one. */
   const hookBoxes = {};
   const removeBoxes = {};
@@ -258,14 +354,16 @@ function routeForm(options) {
   for (const c of [...Object.values(controls), enabled, recipients, ...Object.values(hookBoxes), ...Object.values(removeBoxes)]) c.addEventListener("input", sync);
   const save = el("button", {
     class: "btn primary", type: "button", "data-action": "save-route", text: entries.id == null ? "Add route" : "Save route " + entries.id,
-    onClick: () => sendRoute("save", read(), options.repaint),
+    onClick: () => sendRoute("save", read(), options.repaint, save),
   });
   const parts = [
-    field("Match:", controls.match), field("Applies to:", controls.scope), field("Severity:", controls.severities), field("Agent:", controls.level),
+    field("Match:", controls.match), field("Applies to:", controls.scope), field("Severity:", controls.severities), field("Agent:", controls.level), el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Report notice:" }), controls.reportNotice, noticeHint]),
+    field("Action approval:", controls.approval), field("Single-person approval:", controls.singlePerson),
     field("Requests per hour:", controls.perHour), field("Requests per day:", controls.perDay),
     field("Lease minutes:", controls.lease), field("Expiry minutes:", controls.expiry),
     field("Send resolutions:", controls.resolutions), field("Fallback route:", controls.fallback),
     ...hookFields, field("Email recipients:", recipients),
+    field("Slack bot channel:", controls.botChannel), botSetup,
     el("label", { class: "tag-field" }, [enabled, el("span", { text: " Enabled" })]), save,
   ];
   if (entries.id != null) {
@@ -281,7 +379,9 @@ export function routeEditorNodes(options) {
   const nodes = [];
   const status = statusNode(routeStatus);
   if (status) nodes.push(status);
-  nodes.push(noticeStrip(ROUTES_EDITING_NOTE));
+  nodes.push(captionStrip(ROUTES_EDITING_NOTE));
+  /* #7949: said when a list behind the Applies to box could not be read; a route's stored scope is kept either way. */
+  if (options.scopesComplete === false) nodes.push(noticeStrip(SCOPES_UNREAD_NOTE));
   nodes.push(routeForm(options));
   return nodes;
 }
@@ -290,7 +390,7 @@ export function routeEditorNodes(options) {
 /* #6274: a seat that is not a signed-in admin lists only, and the service says why in its own sentence (sign in as an admin, or use the Viewer). */
 export function routeListOnlyNodes(message, managed, adminWritesOff) {
   const status = statusNode(routeStatus);
-  return (status ? [status] : []).concat([noticeStrip(message || routesListOnly(managed, adminWritesOff))]);
+  return (status ? [status] : []).concat([captionStrip(message || routesListOnly(managed, adminWritesOff))]);
 }
 
 /** The Routes grid's extra columns: Agent use for everyone, Change (Edit and Delete) for an editing seat. */
@@ -307,7 +407,7 @@ export function routeColumns(base, options) {
       class: "btn", type: "button", text: "Delete", "aria-label": "Delete route " + row.route_id, "data-action": "delete-route",
       onClick: () => {
         if (!window.confirm("Delete route " + row.route_id + "? Routes that name it as their fallback lose that fallback. This cannot be undone.")) return undefined;
-        return sendRoute("delete", { id: row.route_id }, options.repaint);
+        return sendRoute("delete", { id: row.route_id }, options.repaint, remove);
       },
     });
     return el("span", { class: "row-actions" }, [edit, remove]);
@@ -327,7 +427,7 @@ export async function readAgentSetupAccess(session) {
 
 /* ───────────────────────────── Environment Profiles ───────────────────────────── */
 
-export const profilesListOnly = (managed, adminWritesOff) => listOnlyNote(managed, "profiles are listed only", "To change one", adminWritesOff);
+export const profilesListOnly = (managed, adminWritesOff) => adminListOnlyNote(managed, "profiles are listed only", "To change one", adminWritesOff);
 export const PROFILES_NOTE =
   "An environment profile is free text every agent brief carries for its scope: the fleet, one server or one tag. Write the server's role, " +
   "business hours, owners, read limits and patterns known to be noisy. Saving blank text removes the scope's profile. Every change is journaled.";
@@ -385,7 +485,8 @@ export async function buildProfiles(body, generation, ctx) {
   const nodes = [];
   const status = statusNode(profileStatus);
   if (status) nodes.push(status);
-  nodes.push(noticeStrip(canEdit ? PROFILES_NOTE : (typeof d.sign_in_message === "string" && d.sign_in_message) || profilesListOnly(session.managed_store === true, session.admin_writes_off === true)));
+  nodes.push(captionStrip(canEdit ? PROFILES_NOTE : (typeof d.sign_in_message === "string" && d.sign_in_message) || profilesListOnly(session.managed_store === true, session.admin_writes_off === true)));
+  if (canEdit && fleet.complete === false) nodes.push(noticeStrip(SCOPES_UNREAD_NOTE));
   if (canEdit) nodes.push(profileForm(profiles, fleet, d.max_length || 4000, ctx));
   const rows = profiles.map((p) => ({ ...p, scope: profileScopeText(p, fleet.servers, fleet.tags) }));
   nodes.push(rows.length
@@ -395,9 +496,9 @@ export async function buildProfiles(body, generation, ctx) {
 }
 
 function profileForm(profiles, fleet, maxLength, ctx) {
-  const choices = [{ value: "", label: "Fleet" }]
-    .concat(fleet.servers.map((s) => ({ value: "s" + s.id, label: "Server: " + s.name })))
-    .concat(fleet.tags.map((t) => ({ value: "t" + t.id, label: "Tag: " + t.name })));
+  /* #7949: a profile's own scope is always a choice, so a profile whose server is not in the list can still be opened and removed. */
+  const choices = scopeChoices("Fleet", fleet.servers, fleet.tags,
+    [profileScope].concat(profiles.map((p) => (p.scope_server_id != null ? "s" + p.scope_server_id : p.scope_tag_id != null ? "t" + p.scope_tag_id : ""))));
   const scope = el("select", { class: "tag-input", "data-field": "profile-scope" }, choices.map((o) => el("option", { value: o.value, text: o.label })));
   scope.value = profileScope;
   const textBox = el("textarea", { class: "tag-input", rows: "8", maxlength: String(maxLength), "data-field": "profile-text" });
@@ -418,6 +519,8 @@ function profileForm(profiles, fleet, maxLength, ctx) {
     onClick: async () => {
       if (profileBusy) return;
       profileBusy = true;
+      /* Disabled while the write runs, so a second press sends nothing; enabled again before the repaint. */
+      save.disabled = true;
       let out;
       try {
         /* The version the page read for this scope (#6274): a profile saved by someone else since is refused with 409, not overwritten.
@@ -434,6 +537,7 @@ function profileForm(profiles, fleet, maxLength, ctx) {
         out = { message: "Could not save the profile: " + (e && e.message ? e.message : String(e)), isError: true };
       }
       profileBusy = false;
+      save.disabled = false;
       if (out.message) profileStatus = { message: out.message, isError: out.isError };
       if (out.isError === false) profileText = null;
       await ctx.repaint();

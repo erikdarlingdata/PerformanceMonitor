@@ -97,6 +97,11 @@ public sealed class AnalysisAsOfAnchorTests : IClassFixture<SharedDuckDbFixture>
         Assert.Contains(HistoricHash, anchored, StringComparison.Ordinal);
         Assert.DoesNotContain(RecentHash, anchored, StringComparison.Ordinal);
         Assert.Equal(1, JsonDocument.Parse(anchored).RootElement.GetProperty("finding_count").GetInt32());
+
+        /* #7486: the raw category stays, with its plain name beside it. */
+        var finding = JsonDocument.Parse(anchored).RootElement.GetProperty("findings")[0];
+        Assert.Equal("waits", finding.GetProperty("category").GetString());
+        Assert.Equal("Waits", finding.GetProperty("category_name").GetString());
     }
 
     /// <summary>

@@ -193,7 +193,7 @@ public sealed class DetachedCollectorGateTests
         }
 
         Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(new[] { dir! }.Concat(parts).ToArray()));
+        return SplitRepoFile.ReadAllText(Path.Combine(new[] { dir! }.Concat(parts).ToArray()));
     }
 
     /// <summary>

@@ -47,9 +47,10 @@ internal static class DarlingCliSealKey
     }
 
     /// <summary>
-    /// Reads the key file (when the directory can be resolved) and the store's published key and state on the owner
-    /// connection, then <see cref="Decide"/>. Never throws for anything the file system or the store can do: the answer is a
-    /// refusing ring with the reason.
+    /// Reads the key file (when the directory can be resolved), or with <c>passwordKey</c> set the key that setting names
+    /// and never the file (#8006), and the store's published key and state on the owner connection, then
+    /// <see cref="Decide"/>. A <c>passwordKey</c> key that cannot be read is the same as no file. Never throws for anything
+    /// the file system or the store can do: the answer is a refusing ring with the reason.
     /// </summary>
     internal static async Task<Decision> ResolveAsync(
         DarlingConfig config, string? configPath, NpgsqlDataSource postgres, ILogger? logger, CancellationToken ct)
@@ -72,12 +73,7 @@ internal static class DarlingCliSealKey
         {
             try
             {
-                if (configPath is not null)
-                {
-                    var directory = DarlingLogHashKeyFile.DirectoryFor(config, configPath);
-                    var load = DarlingPasswordKeyFile.Load(directory, logger ?? NullLogger.Instance);
-                    pkcs8 = load.Pkcs8;
-                }
+                pkcs8 = DarlingPasswordKeySource.LoadConfigured(config, configPath, logger ?? NullLogger.Instance).Pkcs8;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -164,7 +160,8 @@ internal static class DarlingCliSealKey
     /// <summary>
     /// The ring a diagnostics bundle opens sealed webhook values with when the service is not the one making it: the key
     /// file read only (never generated or changed), or null when there is no directory, no file, or the file cannot be
-    /// read. The in-process ring is used instead when it holds a key.
+    /// read. With <c>passwordKey</c> set it is the key that setting names, never the file, or null when that key cannot be
+    /// read (#8006). The in-process ring is used instead when it holds a key.
     /// </summary>
     internal static IPasswordKeyRing? TryOpenFileRing(DarlingConfig config, string? configPath, ILogger? logger)
     {
@@ -176,13 +173,7 @@ internal static class DarlingCliSealKey
         byte[]? pkcs8 = null;
         try
         {
-            if (configPath is null)
-            {
-                return null;
-            }
-
-            var directory = DarlingLogHashKeyFile.DirectoryFor(config, configPath);
-            pkcs8 = DarlingPasswordKeyFile.Load(directory, logger ?? NullLogger.Instance).Pkcs8;
+            pkcs8 = DarlingPasswordKeySource.LoadConfigured(config, configPath, logger ?? NullLogger.Instance).Pkcs8;
             return pkcs8 is null ? null : DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.FromPkcs8(pkcs8));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

@@ -99,21 +99,14 @@ public sealed class PgDeadlocksResumeLiveTests
         (row.GraphText?.Contains(suffix, StringComparison.Ordinal) ?? false)
         || (row.VictimStatement?.Contains(suffix, StringComparison.Ordinal) ?? false);
 
-    private static async Task<string?> NewestLogAsync(NpgsqlConnection connection, CancellationToken ct)
-    {
-        await using var command = new NpgsqlCommand("SELECT name FROM pg_ls_logdir() ORDER BY modification DESC, name DESC LIMIT 1", connection);
-        return (string?)await command.ExecuteScalarAsync(ct);
-    }
-
+    /// <summary>
+    /// Rotates the log and returns only once a NEW file is the newest (#8205). The server names a log file by the second, so a
+    /// rotation requested in the second its own midnight rotation ran reopens that same file; the "newest file only" read below
+    /// then still holds the report written before it. The helper rotates again when no new file appears.
+    /// </summary>
     private static async Task RotateAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        var before = await NewestLogAsync(connection, ct);
-        await ExecAsync(connection, "SELECT pg_rotate_logfile(); SELECT pg_sleep(1.2);", ct);
-        for (var i = 0; i < 50 && string.Equals(await NewestLogAsync(connection, ct), before, StringComparison.Ordinal); i++)
-        {
-            await Task.Delay(200, ct);
-        }
-
+        await PgLogLiveWait.RotateAsync(connection, "log", ct);
         await ExecAsync(connection, "DO $$ BEGIN RAISE WARNING 'pm4699 new file line'; END $$;", ct);
         await ExecAsync(connection, "SELECT pg_sleep(0.3);", ct);
     }

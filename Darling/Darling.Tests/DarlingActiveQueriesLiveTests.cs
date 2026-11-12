@@ -30,7 +30,8 @@ public sealed class DarlingActiveQueriesLiveTests
     {
         SessionId = 57,
         DatabaseName = "AdventureWorks",
-        ElapsedTimeFormatted = "00 00:00:12.345",
+        /* A day count of one: the Viewer's row drops a zero day count for display (ElapsedTimeText), so the round trip is read on a value it keeps whole. */
+        ElapsedTimeFormatted = "01 00:00:12.345",
         QueryText = "SELECT * FROM dbo.Orders WHERE CustomerId = @c",
         QueryPlan = null,                                  /* no estimated plan captured */
         LiveQueryPlan = "<ShowPlanXML>live</ShowPlanXML>", /* but a live plan was */
@@ -65,6 +66,28 @@ public sealed class DarlingActiveQueriesLiveTests
         RequestId = 3,
     };
 
+    /* #7573: the live read runs the collector's own query, which no longer drops the monitor's other sessions, so the Viewer's list follows the
+       Active Queries page's switch: the monitor's out by default, a user's similar name and a missing program name kept. */
+    [Fact]
+    public void TheViewersLiveList_LeavesTheMonitorsSessionsOut_UnlessTheSwitchAsks()
+    {
+        var rows = new List<QuerySnapshotsCollector.Row>();
+        var programs = new string?[] { "PerformanceMonitorLite", "Orders.Api", null, "MyPerformanceMonitorTool", "PerformanceMonitorDarling-Remediation" };
+        for (var i = 0; i < programs.Length; i++)
+        {
+            var row = SampleRow();
+            row.SessionId = 60 + i;
+            row.ProgramName = programs[i];
+            rows.Add(row);
+        }
+
+        var json = ActiveQueriesLivePayload.Serialize(rows, new DateTime(2026, 11, 4, 12, 0, 0, DateTimeKind.Utc));
+        var parsed = ViewerDataService.ParseActiveQueriesLiveResult(new CommandResult("succeeded", "active queries fetched", json)).Rows;
+
+        Assert.Equal(new[] { 61, 62, 63 }, ViewerDataService.LeaveOutMonitorRows(parsed, includeMonitor: false).ConvertAll(r => r.SessionId));
+        Assert.Equal(5, ViewerDataService.LeaveOutMonitorRows(parsed, includeMonitor: true).Count);
+    }
+
     [Fact]
     public void ServiceSerialize_RoundTrips_ThroughViewerParse_PreservingEveryBoundColumn()
     {
@@ -80,7 +103,7 @@ public sealed class DarlingActiveQueriesLiveTests
 
         Assert.Equal(57, row.SessionId);
         Assert.Equal("AdventureWorks", row.DatabaseName);
-        Assert.Equal("00 00:00:12.345", row.ElapsedTimeFormatted);
+        Assert.Equal("01 00:00:12.345", row.ElapsedTimeFormatted);
         Assert.Equal("SELECT * FROM dbo.Orders WHERE CustomerId = @c", row.QueryText);
         Assert.Null(row.QueryPlan);
         Assert.False(row.HasQueryPlan);

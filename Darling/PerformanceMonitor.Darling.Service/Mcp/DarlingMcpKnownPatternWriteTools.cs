@@ -43,7 +43,7 @@ public sealed class DarlingMcpKnownPatternWriteTools
         "Adds a known-pattern entry: operator context about an alert that recurs, such as 'the backup job pushes High CPU every night at 02:00'. " +
         "note is required (at most 500 characters). server_id, metric_name, time_of_day and the other scope fields are optional; a field left out means any " +
         "server, any metric, any time of day, UTC and the default window, and no expiry. Answers with the new entry's id, the entry after, and an undo call " +
-        "(delete_known_pattern). At most 500 entries exist; a create past that is refused until some are deleted. Needs mcp.allowWrites; never offered to an investigation agent. " + NoteFraming)]
+        "(delete_known_pattern). At most 500 entries exist; a create past that is refused until some are deleted. Needs mcp.allowWrites or a named operator token; never offered to an investigation agent. " + NoteFraming)]
     public static async Task<string> CreateKnownPattern(
         NpgsqlDataSource postgres,
         [Description("What the operator knows about the pattern (1-500 characters).")] string note,
@@ -87,7 +87,7 @@ public sealed class DarlingMcpKnownPatternWriteTools
         "REPLACES a known-pattern entry's scope, window, note and expiry (not its creator or creation time), as the web editor's save does: a field you " +
         "leave out becomes any / UTC / the default window / never, so send every field you want to keep (read the entry with get_known_patterns first). " +
         "Answers with the entry before and after and an undo call (update_known_pattern with the old values). An id that matches no entry is not_found " +
-        "and nothing changes. Needs mcp.allowWrites; never offered to an investigation agent. " + NoteFraming)]
+        "and nothing changes. Needs mcp.allowWrites or a named operator token; never offered to an investigation agent. " + NoteFraming)]
     public static async Task<string> UpdateKnownPattern(
         NpgsqlDataSource postgres,
         [Description("The entry's id (from get_known_patterns).")] long id,
@@ -136,7 +136,7 @@ public sealed class DarlingMcpKnownPatternWriteTools
 
     [McpServerTool(Name = "delete_known_pattern"), Description(
         "Deletes a known-pattern entry by its id (from get_known_patterns). Answers with the entry as it was and an undo call (create_known_pattern with " +
-        "the same fields; the re-created entry gets a new id). An id that matches no entry is not_found and nothing changes. Needs mcp.allowWrites; never " +
+        "the same fields; the re-created entry gets a new id). An id that matches no entry is not_found and nothing changes. Needs mcp.allowWrites or a named operator token; never " +
         "offered to an investigation agent. " + NoteFraming)]
     public static async Task<string> DeleteKnownPattern(
         NpgsqlDataSource postgres,

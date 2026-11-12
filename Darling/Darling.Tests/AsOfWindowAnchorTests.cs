@@ -88,6 +88,35 @@ public sealed class AsOfWindowAnchorTests
     }
 
     /// <summary>
+    /// #7504: a whole-day read keeps only the anchor's date, so a closed date rates over all of it, whatever time the anchor names.
+    /// </summary>
+    [Theory]
+    [InlineData("2026-08-18", 0)]
+    [InlineData("2026-08-18T01:00:00Z", 1)]
+    [InlineData("2026-08-18T23:59:59Z", 23)]
+    public void DayAnchorClock_ClosedDate_IsTheEndOfThatDate(string asOf, int hour)
+    {
+        var resolved = new DateTime(2026, 8, 18, hour, 0, 0, DateTimeKind.Utc);
+        Assert.Equal(new DateTime(2026, 8, 19, 0, 0, 0, DateTimeKind.Utc), McpHelpers.DayAnchorClock(asOf, resolved));
+    }
+
+    /// <summary>#7504: today's date is still running, so its day is rated up to now, the same as a read with no anchor.</summary>
+    [Fact]
+    public void DayAnchorClock_TheCurrentDate_StopsAtNow()
+    {
+        var before = DateTime.UtcNow;
+        var clock = McpHelpers.DayAnchorClock(before.ToString("yyyy-MM-dd"), before.Date);
+        Assert.InRange(clock, before, DateTime.UtcNow);
+    }
+
+    [Fact]
+    public void DayAnchorClock_NoAnchor_KeepsTheResolvedNow()
+    {
+        var now = new DateTime(2026, 8, 18, 9, 30, 0, DateTimeKind.Utc);
+        Assert.Equal(now, McpHelpers.DayAnchorClock(null, now));
+    }
+
+    /// <summary>
     /// An anchor we cannot use is REFUSED, following <see cref="McpHelpers.ValidateTop"/>. Silently falling
     /// back to now is the one outcome this parameter exists to prevent: a read answering "the last 4 hours"
     /// when it was asked for "the 4 hours ending Tuesday 03:00" is indistinguishable from a correct answer.

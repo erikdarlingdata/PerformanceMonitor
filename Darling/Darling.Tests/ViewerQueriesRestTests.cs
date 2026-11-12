@@ -43,14 +43,22 @@ public sealed class ViewerQueryTrendsSqlTests
         var sql = SqlByName(sqlName);
         Assert.Contains($"FROM {table}", sql, StringComparison.Ordinal);
         Assert.DoesNotContain($"v_{table}", sql, StringComparison.Ordinal); /* viewer reads base tables */
-        /* The per-second rate denominator is the collection's STORED interval (#3540 V128 for the procedure
-           trend, #3653 A11 for the two query-stats trends): MAX(sample_interval_seconds), 0 → NULL (unrated),
-           and the seconds-since-previous-snapshot LAG only where a pre-V128 collection recorded none. */
-        Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
+        /* The per-second rate denominator is the collection's gap to the previous collection (#7161, the #5449 rule the
+           procedure trend uses), capped at the collector's own 3600 s: a collection whose rows ALL stored 0 is a
+           restart and stays unrated whatever the gap (#3653 A11), and the stored interval, MAX(sample_interval_seconds),
+           is read only where there is no previous collection. Never the longest stored interval of any one query in the
+           collection: that stretched a 60 s collection to the 900 s of one query that returns every 15 minutes. */
+        Assert.Contains("MAX(sample_interval_seconds) AS stored_interval", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN stored_interval = 0 THEN NULL", sql, StringComparison.Ordinal);
+        Assert.Contains($"WHEN gap_seconds IS NOT NULL THEN CASE WHEN gap_seconds <= {CollectorDeltaCalculator.DefaultMaxGapSeconds} THEN gap_seconds END", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(stored_interval, 0)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time) OVER (ORDER BY collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("extract(epoch FROM", sql, StringComparison.Ordinal);
         Assert.Contains("date_trunc('second', collection_time)", sql, StringComparison.Ordinal);
+        /* The table is read an hour before $2 so the first in-window collection has its previous one; the rows before $2 are
+           dropped after the LAG. */
+        Assert.Contains($"collection_time >= $2 - INTERVAL '{CollectorDeltaCalculator.DefaultMaxGapSeconds} seconds'", sql, StringComparison.Ordinal);
         /* interval_seconds > 0 guards the first row: its LAG is NULL, its rate unknowable, and the CASE has no
            ELSE — NULL, not a fabricated 0 (#3653; #3642 on the MCP copies). The reader skips the row. */
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN", sql, StringComparison.Ordinal);
@@ -203,7 +211,7 @@ public sealed class ViewerQueryTrendsSqlTests
 /// Pins the Query-Heatmap DuckDB→PG rewrite — the wave's load-bearing SQL work. Guards that both
 /// dialect swaps landed for EVERY metric: <c>time_bucket</c> is gone (replaced by <c>date_bin</c> with an
 /// explicit epoch origin) and <c>ARG_MAX</c> is gone (replaced by a <c>ROW_NUMBER … rn = 1</c> top-1
-/// window plus <c>COUNT(*) OVER</c> for the per-cell count).
+/// window; the per-cell distinct count is proved by behaviour in the live test).
 /// </summary>
 public sealed class ViewerQueryHeatmapSqlTests
 {
@@ -233,7 +241,6 @@ public sealed class ViewerQueryHeatmapSqlTests
             Assert.DoesNotContain("ARG_MAX", sql, StringComparison.Ordinal); /* DuckDB-only */
             /* Hottest query per cell = the max-delta_execution_count row, taken by a top-1 window. */
             Assert.Contains("ROW_NUMBER() OVER (PARTITION BY time_bin, bucket_index ORDER BY delta_execution_count DESC) AS rn", sql, StringComparison.Ordinal);
-            Assert.Contains("COUNT(*) OVER (PARTITION BY time_bin, bucket_index) AS query_count", sql, StringComparison.Ordinal);
             Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);
         }
     }
@@ -311,7 +318,9 @@ public sealed class ViewerQuerySnapshotsSqlTests
     {
         var sql = ViewerDataService.LatestQuerySnapshotBatchSql;
         Assert.Contains("FROM query_snapshots", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time = (SELECT MAX(collection_time) FROM query_snapshots WHERE server_id = $1)", sql, StringComparison.Ordinal);
+        /* #7573: the MAX(collection_time) subquery is still server-scoped and still the single newest capture, but it now skips the monitor's own
+           rows unless $3 asks for them, so a capture holding only the monitor's statements does not become the "latest" and read empty. */
+        Assert.Contains("collection_time = (SELECT MAX(collection_time) FROM query_snapshots WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("query_text NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY cpu_time_ms DESC", sql, StringComparison.Ordinal);
         /* #1319: the batch stays server-scoped (the MAX(collection_time) subquery reuses $1, not a window),
@@ -320,10 +329,10 @@ public sealed class ViewerQuerySnapshotsSqlTests
     }
 
     [Fact]
-    public void ActiveQuerySlicerSql_BucketsByHour_SevenColumnShape()
+    public void ActiveQuerySlicerSql_BucketsAtTheWindowsWidth_SevenColumnShape()
     {
         var sql = ViewerDataService.ActiveQuerySlicerSql;
-        Assert.Contains("date_trunc('hour', collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("date_bin(CAST($6 AS integer) * INTERVAL '1 minute', collection_time,", sql, StringComparison.Ordinal);
         Assert.Contains("FROM query_snapshots", sql, StringComparison.Ordinal);
         Assert.Contains("COUNT(*) AS session_count", sql, StringComparison.Ordinal);
         Assert.Contains("COALESCE(SUM(cpu_time_ms), 0)", sql, StringComparison.Ordinal);
@@ -536,6 +545,53 @@ public sealed class ViewerQueriesRestLivePostgresTests
             Assert.Equal("SELECT low", result.CellDetails[0, 0].TopQueryText);
             /* 0xZERO (delta_exec = 0) contributed to no cell. */
             Assert.Equal(0.0, result.Intensities[6, 0]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_stats", HeatmapServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>#7881: a cell's count is the number of distinct queries in it, not the sample rows. One hash collected five
+    /// times in one 5-minute bin is ONE query (the old per-row count read 5); a second hash seen twice in the same cell makes it two.</summary>
+    [Fact]
+    public async Task QueryHeatmap_CountsDistinctQueriesPerCell_NotSampleRows_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live heatmap test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "query_stats", HeatmapServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(cs!);
+        var end = TruncateToSeconds(DateTime.UtcNow);
+        var start = end.AddHours(-24);
+        var bin = start.AddHours(1);
+        bin = new DateTime(bin.Ticks - (bin.Ticks % TimeSpan.FromMinutes(5).Ticks), bin.Kind); /* the bin's start, so +0..+4 minutes stay in it */
+
+        var bodySucceeded = false;
+        try
+        {
+            /* ~50ms per execution -> bucket 2 for every row. 0xSTEADY is collected five times, 0xTWICE twice. */
+            for (var minute = 0; minute < 5; minute++)
+                await InsertQueryStatsAsync(connection, HeatmapServerId, bin.AddMinutes(minute), "0xSTEADY", deltaExec: 5, deltaWorker: 0, deltaElapsed: 250_000, deltaReads: 0, deltaWrites: 0, queryText: "SELECT steady");
+            for (var minute = 0; minute < 2; minute++)
+                await InsertQueryStatsAsync(connection, HeatmapServerId, bin.AddMinutes(minute), "0xTWICE", deltaExec: 1, deltaWorker: 0, deltaElapsed: 50_000, deltaReads: 0, deltaWrites: 0, queryText: "SELECT twice");
+            /* A second bin holding only 0xSTEADY: one query, collected five times. */
+            for (var minute = 0; minute < 5; minute++)
+                await InsertQueryStatsAsync(connection, HeatmapServerId, bin.AddMinutes(5 + minute), "0xSTEADY", deltaExec: 5, deltaWorker: 0, deltaElapsed: 250_000, deltaReads: 0, deltaWrites: 0, queryText: "SELECT steady");
+
+            var result = await viewer.GetQueryHeatmapAsync(HeatmapServerId, HeatmapMetric.Duration, start, end);
+
+            Assert.Equal(2, result.TimeBuckets.Length);
+            Assert.Equal(2.0, result.Intensities[2, 0]);              /* 0xSTEADY + 0xTWICE: two queries, seven sample rows */
+            Assert.Equal(1.0, result.Intensities[2, 1]);              /* 0xSTEADY alone: one query, five sample rows */
+            Assert.Equal("0xSTEADY", result.CellDetails[2, 1].TopQueryHash);
 
             bodySucceeded = true;
         }

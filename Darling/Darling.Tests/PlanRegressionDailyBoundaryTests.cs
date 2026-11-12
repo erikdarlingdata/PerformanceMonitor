@@ -111,7 +111,11 @@ public sealed class PlanRegressionDailyBoundaryTests
         Assert.Contains("new NpgsqlCommand(PlanRegressionWorkMemSql, connection, snapshot)", fact, StringComparison.Ordinal);
         Assert.StartsWith("SET LOCAL work_mem = ", PgFactCollector.PlanRegressionWorkMemSql, StringComparison.Ordinal);
         Assert.Contains("connection, snapshot, context.ServerId, windowFloor", fact, StringComparison.Ordinal);
-        Assert.Contains("readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection, snapshot)", fact, StringComparison.Ordinal);
+        /* #7730: the read's SQL is chosen as before, then passed through the key-table gate, which asks in the same snapshot; the read
+           itself is still built on the snapshot, so the daily read cannot leave the transaction. */
+        Assert.Contains("connection, snapshot, FactCommandTimeoutSeconds,", fact, StringComparison.Ordinal);
+        Assert.Contains("readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, context.CancellationToken)", fact, StringComparison.Ordinal);
+        Assert.Contains("new NpgsqlCommand(regressionSql, connection, snapshot)", fact, StringComparison.Ordinal);
 
         var sql = PgFactCollector.PlanRegressionDailySql;
         Assert.Contains("l.first_execution_time >= $4::timestamp", sql, StringComparison.Ordinal);

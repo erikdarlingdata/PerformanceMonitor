@@ -38,8 +38,10 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class DarlingPgLockStatsReader
 {
     /// <param name="Captures">How many snapshots this group appeared in — the numerator.</param>
-    /// <param name="TotalCaptures">How many snapshots the collector took in the window — the denominator.
-    /// Present on every row so a caller never has to make a second read to interpret the first.</param>
+    /// <param name="TotalCaptures">How many snapshots the collector took in the window — the denominator: its
+    /// successful runs in <c>collection_log</c>, the runs that found no lock included, never fewer than the capture
+    /// times the lock rows show. Present on every row so a caller never has to make a second read to interpret
+    /// the first.</param>
     /// <param name="MaxBackends">The largest queue seen in any single capture, not a sum across captures:
     /// summing would multiply one persistent queue by the number of times it was observed.</param>
     /// <param name="MaxWaitMs">The longest any backend in this group was observed waiting.</param>
@@ -59,16 +61,39 @@ public static class DarlingPgLockStatsReader
     /* The capture denominator is computed once over the whole window and cross-joined onto every row, rather
        than counted per group - a group's own count is the numerator and cannot also be the denominator.
 
+       #8055: the denominator is the collector's successful runs in collection_log, not the capture times that
+       appear in pg_lock_stats. A run that finds no lock writes no lock row, so the table alone counts only the
+       captures that saw something, and a lock seen in 3 of 60 runs read as present in 3 of 3. collection_log
+       records a SUCCESS with rows_collected = 0 for such a run, so it holds the runs that found nothing - the
+       same source and the same collector-name-and-SUCCESS filter the blocking read borrows its denominator
+       from. GREATEST floors the count at the capture times the lock rows themselves show, so a window the log
+       does not cover (a retention gap, or rows restored without their log) never reads a denominator below
+       the numerator; there the figure is what the lock rows alone support.
+
        MAX(backend_count), never SUM. A queue of three backends that persists across forty captures is three
        backends, not a hundred and twenty; summing would report a steady queue as an enormous one and rank it
        above a genuinely worse transient. Same trap the blocking read documents. */
     public const string PgLockStatsSql = """
-        WITH captures AS (
+        WITH runs AS (
+            SELECT count(*) AS total
+            FROM collection_log AS l
+            WHERE l.server_id = $1
+            AND   l.collector_name = 'pg_lock_stats'
+            AND   l.status = 'SUCCESS'
+            AND   l.collection_time >= $2
+            AND   l.collection_time <= $3
+        ),
+        seen AS (
             SELECT count(DISTINCT collection_time) AS total
             FROM pg_lock_stats
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
+        ),
+        captures AS (
+            SELECT GREATEST(r.total, s.total) AS total
+            FROM runs AS r
+            CROSS JOIN seen AS s
         )
         SELECT
             s.database_name,

@@ -18,8 +18,8 @@
  * agents over MCP only). A report is an agent's own claim, unreviewed and self-attributed, and the page says so.
  *
  * The list keeps the order the read gave (opened_at DESC, request_id) and the journal keeps its own (event_time
- * DESC, journal_id DESC). The filters and the picked request live at MODULE scope, so the poll's rebuild of the page shows the
- * same choices and the same open request.
+ * DESC, journal_id DESC). The filters, the picked request and the Close reason being typed live at MODULE scope, so the poll's
+ * rebuild of the page shows the same choices, the same open request and the same reason (#7956).
  *
  * R4 (XSS): every value, the brief and the report text included, reaches the DOM as text through el()'s text path
  * (a <pre> or a cell), never as HTML.
@@ -29,7 +29,7 @@ import { VIZ } from "../panels.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { getSession } from "../views-api.js";
 import { canCloseState, closeRequest, writeAccess, SIGN_IN_SENTENCE, CLOSE_REASON_MAX_LENGTH } from "../investigation-writes.js";
-import { el, mount, onPageLeave, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, localTime, makeActivatable, rowsUnder } from "../util.js";
+import { el, mount, onPageLeave, loadingStrip, emptyStrip, noticeStrip, listOnlyNote, errorStrip, readErrorStrip, readTool, apiGet, localTime, makeActivatable, rowsUnder } from "../util.js";
 
 /** The states the list read takes; an empty value is every state. */
 export const STATES = [
@@ -57,7 +57,39 @@ export const FAMILIES = [
 export const LIST_LIMIT = 100;
 
 /** The list's columns, from READ_FIELDS (once, for the page and for a notebook cell). claimed_by is the agent id; lease_until is when its live lease ends (the claim time itself is in the journal). */
-export const REQUEST_COLUMNS = READ_FIELDS.list_investigation_requests.table.columns;
+const REQUEST_CATALOG_COLUMNS = READ_FIELDS.list_investigation_requests.table.columns;
+
+/** #8578: the name one request's Server cell and pane heading show: the registry's display name, or server_name for a row that has none. */
+export function serverLabel(row) {
+  return (row && (row.display_name || row.server_name)) || "";
+}
+
+/** #8578: the host name a request was opened with, when it is not the name shown: for the Server cell's title and the pane. Otherwise "". */
+export function openedAsName(row) {
+  const label = serverLabel(row);
+  return row && row.server_name && row.server_name !== label ? String(row.server_name) : "";
+}
+
+/* #8578: the Server cell is one line under the stylesheet's name-cell cap (a 60 character host name made the table 1658 px wide in 978), with the
+   host name the request was opened with in its title. Sort, Copy and the CSV read the same label the cell shows. */
+const serverColumn = (c) => ({
+  ...c,
+  sortValue: serverLabel,
+  copyValue: serverLabel,
+  cellClass: () => "name-cell",
+  render: (row) => {
+    const label = serverLabel(row);
+    const host = openedAsName(row);
+    return el("span", { class: "clamp-text", title: label ? (host ? label + " (opened as " + host + ")" : label) : null, text: label || "—" });
+  },
+});
+
+/* #8578: ten columns did not fit a 1280 px window (the grid was wider than its box by a screenful, so Agent, Lease until, Reported and Route were off
+   screen). The grids that outgrow a window keep their less-read columns behind a column group: Lease until and Route sit in "Lease and route", off
+   until its toggle is pressed, and Copy and the CSV carry them either way. */
+export const LEASE_GROUP = "Lease and route";
+export const REQUEST_COLUMNS = REQUEST_CATALOG_COLUMNS.map((c) =>
+  c.key === "display_name" ? serverColumn(c) : c.key === "lease_until" || c.key === "route_id" ? { ...c, group: LEASE_GROUP } : c);
 
 /** The journal's columns, in the order the read gave them (newest first): the read's own, then the detail the page draws as text. */
 export const JOURNAL_COLUMNS = [...READ_FIELDS.get_investigation_reports.table.columns, { key: "detail_text", label: "Detail", wrap: true }];
@@ -71,6 +103,24 @@ export function valueText(v) {
   } catch {
     return String(v);
   }
+}
+
+/**
+ * The text of one evidence item. An agent sends key_numbers as a string, and the string is often JSON of its own, so printing the
+ * item as JSON shows it with a second layer of escapes ("{\"sql_cpu\":...}", "-\u003E"). A key_numbers string that parses to an
+ * object or an array is drawn as that object. One that does not parse is drawn as plain text on its own line, as typed.
+ */
+export function evidenceText(item) {
+  if (item == null || typeof item !== "object" || Array.isArray(item) || typeof item.key_numbers !== "string") return valueText(item);
+  let parsed = null;
+  try {
+    parsed = JSON.parse(item.key_numbers);
+  } catch {
+    parsed = null;
+  }
+  if (parsed !== null && typeof parsed === "object") return valueText({ ...item, key_numbers: parsed });
+  const { key_numbers: typed, ...rest } = item;
+  return valueText(rest) + "\nkey_numbers: " + typed;
 }
 
 /** When the request was claimed: the newest "claimed" event of its journal, or null when it was never claimed. */
@@ -105,14 +155,25 @@ export function listParams(choices) {
 }
 
 const choices = { state: "", family: "", requestId: null };
+/* #7956: the Close reason as typed for ONE request, with whether its box has the focus and where the caret is. The poll's rebuild draws
+   the form from it, as Job History does for its job box. A successful close of its own request, the pane's Close button, a filter
+   change and picking another request drop it. */
+let closeDraft = null;
+/* #7956: the requests whose close PUT is out. A form the poll draws while one is out has its button disabled, and a press on it sends
+   nothing (the pressing set of proposals.js). */
+const closing = new Set();
+/* The newest Close form's nodes, so an answer that lands after the poll redrew the form reaches the form on the page. */
+let closeNodes = null;
 let pageSeq = 0;
 let detailSeq = 0;
 let pageAbort = null;
 let detailAbort = null;
-/* #6793: leaving the page (route() calls beginPageScope) aborts its reads. */
+/* #6793: leaving the page (route() calls beginPageScope) aborts its reads. #7987: the reason box leaves with the page, so its draft is
+   marked unfocused: the form drawn on return keeps the reason and does not take the focus. */
 onPageLeave(() => {
   if (pageAbort) pageAbort.abort();
   if (detailAbort) detailAbort.abort();
+  if (closeDraft) closeDraft.focused = false;
 });
 
 function select(label, options, value, onPick) {
@@ -122,27 +183,64 @@ function select(label, options, value, onPick) {
   return el("label", { class: "range-control" }, [el("span", { text: label }), sel]);
 }
 
+/** #7700: the sentence that replaces the Close form when the session's admin writes are off. */
+const closeOffNote = (session) => listOnlyNote(!!session && session.managed_store === true, "requests are listed only", "To close one", true);
+
 /* #6265: the Close form of one request, drawn only for a seat that can make changes and a request that can still be closed. The
    service checks the reason and the state again; a refusal's sentence is shown as the service wrote it. */
-function closeForm(row, access) {
+function closeForm(row, access, offNote) {
   if (access === "no" || !canCloseState(row.state)) return null;
+  /* #7700: writes turned off on the store: the service refuses the close, so the form is not drawn and the section says why. */
+  if (access === "off") return section("Close this request", [el("div", { class: "muted", "data-close-off": "1", text: offNote })]);
   if (access === "sign-in") return section("Close this request", [el("div", { class: "muted", "data-close-sign-in": "1", text: SIGN_IN_SENTENCE })]);
   const reason = el("input", { type: "text", maxlength: String(CLOSE_REASON_MAX_LENGTH), "aria-label": "Reason for closing this request", "data-close-reason": "1", placeholder: "Why is this request being closed?" });
+  if (closeDraft && String(closeDraft.requestId) === String(row.request_id)) reason.value = closeDraft.reason;
+  const remember = (focused) => {
+    closeDraft = { requestId: row.request_id, reason: reason.value, focused, caret: [reason.selectionStart, reason.selectionEnd] };
+  };
+  reason.addEventListener("input", () => remember(true));
+  reason.addEventListener("focus", () => remember(true));
+  /* The rebuild removes this box, and the browser fires blur during the removal while the box is still connected, so the check waits a
+     turn: a removed box leaves the focus to the box that replaces it. */
+  reason.addEventListener("blur", () => setTimeout(() => { if (reason.isConnected) remember(false); }, 0));
   const status = el("div", { class: "muted", role: "status", "data-close-status": "1" });
   const button = el("button", { type: "button", class: "btn", "data-close-request": row.request_id, text: "Close request" });
+  button.disabled = closing.has(row.request_id);
   button.addEventListener("click", async () => {
+    if (closing.has(row.request_id)) return;
+    closing.add(row.request_id);
     button.disabled = true;
-    const out = await closeRequest(row.request_id, reason.value);
-    button.disabled = false;
+    let out;
+    try {
+      out = await closeRequest(row.request_id, reason.value);
+    } finally {
+      closing.delete(row.request_id);
+    }
+    const now = closeNodes && String(closeNodes.requestId) === String(row.request_id) ? closeNodes : { button, status };
+    now.button.disabled = false;
     if (out.message === null) return;
-    status.textContent = out.message;
-    if (out.ok && reloadList) await reloadList();
+    now.status.textContent = out.message;
+    if (out.ok) {
+      /* #7987: only the closed request's own draft is dropped; a reason being typed for another request is kept for the re-read's form. */
+      if (closeDraft && String(closeDraft.requestId) === String(row.request_id)) closeDraft = null;
+      if (reloadList) await reloadList();
+    }
   });
+  closeNodes = { requestId: row.request_id, reason, button, status };
   return section("Close this request", [
     el("div", { class: "muted", text: "Closing ends the request for good and is recorded in its journal under your name. Give a reason." }),
     el("div", {}, [reason, button]),
     status,
   ]);
+}
+
+/* #7956: once the pane is on the page, the reason box that had the focus before the rebuild gets it back, with its caret. */
+function focusCloseReason() {
+  if (!closeDraft || !closeDraft.focused || !closeNodes || String(closeNodes.requestId) !== String(closeDraft.requestId)) return;
+  const box = closeNodes.reason;
+  if (!box.isConnected) return;
+  box.focus();
+  if (closeDraft.caret && typeof box.setSelectionRange === "function") box.setSelectionRange(closeDraft.caret[0], closeDraft.caret[1]);
 }
 
 function section(title, children) {
@@ -168,7 +266,7 @@ function reportBlock(rep) {
   for (const [title, list] of evidenceLists) {
     const items = Array.isArray(list) ? list : [];
     if (items.length) {
-      parts.push(el("div", {}, [el("strong", { text: title + " (" + items.length + "): " }), ...items.map((e) => el("pre", { class: "jh-detail-message", text: valueText(e) }))]));
+      parts.push(el("div", {}, [el("strong", { text: title + " (" + items.length + "): " }), ...items.map((e) => el("pre", { class: "jh-detail-message", text: evidenceText(e) }))]));
     }
   }
   const queries = Array.isArray(rep.queries_run) ? rep.queries_run : [];
@@ -180,7 +278,7 @@ function reportBlock(rep) {
 }
 
 /* The pane under the list for one request, from its get_investigation_reports answer. */
-function detailPane(row, data, access) {
+function detailPane(row, data, access, single, offNote) {
   const reports = reportRows(data, row.request_id);
   const journal = journalRows(data, row.request_id);
   const claimed = claimedAt(journal, row.request_id);
@@ -192,13 +290,16 @@ function detailPane(row, data, access) {
   ].join(" · ");
   const parts = [
     el("div", { class: "jh-detail-head" }, [
-      el("strong", { text: "Request on " + (row.server_name || "?") + " (" + (row.family || "?") + ")" }),
-      el("button", { type: "button", class: "jh-detail-close", text: "Close", onClick: () => { choices.requestId = null; mount(slot, []); } }),
-    ]),
+      el("strong", { class: "jh-detail-title", tabindex: "-1", text: "Request on " + (serverLabel(row) || "?") + " (" + (row.family || "?") + ")" }),
+      single ? null : el("button", { type: "button", class: "jh-detail-close", text: "Close", onClick: () => { choices.requestId = null; closeDraft = null; mount(slot, []); } }),
+    ].filter(Boolean)),
     el("div", { class: "muted", text: facts }),
   ];
+  /* #8578: the name the request was opened with, when it is not the name the heading shows (the Server cell keeps it in its title). */
+  const opened = openedAsName(row);
+  if (opened) parts.push(el("div", { class: "muted", text: "Opened as " + opened }));
 
-  const closer = closeForm(row, access);
+  const closer = closeForm(row, access, offNote);
   if (closer) parts.push(closer);
 
   if (reports.length) {
@@ -223,7 +324,16 @@ function detailPane(row, data, access) {
 let slot = null;
 let reloadList = null;
 
-async function loadDetail(row) {
+/* #8578: a picked request's pane sits under a list that can be most of the window tall, so a pick scrolled nothing into view and the pane
+   appeared below the fold. After a pick the pane's heading is scrolled to and takes the focus; the poll's rebuild of an open pane does not. */
+function revealPane() {
+  const heading = slot && typeof slot.querySelector === "function" ? slot.querySelector(".jh-detail-title") : null;
+  if (!heading) return;
+  heading.focus({ preventScroll: true });
+  if (typeof heading.scrollIntoView === "function") heading.scrollIntoView({ block: "start" });
+}
+
+async function loadDetail(row, reveal = false) {
   const ticket = ++detailSeq;
   if (detailAbort) detailAbort.abort();
   const signal = (detailAbort = new AbortController()).signal;
@@ -234,22 +344,108 @@ async function loadDetail(row) {
   if (res.kind === "error") return mount(slot, [readErrorStrip(res.message)]);
   if (res.kind === "empty") return mount(slot, [emptyStrip(res.message || "This request has no stored report or journal.")]);
   try {
-    mount(slot, detailPane(row, res.data || {}, writeAccess(session)));
+    mount(slot, detailPane(row, res.data || {}, writeAccess(session), false, closeOffNote(session)));
+    focusCloseReason();
+    if (reveal) revealPane();
   } catch (e) {
     mount(slot, [errorStrip("Could not draw this request: " + (e && e.message ? e.message : String(e)))]);
   }
 }
 
-export function renderInvestigations(main) {
+/** #6979: the request id in the query of #/investigations?request=<id>, trimmed, or "" when there is none (the page is then the list). */
+export function requestIdFromQuery(query) {
+  const id = new URLSearchParams(query || "").get("request");
+  return id ? id.trim() : "";
+}
+
+/** The agent changes columns of the one-request page. */
+export const REQUEST_CHANGE_COLUMNS = [
+  { key: "called_at_utc", label: "Called" },
+  { key: "tool", label: "Tool" },
+  { key: "kind", label: "Kind" },
+  { key: "result", label: "Result" },
+  { key: "undone_by", label: "Undone by" },
+];
+
+/* The rows are GET /api/agent-changes?request=<id>: the service filters by request_id and lists up to 200 of that request's changes, newest first (AgentChangesLimit), and one request makes far fewer (#6979). */
+function changesSection(res) {
+  const link = el("a", { href: "#/admin/agent-changes", text: "Open the Agent changes tab" });
+  if (res.kind === "error") return section("Agent changes", [errorStrip("Could not read the agent changes: " + res.message), link]);
+  if (res.kind !== "data") return section("Agent changes", [emptyStrip(res.message || "The agent changes are not available."), link]);
+  const changes = res.data && Array.isArray(res.data.changes) ? res.data.changes : [];
+  if (!changes.length) return section("Agent changes", [emptyStrip("No agent change on this request."), link]);
+  return section("Agent changes (" + changes.length + ")", [
+    VIZ.table({ changes }, { id: "request-agent-changes", rowsKey: "changes", columns: REQUEST_CHANGE_COLUMNS, emptyText: "No agent changes." }),
+    el("div", { class: "muted", text: "Undo is a person's action, on the Agent changes tab." }),
+    link,
+  ]);
+}
+
+/* #6979: #/investigations?request=<id>, the link a report notice carries. One request on its own: its report, brief, journal and
+   its agent changes, or one plain line when the id is not a request. It reads only; a change happens after a click on a button. */
+function renderOneRequest(main, requestId) {
+  if (pageAbort) pageAbort.abort();
+  const signal = (pageAbort = new AbortController()).signal;
+  ++pageSeq;
+  slot = el("div", { class: "jh-detail" });
+  mount(main, [
+    el("div", { class: "page-head" }, [
+      el("h2", { text: "Investigations" }),
+      el("div", { class: "spacer" }),
+      el("a", { href: "#/investigations", text: "All requests" }),
+    ]),
+    slot,
+  ]);
+
+  async function load() {
+    const mine = ++pageSeq;
+    mount(slot, [loadingStrip("Loading this request…")]);
+    const [res, session, changes] = await Promise.all([
+      readTool("get_investigation_reports", { request_id: requestId }, signal),
+      getSession(),
+      apiGet("/api/agent-changes?request=" + encodeURIComponent(requestId), signal),
+    ]);
+    if (mine !== pageSeq || res.kind === "aborted" || res.kind === "auth") return;
+    if (res.kind === "error") return mount(slot, [readErrorStrip(res.message)]);
+    /* An id that is not a request: the read answers not_found with a sentence, which is shown as it is. */
+    if (res.kind === "empty") return mount(slot, [emptyStrip(res.message || "No investigation request has this id.")]);
+    const data = res.data || {};
+    const row = rowsUnder(data, "requests").find((r) => r && String(r.request_id).toLowerCase() === requestId.toLowerCase());
+    if (!row) return mount(slot, [emptyStrip("No investigation request has the id " + requestId + ".")]);
+    if (changes.kind === "aborted" || changes.kind === "auth") return;
+    try {
+      mount(slot, [...detailPane(row, data, writeAccess(session), true, closeOffNote(session)), changesSection(changes)]);
+      focusCloseReason();
+    } catch (e) {
+      mount(slot, [errorStrip("Could not draw this request: " + (e && e.message ? e.message : String(e)))]);
+    }
+  }
+
+  reloadList = load;
+  load();
+}
+
+export function renderInvestigations(main, requestId) {
+  if (requestId) return renderOneRequest(main, requestId);
   if (pageAbort) pageAbort.abort();
   const signal = (pageAbort = new AbortController()).signal;
   ++pageSeq;
   const body = el("div", {}, [loadingStrip("Loading investigation requests…")]);
   slot = el("div", { class: "jh-detail" });
 
-  const reload = () => {
+  /* #7957: the open request is dropped and its pane emptied when a filter changes and when a re-read's list no longer holds it, as after a
+     Close under a State filter: the closed request no longer matches, so a pane still offering its Close form would be for a request
+     that is already closed. #8007: a detail read still out for the dropped request is discarded with it, or its answer would draw the pane,
+     Close form included, for a request the page no longer has picked. */
+  const dropRequest = () => {
     choices.requestId = null;
+    closeDraft = null;
+    ++detailSeq;
+    if (detailAbort) detailAbort.abort();
     mount(slot, []);
+  };
+  const reload = () => {
+    dropRequest();
     load();
   };
   const state = select("State", STATES, choices.state, (v) => { choices.state = v; reload(); });
@@ -267,27 +463,34 @@ export function renderInvestigations(main) {
     const res = await readTool("list_investigation_requests", listParams(choices), signal);
     if (mine !== pageSeq || res.kind === "aborted" || res.kind === "auth") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-    if (res.kind === "empty") return mount(body, emptyStrip(res.message || "No investigation requests."));
+    if (res.kind === "empty") {
+      dropRequest();
+      return mount(body, emptyStrip(res.message || "No investigation requests."));
+    }
     const data = res.data || {};
     const rows = rowsUnder(data, "requests");
-    if (!rows.length) return mount(body, emptyStrip("No investigation requests."));
+    if (!rows.length) {
+      dropRequest();
+      return mount(body, emptyStrip("No investigation requests."));
+    }
     const onRow = (r, tr) => {
       if (!r) return;
       tr.style.cursor = "pointer";
       tr.setAttribute("title", "Show this request's report and journal");
       makeActivatable(tr, () => {
+        if (closeDraft && String(closeDraft.requestId) !== String(r.request_id)) closeDraft = null;
         choices.requestId = r.request_id;
-        loadDetail(r);
+        loadDetail(r, true);
       });
     };
     const parts = [];
     if (data.truncated) parts.push(noticeStrip("Showing the newest " + rows.length + " requests; older ones are not listed. Narrow the state or family."));
     parts.push(el("div", { class: "muted", text: rows.length + " requests shown" }));
-    parts.push(VIZ.table(data, { id: "investigations", rowsKey: "requests", columns: REQUEST_COLUMNS, onRow, emptyText: "No investigation requests." }));
+    parts.push(VIZ.table(data, { id: "investigations", rowsKey: "requests", columns: REQUEST_COLUMNS, groups: [LEASE_GROUP], defaultGroups: [], onRow, emptyText: "No investigation requests." }));
     mount(body, parts);
     const keep = choices.requestId ? rows.find((r) => String(r.request_id) === String(choices.requestId)) : null;
     if (keep) loadDetail(keep);
-    else choices.requestId = null;
+    else dropRequest();
   }
 
   reloadList = load;

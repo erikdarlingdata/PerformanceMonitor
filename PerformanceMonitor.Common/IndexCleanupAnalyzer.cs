@@ -118,7 +118,9 @@ namespace PerformanceMonitor.Common
                         options.ServerSupportsCompression
                         && w.Src.IndexId > 0
                         && string.Equals(w.Src.DataCompressionDesc, CompressionNone, StringComparison.OrdinalIgnoreCase)
-                        && w.SizeGb >= options.MinSizeGb;
+                        && w.SizeGb >= options.MinSizeGb
+                        // #7706: an index with no rows has nothing to compress. A null count (not collected) is not zero.
+                        && w.Src.TotalRows != 0;
                 }
 
                 recommendations.AddRange(BuildRecommendations(perDatabaseAnalyzed, options));
@@ -140,7 +142,7 @@ namespace PerformanceMonitor.Common
                 OverallRollup = BuildOverallRollup(databaseRollups),
                 UptimeWarning = uptimeWarning,
                 DedupeOnlyApplied = dedupeOnly,
-                Notes = BuildNotes(ordered),
+                Notes = BuildNotes(ordered, options),
             };
         }
 
@@ -834,14 +836,14 @@ namespace PerformanceMonitor.Common
                 {
                     yield return BuildReview(a, IndexCleanupRules.ReverseDuplicate, reverse,
                         "Same key columns in a different order/direction as: " + string.Join(", ", reverse)
-                        + ". A different leading column serves different queries — review whether both are needed (not auto-disabled).");
+                        + ". A different leading column serves different queries. Review whether both are needed (not auto-disabled).");
                 }
 
                 if (equalExceptFilter.Count > 0)
                 {
                     yield return BuildReview(a, IndexCleanupRules.EqualExceptForFilter, equalExceptFilter,
                         "Identical keys and includes but a different filter than: " + string.Join(", ", equalExceptFilter)
-                        + ". The filters index different rows — review whether both are needed (not auto-disabled).");
+                        + ". The filters index different rows. Review whether both are needed (not auto-disabled).");
                 }
             }
         }
@@ -1002,7 +1004,7 @@ namespace PerformanceMonitor.Common
                 ConsolidationRule = w.ConsolidationRule,
                 ScriptType = "REVIEW",
                 Script = "",   // a DROP_EXISTING rebuild of a constraint-backed index fails (Msg 1907)
-                AdditionalInfo = "Constraint-backed index cannot be rebuilt with DROP_EXISTING (Msg 1907) — review manually",
+                AdditionalInfo = "Constraint-backed index cannot be rebuilt with DROP_EXISTING (Msg 1907). Review manually",
             };
 
         private static IndexCleanupRecommendation BuildReview(WorkIndex w, string rule, List<string> siblings, string additionalInfo) =>
@@ -1211,7 +1213,7 @@ namespace PerformanceMonitor.Common
             LatchWaitInMs = perDb.Sum(r => r.LatchWaitInMs),
         };
 
-        private static List<string> BuildNotes(List<IndexCleanupRecommendation> recommendations)
+        private static List<string> BuildNotes(List<IndexCleanupRecommendation> recommendations, IndexCleanupOptions options)
         {
             var notes = new List<string>();
 
@@ -1234,6 +1236,9 @@ namespace PerformanceMonitor.Common
                 notes.Add("Some compression candidates may not be compressible in practice. The collected data does not say which "
                     + "columns are sparse or hold legacy large-object types (text, ntext, image), so tables with those columns are "
                     + "not left out. Check a table for them before you compress it.");
+                notes.Add("Indexes with no rows"
+                    + (options.MinSizeGb > 0m ? " or under " + options.MinSizeGb.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + " GB" : "")
+                    + " are not offered for compression, because they would save almost nothing.");
                 notes.Add("Compression savings are a rough range of 20% to 60% of the index size. They are not measured with "
                     + "sp_estimate_data_compression_savings, which samples the live server and cannot run on collected data.");
                 notes.Add("COMPRESSION REBUILD scripts use PARTITION = ALL for an index with more than one partition, because "

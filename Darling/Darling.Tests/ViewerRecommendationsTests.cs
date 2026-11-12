@@ -168,28 +168,6 @@ public sealed class ViewerRecommendationCardTests
     }
 
     [Fact]
-    public void BuildCopyPasteSql_ServerConfigTargets_RenderSpConfigureViaTheSharedBuilder()
-    {
-        // Every server-config setting renders sp_configure + RECONFIGURE via the shared builder,
-        // INCLUDING the advise-only memory settings (the operator wants the scaffold regardless).
-        var action = new RemediationAction(
-            "SERVER_CONFIG", "set", Array.Empty<ForcePlanTarget>(),
-            ServerConfigTargets: new[]
-            {
-                new ServerConfigTarget(ServerConfigSetting.Maxdop, 0, 8),
-                new ServerConfigTarget(ServerConfigSetting.MaxServerMemory, 2147483647, 2147483647),
-            });
-
-        var sql = RecommendationsViewModel.BuildCopyPasteSql(action);
-
-        Assert.Equal(
-            FactRemediation.BuildSpConfigureStatement(ServerConfigSetting.Maxdop, 8) +
-            Environment.NewLine + Environment.NewLine +
-            FactRemediation.BuildSpConfigureStatement(ServerConfigSetting.MaxServerMemory, 2147483647),
-            sql);
-    }
-
-    [Fact]
     public void BuildCopyPasteSql_RcsiTargets_RenderAlterWithTwoSidedDisclosureHeader()
     {
         // RCSI rides a DB_CONFIG action as a per-database RcsiTarget (with real inaction figures). It is
@@ -214,35 +192,6 @@ public sealed class ViewerRecommendationCardTests
             sql!.IndexOf("*/", StringComparison.Ordinal) <
             sql.IndexOf("ALTER DATABASE", StringComparison.Ordinal),
             "the disclosure comment header must precede the ALTER statement");
-    }
-
-    [Fact]
-    public void BuildCopyPasteSql_ClearPlanTargets_RenderResolveAndFreeScriptWithDisclosureHeader()
-    {
-        // Clear-plan is DESTRUCTIVE. The honest runnable form live-resolves the currently-cached plan
-        // handle(s) for the abnormal query hash and frees each — with the two-sided disclosure header.
-        var action = new RemediationAction(
-            "CLEAR_PLAN", "clear", Array.Empty<ForcePlanTarget>(),
-            ClearPlanTargets: new[]
-            {
-                new ClearPlanTarget(
-                    "StackOverflow", "0xABCDEF0123456789",
-                    CurrentCpuPerExecMs: 45.0, BaselineCpuPerExecMs: 9.0, AnomalyRatio: 5.0),
-            },
-            ClearPlanFigures: new ClearPlanFigures(45.0, 9.0, 5.0, 62, false, false));
-
-        var sql = RecommendationsViewModel.BuildCopyPasteSql(action);
-
-        Assert.NotNull(sql);
-        Assert.StartsWith("/*", sql, StringComparison.Ordinal);
-        Assert.Contains("Risks of MAKING this change:", sql!, StringComparison.Ordinal);
-        Assert.Contains("Risks of NOT making this change:", sql!, StringComparison.Ordinal);
-        // The real carried anomaly figure (62% of CPU over the window) reaches the inaction side.
-        Assert.Contains("62% of CPU over the window", sql!, StringComparison.Ordinal);
-        // The honest runnable form: resolve cached handles for the hash, then free each one.
-        Assert.Contains("sys.dm_exec_query_stats", sql!, StringComparison.Ordinal);
-        Assert.Contains("0xABCDEF0123456789", sql!, StringComparison.Ordinal);
-        Assert.Contains("DBCC FREEPROCCACHE(@plan_handle);", sql!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -357,6 +306,150 @@ public sealed class ViewerRecommendationCardTests
         Assert.Null(item.Database);
     }
 
+    // ── The force-plan card against the store's forcing and automatic-plan-correction state ────────
+
+    private static readonly ForcePlanTarget OpenTarget = new("StackOverflow", QueryId: 201, PlanId: 11);
+    private static readonly ForcePlanTarget WithdrawnTarget = new("StackOverflow", QueryId: 202, PlanId: 12);
+    private static readonly ForcePlanTarget FailedTarget = new("StackOverflow", QueryId: 203, PlanId: 13);
+
+    private static AnalysisFinding ThreeTargetForceFinding() =>
+        Finding(
+            severity: 1.6, rootFactKey: "PLAN_REGRESSION", database: "StackOverflow",
+            remediation: new RemediationAction(
+                "PLAN_REGRESSION", "force", new[] { OpenTarget, WithdrawnTarget, FailedTarget }));
+
+    private static ForcePlanTargetState NothingObserved() =>
+        new(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+
+    /// <summary>The collection time of the snapshot a state half was read from. The state reader stamps every half
+    /// it finds a row for, and a state with no stamp on any half is one the read found no row for.</summary>
+    private static readonly DateTime Snapshot = new(2026, 7, 1, 11, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>The state the reader returns for a plan whose forcing is failing: the plan's own snapshot row.</summary>
+    private static ForcePlanTargetState ForcingFailing() =>
+        NothingObserved() with { ForceFailureCount = 2, PlanObservedAtUtc = Snapshot };
+
+    /// <summary>The state the reader returns for a plan the engine recommended and then withdrew: the query's
+    /// newest recommendation row.</summary>
+    private static ForcePlanTargetState RecommendationWithdrawn(ForcePlanTarget target) =>
+        NothingObserved() with { ApcState = "Expired", ApcLastGoodPlanId = target.PlanId, ApcObservedAtUtc = Snapshot };
+
+    /// <summary>The lines of a copy-paste text that SQL Server would run: not blank, not a comment.</summary>
+    private static List<string> RunnableLines(string? sql) =>
+        (sql ?? string.Empty)
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0 && !line.StartsWith("--", StringComparison.Ordinal))
+            .ToList();
+
+    /// <summary>Whether the card's text holds a runnable force statement for the target: a line that is not a
+    /// comment, names the procedure and carries the target's query id and plan id.</summary>
+    private static bool Forces(string? sql, ForcePlanTarget target) =>
+        RunnableLines(sql).Any(line =>
+            line.Contains("sp_query_store_force_plan", StringComparison.Ordinal) &&
+            line.Contains($"@query_id = {target.QueryId},", StringComparison.Ordinal) &&
+            line.Contains($"@plan_id = {target.PlanId};", StringComparison.Ordinal));
+
+    /// <summary>How many runnable lines of the card's text name the force procedure.</summary>
+    private static int ForceStatementCount(string? sql) =>
+        RunnableLines(sql).Count(line => line.Contains("sp_query_store_force_plan", StringComparison.Ordinal));
+
+    [Fact]
+    public void MapItem_WithholdsTheForceStatement_ForATargetTheStoreBlocks()
+    {
+        var states = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer)
+        {
+            [ForcePlanTargetKey.Of(WithdrawnTarget)] = RecommendationWithdrawn(WithdrawnTarget),
+            [ForcePlanTargetKey.Of(FailedTarget)] = ForcingFailing(),
+        };
+
+        var item = RecommendationsViewModel.MapItem(
+            Row(ThreeTargetForceFinding()), "SQL2022", forcePlanStates: states);
+
+        Assert.True(Forces(item.CopyPasteSql, OpenTarget), "the target the store holds nothing against keeps its statement");
+        Assert.False(Forces(item.CopyPasteSql, WithdrawnTarget), "plan 12 is apc_withdrew_it in the store, and the card must not give a runnable force statement for it");
+        Assert.False(Forces(item.CopyPasteSql, FailedTarget), "plan 13 is forcing_failed_on_this_plan in the store, and the card must not give a runnable force statement for it");
+        Assert.Equal(1, ForceStatementCount(item.CopyPasteSql));
+        Assert.Contains(ForcePlanBlockerNames.ApcWithdrewIt, item.CopyPasteSql, StringComparison.Ordinal);
+        Assert.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, item.CopyPasteSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MapItem_KeepsEveryForceStatement_AndSaysTheStateWasNotRead_WhenTheStateReadFailed()
+    {
+        const string reason = "the state read timed out";
+
+        var item = RecommendationsViewModel.MapItem(
+            Row(ThreeTargetForceFinding()), "SQL2022",
+            forcePlanStates: null, forcePlanStateUnavailableReason: reason);
+
+        Assert.StartsWith(FactRemediation.StateNotReadPrefix, item.CopyPasteSql, StringComparison.Ordinal);
+        Assert.Contains(reason, item.CopyPasteSql, StringComparison.Ordinal);
+
+        Assert.True(Forces(item.CopyPasteSql, OpenTarget));
+        Assert.True(Forces(item.CopyPasteSql, WithdrawnTarget));
+        Assert.True(Forces(item.CopyPasteSql, FailedTarget));
+        Assert.Equal(3, ForceStatementCount(item.CopyPasteSql));
+    }
+
+    [Fact]
+    public void FromFindings_CarriesTheForcePlanStateOntoTheCard()
+    {
+        var states = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer)
+        {
+            [ForcePlanTargetKey.Of(FailedTarget)] = ForcingFailing(),
+        };
+        var rows = new List<ViewerFindingRow> { Row(ThreeTargetForceFinding()) };
+
+        var blocked = RecommendationsViewModel.FromFindings(rows, "SQL2022", forcePlanStates: states)
+            .Sections[0].Cards[0];
+        Assert.False(Forces(blocked.CopyPasteSql, FailedTarget), "plan 13 is forcing_failed_on_this_plan in the store, and the card must not give a runnable force statement for it");
+        Assert.True(Forces(blocked.CopyPasteSql, OpenTarget));
+        Assert.True(Forces(blocked.CopyPasteSql, WithdrawnTarget));
+        Assert.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, blocked.CopyPasteSql, StringComparison.Ordinal);
+
+        var unread = RecommendationsViewModel.FromFindings(
+                rows, "SQL2022", forcePlanStates: null, forcePlanStateUnavailableReason: "the state read timed out")
+            .Sections[0].Cards[0];
+        Assert.StartsWith(FactRemediation.StateNotReadPrefix, unread.CopyPasteSql, StringComparison.Ordinal);
+        Assert.True(Forces(unread.CopyPasteSql, FailedTarget));
+    }
+
+    /// <summary>The state the reader returns for a plan it found a row for, with nothing against it.</summary>
+    private static ForcePlanTargetState Quiet() =>
+        NothingObserved() with { PlanIsForced = false, PlanForcingType = "NONE", ForceFailureCount = 0, PlanObservedAtUtc = Snapshot };
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void MapItem_KeepsTheForceStatement_AndSaysTheStateIsUnknown_ForATargetTheReadFoundNoRowFor(bool allNullRow)
+    {
+        var states = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer)
+        {
+            [ForcePlanTargetKey.Of(WithdrawnTarget)] = Quiet(),
+            [ForcePlanTargetKey.Of(FailedTarget)] = Quiet(),
+        };
+        if (allNullRow)
+        {
+            states[ForcePlanTargetKey.Of(OpenTarget)] = NothingObserved();
+        }
+
+        var item = RecommendationsViewModel.MapItem(
+            Row(ThreeTargetForceFinding()), "SQL2022", forcePlanStates: states);
+
+        Assert.True(Forces(item.CopyPasteSql, OpenTarget), "the target with no state row keeps its statement");
+        Assert.Equal(3, ForceStatementCount(item.CopyPasteSql));
+
+        var lines = (item.CopyPasteSql ?? string.Empty).Split('\n').Select(line => line.Trim()).ToList();
+        var notChecked = lines.Where(line => line.StartsWith(FactRemediation.StateNotReadPrefix, StringComparison.Ordinal)).ToList();
+        Assert.True(notChecked.Count == 1, $"one target has no state row, and {notChecked.Count} lines say a state is unknown in:{Environment.NewLine}{item.CopyPasteSql}");
+        Assert.Contains("unknown", notChecked[0], StringComparison.Ordinal);
+        Assert.Contains("before forcing", notChecked[0], StringComparison.Ordinal);
+        Assert.True(
+            lines.IndexOf(notChecked[0]) < lines.FindIndex(line => line.Contains("sp_query_store_force_plan", StringComparison.Ordinal)),
+            "the unknown-state line sits above the first statement, which is the target's it is about");
+    }
+
     [Fact]
     public void Card_AffordanceModel_CopyFixOnlyWhenSqlPresent_AskAiAlways()
     {
@@ -439,6 +532,27 @@ public sealed class ViewerRecommendationCardTests
             Remediation = remediation,
         });
 
+    [Theory]
+    [InlineData("DISK_SPACE", false)]
+    [InlineData("DB_CONFIG", false)]
+    [InlineData("CONFIG_MAXDOP", false)]
+    [InlineData("LCK_M_S", true)]
+    [InlineData("CPU_SQL_PERCENT", true)]
+    public void Card_ShowOpenInActiveQueries_FollowsWhetherRunningQueriesCanExplainTheRoot(string rootFactKey, bool shown)
+    {
+        var start = new DateTime(2026, 7, 1, 10, 0, 0, DateTimeKind.Utc);
+        var card = new RecommendationCardViewModel(new RecommendationItem
+        {
+            Severity = RecommendationSeverity.Warning,
+            Title = "t",
+            ServerId = 7,
+            WindowStartUtc = start,
+            WindowEndUtc = start.AddHours(2),
+            RootFactKey = rootFactKey,
+        });
+        Assert.Equal(shown, card.ShowOpenInActiveQueries);
+    }
+
     // ── Incident-vs-config-fix gate on the deep-link (fixes the #1427 "shows on every finding" bug) ──
 
     [Fact]
@@ -468,12 +582,6 @@ public sealed class ViewerRecommendationCardTests
             "FILE_AUTOGROWTH_PERCENT", "set", Array.Empty<ForcePlanTarget>(),
             FileGrowthTargets: new[] { new FileGrowthTarget("StackOverflow", "SO_data", 90000, 10, 1024) });
         Assert.False(Card(serverId: 7, windowStart: start, windowEnd: end, remediation: autogrowth).ShowOpenInActiveQueries);
-
-        // Server-level config (MAXDOP) is a config fix.
-        var serverConfig = new RemediationAction(
-            "SERVER_CONFIG", "set", Array.Empty<ForcePlanTarget>(),
-            ServerConfigTargets: new[] { new ServerConfigTarget(ServerConfigSetting.Maxdop, 0, 8) });
-        Assert.False(Card(serverId: 7, windowStart: start, windowEnd: end, remediation: serverConfig).ShowOpenInActiveQueries);
     }
 
     [Fact]
@@ -764,9 +872,9 @@ public sealed class ViewerRecommendationGroupingTests
         Assert.Equal(1, b.Count);
         Assert.Equal($"CPU is on fire {MidDot} CRITICAL", b.Header);
 
-        // #6159: the lone card does not repeat the title its expander header carries; a two-card incident keeps each title.
+        // #6159: a card does not repeat the title its section header carries; in a two-card incident the header names the primary, so only the other card keeps its title (#8226).
         Assert.False(b.Cards[0].ShowTitle);
-        Assert.All(a.Cards, c => Assert.True(c.ShowTitle));
+        Assert.Equal(new[] { false, true }, a.Cards.Select(c => c.ShowTitle).ToArray());
     }
 
     [Fact]

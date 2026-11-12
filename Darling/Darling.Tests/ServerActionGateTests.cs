@@ -132,7 +132,7 @@ public sealed class ServerActionGateLiveTests
 
     private static ServerActionHooks Hooks(InvestigationRequestStore store, NpgsqlDataSource source, int? resolved = 3, Action? onCredential = null) => new()
     {
-        LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => resolved),
+        LoadRoutes = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((_, _, _) => TestRouteHooks.AtLevel(resolved)),
         ReadCredential = (serverId, ct) =>
         {
             onCredential?.Invoke();
@@ -293,7 +293,7 @@ public sealed class ServerActionGateLiveTests
                 var writes = 0;
                 var hooks = new AgentActionHooks
                 {
-                    LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => level),
+                    LoadRoutes = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((_, _, _) => TestRouteHooks.AtLevel(level)),
                     ReadBefore = (_, _, _) => Task.FromResult<string?>("{\"reason\":\"old\"}"),
                     Write = (_, _, _) => { writes++; return Task.FromResult<string?>("{\"reason\":\"new\"}"); },
                 };
@@ -314,7 +314,7 @@ public sealed class ServerActionGateLiveTests
     /// write's own transaction opens, which is where a person changes something mid-flight.</summary>
     private AgentActionHooks WriteHooks(Func<int> resolved, Func<CancellationToken, Task> inFlight) => new()
     {
-        LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => resolved()),
+        LoadRoutes = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((_, _, _) => TestRouteHooks.AtLevel(resolved())),
         ReadBefore = async (_, _, token) =>
         {
             await inFlight(token);
@@ -460,12 +460,12 @@ public sealed class ServerActionGateLiveTests
             /* The level the write reads: the route's own while the server holds its tag, 2 once it does not. */
             AgentActionHooks Hooks(Func<CancellationToken, Task>? duringWrite) => new()
             {
-                LoadLevels = async (c, t, token) =>
+                LoadRoutes = async (c, t, token) =>
                 {
                     await using var read = new NpgsqlCommand(
                         "SELECT CASE WHEN EXISTS (SELECT 1 FROM config.server_tag_map WHERE server_id = 7) THEN agent_level ELSE 2 END FROM config.config_notification_routes WHERE route_id = 4001", c, t);
                     var level = Convert.ToInt32(await read.ExecuteScalarAsync(token), CultureInfo.InvariantCulture);
-                    return (_, _, _) => level;
+                    return (_, _, _) => TestRouteHooks.AtLevel(level);
                 },
                 ReadBefore = (_, _, _) => Task.FromResult<string?>("{\"reason\":\"old\"}"),
                 Write = async (_, _, token) =>
@@ -557,7 +557,7 @@ public sealed class ServerActionGateLiveTests
             var bothReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             AgentActionHooks Hooks(string key) => new()
             {
-                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => 3),
+                LoadRoutes = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((_, _, _) => TestRouteHooks.AtLevel(3)),
                 ReadBefore = (_, _, _) => Task.FromResult<string?>(null),
                 Write = async (c, t, token) =>
                 {
@@ -594,7 +594,7 @@ public sealed class ServerActionGateLiveTests
             var hooks = new AgentActionHooks
             {
                 ServerChange = signal,
-                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => 3),
+                LoadRoutes = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((_, _, _) => TestRouteHooks.AtLevel(3)),
                 ReadBefore = (_, _, _) => Task.FromResult<string?>("{\"reason\":\"old\"}"),
                 Write = async (_, _, token) =>
                 {
@@ -628,7 +628,7 @@ public sealed class ServerActionGateLiveTests
             var hooks = new AgentActionHooks
             {
                 ServerChange = new ServerChangeSignal(),
-                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => 3),
+                LoadRoutes = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((_, _, _) => TestRouteHooks.AtLevel(3)),
                 ReadBefore = (_, _, _) => Task.FromResult<string?>("{\"reason\":\"old\"}"),
                 Write = async (_, _, token) =>
                 {

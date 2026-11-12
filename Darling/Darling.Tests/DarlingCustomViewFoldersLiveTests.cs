@@ -48,7 +48,7 @@ public sealed class DarlingCustomViewFoldersLiveTests
 
     private static async Task<ScratchPostgres> MigratedScratchAsync(CancellationToken ct)
     {
-        var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -74,7 +74,7 @@ public sealed class DarlingCustomViewFoldersLiveTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V204 migration facts (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         var bodySucceeded = false;

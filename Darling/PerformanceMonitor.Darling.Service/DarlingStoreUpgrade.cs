@@ -254,6 +254,14 @@ internal sealed class DarlingStoreUpgrade
     /// </summary>
     internal Func<string, CancellationToken, Task<string?>> ReadRuntimeVersionLine { get; set; } = ReadRuntimeVersionLineAsync;
 
+    /// <summary>
+    /// Runs inside <see cref="CarryAutoConfAsync"/>'s trial, after its marker is written and just before its
+    /// cluster start, with the trial's own token. Null in production. A test holds the trial here, cancels,
+    /// and then lets it go, so the cancellation meets the start every time instead of racing a start that may
+    /// already be over.
+    /// </summary>
+    internal Func<CancellationToken, Task>? BeforeTrialStartForTests { get; set; }
+
     /* ============================ outcome ============================ */
 
     internal enum StoreUpgradeStatus
@@ -1819,7 +1827,7 @@ internal sealed class DarlingStoreUpgrade
         if (actualDataMajor is not null && actualDataMajor != expectedDataMajor)
         {
             _logger.LogCritical(
-                "REFUSING to revert the store runtime: the data directory {DataDirectory} is PostgreSQL {Actual}, not the PostgreSQL {Expected} this revert assumes. Restoring the older binaries now would leave them in front of a newer cluster and the store would not start. The current runtime is left in place. This is a bug in the caller — a revert was requested after the data directory had already moved forward.",
+                "REFUSING to revert the store runtime: the data directory {DataDirectory} is PostgreSQL {Actual}, not the PostgreSQL {Expected} this revert assumes. Restoring the older binaries now would leave them in front of a newer cluster and the store would not start. The current runtime is left in place. The data directory was upgraded after this revert was planned, so the store cannot be reverted. Restore a backup taken before the upgrade if you need the old version, and report this with the service log if you did not expect an upgrade.",
                 dataDirectory, actualDataMajor, expectedDataMajor);
             return false;
         }
@@ -1866,7 +1874,7 @@ internal sealed class DarlingStoreUpgrade
         {
             if (!movedAside)
             {
-                _logger.LogCritical(
+                _logger.LogCritical(ex, 
                     "Could not revert the store runtime ({Message}). Restore {Previous} over {Current} by hand before restarting the service.",
                     ex.Message, previousPgsql, pgsqlDirectory);
                 return false;
@@ -1879,13 +1887,13 @@ internal sealed class DarlingStoreUpgrade
             try
             {
                 Directory.Move(failedRuntime, pgsqlDirectory);
-                _logger.LogCritical(
+                _logger.LogCritical(ex, 
                     "Could not revert the store runtime ({Message}), so the runtime it had moved aside was put back at {Current} rather than leave no runtime there at all. The revert did not happen: restore {Previous} over it by hand before restarting the service.",
                     ex.Message, pgsqlDirectory, previousPgsql);
             }
             catch (Exception undo)
             {
-                _logger.LogCritical(
+                _logger.LogCritical(ex, 
                     "Could not revert the store runtime ({Message}), and could not put back the runtime it had moved aside either ({UndoMessage}): there is NO runtime at {Current}. Move {Previous} to that path by hand before restarting the service; the runtime that was moved aside is at {Failed}.",
                     ex.Message, undo.Message, pgsqlDirectory, previousPgsql, failedRuntime);
             }
@@ -2556,7 +2564,7 @@ internal sealed class DarlingStoreUpgrade
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogCritical(
+            _logger.LogCritical(ex, 
                 "Could not update the store's TimescaleDB from {From} to {To} ({Message}). Nothing is reverted: the store opens on the version it has, whose library the runtime carries. The update is retried on the next service start.",
                 before ?? "(unread)", bundledTimescaleVersion, ex.Message);
             return new TimescaleUpdateOutcome(TimescaleUpdateStatus.Failed, before, bundledTimescaleVersion, ex.Message);
@@ -2711,7 +2719,7 @@ internal sealed class DarlingStoreUpgrade
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogCritical(
+            _logger.LogCritical(ex, 
                 "Could not read the store's TimescaleDB version after start ({Message}). The store is running; check its extension with SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'.",
                 ex.Message);
             return (quiesced, null);
@@ -3957,6 +3965,11 @@ internal sealed class DarlingStoreUpgrade
                 try
                 {
                     File.WriteAllText(marker, trialPort.ToString(CultureInfo.InvariantCulture));
+                    if (BeforeTrialStartForTests is { } beforeTrialStart)
+                    {
+                        await beforeTrialStart(cancellationToken);
+                    }
+
                     /* QuiescedStartWaitSeconds (900s), not the default 120s (item 3, round-2 review Medium 2):
                        this can be the retry below, on a cluster whose first start already used up part of any
                        generous wait, and a short timeout here would misreport an unrelated slow start as a
@@ -4266,6 +4279,66 @@ internal sealed class DarlingStoreUpgrade
     }
 
     /// <summary>
+    /// The new cluster of a major upgrade: initdb into <paramref name="newDataDirectory"/> beside the data directory, then
+    /// the same restricted ACL the start gives the data directory itself, before pg_upgrade copies the store into it
+    /// (#7363). The folder initdb makes carries whatever its parent grants, and the parent is not always locked: the service
+    /// never changes a drive root, so under <c>D:\pg</c> the new cluster would otherwise be open to the drive's ordinary
+    /// users from here, through the swap that makes it the live data directory, until the next start's contents check
+    /// tightened it. The ACL is applied to every store, through a handle opened without following a link and anchored on the
+    /// parent, the way <c>RefuseUntrustedStoreContents</c> tightens the data directory (no operator traverse, no inherited
+    /// access), so on a locked parent it changes nothing. A refusal or an ACL that is still open is the contents check's own
+    /// answer for the data directory: the step throws, which lands in <see cref="RecoverFromPreCommitFailureAsync"/> before
+    /// pg_upgrade has copied anything and leaves the store on its current major.
+    /// </summary>
+    /// <param name="runInitDb">Runs initdb: the real tool runner, or a test's stand-in that makes the folder.</param>
+    /// <param name="tightenItem">Applies the ACL to the folder (path, is a directory, anchor): null for the service's own,
+    /// or a test's stand-in that refuses.</param>
+    internal async Task InitializeNewClusterAsync(
+        UpgradeContext context,
+        string newDataDirectory,
+        string passwordFile,
+        ClusterIdentity identity,
+        Func<string, string, TimeSpan, CancellationToken, Task<(int ExitCode, string Output)>> runInitDb,
+        Func<string, bool, string, string?>? tightenItem,
+        CancellationToken cancellationToken)
+    {
+        TryDeleteDirectory(newDataDirectory);
+        /* Created with the store's own ACL, so the superuser password is never in a file the folder's
+           inherited access covers; a leftover from an earlier attempt is replaced. */
+        DarlingManagedPostgres.WriteHardenedText(passwordFile, context.Password + "\n");
+
+        var newInitDb = Path.Combine(context.NewBinDirectory, "initdb.exe");
+        var (initExit, initOutput) = await runInitDb(
+            newInitDb,
+            BuildInitDbArguments(newDataDirectory, context.UserName, passwordFile, identity, context.NewMajor),
+            s_initDbTimeout,
+            cancellationToken);
+        if (initExit != 0)
+        {
+            throw new InvalidOperationException(
+                $"initdb of the new cluster failed (exit {DarlingToolExitCode.Describe(initExit)}):" +
+                DarlingToolExitCode.Diagnose(initExit, newInitDb) +
+                $"\n{DarlingToolExitCode.FormatOutput(initOutput, initExit)}");
+        }
+
+        var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(newDataDirectory)))!;
+        var tighten = tightenItem ?? DarlingManagedPostgres.TightenStoreItem;
+        if (tighten(newDataDirectory, true, parent) is { } why)
+        {
+            throw new InvalidOperationException(
+                $"The new cluster folder {newDataDirectory} could not be given a restricted ACL ({why}), so the upgrade stops " +
+                "before pg_upgrade copies the store into it: until it is restricted, it carries the access of the folder above it.");
+        }
+
+        if (DarlingManagedPostgres.StoreItemExposure(newDataDirectory, isDirectory: true) is { } still)
+        {
+            throw new InvalidOperationException(
+                $"{still}, and still is after its permissions were restricted, so the upgrade stops before pg_upgrade copies the " +
+                "store into it.");
+        }
+    }
+
+    /// <summary>
     /// The in-place major upgrade, start to finish. Each step is labelled, and ANY failure before the commit
     /// point lands in one place, <see cref="RecoverFromPreCommitFailureAsync"/>: drop the half-built new
     /// cluster, put the old data directory back as the old runtime needs it (in hard-link mode that includes
@@ -4370,24 +4443,10 @@ internal sealed class DarlingStoreUpgrade
                     BEFORE pg_upgrade runs: shared_preload_libraries = 'timescaledb' must already be set or
                     pg_upgrade's internal restore cannot load the extension it is restoring ---- */
             step = "initdb-new-cluster";
-            TryDeleteDirectory(newDataDirectory);
-            /* Created with the store's own ACL, so the superuser password is never in a file the folder's
-               inherited access covers; a leftover from an earlier attempt is replaced. */
-            DarlingManagedPostgres.WriteHardenedText(passwordFile, context.Password + "\n");
-
-            var newInitDb = Path.Combine(context.NewBinDirectory, "initdb.exe");
-            var (initExit, initOutput) = await DarlingManagedPostgres.RunToolAsync(
-                newInitDb,
-                BuildInitDbArguments(newDataDirectory, context.UserName, passwordFile, identity, context.NewMajor),
-                s_initDbTimeout,
-                cancellationToken);
-            if (initExit != 0)
-            {
-                throw new InvalidOperationException(
-                    $"initdb of the new cluster failed (exit {DarlingToolExitCode.Describe(initExit)}):" +
-                    DarlingToolExitCode.Diagnose(initExit, newInitDb) +
-                    $"\n{DarlingToolExitCode.FormatOutput(initOutput, initExit)}");
-            }
+            await InitializeNewClusterAsync(
+                context, newDataDirectory, passwordFile, identity,
+                (exePath, arguments, timeout, token) => DarlingManagedPostgres.RunToolAsync(exePath, arguments, timeout, token),
+                tightenItem: null, cancellationToken);
 
             step = "conf-new-cluster";
             context.AppendManagedConf(newDataDirectory);
@@ -4579,7 +4638,7 @@ internal sealed class DarlingStoreUpgrade
 
             var warning =
                 $"the upgrade to PostgreSQL {context.NewMajor} COMPLETED, but post-upgrade bookkeeping failed at step '{step}': {ex.Message}";
-            _logger.LogCritical(
+            _logger.LogCritical(ex, 
                 "STORE UPGRADE COMPLETED WITH A WARNING: the data directory swap succeeded, so the store is now PostgreSQL {New} and is NOT being reverted — reverting past this point would leave the old binaries in front of a new data directory and the store would not boot. But post-upgrade bookkeeping failed at step '{Step}': {Message}. Check free disk space on the store volume and the pre-upgrade rollback copy's retention counter by hand.",
                 context.NewMajor, step, ex.Message);
 
@@ -5419,7 +5478,7 @@ internal sealed class DarlingStoreUpgrade
         {
             /* Verification is diagnosis, not a gate: the data is already migrated and the server is up, so
                a failed check must not take collection down — it must be LOUD. */
-            _logger.LogCritical(
+            _logger.LogCritical(ex, 
                 "Post-upgrade store verification failed ({Message}). The store is running; confirm its version and TimescaleDB state by hand.",
                 ex.Message);
         }

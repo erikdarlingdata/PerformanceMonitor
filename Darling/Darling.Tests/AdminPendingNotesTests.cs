@@ -14,6 +14,7 @@ using System.Text.Json.Nodes;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -54,13 +55,51 @@ public sealed class AdminPendingNotesTests
         Assert.Empty(Pure("pendingNoteRows", (object?)null).EnumerateArray());
     }
 
+    /* #7955: a refused decision carries a machine-readable reason, and the page shows the service's own sentence for each reason it
+       sends, whatever the words are. The sentences are built by the service here, so a reworded refusal cannot leave the page behind. */
+    [Fact]
+    public void EachRefusalReason_ShowsTheServicesOwnSentence_NotThePagesGenericLine_Pure()
+    {
+        var sentences = new (string Reason, string Sentence)[]
+        {
+            ("store_refused", DarlingWebEndpoints.NoteDecisionRefusedMessage(true)),
+            ("store_refused", DarlingWebEndpoints.NoteDecisionRefusedMessage(false)),
+            ("admin_writes_off", DarlingWebEndpoints.NoteDecisionRefusedMessage(true, adminWritesOff: true)),
+            ("sign_in_required", DarlingWebEndpoints.InvestigationWriteSignInMessage),
+            ("read_only_seat", DarlingWebEndpoints.ReadOnlyAccountText),
+            ("reads_only_dashboard", PerformanceMonitor.Darling.Service.Mcp.DarlingWebHostService.TokenlessWriteRefusedMessage),
+        };
+        foreach (var (reason, sentence) in sentences)
+        {
+            var outcome = Pure("noteDecisionOutcome", "approve", 7, new { status = 403, body = new { error = sentence, reason } });
+            Assert.Equal(sentence, outcome.GetProperty("message").GetString());
+            Assert.True(outcome.GetProperty("isError").GetBoolean());
+            Assert.False(outcome.GetProperty("reread").GetBoolean());
+        }
+
+        // A 403 that is not the service's (no reason, or no sentence) keeps the page's own read-only line.
+        Assert.Equal("This sign-in is read-only, so it cannot approve notes.",
+            Pure("noteDecisionOutcome", "approve", 7, new { status = 403, body = new { error = "Forbidden" } }).GetProperty("message").GetString());
+        Assert.Equal("This sign-in is read-only, so it cannot reject notes.",
+            Pure("noteDecisionOutcome", "reject", 7, new { status = 403, body = new { reason = "store_refused" } }).GetProperty("message").GetString());
+    }
+
+    /* #7955: the host's write gate refuses a read-only seat with the account sentence and the read_only_seat reason, so the page reads the code. */
+    [Fact]
+    public void AReadOnlySeatsRefusal_CarriesItsSentenceAndTheReadOnlySeatReason()
+    {
+        var body = JsonNode.Parse(PerformanceMonitor.Darling.Service.Mcp.DarlingWebHostService.ReadOnlySeatRefusalJson())!;
+        Assert.Equal(DarlingWebEndpoints.ReadOnlyAccountText, (string)body["error"]!);
+        Assert.Equal("read_only_seat", (string)body["reason"]!);
+    }
+
     [Theory]
     [InlineData("approve", 200, """{"status":"approved","note_id":7}""", "Note 7 approved.", false, true)]
     [InlineData("reject", 200, """{"status":"rejected","note_id":7}""", "Note 7 rejected.", false, true)]
     [InlineData("approve", 404, """{"error":"That note is not pending: it was already decided, or it is gone."}""",
         "Note 7 was not changed. That note is not pending: it was already decided, or it is gone.", true, true)]
-    [InlineData("approve", 403, """{"error":"Deciding a note needs a store login with the admin role. Managed and compose stores connect the web dashboard as the viewer role."}""",
-        "Deciding a note needs a store login with the admin role. Managed and compose stores connect the web dashboard as the viewer role.", true, false)]
+    [InlineData("approve", 403, """{"error":"This dashboard's store login has no write access, so it cannot decide notes. Decide them in the Viewer app.","reason":"store_refused"}""",
+        "This dashboard's store login has no write access, so it cannot decide notes. Decide them in the Viewer app.", true, false)]
     [InlineData("reject", 403, null, "This sign-in is read-only, so it cannot reject notes.", true, false)]
     [InlineData("approve", 500, """{"error":"The store did not answer."}""",
         "Note 7 was not approved. The service answered 500. The store did not answer.", true, false)]
@@ -152,6 +191,129 @@ public sealed class AdminPendingNotesTests
         Assert.Equal("both", Sent("someday"));
     }
 
+    /* #6979: the Routes list names the report notice setting (Off when the field is missing or unknown), the editor reads it back from a
+       route, and the save sends it. A word the page does not know is sent as off, so it never turns a notice on. */
+    [Fact]
+    public void TheRoutesList_ShowsTheReportNotice_AndTheEditorRoundTripsIt_Pure()
+    {
+        var data = JsonNode.Parse("""
+            {"routes":[
+              {"route_id":1,"metric_match":"blocking","report_notice":"needs_person_or_change","enabled":true},
+              {"route_id":2,"metric_match":"performance","report_notice":"all","enabled":true},
+              {"route_id":3,"metric_match":"reports","report_notice":"off","enabled":true},
+              {"route_id":4,"metric_match":"agent-jobs","enabled":true},
+              {"route_id":5,"metric_match":"waits","report_notice":"someday","enabled":true}
+            ]}
+            """);
+        var rows = Pure("routeRows", data).EnumerateArray().ToArray();
+        Assert.Equal(new[] { "Needs a person or made a change", "All reports", "Off", "Off", "Off" }, rows.Select(r => r.GetProperty("report_notice").GetString()));
+
+        var columns = Pure("ROUTE_COLUMNS").EnumerateArray().Select(c => c.GetProperty("key").GetString()).ToList();
+        Assert.Equal(columns.IndexOf("severities") + 1, columns.IndexOf("report_notice"));
+
+        Assert.Equal("all", Pure("entriesFromRoute", new { route_id = 1, metric_match = "blocking", report_notice = "all" }).GetProperty("reportNotice").GetString());
+        Assert.Equal("off", Pure("entriesFromRoute", new { route_id = 1, metric_match = "blocking" }).GetProperty("reportNotice").GetString());
+        Assert.Equal("off", Pure("entriesFromRoute", (object?)null).GetProperty("reportNotice").GetString());
+
+        string Sent(string reportNotice) => Pure("routePayload", new { id = (int?)null, match = "blocking", perHour = "10", perDay = "50", lease = "30", expiry = "120", fallback = "", scope = "", level = "", resolutions = "", enabled = true, severities = "both", reportNotice })
+            .GetProperty("payload").GetProperty("report_notice").GetString()!;
+        Assert.Equal("needs_person_or_change", Sent("needs_person_or_change"));
+        Assert.Equal("all", Sent("all"));
+        Assert.Equal("off", Sent("off"));
+        Assert.Equal("off", Sent("someday"));
+    }
+
+    /* #6979: the editor opens on a stored route with its report notice showing, and Save sends the choice made in the box. */
+    [Fact]
+    public void TheRouteEditor_ShowsTheStoredReportNotice_AndSavingSendsTheChosenOne()
+    {
+        var result = AdminServerEditBehaviourTests.Run("routeEdit:warning,all");
+
+        Assert.Equal("needs_person_or_change", result.GetProperty("reportNoticeShown").GetString());
+        var write = Assert.Single(result.GetProperty("writes").EnumerateArray().ToArray());
+        Assert.Equal("all", write.GetProperty("body").GetProperty("report_notice").GetString());
+    }
+
+    /* #6979: the report notice box is disabled with its hint showing while the route's agent level is Inherit or Off, and enabled with the
+       hint gone once a level is chosen. The hint must be hidden by display as well as by the hidden attribute, because the .mute-label
+       rule would otherwise keep it on screen next to an enabled box. */
+    [Fact]
+    public void TheReportNoticeBox_IsDisabledWithItsHintUntilTheRouteHasAnAgentLevel()
+    {
+        var result = AdminServerEditBehaviourTests.Run("routeEdit:warning");
+
+        foreach (var name in new[] { "noticeAtInherit", "noticeAtOff" })
+        {
+            var state = result.GetProperty(name);
+            Assert.True(state.GetProperty("disabled").GetBoolean(), name);
+            Assert.False(state.GetProperty("hidden").GetBoolean(), name);
+            Assert.Equal("", state.GetProperty("display").GetString());
+        }
+
+        var investigate = result.GetProperty("noticeAtInvestigate");
+        Assert.False(investigate.GetProperty("disabled").GetBoolean());
+        Assert.True(investigate.GetProperty("hidden").GetBoolean());
+        Assert.Equal("none", investigate.GetProperty("display").GetString());
+    }
+
+    /* #7656: the Routes list carries the bot channel id as stored (none when the field is missing), the editor reads it back from a route,
+       and the save sends it trimmed as slack_bot_channel. A channel name is refused by the form with the one sentence, before any request. */
+    [Fact]
+    public void TheRoutesList_ShowsTheBotChannel_AndTheEditorRoundTripsIt_Pure()
+    {
+        var data = JsonNode.Parse("""
+            {"routes":[
+              {"route_id":1,"metric_match":"blocking","slack_bot_channel":"C0123ABCDEF","enabled":true},
+              {"route_id":2,"metric_match":"performance","slack_bot_channel":"","enabled":true},
+              {"route_id":3,"metric_match":"reports","enabled":true}
+            ]}
+            """);
+        var rows = Pure("routeRows", data).EnumerateArray().ToArray();
+        Assert.Equal("C0123ABCDEF", rows[0].GetProperty("slack_bot_channel").GetString());
+        Assert.True(string.IsNullOrEmpty(rows[1].GetProperty("slack_bot_channel").GetString()));
+        Assert.True(string.IsNullOrEmpty(rows[2].GetProperty("slack_bot_channel").GetString()));
+
+        var columns = Pure("ROUTE_COLUMNS").EnumerateArray().ToList();
+        var keys = columns.Select(c => c.GetProperty("key").GetString()).ToList();
+        Assert.Equal(keys.IndexOf("report_notice") + 1, keys.IndexOf("slack_bot_channel"));
+        Assert.Equal("Bot channel", columns.Single(c => c.GetProperty("key").GetString() == "slack_bot_channel").GetProperty("label").GetString());
+
+        Assert.Equal("C0123ABCDEF", Pure("entriesFromRoute", new { route_id = 1, metric_match = "blocking", slack_bot_channel = "C0123ABCDEF" }).GetProperty("botChannel").GetString());
+        Assert.Equal("", Pure("entriesFromRoute", new { route_id = 1, metric_match = "blocking" }).GetProperty("botChannel").GetString());
+        Assert.Equal("", Pure("entriesFromRoute", (object?)null).GetProperty("botChannel").GetString());
+
+        JsonElement Built(string botChannel) => Pure("routePayload", new { id = (int?)null, match = "blocking", perHour = "10", perDay = "50", lease = "30", expiry = "120", fallback = "", scope = "", level = "", resolutions = "", enabled = true, severities = "both", reportNotice = "off", botChannel });
+        Assert.Equal("C0123ABCDEF", Built("  C0123ABCDEF ").GetProperty("payload").GetProperty("slack_bot_channel").GetString());
+        Assert.Equal("", Built("").GetProperty("payload").GetProperty("slack_bot_channel").GetString());
+        var refused = Built("#ops");
+        Assert.Equal(SlackChannelId.RefusalText, refused.GetProperty("error").GetString());
+        Assert.False(refused.TryGetProperty("payload", out _));
+    }
+
+    /* #7656: the editor opens on a stored route with its bot channel showing, and Save sends what was typed as slack_bot_channel. */
+    [Fact]
+    public void TheRouteEditor_ShowsTheStoredBotChannel_AndSavingSendsTheTypedOne()
+    {
+        var result = AdminServerEditBehaviourTests.Run("routeBotChannel:G9ZZZ");
+
+        Assert.Equal("C0123ABCDEF", result.GetProperty("botChannelShown").GetString());
+        var write = Assert.Single(result.GetProperty("writes").EnumerateArray().ToArray());
+        Assert.Equal("/api/notification-routes/7", write.GetProperty("url").GetString());
+        Assert.Equal("G9ZZZ", write.GetProperty("body").GetProperty("slack_bot_channel").GetString());
+    }
+
+    /* #7656: a channel name typed into the Bot channel box is refused by the form with the one sentence, and no write is sent. */
+    [Fact]
+    public void TheRouteEditor_RefusesAChannelName_WithTheSentence_AndSendsNothing()
+    {
+        var result = AdminServerEditBehaviourTests.Run("routeBotChannel:#ops");
+
+        Assert.Equal("C0123ABCDEF", result.GetProperty("botChannelShown").GetString());
+        Assert.Empty(result.GetProperty("writes").EnumerateArray());
+        Assert.Contains(result.GetProperty("strips").EnumerateArray().Select(s => s.GetString()),
+            s => s is not null && s.Contains(SlackChannelId.RefusalText, StringComparison.Ordinal));
+    }
+
     /* #6936: Edit then Save on the Routes tab sends the version the form read (expected_modified_at), because the service refuses an edit
        without it with a 400. The test drives the page itself: it opens the editor on a stored Critical only route, picks Warning only,
        presses Save and reads the write the page made. */
@@ -184,7 +346,7 @@ public sealed class AdminPendingNotesTests
     [Theory]
     [InlineData("approved", 2, "7|8", "8", "Note 7 approved.")]
     [InlineData("gone", 2, "7|8", "8", "Note 7 was not changed. That note is not pending: it was already decided, or it is gone.")]
-    [InlineData("refused", 1, "7|8", "7|8", "Deciding a note needs a store login with the admin role.")]
+    [InlineData("refused", 1, "7|8", "7|8", "This dashboard's store login has no write access, so it cannot decide notes. Decide them in the Viewer app.")]
     [InlineData("broken", 1, "7|8", "7|8", "Note 7 was not approved. The service answered 500. The store did not answer.")]
     [InlineData("signin", 1, "7|8", "7|8", "Sign in to the web as an admin to make this change, or use the Viewer.")]
     public void TheDecideButton_ReadsTheListAgainOnlyWhenTheAnswerSaysItIsStale(

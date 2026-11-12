@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage.FinOps;
 
@@ -38,7 +39,7 @@ SELECT
     total_size_mb,
     used_size_mb,
     max_size_mb,
-    volume_mount_point,
+    " + VolumeKey.Sql + @" AS volume_mount_point,
     volume_total_mb,
     volume_free_mb,
     recovery_model_desc,

@@ -5,6 +5,7 @@ using System.Numerics;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
 
@@ -38,6 +39,7 @@ LIMIT " + FactRanked.MaxObjects + ";";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -73,9 +75,7 @@ SELECT
     /* #5633: DISTINCT (database, query_hash), like spilling_queries below. This count drives the QUERY_HIGH_DOP threshold (5/20) and
        its N-queries text, and v_query_stats holds one row per query per snapshot, so one high-DOP query seen in 20 collections
        scored at full severity as 20 queries. A NULL hash collapses to one per database, as for spilling_queries. */
-    COUNT(DISTINCT CASE WHEN v.max_dop > 8
-                         AND (m.value_in_use IS NULL OR m.value_in_use = 0 OR v.max_dop <= m.value_in_use)
-                        THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS high_dop_queries,
+" + QueryHighDopSignature.HighDopQueriesCountSql + @"
     COUNT(DISTINCT CASE WHEN v.delta_spills > 0
                         THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS spilling_queries,
     SUM(v.delta_execution_count) AS total_executions,
@@ -91,6 +91,7 @@ AND   v.delta_execution_count > 0";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
 
@@ -116,6 +117,7 @@ AND   v.delta_execution_count > 0";
                     rankCmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                     rankCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                     rankCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+                    rankCmd.CommandText = plan.Apply(rankCmd.CommandText);
                     using var rankReader = await rankCmd.ExecuteReaderAsync(context.CancellationToken);
                     while (await rankReader.ReadAsync(context.CancellationToken))
                     {
@@ -134,6 +136,18 @@ AND   v.delta_execution_count > 0";
 
             if (totalSpills > 0)
             {
+                /* #7884: the period and coverage stamps the wait facts carry, so the scorer grades pages per OBSERVED hour
+                   (FactScorer.ObservedHours) and the same spill rate reads the same at every hours_back. */
+                var spillMetadata = new Dictionary<string, double>
+                {
+                    ["total_spills"] = totalSpills,
+                    /* #5633: DISTINCT queries (database + query_hash) with a spill, not snapshot rows. */
+                    ["spilling_query_count"] = spillingQueries,
+                    ["total_executions"] = totalExecutions,
+                    ["period_duration_ms"] = context.PeriodDurationMs
+                };
+                FactCollectorHelpers.AddCoverageFraction(spillMetadata, context);
+
                 facts.Add(new Fact
                 {
                     Source = "queries",
@@ -142,13 +156,7 @@ AND   v.delta_execution_count > 0";
                     ServerId = context.ServerId,
                     ObjectName = spillRanked.Count > 0 ? spillRanked[0].ObjectName : null,
                     Ranked = spillRanked,
-                    Metadata = new Dictionary<string, double>
-                    {
-                        ["total_spills"] = totalSpills,
-                        /* #5633: DISTINCT queries (database + query_hash) with a spill, not snapshot rows. */
-                        ["spilling_query_count"] = spillingQueries,
-                        ["total_executions"] = totalExecutions
-                    }
+                    Metadata = spillMetadata
                 });
             }
 
@@ -178,9 +186,6 @@ AND   v.delta_execution_count > 0";
         }
     }
 
-    /// <summary>The most offenders the PARAMETER_SENSITIVITY fact counts. Applied after the exact creation-time test (#4821), not in SQL.</summary>
-    private const int ParameterSensitivityOffenderCap = 20;
-
     /// <summary>
     /// Detects parameter-sensitive cached plans: a single query_plan_hash whose
     /// per-execution worker time varies wildly — one plan serving very different
@@ -192,6 +197,7 @@ AND   v.delta_execution_count > 0";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -272,11 +278,7 @@ SELECT
     query_plan_hash
 FROM latest
 WHERE rn = 1
-AND   min_worker_time >= 10000
-AND   max_worker_time >= 250000
-AND   execution_count >= 20
-AND   creation_time_utc <= $4
-AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
+" + ParameterSensitivitySignature.PredicateSql("creation_time_utc <= $4") + @"
 ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -296,6 +298,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                two plans is two offenders. */
             var ranked = new List<RankedObject>();
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
             {
@@ -309,7 +312,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                     continue;
                 }
 
-                if (offenderCount >= ParameterSensitivityOffenderCap)
+                if (offenderCount >= FactThresholds.ParameterSensitivity.OffenderCap)
                 {
                     break;
                 }
@@ -360,7 +363,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                     ["worst_min_worker_us"] = worstMinWorker,
                     ["worst_max_worker_us"] = worstMaxWorker,
                     ["worst_grant_ratio"] = worstGrantRatio,
-                    ["grant_divergence"] = worstGrantRatio >= 5 ? 1 : 0,
+                    ["grant_divergence"] = worstGrantRatio >= FactThresholds.ParameterSensitivity.GrantDivergenceRatio ? 1 : 0,
                     ["spill_divergence"] = worstSpillDivergence
                 }
             });
@@ -397,6 +400,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
             var candidates = new List<PlanRegressionCandidate>();
             var failures = new List<PlanRegressionFailureRule.Failure>();
             {
+                var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14), context.CancellationToken);
                 using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
                 using var connection = _duckDb.CreateConnection();
                 await connection.OpenAsync(context.CancellationToken);
@@ -405,7 +409,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                    that regresses into timeouts or errors is found here. A failed read costs the failure half only. */
                 try
                 {
-                    failures = await ReadPlanRegressionFailuresAsync(connection, context);
+                    failures = await ReadPlanRegressionFailuresAsync(connection, context, plan);
                 }
                 catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
                 {
@@ -555,6 +559,10 @@ compared AS
         -- The resource-expenditure half of the importance gate (#2138): total CPU the LATEST plan burned
         -- over the window. The exec-count floor above only counts; this weighs.
         l.execs * l.cpu_per_exec AS latest_total_cpu_us,
+        -- #7417: the CPU the regression lost in the window, the ranking key and a floor (PlanRegressionRanking): the
+        -- per-execution difference times the latest plan's executions. A factor alone ranked a 455 us statement over a
+        -- 1.2 s one. NULL cpu figures give NULL, which the floor drops.
+        " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuExpressionSql + @" AS lost_cpu_us,
         l.database_name,
         -- #3953: when the best plan last ran, so the advice can state its age. The window reaches a full 14 days
         -- on both SKUs, so a best plan can be two weeks old.
@@ -600,13 +608,16 @@ SELECT
 FROM compared
 WHERE regression_factor >= 2
 -- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
--- near-zero-cost queries whose ratios are all sampling jitter; magnitude ranking stays with
--- regression_factor and the scorer.
+-- near-zero-cost queries whose ratios are all sampling jitter. Magnitude ranking is the ORDER BY below (#7417).
 AND   latest_total_cpu_us >= 10000000
+-- #7417: and a CPU-path regression must have LOST that much of it (PlanRegressionRanking). A duration-path row keeps the
+-- bar above: it got slower through waits more than CPU, so its CPU loss is small by construction.
+AND   " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuFloorSql + @"
 -- #6548: SQL Server own housekeeping statements (change tracking cleanup and the like) are not application code. Left out
 -- BEFORE the LIMIT below, so they cannot use up its rows or lead the fact.
 AND   NOT regexp_matches(lower(COALESCE(query_text, '')), '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
-ORDER BY regression_factor DESC
+-- #7417: by the CPU the regression lost, the factor second. The first row leads the card and its force statement.
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
 -- #5630: more rows than the fact keeps. The C# side drops the rows the shared input rule rules out and keeps
 -- the first MaxPlanRegressionOffenders (20) of what is left, so a dropped row does not leave the fact one
 -- offender short.
@@ -618,6 +629,7 @@ LIMIT 100";
                    primary stay in the window, so the read skips those databases. */
                 cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 3);
 
+                cmd.CommandText = plan.Apply(cmd.CommandText);
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
@@ -658,7 +670,7 @@ LIMIT 100";
             {
                 var row = kept[i];
 
-                // Rows arrive ordered by regression_factor DESC — the first kept row is the worst offender.
+                // Rows arrive ordered by the CPU the regression lost (#7417), the factor second — the first kept row is the worst offender.
                 if (i == 0)
                 {
                     worstQueryId = row.QueryId;
@@ -718,7 +730,9 @@ LIMIT 100";
                advice reads their absence as "no cost regression" and not as a zero factor (#6267). */
             if (offenderCount > 0)
             {
-                fact.Metadata["worst_regression_factor"] = worstFactor;
+                /* #7417: the LEAD offender's factor (the one that lost the most CPU), the figure the advice pairs with the
+                   lead's own per-execution costs below. Another kept row can have a larger factor. */
+                fact.Metadata["lead_regression_factor"] = worstFactor;
                 fact.Metadata["worst_query_id"] = worstQueryId;
                 fact.Metadata["latest_cpu_per_exec_us"] = worstLatestCpu;
                 fact.Metadata["best_cpu_per_exec_us"] = worstBestCpu;
@@ -753,6 +767,7 @@ LIMIT 100";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("procedure_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -775,6 +790,7 @@ AND   delta_execution_count > 0";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
 
@@ -813,6 +829,49 @@ AND   delta_execution_count > 0";
     }
 
     /// <summary>
+    /// The plan fetch of the plan advisory fact (<see cref="CollectPlanAdvisoryFactsAsync"/>) and of its drill-down: $1 server, $2 window start, $3 window end.
+    /// #8570: the rank reads only thin columns (the row's collection_id and its sort keys), and the ten winning rows' plan XML is read by collection_id after the
+    /// limit. The earlier statement carried every in-window row's plan XML through the window's sort, so a window of a few hundred thousand rows sorted gigabytes of
+    /// plan text to keep ten plans. The plan column is only tested for NULL in the rank. The result is the same ten plans in the same order (the Darling twin is
+    /// <c>PgFactCollector.PlanAdvisorySql</c>).
+    /// </summary>
+    internal const string PlanAdvisorySql = @"
+SELECT w.query_plan_xml
+FROM
+(
+    SELECT collection_id, delta_worker_time
+    FROM
+    (
+        SELECT
+            collection_id,
+            delta_worker_time,
+            /* #7886: one row per plan. v_query_stats holds one row per query per snapshot, and every snapshot
+               row of a cached plan resolves to the same plan XML. Without this rank the hottest plan fills all
+               ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
+               multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
+               plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A plan is
+               a statement's plan in one database: query_plan_hash is a shape hash that two statements with one
+               shape share, as does one statement in two databases, and a hashless row's plan_handle is shared by
+               every statement in its batch, so database_name and query_hash stay in the key. */
+            ROW_NUMBER() OVER (PARTITION BY database_name, query_hash, COALESCE(query_plan_hash, plan_handle) ORDER BY delta_worker_time DESC) AS plan_rank
+        FROM v_query_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   query_plan_xml IS NOT NULL
+    ) AS ranked
+    WHERE plan_rank = 1
+    ORDER BY delta_worker_time DESC
+    LIMIT 10
+) AS top
+JOIN v_query_stats AS w
+  ON w.collection_id = top.collection_id
+WHERE w.server_id = $1
+AND   w.collection_time >= $2
+AND   w.collection_time <= $3
+ORDER BY top.delta_worker_time DESC";
+
+    /// <summary>
     /// WS4: plan-XML advisories. Parses the already-collected query plans of the top queries by
     /// cost with the shared ShowPlanParser/PlanAnalyzer and emits two advise-only facts —
     /// MISSING_INDEX (Value = distinct suggested indexes) and PLAN_WARNING (Value = actionable
@@ -825,25 +884,19 @@ AND   delta_execution_count > 0";
         {
             var planXmls = new List<string>();
 
+            var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using (var readLock = _duckDb.AcquireReadLock(context.CancellationToken))
             using (var connection = _duckDb.CreateConnection())
             {
                 await connection.OpenAsync(context.CancellationToken);
 
                 using var command = connection.CreateCommand();
-                command.CommandText = @"
-SELECT query_plan_xml
-FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   query_plan_xml IS NOT NULL
-ORDER BY delta_worker_time DESC
-LIMIT 10";
+                command.CommandText = DuckDbFactCollector.PlanAdvisorySql;
                 command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                 command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                 command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
+                command.CommandText = plan.Apply(command.CommandText);
                 using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
                 while (await reader.ReadAsync(context.CancellationToken))
                 {

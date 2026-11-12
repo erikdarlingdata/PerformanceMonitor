@@ -33,8 +33,9 @@ namespace PerformanceMonitor.Common
     public static class DeadlockGraphParser
     {
         // Lock resource elements that carry owner/waiter lists. exchangeEvent/SyncPoint mark a parallel
-        // (intra-query) deadlock and may have neither object names nor modes.
-        private static readonly HashSet<string> LockElementNames = new(StringComparer.Ordinal)
+        // (intra-query) deadlock and may have neither object names nor modes. The per-process walk
+        // (DeadlockGraphProcessParser) reads the same set, so the two parsers see the same resources.
+        internal static readonly HashSet<string> LockElementNames = new(StringComparer.Ordinal)
         {
             "objectlock", "keylock", "pagelock", "ridlock", "rowgrouplock",
             "hobtlock", "allocunitlock", "metadatalock", "applicationlock", "filegrouplock",

@@ -64,20 +64,35 @@ public sealed class PgOldVersionWebCellsTests
         var grid = RunHarness().GetProperty("topQueries");
 
         Assert.True(grid.GetProperty("present").GetBoolean());
-        Assert.Equal("—", Cell(grid, 0, "WAL (bytes)"));
-        Assert.Equal("0", Cell(grid, 1, "WAL (bytes)"));
-        /* The digits only: the grouping separator follows the machine's locale. */
-        Assert.Equal("2048", new string(Cell(grid, 2, "WAL (bytes)").Where(char.IsDigit).ToArray()));
+        /* #7410: the column is "WAL" and the cell is written in the unit that fits (2048 bytes is 2.0 KB). */
+        Assert.Equal("—", Cell(grid, 0, "WAL"));
+        Assert.Equal("0 B", Cell(grid, 1, "WAL"));
+        /* The digits only: the decimal separator follows the machine's locale. */
+        var reported = Cell(grid, 2, "WAL");
+        Assert.EndsWith("KB", reported);
+        Assert.Equal("20", new string(reported.Where(char.IsDigit).ToArray()));
+    }
+
+    /// <summary>#7731: the first column names the database, so one Query ID in two databases reads as two databases.</summary>
+    [Fact]
+    public void TheTopQueriesGrid_NamesTheDatabaseInItsFirstColumn()
+    {
+        var grid = RunHarness().GetProperty("topQueries");
+
+        Assert.True(grid.GetProperty("present").GetBoolean());
+        Assert.Equal("Database", grid.GetProperty("headers")[0].GetString());
+        Assert.Equal("appdb", Cell(grid, 0, "Database"));
+        Assert.Equal("database 16385", Cell(grid, 1, "Database"));
     }
 
     [Fact]
-    public void TheSampledWaitsGrid_DrawsADashForAnUnreportedQueryId_AndKeepsZeroForNoStatement()
+    public void TheSampledWaitsGrid_DrawsADashForAnUnreportedQueryId_AndShowsNoStatementForQueryIdZero()
     {
         var grid = RunHarness().GetProperty("sampledWaits");
 
         Assert.True(grid.GetProperty("present").GetBoolean());
         Assert.Equal("—", Cell(grid, 0, "Query ID"));
-        Assert.Equal("0", Cell(grid, 1, "Query ID"));
+        Assert.Equal("no statement", Cell(grid, 1, "Query ID"));
         Assert.Equal("555", Cell(grid, 2, "Query ID"));
     }
 }

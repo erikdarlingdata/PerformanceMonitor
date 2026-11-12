@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -31,7 +32,11 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para><b>Called only on the miss path.</b> Every call site checks capability after its read came back
 /// empty, never before it. That costs nothing in the common case, and — more importantly — a server whose
 /// registry row says one engine while its collected rows say another (a re-registration, a restored
-/// database) still gets its DATA rather than a confident explanation of why it cannot have any.</para>
+/// database) still gets its DATA rather than a confident explanation of why it cannot have any.
+/// The one exception is <see cref="PostgresTargetSqlServerReadStatusAsync"/> (#7159), which runs BEFORE the read: a PostgreSQL target
+/// has collection rows, so <c>get_server_summary</c>, <c>get_daily_summary</c> and <c>get_daily_summary_range</c> never miss there and
+/// would answer zeros and Healthy bands nothing measured. The price is that a <c>server_id</c> re-pointed from SQL Server to PostgreSQL
+/// no longer reads its SQL Server history through those three tools.</para>
 /// </summary>
 internal static class DarlingEngineCapability
 {
@@ -75,7 +80,7 @@ WHERE server_id = $1";
         {
             (engineEdition, engineKind, awsRdsKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return null;
         }
@@ -90,9 +95,105 @@ WHERE server_id = $1";
         return await DarlingRuntimePrecondition.QueryStoreReadableSecondaryStatusAsync(postgres, serverId, serverName, cancellationToken);
     }
 
+    /// <summary>
+    /// #7374: the engine facts of several servers in ONE registry read, the columns <see cref="ServerEngineSql"/> reads for one. $1 the
+    /// server ids.
+    /// </summary>
+    public const string ServersEngineSql = @"
+SELECT server_id, sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express
+FROM servers
+WHERE server_id = ANY($1)";
+
+    /// <summary>
+    /// #7374: which of <paramref name="servers"/> cannot run <paramref name="collectorName"/> on their engine (a PostgreSQL target for
+    /// a read of SQL Server sources), with the reason each one's <see cref="NotCollectedStatusAsync"/> envelope gives (the same
+    /// <see cref="CollectorEngineCapability.NotCollectedMessage"/> words), so a fleet read can answer <c>not_collected</c> per server as
+    /// the one-server form does. One registry read for all of them. A server it can run on, or whose registry row is missing, is left out
+    /// of the answer (no claim), and so is every server when the read fails, exactly as <see cref="NotCollectedStatusAsync"/> answers
+    /// null. A fleet read calls it AFTER its read, for the servers that came back with no rows (the contract in this class's summary).
+    /// </summary>
+    public static async Task<System.Collections.Generic.Dictionary<int, string>> NotCollectedReasonsAsync(
+        NpgsqlDataSource postgres,
+        System.Collections.Generic.IReadOnlyCollection<(int ServerId, string ServerName)> servers,
+        string collectorName,
+        CancellationToken cancellationToken = default)
+    {
+        var reasons = new System.Collections.Generic.Dictionary<int, string>();
+        if (servers.Count == 0)
+        {
+            return reasons;
+        }
+
+        var names = servers.ToDictionary(s => s.ServerId, s => s.ServerName);
+        try
+        {
+            await using var command = postgres.CreateCommand(ServersEngineSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = names.Keys.ToArray() });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var serverId = reader.GetInt32(0);
+                var edition = reader.IsDBNull(1) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(1);
+                var kind = reader.IsDBNull(2) ? null : reader.GetString(2);
+                var awsRdsKind = CollectorEngineCapability.AwsRdsKindOf(!reader.IsDBNull(3) && reader.GetBoolean(3), !reader.IsDBNull(4) && reader.GetBoolean(4));
+                if (CollectorEngineCapability.NotCollectedMessage(names[serverId], edition, kind, collectorName, awsRdsKind) is { } message)
+                {
+                    reasons[serverId] = message;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            reasons.Clear();
+        }
+
+        return reasons;
+    }
+
     /// <summary>The collectors that skip a readable secondary's databases (bit 8 of readonly_reason), so a read of what they store can be empty by design there (#6554).</summary>
     internal static bool IsReadableSecondaryGated(string collectorName) =>
-        collectorName is "query_store" or "query_store_forced_plans" or "query_store_hints" or "plan_correction";
+        collectorName is "query_store" or "query_store_forced_plans" or "query_store_hints" or "plan_correction" or "query_store_health";
+
+    /// <summary>
+    /// #7159: the <c>not_collected</c> envelope for a read whose every figure comes from SQL Server tables (CPU, memory, blocking,
+    /// deadlocks, waits: <c>get_server_summary</c>, <c>get_daily_summary</c>, <c>get_daily_summary_range</c>) when the server is a
+    /// PostgreSQL target, or <c>null</c> on any other engine. Unlike <see cref="NotCollectedStatusAsync"/> this runs BEFORE the read,
+    /// because a PostgreSQL target has collection rows, so those reads never miss: they answer zeros nothing measured and call every
+    /// collected day Healthy. A registry read that fails answers null, for the reason <see cref="NotCollectedStatusAsync"/> gives.
+    /// </summary>
+    public static async Task<string?> PostgresTargetSqlServerReadStatusAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        string serverName,
+        string toolName,
+        CancellationToken cancellationToken = default)
+    {
+        string? engineKind;
+        try
+        {
+            (_, engineKind, _) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+
+        return PostgresTargetSqlServerReadStatus(serverName, engineKind, toolName);
+    }
+
+    /// <summary>The pure half of <see cref="PostgresTargetSqlServerReadStatusAsync"/>: the envelope for this engine kind, or <c>null</c> for a SQL Server target or a kind the store does not record.</summary>
+    internal static string? PostgresTargetSqlServerReadStatus(string serverName, string? engineKind, string toolName) =>
+        MonitoredEngineKind.IsPostgres(engineKind)
+            ? McpHelpers.Status(
+                "not_collected",
+                $"{serverName} runs {MonitoredEngineKind.DescribeEngineKind(engineKind)}. {toolName} reads SQL Server signals (CPU, memory, blocking, " +
+                "deadlocks, waits) that this engine does not collect, so it has no figures for this server and never will: any zero or " +
+                "Healthy band would be a guess. Read this server through get_fleet_overview for its health card, and the get_pg_* reads " +
+                "(get_pg_database_stats, get_pg_deadlocks, get_pg_blocking, get_pg_cpu_utilization, get_pg_wait_stats) for the detail. " +
+                "This is a permanent engine capability gap, not a collection outage: checking collection health, " +
+                "enabling a collector or starting a capture cannot change it.")
+            : null;
 
     /// <summary>
     /// #6439: the <c>not_collected</c> envelope for the tempdb file I/O read on an Azure SQL Database, or <c>null</c> on any other
@@ -261,6 +362,21 @@ ORDER BY server_name";
         var isAwsRds = !reader.IsDBNull(2) && reader.GetBoolean(2);
         var isAwsRdsWebOrExpress = !reader.IsDBNull(3) && reader.GetBoolean(3);
         return (edition, kind, CollectorEngineCapability.AwsRdsKindOf(isAwsRds, isAwsRdsWebOrExpress));
+    }
+
+    /// <summary>
+    /// The collector table an analysis read (get_analysis_findings, get_analysis_facts) asks "was this window collected at all"
+    /// of, chosen from the registry's engine kind by <see cref="PerformanceMonitor.Darling.Analysis.DarlingAnalysisService.CoverageTableFor"/>
+    /// (#7194): <c>wait_stats</c> for a SQL Server target, <c>pg_database_stats</c> for a PostgreSQL one. One registry read, the
+    /// same column <see cref="ReadServerEngineAsync"/> answers the <c>not_collected</c> envelopes from.
+    /// </summary>
+    internal static async Task<string> AnalysisCoverageTableAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        CancellationToken cancellationToken)
+    {
+        var (_, kind, _) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
+        return PerformanceMonitor.Darling.Analysis.DarlingAnalysisService.CoverageTableFor(kind);
     }
 
     /// <summary>

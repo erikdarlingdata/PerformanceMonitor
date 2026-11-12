@@ -99,6 +99,14 @@ namespace PerformanceMonitor.Darling.Service;
 public static class DarlingManagedRoles
 {
     /// <summary>
+    /// The words every refusal and log line uses to name the role-provisioning script. The release zip and the service
+    /// folder carry it beside the service exe (the project file links it into the output), and a source build has it at
+    /// <c>Darling/tools</c>, so the text names both. The managed store and the compose store never run it by hand, because
+    /// the service provisions their roles at every start.
+    /// </summary>
+    public const string ProvisionRolesScriptPath = "provision-roles.sql in the install folder (Darling/tools/provision-roles.sql in the source tree)";
+
+    /// <summary>
     /// The comment stamped on every Darling-created login role (<c>COMMENT ON ROLE … IS</c>, read back
     /// via <c>shobj_description(oid, 'pg_authid')</c>). Because the role names are the bare, un-prefixed
     /// <c>admin</c>/<c>viewer</c> (Erik's decision — no <c>darling_</c> namespace), provisioning must not
@@ -177,6 +185,8 @@ public static class DarlingManagedRoles
                 "server_id", "name", "host", "database", "auth", "username", "encrypt_mode",
                 "trust_server_certificate", "read_only_intent", "multi_subnet_failover",
                 "excluded_databases", "monthly_cost_usd", "capture_plans", "is_enabled",
+                /* V247 (#7639): database names, non-secret like excluded_databases. */
+                "xe_session_databases",
                 "created_at", "modified_at", "alert_delivery_mode_override",
                 /* V68. Non-secret: which engine a target is, and its port, are exactly as sensitive as its
                    host — which is already readable. The fail-closed design is why they have to be named at
@@ -251,6 +261,9 @@ public static class DarlingManagedRoles
             {
                 "smtp_encrypted_password", "smtp_username", "teams_url", "slack_url",
                 "generic_url", "generic_headers", "pagerduty_routing_key",
+                /* V252 (#7656): the Slack bot token and app-level token, sealed like slack_url. Whoever holds the bot token posts as
+                   the bot, so a read role never sees either. */
+                "slack_bot_token", "slack_app_token",
                 /* V193 (#5997): the sealed webhook signing key and the previous one kept for the 7-day overlap. Whoever holds
                    a key can forge a signed send, so a read role never sees either. */
                 "signing_key", "previous_signing_key",
@@ -275,6 +288,13 @@ public static class DarlingManagedRoles
                 "fallback_route_id", "previous_signing_key_until",
                 /* V229 (#6928): the route's severity filter (both, critical or warning). Non-secret. */
                 "severities",
+                /* V233 (#6979): the route's report notice setting (off, needs_person_or_change or all). Non-secret. */
+                "report_notice",
+                /* V238 (#7109): whether a Level 3 action waits for a person's approval, and whether the asker may approve. Non-secret. */
+                "action_approval", "approval_single_person",
+                /* V252 (#7656): the route's Slack bot channel id, blank for none, and the time the route got it (the trigger's stamp, null
+                   when the channel is blank). Non-secret. */
+                "slack_bot_channel", "slack_bot_channel_set_at",
             },
             SecretColumns: new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key", "signing_key", "previous_signing_key" }),
     };
@@ -385,12 +405,18 @@ public static class DarlingManagedRoles
             DarlingManagedPostgres.McpCredentialPathFor(dataDirectory), DarlingManagedPostgres.McpRoleName,
             allowInteractiveRead: false, logger, isTrustedOwner);
 
+        /* The web host's own login: read by the in-service web host only, never an interactive Viewer, so it is hardened
+           non-interactive like the mcp one. The same reader/generator as every other role's credential. */
+        var web = ReadOrGenerateRoleCredential(
+            DarlingManagedPostgres.WebCredentialPathFor(dataDirectory), DarlingManagedPostgres.WebRoleName,
+            allowInteractiveRead: false, logger, isTrustedOwner);
+
         var applied = await ProvisionRolesAsync(
-            dataSource, admin.Password, viewer.Password, mcp.Password, ProvisioningTarget.Managed, logger, cancellationToken);
+            dataSource, admin.Password, viewer.Password, mcp.Password, web.Password, ProvisioningTarget.Managed, logger, cancellationToken);
 
         /* Only now: each generated password is one its role has accepted, so a file on disk is always a login the
            store honours. A throw above leaves every generated password unwritten. */
-        PersistGeneratedRoleCredentials(new[] { admin, viewer, mcp }, logger);
+        PersistGeneratedRoleCredentials(new[] { admin, viewer, mcp, web }, logger);
         return applied;
     }
 
@@ -462,12 +488,13 @@ public static class DarlingManagedRoles
         var admin = ReadOrGenerateComposeCredential(credentialDirectory, DarlingManagedPostgres.AdminRoleName, readFiles, logger);
         var viewer = ReadOrGenerateComposeCredential(credentialDirectory, DarlingManagedPostgres.ViewerRoleName, readFiles, logger);
         var mcp = ReadOrGenerateComposeCredential(credentialDirectory, DarlingManagedPostgres.McpRoleName, readFiles, logger);
+        var web = ReadOrGenerateComposeCredential(credentialDirectory, DarlingManagedPostgres.WebRoleName, readFiles, logger);
 
         var applied = await ProvisionRolesAsync(
-            dataSource, admin.Password, viewer.Password, mcp.Password,
+            dataSource, admin.Password, viewer.Password, mcp.Password, web.Password,
             ProvisioningTarget.ComposeStore(facts.Login, facts.Database), logger, cancellationToken);
 
-        foreach (var credential in new[] { admin, viewer, mcp })
+        foreach (var credential in new[] { admin, viewer, mcp, web })
         {
             if (credential.Generated && directory.MayWrite)
             {
@@ -475,7 +502,7 @@ public static class DarlingManagedRoles
             }
         }
 
-        return ComposeStoreProvisioning.Succeeded(applied, viewer.Password, mcp.Password);
+        return ComposeStoreProvisioning.Succeeded(applied, viewer.Password, mcp.Password, web.Password);
     }
 
     /// <summary>
@@ -765,7 +792,7 @@ LIMIT 1", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.Se
     /// statement_timeout it wrote onto the roles (see <see cref="EnsureProvisionedAsync"/>).
     /// </summary>
     private static async Task<int> ProvisionRolesAsync(
-        NpgsqlDataSource dataSource, string adminPassword, string viewerPassword, string mcpPassword,
+        NpgsqlDataSource dataSource, string adminPassword, string viewerPassword, string mcpPassword, string webPassword,
         ProvisioningTarget target, ILogger logger, CancellationToken cancellationToken)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
@@ -789,7 +816,7 @@ LIMIT 1", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.Se
                its credential file's password is not re-asserted at all: a steady-state start sends no PASSWORD
                clause. The CREATE branch still carries a fresh verifier, for a role that does not exist yet. */
             var stored = await ReadStoredRoleSecretsAsync(connection, transaction, logger, token);
-            reassert = PlanPasswordReassert(stored, adminPassword, viewerPassword, mcpPassword);
+            reassert = PlanPasswordReassert(stored, adminPassword, viewerPassword, mcpPassword, webPassword);
 
             return new NpgsqlCommand(
                 BuildProvisioningSql(
@@ -798,7 +825,8 @@ LIMIT 1", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.Se
                     ScramSha256Verifier.Create(mcpPassword),
                     composeTimeoutSeconds,
                     reassert,
-                    target),
+                    target,
+                    ScramSha256Verifier.Create(webPassword)),
                 connection, transaction) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         }, logger, cancellationToken);
 
@@ -809,7 +837,7 @@ LIMIT 1", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.Se
                 : "re-asserted for " + DescribeReassert(reassert));
 
         logger.LogInformation(
-            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + the narrow web-surface writes (custom_views, custom_alert_rules, database_state_expected, config_mute_rules + the reload beacon + the config_alert_log dismissed column + server_tags, server_tag_map + INSERT and a column-level UPDATE on config_monitored_servers); mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_notification.email_cooldown_minutes, config_service reload beacon) + onboard servers (config_monitored_servers) + tag servers (server_tags, server_tag_map)) — the Viewer, the web dashboard and the MCP host no longer connect as the superuser");
+            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only, the login for remote and locked-down Viewer seats; web: viewer's reads + the narrow web-surface writes (custom_views, custom_alert_rules, database_state_expected, config_mute_rules + the reload beacon + the config_alert_log dismissed column + server_tags, server_tag_map + INSERT on config_monitored_servers and the edit function); mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_notification.email_cooldown_minutes, config_service reload beacon) + onboard servers (config_monitored_servers) + tag servers (server_tags, server_tag_map)) — the Viewer, the web dashboard and the MCP host no longer connect as the superuser");
 
         /* CLAMPED, not raw: the batch above wrote the clamped form, so returning the raw read would hand the
            caller a baseline that differs from what the roles actually carry (a stored 0 provisions '15s').
@@ -849,14 +877,17 @@ LIMIT 1", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.Se
     public static string BuildComposeStatementTimeoutSql(int composeStatementTimeoutSeconds)
     {
         const string viewer = DarlingManagedPostgres.ViewerRoleName;
+        const string web = DarlingManagedPostgres.WebRoleName;
         const string mcp = DarlingManagedPostgres.McpRoleName;
         var statementTimeout =
             $"{StoreConfigProvider.ClampComposeStatementTimeoutSeconds(composeStatementTimeoutSeconds)}s";
         var slowStatement = $"{SlowStatementThresholdMs(composeStatementTimeoutSeconds).ToString(CultureInfo.InvariantCulture)}ms";
 
         return $@"ALTER ROLE {viewer} SET statement_timeout = '{statementTimeout}';
+ALTER ROLE {web}    SET statement_timeout = '{statementTimeout}';
 ALTER ROLE {mcp}    SET statement_timeout = '{statementTimeout}';
 ALTER ROLE {viewer} SET log_min_duration_statement = '{slowStatement}';
+ALTER ROLE {web}    SET log_min_duration_statement = '{slowStatement}';
 ALTER ROLE {mcp}    SET log_min_duration_statement = '{slowStatement}';";
     }
 
@@ -873,9 +904,11 @@ ALTER ROLE {mcp}    SET log_min_duration_statement = '{slowStatement}';";
     public static string BuildComposeTempFileLimitSql()
     {
         const string viewer = DarlingManagedPostgres.ViewerRoleName;
+        const string web = DarlingManagedPostgres.WebRoleName;
         const string mcp = DarlingManagedPostgres.McpRoleName;
 
         return $@"ALTER ROLE {viewer} SET temp_file_limit = '{ComposeLimits.TempFileLimit}';
+ALTER ROLE {web}    SET temp_file_limit = '{ComposeLimits.TempFileLimit}';
 ALTER ROLE {mcp}    SET temp_file_limit = '{ComposeLimits.TempFileLimit}';";
     }
 
@@ -907,9 +940,11 @@ ALTER ROLE {mcp}    SET temp_file_limit = '{ComposeLimits.TempFileLimit}';";
     public static string BuildSlowStatementParameterSql()
     {
         const string viewer = DarlingManagedPostgres.ViewerRoleName;
+        const string web = DarlingManagedPostgres.WebRoleName;
         const string mcp = DarlingManagedPostgres.McpRoleName;
 
         return $@"ALTER ROLE {viewer} SET log_parameter_max_length = 0;
+ALTER ROLE {web}    SET log_parameter_max_length = 0;
 ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
     }
 
@@ -1002,7 +1037,7 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(
+            logger.LogError(ex, 
                 "Could not re-assert the compose statement_timeout/temp_file_limit on the viewer/mcp roles ({Message}) — the live ceilings are whatever the last successful provisioning set, and the next service start will converge them.",
                 ex.Message);
             return false;
@@ -1172,7 +1207,7 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
            shutdown must never be reported to an operator as an ACL failure they should go fix. */
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(
+            logger.LogError(ex, 
                 "Could not restrict the ACL on {Path}{Detail} ({Message}). If the owner is not this service, the " +
                 "re-ACL can never succeed — it needs ownership or FullControl — so restarting will not clear this; " +
                 "grant the service account FullControl or make it the owner.",
@@ -1295,8 +1330,13 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         string adminVerifier, string viewerVerifier, string mcpVerifier,
         int? composeStatementTimeoutSeconds = McpCommandDeadlines.ComposedQueryFallbackSeconds,
         PasswordReassert reassert = PasswordReassert.All,
-        ProvisioningTarget? target = null)
+        ProvisioningTarget? target = null,
+        string? webVerifier = null)
     {
+        /* The web login (a fourth role, the web host's own identity). A caller that does not pass one (an older call
+           shape) still gets a role that exists, with a verifier nobody holds the password for, so its grants apply. */
+        webVerifier ??= ScramSha256Verifier.Create(DarlingManagedPostgres.GeneratePassword());
+        RequireVerifier(webVerifier, nameof(webVerifier));
         RequireVerifier(adminVerifier, nameof(adminVerifier));
         RequireVerifier(viewerVerifier, nameof(viewerVerifier));
         RequireVerifier(mcpVerifier, nameof(mcpVerifier));
@@ -1309,16 +1349,20 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         var database = target.DatabaseIdentifier;    // darling on a managed store
         const string admin = DarlingManagedPostgres.AdminRoleName;
         const string viewer = DarlingManagedPostgres.ViewerRoleName;
+        const string web = DarlingManagedPostgres.WebRoleName;
         const string mcp = DarlingManagedPostgres.McpRoleName;
         const string collect = PgSchemaGenerator.CollectSchema;
         const string config = PgSchemaGenerator.ConfigSchema;
         var marker = target.RoleMarker;
 
         /* #3914: the managed store is loopback-only and nothing but Darling's own logins connects to it, so it
-           takes CONNECT away from PUBLIC. The compose store is one people read directly with roles of their own,
+           takes CONNECT away from PUBLIC, on postgres and template1 as well, because every login's grants stop at the database it connects to. The compose store is one people read directly with roles of their own,
            and the same statement would silently take their CONNECT away, so there it is a comment instead. */
         var publicDatabaseRevoke = target.RevokePublicDatabaseAccess
-            ? $"REVOKE ALL ON DATABASE {database} FROM PUBLIC;"
+            ? $"REVOKE ALL ON DATABASE {database} FROM PUBLIC;{Environment.NewLine}"
+              + "-- The maintenance databases too: the large object revoke below is per database, so a login that could connect to postgres or template1 would"
+              + $"{Environment.NewLine}-- still reach large objects and TEMP there. Only the owner (a superuser, which needs no CONNECT grant) opens them."
+              + $"{Environment.NewLine}REVOKE CONNECT ON DATABASE postgres, template1 FROM PUBLIC;"
             : "--     LEFT AS-IS on the compose store: its other roles are the operator's, and this would revoke their CONNECT.";
         /* #2357: was ComposeLimits.StatementTimeout, a bare "15s". Rendered by the SHARED builder rather
            than inline, because #2918 made the reload path re-assert the same two statements: two renderers
@@ -1342,6 +1386,7 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
            denied the identical secret columns. Reusing BuildViewerColumnAclSql(config, mcp) means the
            mcp carve can never drift from viewer's (Round 4 #5 guards this with a live denial test). */
         var mcpColumnAcl = BuildMcpColumnAclSql(config, mcp);
+        var webColumnAcl = BuildViewerColumnAclSql(config, web);
 
         return $@"
 /* Least-privilege roles for the Darling security split (#1262). Idempotent + self-healing:
@@ -1366,6 +1411,13 @@ BEGIN
       RAISE EXCEPTION 'Role ""{viewer}"" already exists and was not created by Darling (missing the ''{marker}'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
    END IF;
 
+   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{web}') THEN
+      CREATE ROLE {web} LOGIN NOSUPERUSER PASSWORD '{webVerifier}';
+      COMMENT ON ROLE {web} IS '{marker}';
+   ELSIF shobj_description((SELECT oid FROM pg_roles WHERE rolname = '{web}'), 'pg_authid') IS DISTINCT FROM '{marker}' THEN
+      RAISE EXCEPTION 'Role ""{web}"" already exists and was not created by Darling (missing the ''{marker}'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
+   END IF;
+
    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{mcp}') THEN
       CREATE ROLE {mcp} LOGIN NOSUPERUSER PASSWORD '{mcpVerifier}';
       COMMENT ON ROLE {mcp} IS '{marker}';
@@ -1383,6 +1435,7 @@ END $do$;
 --     role memberships.
 ALTER ROLE {admin}  LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS{PasswordClause(PasswordReassert.Admin, adminVerifier)};
 ALTER ROLE {viewer} LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS{PasswordClause(PasswordReassert.Viewer, viewerVerifier)};
+ALTER ROLE {web}    LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS{PasswordClause(PasswordReassert.Web, webVerifier)};
 ALTER ROLE {mcp}    LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS{PasswordClause(PasswordReassert.Mcp, mcpVerifier)};
 
 -- 1c. statement_timeout backstop on the composed-query identities (Custom Views v2, #1563). viewer is the web
@@ -1409,9 +1462,9 @@ ALTER ROLE {mcp}    LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBY
 -- 2. Schema usage + SELECT everywhere (ALL TABLES covers tables AND views). collect holds no secrets,
 --    so admin+viewer read all of it. config: admin (the writer, and the Settings window's identity) reads
 --    every column; viewer reads all config tables too — MINUS the secret columns carved below.
-GRANT USAGE ON SCHEMA {collect}, {config} TO {admin}, {viewer};
-GRANT SELECT ON ALL TABLES IN SCHEMA {collect} TO {admin}, {viewer};
-GRANT SELECT ON ALL TABLES IN SCHEMA {config}  TO {admin}, {viewer};
+GRANT USAGE ON SCHEMA {collect}, {config} TO {admin}, {viewer}, {web};
+GRANT SELECT ON ALL TABLES IN SCHEMA {collect} TO {admin}, {viewer}, {web};
+GRANT SELECT ON ALL TABLES IN SCHEMA {config}  TO {admin}, {viewer}, {web};
 
 -- 2b. Credential-column fail-closed ACLs (#1262 Medium follow-up). The read-only viewer must NOT read the
 --     secret columns in config_monitored_servers / config_command / config_notification (a DPAPI password
@@ -1423,6 +1476,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA {config}  TO {admin}, {viewer};
 --     so the Settings window is unaffected. This also undoes the table-level grant the V17 ALTER DEFAULT
 --     PRIVILEGES already landed on these tables when they were created.
 {viewerColumnAcl}
+{webColumnAcl}
 
 -- 3. config writes -- admin gets the whole schema. (mcp gets ONLY a narrow config.analysis_muted INSERT and DELETE
 --    in section 6, never the config_command/monitored_servers/notification pivot tables; viewer: none.)
@@ -1430,9 +1484,9 @@ GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {config} TO {admin};
 
 -- 4. Default privileges so NEW tables/views auto-inherit (no per-table-grant foot-gun).
 ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA {collect}
-   GRANT SELECT ON TABLES TO {admin}, {viewer};
+   GRANT SELECT ON TABLES TO {admin}, {viewer}, {web};
 ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA {config}
-   GRANT SELECT ON TABLES TO {admin}, {viewer};
+   GRANT SELECT ON TABLES TO {admin}, {viewer}, {web};
 ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA {config}
    GRANT INSERT, UPDATE, DELETE ON TABLES TO {admin};
 -- Fail-closed: today no config table has a sequence (ids are app-generated / text), but a future
@@ -1445,7 +1499,30 @@ ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA {config}
 --    superuser + owner and never needs it).
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 {publicDatabaseRevoke}
-GRANT CONNECT ON DATABASE {database} TO {admin}, {viewer};
+GRANT CONNECT ON DATABASE {database} TO {admin}, {viewer}, {web};
+
+-- 5b. Built-in functions every role can run by default, taken from PUBLIC (this batch runs as a superuser, which owns them).
+--     Large objects: lo_create, lo_creat and lo_from_bytea store data in the store database whatever a role's table grants are,
+--     and the service uses none. Session advisory locks: a session lock on the migration key, held open, makes the next upgrade
+--     wait out its budget and stop, so the session forms go to the logins that take one (admin and mcp through the agent-change
+--     undo; the superuser needs no grant). The transaction forms (a transaction left open holds the same key just as long) go to
+--     the logins whose own code takes one: admin, web and mcp. The store's own functions take them as the owner, and viewer takes none.
+--     The unlock forms are not touched (a session can only release its own locks).
+REVOKE EXECUTE ON FUNCTION pg_catalog.lo_create(oid), pg_catalog.lo_creat(integer), pg_catalog.lo_from_bytea(oid, bytea) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_catalog.pg_advisory_lock(bigint), pg_catalog.pg_advisory_lock(integer, integer),
+   pg_catalog.pg_try_advisory_lock(bigint), pg_catalog.pg_try_advisory_lock(integer, integer),
+   pg_catalog.pg_advisory_lock_shared(bigint), pg_catalog.pg_advisory_lock_shared(integer, integer),
+   pg_catalog.pg_try_advisory_lock_shared(bigint), pg_catalog.pg_try_advisory_lock_shared(integer, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_advisory_lock(bigint), pg_catalog.pg_advisory_lock(integer, integer),
+   pg_catalog.pg_try_advisory_lock(bigint), pg_catalog.pg_try_advisory_lock(integer, integer) TO {admin}, {mcp};
+REVOKE EXECUTE ON FUNCTION pg_catalog.pg_advisory_xact_lock(bigint), pg_catalog.pg_advisory_xact_lock(integer, integer),
+   pg_catalog.pg_try_advisory_xact_lock(bigint), pg_catalog.pg_try_advisory_xact_lock(integer, integer),
+   pg_catalog.pg_advisory_xact_lock_shared(bigint), pg_catalog.pg_advisory_xact_lock_shared(integer, integer),
+   pg_catalog.pg_try_advisory_xact_lock_shared(bigint), pg_catalog.pg_try_advisory_xact_lock_shared(integer, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_advisory_xact_lock(bigint), pg_catalog.pg_advisory_xact_lock(integer, integer),
+   pg_catalog.pg_try_advisory_xact_lock(bigint), pg_catalog.pg_try_advisory_xact_lock(integer, integer),
+   pg_catalog.pg_advisory_xact_lock_shared(bigint), pg_catalog.pg_advisory_xact_lock_shared(integer, integer),
+   pg_catalog.pg_try_advisory_xact_lock_shared(bigint), pg_catalog.pg_try_advisory_xact_lock_shared(integer, integer) TO {admin}, {web}, {mcp};
 
 -- 6. The mcp role (darling-network-endpoints, D3-role): the ONLY credential reachable (via the bearer
 --    token) from the optional network MCP surface, so it is deliberately NOT admin. It gets viewer's exact
@@ -1493,20 +1570,20 @@ GRANT CONNECT ON DATABASE {database} TO {mcp};
 --    table re-grants (self-heal). The target must already exist here, so provisioning runs AFTER migration (V31
 --    created config.custom_views). id is GENERATED ALWAYS AS IDENTITY (like config_command), so the INSERT needs
 --    no sequence USAGE grant.
-GRANT INSERT, UPDATE, DELETE ON {config}.custom_views TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.custom_views TO {web};
 GRANT INSERT, UPDATE, DELETE ON {config}.custom_views TO {mcp};
 -- Custom alerting (#3285): the web editor (viewer) and the MCP rule tools (mcp) CRUD config.custom_alert_rules,
 -- the same narrow single-table floor as custom_views (non-secret rule JSON -- no ViewerRestrictedConfigTables
 -- carve, no config_command pivot). Created by V116, so provisioning runs after migration. NOTE: the sibling
 -- config.custom_alert_state is written by the CustomAlertEvaluator on the OWNER pool only, so it deliberately
 -- gets NO viewer/mcp grant here (add a viewer SELECT only when the editor surfaces a rule's firing status).
-GRANT INSERT, UPDATE, DELETE ON {config}.custom_alert_rules TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.custom_alert_rules TO {web};
 GRANT INSERT, UPDATE, DELETE ON {config}.custom_alert_rules TO {mcp};
 -- The Viewer's per-database database-state override editor (#1986) writes config.database_state_expected:
 -- the same narrow single-table floor as custom_views. Created by V49, so provisioning runs after migration.
 -- The mcp role gets the same three (#6397): set_database_state_expected upserts (INSERT, UPDATE) and clears (DELETE) one row, and its
 -- read, get_database_state_expectations, already runs on mcp's SELECT on all of config. Nothing wider, and no sibling table.
-GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {web};
 GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {mcp};
 
 -- 8. Alert tuning (the MCP alert-tuning write tools): the mcp role's alert-config writes, mirroring section 7's
@@ -1598,8 +1675,8 @@ GRANT DELETE ON {config}.config_collector_run_times TO {mcp};
 --    alert-dismiss writes still 42501 -- the probe now discriminates on config_alert_log UPDATE
 --    (ViewerDataService.ReadOnlyProbeSql), a write only admin/owner hold, so the locked-down Viewer's
 --    read-only UX is unchanged by this grant.
-GRANT INSERT, UPDATE, DELETE ON {config}.config_mute_rules TO {viewer};
-GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.config_mute_rules TO {web};
+GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {web};
 -- #4843: the web dashboard's Alert History dismiss route (POST /api/alert-history/dismiss) runs as viewer, the web
 --    host's ONLY store identity, and its write is `UPDATE config_alert_log SET dismissed = TRUE` (AlertDismissStore,
 --    the one copy the Viewer's Dismiss Selected / Dismiss All share). The grant is COLUMN-level on exactly that one
@@ -1610,7 +1687,7 @@ GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {viewer}
 --    read-only probe is unaffected: has_table_privilege(..., 'UPDATE') answers for the TABLE-level privilege only
 --    (the column-level form is has_column_privilege), so it stays false for viewer and the locked-down Viewer's
 --    dismiss buttons stay hidden. mcp gets the same one-column grant just below (#6231).
-GRANT UPDATE (dismissed) ON {config}.config_alert_log TO {viewer};
+GRANT UPDATE (dismissed) ON {config}.config_alert_log TO {web};
 -- #6231: the MCP dismiss_alert_history / restore_alert_history tools run as mcp and set the SAME one column through
 --    AlertDismissStore, so mcp gets the same column-level grant (revoke first, so a table-level UPDATE from an older
 --    provisioning run cannot linger). It names no other column and no INSERT/DELETE: mcp can flip the dismissed
@@ -1624,8 +1701,8 @@ GRANT UPDATE (dismissed) ON {config}.config_alert_log TO {mcp};
 --    read-only probe is unchanged: it discriminates on config_alert_log UPDATE (ViewerDataService.ReadOnlyProbeSql),
 --    which these grants do not touch, so a read-only desktop seat still reads as read-only and its tag editors
 --    stay disabled. A server removal also clears that server's server_tag_map rows, which needs the DELETE here.
-GRANT INSERT, UPDATE, DELETE ON {config}.server_tags TO {viewer};
-GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.server_tags TO {web};
+GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {web};
 -- #5977: server removal clears that server's query-tag rows (assignments, rules, map), so viewer holds DELETE on
 --    those three. #5986: the web page that manages query tags (POST/PATCH/DELETE under /api/query-tags and
 --    /api/query-tag-rules) runs the SAME cores the MCP tools run, as viewer, so viewer also gets the three writes mcp holds
@@ -1634,10 +1711,10 @@ GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {viewer};
 --    map stays DELETE only (the service's map builder writes it), and nobody but the owner writes the sightings or the
 --    state row: the rules_version bump is a SECURITY DEFINER trigger function, so no grant on config.query_tag_state. Admin
 --    (the desktop Viewer's default identity) already holds the config writes through the blanket grant above.
-GRANT INSERT, UPDATE, DELETE ON {config}.query_tags TO {viewer};
-GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_assignments TO {viewer};
-GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_rules TO {viewer};
-GRANT DELETE ON {config}.query_tag_map TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.query_tags TO {web};
+GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_assignments TO {web};
+GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_rules TO {web};
+GRANT DELETE ON {config}.query_tag_map TO {web};
 -- #4843: the web dashboard's add-server route (POST /api/servers) runs the SAME add_servers core the MCP tool runs, as
 --    viewer, so viewer gets the INSERT that core issues on config_monitored_servers; no DELETE, because no web route
 --    removes a server yet. Viewer holds no UPDATE on the table: see the #5240 note right below.
@@ -1650,7 +1727,7 @@ GRANT DELETE ON {config}.query_tag_map TO {viewer};
 --    AS viewer. The seat model, not this grant, decides who may call the route (a read-only seat is refused every
 --    unsafe method); the grant is only the floor beneath that gate. The WPF Viewer's read-only probe is unchanged: it
 --    discriminates on config_alert_log UPDATE (ViewerDataService.ReadOnlyProbeSql), which this grant does not touch.
-GRANT INSERT ON {config}.config_monitored_servers TO {viewer};
+GRANT INSERT ON {config}.config_monitored_servers TO {web};
 -- #5240: the web dashboard's edit route (PATCH /api/servers/{{id}}) and the MCP edit_server tool change a monitored
 --    server through {config}.edit_monitored_server, a SECURITY DEFINER function granted to viewer and mcp in section 10.
 --    Viewer holds NO UPDATE on this table, column-level or otherwise: the function checks the optimistic token, works
@@ -1662,7 +1739,7 @@ GRANT INSERT ON {config}.config_monitored_servers TO {viewer};
 --    privileges recorded as granted by the role that issues it (a superuser or the owner counts as the owner); this
 --    batch grants and revokes as that same owner. The write fires trg_bump_monitored_servers inside the function, as
 --    the owner. Idempotent, applied on every managed startup: not a migration rung.
-REVOKE UPDATE ON {config}.config_monitored_servers FROM {viewer};
+REVOKE UPDATE ON {config}.config_monitored_servers FROM {viewer}, {web};
 -- #3314: the DELIVERY cooldown -- the sole throttle on a Slack/Teams/PagerDuty/webhook post -- is the one
 -- alert-engine knob stored on config_notification rather than config_alert_settings, so update_alert_settings
 -- spans two tables and needs a write here. This DOES widen mcp into a table holding bearer secrets (the SMTP
@@ -1722,8 +1799,20 @@ REVOKE UPDATE ON {config}.config_monitored_servers FROM {mcp};
 -- The role and external ID of a server are set only through the edit function (and an INSERT): mcp's UPDATE
 -- names every other column of the table and leaves out aws_role_arn, aws_external_id and the generated
 -- aws_external_id_set. A column added to the table later is added to this list.
-GRANT UPDATE ({McpMonitoredServerUpdateColumns})
+GRANT UPDATE ({McpMonitoredServerBaseUpdateColumns})
    ON {config}.config_monitored_servers TO {mcp};
+-- V247 (#7639): the databases that get Extended Events sessions are a column that set_server_xe_session_databases writes with a plain UPDATE (edit_server
+-- refuses it), so mcp updates it directly like the others. Its own statement, guarded on the column, so a store below V247 still commits the rest of the script.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('{config}.config_monitored_servers')
+                AND attname = 'xe_session_databases' AND NOT attisdropped) THEN
+      EXECUTE $v247u$
+GRANT UPDATE (xe_session_databases) ON {config}.config_monitored_servers TO {mcp};
+$v247u$;
+   END IF;
+END $$;
 
 -- 10. Custom-alert resolve-on-delete privileged write (#3334). The recovery/resolution row a caller-initiated
 --     rule DELETE writes (CustomAlertEvaluator.WriteTeardownResolutionAsync) lands in config.config_alert_log,
@@ -1746,18 +1835,18 @@ GRANT UPDATE ({McpMonitoredServerUpdateColumns})
 --     has no probeable schema footprint (the section-1c role-SET rationale), so a V-number would drag in the
 --     probe rung + ladder fixture + version-pin tests for no gain.
 {BuildCustomAlertResolveFunctionSql(config)}
-GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) TO {viewer}, {mcp};
+GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) TO {web}, {mcp};
 -- #6334: the known-pattern entries' writes. The web editor (viewer) and the Viewer (admin) write config.config_known_patterns only
 --     through these three functions, and the MCP create_known_pattern / update_known_pattern / delete_known_pattern tools (#6398) call the same
 --     functions as mcp; no role holds a direct INSERT/UPDATE/DELETE on the table. Owned by the store owner, pinned search_path, no dynamic SQL; created and
 --     REVOKEd from PUBLIC by the shared builder. The reads need no grant: the schema-wide SELECT covers the table. The beacon trigger runs as
 --     the function's owner, so no config_service grant is needed either. NOT a versioned migration, for the same reason as the edit function.
 {BuildKnownPatternFunctionsSql(config)}
-GRANT EXECUTE ON FUNCTION {config}.insert_known_pattern({InsertKnownPatternSignature}) TO {admin}, {viewer};
+GRANT EXECUTE ON FUNCTION {config}.insert_known_pattern({InsertKnownPatternSignature}) TO {admin}, {web};
 GRANT EXECUTE ON FUNCTION {config}.insert_known_pattern({InsertKnownPatternSignature}) TO {mcp};
-GRANT EXECUTE ON FUNCTION {config}.update_known_pattern({UpdateKnownPatternSignature}) TO {admin}, {viewer};
+GRANT EXECUTE ON FUNCTION {config}.update_known_pattern({UpdateKnownPatternSignature}) TO {admin}, {web};
 GRANT EXECUTE ON FUNCTION {config}.update_known_pattern({UpdateKnownPatternSignature}) TO {mcp};
-GRANT EXECUTE ON FUNCTION {config}.delete_known_pattern(bigint) TO {admin}, {viewer};
+GRANT EXECUTE ON FUNCTION {config}.delete_known_pattern(bigint) TO {admin}, {web};
 GRANT EXECUTE ON FUNCTION {config}.delete_known_pattern(bigint) TO {mcp};
 -- #5240: the edit write. The web edit route (viewer) and the MCP edit_server tool (mcp) call
 --     {config}.edit_monitored_server for their one UPDATE of a config_monitored_servers row. It locks the row, checks
@@ -1768,17 +1857,17 @@ GRANT EXECUTE ON FUNCTION {config}.delete_known_pattern(bigint) TO {mcp};
 --     CREATE OR REPLACE is idempotent and owner-run every start. A self-managed store gets the same function from
 --     tools/provision-roles.sql, and is told to re-run it when the function is missing.
 {BuildEditMonitoredServerFunctionSql(config)}
-GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSignature}) TO {viewer}, {mcp};
+GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSignature}) TO {web}, {mcp};
 -- #6254: the 17-argument edit function stays as a permanent wrapper over the 18-argument one, for a caller built before the Query
 --     Store replica column. It passes NULL for the replica and strips the column name from p_columns, so a caller of the older
 --     signature can neither change nor clear a replica. Same grants, same owner.
 {BuildEditMonitoredServerSeventeenWrapperSql(config)}
-GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSeventeenSignature}) TO {viewer}, {mcp};
+GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSeventeenSignature}) TO {web}, {mcp};
 -- #5452: the 15-argument edit function stays as a permanent wrapper over the 17-argument one, for a caller that
 --     was built before the AWS role columns. It passes NULL for both and strips the two AWS column names from
 --     p_columns, so a caller of the old signature can neither change nor clear a role. Same grants, same owner.
 {BuildEditMonitoredServerLegacyWrapperSql(config)}
-GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLegacySignature}) TO {viewer}, {mcp};
+GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLegacySignature}) TO {web}, {mcp};
 -- #5941: the run-collectors-now request. The web route (viewer) and the MCP run_collectors_now tool (mcp) queue a
 --     snapshot_now command through {config}.request_snapshot_now, the only way those two roles write a command row.
 --     The command type is fixed in the body; the caller supplies a server id and an optional list of collector names
@@ -1786,21 +1875,21 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLeg
 --     the store owner, pinned search_path, no dynamic SQL; created and REVOKEd from PUBLIC by the shared builder.
 --     NOT a versioned migration, for the same reason as the edit function above.
 {BuildRequestSnapshotNowFunctionSql(config)}
-GRANT EXECUTE ON FUNCTION {config}.request_snapshot_now(integer, text, text) TO {viewer}, {mcp};
+GRANT EXECUTE ON FUNCTION {config}.request_snapshot_now(integer, text, text) TO {web}, {mcp};
 -- #6386: the web's Run live now button on the Active Queries panel. The web route (viewer) queues a fetch_active_queries command
 --     through {config}.request_active_queries_live, the only way viewer writes that command row. The command type is fixed in
 --     the body and the caller supplies a server id and nothing else, so it cannot reach the service-credential pivot that
 --     test_connect's args_json is. Owned by the store owner, pinned search_path, no dynamic SQL; created and REVOKEd from
 --     PUBLIC by the builder. NOT a versioned migration, for the same reason as request_snapshot_now above.
 {BuildRequestActiveQueriesLiveFunctionSql(config)}
-GRANT EXECUTE ON FUNCTION {config}.request_active_queries_live(integer, text) TO {viewer};
+GRANT EXECUTE ON FUNCTION {config}.request_active_queries_live(integer, text) TO {web};
 -- #6389: the web's Generate now button on the Recommendations tab. The web route (viewer) queues an analyze_now command
 --     through {config}.request_analyze_now, the only way viewer writes that command row. The command type is fixed in the body
 --     and the caller supplies a server id and a requested_by label (the label is not checked: the web host and a locked-down
 --     Viewer share the viewer login, and the web's log line is the record of who asked). Owned by the store owner, pinned search_path, no dynamic SQL; created
 --     and REVOKEd from PUBLIC by the builder. NOT a versioned migration, for the same reason as request_snapshot_now above.
 {BuildRequestAnalyzeNowFunctionSql(config)}
-GRANT EXECUTE ON FUNCTION {config}.request_analyze_now(integer, text) TO {viewer};
+GRANT EXECUTE ON FUNCTION {config}.request_analyze_now(integer, text) TO {web};
 -- #6231: the MCP route tools. mcp holds no INSERT on {config}.config_notification_routes and no SELECT or UPDATE on its
 --     destination columns, and gets none here: create_notification_route and update_notification_route reach the table only
 --     through these functions. create leaves every channel empty and update writes the match, scope, enabled flag, resolution
@@ -1810,10 +1899,10 @@ GRANT EXECUTE ON FUNCTION {config}.request_analyze_now(integer, text) TO {viewer
 --     (the address list is plain text). All three re-read the row FOR UPDATE and refuse an agent route inside the transaction,
 --     unless the actor the service passes is an operator-class token (#6542 part 2). Granted to mcp only.
 {BuildNotificationRouteFunctionsSql(config)}
-GRANT EXECUTE ON FUNCTION {config}.create_notification_route(text, boolean, integer, integer, boolean, integer, text) TO {mcp};
-GRANT EXECUTE ON FUNCTION {config}.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text) TO {mcp};
+GRANT EXECUTE ON FUNCTION {config}.create_notification_route(text, boolean, integer, integer, boolean, integer, text, text, text) TO {mcp};
+GRANT EXECUTE ON FUNCTION {config}.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text, text) TO {mcp};
 GRANT EXECUTE ON FUNCTION {config}.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) TO {mcp};
-GRANT EXECUTE ON FUNCTION {config}.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb) TO {mcp};
+GRANT EXECUTE ON FUNCTION {config}.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb, text, boolean) TO {mcp};
 -- #6394: the MCP generate_webhook_signing_key and remove_webhook_signing_key tools. mcp holds no UPDATE on a signing key column of {config}.config_notification
 --     or {config}.config_notification_routes (they are secret columns) and no SELECT on them, and gets none here. The service reads the saved (sealed) URL
 --     and proxy a new key is sealed for through its own store connection, so there is no function that returns them to mcp (an earlier build of this
@@ -1832,7 +1921,7 @@ GRANT EXECUTE ON FUNCTION {config}.clear_webhook_signing_key(integer) TO {mcp};
 --     It returns only whether each secret named in the call was saved before. The tool is served only under mcp.allowWrites with a token.
 --     Granted to mcp only.
 {BuildNotificationChannelsFunctionSql(config)}
-GRANT EXECUTE ON FUNCTION {config}.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean) TO {mcp};
+GRANT EXECUTE ON FUNCTION {config}.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean, text, text) TO {mcp};
 -- #6230: the MCP incident tools (analyze now, purge now, test a connection, pause, resume) queue their command through
 --     {config}.request_mcp_command, the only way the mcp role writes a command row. It names five command types and refuses any
 --     other, builds a connection test from the stored server row (no credential or connection string is an argument), and
@@ -1882,12 +1971,12 @@ GRANT EXECUTE ON FUNCTION {config}.read_mcp_command_result(bigint) TO {mcp};
 --     the batch, the section 1 rule): it exists so the pg_hba line written for postgres.network.role ""sources"" names one
 --     role. Every member that is not a registered, marked source login is revoked from it.
 REVOKE ALL ON {config}.external_alert_source, {config}.external_alert_pending, {config}.external_alert_state
-   FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+   FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
 GRANT SELECT ON {config}.external_alert_source, {config}.external_alert_pending, {config}.external_alert_state
-   TO {admin}, {viewer};
+   TO {admin}, {viewer}, {web};
 GRANT SELECT ON {config}.external_alert_source, {config}.external_alert_pending, {config}.external_alert_state
    TO {mcp};
-REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM {admin}, {viewer}, {mcp};
+REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM {admin}, {viewer}, {web}, {mcp};
 REVOKE EXECUTE ON FUNCTION {config}.config_bump_version(), {config}.config_service_bump() FROM PUBLIC;
 {BuildExternalAlertSourceRolesSql(config)}
 
@@ -1905,10 +1994,10 @@ REVOKE EXECUTE ON FUNCTION {config}.config_bump_version(), {config}.config_servi
 --     grant above, and before 10a.
 REVOKE ALL ON {config}.investigation_requests, {config}.investigation_request_alerts, {config}.investigation_reports,
    {config}.investigation_journal, {config}.investigation_notes, {config}.agent_environment_profiles
-   FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+   FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
 GRANT SELECT ON {config}.investigation_requests, {config}.investigation_request_alerts, {config}.investigation_reports,
    {config}.investigation_journal, {config}.investigation_notes, {config}.agent_environment_profiles
-   TO {admin}, {viewer};
+   TO {admin}, {viewer}, {web};
 GRANT SELECT ON {config}.investigation_requests, {config}.investigation_request_alerts, {config}.investigation_reports,
    {config}.investigation_journal, {config}.investigation_notes, {config}.agent_environment_profiles
    TO {mcp};
@@ -1987,8 +2076,8 @@ GRANT DELETE ON {config}.agent_environment_profiles TO {mcp};
 --     and values the agent may write, and the table has no authority column to protect. It runs after every blanket grant
 --     above, and before 10a.
 REVOKE ALL ON {config}.config_threshold_overrides, {config}.investigation_feedback
-   FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
-GRANT SELECT ON {config}.config_threshold_overrides, {config}.investigation_feedback TO {admin}, {viewer};
+   FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.config_threshold_overrides, {config}.investigation_feedback TO {admin}, {viewer}, {web};
 GRANT SELECT ON {config}.config_threshold_overrides, {config}.investigation_feedback TO {mcp};
 GRANT INSERT, UPDATE, DELETE ON {config}.config_threshold_overrides TO {admin};
 GRANT INSERT, UPDATE, DELETE ON {config}.investigation_feedback TO {admin};
@@ -2020,9 +2109,55 @@ GRANT UPDATE (verdict, corrected_verdict, missed_step, comment, author, created_
 --     takes every privilege from PUBLIC and the three roles, and SELECT goes back to all three. No MCP tool, web route or darling.json
 --     key can turn a switch on. How a person turns one on is a later grant, added here and in provision-roles.sql step 3j2. It runs
 --     after every blanket grant above, and before 10a.
-REVOKE ALL ON {config}.config_server_actions FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
-GRANT SELECT ON {config}.config_server_actions TO {admin}, {viewer};
+REVOKE ALL ON {config}.config_server_actions FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.config_server_actions TO {admin}, {viewer}, {web};
 GRANT SELECT ON {config}.config_server_actions TO {mcp};
+
+-- 10e3. The people directory (V237, #7107): the people, their identities and their grants. Every role reads them and NO role but the store
+--     owner (the service, through PersonDirectory, which journals each change) writes them: the default privileges would give admin
+--     INSERT/UPDATE/DELETE on a table made after them, so REVOKE ALL ... CASCADE takes every privilege from PUBLIC and the four roles,
+--     and SELECT goes back to all four. A table's REVOKE does not reach its identity sequences, which the default privileges give admin
+--     USAGE and SELECT on (so admin could call nextval and spend ids), so each sequence is revoked by name too. No MCP tool, web login or
+--     chat message writes a person. provision-roles.sql step 3j3 mirrors it. It runs after every blanket grant above, and before 10a.
+REVOKE ALL ON {config}.person, {config}.person_identity, {config}.person_grant FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.person, {config}.person_identity, {config}.person_grant TO {admin}, {viewer}, {web};
+GRANT SELECT ON {config}.person, {config}.person_identity, {config}.person_grant TO {mcp};
+DO $people_seq$
+DECLARE
+   sequence_name text;
+BEGIN
+   FOREACH sequence_name IN ARRAY ARRAY[
+      pg_catalog.pg_get_serial_sequence('{config}.person', 'person_id'),
+      pg_catalog.pg_get_serial_sequence('{config}.person_identity', 'identity_id'),
+      pg_catalog.pg_get_serial_sequence('{config}.person_grant', 'grant_id')]
+   LOOP
+      EXECUTE pg_catalog.format('REVOKE ALL ON SEQUENCE %s FROM PUBLIC, %I, %I, %I, %I', sequence_name, '{admin}', '{viewer}', '{web}', '{mcp}');
+   END LOOP;
+END $people_seq$;
+
+-- 10e4. The action proposals (V238, #7109). NO role but the store owner (the service's proposal store, which journals each state change)
+--     writes them: REVOKE ALL ... CASCADE takes every privilege the default privileges gave, and SELECT goes back to admin, viewer and web,
+--     which read proposals. mcp reads none: no tool reads a proposal, and its binding holds statement text. The table has no sequence.
+--     provision-roles.sql step 3j4 mirrors it.
+REVOKE ALL ON {config}.agent_action_proposals FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.agent_action_proposals TO {admin}, {viewer}, {web};
+
+-- 10e5. The request Slack threads (V252, #7656): the channel and parent ts of each request's thread. NO role but the store owner (the
+--     service's thread poster) writes them: REVOKE ALL ... CASCADE takes every privilege the default privileges gave, and SELECT goes
+--     back to admin alone. No viewer, web or MCP read exists. The table has no sequence. provision-roles.sql step 3j5 mirrors it.
+REVOKE ALL ON {config}.investigation_request_threads FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.investigation_request_threads TO {admin};
+-- 10e6. The Slack cards (V253, #7658): the channel and ts of each card the bot posted with buttons, and its state. Owner-written as the
+--       threads are, SELECT to admin alone. provision-roles.sql step 3j6 does the same.
+REVOKE ALL ON {config}.investigation_slack_posts FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.investigation_slack_posts TO {admin};
+-- 10e7. The chat requests (V254, #7659): who asked in a chat request, and each person's message. Owner-written as the threads are, SELECT to
+--       admin alone. mcp reads neither: a person's text reaches an agent only through the claim answer the service composes.
+--       provision-roles.sql step 3j7 does the same.
+REVOKE ALL ON {config}.investigation_request_askers FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.investigation_request_askers TO {admin};
+REVOKE ALL ON {config}.investigation_person_messages FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.investigation_person_messages TO {admin};
 
 -- 10f. Phase C tables (V193, #5997): the evidence of a request, the daily deadlock signature counts and the signature
 --     merges. Only the store owner (the service) writes them. The default privileges would give admin INSERT/UPDATE/DELETE
@@ -2034,9 +2169,9 @@ GRANT SELECT ON {config}.config_server_actions TO {mcp};
 --     signing keys from viewer and mcp.
 --     It runs after every blanket grant above, and before 10a.
 REVOKE ALL ON {config}.investigation_evidence, {config}.investigation_signature_days, {config}.investigation_signature_merges
-   FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+   FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
 GRANT SELECT ON {config}.investigation_evidence, {config}.investigation_signature_days, {config}.investigation_signature_merges
-   TO {admin}, {viewer};
+   TO {admin}, {viewer}, {web};
 GRANT SELECT ON {config}.investigation_evidence, {config}.investigation_signature_days, {config}.investigation_signature_merges
    TO {mcp};
 -- #6006: the one write a role gets here. The gated merge tool runs as mcp and adds a merge row, naming only the columns an
@@ -2056,10 +2191,10 @@ GRANT UPDATE (undone_at, undone_by) ON {config}.investigation_signature_merges T
 --     to {admin} only (the desktop Viewer reads them as admin), and the DO block checks that nothing else is left; the
 --     pin tables are read by the owner only. Provisioning runs after the migrations, so the tables exist here.
 REVOKE ALL ON {config}.password_key, {config}.password_key_service,
-   {config}.legacy_secret_pin, {config}.legacy_secret_pin_marker FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
-REVOKE ALL ON {config}.legacy_secret_pin_candidate FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+   {config}.legacy_secret_pin, {config}.legacy_secret_pin_marker FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+REVOKE ALL ON {config}.legacy_secret_pin_candidate FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
 -- V198 (#6066): the pseudonym key table; no role but the store owner reads it, so nothing is granted back.
-REVOKE ALL ON {config}.pseudonym_key FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+REVOKE ALL ON {config}.pseudonym_key FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
 GRANT SELECT ON {config}.password_key, {config}.password_key_service TO {admin};
 DO $do$
 DECLARE
@@ -2092,7 +2227,7 @@ BEGIN
       CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) AS a
       LEFT JOIN pg_catalog.pg_roles AS r ON r.oid = a.grantee
       WHERE c.oid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'), pg_catalog.to_regclass('{config}.legacy_secret_pin_candidate'), pg_catalog.to_regclass('{config}.pseudonym_key'))
-        AND (a.grantee = 0 OR r.rolname IN ('{admin}', '{viewer}', '{mcp}'))
+        AND (a.grantee = 0 OR r.rolname IN ('{admin}', '{viewer}', '{web}', '{mcp}'))
         AND NOT (COALESCE(r.rolname = '{admin}', false) AND a.privilege_type = 'SELECT'
                  AND c.oid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service')))
    ) THEN
@@ -2101,7 +2236,28 @@ BEGIN
 END
 $do$;
 
--- 11. Role memberships (#3914): the three roles hold none. Nothing above grants one, so every membership in which
+-- 10g. The web login's writes, taken from viewer. The web host used to connect as viewer and viewer held every write the
+--     dashboard's pages make; those grants now go to the {web} role (above), and viewer is SELECT plus the secret-column
+--     carve. A store that ran an earlier build keeps the old grants on viewer until this statement removes them, so every
+--     start revokes them and the first start after an upgrade converges. REVOKE removes only privileges granted by the role
+--     that issues it, and this batch granted them as that same owner. A table-level REVOKE of UPDATE also removes any
+--     column-level UPDATE, so config_service and config_alert_log leave viewer with no write at all.
+REVOKE INSERT, UPDATE, DELETE ON {config}.custom_views, {config}.custom_alert_rules, {config}.database_state_expected,
+   {config}.config_mute_rules, {config}.server_tags, {config}.server_tag_map, {config}.query_tags,
+   {config}.query_tag_assignments, {config}.query_tag_rules, {config}.query_tag_map, {config}.config_monitored_servers FROM {viewer};
+REVOKE UPDATE ON {config}.config_service, {config}.config_alert_log FROM {viewer};
+REVOKE EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) FROM {viewer};
+REVOKE EXECUTE ON FUNCTION {config}.insert_known_pattern({InsertKnownPatternSignature}) FROM {viewer};
+REVOKE EXECUTE ON FUNCTION {config}.update_known_pattern({UpdateKnownPatternSignature}) FROM {viewer};
+REVOKE EXECUTE ON FUNCTION {config}.delete_known_pattern(bigint) FROM {viewer};
+REVOKE EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSignature}) FROM {viewer};
+REVOKE EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSeventeenSignature}) FROM {viewer};
+REVOKE EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLegacySignature}) FROM {viewer};
+REVOKE EXECUTE ON FUNCTION {config}.request_snapshot_now(integer, text, text) FROM {viewer};
+REVOKE EXECUTE ON FUNCTION {config}.request_active_queries_live(integer, text) FROM {viewer};
+REVOKE EXECUTE ON FUNCTION {config}.request_analyze_now(integer, text) FROM {viewer};
+
+-- 11. Role memberships (#3914): the four roles hold none. Nothing above grants one, so every membership in which
 --     admin, viewer or mcp is the MEMBER was given by someone else, and each outranks the grants above -- a
 --     pg_read_all_data undoes the secret-column carve, and membership in the owner is every privilege the owner
 --     has. A role this batch adopts would otherwise keep them, so every one is revoked, every start.
@@ -2121,13 +2277,16 @@ BEGIN
       JOIN pg_catalog.pg_roles AS g ON g.oid = a.roleid
       JOIN pg_catalog.pg_roles AS m ON m.oid = a.member
       LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
-      WHERE m.rolname IN ('{admin}', '{viewer}', '{mcp}')
+      WHERE m.rolname IN ('{admin}', '{viewer}', '{web}', '{mcp}')
    LOOP
       EXECUTE format('REVOKE %I FROM %I', membership.granted, membership.member)
          || CASE WHEN membership.grantor IS NULL THEN '' ELSE format(' GRANTED BY %I', membership.grantor) END
          || ' CASCADE';
    END LOOP;
 END $do$;
+
+-- Managed web credentials have their own protected-table carve, after every blanket grant.
+{WebAccessGroupSchema.ReassertPermissionsSql}
 ";
     }
 
@@ -2269,7 +2428,7 @@ DECLARE
 BEGIN
    FOR own_role IN
       SELECT rolname FROM pg_catalog.pg_roles
-      WHERE rolname IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.McpRoleName}')
+      WHERE rolname IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.WebRoleName}', '{DarlingManagedPostgres.McpRoleName}')
    LOOP
       EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM %I', own_role);
    END LOOP;
@@ -2334,7 +2493,7 @@ BEGIN
    FOR source_login IN
       SELECT s.role_name, r.oid AS role_oid, r.rolsuper, r.rolcreaterole, r.rolcreatedb, r.rolreplication, r.rolbypassrls,
              (pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}') AS marked,
-             (r.rolname IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.McpRoleName}')
+             (r.rolname IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.WebRoleName}', '{DarlingManagedPostgres.McpRoleName}')
               OR r.rolname = current_user
               OR r.rolsuper
               OR r.oid = (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database())) AS reserved
@@ -2403,7 +2562,7 @@ END $do$;";
          FROM {config}.external_alert_source AS s
          JOIN pg_catalog.pg_roles AS r ON r.rolname = s.role_name
          WHERE pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}'
-           AND r.rolname NOT IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.McpRoleName}')
+           AND r.rolname NOT IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.WebRoleName}', '{DarlingManagedPostgres.McpRoleName}')
            AND r.rolname <> current_user
            AND NOT r.rolsuper
            AND r.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database())
@@ -2437,7 +2596,7 @@ END $do$;";
         var isSource = registryExists
             ? $@"EXISTS (SELECT 1 FROM {config}.external_alert_source AS s WHERE s.role_name = r.rolname)
               AND pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}'
-              AND r.rolname NOT IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.McpRoleName}')
+              AND r.rolname NOT IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.WebRoleName}', '{DarlingManagedPostgres.McpRoleName}')
               AND NOT r.rolsuper
               AND r.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database())"
             : "false";
@@ -2833,6 +2992,10 @@ REVOKE ALL ON FUNCTION {config}.request_analyze_now(integer, text) FROM PUBLIC;"
     internal static string BuildNotificationRouteFunctionsSql(string config) => $@"
 -- #6928 (V229): p_severities joins the argument list, so the six-argument function is dropped and stays uncallable. NULL is both.
 DROP FUNCTION IF EXISTS {config}.create_notification_route(text, boolean, integer, integer, boolean, integer);
+-- #6979 (V233): p_report_notice joins the argument list, so the seven-argument function is dropped and stays uncallable. NULL is off.
+DROP FUNCTION IF EXISTS {config}.create_notification_route(text, boolean, integer, integer, boolean, integer, text);
+-- #7656 (V252): p_slack_bot_channel joins the argument list, so the eight-argument function is dropped and stays uncallable. NULL is none.
+DROP FUNCTION IF EXISTS {config}.create_notification_route(text, boolean, integer, integer, boolean, integer, text, text);
 CREATE OR REPLACE FUNCTION {config}.create_notification_route(
    p_metric_match text,
    p_enabled boolean,
@@ -2840,7 +3003,9 @@ CREATE OR REPLACE FUNCTION {config}.create_notification_route(
    p_scope_tag_id integer,
    p_send_resolutions boolean,
    p_fallback_route_id integer,
-   p_severities text DEFAULT NULL)
+   p_severities text DEFAULT NULL,
+   p_report_notice text DEFAULT NULL,
+   p_slack_bot_channel text DEFAULT NULL)
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -2849,10 +3014,18 @@ AS $fn$
 DECLARE
    v_match text := btrim(COALESCE(p_metric_match, ''));
    v_severities text := lower(btrim(COALESCE(p_severities, 'both')));
+   v_report_notice text := lower(btrim(COALESCE(p_report_notice, 'off')));
+   v_slack_bot_channel text := btrim(COALESCE(p_slack_bot_channel, ''));
    v_id integer;
 BEGIN
    IF v_severities NOT IN ('both', 'critical', 'warning') THEN
       RAISE EXCEPTION 'severities is critical, warning or both.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_report_notice NOT IN ('off', 'needs_person_or_change', 'all') THEN
+      RAISE EXCEPTION 'report_notice is off, needs_person_or_change or all.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_slack_bot_channel <> '' AND v_slack_bot_channel !~ '^[CG][A-Z0-9]{{1,31}}$' THEN
+      RAISE EXCEPTION 'The Slack bot channel is a channel id: C or G, then capital letters and digits (for example C0123ABCDEF), or blank for none. Not the channel''s name.' USING ERRCODE = 'DL400';
    END IF;
    IF v_match = '' THEN
       RAISE EXCEPTION 'Choose a family or enter an exact metric name.' USING ERRCODE = 'DL400';
@@ -2879,20 +3052,26 @@ BEGIN
    -- goes where it went before (the next matching route, else the Settings channels), and no caller of this function can name a URL, a key or an address list.
    -- The agent columns keep their defaults too: this function never makes an agent route.
    INSERT INTO {config}.config_notification_routes
-      (metric_match, enabled, scope_server_id, scope_tag_id, send_resolutions, fallback_route_id, severities, modified_at)
+      (metric_match, enabled, scope_server_id, scope_tag_id, send_resolutions, fallback_route_id, severities, report_notice, slack_bot_channel, modified_at)
    VALUES
-      (v_match, COALESCE(p_enabled, true), p_scope_server_id, p_scope_tag_id, p_send_resolutions, p_fallback_route_id, v_severities,
+      (v_match, COALESCE(p_enabled, true), p_scope_server_id, p_scope_tag_id, p_send_resolutions, p_fallback_route_id, v_severities, v_report_notice, v_slack_bot_channel,
        (now() AT TIME ZONE 'UTC'))
    RETURNING route_id INTO v_id;
    RETURN v_id;
 END
 $fn$;
-REVOKE ALL ON FUNCTION {config}.create_notification_route(text, boolean, integer, integer, boolean, integer, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION {config}.create_notification_route(text, boolean, integer, integer, boolean, integer, text, text, text) FROM PUBLIC;
 -- #6542 part 2: the actor is an argument now and the before row comes back, so the old signature is dropped and stays uncallable.
 DROP FUNCTION IF EXISTS {config}.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer);
 -- #6928 (V229): p_severities joins the argument list, so the nine-argument function is dropped and stays uncallable. It is read only when
 -- p_columns names severities.
 DROP FUNCTION IF EXISTS {config}.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer);
+-- #6979 (V233): p_report_notice joins the argument list, so the ten-argument function is dropped and stays uncallable. It is read only when
+-- p_columns names report_notice.
+DROP FUNCTION IF EXISTS {config}.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text);
+-- #7656 (V252): p_slack_bot_channel joins the argument list, so the eleven-argument function is dropped and stays uncallable. It is read only when
+-- p_columns names slack_bot_channel.
+DROP FUNCTION IF EXISTS {config}.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text);
 CREATE OR REPLACE FUNCTION {config}.update_notification_route(
    p_route_id integer,
    p_actor text,
@@ -2903,7 +3082,9 @@ CREATE OR REPLACE FUNCTION {config}.update_notification_route(
    p_scope_tag_id integer,
    p_send_resolutions boolean,
    p_fallback_route_id integer,
-   p_severities text DEFAULT NULL)
+   p_severities text DEFAULT NULL,
+   p_report_notice text DEFAULT NULL,
+   p_slack_bot_channel text DEFAULT NULL)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -2921,11 +3102,13 @@ DECLARE
    v_resolutions boolean;
    v_fallback integer;
    v_severities text;
+   v_report_notice text;
+   v_slack_bot_channel text;
 BEGIN
    IF p_columns IS NULL OR cardinality(p_columns) = 0
       OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
-                 WHERE c.name IS NULL OR c.name NOT IN ('metric_match', 'enabled', 'scope', 'send_resolutions', 'fallback_route_id', 'severities')) THEN
-      RAISE EXCEPTION 'The columns to change are metric_match, enabled, scope, send_resolutions, fallback_route_id and severities.' USING ERRCODE = 'DL400';
+                 WHERE c.name IS NULL OR c.name NOT IN ('metric_match', 'enabled', 'scope', 'send_resolutions', 'fallback_route_id', 'severities', 'report_notice', 'slack_bot_channel')) THEN
+      RAISE EXCEPTION 'The columns to change are metric_match, enabled, scope, send_resolutions, fallback_route_id, severities, report_notice and slack_bot_channel.' USING ERRCODE = 'DL400';
    END IF;
    -- The row is read again here, under its lock, so the agent-route refusal and every check below are on what is stored now
    -- and not on what the caller read a moment ago.
@@ -2957,6 +3140,14 @@ BEGIN
    IF v_severities NOT IN ('both', 'critical', 'warning') THEN
       RAISE EXCEPTION 'severities is critical, warning or both.' USING ERRCODE = 'DL400';
    END IF;
+   v_report_notice := CASE WHEN 'report_notice' = ANY (p_columns) THEN lower(btrim(COALESCE(p_report_notice, ''))) ELSE v_row.report_notice END;
+   IF v_report_notice NOT IN ('off', 'needs_person_or_change', 'all') THEN
+      RAISE EXCEPTION 'report_notice is off, needs_person_or_change or all.' USING ERRCODE = 'DL400';
+   END IF;
+   v_slack_bot_channel := CASE WHEN 'slack_bot_channel' = ANY (p_columns) THEN btrim(COALESCE(p_slack_bot_channel, '')) ELSE v_row.slack_bot_channel END;
+   IF v_slack_bot_channel <> '' AND v_slack_bot_channel !~ '^[CG][A-Z0-9]{{1,31}}$' THEN
+      RAISE EXCEPTION 'The Slack bot channel is a channel id: C or G, then capital letters and digits (for example C0123ABCDEF), or blank for none. Not the channel''s name.' USING ERRCODE = 'DL400';
+   END IF;
    IF v_match = '' THEN
       RAISE EXCEPTION 'Choose a family or enter an exact metric name.' USING ERRCODE = 'DL400';
    END IF;
@@ -2981,6 +3172,13 @@ BEGIN
       AND NOT EXISTS (SELECT 1 FROM {config}.config_notification_routes WHERE route_id = v_fallback) THEN
       RAISE EXCEPTION 'The fallback route does not exist.' USING ERRCODE = 'DL404';
    END IF;
+   -- #7109: the Level 3 route with approval off is not made or kept live by an MCP change. The caller read the approval a moment ago, so the
+   -- stored value is checked again here, under the lock: a person who saved approval off after that read leaves a route this call must not
+   -- enable or reshape. A person in the Viewer or on the web writes the table on their own login and is not held to this.
+   IF v_operator AND v_row.agent_level = 3 AND v_row.action_approval = 'off'
+      AND (('enabled' = ANY (p_columns) AND v_enabled) OR 'metric_match' = ANY (p_columns) OR 'scope' = ANY (p_columns) OR 'severities' = ANY (p_columns)) THEN
+      RAISE EXCEPTION 'Route % is a Level 3 route with action approval off, so it is not enabled, and its match, scope or severities are not changed, over MCP. A person can make this change in the Viewer or on the web dashboard, or set action_approval to required here first.', p_route_id USING ERRCODE = 'DL403';
+   END IF;
    -- The one UPDATE names no destination column: the sealed webhook values, the key, the signing keys and the address list
    -- stay exactly as stored.
    UPDATE {config}.config_notification_routes
@@ -2991,6 +3189,8 @@ BEGIN
           send_resolutions = v_resolutions,
           fallback_route_id = v_fallback,
           severities = v_severities,
+          report_notice = v_report_notice,
+          slack_bot_channel = v_slack_bot_channel,
           modified_at = (now() AT TIME ZONE 'UTC')
     WHERE route_id = p_route_id;
    -- The row as it was before this change, in the journal's words: set_notification_route_agent journals it as the before of a
@@ -2999,16 +3199,20 @@ BEGIN
       'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
       'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
       'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled,
-      'severities', v_row.severities);
+      'severities', v_row.severities, 'report_notice', v_row.report_notice, 'slack_bot_channel', v_row.slack_bot_channel,
+      'action_approval', v_row.action_approval, 'approval_single_person', v_row.approval_single_person);
 END
 $fn$;
-REVOKE ALL ON FUNCTION {config}.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION {config}.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text, text) FROM PUBLIC;
 -- #6542: a named operator token sets a route's agent level, its four limits and its fallback over MCP through this function, and
 -- the change is journaled as route_agent_changed under the token's name (operator:<name>), in the same transaction. Levels 0 to 3 are
 -- set here (MCP is full admin). A level 3 server action still needs that server's switch (config_server_actions) and its remediation login.
 -- p_before is the row update_notification_route returned in the same transaction, so the journal row names a match, scope or enabled change
 -- made in the same call. The old signature is dropped and stays uncallable.
 DROP FUNCTION IF EXISTS {config}.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean);
+-- #7109 (V238): p_action_approval and p_approval_single_person join the argument list, so the eleven-argument function is dropped and
+-- stays uncallable. MCP can turn approval on but never off: action_approval goes only to required, approval_single_person only to false.
+DROP FUNCTION IF EXISTS {config}.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb);
 CREATE OR REPLACE FUNCTION {config}.set_notification_route_agent(
    p_route_id integer,
    p_actor text,
@@ -3020,7 +3224,9 @@ CREATE OR REPLACE FUNCTION {config}.set_notification_route_agent(
    p_agent_expiry_minutes integer,
    p_fallback_route_id integer,
    p_created boolean,
-   p_before jsonb)
+   p_before jsonb,
+   p_action_approval text DEFAULT NULL,
+   p_approval_single_person boolean DEFAULT NULL)
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -3034,6 +3240,8 @@ DECLARE
    v_lease integer;
    v_expiry integer;
    v_fallback integer;
+   v_approval text;
+   v_single boolean;
    v_changed text[] := ARRAY[]::text[];
    v_before jsonb;
    v_after jsonb;
@@ -3044,8 +3252,9 @@ BEGIN
    -- No column is allowed only with p_before: a match, scope or enabled change to a route with an agent setting is journaled on its own.
    IF p_columns IS NULL OR (cardinality(p_columns) = 0 AND p_before IS NULL)
       OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
-                 WHERE c.name IS NULL OR c.name NOT IN ('agent_level', 'agent_max_per_hour', 'agent_max_per_day', 'agent_lease_minutes', 'agent_expiry_minutes', 'fallback_route_id')) THEN
-      RAISE EXCEPTION 'The columns to change are agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes and fallback_route_id.' USING ERRCODE = 'DL400';
+                 WHERE c.name IS NULL OR c.name NOT IN ('agent_level', 'agent_max_per_hour', 'agent_max_per_day', 'agent_lease_minutes', 'agent_expiry_minutes', 'fallback_route_id',
+                                                        'action_approval', 'approval_single_person')) THEN
+      RAISE EXCEPTION 'The columns to change are agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, fallback_route_id, action_approval and approval_single_person.' USING ERRCODE = 'DL400';
    END IF;
    SELECT * INTO v_row FROM {config}.config_notification_routes WHERE route_id = p_route_id FOR UPDATE;
    IF NOT FOUND THEN
@@ -3057,6 +3266,21 @@ BEGIN
    v_lease := CASE WHEN 'agent_lease_minutes' = ANY (p_columns) THEN p_agent_lease_minutes ELSE v_row.agent_lease_minutes END;
    v_expiry := CASE WHEN 'agent_expiry_minutes' = ANY (p_columns) THEN p_agent_expiry_minutes ELSE v_row.agent_expiry_minutes END;
    v_fallback := CASE WHEN 'fallback_route_id' = ANY (p_columns) THEN p_fallback_route_id ELSE v_row.fallback_route_id END;
+   v_approval := CASE WHEN 'action_approval' = ANY (p_columns) THEN lower(btrim(COALESCE(p_action_approval, ''))) ELSE v_row.action_approval END;
+   v_single := CASE WHEN 'approval_single_person' = ANY (p_columns) THEN COALESCE(p_approval_single_person, v_row.approval_single_person) ELSE v_row.approval_single_person END;
+   -- #7109: this function is the MCP path only (the Viewer and the web write the table on their own logins), and MCP turns approval
+   -- on but never off, so an alert never reaches a Level 3 route that runs an action without a person's approval through it.
+   IF v_approval IS DISTINCT FROM v_row.action_approval AND v_approval IS DISTINCT FROM 'required' THEN
+      RAISE EXCEPTION 'MCP sets action_approval only to required, never to off. A person turns approval off in the Viewer or on the web dashboard.' USING ERRCODE = 'DL403';
+   END IF;
+   IF v_single AND NOT v_row.approval_single_person THEN
+      RAISE EXCEPTION 'MCP sets approval_single_person only to false, never to true. A person turns it on in the Viewer or on the web dashboard.' USING ERRCODE = 'DL403';
+   END IF;
+   -- #7109: the approval value is read again under the lock. A person who saved approval off after the caller's read leaves a route that this
+   -- call must not raise to Level 3, or the result is a Level 3 route with no approval that nobody chose.
+   IF v_level = 3 AND v_approval = 'off' AND 'agent_level' = ANY (p_columns) AND v_row.agent_level IS DISTINCT FROM 3 THEN
+      RAISE EXCEPTION 'Route % has action approval off, so it is not raised to Level 3 over MCP. A person can make this change in the Viewer or on the web dashboard, or set action_approval to required in the same call.', p_route_id USING ERRCODE = 'DL403';
+   END IF;
    IF v_level IS NOT NULL AND v_level NOT IN (0, 1, 2, 3) THEN
       RAISE EXCEPTION 'The agent level is Off (0), Investigate (1), Act (2) or Act on servers (3).' USING ERRCODE = 'DL400';
    END IF;
@@ -3088,6 +3312,21 @@ BEGIN
       IF (p_before ->> 'severities') IS DISTINCT FROM v_row.severities AND ((p_before ->> 'agent_level') IS NOT NULL OR v_level IS NOT NULL) THEN
          v_changed := array_append(v_changed, 'severities');
       END IF;
+      -- #6979: the report notice setting decides whether the route's requests post a notice. Only a route with an agent setting.
+      IF (p_before ->> 'report_notice') IS DISTINCT FROM v_row.report_notice AND ((p_before ->> 'agent_level') IS NOT NULL OR v_level IS NOT NULL) THEN
+         v_changed := array_append(v_changed, 'report_notice');
+      END IF;
+      -- #7656: the Slack bot channel is where the route's bot posts, named like the report notice. Only a route with an agent setting.
+      IF (p_before ->> 'slack_bot_channel') IS DISTINCT FROM v_row.slack_bot_channel AND ((p_before ->> 'agent_level') IS NOT NULL OR v_level IS NOT NULL) THEN
+         v_changed := array_append(v_changed, 'slack_bot_channel');
+      END IF;
+   END IF;
+   -- #7109: the approval setting and single-person approval, named like the report notice. Only a route with an agent setting.
+   IF v_approval IS DISTINCT FROM v_row.action_approval AND (v_row.agent_level IS NOT NULL OR v_level IS NOT NULL) THEN
+      v_changed := array_append(v_changed, 'action_approval');
+   END IF;
+   IF v_single IS DISTINCT FROM v_row.approval_single_person AND (v_row.agent_level IS NOT NULL OR v_level IS NOT NULL) THEN
+      v_changed := array_append(v_changed, 'approval_single_person');
    END IF;
    IF v_level IS DISTINCT FROM v_row.agent_level THEN v_changed := array_append(v_changed, 'agent_level'); END IF;
    IF v_hour IS DISTINCT FROM v_row.agent_max_per_hour THEN v_changed := array_append(v_changed, 'agent_max_per_hour'); END IF;
@@ -3105,6 +3344,8 @@ BEGIN
           agent_lease_minutes = v_lease,
           agent_expiry_minutes = v_expiry,
           fallback_route_id = v_fallback,
+          action_approval = v_approval,
+          approval_single_person = v_single,
           modified_at = (now() AT TIME ZONE 'UTC')
     WHERE route_id = p_route_id;
    -- The journal row the Viewer's save writes (NotificationRouteWriter.AgentChange): a new route journals only when it sets a level,
@@ -3114,12 +3355,14 @@ BEGIN
          'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
          'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
          'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled,
-         'severities', v_row.severities) END;
+         'severities', v_row.severities, 'report_notice', v_row.report_notice, 'slack_bot_channel', v_row.slack_bot_channel,
+         'action_approval', v_row.action_approval, 'approval_single_person', v_row.approval_single_person) END;
       v_after := jsonb_build_object(
          'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
          'agent_level', v_level, 'agent_max_per_hour', v_hour, 'agent_max_per_day', v_day,
          'agent_lease_minutes', v_lease, 'agent_expiry_minutes', v_expiry, 'enabled', v_row.enabled,
-         'severities', v_row.severities);
+         'severities', v_row.severities, 'report_notice', v_row.report_notice, 'slack_bot_channel', v_row.slack_bot_channel,
+         'action_approval', v_approval, 'approval_single_person', v_single);
       INSERT INTO {config}.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail)
       VALUES (now(), NULL, p_route_id, v_row.scope_server_id, 'route_agent_changed', p_actor,
               CASE WHEN COALESCE(p_created, false) THEN 'created route' ELSE 'changed ' || array_to_string(v_changed, ', ') END,
@@ -3127,7 +3370,7 @@ BEGIN
    END IF;
 END
 $fn$;
-REVOKE ALL ON FUNCTION {config}.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION {config}.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb, text, boolean) FROM PUBLIC;
 -- The return type changed (a previous value is now only a flag for whether one was saved), which CREATE OR REPLACE cannot do on its own.
 -- #6542 part 2: the actor is an argument too, so the old signature is dropped and stays uncallable.
 DROP FUNCTION IF EXISTS {config}.set_notification_route_destinations(integer, text[], text, text, text, text, text);
@@ -3323,6 +3566,8 @@ REVOKE ALL ON FUNCTION {config}.clear_webhook_signing_key(integer) FROM PUBLIC;"
     /// The SECURITY DEFINER function (#6392) the MCP <c>update_notification_channels</c> tool writes the default notification channels through: <c>set_notification_channels</c>. The <c>mcp</c> login holds no UPDATE on a secret column of <c>config_notification</c>; the service seals each secret and this function stores only sealed text or empty, makes the Viewer's refusals on the stored row, and returns only whether each secret was saved. Created and REVOKEd from PUBLIC here; the caller adds the GRANT EXECUTE to mcp only.
     /// </summary>
     internal static string BuildNotificationChannelsFunctionSql(string config) => $@"
+-- #7656: the signature without the Slack bot token parameters; the caller's GRANT names the current one.
+DROP FUNCTION IF EXISTS {config}.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean);
 CREATE OR REPLACE FUNCTION {config}.set_notification_channels(
    p_columns text[],
    p_smtp_host text,
@@ -3343,9 +3588,12 @@ CREATE OR REPLACE FUNCTION {config}.set_notification_channels(
    p_pagerduty_routing_key text,
    p_pagerduty_use_eu_region boolean,
    p_pagerduty_proxy text,
-   p_pagerduty_auto_resolve boolean)
+   p_pagerduty_auto_resolve boolean,
+   p_slack_bot_token text,
+   p_slack_app_token text)
 RETURNS TABLE (prev_smtp_username_set boolean, prev_smtp_password_set boolean, prev_teams_url_set boolean, prev_slack_url_set boolean,
-               prev_generic_url_set boolean, prev_generic_headers_set boolean, prev_pagerduty_routing_key_set boolean)
+               prev_generic_url_set boolean, prev_generic_headers_set boolean, prev_pagerduty_routing_key_set boolean,
+               prev_slack_bot_token_set boolean, prev_slack_app_token_set boolean)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -3371,13 +3619,16 @@ DECLARE
    v_eu boolean;
    v_pd_proxy text;
    v_auto boolean;
+   v_bot_token text;
+   v_app_token text;
 BEGIN
    IF p_columns IS NULL OR cardinality(p_columns) = 0
       OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
                  WHERE c.name IS NULL OR c.name NOT IN (
                     'smtp_host', 'smtp_port', 'smtp_use_ssl', 'smtp_username', 'smtp_encrypted_password', 'smtp_from_address', 'smtp_recipients',
                     'teams_url', 'teams_proxy', 'slack_url', 'slack_proxy', 'generic_url', 'generic_headers', 'generic_body_template',
-                    'generic_proxy', 'pagerduty_routing_key', 'pagerduty_use_eu_region', 'pagerduty_proxy', 'pagerduty_auto_resolve')) THEN
+                    'generic_proxy', 'pagerduty_routing_key', 'pagerduty_use_eu_region', 'pagerduty_proxy', 'pagerduty_auto_resolve',
+                    'slack_bot_token', 'slack_app_token')) THEN
       RAISE EXCEPTION 'The notification channel columns to change are the SMTP, Teams, Slack, generic webhook and PagerDuty settings.' USING ERRCODE = 'DL400';
    END IF;
    -- The row is read under its lock, so every check below is on what is stored now.
@@ -3404,6 +3655,8 @@ BEGIN
    v_eu := CASE WHEN 'pagerduty_use_eu_region' = ANY (p_columns) THEN COALESCE(p_pagerduty_use_eu_region, v_row.pagerduty_use_eu_region) ELSE v_row.pagerduty_use_eu_region END;
    v_pd_proxy := CASE WHEN 'pagerduty_proxy' = ANY (p_columns) THEN COALESCE(p_pagerduty_proxy, '') ELSE v_row.pagerduty_proxy END;
    v_auto := CASE WHEN 'pagerduty_auto_resolve' = ANY (p_columns) THEN COALESCE(p_pagerduty_auto_resolve, v_row.pagerduty_auto_resolve) ELSE v_row.pagerduty_auto_resolve END;
+   v_bot_token := CASE WHEN 'slack_bot_token' = ANY (p_columns) THEN COALESCE(p_slack_bot_token, '') ELSE v_row.slack_bot_token END;
+   v_app_token := CASE WHEN 'slack_app_token' = ANY (p_columns) THEN COALESCE(p_slack_app_token, '') ELSE v_row.slack_app_token END;
    IF v_port < 1 OR v_port > 65535 THEN
       RAISE EXCEPTION 'The SMTP port is between 1 and 65535.' USING ERRCODE = 'DL400';
    END IF;
@@ -3415,7 +3668,8 @@ BEGIN
    -- of sealed:v1:, the 16 character key id, base64, at most 16384 characters), so no caller of it can store a secret as text.
    IF EXISTS (SELECT 1
                 FROM (VALUES (v_password, COALESCE(v_row.smtp_encrypted_password, '')), (v_teams, v_row.teams_url), (v_slack, v_row.slack_url),
-                             (v_generic, v_row.generic_url), (v_headers, v_row.generic_headers), (v_key, v_row.pagerduty_routing_key))
+                             (v_generic, v_row.generic_url), (v_headers, v_row.generic_headers), (v_key, v_row.pagerduty_routing_key),
+                             (v_bot_token, v_row.slack_bot_token), (v_app_token, v_row.slack_app_token))
                      AS w(new_value, old_value)
                WHERE w.new_value <> w.old_value AND w.new_value <> ''
                  AND (length(w.new_value) > 16384
@@ -3493,6 +3747,8 @@ BEGIN
           pagerduty_use_eu_region = v_eu,
           pagerduty_proxy = v_pd_proxy,
           pagerduty_auto_resolve = v_auto,
+          slack_bot_token = v_bot_token,
+          slack_app_token = v_app_token,
           modified_at = (now() AT TIME ZONE 'UTC')
     WHERE id = 1;
    -- What was stored before comes back only as a flag for whether a secret was saved, and only for the columns this call names: the
@@ -3504,10 +3760,12 @@ BEGIN
       CASE WHEN 'slack_url' = ANY (p_columns) THEN v_row.slack_url <> '' END,
       CASE WHEN 'generic_url' = ANY (p_columns) THEN v_row.generic_url <> '' END,
       CASE WHEN 'generic_headers' = ANY (p_columns) THEN v_row.generic_headers <> '' END,
-      CASE WHEN 'pagerduty_routing_key' = ANY (p_columns) THEN v_row.pagerduty_routing_key <> '' END;
+      CASE WHEN 'pagerduty_routing_key' = ANY (p_columns) THEN v_row.pagerduty_routing_key <> '' END,
+      CASE WHEN 'slack_bot_token' = ANY (p_columns) THEN v_row.slack_bot_token <> '' END,
+      CASE WHEN 'slack_app_token' = ANY (p_columns) THEN v_row.slack_app_token <> '' END;
 END
 $fn$;
-REVOKE ALL ON FUNCTION {config}.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean) FROM PUBLIC;";
+REVOKE ALL ON FUNCTION {config}.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean, text, text) FROM PUBLIC;";
 
     /// <summary>
     /// The SECURITY DEFINER read function (#6230) behind <c>get_command_result</c> and the collector-run state read: one command's
@@ -3639,7 +3897,10 @@ REVOKE ALL ON FUNCTION {config}.request_mcp_command(text, integer, integer, text
     // NOT IN (...) beside the column-set check) instead. query_store_replica (#6254) is one: never add it here, a direct UPDATE
     // would skip the edit core.
     /// <summary>The columns of <c>config.config_monitored_servers</c> the <c>mcp</c> login may UPDATE directly (#5452): every column except the AWS role, the external ID, the generated external-ID flag and <c>query_store_replica</c> (#6254), which change only through <c>config.edit_monitored_server</c>. <c>tools/provision-roles.sql</c> carries the same list.</summary>
-    internal const string McpMonitoredServerUpdateColumns =
+    internal const string McpMonitoredServerUpdateColumns = McpMonitoredServerBaseUpdateColumns + ", xe_session_databases";
+
+    /// <summary>The columns of <see cref="McpMonitoredServerUpdateColumns"/> granted in the one main <c>GRANT UPDATE</c>. <c>xe_session_databases</c> (V247, #7639) is left out and granted in its own statement guarded on the column, in this batch and in <c>tools/provision-roles.sql</c>, so a store below V247 still commits the rest.</summary>
+    internal const string McpMonitoredServerBaseUpdateColumns =
         "server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password";
 
     /// <summary>The argument types of <c>config.edit_monitored_server</c> (#5240, 18 since #6254), in order. The one place the signature is
@@ -4107,10 +4368,23 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
     /// <summary>The journal events only the owner writes (<see cref="BuildJournalEventRulesSql"/>), as a SQL list. <c>server_action_switched</c>
     /// is the owner's alone (#6269): only the switch writer, on the owner connection, journals it, so no other login can write who changed a switch.
     /// So are the three rows of an agent action (<see cref="AgentActionEvents.OwnerOnly"/>, #6569): the Agent changes list offers Undo on an
-    /// <c>action_called</c> row, so only the service, which runs the action and checks the request, journals it and its result.</summary>
+    /// <c>action_called</c> row, so only the service, which runs the action and checks the request, journals it and its result.
+    /// So are the people directory's events (<see cref="PersonEvents.OwnerOnly"/>, #7107): only <see cref="PersonDirectory"/>, on the owner connection, journals
+    /// who mapped or granted a person. So are an action proposal's events (<see cref="ProposalEvents.OwnerOnly"/>, #7109): otherwise the mcp or
+    /// admin login could write a false <c>proposal_approved</c> row. So is a proposal's notice mark
+    /// (<see cref="InvestigationRequestStore.ProposalNoticeSent"/>, #7109): another login that wrote it first would stop the proposal's notice. So is
+    /// <see cref="InvestigationRequestStore.AskerJournalEvent"/> (#7109): the approver check reads askers from it, so a row another login wrote would
+    /// block an approver.</summary>
     internal static string JournalOwnerEventList => string.Join(", ",
         InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent).Append(ServerActionSwitches.JournalEvent)
             .Concat(AgentActionEvents.OwnerOnly)
+            .Concat(PersonEvents.OwnerOnly)
+            .Concat(ProposalEvents.OwnerOnly)
+            .Append(InvestigationRequestStore.ProposalNoticeSent)
+            .Append(InvestigationRequestStore.SlackThreadPosted)
+            .Append(InvestigationRequestStore.SlackPressed)
+            .Append(InvestigationRequestStore.AskerJournalEvent)
+            .Append(InvestigationRequestStore.AgentMessage)
             .Select(k => "'" + k + "'"));
 
     /// <summary>
@@ -4293,7 +4567,7 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(
-                "Could not create the store's password or journal rules ({Message}). Run provision-roles.sql against the store as the role that owns its tables.",
+                "Could not create the store's password or journal rules ({Message}). Run " + ProvisionRolesScriptPath + " against the store as the role that owns its tables.",
                 ex.Message);
             return false;
         }
@@ -4540,7 +4814,7 @@ WHERE t.tgrelid = 'config.investigation_journal'::regclass
             await TakeReadSavepointAsync(transaction, cancellationToken);
             await using var command = new NpgsqlCommand(
                 "SELECT rolname::text, rolpassword FROM pg_catalog.pg_authid WHERE rolname = ANY($1)", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
-            command.Parameters.AddWithValue(new[] { DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.McpRoleName });
+            command.Parameters.AddWithValue(new[] { DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.WebRoleName, DarlingManagedPostgres.McpRoleName });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -4563,7 +4837,7 @@ WHERE t.tgrelid = 'config.investigation_journal'::regclass
     /// password (the file was regenerated). Pure, so the decision is pinned without a server.
     /// </summary>
     internal static PasswordReassert PlanPasswordReassert(
-        IReadOnlyDictionary<string, string?> stored, string adminPassword, string viewerPassword, string mcpPassword)
+        IReadOnlyDictionary<string, string?> stored, string adminPassword, string viewerPassword, string mcpPassword, string webPassword)
     {
         ArgumentNullException.ThrowIfNull(stored);
 
@@ -4581,6 +4855,11 @@ WHERE t.tgrelid = 'config.investigation_journal'::regclass
         if (!ScramSha256Verifier.Verifies(stored.GetValueOrDefault(DarlingManagedPostgres.McpRoleName), mcpPassword))
         {
             reassert |= PasswordReassert.Mcp;
+        }
+
+        if (!ScramSha256Verifier.Verifies(stored.GetValueOrDefault(DarlingManagedPostgres.WebRoleName), webPassword))
+        {
+            reassert |= PasswordReassert.Web;
         }
 
         return reassert;
@@ -4604,6 +4883,11 @@ WHERE t.tgrelid = 'config.investigation_journal'::regclass
             roles.Add(DarlingManagedPostgres.McpRoleName);
         }
 
+        if ((reassert & PasswordReassert.Web) != 0)
+        {
+            roles.Add(DarlingManagedPostgres.WebRoleName);
+        }
+
         return string.Join(", ", roles);
     }
 
@@ -4619,6 +4903,60 @@ WHERE t.tgrelid = 'config.investigation_journal'::regclass
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "PerformanceMonitorDarling", "compose-credentials")
         : "/var/lib/darling/credentials";
+
+    /// <summary>The mount point of the compose distribution's credential volume (#8141).</summary>
+    internal const string ComposeCredentialVolumeRoot = "/var/lib/darling";
+
+    /// <summary>
+    /// The command that gives the credential file or directory at <paramref name="path"/> to <paramref name="userId"/>
+    /// (#8141). Inside the compose volume the files are reachable only through the container, so the fix is the
+    /// one-off root container that chowns the volume; elsewhere it is a recursive chown of the path, so a directory's
+    /// files follow it.
+    /// </summary>
+    internal static string CredentialOwnershipFix(uint userId, string path)
+    {
+        var u = userId.ToString(CultureInfo.InvariantCulture);
+        return path == ComposeCredentialVolumeRoot || path.StartsWith(ComposeCredentialVolumeRoot + "/", StringComparison.Ordinal)
+            ? $"{ComposeVolumeOwnershipCommand(userId)} "
+                + "(on Kubernetes, run the one-off root Job under Container user in docs/darling/security.md instead)"
+            : $"chown -R {u}:{u} '{path}'";
+    }
+
+    /// <summary>The one-off root compose container that gives the whole credential volume to <paramref name="userId"/>
+    /// (#8141), as docs/darling/security.md gives it.</summary>
+    internal static string ComposeVolumeOwnershipCommand(uint userId)
+    {
+        var u = userId.ToString(CultureInfo.InvariantCulture);
+        return $"docker compose run --rm --no-deps --user 0 --entrypoint chown darling -R {u}:{u} {ComposeCredentialVolumeRoot}";
+    }
+
+    /// <summary>The image's own user, <c>$APP_UID</c> of the .NET base image, which owns the image's /var/lib/darling (#8141).</summary>
+    internal const uint ImageUserId = 1654;
+
+    /// <summary>
+    /// What to do instead of only the chown when a service that is neither root nor the image's user finds a compose
+    /// credential path owned by the image's user (#8141 review: <c>user:</c> set to another uid, or OpenShift's random
+    /// one). With nothing mounted at /var/lib/darling that is the image's own directory, and the one-off container's chown
+    /// changes only that container, so the next start refuses again: run as the image's user, or mount a volume. A new
+    /// named volume is seeded from the image, owned by 1654, so the chown still follows the mount; a mounted volume keeps
+    /// it. Null when it is not this case.
+    /// </summary>
+    internal static string? ImageOwnedCredentialAdvice(uint userId, string path, uint ownerUserId)
+    {
+        if (ownerUserId != ImageUserId || userId == ImageUserId || userId == 0
+            || (path != ComposeCredentialVolumeRoot && !path.StartsWith(ComposeCredentialVolumeRoot + "/", StringComparison.Ordinal)))
+        {
+            return null;
+        }
+
+        var image = ImageUserId.ToString(CultureInfo.InvariantCulture);
+        return $"run the service as user {image}, or mount a volume at {ComposeCredentialVolumeRoot} "
+            + $"(or {ComposeCredentialVolumeRoot}/credentials) and recreate the container (docker compose up -d); "
+            + $"with nothing mounted at {ComposeCredentialVolumeRoot} this is the image's own directory, and a chown in a "
+            + "one-off container changes only that container, so the next start refuses again; "
+            + $"a new named volume starts owned by user {image}, so then, as for a volume already mounted there, "
+            + $"run: {CredentialOwnershipFix(userId, path)}";
+    }
 
     /// <summary>The compose store's credential file for <paramref name="role"/>: the managed file's name without
     /// the <c>.dpapi</c> extension, because it holds the password itself (#3914).</summary>
@@ -4655,7 +4993,7 @@ WHERE u.rolname = current_user";
         NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(ComposeStoreFactsSql, connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
-        command.Parameters.AddWithValue(new[] { DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.McpRoleName });
+        command.Parameters.AddWithValue(new[] { DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.WebRoleName, DarlingManagedPostgres.McpRoleName });
 
         string? login = null;
         string? database = null;
@@ -4730,6 +5068,10 @@ WHERE u.rolname = current_user";
 
         return null;
     }
+
+    /// <summary>True when a refusal from <see cref="RefuseComposeStore"/> names <paramref name="role"/> as a role it found that the service did not create.</summary>
+    internal static bool RefusalNamesForeignRole(string? refusal, string role) =>
+        refusal is not null && refusal.Contains($"'{role}' (", StringComparison.Ordinal);
 
     private static string DescribeForeignRoleMarker(string? marker) => marker switch
     {
@@ -4827,9 +5169,15 @@ WHERE u.rolname = current_user";
                 return EarlierComposeCredential.Trusted(password);
             }
 
-            return EarlierComposeCredential.None(untrusted is null
-                ? $"{path} does not exist"
-                : $"{path} is not trusted ({untrusted})");
+            if (untrusted is not null)
+            {
+                return EarlierComposeCredential.None($"{path} is not trusted ({untrusted})");
+            }
+
+            /* #8141: a file in a directory the service cannot list reads as absent; say so, never "does not exist". */
+            return EarlierComposeCredential.None(DarlingServiceKeyFile.UnreadableDirectoryReason(directory) is { } unreadable
+                ? $"{path} could not be looked for: {unreadable}"
+                : $"{path} does not exist");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -4876,12 +5224,14 @@ WHERE u.rolname = current_user";
     /// readable by ordinary users (<see cref="DarlingFileSecurity.IsReadableByOrdinaryUsers"/>). A plaintext password
     /// others could read may already be theirs, so such a file is distrusted and regenerated, not re-hardened.
     ///
-    /// <para><b>What this cannot see.</b> Managed .NET cannot read a Unix file's owner, and this adds no native
-    /// interop to get it, so a file another user created with mode 0600 passes the mode check. What keeps anyone
-    /// else from creating one is the directory: the shipped <c>darling-credentials</c> named volume is seeded
-    /// root:root 0700 by the Dockerfile, and the service sets the directory owner-only again every start and
-    /// distrusts it when it cannot (<see cref="PrepareComposeCredentialDirectory"/>). A bind mount whose host
-    /// directory another host user owns or can write to is outside what either check can see.</para>
+    /// <para><b>What this does not check.</b> This method looks at the file's mode, not its owner, so a file another
+    /// user created with mode 0600 passes it. The owner of the credentials directory is checked at start (a
+    /// directory owned by another user stops collection), and <see cref="DarlingServiceKeyFile.UnexpectedOwnerReason"/>
+    /// checks the password key's owner. What keeps anyone else from creating a role credential file is the
+    /// directory: the shipped <c>darling-credentials</c> named volume is seeded owned by user 1654, mode 0700, by the
+    /// Dockerfile, and the service sets the directory owner-only again every start and distrusts it when it cannot
+    /// (<see cref="PrepareComposeCredentialDirectory"/>). A bind mount whose host directory another host user can
+    /// write to is outside what these checks can see.</para>
     /// </summary>
     internal static string? UntrustedComposeCredentialReason(FileInfo info)
     {
@@ -4916,6 +5266,48 @@ WHERE u.rolname = current_user";
 
         var mode = File.GetUnixFileMode(info.FullName);
         return (mode & GroupOrOtherAccess) == 0 ? null : $"its mode {Octal(mode)} gives other users access";
+    }
+
+    /// <summary>
+    /// Why the service must not start collecting with the credentials directory at <paramref name="directory"/> (#8141):
+    /// another user owns it, or its owner cannot be read because a parent cannot be searched. One sentence with the path,
+    /// both users and the command that fixes it; no exception text, because it reaches the ping body. Null when there is
+    /// nothing to refuse: this platform has no Unix modes, the service is root, nothing is at the path, the owner cannot
+    /// be told, or the service owns it (even unlistable: the start sets its own directory owner-only again).
+    /// </summary>
+    internal static ComposeCredentialDirectoryRefusal? ComposeCredentialDirectoryOwnershipRefusal(string directory)
+    {
+        if (ComposeCredentialDirectoryGuard.Current.UnixModes is not { } modes || modes.EffectiveUserId == 0)
+        {
+            return null;
+        }
+
+        var euid = modes.EffectiveUserId;
+        UnixFileOwner? owner;
+        try
+        {
+            owner = modes.OwnerOf(directory);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return new ComposeCredentialDirectoryRefusal(directory, euid, null);
+        }
+        catch (Exception ex) when (ex is IOException or PlatformNotSupportedException)
+        {
+            // Cannot tell who owns it: not a reason to stop the start.
+            return null;
+        }
+
+        if (owner is not { } found)
+        {
+            return null;
+        }
+
+        /* The service's own directory is never refused, even one it cannot list (and CanList, which can throw, is never
+           asked here): PrepareComposeCredentialDirectory sets it owner-only again, which a chown would not fix. */
+        return found.UserId != euid
+            ? new ComposeCredentialDirectoryRefusal(directory, euid, found.UserId)
+            : null;
     }
 
     /// <summary>
@@ -5067,6 +5459,7 @@ WHERE u.rolname = current_user";
             ComposeStoreCredentialFileName(DarlingManagedPostgres.AdminRoleName),
             ComposeStoreCredentialFileName(DarlingManagedPostgres.ViewerRoleName),
             ComposeStoreCredentialFileName(DarlingManagedPostgres.McpRoleName),
+            ComposeStoreCredentialFileName(DarlingManagedPostgres.WebRoleName),
             DarlingLogHashKeyFile.UnixFileName,
             DarlingLogHashKeyFile.WindowsFileName,
         };
@@ -5179,7 +5572,7 @@ WHERE u.rolname = current_user";
         if (removed.Count > 0)
         {
             logger.LogError(
-                "The credentials directory {Directory} was open to other users until now ({Reason}), so its files could have been planted: {Files} discarded (#4004). Every role password removed is generated again and re-asserted on its role, and a removed log-hash key is generated again, which gives every log event stored from now on a new identity. Keep the directory owner-only (on Kubernetes, an fsGroup re-applied on every mount opens it again) so this does not repeat, and run one service per credentials volume (on Kubernetes, one replica with strategy: Recreate): a second one starting beside this one could read the directory between this start's chmod and this removal.",
+                "The credentials directory {Directory} was open to other users until now ({Reason}), so its files could have been planted: {Files} discarded. Every role password removed is generated again and re-asserted on its role, and a removed log-hash key is generated again, which gives every log event stored from now on a new identity. Keep the directory owner-only (on Kubernetes, an fsGroup re-applied on every mount opens it again) so this does not repeat, and run one service per credentials volume (on Kubernetes, one replica with strategy: Recreate): a second one starting beside this one could read the directory between this start's chmod and this removal.",
                 directory, wasOpen, string.Join(", ", removed));
         }
 
@@ -5187,7 +5580,7 @@ WHERE u.rolname = current_user";
         {
             var reason = $"{wasOpen}, and {(left.Count == 1 ? "this entry at a credential's name" : "these entries at credentials' names")} could not be removed, so nothing in it is used this start: "
                 + $"{string.Join("; ", left)}. Every other credential file there is removed and the directory stays owner-only, so remove {(left.Count == 1 ? "it" : "each of them")} and restart";
-            logger.LogError("The credentials directory {Directory} is not trusted ({Reason}) (#4004).", directory, reason);
+            logger.LogError("The credentials directory {Directory} is not trusted ({Reason}).", directory, reason);
             guard.RecordLeftBehind(directory, reason);
             return new ComposeCredentialDirectoryTrust(reason, MayWrite: false);
         }
@@ -5363,7 +5756,7 @@ WHERE u.rolname = current_user";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(
+            logger.LogError(ex, 
                 "Could not write the compose store's '{Role}' credential {File} ({Message}). The role has this start's password; the next start generates a new one and re-asserts it.",
                 credential.Role, path, ex.Message);
             try
@@ -5425,8 +5818,11 @@ public enum PasswordReassert
     /// <summary>The <c>mcp</c> role.</summary>
     Mcp = 4,
 
+    /// <summary>The <c>web</c> role.</summary>
+    Web = 8,
+
     /// <summary>Every role: the default, and what a store without stored verifiers gets.</summary>
-    All = Admin | Viewer | Mcp,
+    All = Admin | Viewer | Mcp | Web,
 }
 
 /// <summary>
@@ -5497,12 +5893,13 @@ internal sealed record ComposeStoreFacts(
 /// </summary>
 public sealed class ComposeStoreProvisioning
 {
-    private ComposeStoreProvisioning(bool provisioned, int appliedSeconds, string? viewerPassword, string? mcpPassword, string? refusalReason)
+    private ComposeStoreProvisioning(bool provisioned, int appliedSeconds, string? viewerPassword, string? mcpPassword, string? webPassword, string? refusalReason)
     {
         Provisioned = provisioned;
         AppliedComposeStatementTimeoutSeconds = appliedSeconds;
         ViewerPassword = viewerPassword;
         McpPassword = mcpPassword;
+        WebPassword = webPassword;
         RefusalReason = refusalReason;
     }
 
@@ -5518,14 +5915,17 @@ public sealed class ComposeStoreProvisioning
     /// <summary>The <c>mcp</c> role's password; null when refused.</summary>
     public string? McpPassword { get; }
 
+    /// <summary>The <c>web</c> role's password; null when refused.</summary>
+    public string? WebPassword { get; }
+
     /// <summary>Why nothing was provisioned; null when provisioned.</summary>
     public string? RefusalReason { get; }
 
-    internal static ComposeStoreProvisioning Succeeded(int appliedSeconds, string viewerPassword, string mcpPassword) =>
-        new(true, appliedSeconds, viewerPassword, mcpPassword, null);
+    internal static ComposeStoreProvisioning Succeeded(int appliedSeconds, string viewerPassword, string mcpPassword, string webPassword) =>
+        new(true, appliedSeconds, viewerPassword, mcpPassword, webPassword, null);
 
     internal static ComposeStoreProvisioning Refused(string reason) =>
-        new(false, DarlingManagedRoles.ComposeStatementTimeoutUnknown, null, null, reason);
+        new(false, DarlingManagedRoles.ComposeStatementTimeoutUnknown, null, null, null, reason);
 }
 
 /// <summary>
@@ -5688,6 +6088,16 @@ internal interface IUnixDirectoryModes
 
     /// <summary>The user id this process runs as, for comparing with <see cref="UnixFileOwner.UserId"/>.</summary>
     uint EffectiveUserId => 0;
+
+    /// <summary>Whether this process can list <paramref name="directory"/> (#8141). When it cannot, a file in it reads as
+    /// absent (<see cref="FileInfo.Exists"/> is false), which is not the same as missing. True where a stand-in does not
+    /// model it.</summary>
+    bool CanList(string directory) => true;
+
+    /// <summary>Whether the file at <paramref name="path"/>, every link followed, is a regular file (#8006): not a
+    /// directory, a device, a FIFO or a socket. Null when that cannot be told here (Windows, a stand-in that does not
+    /// model it).</summary>
+    bool? IsRegularFile(string path) => null;
 }
 
 /// <summary>Who owns a file and how many names it has (#5366).</summary>
@@ -5706,4 +6116,19 @@ internal sealed class PlatformUnixDirectoryModes : IUnixDirectoryModes
     public UnixFileOwner? OwnerOf(string path) => FileIdentity.UnixOwnerOf(path);
 
     public uint EffectiveUserId => FileIdentity.EffectiveUserId();
+
+    public bool CanList(string directory)
+    {
+        try
+        {
+            _ = Directory.EnumerateFileSystemEntries(directory).Any();
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    public bool? IsRegularFile(string path) => FileIdentity.UnixIsRegularFile(path);
 }

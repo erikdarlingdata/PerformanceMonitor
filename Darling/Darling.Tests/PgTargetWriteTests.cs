@@ -245,21 +245,23 @@ public sealed class PgTargetWriteTests
     /* ───────────────────────── one definition of "WAL tracked" (#3691 exit check) ───────────────────────── */
 
     /// <summary>
-    /// The one predicate both write reads apply. The real shapes: all-NULL <c>wal_bytes</c> (Aurora, pre-14) is
-    /// untracked whatever the sums coalesced to; bytes moving is tracked; records moving alone is tracked (either
-    /// counter moving is the counter being populated). The exit check's fixture shape — 0-not-NULL bytes AND zero
-    /// records over a window in which checkpoints ran — is untracked, where lane 15's checkpoint read said
-    /// <c>wal_tracked 1, wal_bytes 0</c> beside a shift fact saying <c>unavailable</c>.
+    /// The one classification both write reads apply (#7457). All-NULL <c>wal_bytes</c> (Aurora, pre-14) is not reported
+    /// whatever the sums coalesced to; bytes or records moving is reported (either counter moving is the counter being
+    /// populated); non-NULL zeros are split by other evidence of writing. Zero beside checkpoint buffers written is a
+    /// counter nobody populates. Zero with no buffers written is a server that wrote no WAL: checkpoints RUNNING prove
+    /// nothing, because PostgreSQL counts the timed checkpoints it skipped while idle.
     /// </summary>
     [Theory]
-    [InlineData(false, 0.0, 0L, false)]
-    [InlineData(false, 1e9, 1_000_000L, false)]
-    [InlineData(true, 0.0, 0L, false)]
-    [InlineData(true, 1e9, 0L, true)]
-    [InlineData(true, 0.0, 12L, true)]
-    [InlineData(true, 1e9, 1_000_000L, true)]
-    public void WalIsTracked_IsOneDecision_NullnessAndBothSums(bool anyNonNull, double bytes, long records, bool expected)
-        => Assert.Equal(expected, PgTargetFactCollector.WalIsTracked(anyNonNull, bytes, records));
+    [InlineData(false, 0.0, 0L, 0L, PgTargetFactCollector.WalReport.NotReported)]
+    [InlineData(false, 1e9, 1_000_000L, 500L, PgTargetFactCollector.WalReport.NotReported)]
+    [InlineData(true, 0.0, 0L, 0L, PgTargetFactCollector.WalReport.NoneWritten)]
+    [InlineData(true, 0.0, 0L, 500L, PgTargetFactCollector.WalReport.NotPopulated)]
+    [InlineData(true, 1e9, 0L, 0L, PgTargetFactCollector.WalReport.Reported)]
+    [InlineData(true, 0.0, 12L, 0L, PgTargetFactCollector.WalReport.Reported)]
+    [InlineData(true, 1e9, 1_000_000L, 500L, PgTargetFactCollector.WalReport.Reported)]
+    public void ClassifyWal_IsOneDecision_NullnessSumsAndOtherEvidenceOfWrites(
+        bool anyNonNull, double bytes, long records, long checkpointBuffers, PgTargetFactCollector.WalReport expected)
+        => Assert.Equal(expected, PgTargetFactCollector.ClassifyWal(anyNonNull, bytes, records, checkpointBuffers));
 
     /// <summary>The checkpoint read returns the record sum the predicate needs, APPENDED after <c>sample_count</c> so
     /// the ten ordinals lane 2 and lane 15 read did not move; the differencing is the WAL read's, verbatim. #3955's
@@ -369,7 +371,7 @@ public sealed class PgTargetWriteTests
         var knob = Config(PgTargetFactKeys.ConfigMaxWalSize, 1024, notApplicable: true);
 
         var pressureBlock = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(pressure, knob))!;
-        Assert.Equal("Checkpoint pressure is not applicable on Aurora — the storage layer owns checkpointing", pressureBlock.Headline);
+        Assert.Equal("Checkpoint pressure is not applicable on Aurora: the storage layer owns checkpointing", pressureBlock.Headline);
         Assert.Contains("60 timed checkpoints an hour", pressureBlock.Investigation, StringComparison.Ordinal);
         Assert.Contains("requested share of 0 %", pressureBlock.Investigation, StringComparison.Ordinal);
         Assert.Contains("get_pg_write_stats", pressureBlock.Remediation, StringComparison.Ordinal);
@@ -377,13 +379,13 @@ public sealed class PgTargetWriteTests
         Assert.DoesNotContain("checkpoint_completion_target", pressureBlock.Remediation, StringComparison.Ordinal);
 
         var knobBlock = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigMaxWalSize, Lookup(pressure, knob))!;
-        Assert.Equal("max_wal_size is 1 GB — not a finding on Aurora, where the engine does not consult it", knobBlock.Headline);
+        Assert.Equal("max_wal_size is 1 GB, not a finding on Aurora, where the engine does not consult it", knobBlock.Headline);
         Assert.Contains("does not govern", knobBlock.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("shipped default", knobBlock.Investigation, StringComparison.Ordinal);
 
         /* Stock PostgreSQL's blocks are lane 2's, untouched: the same facts without the flag compose the sizing arithmetic. */
         var stockBlock = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigMaxWalSize, Lookup(Pressure(0.0, 240), Config(PgTargetFactKeys.ConfigMaxWalSize, 1024)))!;
-        Assert.Equal("max_wal_size is 1 GB — the shipped default", stockBlock.Headline);
+        Assert.Equal("max_wal_size is 1 GB: the shipped default", stockBlock.Headline);
     }
 
     [Fact]
@@ -403,6 +405,17 @@ public sealed class PgTargetWriteTests
         Assert.Contains("get_pg_top_queries", aurora.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("0 B/s", aurora.Headline + aurora.Investigation, StringComparison.Ordinal);
 
+        /* #7457: zero while checkpoints wrote buffers is a counter nobody populates - and no Aurora in the text. */
+        var unpopulated = PgTargetAdvice.Compose(PgTargetFactKeys.WalVolumeShift, Lookup(UnavailableShift("reason_wal_stats_not_populated")))!;
+        Assert.Contains("not being populated", unpopulated.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Aurora", unpopulated.Headline + unpopulated.Investigation + unpopulated.Remediation, StringComparison.Ordinal);
+
+        /* A quiet server's tracked zero: a measured zero, not a gap. */
+        var quiet = PgTargetAdvice.Compose(PgTargetFactKeys.WalVolumeShift, Lookup(Shift(mean: 0, peak: 0, totalBytes: 0)))!;
+        Assert.Equal("No WAL was written this window", quiet.Headline);
+        Assert.Contains("there is no WAL volume to size from", quiet.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Aurora", quiet.Headline + quiet.Investigation + quiet.Remediation, StringComparison.Ordinal);
+
         var old = PgTargetAdvice.Compose(PgTargetFactKeys.WalVolumeShift, Lookup(UnavailableShift("reason_pg_stat_wal_absent")))!;
         Assert.Equal("WAL volume is not reported by this engine", old.Headline);
         Assert.Contains("below 14", old.Investigation, StringComparison.Ordinal);
@@ -419,7 +432,7 @@ public sealed class PgTargetWriteTests
         anomaly.Metadata["baseline_ratio"] = 9.2 / 1.05;   /* peak over the robust centre (the median), as the detector stamps it */
 
         var leading = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyWalVolume, Lookup(anomaly, Pressure(0.1, 48)))!;
-        Assert.Equal("WAL volume spiked to 9.2 MB/s — 7 times its usual variation above its normal level for this time of week", leading.Headline);
+        Assert.Equal("WAL volume spiked to 9.2 MB/s: 7 times its usual variation above its normal level for this time of week", leading.Headline);
         Assert.Contains("7 times its usual variation above its 1.1 MB/s normal level", leading.Investigation, StringComparison.Ordinal);
         Assert.Contains("8.76× the 1.1 MB/s this server routinely writes", leading.Investigation, StringComparison.Ordinal);
         Assert.Contains("leading edge", leading.Investigation, StringComparison.Ordinal);
@@ -497,14 +510,9 @@ public sealed class PgTargetWriteTests
             using (var doc = JsonDocument.Parse(json))
             {
                 var root = doc.RootElement;
-                Assert.Equal("findings", root.GetProperty("status").GetString());
-                var findings = root.GetProperty("findings").EnumerateArray().ToList();
-                string RootKey(JsonElement f) => f.GetProperty("root_fact").GetProperty("key").GetString()!;
-                /* shared_buffers at its default is the ONE advisory; the write chain roots nothing and is in no path. */
-                var only = Assert.Single(findings);
-                Assert.Equal(PgTargetFactKeys.ConfigSharedBuffers, RootKey(only));
-                Assert.DoesNotContain(PgTargetFactKeys.CheckpointPressure, only.GetProperty("story_path").GetString()!, StringComparison.Ordinal);
-                Assert.DoesNotContain(PgTargetFactKeys.ConfigMaxWalSize, only.GetProperty("story_path").GetString()!, StringComparison.Ordinal);
+                /* #8322: shared_buffers at the initdb figure is the service's value on Aurora, so no advisory roots there
+                   either; with the write chain rooting nothing, the Aurora target at defaults is an all-clear. */
+                Assert.Equal("empty", root.GetProperty("status").GetString());
             }
 
             var factsJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, AuroraServerName, 4, PgTargetSources.WriteSource, as_of: asOf);
@@ -549,8 +557,12 @@ public sealed class PgTargetWriteTests
                 Assert.Equal(1, checkpointTimeout.GetProperty("metadata").GetProperty("not_applicable").GetDouble());
                 Assert.Equal(1, checkpointTimeout.GetProperty("metadata").GetProperty("not_applicable_on_aurora").GetDouble());
 
+                /* #8322: the same stamp on shared_buffers, which the service sizes from the instance's capacity on Aurora. */
                 var sharedBuffers = doc.RootElement.GetProperty("facts").EnumerateArray().Single(f => f.GetProperty("key").GetString() == PgTargetFactKeys.ConfigSharedBuffers);
-                Assert.Equal(0.4, sharedBuffers.GetProperty("base_severity").GetDouble(), precision: 6);
+                Assert.Equal(128, sharedBuffers.GetProperty("value").GetDouble());
+                Assert.Equal(0, sharedBuffers.GetProperty("base_severity").GetDouble());
+                Assert.Equal(1, sharedBuffers.GetProperty("metadata").GetProperty("not_applicable").GetDouble());
+                Assert.Equal(1, sharedBuffers.GetProperty("metadata").GetProperty("not_applicable_on_aurora").GetDouble());
             }
 
             bodySucceeded = true;
@@ -563,16 +575,128 @@ public sealed class PgTargetWriteTests
     }
 
     /// <summary>
-    /// The exit check's fixture shape, live: a stock-stamped server whose <c>wal_bytes</c> is 0-not-NULL (constant,
-    /// non-NULL) and whose <c>wal_records</c> never move, with a checkpoint a minute. Lane 15's two reads disagreed here
-    /// — pressure <c>wal_tracked 1, wal_bytes 0, wal_bytes_per_sec 0</c>, shift <c>unavailable</c>. Through the one
-    /// predicate both facts now say untracked: the pressure fact's WAL figures are ABSENT (not zero), the shift is
-    /// <c>unavailable</c> / <c>reason_wal_stats_not_reported</c>. Unreachable from the real collector (it types the
-    /// columns NULL where <c>pg_stat_wal</c> is not reported) — pinned because a read that can contradict its sibling on
-    /// any input is two definitions. The stock e2e below is the tracked shape's pin (bytes moving ⇒ both tracked).
+    /// A stock server whose <c>wal_bytes</c> is 0-not-NULL (constant) and whose <c>wal_records</c> never move, with a timed
+    /// checkpoint a minute and NO buffers written: the quiet server of #7457 (288 timed checkpoints, 0 buffers, 0 WAL
+    /// over a day). Lane 15's first rule read "checkpoints ran" as proof of writes and blamed Aurora; both facts now say
+    /// tracked with nothing written, and the pressure fact's WAL figures are present and zero. The two reads still agree
+    /// (#3691 exit check), through the one classification.
     /// </summary>
     [Fact]
-    public async Task AZeroNotNullWalSeries_ReadsUntracked_OnBothWriteFacts_ThroughTheOnePredicate()
+    public async Task AQuietStockServerWithZeroWal_ReadsTrackedAndNothingWritten_OnBothWriteFacts()
+    {
+        var facts = await CollectZeroWalFactsAsync(walBytesPerMinute: 0L, checkpointBuffersPerMinute: 0, major: 18);
+        if (facts is null) return;
+
+        var pressure = Assert.Single(facts, f => f.Key == PgTargetFactKeys.CheckpointPressure);
+        Assert.Equal(240, pressure.Metadata["checkpoints_timed"]);
+        Assert.Equal(1, pressure.Metadata["wal_tracked"]);
+        Assert.Equal(0, pressure.Metadata["wal_bytes"]);
+        Assert.Equal(0, pressure.Metadata["wal_bytes_per_sec"]);
+        Assert.False(pressure.Metadata.ContainsKey("wal_not_populated"));
+        Assert.False(pressure.Metadata.ContainsKey("not_applicable"));
+
+        var shift = Assert.Single(facts, f => f.Key == PgTargetFactKeys.WalVolumeShift);
+        Assert.Equal(0, shift.Value);
+        Assert.Equal(1, shift.Metadata["wal_tracked"]);
+        Assert.False(shift.Metadata.ContainsKey("unavailable"));
+
+        /* The words: no WAL was written, and a stock server is never told about Aurora. */
+        var advice = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(pressure))!;
+        Assert.Contains("No WAL was written in this window", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Aurora", advice.Investigation + advice.Remediation, StringComparison.Ordinal);
+    }
+
+    /// <summary>The same zero WAL series with checkpoints that wrote buffers: something proves WAL was written, so the
+    /// counters are not being populated. Both facts say untracked, with <c>wal_not_populated</c> and the populated reason,
+    /// and the words do not name Aurora.</summary>
+    [Fact]
+    public async Task AZeroWalSeries_BesideCheckpointBuffersWritten_ReadsNotPopulated_OnBothWriteFacts()
+    {
+        var facts = await CollectZeroWalFactsAsync(walBytesPerMinute: 0L, checkpointBuffersPerMinute: 100, major: 18);
+        if (facts is null) return;
+
+        var pressure = Assert.Single(facts, f => f.Key == PgTargetFactKeys.CheckpointPressure);
+        Assert.Equal(0, pressure.Metadata["wal_tracked"]);
+        Assert.Equal(1, pressure.Metadata["wal_not_populated"]);
+        Assert.False(pressure.Metadata.ContainsKey("wal_bytes"));
+        Assert.False(pressure.Metadata.ContainsKey("wal_bytes_per_sec"));
+        Assert.False(pressure.Metadata.ContainsKey("wal_bytes_per_checkpoint"));
+        Assert.False(pressure.Metadata.ContainsKey("not_applicable"));   // stock: graded, just without WAL figures
+
+        var shift = Assert.Single(facts, f => f.Key == PgTargetFactKeys.WalVolumeShift);
+        Assert.Equal(0, shift.Value);
+        Assert.Equal(0, shift.Metadata["wal_tracked"]);
+        Assert.Equal(1, shift.Metadata["unavailable"]);
+        Assert.Equal(1, shift.Metadata["reason_wal_stats_not_populated"]);
+        Assert.False(shift.Metadata.ContainsKey("reason_wal_stats_not_reported"));
+        Assert.False(shift.Metadata.ContainsKey("peak_wal_bytes_per_sec"));  // and so ComparisonBanding withholds it
+
+        var advice = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(pressure))!;
+        Assert.Contains("not being populated", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Aurora", advice.Investigation + advice.Remediation, StringComparison.Ordinal);
+    }
+
+    /// <summary>All-NULL WAL columns on a stock registry major below 14 (the collector types them NULL: the view does not
+    /// exist): not reported, the below-14 reason on both facts, and no Aurora in the words.</summary>
+    [Fact]
+    public async Task NullWalColumns_OnAMajorBelow14_ReadNotReported_WithTheViewAbsentReason()
+    {
+        var facts = await CollectZeroWalFactsAsync(walBytesPerMinute: null, checkpointBuffersPerMinute: 0, major: 12);
+        if (facts is null) return;
+
+        var pressure = Assert.Single(facts, f => f.Key == PgTargetFactKeys.CheckpointPressure);
+        Assert.Equal(0, pressure.Metadata["wal_tracked"]);
+        Assert.Equal(1, pressure.Metadata["reason_pg_stat_wal_absent"]);
+        Assert.False(pressure.Metadata.ContainsKey("wal_not_populated"));
+
+        var shift = Assert.Single(facts, f => f.Key == PgTargetFactKeys.WalVolumeShift);
+        Assert.Equal(1, shift.Metadata["unavailable"]);
+        Assert.Equal(1, shift.Metadata["reason_pg_stat_wal_absent"]);
+
+        var advice = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(pressure))!;
+        Assert.Contains("does not exist below PostgreSQL 14", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Aurora", advice.Investigation + advice.Remediation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// All-NULL WAL columns with NO registry major (the row's <c>postgres_major_version</c> is unreadable, so Aurora and
+    /// below-14 cannot be told apart) and zero checkpoint buffers written. The window proves nothing about writes, so
+    /// neither fact may say checkpoints wrote buffers or that the counters are not populated, and no Aurora either: the
+    /// words say the cause could not be determined. Old code stamped <c>wal_not_populated</c> here.
+    /// </summary>
+    [Fact]
+    public async Task NullWalColumns_WithNoRegistryMajor_ReadCauseUnknown_AndNeverClaimCheckpointsWroteBuffers()
+    {
+        var facts = await CollectZeroWalFactsAsync(walBytesPerMinute: null, checkpointBuffersPerMinute: 0, major: null);
+        if (facts is null) return;
+
+        var pressure = Assert.Single(facts, f => f.Key == PgTargetFactKeys.CheckpointPressure);
+        Assert.Equal(0, pressure.Metadata["wal_tracked"]);
+        Assert.Equal(1, pressure.Metadata["wal_cause_unknown"]);
+        Assert.False(pressure.Metadata.ContainsKey("wal_not_populated"));
+        Assert.False(pressure.Metadata.ContainsKey("reason_pg_stat_wal_absent"));
+        Assert.False(pressure.Metadata.ContainsKey("not_applicable"));
+
+        var shift = Assert.Single(facts, f => f.Key == PgTargetFactKeys.WalVolumeShift);
+        Assert.Equal(1, shift.Metadata["unavailable"]);
+        Assert.Equal(1, shift.Metadata["reason_wal_cause_unknown"]);
+        Assert.False(shift.Metadata.ContainsKey("reason_wal_stats_not_populated"));
+
+        var advice = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(pressure))!;
+        var shiftAdvice = PgTargetAdvice.Compose(PgTargetFactKeys.WalVolumeShift, Lookup(shift))!;
+        Assert.Contains("could not be determined", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("could not be determined", shiftAdvice.Investigation, StringComparison.Ordinal);
+        foreach (var text in new[] { advice.Investigation + advice.Remediation, shiftAdvice.Headline + shiftAdvice.Investigation + shiftAdvice.Remediation })
+        {
+            Assert.DoesNotContain("checkpoints wrote buffers", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("not being populated", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("Aurora", text, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>Plants a four-hour, one-timed-checkpoint-a-minute write series for a stock server of registry
+    /// <paramref name="major"/> and returns the write facts, or null when <c>DARLING_TEST_PG</c> is unset.</summary>
+    private static async Task<List<Fact>?> CollectZeroWalFactsAsync(long? walBytesPerMinute, int checkpointBuffersPerMinute, int? major)
     {
         var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the write-family trackedness e2e.");
@@ -588,19 +712,19 @@ public sealed class PgTargetWriteTests
         var bodySucceeded = false;
         try
         {
-            await PgTargetFactCollectorTests.RegisterServerAsync(connection, ZeroWalServerId, ZeroWalServerName, MonitoredEngineKind.Postgres, 18, ct);
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, ZeroWalServerId, ZeroWalServerName, MonitoredEngineKind.Postgres, major, ct);
 
             var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
             var windowStart = windowEnd.AddHours(-4);
 
             /* The coverage witness over the window (the collector stamps observed time from pg_database_stats FIRST and
                the write read returns on zero observed time), then the write series: one timed checkpoint a minute; a
-               zero per-minute WAL increment plants wal_bytes CONSTANT and non-NULL and wal_records at 0 on every row —
-               the 0-not-NULL shape. */
+               zero per-minute WAL increment plants wal_bytes CONSTANT and non-NULL and wal_records at 0 on every row. */
             for (var minute = 0; minute <= 4 * 60 + 1; minute++)
                 await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ZeroWalServerId, ZeroWalServerName, windowStart.AddMinutes(minute - 1), ct);
             await PlantWriteSeriesAsync(connection, ZeroWalServerId, ZeroWalServerName, windowStart.AddMinutes(-1), minutes: 4 * 60 + 1,
-                requestedPerMinute: 0, timedPerMinute: 1, walBytesPerMinuteBase: 0L, walBytesPerMinuteSpike: 0L, spikeFromMinute: int.MaxValue, ct);
+                requestedPerMinute: 0, timedPerMinute: 1, walBytesPerMinuteBase: walBytesPerMinute, walBytesPerMinuteSpike: walBytesPerMinute, spikeFromMinute: int.MaxValue, ct,
+                checkpointBuffersPerMinute: checkpointBuffersPerMinute);
 
             var facts = await new PgTargetFactCollector(postgres).CollectFactsAsync(new AnalysisContext
             {
@@ -608,22 +732,8 @@ public sealed class PgTargetWriteTests
                 Coverage = new WindowCoverage { NominalMs = 4 * 3_600_000, ObservedMs = 4 * 3_600_000, SampleCount = 240 },
             });
 
-            var pressure = Assert.Single(facts, f => f.Key == PgTargetFactKeys.CheckpointPressure);
-            Assert.Equal(240, pressure.Metadata["checkpoints_timed"]);
-            Assert.Equal(0, pressure.Metadata["wal_tracked"]);
-            Assert.False(pressure.Metadata.ContainsKey("wal_bytes"));
-            Assert.False(pressure.Metadata.ContainsKey("wal_bytes_per_sec"));
-            Assert.False(pressure.Metadata.ContainsKey("wal_bytes_per_checkpoint"));
-            Assert.False(pressure.Metadata.ContainsKey("not_applicable"));   // stock: graded, just without WAL figures
-
-            var shift = Assert.Single(facts, f => f.Key == PgTargetFactKeys.WalVolumeShift);
-            Assert.Equal(0, shift.Value);
-            Assert.Equal(0, shift.Metadata["wal_tracked"]);
-            Assert.Equal(1, shift.Metadata["unavailable"]);
-            Assert.Equal(1, shift.Metadata["reason_wal_stats_not_reported"]);
-            Assert.False(shift.Metadata.ContainsKey("peak_wal_bytes_per_sec"));  // and so ComparisonBanding withholds it
-
             bodySucceeded = true;
+            return facts.ToList();
         }
         finally
         {
@@ -777,7 +887,7 @@ public sealed class PgTargetWriteTests
         var restarted = Pressure(0.6, 10);
         restarted.Metadata["postmaster_restart_count"] = 2;
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(restarted))!;
-        Assert.Contains("PostgreSQL restarted 2 time(s) inside the window; a shutdown checkpoint counts as requested and its own write and sync phases land in the same counters", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("PostgreSQL restarted 2 times inside the window; a shutdown checkpoint counts as requested and its own write and sync phases land in the same counters", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("left out of the requested count and the checkpoint write and sync time rather than read as WAL pressure", block.Investigation, StringComparison.Ordinal);
 
         var steady = Pressure(0.6, 10);
@@ -1168,7 +1278,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Test', 'postmaster', 'string', 'configurati
     /// </summary>
     private static async Task PlantWriteSeriesAsync(
         NpgsqlConnection connection, int serverId, string serverName, DateTime start, int minutes,
-        int requestedPerMinute, int timedPerMinute, long? walBytesPerMinuteBase, long? walBytesPerMinuteSpike, int spikeFromMinute, CancellationToken ct)
+        int requestedPerMinute, int timedPerMinute, long? walBytesPerMinuteBase, long? walBytesPerMinuteSpike, int spikeFromMinute, CancellationToken ct,
+        int checkpointBuffersPerMinute = 0)
     {
         using var command = new NpgsqlCommand(@"
 WITH s AS (
@@ -1184,7 +1295,7 @@ INSERT INTO pg_write_stats
      buffers_clean, maxwritten_clean, buffers_alloc, buffers_backend, buffers_backend_fsync, bgwriter_stats_reset,
      wal_records, wal_fpi, wal_bytes, wal_buffers_full, wal_write, wal_sync, wal_write_time_ms, wal_sync_time_ms, wal_stats_reset)
 SELECT $1 + n, $2 + (n * interval '1 minute'), $3, $4,
-       500 + n * $7, 1000 + n * $6, 1500 + n * ($6 + $7), 0, 0, 0, NULL,
+       500 + n * $7, 1000 + n * $6, 1500 + n * ($6 + $7), 0, 0, n * $11, NULL,
        0, 0, 0, NULL, NULL, NULL,
        CASE WHEN wal_inc IS NULL THEN NULL ELSE (SUM(wal_inc) OVER (ORDER BY n)) / 8192 END,
        CASE WHEN wal_inc IS NULL THEN NULL ELSE 0 END,
@@ -1201,6 +1312,7 @@ FROM s", connection) { CommandTimeout = 120 };
         command.Parameters.Add(new NpgsqlParameter { Value = walBytesPerMinuteBase.HasValue ? walBytesPerMinuteBase.Value : DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint });
         command.Parameters.Add(new NpgsqlParameter { Value = walBytesPerMinuteSpike.HasValue ? walBytesPerMinuteSpike.Value : DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint });
         command.Parameters.AddWithValue(spikeFromMinute);
+        command.Parameters.Add(new NpgsqlParameter { Value = (long)checkpointBuffersPerMinute, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint });
         await command.ExecuteNonQueryAsync(ct);
     }
 

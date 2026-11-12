@@ -94,6 +94,33 @@ public sealed class ViewerBlockingMergeTests
             BlockingSpid = blocking,
         };
 
+    /// <summary>#7497: the report row carries its own head open transaction count and last transaction start; a folded DMV row fills them only where
+    /// the report row has none, and never replaces the report's own.</summary>
+    [Fact]
+    public void DroppedDmvRow_FillsTheOpenTransactionCountAndLastTranStartOnlyWhereTheReportRowHasNone()
+    {
+        var t = new DateTime(2026, 7, 1, 12, 0, 0);
+        var own = Row(BlockedProcessAlertRow.XeReportSource, t, blocked: 51, blocking: 60);
+        own.BlockingOpenTransactionCount = 1;
+        own.BlockingLastTranStarted = t.AddHours(-1);
+        var bare = Row(BlockedProcessAlertRow.XeReportSource, t, blocked: 52, blocking: 61);
+        ViewerBlockedProcessRow Dmv(int blocked, int blocking, int count)
+        {
+            var d = Row(BlockedProcessAlertRow.DmvSnapshotSource, t.AddSeconds(20), blocked, blocking);
+            d.BlockingOpenTransactionCount = count;
+            d.BlockingLastTranStarted = t.AddHours(-3);
+            return d;
+        }
+        var items = new List<ViewerBlockedProcessRow> { own, bare };
+
+        BlockedProcessReportMerge.AppendDmvFallbackRows(items, new List<ViewerBlockedProcessRow> { Dmv(51, 60, 5), Dmv(52, 61, 3) });
+
+        Assert.Equal(1, own.BlockingOpenTransactionCount);
+        Assert.Equal(t.AddHours(-1), own.BlockingLastTranStarted);
+        Assert.Equal(3, bare.BlockingOpenTransactionCount);
+        Assert.Equal(t.AddHours(-3), bare.BlockingLastTranStarted);
+    }
+
     /// <summary>The report XML has no head-blocker session facts, so a DMV row dropped because a report row covers its pair and minute
     /// hands them over; a report row with no covering DMV row, and a different pair, keep nulls.</summary>
     [Fact]

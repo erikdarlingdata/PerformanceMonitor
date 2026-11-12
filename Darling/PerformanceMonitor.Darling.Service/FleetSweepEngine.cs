@@ -33,19 +33,44 @@ public sealed record FleetSweepServerReading(
     long PeakBlockWaitMs,
     string? ReadFault,
     DateTime? LastCollectionUtc = null,
-    DateTime? RegisteredUtc = null)
+    DateTime? RegisteredUtc = null,
+    FleetIdentityCapacity? IdentityCapacity = null,
+    FleetDatabaseStates? DatabaseStates = null,
+    bool Attempted = false)
 {
+    /// <summary>
+    /// #7669: a column at its identity limit is a state that stays true until someone acts, so no count of events in the span carries it.
+    /// It reads through the Fleet Overview card's own test (<see cref="FleetServerCard.IsIdentityCritical"/>), so the sweep is never
+    /// better than the card for it.
+    /// </summary>
+    public bool IdentityCapacityCritical => ReadFault is null && FleetServerCard.IsIdentityCritical(IdentityCapacity);
+
+    /// <summary>
+    /// #7647: a database in a state the Database State alert grades Critical (SUSPECT, RECOVERY_PENDING, EMERGENCY) is the same kind of state, and sets the
+    /// same floor. It reads through the card's own test, a Critical count in the read the card shows.
+    /// </summary>
+    public bool DatabaseStateCritical => ReadFault is null && DatabaseStates is { CriticalCount: > 0 };
+
     /// <summary>
     /// #6155: this server reported nothing in the span AND was already Offline, by <c>list_servers</c>'s rule, at the instant the service
     /// started. Its silence is older than the restart, so the post-restart settle window does not explain it. A server last collected a
-    /// minute before the restart is not Offline by that rule and stays inside the window.
+    /// minute before the restart is not Offline by that rule and stays inside the window. #8464: the rule reads the log's failed rows
+    /// too, through <see cref="WasFailingBeforeRestart"/>, so a server whose collectors ran and all failed before the restart is Offline
+    /// here as it is on every other surface, and the restart does not explain its silence.
     /// </summary>
     public bool WasOfflineBeforeRestart(DateTime serviceStartedUtc) =>
         ReadFault is null
         && !Signals.HasData
         && (LastCollectionUtc is not null || RegisteredUtc is not null)
         && (LastCollectionUtc is null || LastCollectionUtc < serviceStartedUtc)
-        && DarlingMcpDataTools.FreshnessStatus(LastCollectionUtc, RegisteredUtc, serviceStartedUtc) == "Offline";
+        && DarlingMcpDataTools.FreshnessStatus(LastCollectionUtc, RegisteredUtc, serviceStartedUtc, null, WasFailingBeforeRestart(serviceStartedUtc)) == "Offline";
+
+    /// <summary>#8464: whether the collectors had run against this server, and none had collected, before the service started. The
+    /// any-collector-row probe behind <see cref="Attempted"/> is unbounded in time, so the registration guards it: a server first registered
+    /// after the restart cannot have been failing before it, and one registered before the restart with collector rows and no success was,
+    /// because its collectors run every cycle from registration.</summary>
+    public bool WasFailingBeforeRestart(DateTime serviceStartedUtc) =>
+        Attempted && LastCollectionUtc is null && RegisteredUtc is { } registered && registered < serviceStartedUtc;
 }
 
 /// <summary>The in-process counters the sweep cites as its instrument-liveness evidence: the service's
@@ -239,12 +264,23 @@ public static class FleetSweepEngine
                    header cannot read green over this card. */
                 band = DailyHealthBandCalculator.Label(DailyHealthBand.NoData);
                 reason = "The sweep could not read this server's signals: " + fault
-                    + ". Unreadable is not quiet — instrument liveness is red for this sweep.";
+                    + ". Unreadable is not quiet. Instrument liveness is red for this sweep.";
                 readFaults.Add((reading.ServerName, fault));
             }
             else
             {
                 var classified = DailyHealthBandCalculator.Classify(reading.Signals, banding);
+                /* #7669: a state that stays true until someone acts sets a floor on the sweep's band (Fleet Overview's
+                   OverallMetricSeverity does the same), so the sweep is never better than the card for it. */
+                var eventsBand = classified;
+                var floored = eventsBand != DailyHealthBand.NoData && (reading.IdentityCapacityCritical || reading.DatabaseStateCritical);
+                if (floored)
+                {
+                    /* A server with no data in the span stays No Data, as Fleet Overview bands it Offline: the identity read looks
+                       back 168 hours, so it can name a column for a server that collected nothing in this span. */
+                    classified = DailyHealthBand.Critical;
+                }
+
                 band = DailyHealthBandCalculator.Label(classified);
                 reason = classified switch
                 {
@@ -252,15 +288,35 @@ public static class FleetSweepEngine
                     DailyHealthBand.NoData when reading.WasOfflineBeforeRestart(instruments.ServiceStartedUtc) =>
                         "No collection inside the sweep span. " + (reading.LastCollectionUtc is { } lastSeen
                             ? "The server's last collection was " + lastSeen.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC, "
-                            : "The store holds no collection from it within its retained history, ")
+                            : reading.WasFailingBeforeRestart(instruments.ServiceStartedUtc)
+                                ? "Its collectors run and every collection fails, and they were failing "
+                                : "The store holds no collection from it within its retained history, ")
                         + "before the service started (" + instruments.ServiceStartedUtc.ToString("o")
                         + "), so it was already offline before the restart: classified offline, not startup-transient.",
                     DailyHealthBand.NoData when inSettleWindow =>
-                        "No collection inside the sweep span — inside the post-restart settle window (service started "
+                        "No collection inside the sweep span. Inside the post-restart settle window (service started "
                         + instruments.ServiceStartedUtc.ToString("o") + "), classified startup-transient, not an outage.",
                     DailyHealthBand.NoData => "No collection inside the sweep span.",
                     _ => string.Join("; ", DailyHealthBandCalculator.BuildReasons(reading.Signals, reading.PeakBlockWaitMs)),
                 };
+                if (floored)
+                {
+                    /* The events alone band it Healthy: BuildReasons would say "No issues detected.", which a clause contradicts,
+                       so the clauses stand alone. With event reasons, they stay and the clauses follow. */
+                    var clauses = new List<string>();
+                    if (reading.IdentityCapacityCritical && reading.IdentityCapacity is { } identity)
+                    {
+                        clauses.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns));
+                    }
+
+                    if (reading.DatabaseStateCritical && reading.DatabaseStates is { } databaseStates)
+                    {
+                        clauses.Add(databaseStates.Reason);
+                    }
+
+                    var clause = string.Join("; ", clauses);
+                    reason = eventsBand == DailyHealthBand.Healthy ? clause : reason + "; " + clause;
+                }
             }
 
             verdicts.Add(new FleetSweepServerVerdict(
@@ -467,19 +523,19 @@ public static class FleetSweepEngine
         if (readFaults.Count > 0)
         {
             alive = false;
-            notes.Add($"{readFaults.Count} server signal read(s) failed — those servers are unreadable, not quiet.");
+            notes.Add($"{CountText.Plural(readFaults.Count, "server signal read")} failed: {(readFaults.Count == 1 ? "that server is" : "those servers are")} unreadable, not quiet.");
         }
 
         if (serversExpected > 0 && serversReported == 0)
         {
             if (inSettleWindow)
             {
-                notes.Add("Fleet-wide quiet inside the post-restart settle window — startup transient, not judged.");
+                notes.Add("Fleet-wide quiet inside the post-restart settle window. Startup transient, not judged.");
             }
             else
             {
                 alive = false;
-                notes.Add("No server reported any collection inside the span — the collection instruments are not advancing.");
+                notes.Add("No server reported any collection inside the span. The collection instruments are not advancing.");
             }
         }
 
@@ -505,11 +561,11 @@ public static class FleetSweepEngine
             {
                 alive = false;
                 notes.Add($"The alert-pass counter is frozen at {instruments.AlertPassesTotal} since the previous sweep "
-                    + "while alerts are enabled and servers are reporting — the alert path's instruments are not advancing.");
+                    + "while alerts are enabled and servers are reporting. The alert path's instruments are not advancing.");
             }
             else if (!alertsEnabled || previousRun is { AlertsEnabled: false })
             {
-                notes.Add("The alert-pass counter did not advance — expected under the alert master switch, which stops "
+                notes.Add("The alert-pass counter did not advance. Expected under the alert master switch, which stops "
                     + "the pass before it is counted; stated so the frozen counter reads as the mute, not as a dead path.");
             }
             else
@@ -519,7 +575,7 @@ public static class FleetSweepEngine
         }
         else if (baselineReset)
         {
-            notes.Add("Service restarted since the previous sweep — the pass-counter baseline reset, so counter advance "
+            notes.Add("Service restarted since the previous sweep: the pass-counter baseline reset, so counter advance "
                 + "is not judgeable this sweep.");
         }
 
@@ -634,7 +690,7 @@ public static class FleetSweepEngine
         if (!instrumentsAlive)
         {
             hits[(FleetSweepStore.FleetScopeServerId, InstrumentsDeadItemKey)] = (
-                "The sweep's instrument-liveness verdict was false — see the run's liveness block.",
+                "The sweep's instrument-liveness verdict was false. See the run's liveness block.",
                 JsonSerializer.Serialize(new { sweep_id = sweepId }));
         }
 
@@ -787,27 +843,28 @@ public static class FleetSweepEngine
         /* The SIGNALS' peak, not the reading's: Classify sees only the signals, and the two must agree.
            The production read fills both from one MAX. */
         var peakBlockSeconds = signals.PeakBlockWaitMs / 1000.0;
-        /* #5644: the band's count is the span's blocked-process REPORT rows (DailyHealthSignals.BlockingReports), the
-           unit its rate tiers were measured in; BlockingEvents counts WAITS and is what the evidence shows as the
-           count. Classify reads the same pair, so the ledger still cannot page on a count the verdict did not band. */
-        var bandedBlocking = signals.BlockingReports ?? signals.BlockingEvents;
-        if (ServerHealthClassifier.BlockingSeverity(bandedBlocking, peakBlockSeconds, signals.Window, thresholds.BlockingBands)
+        /* #7028: the band's count is the span's blocking WAITS (DailyHealthSignals.BlockingEvents), the unit the alerts
+           count, plus the snapshot arm's value. Classify reads the same fields, so the ledger still cannot page on a
+           count the verdict did not band. */
+        var peakSnapshotSeconds = signals.PeakSnapshotWaitMs.HasValue ? signals.PeakSnapshotWaitMs.Value / 1000.0 : (double?)null;
+        if (ServerHealthClassifier.BlockingSeverity(
+                signals.BlockingEvents, peakBlockSeconds, signals.Window, thresholds.BlockingBands, peakSnapshotSeconds)
             == HealthSeverity.Critical)
         {
-            yield return (FamilyBlocking, BlockingEvidence(signals.BlockingEvents, bandedBlocking, signals.BlockingReports.HasValue, signals.Window, peakBlockSeconds, thresholds.BlockingBands));
+            yield return (FamilyBlocking, BlockingEvidence(signals.BlockingEvents, signals.Window, peakBlockSeconds, peakSnapshotSeconds, thresholds.BlockingBands));
         }
     }
 
     /// <summary>The blocking family's evidence (#3539 A3): the arm that banded is the one named. A 60 s
     /// block is the wait arm's Critical whatever the rate; otherwise the RATE is the value, with the raw
     /// count as its own member for the operator reconciling against the blocking grid.</summary>
-    private static string BlockingEvidence(long count, long bandedCount, bool bandedOnReports, TimeSpan window, double peakBlockSeconds, BlockingBandThresholds tiers)
+    private static string BlockingEvidence(long count, TimeSpan window, double peakBlockSeconds, double? peakSnapshotSeconds, BlockingBandThresholds tiers)
     {
         if (peakBlockSeconds >= tiers.CriticalWaitSeconds)
         {
             return JsonSerializer.Serialize(new
             {
-                derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
+                derivation = "summary-scoring critical trigger under alerts_enabled: false. Not an alert-engine replay",
                 trigger = "longest single block in the sweep span, seconds",
                 value = peakBlockSeconds,
                 threshold = tiers.CriticalWaitSeconds,
@@ -815,15 +872,26 @@ public static class FleetSweepEngine
             });
         }
 
-        /* Critical without the wait arm implies a rateable window at or past the Critical tier, so the
+        /* #7028: the snapshot arm, the Blocking Wait Time alert's measure, banded Critical next. */
+        if (peakSnapshotSeconds.HasValue && tiers.CriticalSnapshotWaitSeconds > 0 && peakSnapshotSeconds.Value >= tiers.CriticalSnapshotWaitSeconds)
+        {
+            return JsonSerializer.Serialize(new
+            {
+                derivation = "summary-scoring critical trigger under alerts_enabled: false. Not an alert-engine replay",
+                trigger = "largest total blocked wait of one DMV snapshot in the sweep span (after the Blocking Wait Time persistence gate), seconds",
+                value = peakSnapshotSeconds.Value,
+                threshold = tiers.CriticalSnapshotWaitSeconds,
+                blocking_count = count,
+            });
+        }
+
+        /* Critical without the wait arms implies a rateable window at or past the Critical tier, so the
            rate is present by construction. */
-        var ratePerHour = ServerHealthClassifier.BlockingRatePerHour(bandedCount, window)!.Value;
+        var ratePerHour = ServerHealthClassifier.BlockingRatePerHour(count, window)!.Value;
         return JsonSerializer.Serialize(new
         {
-            derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
-            trigger = bandedOnReports
-                ? "blocked-process reports per hour over the sweep span"
-                : "blocking events per hour over the sweep span",
+            derivation = "summary-scoring critical trigger under alerts_enabled: false. Not an alert-engine replay",
+            trigger = "blocking waits per hour over the sweep span",
             value = ratePerHour,
             threshold = tiers.CriticalPerHour,
             blocking_count = count,
@@ -833,7 +901,7 @@ public static class FleetSweepEngine
     private static string Evidence(string what, long value, double threshold) =>
         JsonSerializer.Serialize(new
         {
-            derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
+            derivation = "summary-scoring critical trigger under alerts_enabled: false. Not an alert-engine replay",
             trigger = what,
             value,
             threshold,
@@ -845,7 +913,7 @@ public static class FleetSweepEngine
     private static string DeadlockRateEvidence(double ratePerHour, double criticalPerHour, long count) =>
         JsonSerializer.Serialize(new
         {
-            derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
+            derivation = "summary-scoring critical trigger under alerts_enabled: false. Not an alert-engine replay",
             trigger = "deadlocks per hour over the sweep span",
             value = ratePerHour,
             threshold = criticalPerHour,
@@ -870,8 +938,8 @@ public static class FleetSweepEngine
             collection_runs = reading.Signals.CollectionRuns,
             high_cpu_events = reading.Signals.HighCpuEvents,
             blocking_events = reading.Signals.BlockingEvents,
-            blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(
-                reading.Signals.BlockingEvents, reading.Signals.Window),
+            blocking_rate_per_hour = TrendPayloads.RoundRate(ServerHealthClassifier.BlockingRatePerHour(
+                reading.Signals.BlockingEvents, reading.Signals.Window), 2), // #8572
             memory_pressure_events = reading.Signals.MemoryPressureEvents,
             memory_critical_events = reading.Signals.MemoryCriticalEvents,
             alert_count = reading.Signals.AlertCount,
@@ -935,6 +1003,11 @@ public static class FleetSweepEngine
             var nowUtc = DateTime.UtcNow;
             var spanStartUtc = ComputeSpanStart(nowUtc, interval, previousRun);
 
+            /* #7669: the state Fleet Overview shows, read once through the card's own reader. An engine-seam read like the two above. */
+            var identityCapacity = await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, nowUtc, cancellationToken, logger).ConfigureAwait(false);
+            /* #7647: the database states the card shows, read through the Database State alert's own statement. */
+            var databaseStates = await DarlingFleetReader.ReadDatabaseStatesAsync(postgres, servers.Select(s => s.ServerId), nowUtc, cancellationToken).ConfigureAwait(false);
+
             /* Sequential, deliberately: 100+ aggregate reads against the loopback store are cheap one
                at a time and a herd all at once — and the sweep is a background errand racing nothing. */
             var readings = new List<FleetSweepServerReading>(servers.Count);
@@ -943,8 +1016,13 @@ public static class FleetSweepEngine
                 cancellationToken.ThrowIfCancellationRequested();
                 IReadOnlyList<string>? separate = null;
                 separatelyMonitored?.TryGetValue(serverId, out separate);
-                readings.Add(await ReadServerSignalsAsync(
-                    postgres, serverId, serverName, spanStartUtc, nowUtc, separate, logger, cancellationToken).ConfigureAwait(false));
+                var reading = await ReadServerSignalsAsync(
+                    postgres, serverId, serverName, spanStartUtc, nowUtc, separate, logger, cancellationToken).ConfigureAwait(false);
+                readings.Add(reading with
+                {
+                    IdentityCapacity = identityCapacity.TryGetValue(serverId, out var identity) ? identity : null,
+                    DatabaseStates = databaseStates.TryGetValue(serverId, out var states) ? states : null,
+                });
             }
 
             var composition = Compose(
@@ -972,7 +1050,7 @@ public static class FleetSweepEngine
             /* One sweep lost, loudly; the next slot tries again. The previous sweep remains the
                newest complete document — stale, stamped with its own instant, incapable of
                misleading anyone. */
-            logger.LogError("Fleet sweep failed; the previous sweep remains the newest complete one: {Message}", ex.Message);
+            logger.LogError(ex, "Fleet sweep failed; the previous sweep remains the newest complete one: {Message}", ex.Message);
         }
     }
 
@@ -1021,11 +1099,12 @@ public static class FleetSweepEngine
                 CollectionRuns = rows.Sum(r => r.CollectionRuns),
                 HighCpuEvents = rows.Sum(r => r.HighCpuEvents),
                 BlockingEvents = rows.Sum(r => r.BlockingEvents),
-                /* #5644: the report rows the band's count tiers were measured in; a hand-built row without them bands its events. */
-                BlockingReports = rows.Sum(r => r.BlockingReports ?? r.BlockingEvents),
                 /* #3539 A2: the longest block across the span's day buckets — a MAX, not a sum, because it
                    is a magnitude; the blocking band's wait arm reads it. */
                 PeakBlockWaitMs = peakBlock,
+                /* #7028: the largest snapshot value of the span's day buckets, a MAX like the peak block. Null when no
+                   day row carries one, so the arm stays off for a hand-built row. */
+                PeakSnapshotWaitMs = rows.Any(r => r.PeakSnapshotWaitMs.HasValue) ? rows.Max(r => r.PeakSnapshotWaitMs ?? 0L) : (long?)null,
                 MemoryPressureEvents = rows.Sum(r => r.MemoryPressureEvents),
                 MemoryCriticalEvents = rows.Sum(r => r.MemoryCriticalEvents),
                 AlertCount = rows.Sum(r => r.AlertCount),
@@ -1035,17 +1114,19 @@ public static class FleetSweepEngine
                 Window = spanEndUtc - spanStartUtc,
             };
 
-            /* #6155: a server with nothing in the span gets its newest collection read, through the probe list_servers uses, so the
-               sweep can tell a server that went quiet after the restart from one that was already offline before it. */
+            /* #6155: a server with nothing in the span gets its newest SUCCESS collection read, through the probe the offline note and
+               list_servers share, so the sweep can tell a server that went quiet after the restart from one that was already offline before it. */
             DateTime? lastCollection = null;
             DateTime? registered = null;
-            if (!signals.HasData && await DarlingServerOfflineNote.ReadFreshnessAsync(postgres, serverId, cancellationToken).ConfigureAwait(false) is var (reg, last))
+            var attempted = false;
+            if (!signals.HasData && await DarlingServerOfflineNote.ReadFreshnessAsync(postgres, serverId, cancellationToken).ConfigureAwait(false) is var (reg, last, tried))
             {
                 registered = reg;
                 lastCollection = last;
+                attempted = tried;
             }
 
-            return new FleetSweepServerReading(serverId, serverName, signals, peakBlock, ReadFault: null, lastCollection, registered);
+            return new FleetSweepServerReading(serverId, serverName, signals, peakBlock, ReadFault: null, lastCollection, registered, Attempted: attempted);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

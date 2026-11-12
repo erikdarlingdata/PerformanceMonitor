@@ -37,7 +37,7 @@ public class DailySummaryHealthFormatTests
     [Fact]
     public void DailySummary_HasNoNumericOverallHealthCard()
     {
-        var daily = DailyStatsBlock(FrontendSource("pages/server-tabs.js"));
+        var daily = DailyStatsBlock(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
         // overall_health is DailyHealthBandCalculator.Label(HealthBand) — the band's text label, the same
         // value health_band carries — so it must not be a Daily Summary card (a num1 one rendered it "NaN").
         Assert.DoesNotContain("key: \"overall_health\"", daily, StringComparison.Ordinal);

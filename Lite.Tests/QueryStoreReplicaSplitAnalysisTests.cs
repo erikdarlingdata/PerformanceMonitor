@@ -281,7 +281,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         /* RED under the old key: 3. Dropping the primary did not merely lose a row — it reported the
            SECONDARY's much milder regression as the server's worst, understating the real problem by
            4x. This is the under-count being worse than a double-count, in one number. */
-        Assert.Equal(12.0, fact.Metadata["worst_regression_factor"], precision: 1);
+        Assert.Equal(12.0, fact.Metadata["lead_regression_factor"], precision: 1);
     }
 
     [Fact]
@@ -319,7 +319,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
         Assert.NotNull(fact);
         Assert.Equal(1.0, fact!.Metadata["offender_count"]);
-        Assert.Equal(12.0, fact.Metadata["worst_regression_factor"], precision: 1);
+        Assert.Equal(12.0, fact.Metadata["lead_regression_factor"], precision: 1);
 
         var rows = await CollectRegressedQueriesDrillDownAsync();
         Assert.Single(rows);
@@ -342,7 +342,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
         Assert.NotNull(fact);
         Assert.Equal(2.0, fact!.Metadata["offender_count"]);
-        Assert.Equal(12.0, fact.Metadata["worst_regression_factor"], precision: 1);
+        Assert.Equal(12.0, fact.Metadata["lead_regression_factor"], precision: 1);
     }
 
     [Fact]
@@ -375,7 +375,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var fact = await CollectPlanRegressionFactAsync();
 
         Assert.NotNull(fact);
-        Assert.Equal(3.0, fact!.Metadata["worst_regression_factor"], precision: 1);
+        Assert.Equal(3.0, fact!.Metadata["lead_regression_factor"], precision: 1);
         /* A duration-fired row reports the duration dimension. */
         Assert.Equal(2.0, fact.Metadata["regressed_dimension"]);
     }
@@ -394,7 +394,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var fact = await CollectPlanRegressionFactAsync();
 
         Assert.NotNull(fact);
-        Assert.Equal(2.5, fact!.Metadata["worst_regression_factor"], precision: 1);
+        Assert.Equal(2.5, fact!.Metadata["lead_regression_factor"], precision: 1);
         Assert.Equal(1.0, fact.Metadata["regressed_dimension"]);
     }
 

@@ -1,0 +1,177 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
+using Xunit;
+
+namespace Darling.Tests;
+
+/* #1776 own-store: each fact mints its own scratch databases through ScratchPostgres and never touches the shared store. */
+
+/// <summary>
+/// #7731: the statement collector stores the NAME of the database each statement ran in, read from the <c>pg_database</c> join at
+/// ordinal 31. The same statement runs in two databases of one cluster, so pg_stat_statements holds two entries with the same
+/// <c>queryid</c> and different <c>dbid</c>. The collector, run against a real target, must return each entry carrying the name of
+/// the database whose oid is its <c>dbid</c>: not the other database's name, and not NULL.
+/// </summary>
+/* pg-cluster-roles, not live-postgres: this class runs statements once and reads them back from pg_stat_statements, whose
+   hash table is cluster-wide. In the parallel collections every other session adds shapes, and an eviction pass can take
+   this class's entries between its statements and its read however much room PgStatementTable secured first. The
+   collection runs alone, after the parallel collections, so no other session adds shapes meanwhile and the dealloc
+   bracket is a tripwire that names a pass instead of a step that retries one. */
+[Collection("pg-cluster-roles")]
+public sealed class PgStatementStatsDatabaseNameLiveTests
+{
+    private const int ServerId = -773101;
+
+    [Fact]
+    public Task TheCollectorNamesEachStatementsOwnDatabase_NotTheOtherOne_AndNeverNull()
+        => CollectorNamesAsync(forcePass: false);
+
+    /// <summary>The same run with an eviction pass forced between its statements and its first read: the pass is named, and the reads look at entries the statements made.</summary>
+    [Fact]
+    public Task TheCollectorNamesEachStatementsOwnDatabase_NotTheOtherOne_AndNeverNull_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => CollectorNamesAsync(forcePass: true);
+
+    private async Task CollectorNamesAsync(bool forcePass)
+    {
+        var adminConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(adminConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the statement collector database name test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var target = await ScratchPostgres.CreateAsync(adminConnectionString!, ct, emptyStore: true);
+        await using var first = await ScratchPostgres.CreateAsync(adminConnectionString!, ct, emptyStore: true);
+        await using var second = await ScratchPostgres.CreateAsync(adminConnectionString!, ct, emptyStore: true);
+
+        /* pg_stat_statements is cluster-wide: the view in the target database lists the entries of every database. */
+        await ExecAsync(target.ConnectionString, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements", ct);
+
+
+        var firstOid = await DatabaseOidAsync(target.ConnectionString, first.DatabaseName, ct);
+        var secondOid = await DatabaseOidAsync(target.ConnectionString, second.DatabaseName, ct);
+        Assert.NotEqual(firstOid, secondOid);
+
+        await using var connection = new NpgsqlConnection(target.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        var context = new CollectorContext
+        {
+            ServerId = ServerId,
+            ServerName = "pm7731-target",
+            CollectionTime = LiveClock.Now(),
+            Deltas = new CollectorDeltaCalculator(),
+            Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = connection.PostgreSqlVersion.Major },
+        };
+        Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
+            context, PgStatementStatsCollector.Instance, connection, null, ct));
+
+        var before = await ReadDatabaseNamesAsync(connection, ct);
+
+        List<PgStatementStatsCollector.Row> rows = null!;
+        var bracket = await PgStatementTable.RunAsync(connection, ct, async pass =>
+        {
+            /* The same statement text in two databases: one queryid, two dbids. */
+            foreach (var database in new[] { first, second })
+            {
+                for (var run = 0; run < 3; run++)
+                {
+                    await ExecAsync(database.ConnectionString, "SELECT 773100 + 1 AS pm7731_database_name", ct);
+                }
+            }
+
+            await pass.BeforeReadAsync(ct);
+            await using (var command = new NpgsqlCommand(PgStatementStatsCollector.Instance.BuildQuery(context).Text, connection))
+            await using (var reader = await command.ExecuteReaderAsync(ct))
+            {
+                rows = await PgStatementStatsCollector.Instance.ReadAsync(reader, context, ct);
+            }
+        }, forcePass);
+        PgStatementTable.AssertNoPassInside(bracket);
+
+        var after = await ReadDatabaseNamesAsync(connection, ct);
+
+        var ofFirst = rows.Where(r => r.DatabaseId == firstOid).ToList();
+        var ofSecond = rows.Where(r => r.DatabaseId == secondOid).ToList();
+        Assert.NotEmpty(ofFirst);
+        Assert.NotEmpty(ofSecond);
+        Assert.All(ofFirst, r => Assert.Equal(first.DatabaseName, r.DatabaseName));
+        Assert.All(ofSecond, r => Assert.Equal(second.DatabaseName, r.DatabaseName));
+
+        /* The shared statement shape appears in both, with one queryid, so a join on the wrong column or an ordinal off by one cannot pass. */
+        Assert.Contains(ofFirst.Select(r => r.QueryId), id => ofSecond.Any(s => s.QueryId == id));
+
+        /* Every collected row names the database its dbid points at, as the catalog stood while the collector ran. Other classes create
+           and drop darling_scratch_* databases on this cluster while the test runs, and pg_stat_statements is cluster-wide, so a database
+           dropped during the test may still be named (it existed when the collector ran) or NULL (it was already gone, and the LEFT join
+           keeps its row). The catalog is read before and after the collector, and each row's name is checked against those reads (#7853). */
+        Assert.All(rows, r =>
+        {
+            var inBefore = before.TryGetValue(r.DatabaseId, out var beforeName);
+            var inAfter = after.TryGetValue(r.DatabaseId, out var afterName);
+            if (inBefore && inAfter)
+            {
+                Assert.Equal(beforeName, r.DatabaseName);
+            }
+            else if (inBefore)
+            {
+                Assert.True(r.DatabaseName is null || r.DatabaseName == beforeName,
+                    $"dbid {r.DatabaseId} was dropped during the test: named '{r.DatabaseName}', expected its name or NULL");
+            }
+            else if (inAfter)
+            {
+                Assert.True(r.DatabaseName is null || r.DatabaseName == afterName,
+                    $"dbid {r.DatabaseId} was created during the test: named '{r.DatabaseName}', expected its name or NULL");
+            }
+            else
+            {
+                Assert.Null(r.DatabaseName);
+            }
+        });
+    }
+
+    private static async Task ExecAsync(string connectionString, string sql, CancellationToken ct)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<long> DatabaseOidAsync(string connectionString, string database, CancellationToken ct)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new NpgsqlCommand("SELECT oid::bigint FROM pg_catalog.pg_database WHERE datname = $1", connection);
+        command.Parameters.AddWithValue(database);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static async Task<Dictionary<long, string>> ReadDatabaseNamesAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var names = new Dictionary<long, string>();
+        await using (var catalog = new NpgsqlCommand("SELECT oid::bigint, datname::text FROM pg_catalog.pg_database", connection))
+        await using (var reader = await catalog.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                names[reader.GetInt64(0)] = reader.GetString(1);
+            }
+        }
+
+        return names;
+    }
+}

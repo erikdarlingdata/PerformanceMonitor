@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -74,7 +76,21 @@ public enum QueryWindowRelation
     WaitStats,
     /* The Latches & Spinlocks tab's two trend charts (#4966): the cumulative-delta tables the trends read. */
     LatchStats,
-    SpinlockStats
+    SpinlockStats,
+
+    /* #7005: the MCP trend and snapshot reads over the periodic collectors. Each collector stores a row every cycle, so these
+       probe like WaitStats: the collector's runs show the store covered a window's start, and the window's time column is
+       collection_time. */
+    CpuUtilization,
+    CpuScheduler,
+    MemoryStats,
+    MemoryGrantStats,
+    FileIoStats,
+    TempDbStats,
+    PerfmonStats,
+    PlanCacheStats,
+    /* get_client_timeouts: the attention XE events, which hold a row only when a client gave up, so the collector's runs show coverage. */
+    AttentionEvents
 }
 
 public partial class LocalDataService
@@ -105,8 +121,99 @@ public partial class LocalDataService
         QueryWindowRelation.WaitStats => "v_wait_stats",
         QueryWindowRelation.LatchStats => "v_latch_stats",
         QueryWindowRelation.SpinlockStats => "v_spinlock_stats",
+        QueryWindowRelation.CpuUtilization => "v_cpu_utilization_stats",
+        QueryWindowRelation.CpuScheduler => "v_cpu_scheduler_stats",
+        QueryWindowRelation.MemoryStats => "v_memory_stats",
+        QueryWindowRelation.MemoryGrantStats => "v_memory_grant_stats",
+        QueryWindowRelation.FileIoStats => "v_file_io_stats",
+        QueryWindowRelation.TempDbStats => "v_tempdb_stats",
+        QueryWindowRelation.PerfmonStats => "v_perfmon_stats",
+        QueryWindowRelation.PlanCacheStats => "v_plan_cache_stats",
+        QueryWindowRelation.AttentionEvents => "v_attention_events",
         _ => throw new ArgumentOutOfRangeException(nameof(relation), relation, "unknown QueryWindowRelation")
     };
+
+    /// <summary>
+    /// #7005: <see cref="GetQueryWindowFloorAsync"/> over every server that holds a row of <paramref name="relation"/> in the window, for a read
+    /// that spans servers (<c>get_alert_history</c> has no server argument): the EARLIEST floor any of those servers answers, because the store
+    /// holds data as far back as its oldest-reaching server. Null when no server holds a row in the window. UTC relations only.
+    /// </summary>
+    public async Task<DateTime?> GetFleetWindowFloorAsync(QueryWindowRelation relation, DateTime startUtc, DateTime endUtc, IReadOnlyCollection<int>? serverIds = null)
+    {
+        var timeColumn = QueryWindowRelationTimeColumn(relation);
+        var scope = ServerScopeSql(serverIds);
+        /* #7256: the window's servers are asked of the hot tables alone when the Parquet archives of the relation (and of
+           collection_log, for a relation with a collector) hold nothing at or after the start. The views open every archive
+           file however short the window is. A rebuild of the archive views during the read sends it back to the views. */
+        var view = QueryWindowRelationView(relation);
+        var collectorName = QueryWindowRelationCollector(relation);
+        var generation = _duckDb.ArchiveViewGeneration;
+        var hotOnly = ArchiveHoldsNothingFrom(await GetArchiveSpanAsync(view.Substring(2), timeColumn, CancellationToken.None), startUtc)
+            && (collectorName is null || ArchiveHoldsNothingFrom(await GetArchiveSpanAsync("collection_log", "collection_time", CancellationToken.None), startUtc));
+        var ids = await ReadWindowServerIdsAsync(hotOnly);
+        if (hotOnly && _duckDb.ArchiveViewGeneration != generation)
+        {
+            ids = await ReadWindowServerIdsAsync(hot: false);
+        }
+
+        async Task<System.Collections.Generic.List<int>> ReadWindowServerIdsAsync(bool hot)
+        {
+            var found = new System.Collections.Generic.List<int>();
+            using var connection = await OpenConnectionAsync();
+            using var command = connection.CreateCommand();
+            /* A server with a logged run of the relation's collector in the window counts as well as one with a row (a quiet collector stores none); the collector name is from the closed map. */
+            var runs = collectorName is { } collector
+                ? $" UNION SELECT server_id FROM {(hot ? "collection_log" : "v_collection_log")} WHERE collector_name = '{collector}' AND collection_time >= $1 AND collection_time <= $2{scope}"
+                : "";
+            command.CommandText = $"SELECT server_id FROM (SELECT server_id FROM {(hot ? view.Substring(2) : view)} WHERE {timeColumn} >= $1 AND {timeColumn} <= $2{scope}{runs}) AS u GROUP BY server_id ORDER BY server_id";
+            command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+            command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                found.Add((int)ToInt64(reader.GetValue(0)));
+            }
+
+            return found;
+        }
+
+        return await EarliestCoverageAsync(ids, id => GetQueryWindowFloorAsync(relation, id, startUtc, endUtc, includeAlsoCovered: false), startUtc);
+    }
+
+    /// <summary>
+    /// #7005: whether a relation's collector stores a row every cycle, so a server with no row of it was never collected (the periodic
+    /// collectors the MCP trends read), as against the event and snapshot tables, which hold a row only when something happened and whose
+    /// collector runs are what show the store covered a window.
+    /// </summary>
+    internal static bool QueryWindowRelationStoresEveryCycle(QueryWindowRelation relation) => relation is
+        QueryWindowRelation.WaitStats or QueryWindowRelation.LatchStats or QueryWindowRelation.SpinlockStats
+        or QueryWindowRelation.CpuUtilization or QueryWindowRelation.CpuScheduler or QueryWindowRelation.MemoryStats
+        or QueryWindowRelation.MemoryGrantStats or QueryWindowRelation.FileIoStats or QueryWindowRelation.TempDbStats
+        or QueryWindowRelation.PerfmonStats or QueryWindowRelation.PlanCacheStats;
+
+    /// <summary>#7005: whether the collector has any logged run for the server (any status, any time the log still holds).</summary>
+    public async Task<bool> HasCollectorRunAsync(int serverId, string collectorName)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT 1 FROM v_collection_log WHERE server_id = $1 AND collector_name = $2 LIMIT 1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = collectorName });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
+
+    /// <summary>The scope a fleet-form probe adds for a read over some servers (<c>get_resource_use_by_tag</c> with a server, or with the enabled ones): an AND clause over the ids, which are ints, so nothing a caller passes reaches the SQL as text. Empty for no scope (every server).</summary>
+    private static string ServerScopeSql(IReadOnlyCollection<int>? serverIds) =>
+        serverIds is null ? "" : $" AND server_id IN ({(serverIds.Count == 0 ? "NULL" : string.Join(",", serverIds.Select(id => id.ToString(System.Globalization.CultureInfo.InvariantCulture))))})";
+
+    /// <summary>#7005: the oldest row of <paramref name="relation"/> any server holds (the aged-out answer of a read that spans servers). Null when the relation is empty. UTC relations only.</summary>
+    public async Task<DateTime?> GetOldestFleetWindowRowAsync(QueryWindowRelation relation, IReadOnlyCollection<int>? serverIds = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT min({QueryWindowRelationTimeColumn(relation)}) FROM {QueryWindowRelationView(relation)}{(serverIds is null ? "" : " WHERE 1 = 1" + ServerScopeSql(serverIds))}";
+        return await command.ExecuteScalarAsync() is DateTime first ? first : null;
+    }
 
     /// <summary>
     /// The collector whose runs <c>collection_log</c> records for a relation the probe reads by coverage
@@ -155,6 +262,16 @@ public partial class LocalDataService
            class has no delta, so a collector's runs (not the oldest row) say the store covered the window's start. */
         QueryWindowRelation.LatchStats => "latch_stats",
         QueryWindowRelation.SpinlockStats => "spinlock_stats",
+        /* #7005: the periodic collectors the MCP trends read; a run in the window shows the store covered it. */
+        QueryWindowRelation.CpuUtilization => "cpu_utilization",
+        QueryWindowRelation.CpuScheduler => "cpu_scheduler_stats",
+        QueryWindowRelation.MemoryStats => "memory_stats",
+        QueryWindowRelation.MemoryGrantStats => "memory_grant_stats",
+        QueryWindowRelation.FileIoStats => "file_io_stats",
+        QueryWindowRelation.TempDbStats => "tempdb_stats",
+        QueryWindowRelation.PerfmonStats => "perfmon_stats",
+        QueryWindowRelation.PlanCacheStats => "plan_cache_stats",
+        QueryWindowRelation.AttentionEvents => "attention",
         _ => null
     };
 
@@ -311,12 +428,39 @@ public partial class LocalDataService
     {
         var view = QueryWindowRelationView(relation);
         using var _q = TimeQuery("GetQueryWindowFloorAsync", $"{view} window floor");
+        var collector = QueryWindowRelationCollector(relation);
+        var timeColumn = QueryWindowRelationTimeColumn(relation);
+
+        /* #7256: what the table's Parquet archive holds in time, taken BEFORE this read's own lock (a lookup that waits for a
+           slot or another reader's lookup must not do it while holding the non-recursive read lock). Read once per archive
+           generation. Null (unknown, or a view that removes copies on a natural key) keeps the whole-view probe below. */
+        var archiveTable = view.Substring(2);
+        var spanGeneration = _duckDb.ArchiveViewGeneration;
+        ArchiveSpan? archiveSpan = QueryWindowRelationTimeIsServerLocal(relation)
+            ? null
+            : await GetArchiveSpanAsync(archiveTable, timeColumn, cancellationToken);
+        ArchiveSpan? logSpan = collector is null || QueryWindowRelationTimeIsServerLocal(relation)
+            ? null
+            : await GetArchiveSpanAsync("collection_log", "collection_time", cancellationToken);
+
         /* #5371: a token (the Collection Health pass's) reaches the lock wait, the open and the two statements of the generic
            path below; a caller that passes none keeps the original uninterruptible read. */
         using var connection = await OpenConnectionAsync(timer: null, cancellationToken);
 
-        var collector = QueryWindowRelationCollector(relation);
-        var timeColumn = QueryWindowRelationTimeColumn(relation);
+        /* The span was taken before the lock wait. An archive-and-reset or an export that ran during the wait moved older rows to
+           Parquet and bumped the generation inside its write lock, so the span is stale and the view probe below must run. The
+           read lock is held here, so this check is exact. */
+        if (_duckDb.ArchiveViewGeneration != spanGeneration)
+        {
+            archiveSpan = null;
+            logSpan = null;
+        }
+
+        /* #7256: the first query asks for rows inside [start, end]. When the archive holds nothing at or after the start, only the
+           hot table can hold them, so it reads that alone and never opens an archive file (the view opens every one, however
+           narrow the window). The span is exact here: the generation was checked under this connection's read lock. */
+        var windowRelation = ArchiveHoldsNothingFrom(archiveSpan, startUtc) ? archiveTable : view;
+        var windowLogRelation = ArchiveHoldsNothingFrom(logSpan, startUtc) ? "collection_log" : "v_collection_log";
 
         /* #4989: a time column that holds the server's wall clock (the Default Trace) goes through the clock, the way the
            grid reads it. Every UTC relation keeps the single-query path below. */
@@ -339,14 +483,14 @@ public partial class LocalDataService
             windowCommand.CommandText = collector is null
                 ? $@"
 SELECT MIN({timeColumn})
-FROM {view}
+FROM {windowRelation}
 WHERE server_id = $1
 AND   {timeColumn} >= $2
 AND   {timeColumn} <= $3{rowsFloorInline}"
                 : $@"
 SELECT LEAST(
-    (SELECT MIN({timeColumn}) FROM {view} WHERE server_id = $1 AND {timeColumn} >= $2 AND {timeColumn} <= $3{rowsFloorInline}),
-    (SELECT MIN(collection_time) FROM v_collection_log WHERE server_id = $1 AND collector_name = '{collector}' AND collection_time >= $2 AND collection_time <= $3))";
+    (SELECT MIN({timeColumn}) FROM {windowRelation} WHERE server_id = $1 AND {timeColumn} >= $2 AND {timeColumn} <= $3{rowsFloorInline}),
+    (SELECT MIN(collection_time) FROM {windowLogRelation} WHERE server_id = $1 AND collector_name = '{collector}' AND collection_time >= $2 AND collection_time <= $3))";
             windowCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = endUtc });
@@ -362,17 +506,23 @@ SELECT LEAST(
             return firstInWindow;
         }
 
-        using (var olderCommand = connection.CreateCommand())
+        /* #7256: the older-row probe asks the hot table first and stops at its first older row, so a server whose hot table holds
+           an older row never reads the archive. The view, which opens every archive file, is read when the archive's cached span
+           reaches back before the window start or is unknown. That span covers every server in the archive, so the view is
+           skipped only when the whole archive holds nothing older than the start. A server with no older row of its own still
+           reads the view when another server's archived rows are older. The answer is the same either way: a row older than the
+           start exists in the view exactly when it exists in the hot table or in the archive. */
+        if (archiveSpan is not null)
         {
-            olderCommand.CommandText = $@"
-SELECT 1
-FROM {view}
-WHERE server_id = $1
-AND   {timeColumn} < $2
-LIMIT 1";
-            olderCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
-            olderCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
-            if (await olderCommand.ExecuteScalarAsync(cancellationToken) is not null)
+            if (await HasRowOlderThanAsync(connection, archiveTable, timeColumn, serverId, startUtc, cancellationToken))
+            {
+                return startUtc;
+            }
+        }
+
+        if (archiveSpan is null || (archiveSpan.Value.Oldest is DateTime archiveOldest && archiveOldest < startUtc))
+        {
+            if (await HasRowOlderThanAsync(connection, view, timeColumn, serverId, startUtc, cancellationToken))
             {
                 return startUtc;
             }
@@ -385,6 +535,23 @@ LIMIT 1";
 
         /* No older row: an older run of the collector still proves the window is covered. */
         return await HasCollectorRunBeforeAsync(connection, collector, serverId, startUtc) ? startUtc : firstRow;
+    }
+
+    /// <summary>Whether <paramref name="relation"/> (a table or a <c>v_</c> view) holds a row of the server older than <paramref name="startUtc"/>.
+    /// It stops at the first one.</summary>
+    private static async Task<bool> HasRowOlderThanAsync(
+        LockedConnection connection, string relation, string timeColumn, int serverId, DateTime startUtc, CancellationToken cancellationToken)
+    {
+        using var olderCommand = connection.CreateCommand();
+        olderCommand.CommandText = $@"
+SELECT 1
+FROM {relation}
+WHERE server_id = $1
+AND   {timeColumn} < $2
+LIMIT 1";
+        olderCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
+        olderCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        return await olderCommand.ExecuteScalarAsync(cancellationToken) is not null;
     }
 
     /// <summary>Whether the collector's runs in <c>v_collection_log</c> (<c>collection_time</c>, UTC) include one before

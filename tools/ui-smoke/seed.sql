@@ -7,20 +7,28 @@
 --   * Every time is relative to ONE anchor: the store's own clock in UTC, cut to the minute, or the psql variable `anchor` when the
 --     caller sets it (-v anchor=...; run-ui-smoke.ps1 does, so the screenshot step knows it, #5744). Nothing is dated.
 --   * Every count is fixed: the same rows on every run, whatever the minute.
---   * The targets are the two servers the config registers: "ui-sql" (SQL Server) and "ui-pg" (PostgreSQL), both at an
---     address nothing listens on, so the service never collects and never overwrites what is seeded here.
+--   * The targets are the servers the config registers: "ui-sql" (SQL Server), "ui-pg" (PostgreSQL), a long-name SQL
+--     Server (#7479) and "ui-down-sql" (#7590), all at an
+--     address nothing listens on, so the service never collects and never overwrites what is seeded here. It does store each
+--     failed connect on the registry row (connect_down_since and two more columns, #7590), which would turn the first three
+--     cards Offline and overwrite the fourth's error: a trigger at the end of this file keeps those three columns as seeded.
 --   * To cover another table, add one more section below, in the same shape, and name what it feeds. Keep the
 --     collection_id / log_id ranges apart (the ranges are listed in each section) so rows never collide.
 --
 -- Seeded (SQL Server target "ui-sql", 6 hours back, one row a minute unless said otherwise):
 --   cpu_utilization_stats 360 | memory_stats 360 | wait_stats 4 types x 360 | file_io_stats 2 files x 360
---   query_stats 12 queries (3 databases x 4) x 36 collections (every 10 minutes) | server_properties 1
---   database_size_stats 3 databases x 2 files, newest minute | collection_log 5 collectors x 72 (every 5 minutes), all success
+--   query_stats 12 queries (3 databases x 4) x 36 collections (every 10 minutes), plus (#7479) 2 queries in a 77-character database name x 36, and 300 queries in
+--   BulkDb x 1 collection (a grid of several hundred rows) | server_properties 1
+--   database_size_stats 4 databases x 2 files, newest minute (the fourth has a 77-character name, #7479) | collection_log 5 collectors x 72 (every 5 minutes), all success
 --   blocked_process_reports 2 | deadlocks 1 | analysis_findings 2 | config_alert_log 1 (metric 'High CPU', the name #/triage resolves)
 --   ag_replica_states 2 (one group, SalesAG: UISQL01 primary, UISQL02 secondary) | ag_database_replica_states 4 (2 databases x 2 replicas), newest minute
 -- Seeded (PostgreSQL target "ui-pg"):
 --   pg_database_stats 2 databases x 360 | pg_wait_stats 3 events x 360 | pg_statement_stats 6 queries x 36 (every 10 minutes)
 --   pg_statement_text 6 | collection_log 3 collectors x 72
+-- Seeded (the unreachable SQL Server "ui-down-sql", #7590): a stored failed connect (down 3 hours, retry in 4 minutes) over one cpu_utilization_stats row and one
+--   collection_log row from 3 hours back (the last collection before the outage), so the card reads Offline with its last values
+-- Seeded (the long-name SQL Server): collection_log 1 (cpu_utilization_stats at the anchor, #7569), so its card reads stale
+--   like the other two and not Offline
 
 \set ON_ERROR_STOP on
 -- The anchor, as UTC text. Set by the caller (-v anchor='2026-01-01 12:00:00'), else taken once here, from the store's clock.
@@ -30,6 +38,8 @@ SELECT to_char(date_trunc('minute', now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:
 \gset
 \endif
 BEGIN;
+-- A rerun against a seeded store: the freeze trigger (end of this file) would hold the connect columns at the earlier values.
+DROP TRIGGER IF EXISTS ui_smoke_freeze_connect_state ON collect.servers;
 
 -- The registry row the config seed made. server_name in every collect table is the STORAGE name (the host, for a SQL
 -- Server entry without a database), the name in the sidebar and the URL is the config name "ui-sql".
@@ -45,6 +55,43 @@ VALUES (:sid, :'sname', 'ui-sql', TRUE, 3, 16, 'sqlserver',
 ON CONFLICT (server_id) DO UPDATE SET
     server_name = EXCLUDED.server_name, display_name = EXCLUDED.display_name, is_enabled = TRUE,
     sql_engine_edition = 3, sql_major_version = 16, engine_kind = 'sqlserver', modified_date = EXCLUDED.modified_date;
+
+-- A third SQL Server with a 70-character name (#7479), so the sidebar, the fleet card and the page header have a long name to lay out. It
+-- has an observed-registry row and one collection_log row (below, #7569): like the other two it is at an address nothing listens on.
+SELECT server_id AS lsid, host AS lname
+FROM config.config_monitored_servers
+WHERE name = 'ui-long-name-sql-server-production-east-region-cluster-demo-01-primary'
+\gset
+INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date)
+VALUES (:lsid, :'lname', 'ui-long-name-sql-server-production-east-region-cluster-demo-01-primary', TRUE, 3, 16, 'sqlserver',
+        (:'anchor'::timestamp) - interval '7 days', :'anchor'::timestamp)
+ON CONFLICT (server_id) DO UPDATE SET
+    server_name = EXCLUDED.server_name, display_name = EXCLUDED.display_name, is_enabled = TRUE,
+    sql_engine_edition = 3, sql_major_version = 16, engine_kind = 'sqlserver', modified_date = EXCLUDED.modified_date;
+
+-- A fourth SQL Server, seeded as unreachable (#7590): the registry row carries a stored failed connect, the way the service writes one when a
+-- connect fails. It reads Offline with "Server unreachable since ...", greyed last-known tiles and a Server Connection panel on Collection Health.
+-- Its last collection (one cpu_utilization_stats row, collection_id 6100000, and one collection_log row, log_id 8900001) is 3 hours back,
+-- the moment the outage began.
+SELECT server_id AS dsid, host AS dname
+FROM config.config_monitored_servers
+WHERE name = 'ui-down-sql'
+\gset
+INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date,
+    connect_down_since, last_connect_error, next_connect_attempt)
+VALUES (:dsid, :'dname', 'ui-down-sql', TRUE, 3, 16, 'sqlserver',
+        (:'anchor'::timestamp) - interval '7 days', :'anchor'::timestamp,
+        (:'anchor'::timestamp) - interval '3 hours', 'Login failed for user ''pm_monitor''. Reason: Password did not match that for the login provided.',
+        (:'anchor'::timestamp) + interval '4 minutes')
+ON CONFLICT (server_id) DO UPDATE SET
+    server_name = EXCLUDED.server_name, display_name = EXCLUDED.display_name, is_enabled = TRUE,
+    sql_engine_edition = 3, sql_major_version = 16, engine_kind = 'sqlserver', modified_date = EXCLUDED.modified_date,
+    connect_down_since = EXCLUDED.connect_down_since, last_connect_error = EXCLUDED.last_connect_error, next_connect_attempt = EXCLUDED.next_connect_attempt;
+
+INSERT INTO collect.cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time_utc)
+VALUES (6100000, (:'anchor'::timestamp) - interval '3 hours', :dsid, :'dname', (:'anchor'::timestamp) - interval '3 hours', 38, 6, (:'anchor'::timestamp) - interval '3 hours');
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+VALUES (8900001, :dsid, :'dname', 'cpu_utilization_stats', (:'anchor'::timestamp) - interval '3 hours', 120, 'SUCCESS', 1);
 
 -- The minutes: m = 0 is the current minute, m = 359 is six hours earlier.
 CREATE TEMP TABLE ui_minutes ON COMMIT DROP AS
@@ -114,8 +161,25 @@ CROSS JOIN (VALUES
     (9,  'ReportingDb', 'SELECT * FROM dbo.DailySales WHERE SaleDate >= @From;', 80, 30000, 7000),
     (10, 'ReportingDb', 'SELECT TOP (50) * FROM dbo.TopCustomers ORDER BY Revenue DESC;', 60, 22000, 5000),
     (11, 'ReportingDb', 'EXEC dbo.RefreshDailySales;', 2, 400000, 90000),
-    (12, 'ReportingDb', 'SELECT COUNT(*) FROM dbo.AuditTrail WHERE ActorId = @ActorId;', 150, 8000, 1800))
+    (12, 'ReportingDb', 'SELECT COUNT(*) FROM dbo.AuditTrail WHERE ActorId = @ActorId;', 150, 8000, 1800),
+    (13, 'ReportingWarehouse_ArchiveFinancialTransactionsHistory_2019_2025_ReadOnlyCopy', 'SELECT t.TransactionId, t.AccountIdentifierWithAVeryLongColumnNameThatHasNoSpacesAtAllAndKeepsGoingForQuiteAWhile, t.PostedAmountInReportingCurrency FROM dbo.ArchivedFinancialTransactionsHistoryPartitionedByFiscalQuarterAndLegalEntity AS t WHERE t.PostedOn >= @From AND t.PostedOn < @To ORDER BY t.PostedOn DESC;', 20, 70000, 12000),
+    (14, 'ReportingWarehouse_ArchiveFinancialTransactionsHistory_2019_2025_ReadOnlyCopy', 'EXEC dbo.usp_RebuildArchivedFinancialTransactionsHistorySummaryForEveryLegalEntityAndFiscalQuarterInTheReportingWarehouse;', 1, 500000, 100000))
     AS q(n, db, query_text, execs, cpu_us, reads);
+
+-- query_stats, BulkDb (#7479): 300 queries, one collection each, so the Queries grid and the triage list have several hundred rows to lay out.
+-- collection_id 5500000 + n. Low CPU, so they sort below the 12 queries above.
+INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, creation_time,
+    last_execution_time, execution_count, total_worker_time, total_elapsed_time, total_logical_reads, total_logical_writes, total_physical_reads, total_rows,
+    min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time, query_text, sql_handle, plan_handle,
+    delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, delta_logical_writes, delta_physical_reads, delta_rows,
+    sample_interval_seconds)
+SELECT 5500000 + n, :'anchor'::timestamp, :sid, :'sname', 'BulkDb', '0x' || lpad(to_hex(n * 4099), 16, '0'), '0x' || lpad(to_hex(n * 7919), 16, '0'),
+       :'anchor'::timestamp - interval '2 days', :'anchor'::timestamp,
+       10 + n % 7, (10 + n % 7) * 40, (10 + n % 7) * 80, (10 + n % 7) * 12, 0, 0, 10 + n % 7,
+       20, 60, 40, 120,
+       'SELECT Col' || n || ' FROM dbo.BulkTable' || n || ' WHERE Id = @Id;', '0x02' || lpad(to_hex(n), 8, '0'), '0x06' || lpad(to_hex(n), 8, '0'),
+       10 + n % 7, (10 + n % 7) * 40, (10 + n % 7) * 80, (10 + n % 7) * 12, 0, 0, 10 + n % 7, 600
+FROM generate_series(100, 399) AS n;
 
 -- server_properties: Overview. One row, the newest minute. collection_id 6000000.
 INSERT INTO collect.server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition,
@@ -131,7 +195,7 @@ SELECT 7000000 + 10 * d.n + f.fid, mm.t, :sid, :'sname', d.db, 4 + d.n, f.fid, f
        d.db || f.suffix, f.dir || d.db || f.suffix, f.total_mb, f.total_mb / 2, 256, -1, 'FULL', 160, 'ONLINE',
        f.dir, 512000, 300000
 FROM (SELECT t FROM ui_minutes WHERE m = 0) mm
-CROSS JOIN (VALUES (1, 'SalesDb'), (2, 'InventoryDb'), (3, 'ReportingDb')) AS d(n, db)
+CROSS JOIN (VALUES (1, 'SalesDb'), (2, 'InventoryDb'), (3, 'ReportingDb'), (4, 'ReportingWarehouse_ArchiveFinancialTransactionsHistory_2019_2025_ReadOnlyCopy')) AS d(n, db)
 CROSS JOIN (VALUES (1, 'ROWS', '.mdf', 'D:\data\', 20480), (2, 'LOG', '_log.ldf', 'L:\log\', 4096)) AS f(fid, kind, suffix, dir, total_mb);
 
 -- collection_log: Health and Collection Health. 5 collectors, every 5 minutes, all success. log_id 8000000 + 1000 * collector + k.
@@ -141,6 +205,12 @@ SELECT 8000000 + 1000 * cl.n + k.k, :sid, :'sname', cl.name,
 FROM generate_series(0, 71) AS k(k)
 CROSS JOIN (VALUES (1, 'wait_stats', 4), (2, 'cpu_utilization_stats', 1), (3, 'memory_stats', 1), (4, 'file_io_stats', 2), (5, 'query_stats', 12))
     AS cl(n, name, rows_collected);
+
+-- collection_log, the long-name server (#7569): one successful row at the anchor. With none, the fleet reads that card Offline from the first poll
+-- (registered, never collected), so the screenshot step, which waits for every card to be collection stale, took it for a fleet that had aged
+-- past 30 minutes. With one row it turns stale 2 minutes after the anchor and Offline 30 minutes after, like the other two. log_id 8900000.
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+VALUES (8900000, :lsid, :'lname', 'cpu_utilization_stats', :'anchor'::timestamp, 120, 'SUCCESS', 1);
 
 -- blocked_process_reports: Blocking tab. Two reports, 1 and 2 hours back. blocked_report_id 9000001 and 9000002.
 INSERT INTO collect.blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocking_spid,
@@ -269,6 +339,19 @@ SELECT 23000000 + 1000 * cl.n + k.k, :pgid, :'pgname', cl.name,
        :'anchor'::timestamp - make_interval(mins => k.k * 5), 90 + k.k, 'SUCCESS', cl.rows_collected
 FROM generate_series(0, 71) AS k(k)
 CROSS JOIN (VALUES (1, 'pg_database_stats', 2), (2, 'pg_wait_stats', 3), (3, 'pg_statement_stats', 6)) AS cl(n, name, rows_collected);
+
+-- Keep the three connect-state columns as seeded (#7590). The service retries each unreachable server on a backoff of 1 to 4 minutes and writes the failure
+-- onto the registry row every time: the first three servers would turn Offline in the middle of the run and ui-down-sql's error and retry time would move.
+-- The trigger is part of the throwaway store only, and runs after the inserts above, so those still land.
+CREATE OR REPLACE FUNCTION collect.ui_smoke_freeze_connect_state() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.connect_down_since := OLD.connect_down_since;
+    NEW.last_connect_error := OLD.last_connect_error;
+    NEW.next_connect_attempt := OLD.next_connect_attempt;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER ui_smoke_freeze_connect_state BEFORE UPDATE ON collect.servers
+    FOR EACH ROW EXECUTE FUNCTION collect.ui_smoke_freeze_connect_state();
 
 COMMIT;
 

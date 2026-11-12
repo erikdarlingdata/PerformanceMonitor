@@ -63,12 +63,20 @@ public static class ReadOutcomeClassifier
     /// <c>McpHelpers.FormatError</c> envelope counts the same way a raw exception would. Reuses
     /// <see cref="Hosting.DarlingWebFailureLog.IsStatementTimeoutSentence"/> — the web surface's own sentence
     /// matcher — rather than a second regex, so a 503-for-57014 on the wire and a <see cref="ReadOutcome.Timeout"/>
-    /// sample can never disagree about which sentences count.</summary>
+    /// sample can never disagree about which sentences count. A 53400 sentence (#7938, the store's
+    /// <c>temp_file_limit</c> refusing the read's spill) is <see cref="ReadOutcome.Limit"/> through the same anchored
+    /// shape, <see cref="Hosting.DarlingWebFailureLog.IsConfigurationLimitSentence"/>, so the web's read health
+    /// records it as the limit the live exception would be, not as an error.</summary>
     public static ReadOutcome ClassifySentence(string sentence, CancellationToken requestToken)
     {
         if (requestToken.IsCancellationRequested)
         {
             return ReadOutcome.Cancelled;
+        }
+
+        if (sentence is not null && Hosting.DarlingWebFailureLog.IsConfigurationLimitSentence(sentence))
+        {
+            return ReadOutcome.Limit;
         }
 
         if (sentence is not null && Hosting.DarlingWebFailureLog.IsStatementTimeoutSentence(sentence))

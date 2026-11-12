@@ -322,9 +322,14 @@ internal static class ComposePanelRunner
     /// unchanged from before #4442 scope 2 added the wrapper. <paramref name="logger"/> is the one the host's
     /// read-latency recorder carries (<see cref="ReadLatencyRecorder.Logger"/>), where the data-start probe reports
     /// a failure it swallows.</summary>
+    /// <summary>The one answer a scoped caller gets for a scope that names no server it may see: an unknown name, a name outside the
+    /// grant and a name the registry cannot resolve all look the same.</summary>
+    private static ComposeRunOutcome EmptyScopedAnswer() =>
+        ComposeRunOutcome.Ok(new JsonObject { ["sql"] = "", ["rows"] = new JsonArray(), ["annotations"] = new JsonArray() });
+
     internal static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(
         ComposeRunHost host, NpgsqlDataSource postgres, JsonObject body, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, bool includeDataStartFields, System.Threading.CancellationToken cancellationToken,
-        ILogger? logger = null, Action<Exception>? onRunException = null, DateTime? nowUtc = null)
+        ILogger? logger = null, Action<Exception>? onRunException = null, IReadOnlyList<int>? authorizedServerIds = null, DateTime? nowUtc = null)
     {
         if (body["panel"] is not JsonObject panel)
         {
@@ -369,10 +374,33 @@ internal static class ComposePanelRunner
         var (resolvedScope, scopeRefusal) = await host.ResolveServerNames(postgres, serverScope, cancellationToken, logger);
         if (scopeRefusal is not null)
         {
-            return ComposeRunOutcome.BadRequest(McpHelpers.ErrorMessageOf(scopeRefusal));
+            /* A scoped caller gets the empty answer an unknown or out-of-scope name gets: a refusal would say that two registrations
+               share the name it sent. */
+            return authorizedServerIds is null ? ComposeRunOutcome.BadRequest(McpHelpers.ErrorMessageOf(scopeRefusal)) : EmptyScopedAnswer();
         }
 
         serverScope = resolvedScope;
+        if (authorizedServerIds is not null)
+        {
+            var names = new List<string>();
+            await using var command = postgres.CreateCommand(
+                "SELECT server_name FROM collect.servers WHERE server_id = ANY($1)");
+            command.CommandTimeout = StorageCommandDeadlines.ComposedReadSeconds;
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, authorizedServerIds.ToArray());
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                names.Add(reader.GetString(0));
+            }
+
+            serverScope = serverScope is { Count: > 0 }
+                ? serverScope.Intersect(names, StringComparer.OrdinalIgnoreCase).ToList()
+                : names;
+            if (serverScope.Count == 0)
+            {
+                return EmptyScopedAnswer();
+            }
+        }
 
         /* The run window (#1606): an explicit absolute pair (windowStart/windowEnd — the zoom/brush and
            historical-analysis path) takes precedence over the relative `hours` (which the frontend keeps
@@ -438,6 +466,8 @@ internal static class ComposePanelRunner
            (ComposeCompiler.BuildFactRelation returns it before any wide-table branch), so the wide table is never read: its
            eligibility gate, its size guard and its notes would all describe a table this panel does not touch. A panel the
            router sends to a rollup skips them; one that reads the wide table (a recent window, or a dimension no rollup carries) is unchanged. */
+        /* A scoped caller reaches every guard below. serverScope holds only servers the grant permits by this point, so the
+           guards' refusals and notices, which name the servers they counted, name no server outside the grant. */
         var wideResolution = plan!.Measure.SourceTable == "query_store_stats"
             && !ComposeCompiler.ResolveFactRoute(plan, now, start, rollups, coverage).IsCagg
             ? await ResolveQueryStoreWideEligibleAsync(postgres, serverScope, start, end, hasWindowEnd ? end : (DateTime?)null, cancellationToken, plan)
@@ -464,13 +494,18 @@ internal static class ComposePanelRunner
                 stampThrough = wideResolution.StampThrough;
             }
 
+            /* #7285: a panel the compile sends to the fleet rollup (V239) has its stamped hours counted from the fleet table's size. The
+               conditions are the compile's own, asked of the same context fields. */
+            var readsFleetRollup = stampThrough is not null
+                && ComposeCompiler.ReadsFleetRollup(plan!, new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, true, wideResolution.WideStart, QueryStoreRawServerIds: rawServerIds, QueryStoreFleetReady: wideResolution.FleetReady));
+
             /* #6115: the guard's wide estimate leaves out the servers read raw (the interval table never reads them), and ADDS the raw half's
                rows, counted from the collection log over the window's own start (the raw half is not clamped to the wide start) at 1.0 each,
                against the same limit. One statement reads both halves under one timeout, so the sum is what must fit. The wide figure is
                exactly what the guard counted before #6115 for those servers, so a split panel is never let through that today's code would
                refuse for the same wide rows; the raw rows can only refuse more. A panel whose every server passes adds nothing and is
                unchanged. A log that cannot answer adds nothing: the guard fails open, as it always has. */
-            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, StorageCommandDeadlines.ComposedReadSeconds, cancellationToken, limit, stampThrough, rawServerIds, start) is { } tooBig)
+            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, StorageCommandDeadlines.ComposedReadSeconds, cancellationToken, limit, stampThrough, rawServerIds, start, readsFleetRollup) is { } tooBig)
             {
                 return ComposeRunOutcome.BadRequest(tooBig);
             }
@@ -525,7 +560,7 @@ internal static class ComposePanelRunner
 
         await using var snapshot = hourlyEdgesSnapshot;
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough ?? moduleMap.Through, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers, QueryStoreStampThrough: stampThrough, ModuleMapMissing: moduleMap.Missing, QueryStoreRawServerIds: rawServerIds);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough ?? moduleMap.Through, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers, QueryStoreStampThrough: stampThrough, ModuleMapMissing: moduleMap.Missing, QueryStoreRawServerIds: rawServerIds, QueryStoreFleetReady: wideResolution.FleetReady, AuthorizedServerIds: authorizedServerIds);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -566,7 +601,7 @@ internal static class ComposePanelRunner
             /* W13: a scope naming only servers the registry does not know, over rows that hold nothing, is a server that does not exist, and
                a null aggregate row was being returned as if it were an answer. Names that ARE stored (a removed server's history, #5525)
                keep returning their rows, so this fires only when the run found nothing for them. */
-            if (UnknownServerMessage(serverScope, unregisteredServers, rows, registryLookupFailed) is { } unknownServer)
+            if (authorizedServerIds is null && UnknownServerMessage(serverScope, unregisteredServers, rows, registryLookupFailed) is { } unknownServer)
             {
                 return ComposeRunOutcome.NotFound(unknownServer);
             }
@@ -599,7 +634,7 @@ internal static class ComposePanelRunner
 
             if (ComposeStoreAvailability.CombineNotices(
                     retentionNotice,
-                    ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count)) is string notice)
+                    ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count, rows.Count >= ComposeLimits.HardRowCap ? EarliestBucket(rows) : null)) is string notice)
             {
                 payload["notice"] = notice;
 
@@ -635,6 +670,22 @@ internal static class ComposePanelRunner
                 payload["query_store_raw_servers_note"] = rawServerIds.Count == 1
                     ? "1 server whose interval table could not serve the window was read from the raw tables, from the window's own start (#6115)."
                     : $"{rawServerIds.Count} servers whose interval table could not serve the window were read from the raw tables, from the window's own start (#6115).";
+            }
+
+            /* #7668: the validator's warnings for this panel ride the run's answer, so a panel saved before #7565 (a perfmon counter ending in /sec
+               charted as its running total) says so wherever it is run, not only in the reply to a save. The same sentences validate_custom_view and a
+               save return, from the same function; the stored definition is untouched. Absent when there are none, so a clean answer keeps its shape. */
+            var panelWarnings = new List<string>();
+            CustomViewValidation.AddCumulativePerfmonWarnings(panelWarnings, plan, "this panel");
+            if (panelWarnings.Count > 0)
+            {
+                var list = new JsonArray();
+                foreach (var warning in panelWarnings)
+                {
+                    list.Add(warning);
+                }
+
+                payload["warnings"] = list;
             }
 
             return ComposeRunOutcome.Ok(payload);
@@ -689,7 +740,7 @@ internal static class ComposePanelRunner
     /// a refused clause on any server in scope makes the whole panel raw — every input here leans toward raw,
     /// the same rule #3953 already applies to the single-server reads.
     /// </summary>
-    internal static async Task<(bool Eligible, DateTime? WideStart, QueryStoreIntervalWide.WideStartBound Bound, string? SettingServer, long? GroupMembers, DateTime? StampThrough, IReadOnlyList<int>? RawServerIds)> ResolveQueryStoreWideEligibleAsync(
+    internal static async Task<(bool Eligible, DateTime? WideStart, QueryStoreIntervalWide.WideStartBound Bound, string? SettingServer, long? GroupMembers, DateTime? StampThrough, IReadOnlyList<int>? RawServerIds, bool FleetReady)> ResolveQueryStoreWideEligibleAsync(
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime start, DateTime end,
         DateTime? literalWindowEnd, System.Threading.CancellationToken cancellationToken, PanelPlan? groupMembersFor = null)
     {
@@ -714,9 +765,7 @@ internal static class ComposePanelRunner
             }
 
             var wideServers = new List<(int Id, string Name)>();
-            /* #5582 L4: the stamp-through lookup takes every server in scope, enabled or not, because the read and the fleet stale arm
-               cover a disabled server's rows too. The eligibility checks and the group-member count below still see the enabled ones only. */
-            var scopedServerIds = new List<int>();
+            /* The eligibility checks and the group-member count below see the enabled servers only. */
             await using (var servers = new NpgsqlCommand(QueryStoreWideServerIdsSql, connection) { CommandTimeout = StorageCommandDeadlines.ComposedReadSeconds })
             {
                 servers.Parameters.Add(new NpgsqlParameter
@@ -727,7 +776,6 @@ internal static class ComposePanelRunner
                 await using var reader = await servers.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
                 {
-                    scopedServerIds.Add(reader.GetInt32(0));
                     if (reader.GetBoolean(2))
                     {
                         wideServers.Add((reader.GetInt32(0), reader.GetString(1)));
@@ -814,10 +862,9 @@ internal static class ComposePanelRunner
                 : await QueryStoreGroupMembers.ResolveAsync(connection, groupMembersFor, wideServers.Count, StorageCommandDeadlines.ComposedReadSeconds, cancellationToken, ComposeReadNotes.CurrentLogger);
 
             /* #5582 part 3: where the compose rollup stops answering, on this same connection. Null (today's route) on any fault. */
-            var stampThrough = await ResolveQueryStoreStampThroughAsync(
-                connection, (rawServerIds is null ? scopedServerIds : scopedServerIds.Except(rawServerIds).ToList()).ToArray(), wideStart, end, schemaVersion, cancellationToken);
+            var stampThrough = await ResolveQueryStoreStampThroughAsync(connection, wideStart, end, schemaVersion, cancellationToken);
 
-            return (true, wideStart, bound, settingServer, groupMembers, stampThrough, rawServerIds);
+            return (true, wideStart, bound, settingServer, groupMembers, stampThrough, rawServerIds, schemaVersion >= QueryStoreComposeStamp.FleetRungVersion);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -860,15 +907,17 @@ internal static class ComposePanelRunner
     /// <summary>
     /// #5582 part 3: the first hour of the window the compose rollup (V173) cannot answer. The hours checked run from
     /// <c>date_trunc('hour', wideStart)</c> to the hour of the window end. An hour is unusable when it is missing from
-    /// <c>query_store_compose_stamp_hours</c> (never built), or when a <c>_built</c> pair for a server in scope has
-    /// <c>built_seq IS DISTINCT FROM late_seq</c> (a late write since the build). The statement's own stale arm covers the
-    /// race between this lookup and the read, so this is only where the rollup arm stops and the wide-table tail starts.
+    /// <c>query_store_compose_stamp_hours</c> (never built). A stale pair (<c>built_seq IS DISTINCT FROM late_seq</c>, a late write
+    /// since the build) no longer ends the rollup here (#7762): one late write on one server of 210 used to send every later hour to the
+    /// tail. The statement's stale arm reads the rows of each stale (server, hour) from the wide table, once per stale hour, and the rollup
+    /// arm leaves those pairs out, so every row is read once (see <c>ComposeCompiler.BuildStampRelation</c>); this is only where the
+    /// rollup arm stops and the wide-table tail starts.
     /// Null means today's route: the schema is below V173, the very first hour is already unusable (nothing to gain), or
     /// the lookup faulted (it leans toward the route that needs no rollup). A usable run to the end is capped at the window
     /// end, because a later instant makes the rollup arm read rows the statement's outer WHERE throws away.
     /// </summary>
     internal static async Task<DateTime?> ResolveQueryStoreStampThroughAsync(
-        NpgsqlConnection connection, int[] serverIds, DateTime wideStart, DateTime end, int schemaVersion, System.Threading.CancellationToken cancellationToken)
+        NpgsqlConnection connection, DateTime wideStart, DateTime end, int schemaVersion, System.Threading.CancellationToken cancellationToken)
     {
         if (schemaVersion < QueryStoreComposeStamp.RungVersion || end <= wideStart)
         {
@@ -880,7 +929,6 @@ internal static class ComposePanelRunner
             await using var lookup = new NpgsqlCommand(QueryStoreStampThroughSql, connection) { CommandTimeout = StorageCommandDeadlines.ComposedReadSeconds };
             lookup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(wideStart, DateTimeKind.Unspecified) });
             lookup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(end, DateTimeKind.Unspecified) });
-            lookup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, Value = serverIds });
             var found = await lookup.ExecuteScalarAsync(cancellationToken);
             /* The series stops at the hour of the window end, so a found hour is never after the end, and it is never before the hour
                of wideStart: the one test against wideStart covers "the very first hour is already unusable". */
@@ -894,13 +942,12 @@ internal static class ComposePanelRunner
         }
     }
 
-    /// <summary>#5582 part 3: see <see cref="ResolveQueryStoreStampThroughAsync"/>. $1 wide start, $2 window end, $3 server ids in scope.</summary>
+    /// <summary>#5582 part 3: see <see cref="ResolveQueryStoreStampThroughAsync"/>. $1 wide start, $2 window end. (#7762: the lookup no longer takes the servers in scope,
+    /// because the stale pairs are the statement's stale arm's, not this lookup's.)</summary>
     internal const string QueryStoreStampThroughSql = """
         SELECT MIN(g.hour)
         FROM generate_series(date_trunc('hour', $1::timestamp), date_trunc('hour', $2::timestamp), interval '1 hour') AS g(hour)
         WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_hours h WHERE h.hour = g.hour)
-           OR EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_built b
-                      WHERE b.hour = g.hour AND b.server_id = ANY($3::integer[]) AND b.built_seq IS DISTINCT FROM b.late_seq)
         """;
 
     /// <summary>#4689: the note a Compose Query Store panel carries when the interval table served it from a
@@ -950,6 +997,12 @@ internal static class ComposePanelRunner
 
         return names.Count == 0 ? null : names;
     }
+
+    /// <summary>#8323: the server scope a run of <paramref name="body"/> reads, by the run's own rule
+    /// (<see cref="ParseServerScope"/> over the body's <c>server</c> and bound <c>values</c>): null for the whole fleet, else the
+    /// named servers. For a caller that describes the run rather than runs it, such as the statement-timeout answer.</summary>
+    internal static IReadOnlyList<string>? ServerScopeOf(JsonObject body) =>
+        ParseServerScope(body, ParseRunValues(body["values"]));
 
     /// <summary>Adds a server name to the scope, treating null/empty and the literal "All" as "no scope" (fleet).</summary>
     private static void AddServer(List<string> names, string? name)
@@ -1292,6 +1345,24 @@ internal static class ComposePanelRunner
 
             return null;
         }
+    }
+
+    /// <summary>#7729: the earliest <c>bucket</c> of a time-series answer (UTC, written as <c>yyyy-MM-ddTHH:mm:ss</c> by <see cref="DbValueToJson"/>), or null when no row
+    /// carries one. The row-cap notice names it as where the capped data starts.</summary>
+    internal static DateTime? EarliestBucket(JsonArray rows)
+    {
+        DateTime? earliest = null;
+        foreach (var node in rows)
+        {
+            if (node is JsonObject row && row["bucket"] is JsonValue value && value.TryGetValue<string>(out var text)
+                && DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var at)
+                && (earliest is null || at < earliest))
+            {
+                earliest = at;
+            }
+        }
+
+        return earliest;
     }
 
     /// <summary>Runs a compiled composed query on the viewer pool and serializes its rows to a JSON array of

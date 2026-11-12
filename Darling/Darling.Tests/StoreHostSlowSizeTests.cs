@@ -257,7 +257,7 @@ public sealed class StoreHostSlowSizeTests
         return dir!;
     }
 
-    private static string Source(params string[] relative) => File.ReadAllText(Path.Combine(RepoRoot(), Path.Combine(relative)));
+    private static string Source(params string[] relative) => RepoFile.ReadRepoFile(relative);
 
     [Fact]
     public void AnEscapedTimeout_ReadsAsATimeoutWithItsDuration_NotAsAStreamError()

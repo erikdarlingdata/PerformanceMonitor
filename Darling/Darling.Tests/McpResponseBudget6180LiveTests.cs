@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -127,6 +128,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             Assert.InRange(returned, 1, 4);
             Assert.Equal(returned, root.GetProperty("reports_returned").GetInt32());
             Assert.True(root.GetProperty("truncated").GetBoolean());
+            /* #7545: the window held exactly the limit (5 of 5), so the size cut is the only reason for truncated. */
+            Assert.False(root.GetProperty("more_reports_than_limit").GetBoolean());
             Assert.Equal(5 - returned, root.GetProperty("left_out_count").GetInt32());
             Assert.Equal(5 - returned, root.GetProperty("left_out_reports").GetArrayLength());
             Assert.Contains("limit 1", root.GetProperty("size_note").GetString(), StringComparison.Ordinal);
@@ -156,6 +159,99 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 postgres, ServerName, hours_back: 24, limit: 1, as_of: leftOut.GetProperty("event_time").GetString()));
             Assert.Equal(1, one.RootElement.GetProperty("reports").GetArrayLength());
             Assert.Equal(leftOut.GetProperty("blocked_spid").GetInt32(), one.RootElement.GetProperty("reports")[0].GetProperty("blocked_spid").GetInt32());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static async Task SeedReportAsync(NpgsqlConnection connection, long id, DateTime collected, DateTime eventTime, int spid, string xml) =>
+        await DarlingMcpTestData.ExecAsync(connection, TestContext.Current.CancellationToken,
+            @"INSERT INTO blocked_process_reports
+    (blocked_report_id, collection_time, server_id, server_name, event_time, database_name,
+     blocked_spid, blocking_spid, wait_time_ms, blocked_process_report_xml)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            id, collected, ServerId, ServerName, eventTime, "StackOverflow", spid, 51, 5000L, xml);
+
+    /* #7545: truncated is true for a size cut or for a window that held more than limit, and the web page's capped-list note needs the
+       second alone. A window holding exactly limit large reports is a size cut only; one more report makes it more than limit. */
+    [Fact]
+    public async Task BlockedProcessXml_MoreReportsThanLimit_IsItsOwnKey_NotTheSizeCut()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live #6180 budget tests.");
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var bigXml = BuildReportXml(18_000);
+            var newest = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-5);
+            for (var i = 0; i < 5; i++) await SeedReportAsync(connection, CollectionIdGenerator.Next(), newest, newest.AddMinutes(-i * 10), 100 + i, bigXml);
+
+            using (var exact = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockedProcessXml(postgres, ServerName, limit: 5)))
+            {
+                Assert.True(exact.RootElement.GetProperty("truncated").GetBoolean());
+                Assert.True(exact.RootElement.GetProperty("left_out_count").GetInt32() > 0);
+                Assert.False(exact.RootElement.GetProperty("more_reports_than_limit").GetBoolean());
+            }
+
+            await SeedReportAsync(connection, CollectionIdGenerator.Next(), newest, newest.AddMinutes(-50), 105, bigXml);
+            using (var more = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockedProcessXml(postgres, ServerName, limit: 5)))
+            {
+                Assert.True(more.RootElement.GetProperty("more_reports_than_limit").GetBoolean());
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /* #7545: reports sharing one event_time come back in one order however far the read is asked: collection_time then
+       blocked_report_id, newest first. Without the tie-break the order among them was whatever the plan produced. */
+    [Fact]
+    public async Task BlockedProcessXml_ReportsSharingAnEventTime_ComeBackInTheSameOrderEachCall()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live #6180 budget tests.");
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var at = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-5);
+            /* Inserted oldest-first in every key, so a read that ignores the keys returns them the other way round. */
+            await SeedReportAsync(connection, 1000, at, at, 101, "<x/>");
+            await SeedReportAsync(connection, 1001, at.AddSeconds(1), at, 102, "<x/>");
+            await SeedReportAsync(connection, 1002, at.AddSeconds(1), at, 103, "<x/>");
+            await SeedReportAsync(connection, 1003, at.AddSeconds(2), at, 104, "<x/>");
+
+            for (var call = 0; call < 2; call++)
+            {
+                var all = await DarlingBlockingReader.GetRecentBlockedProcessReportsWithXmlAsync(postgres, ServerId, at.AddHours(-1), at.AddHours(1), 10, DatabaseFilter.All, ct);
+                Assert.Equal(new[] { 104, 103, 102, 101 }, all.Select(r => r.BlockedSpid).ToArray());
+            }
+
+            var top2 = await DarlingBlockingReader.GetRecentBlockedProcessReportsWithXmlAsync(postgres, ServerId, at.AddHours(-1), at.AddHours(1), 2, DatabaseFilter.All, ct);
+            Assert.Equal(new[] { 104, 103 }, top2.Select(r => r.BlockedSpid).ToArray());
 
             bodySucceeded = true;
         }

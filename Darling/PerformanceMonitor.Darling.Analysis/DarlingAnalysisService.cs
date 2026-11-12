@@ -368,7 +368,7 @@ public sealed class DarlingAnalysisService
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1068:CancellationToken parameters must come last",
         Justification = "The two tokens are at positions 4 and 5 and the Darling worker passes them POSITIONALLY. " +
                         "Moving asOfUtc ahead of them to satisfy the rule would silently rebind that call site's " +
-                        "arguments — a compiling change of meaning on the one caller that matters. Appending is the " +
+                        "arguments: a compiling change of meaning on the one caller that matters. Appending is the " +
                         "only edit that cannot do that, and Lite's twin keeps the same order so the two stay transplantable.")]
     public async Task<List<AnalysisFinding>> AnalyzeAsync(
         int serverId, string serverName, int hoursBack = 4, CancellationToken cancellationToken = default,
@@ -386,7 +386,7 @@ public sealed class DarlingAnalysisService
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
-            /* #5812: an on-demand current pass may reuse PLAN_REGRESSION candidates younger than one analysis cadence; the
+            /* #5812: an on-demand current pass may reuse PLAN_REGRESSION candidates younger than the reuse window; the
                scheduled pass (the one caller that persists caveats, #5633) always reads and refills them; a past as_of reads
                live. */
             ReusePlanRegressionCandidates = asOfUtc is null && !persistCollectionCaveats,
@@ -547,7 +547,7 @@ public sealed class DarlingAnalysisService
 
                 _logger?.LogWarning(
                     "[DarlingAnalysisService] No observed collection in the analysis window for {Server} ({Start} to {End}) " +
-                    "despite {Span:F1}h of total history — collection may be down ({FactCount} point-in-time fact(s) only)",
+                    "despite {Span:F1}h of total history: collection may be down ({FactCount} point-in-time fact(s) only)",
                     context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, dataSpanHours, facts.Count);
 
                 LastAnalysisTime = DateTime.UtcNow;
@@ -580,7 +580,7 @@ public sealed class DarlingAnalysisService
                    volume. */
                 _logger?.LogInformation(
                     "[DarlingAnalysisService] The collector observed the analysis window for {Server} ({Start} to {End}) " +
-                    "but emitted no fact over it — {Coverage}; nothing rose to a fact, and an all-clear from this pass rests on that coverage",
+                    "but emitted no fact over it: {Coverage}; nothing rose to a fact, and an all-clear from this pass rests on that coverage",
                     context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, context.Coverage!.Describe());
             }
 
@@ -589,7 +589,7 @@ public sealed class DarlingAnalysisService
                 /* Logged, not just carried: a scheduled pass has no payload to put the caveat in, and
                    the persisted findings from this pass were rated against the observed hours. */
                 _logger?.LogWarning(
-                    "[DarlingAnalysisService] Partial collection coverage for {Server}: {Coverage} — rates in this pass are per observed time, and the COLLECTION_GAP fact records the hole",
+                    "[DarlingAnalysisService] Partial collection coverage for {Server}: {Coverage}, rates in this pass are per observed time, and the COLLECTION_GAP fact records the hole",
                     context.ServerName, partial.Describe());
             }
 
@@ -678,9 +678,7 @@ public sealed class DarlingAnalysisService
                 finding.Remediation =
                     FactRemediation.BuildAction(finding)
                     ?? FactRemediation.BuildRcsiAction(finding)
-                    ?? FactRemediation.BuildClearPlanAction(finding)
                     ?? FactRemediation.BuildFileAutogrowthAction(finding) // WS3: advisory only (no handler -> no Apply); carried for the read-time copy-paste
-                    ?? FactRemediation.BuildServerConfigAction(finding) // WS3: server-level config — MAXDOP/CTFP/memory
                     ?? FactRemediation.BuildMissingIndexAction(finding); // WS4: missing-index CREATE — copy-paste only
             }
 
@@ -690,7 +688,7 @@ public sealed class DarlingAnalysisService
             //    full; only the row is withheld, because the row would claim to be a current
             //    observation. AnalysisContext.PersistFindings carries the whole argument.
             //    #5812 (L2): a current on-demand pass persists too, and its PLAN_REGRESSION findings may come from a
-            //    reused read up to PlanRegressionCandidateCache.RefreshAfter (one analysis cadence) old: the same band as
+            //    reused read up to PlanRegressionCandidateCache.RefreshAfter old: the same band as
             //    the scheduled pass's own findings when the next call reads them (see PgFactCollector.PlanRegressionCache).
             if (context.PersistFindings)
             {
@@ -718,7 +716,7 @@ public sealed class DarlingAnalysisService
             _logger?.LogInformation(
                 "[DarlingAnalysisService] Analysis complete for {Server}: {Count} finding(s), highest severity {Severity:F2}{Exploratory}",
                 context.ServerName, findings.Count, findings.Count > 0 ? findings.Max(f => f.Severity) : 0,
-                context.PersistFindings ? string.Empty : " (anchored window — exploratory, not persisted)");
+                context.PersistFindings ? string.Empty : " (anchored window, exploratory, not persisted)");
 
             return findings;
         }
@@ -745,13 +743,13 @@ public sealed class DarlingAnalysisService
             {
                 case AnalysisAbandonKind.Shutdown:
                     _logger?.LogInformation(
-                        "[DarlingAnalysisService] Analysis abandoned at shutdown for {Server} — this pass's findings are lost by design; the next pass recomputes them ({Detail})",
+                        "[DarlingAnalysisService] Analysis abandoned at shutdown for {Server}: this pass's findings are lost by design; the next pass recomputes them ({Detail})",
                         context.ServerName, ex.Message);
                     break;
 
                 case AnalysisAbandonKind.Timeout:
                     _logger?.LogWarning(
-                        "[DarlingAnalysisService] Analysis for {Server} was cancelled at its per-pass budget and unwound as asked — this cycle produces no findings and the next one recomputes them. A pass that keeps hitting this is not finishing inside its budget, which is a server whose analysis is quietly getting less complete, not a stop ({Detail})",
+                        "[DarlingAnalysisService] Analysis for {Server} was cancelled at its per-pass budget and unwound as asked: this cycle produces no findings and the next one recomputes them. A pass that keeps hitting this is not finishing inside its budget, which is a server whose analysis is quietly getting less complete, not a stop ({Detail})",
                         context.ServerName, ex.Message);
                     break;
 
@@ -1137,6 +1135,27 @@ FROM wait_stats
 WHERE server_id = $1";
 
     /// <summary>
+    /// The table that proves a SQL Server target is being collected: the one <see cref="TotalDataSpanSql"/> measures and
+    /// the SQL Server fact collector stamps its coverage witness from.
+    /// </summary>
+    internal const string SqlServerCoverageTable = "wait_stats";
+
+    /// <summary>
+    /// The table that proves a PostgreSQL target is being collected: the one <see cref="PgTargetDataSpanSql"/> measures and
+    /// the PostgreSQL-target fact collector stamps its coverage witness from (#3665).
+    /// </summary>
+    internal const string PgTargetCoverageTable = "pg_database_stats";
+
+    /// <summary>
+    /// The table "was this window collected at all" is asked of, for a server of <paramref name="engineKind"/> (#7194): the one
+    /// engine mapping of <see cref="EngineFor"/> (<see cref="MonitoredEngineKind.IsPostgres"/>), so a read outside the
+    /// analysis pass (get_analysis_findings, get_analysis_facts) probes the same series the pass reads and cannot call a
+    /// quiet PostgreSQL window "not collected" for lacking a SQL Server table.
+    /// </summary>
+    internal static string CoverageTableFor(string? engineKind) =>
+        MonitoredEngineKind.IsPostgres(engineKind) ? PgTargetCoverageTable : SqlServerCoverageTable;
+
+    /// <summary>
     /// The PostgreSQL-target engine set's data-span gate (#3542, D3): the same measurement over
     /// <c>pg_database_stats</c> — the one-minute series every PostgreSQL flavour writes with no extension,
     /// and the same table the pass's coverage witness and baseline gate read, so "how long has this server
@@ -1302,6 +1321,13 @@ ORDER BY capture_time, trace_flag";
     /// collection_time)</c>), so this is a scan of the server's rows in a curated, low-volume table with a
     /// 30-day retention; and it runs only when the snapshot diff found a change in the pass window, which
     /// the connect cadence makes rare. Exposed const for the dialect pins.</para>
+    ///
+    /// <para><b>The <c>collection_time</c> bound (#8570).</b> A redundant bound on the indexed column, so the read walks
+    /// the <c>(server_id, collection_time)</c> index over the span and not every event the server has kept for 30
+    /// days (a parallel scan of 30,000 pages on a 1.5 million row plant). A line is collected after it happens, so a
+    /// row collected more than a day before the span's start cannot hold a line inside it. The day is the margin
+    /// the plan regression reads use for clock skew: a monitored server's clock running fast puts an event's time
+    /// after its collection. It is not part of the span: the span stays exclusive below and inclusive above.</para>
     /// </summary>
     public const string ReconfigureTraceLinesForAttributionSql = @"
 WITH newest AS (
@@ -1325,6 +1351,7 @@ SELECT
 FROM default_trace_events AS dte, svr
 WHERE dte.server_id = $1
 AND   dte.error_number = 15457
+AND   dte.collection_time >= $2 - interval '1 day'
 AND   dte.event_time - make_interval(mins => svr.offset_minutes) > $2 - interval '1 hour'
 AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'
 ORDER BY event_time_local";
@@ -1458,7 +1485,7 @@ ORDER BY event_time_local";
             var notYetComparable = (int)attributionFact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaNotYetComparable);
 
             _logger?.LogInformation(
-                "[DarlingAnalysisService] Configuration change attributed for {Server} ({Families}): {Settings} {Verb} {AnchorAt:u} ({AnchorSource}), compare over ±{Hours} h ({AfterHours:0.#} h after so far) — {Worse} worse, {Better} better{NotYetComparable}, {Stable} stable{Unavailable}",
+                "[DarlingAnalysisService] Configuration change attributed for {Server} ({Families}): {Settings} {Verb} {AnchorAt:u} ({AnchorSource}), compare over ±{Hours} h ({AfterHours:0.#} h after so far), {Worse} worse, {Better} better{NotYetComparable}, {Stable} stable{Unavailable}",
                 context.ServerName, latest.Families, string.Join(ConfigChangeAttribution.SettingSeparator, latest.Changes.Select(c => c.Name)),
                 anchor is null ? "first observed at" : "changed at", anchorTime,
                 anchor is null ? "configuration snapshot" : "default trace, msg 15457",

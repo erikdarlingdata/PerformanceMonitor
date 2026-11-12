@@ -59,14 +59,50 @@ public sealed class SystemTrayService : IDisposable
     }
 
     /// <summary>
-    /// Initializes the system tray icon with its context menu. Safe to call again (theme change): it
-    /// disposes the old icon and re-subscribes the StateChanged handler exactly once.
+    /// Initializes the system tray icon with its context menu. Safe to call again: it disposes the old icon and
+    /// re-subscribes the StateChanged handler exactly once. A theme change does not come through here; it restyles
+    /// the icon that exists (<see cref="ApplyTheme"/>).
     /// </summary>
     public void Initialize()
     {
         _trayIcon?.Dispose();
 
         _trayIcon = new TaskbarIcon();
+
+        /* Load icon */
+        try
+        {
+            var iconUri = new Uri("pack://application:,,,/EDD.ico", UriKind.Absolute);
+            _trayIcon.IconSource = new BitmapImage(iconUri);
+        }
+        catch
+        {
+            /* Icon loading failed - tray icon will be blank but functional */
+        }
+
+        ApplyTheme();
+
+        /* Double-click to show window */
+        _trayIcon.TrayMouseDoubleClick += (s, e) => _restoreWindow();
+
+        /* Handle minimize to tray. Unsubscribe first, so a second Initialize does not stack a duplicate
+           StateChanged handler on the app-lifetime window. */
+        _mainWindow.StateChanged -= MainWindow_StateChanged;
+        _mainWindow.StateChanged += MainWindow_StateChanged;
+    }
+
+    /// <summary>
+    /// Styles the tray icon's tooltip and context menu for the current theme, on the icon that already exists. A theme
+    /// change runs this in place of rebuilding the icon: disposing the icon leaves a toast on screen open, with its close
+    /// timer stopped and no icon that can close it, and the next toast opens over it (#8475). The toast itself follows the
+    /// theme through <see cref="WindowlessThemeFollower"/>.
+    /// </summary>
+    private void ApplyTheme()
+    {
+        if (_trayIcon == null)
+        {
+            return;
+        }
 
         bool hasLightBackground = ThemeManager.HasLightBackground;
 
@@ -97,17 +133,6 @@ public sealed class SystemTrayService : IDisposable
             Child = _tooltipText
         };
 
-        /* Load icon */
-        try
-        {
-            var iconUri = new Uri("pack://application:,,,/EDD.ico", UriKind.Absolute);
-            _trayIcon.IconSource = new BitmapImage(iconUri);
-        }
-        catch
-        {
-            /* Icon loading failed - tray icon will be blank but functional */
-        }
-
         /* Build context menu — Show Window / Exit. The viewer has no in-process collection to pause. */
         var contextMenu = new ContextMenu();
 
@@ -122,14 +147,6 @@ public sealed class SystemTrayService : IDisposable
         contextMenu.Items.Add(exitItem);
 
         _trayIcon.ContextMenu = contextMenu;
-
-        /* Double-click to show window */
-        _trayIcon.TrayMouseDoubleClick += (s, e) => _restoreWindow();
-
-        /* Handle minimize to tray. Unsubscribe first: Initialize re-runs on theme change, so a
-           plain += would stack a duplicate StateChanged handler on the app-lifetime window each time. */
-        _mainWindow.StateChanged -= MainWindow_StateChanged;
-        _mainWindow.StateChanged += MainWindow_StateChanged;
     }
 
     private void MainWindow_StateChanged(object? sender, EventArgs e)
@@ -167,8 +184,10 @@ public sealed class SystemTrayService : IDisposable
             return;
         }
 
+        var trayIcon = _trayIcon;
         var balloon = new StyledBalloon(title, message, severity);
-        _trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, 10000);
+        trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, StyledToastTimeoutMs);
+        HoldWhileRead(balloon, trayIcon, StyledToastTimeoutMs);
     }
 
     /// <summary>
@@ -189,8 +208,30 @@ public sealed class SystemTrayService : IDisposable
 
         var trayIcon = _trayIcon;
         var balloon = new SnoozeBalloon(title, message, icon, onSnooze, () => trayIcon.CloseBalloon());
-        _trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, 15000);
+        trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, SnoozeToastTimeoutMs);
+        HoldWhileRead(balloon, trayIcon, SnoozeToastTimeoutMs);
     }
+
+    /// <summary>How long a plain (cleared or resolved) card stays, and how long a snoozable one stays, without a reader on it.</summary>
+    private const int StyledToastTimeoutMs = 10000;
+    private const int SnoozeToastTimeoutMs = 15000;
+
+    /// <summary>
+    /// #8475: a card stays while the pointer is on it or keyboard focus is inside it, and its timeout runs again from the
+    /// moment the reader leaves, so a message long enough to scroll is not closed under the reader. The hold's two actions
+    /// act only while this card is the balloon the tray is showing: a card that the next toast has replaced, or that Dismiss
+    /// has closed, neither stops the current balloon's timer nor closes it.
+    /// </summary>
+    private static void HoldWhileRead(FrameworkElement balloon, TaskbarIcon trayIcon, int timeoutMs) =>
+        BalloonHoverHold.Attach(
+            balloon,
+            TimeSpan.FromMilliseconds(timeoutMs),
+            holdOpen: () => { if (IsShowing(trayIcon, balloon)) trayIcon.ResetBalloonCloseTimer(); },
+            close: () => { if (IsShowing(trayIcon, balloon)) trayIcon.CloseBalloon(); });
+
+    /// <summary>Whether <paramref name="balloon"/> is the custom balloon the tray icon has on screen now.</summary>
+    private static bool IsShowing(TaskbarIcon trayIcon, FrameworkElement balloon) =>
+        ReferenceEquals(trayIcon.CustomBalloon?.Child, balloon);
 
     public void Dispose()
     {
@@ -214,6 +255,6 @@ public sealed class SystemTrayService : IDisposable
 
     private void OnThemeChanged(string _)
     {
-        _mainWindow.Dispatcher.InvokeAsync(Initialize);
+        _mainWindow.Dispatcher.InvokeAsync(ApplyTheme);
     }
 }

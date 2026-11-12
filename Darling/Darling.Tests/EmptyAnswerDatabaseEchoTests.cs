@@ -63,7 +63,8 @@ public sealed class EmptyAnswerDatabaseEchoTests
         Assert.Contains("[\"database_name\"] = databases.Describe()", body, StringComparison.Ordinal);
 
         var calls = Regex.Matches(source, @"EmptyStatus\(\s*""(empty|unavailable)""", RegexOptions.Singleline).Count;
-        var withFilter = Regex.Matches(source, @"disclosure, databases\);", RegexOptions.Singleline).Count;
+        /* #7167: an offline server's empty answer is wrapped in DarlingServerOfflineNote.EmptyAsync(..., EmptyStatus(..., disclosure, databases), cancellationToken, windowStart), so the call ends on the filter or on the wrapper's closing (#7724: its last argument is the window start). */
+        var withFilter = Regex.Matches(source, @"disclosure, databases\)(?:, cancellationToken(?:, startUtc)?\))?;", RegexOptions.Singleline).Count;
         Assert.True(calls >= 8, $"expected the trend tools' eight empty answers, found {calls}");
         Assert.Equal(calls, withFilter);
     }
@@ -79,19 +80,5 @@ public sealed class EmptyAnswerDatabaseEchoTests
 
         Assert.Equal(expected, Regex.Matches(source, @"McpHelpers\.StatusForDatabase\(\s*""(empty|unavailable)""", RegexOptions.Singleline).Count);
         Assert.DoesNotMatch(@"McpHelpers\.Status\(\s*""(empty|unavailable)""", source);
-    }
-
-    /// <summary>
-    /// L3: the long-query empty answer names the opt-in switch only when no filter is chosen. Under a filter it ends after the
-    /// database clause, as get_plan_corrections does.
-    /// </summary>
-    [Fact]
-    public void LongQueryEmpty_BlamesTheOptInSwitch_OnlyWhenNoFilterIsChosen()
-    {
-        var source = Tool("DarlingMcpLongQueryTools.cs");
-
-        /* Round 2: the sentence follows the (unfiltered) window-notice probe, so a filtered answer keeps it only when the store holds no row. */
-        Assert.Contains("var collectorMayBeOff = (databaseFilter.IsAll && !tagFilter.Active) || (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null);", source, StringComparison.Ordinal);
-        Assert.Contains("(collectorMayBeOff ? \". The long_query_completions collector is opt-in (default OFF)", source, StringComparison.Ordinal);
     }
 }

@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Common.Tags;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -22,17 +24,42 @@ namespace PerformanceMonitor.Darling.Viewer;
 public static class OverviewCardView
 {
     /// <summary>
-    /// The fields a search term matches for a card: display name, instance name, and each tag pill's name, so
-    /// "prod" finds <c>sql-prod-01</c> and every server tagged Production. The same fields as Lite's Overview
-    /// search and the sidebar's.
+    /// The fields a search term matches for a card: display name, instance name, each tag pill's name, and the
+    /// names of the tags above each pill (#7984), so "prod" finds <c>sql-prod-01</c>, every server tagged
+    /// Production, and every server tagged under Production, the way a custom alert rule on Production covers
+    /// them. The same fields as Lite's Overview search and the sidebar's.
     /// </summary>
     public static string?[] SearchFields(ServerSummaryItem card)
     {
         ArgumentNullException.ThrowIfNull(card);
 
         var fields = new List<string?> { card.DisplayName, card.ServerName };
-        fields.AddRange(card.TagPills.Select(p => p.Name));
+        foreach (var pill in card.TagPills)
+        {
+            fields.Add(pill.Name);
+            fields.AddRange(pill.AncestorNames);
+        }
+
         return fields.ToArray();
+    }
+
+    /// <summary>
+    /// The pills for one card: its assigned tags that exist, ordered by name so a card is stable, each carrying
+    /// the names of the tags above it for the search (#7984). The pill shows only its own tag's name.
+    /// </summary>
+    public static IReadOnlyList<ServerTagPill> TagPills(IReadOnlyList<DarlingTag> tags, IEnumerable<int> assignedTagIds)
+    {
+        ArgumentNullException.ThrowIfNull(tags);
+        ArgumentNullException.ThrowIfNull(assignedTagIds);
+
+        var tagById = tags.ToDictionary(t => t.Id);
+        var nodes = tags.Select(t => new TagTreeNode(t.Id, t.Name, t.ParentId)).ToList();
+        return assignedTagIds
+            .Select(id => tagById.TryGetValue(id, out var tag) ? tag : null)
+            .Where(t => t is not null)
+            .OrderBy(t => t!.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(t => new ServerTagPill(t!.Name, t!.Colour, TagTreeRules.Ancestors(nodes, t!.Id).Select(a => a.Name).ToList()))
+            .ToList();
     }
 
     /// <summary>
@@ -57,14 +84,20 @@ public static class OverviewCardView
 
     /// <summary>
     /// The fleet roll-up above the cards, narrowed by the search box (D9 of the final walk): the "Needs Attention"
-    /// rows, the band counts and "Monitoring N servers" count the servers the search leaves, not the whole fleet, so
-    /// the panel and the grid under it agree. With no search it is <see cref="FleetRollup.Build"/> over every card
-    /// and the registered fleet size, as before. With one, it reduces only the matching cards and
-    /// <see cref="FleetRollup.FilteredOfTotal"/> carries the registered size, so the subtitle reads "Monitoring 2 of
-    /// 9 servers". The needs-attention toggle does not narrow it: the panel is the shortlist that toggle opens.
+    /// rows, the band counts and "Monitoring N enabled servers" count the servers the search leaves, not the whole
+    /// fleet, so the panel and the grid under it agree. With no search it is <see cref="FleetRollup.Build"/> over every
+    /// card and the enabled fleet size. With one, it reduces only the matching cards and
+    /// <see cref="FleetRollup.FilteredOfTotal"/> carries the enabled fleet size, so the subtitle reads "Monitoring 2 of
+    /// 9 enabled servers". The blocking and deadlock totals follow the search too: the fleet-wide <paramref name="totals"/>
+    /// read counts every server, so a narrowed panel sums the matching cards' own counts instead, and the totals
+    /// describe the same servers as the band counts beside them. A null <paramref name="totals"/> is a failed
+    /// fleet-wide read: with no search the roll-up says the totals are unavailable, and with one the matched cards'
+    /// counts stand on their own, since each came from that card's own summary read and a card whose read failed is
+    /// not in <paramref name="cards"/>. The needs-attention toggle does not narrow it: the panel is the shortlist that
+    /// toggle opens.
     /// </summary>
     public static FleetRollup BuildRollup(
-        IReadOnlyList<ServerSummaryItem> cards, FleetTotals totals, int registeredCount, string? search)
+        IReadOnlyList<ServerSummaryItem> cards, FleetTotals? totals, int registeredCount, string? search)
     {
         ArgumentNullException.ThrowIfNull(cards);
 
@@ -74,9 +107,40 @@ public static class OverviewCardView
         }
 
         var matched = cards.Where(c => ServerOverviewFilter.Matches(term, SearchFields(c))).ToList();
-        var rollup = FleetRollup.Build(matched, totals, totalServerCount: matched.Count);
+        /* Each card adds what the fleet-wide read adds for it: BlockingCountForBand is a SQL Server card's blocked
+           waits and a PostgreSQL card's captures that saw blocking, and null (no capture in the window) adds nothing. */
+        var matchedTotals = new FleetTotals
+        {
+            TotalBlockingEvents = matched.Sum(c => (long)(c.BlockingCountForBand ?? 0)),
+            TotalDeadlocks = matched.Sum(c => (long)c.DeadlockCount),
+        };
+        var rollup = FleetRollup.Build(matched, matchedTotals, totalServerCount: matched.Count);
         rollup.FilteredOfTotal = registeredCount;
         return rollup;
+    }
+
+    /// <summary>
+    /// Whether the Fleet Health block (heading, toggle, Search box, Sort) is drawn at all (#7354). It follows the
+    /// ENABLED fleet, not the servers the search left: a search that matches nothing leaves
+    /// <see cref="FleetRollup.TotalServers"/> at 0, and gating on that hid the block with the Search box inside
+    /// it, so the user had no way to clear the term. An empty fleet (nothing enabled) still hides it.
+    /// </summary>
+    public static bool ShowsRollup(FleetRollup rollup)
+    {
+        ArgumentNullException.ThrowIfNull(rollup);
+        return (rollup.FilteredOfTotal ?? rollup.TotalServers) > 0;
+    }
+
+    /// <summary>
+    /// Whether the "All N enabled servers healthy" line is shown. A search that matched nothing has no servers to
+    /// judge, and <see cref="FleetRollup.IsAllClear"/> is vacuously true there, which would print "All 0 enabled
+    /// servers healthy".
+    /// The no-match sentence beside the toggle (<see cref="CountText"/>) is what that state shows instead.
+    /// </summary>
+    public static bool ShowsAllClear(FleetRollup rollup)
+    {
+        ArgumentNullException.ThrowIfNull(rollup);
+        return rollup.TotalServers > 0 && rollup.IsAllClear;
     }
 
     /// <summary>
@@ -93,7 +157,9 @@ public static class OverviewCardView
 
         if (!searching)
         {
-            return attentionOnly ? FleetRollup.AttentionFilterCountText(shown, cards.Count) : null;
+            /* #8115: the filtered grid is FleetRollup.NeedsAttention(cards), so its Healthy cards are exactly the ones with an advisory tile. */
+            var healthyWithAdvisories = cards.Count(c => c.HasAdvisoryTile && FleetRollup.ClassifyBand(c) == FleetHealthBand.Healthy);
+            return attentionOnly ? FleetRollup.AttentionFilterCountText(shown, cards.Count, healthyWithAdvisories) : null;
         }
 
         if (cards.Count == 0)

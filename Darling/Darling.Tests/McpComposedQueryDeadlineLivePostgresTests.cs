@@ -137,7 +137,7 @@ public sealed class McpComposedQueryDeadlineLivePostgresTests
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         /* Not migrated at all, so config.config_service does not exist. */
@@ -156,7 +156,7 @@ public sealed class McpComposedQueryDeadlineLivePostgresTests
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         await using var command = postgres.CreateCommand("SELECT 1");
 

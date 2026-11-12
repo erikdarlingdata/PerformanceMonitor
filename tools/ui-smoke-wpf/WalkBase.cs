@@ -32,6 +32,11 @@ public abstract class WalkBase : IAsyncLifetime
 {
     private static readonly TimeSpan s_wait = TimeSpan.FromSeconds(90);
 
+    /// <summary>How long the sidebar step gives the server picker to appear before it treats the sidebar as a rail. Both
+    /// apps put the picker in the automation tree as soon as the main window has laid out, so a picker still missing after
+    /// this is a collapsed one, not a slow one.</summary>
+    private static readonly TimeSpan s_sidebarProbe = TimeSpan.FromSeconds(10);
+
     private readonly string _out = Environment.GetEnvironmentVariable("UI_SMOKE_OUT")
         ?? Path.Combine(Path.GetTempPath(), "ui-smoke-wpf");
 
@@ -82,6 +87,11 @@ public abstract class WalkBase : IAsyncLifetime
             ?? throw new Xunit.Sdk.XunitException("no main window within " + s_wait));
         Shot("00-main-window");
 
+        // On a narrow screen both apps start with the sidebar as a rail (#8266 in the viewer, #8219 in Lite), and the viewer's
+        // rail takes the server list out of the automation tree. A person opens the pane with the rail's toggle, so the walk
+        // does the same before it looks for the picker (#8311).
+        Step("sidebar", () => OpenSidebarIfRail(main));
+
         // The named server picker lists the seeded server.
         Step("server picker", () => Find(main, "ServerPicker"));
         Step("server picker item", () => WaitFor(() => FindPickerItem(main), "a ServerPicker item named " + ServerName));
@@ -105,6 +115,26 @@ public abstract class WalkBase : IAsyncLifetime
         Step("Top Queries by Duration", () => SelectTab(main, "Top Queries by Duration"));
         Step("query stats rows", () => WaitForRows(main, "QueryStatsGrid", ControlType.DataItem));
         Shot("99-after-walk");
+    }
+
+    /// <summary>Presses the sidebar's toggle (<c>SidebarToggleButton</c>) when the server picker is not in the automation
+    /// tree within <see cref="s_sidebarProbe"/>. A sidebar that already shows the picker is left alone, so an app whose
+    /// rail keeps its list in the tree (Lite) walks as it does on a wide screen. The toggle fixes the pane open, so a later
+    /// resize does not collapse it again. The picker step that follows still decides whether the list is there.</summary>
+    private static bool OpenSidebarIfRail(AutomationElement main)
+    {
+        var picker = Retry.WhileNull(() => main.FindFirstDescendant(cf => cf.ByAutomationId("ServerPicker")),
+            s_sidebarProbe, TimeSpan.FromMilliseconds(500), ignoreException: true).Result;
+        if (picker is not null)
+        {
+            Console.WriteLine("sidebar: open, the picker is in the tree");
+            return false;
+        }
+
+        var toggle = Find(main, "SidebarToggleButton");
+        toggle.AsButton().Invoke();
+        Console.WriteLine("sidebar: a rail with no picker in the tree; pressed its toggle");
+        return true;
     }
 
     private AutomationElement? FindPickerItem(AutomationElement main) =>

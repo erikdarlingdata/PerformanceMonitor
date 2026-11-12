@@ -47,6 +47,9 @@ public static class InvestigationEvents
     /// <summary>The journal row that marks an expired request's fallback as sent (once key <see cref="FallbackOnceKey"/>).</summary>
     public const string FallbackSent = "fallback_sent";
 
+    /// <summary>#6979: the journal row that marks a report's notice as sent to the route's human channels (once key <see cref="ReportNoticeOnceKey"/>).</summary>
+    public const string ReportNoticeSent = "report_notice_sent";
+
     /// <summary>
     /// #6596: an alert on an agent route whose story the analysis pass labelled "recurring at this hour", so no request was
     /// opened or joined for it. Journaled with no request id, for a person to read; not an event (an agent is not woken for it).
@@ -96,6 +99,9 @@ public static class InvestigationEvents
 
     /// <summary>The once key of an expired request's fallback.</summary>
     public static string FallbackOnceKey(Guid requestId) => "fallback:" + requestId.ToString("D");
+
+    /// <summary>The once key of a report's notice (#6979): one per request, so a report is announced at most once whatever replays the pass.</summary>
+    public static string ReportNoticeOnceKey(Guid requestId) => "report_notice:" + requestId.ToString("D");
 
     /// <summary>The once key of a follow-up's event (#6008): one <c>follow_up</c> row per earlier request, whatever replays the sweep.</summary>
     public static string FollowUpOnceKey(Guid earlierRequestId) => "follow_up:" + earlierRequestId.ToString("D");

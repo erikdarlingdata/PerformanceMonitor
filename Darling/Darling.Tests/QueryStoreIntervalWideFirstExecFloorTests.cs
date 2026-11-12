@@ -70,13 +70,13 @@ public sealed class QueryStoreIntervalWideFirstExecFloorTests
         /* The floor is inside the table CTE, beside the collection_time bound it accompanies, and $1 stayed
            literal through the raw string's interpolation. */
         var floor = sql.IndexOf(Floor("$2"), StringComparison.Ordinal);
-        var collectionBound = sql.IndexOf("collection_time >= $2", StringComparison.Ordinal);
-        Assert.True(collectionBound >= 0 && collectionBound < floor, "the floor follows the collection_time bound it accompanies");
+        /* #7814: the window is placed by the interval's start, so the floor follows that bound. */
+        var collectionBound = sql.IndexOf("COALESCE(interval_start_time_utc, collection_time) >= $2", StringComparison.Ordinal);
+        Assert.True(collectionBound >= 0 && collectionBound < floor, "the floor follows the window bound it accompanies");
         Assert.True(floor < sql.IndexOf("ranked AS", StringComparison.Ordinal));
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
 
         Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, DarlingDataReader.QueryStoreTopSql, StringComparison.Ordinal);
-        Assert.StartsWith("WITH deduped AS (", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -87,13 +87,12 @@ public sealed class QueryStoreIntervalWideFirstExecFloorTests
         Assert.Single(Regex.Matches(sql, Regex.Escape(QueryStoreIntervalWide.PurgeEdgeMarginSql)));
 
         var floor = sql.IndexOf(Floor("$2"), StringComparison.Ordinal);
-        var collectionBound = sql.IndexOf("collection_time >= $2", StringComparison.Ordinal);
+        var collectionBound = sql.IndexOf("COALESCE(interval_start_time_utc, collection_time) >= $2", StringComparison.Ordinal);
         Assert.True(collectionBound >= 0 && collectionBound < floor, "the floor follows the collection_time bound it accompanies");
         Assert.True(floor < sql.IndexOf("ranked AS", StringComparison.Ordinal));
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
 
         Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, ViewerDataService.QueryStoreTopSql, StringComparison.Ordinal);
-        Assert.StartsWith("WITH deduped AS (", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -135,8 +134,10 @@ public sealed class QueryStoreIntervalWideFirstExecFloorTests
     {
         var slack = QueryStoreIntervalWide.FirstExecUpperSlackSql;
 
+        /* #7814: the MCP table read places an interval by its start, so its upper bound is the start-placed margin (an interval spans
+           up to a day), not the collection-placed slack; the daily read's edge arms below stay on the slack. */
         var mcp = DarlingDataReader.QueryStoreTopTableSql;
-        Assert.Single(Regex.Matches(mcp, Regex.Escape("first_execution_time <= $3 + " + slack)));
+        Assert.Single(Regex.Matches(mcp, Regex.Escape("first_execution_time <= $3 + " + QueryStoreIntervalWide.IntervalStartFirstExecMarginSql)));
         Assert.True(mcp.IndexOf(Floor("$2"), StringComparison.Ordinal) < mcp.IndexOf("first_execution_time <= $3 + ", StringComparison.Ordinal));
         Assert.DoesNotContain(slack, DarlingDataReader.QueryStoreTopSql, StringComparison.Ordinal);
 
@@ -147,7 +148,8 @@ public sealed class QueryStoreIntervalWideFirstExecFloorTests
         Assert.Equal(2, Regex.Matches(daily, Regex.Escape("first_execution_time >= ")).Count);
 
         var grid = ViewerDataService.QueryStoreTopTableSql;
-        Assert.Single(Regex.Matches(grid, Regex.Escape("($3::timestamp IS NULL OR first_execution_time <= $3 + " + slack + ")")));
+        /* #7776: the grid places an interval by its start, so its upper bound is the start-placed margin (an interval spans up to a day), not the collection-placed slack. */
+        Assert.Single(Regex.Matches(grid, Regex.Escape("($3::timestamp IS NULL OR first_execution_time <= $3 + " + QueryStoreIntervalWide.IntervalStartFirstExecMarginSql + ")")));
         Assert.DoesNotContain(slack, ViewerDataService.QueryStoreTopSql, StringComparison.Ordinal);
 
         var history = DarlingMcpQueryStoreHistoryTools.HistoryTableSql;

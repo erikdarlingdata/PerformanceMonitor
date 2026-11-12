@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -378,7 +379,7 @@ public sealed class ParameterSensitivityClockFrameLiveTests
                 TimeRangeStart = windowStart,
                 TimeRangeEnd = windowEnd,
             };
-            var cap = PgFactCollector.ParameterSensitivityMaxOffenders;
+            var cap = FactThresholds.ParameterSensitivity.OffenderCap;
 
             await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
             {

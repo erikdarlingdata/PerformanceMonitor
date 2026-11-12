@@ -31,7 +31,7 @@ public sealed class QueryStatsHourLedgerWriterTests
     private static string CopyBatchOnceCode()
     {
         var path = Path.Combine(Path.GetDirectoryName(Here())!, "..", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
-        var text = File.ReadAllText(path);
+        var text = RepoFile.ReadRepoFile(path);
         var start = text.IndexOf("private async Task<int> CopyBatchOnceAsync<TRow>(", StringComparison.Ordinal);
         Assert.True(start > 0);
         var end = text.IndexOf("private static List<string>? DistinctQueryStoreDatabases", start, StringComparison.Ordinal);

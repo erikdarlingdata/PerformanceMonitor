@@ -18,8 +18,10 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Interop;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Notifications;
 using System.Windows.Threading;
+using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
@@ -218,14 +220,14 @@ public partial class App : Application
     /// <summary>Which CPU metric the alert evaluates against. Total = sql_server_cpu + other_process_cpu (matches OS user+system). SqlOnly = SQL Server scheduler %.</summary>
     public static CpuAlertMode AlertCpuMode { get; set; } = CpuAlertMode.Total;
     public static bool AlertBlockingEnabled { get; set; } = true;
-    public static int AlertBlockingThreshold { get; set; } = 1;
+    public static int AlertBlockingThreshold { get; set; } = BlockingPageRule.CountThresholdDefault;
     /// <summary>
     /// #1839: fire when the latest blocking snapshot's TOTAL blocked wait reaches this many seconds.
-    /// 0 = off, and off ships by default — a count threshold can't tell one session blocked for an hour
-    /// from one blocked for a second, but turning this on for everyone would change what existing
-    /// installs alert about.
+    /// 0 = off. It ships at <see cref="BlockingPageRule.WaitSecondsThresholdDefault"/> (60, since #7083), which is also the bar for one
+    /// blocked event to page at once. A count threshold can't tell one session blocked for an hour
+    /// from one blocked for a second, and this bar can.
     /// </summary>
-    public static int AlertBlockingWaitSecondsThreshold { get; set; }
+    public static int AlertBlockingWaitSecondsThreshold { get; set; } = BlockingPageRule.WaitSecondsThresholdDefault;
     public static bool AlertDeadlockEnabled { get; set; } = true;
     public static int AlertDeadlockThreshold { get; set; } = 1;
     public static bool AlertPoisonWaitEnabled { get; set; } = true;
@@ -295,7 +297,7 @@ public partial class App : Application
     /* #1141: deadlock/blocking notification delivery — Summary (one batched card per cycle, the default)
        or PerEvent (one notification per distinct incident, capped, for per-incident ticketing). */
     public static AlertNotificationMode AlertDeliveryMode { get; set; } = AlertNotificationMode.Summary;
-    public static int AlertPerEventMaxPerCycle { get; set; } = 10; // Max per-event notifications per cycle before "+N more"
+    public static int AlertPerEventMaxPerCycle { get; set; } = AlertDefaults.PerEventMax; // Max per-event notifications per cycle before "+N more"
     public static string MuteRuleDefaultExpiration { get; set; } = "24 hours"; // Default expiration for new mute rules
     public static bool LogAlertDismissals { get; set; } = true; // Log alert dismiss/mute actions to file
 
@@ -322,6 +324,9 @@ public partial class App : Application
 
     /* Connection settings */
     public static int ConnectionTimeoutSeconds { get; set; } = 5;
+
+    /// <summary>#8146: the max_events_limit the deadlock, blocked-process and long-query sessions are created with (settings.json xe_ring_buffer_max_events), 1000 to 10000.</summary>
+    public static int XeRingBufferMaxEvents { get; set; } = RingBufferTarget.DefaultMaxEvents;
 
     /* CSV export settings */
     public static string CsvSeparator { get; set; } = GetDefaultCsvSeparator();
@@ -431,7 +436,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            AppLogger.Error("App", $"Failed to retrieve webhook URL for {credentialKey}: {ex.Message}");
+            AppLogger.Error("App", $"Failed to retrieve webhook URL for {credentialKey}: {ex.Message}", ex);
             return "";
         }
     }
@@ -495,7 +500,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            AppLogger.Error("App", $"Failed to save webhook URL for {credentialKey} ({url?.Length ?? 0} characters): {ex.Message}");
+            AppLogger.Error("App", $"Failed to save webhook URL for {credentialKey} ({url?.Length ?? 0} characters): {ex.Message}", ex);
             return $"The {name} was not saved because {ex.Message.TrimEnd('.', ' ')}.";
         }
     }
@@ -524,7 +529,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            AppLogger.Error("App", $"Failed to retrieve SMTP password: {ex.Message}");
+            AppLogger.Error("App", $"Failed to retrieve SMTP password: {ex.Message}", ex);
             return null;
         }
     }
@@ -564,9 +569,29 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            AppLogger.Error("App", $"Failed to save SMTP password: {ex.Message}");
+            AppLogger.Error("App", $"Failed to save SMTP password: {ex.Message}", ex);
             return $"The {name} was not saved because {ex.Message.TrimEnd('.', ' ')}.";
         }
+    }
+
+    private static bool s_keyboardFocusCueInstalled;
+
+    /// <summary>
+    /// #8222: makes the themed keyboard focus cue (the theme's KeyboardFocusVisualStyle, a 1 px accent outline) the default
+    /// FocusVisualStyle of every control, so charts, combo boxes, buttons and check boxes stop drawing the stock dotted box.
+    /// WPF shows a focus visual only when focus arrived by keyboard, so a mouse click shows nothing and Tab still shows the cue.
+    /// One call per process: a type's metadata can be overridden once. The brush inside the style is a DynamicResource, so
+    /// the one instance follows a theme switch.
+    /// </summary>
+    public static void InstallKeyboardFocusCue()
+    {
+        if (s_keyboardFocusCueInstalled || Current?.TryFindResource("KeyboardFocusVisualStyle") is not Style cue)
+        {
+            return;
+        }
+
+        FrameworkElement.FocusVisualStyleProperty.OverrideMetadata(typeof(System.Windows.Controls.Control), new FrameworkPropertyMetadata(cue));
+        s_keyboardFocusCueInstalled = true;
     }
 
     protected override void OnStartup(StartupEventArgs e)
@@ -696,6 +721,7 @@ public partial class App : Application
 
         // Apply saved color theme before the main window is shown
         ThemeManager.Apply(ColorTheme);
+        InstallKeyboardFocusCue();
 
         // Initialize logging
         var logDirectory = Path.Combine(appDataRoot, "logs");
@@ -936,7 +962,7 @@ public partial class App : Application
                     AppLogger.Info("App",
                         $"Migrated servers.json from '{legacyServers}' to '{sharedServers}'. " +
                         "The old file was left in place as a backup. " +
-                        "Passwords in Windows Credential Manager remain per-user — other users on this machine will need to re-enter SQL passwords for each server.");
+                        "Passwords in Windows Credential Manager remain per-user. Other users on this machine will need to re-enter SQL passwords for each server.");
                 }
                 catch (Exception ex)
                 {
@@ -1122,7 +1148,7 @@ public partial class App : Application
         }
 
         MessageBox.Show(
-            $"{s_badSettingValues.Count} setting(s) in settings.json could not be read and are at their " +
+            $"{CountText.Plural(s_badSettingValues.Count, "setting")} in settings.json could not be read and {(s_badSettingValues.Count == 1 ? "is at its" : "are at their")} " +
             "defaults for this session. Everything else in the file loaded normally.\n\n" +
             $"{Path.Combine(ConfigDirectory, "settings.json")}\n\n" +
             string.Join("\n", s_badSettingValues) + "\n\n" +
@@ -1407,8 +1433,20 @@ public partial class App : Application
             if (read.TryGetProperty("alert_cpu_mode", out v) && Enum.TryParse<CpuAlertMode>(v.TextOrNull(), out var mode))
                 AlertCpuMode = mode;
             if (read.TryGetProperty("alert_blocking_enabled", out v)) AlertBlockingEnabled = v.Bool(AlertBlockingEnabled);
-            if (read.TryGetProperty("alert_blocking_threshold", out v)) AlertBlockingThreshold = v.WholeNumber(AlertBlockingThreshold);
-            if (read.TryGetProperty("alert_blocking_wait_seconds_threshold", out v)) AlertBlockingWaitSecondsThreshold = v.WholeNumber(AlertBlockingWaitSecondsThreshold);
+            /* #7083: the two blocking bars moved (1 -> 3, 0 -> 60). A Settings save writes the whole block, so a saved 1 or 0
+               is usually the old default and not a choice. Beside the marker a saved value is a choice and is kept as it is; without it
+               a value equal to the old default loads as the new default, and any other value is kept. */
+            var blockingBarsApplied = read.TryGetProperty("alert_blocking_defaults_applied", out v) && v.Bool(false);
+            if (read.TryGetProperty("alert_blocking_threshold", out v))
+            {
+                var savedBlockingCount = v.WholeNumber(AlertBlockingThreshold);
+                if (blockingBarsApplied || savedBlockingCount != 1) AlertBlockingThreshold = savedBlockingCount;
+            }
+            if (read.TryGetProperty("alert_blocking_wait_seconds_threshold", out v))
+            {
+                var savedBlockingWait = v.WholeNumber(AlertBlockingWaitSecondsThreshold);
+                if (blockingBarsApplied || savedBlockingWait != 0) AlertBlockingWaitSecondsThreshold = savedBlockingWait;
+            }
             if (read.TryGetProperty("alert_deadlock_enabled", out v)) AlertDeadlockEnabled = v.Bool(AlertDeadlockEnabled);
             if (read.TryGetProperty("alert_deadlock_threshold", out v)) AlertDeadlockThreshold = v.WholeNumber(AlertDeadlockThreshold);
             if (read.TryGetProperty("alert_poison_wait_enabled", out v)) AlertPoisonWaitEnabled = v.Bool(AlertPoisonWaitEnabled);
@@ -1511,6 +1549,20 @@ public partial class App : Application
                    an out-of-range timeout here has always been ignored in favour of the current value. */
                 var timeout = v.WholeNumber(ConnectionTimeoutSeconds);
                 if (timeout >= 5 && timeout <= 60) ConnectionTimeoutSeconds = timeout;
+            }
+
+            /* #8146: the ring-buffer limit of the deadlock, blocked-process and long-query sessions. Clamped to 1000-10000 and
+               logged, because a value that is not honoured otherwise looks like a ring buffer that loses events for no reason. Read
+               as a long, so a value too large for an int lands on the nearest bound as the guide says; not a number reads as the
+               default. */
+            if (read.TryGetProperty("xe_ring_buffer_max_events", out v))
+            {
+                var givenLimit = v.BigWholeNumber(RingBufferTarget.DefaultMaxEvents, long.MinValue, long.MaxValue);
+                XeRingBufferMaxEvents = RingBufferTarget.Clamp(givenLimit);
+                if (givenLimit != XeRingBufferMaxEvents)
+                {
+                    AppLogger.Warn("Settings", $"settings.json xe_ring_buffer_max_events is {givenLimit}, outside {RingBufferTarget.MinMaxEvents} to {RingBufferTarget.MaxMaxEvents}; using {XeRingBufferMaxEvents}");
+                }
             }
 
             /* CSV export settings */
@@ -1717,7 +1769,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Settings", $"Failed to save {what}: settings.json could not be written ({ex.Message})");
+            AppLogger.Error("Settings", $"Failed to save {what}: settings.json could not be written ({ex.Message})", ex);
             return false;
         }
     }
@@ -1747,7 +1799,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Settings", $"Failed to save {what}: {ex.Message}");
+            AppLogger.Error("Settings", $"Failed to save {what}: {ex.Message}", ex);
             return false;
         }
     }
@@ -1769,9 +1821,8 @@ public partial class App : Application
         AppLogger.Error("AppDomain", "Unhandled exception (terminating=" + e.IsTerminating + ")", exception);
         AppLogger.Flush();
 
-        var details = FormatExceptionDetails(exception);
         MessageBox.Show(
-            $"A fatal error occurred and the application must close.\n\n{details}",
+            ErrorDialogText.Fatal(exception, AppLogger.GetCurrentLogFile()),
             "Fatal Error",
             MessageBoxButton.OK,
             MessageBoxImage.Error);
@@ -1792,9 +1843,8 @@ public partial class App : Application
         AppLogger.Error("Dispatcher", "Unhandled exception", e.Exception);
         AppLogger.Flush();
 
-        var details = FormatExceptionDetails(e.Exception);
         MessageBox.Show(
-            $"An error occurred:\n\n{details}\n\nThe application will attempt to continue.",
+            ErrorDialogText.Recoverable(e.Exception, AppLogger.GetCurrentLogFile()),
             "Error",
             MessageBoxButton.OK,
             MessageBoxImage.Error);
@@ -1817,33 +1867,5 @@ public partial class App : Application
         return ex is System.ArgumentException
             && ex.Message.Contains("VisualTarget")
             && ex.StackTrace?.Contains("TaskbarIcon") == true;
-    }
-
-    private static string FormatExceptionDetails(Exception? ex)
-    {
-        if (ex == null) return "Unknown error";
-
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"Type: {ex.GetType().FullName}");
-        sb.AppendLine($"Message: {ex.Message}");
-        sb.AppendLine();
-        sb.AppendLine("Stack trace:");
-        sb.AppendLine(ex.StackTrace);
-
-        var inner = ex.InnerException;
-        var depth = 1;
-        while (inner != null)
-        {
-            sb.AppendLine();
-            sb.AppendLine($"--- Inner Exception [{depth}] ---");
-            sb.AppendLine($"Type: {inner.GetType().FullName}");
-            sb.AppendLine($"Message: {inner.Message}");
-            sb.AppendLine("Stack trace:");
-            sb.AppendLine(inner.StackTrace);
-            inner = inner.InnerException;
-            depth++;
-        }
-
-        return sb.ToString();
     }
 }

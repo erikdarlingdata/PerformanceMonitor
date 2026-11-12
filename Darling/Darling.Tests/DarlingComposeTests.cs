@@ -1480,8 +1480,17 @@ public sealed class DarlingComposeTests
 
         var notice = ComposeStoreAvailability.BuildRowCapNotice(PanelMode.TimeSeries, ComposeLimits.HardRowCap);
         Assert.NotNull(notice);
-        Assert.Contains("row cap reached", notice, StringComparison.Ordinal);
+        /* #7729: a sentence starts with a capital, has no dash, and names where the capped data starts when the rows say so. */
+        Assert.StartsWith("Row cap reached.", notice, StringComparison.Ordinal);
+        Assert.DoesNotContain("—", notice, StringComparison.Ordinal);
         Assert.Contains("most recent", notice, StringComparison.Ordinal);
+        var rows = new System.Text.Json.Nodes.JsonArray(
+            new System.Text.Json.Nodes.JsonObject { ["bucket"] = "2026-11-03T08:00:00", ["value"] = 1 },
+            new System.Text.Json.Nodes.JsonObject { ["bucket"] = "2026-11-02T20:30:00", ["value"] = 2 });
+        var first = ComposePanelRunner.EarliestBucket(rows);
+        Assert.Equal(new DateTime(2026, 11, 2, 20, 30, 0, DateTimeKind.Utc), first);
+        Assert.Contains("buckets of the window, from 2026-11-02 20:30 UTC, not the whole of it", ComposeStoreAvailability.BuildRowCapNotice(PanelMode.TimeSeries, ComposeLimits.HardRowCap, first), StringComparison.Ordinal);
+        Assert.Null(ComposePanelRunner.EarliestBucket(new System.Text.Json.Nodes.JsonArray()));
 
         /* Names both escape hatches, because "it was truncated" without "here is what to do" is only
            half the fix. */
@@ -3025,9 +3034,8 @@ public sealed class DarlingComposeTests
             StringComparison.Ordinal);
 
         /* And the residual must be held out of BOTH places a synthetic series would otherwise be mistaken for a
-           real one: the drill path and the series cap. */
+           real one: the drill path and the series cap (the cap half is run by SeriesColorBehaviourTests). */
         Assert.Contains("drills.set(key, null);", composeJs, StringComparison.Ordinal);
-        Assert.Contains("const realKeys = order.filter((k) => !residual.has(k));", composeJs, StringComparison.Ordinal);
 
         /* But that recognition MUST be gated on the panel actually carrying a residual, which only a
            rank-then-bucket panel with includeOther does. pivotTimeSeries serves EVERY grouped time series, and
@@ -3526,7 +3534,7 @@ public sealed class DarlingComposeTests
             + "WHERE f.collection_time >= $1\n"
             + "  AND f.collection_time <= $2\n"
             + "GROUP BY f.database_name, COALESCE(m.object_name, '(ad hoc)')\n"
-            + "ORDER BY value DESC NULLS LAST\n"
+            + "ORDER BY value DESC NULLS LAST, database_name, object_name\n"
             + "LIMIT $5", compiled.Sql);
         Assert.Contains("collect.procedure_stats", compiled.Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("module_map", compiled.Sql, StringComparison.Ordinal);
@@ -3586,7 +3594,7 @@ public sealed class DarlingComposeTests
             + "WHERE f.collection_time >= $1\n"
             + "  AND f.collection_time <= $2\n"
             + "GROUP BY f.database_name, COALESCE(m.object_name, '(ad hoc)')\n"
-            + "ORDER BY value DESC NULLS LAST\n"
+            + "ORDER BY value DESC NULLS LAST, database_name, object_name\n"
             + "LIMIT $6", compiled.Sql);
         Assert.Contains("collect.module_map AS mm", compiled.Sql, StringComparison.Ordinal);
         Assert.Contains("LEAST(last_ps.collection_time, $5)", compiled.Sql, StringComparison.Ordinal);

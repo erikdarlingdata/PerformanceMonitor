@@ -46,7 +46,7 @@ public class FleetPartialDatabaseFailureBandTests
     private static string RepoRoot([CallerFilePath] string thisFile = "")
         => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", ".."));
 
-    private static string Source(string relative) => File.ReadAllText(Path.Combine(RepoRoot(), relative));
+    private static string Source(string relative) => RepoFile.ReadRepoFile(Path.Combine(RepoRoot(), relative));
 
     private static string Flat(string sql) => Regex.Replace(Regex.Replace(sql, @"--[^\r\n]*", string.Empty), @"\s+", " ");
 

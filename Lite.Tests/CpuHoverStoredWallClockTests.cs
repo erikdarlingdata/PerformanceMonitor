@@ -355,14 +355,20 @@ public sealed class CpuHoverStoredWallClockTests : IClassFixture<SharedDuckDbFix
     [Fact]
     public void ClearingTheHover_DropsThePredicate()
     {
+        /* #7081: this body did not return within the hang guard in one CI leg, as the process's first WPF body, and named no step. */
         var afterClear = StaTestThread.Run(() =>
         {
+            StaTestThread.Step("new ScottPlot.WPF.WpfPlot(): the process's first WPF use when this test runs first");
             var chart = new ScottPlot.WPF.WpfPlot();
+            StaTestThread.Step("new ChartHoverHelper(chart): the Popup, the TextBlock and the chart's event hooks");
             var hover = new ChartHoverHelper(chart, "%", displayZone: () => TimeZoneInfo.Utc);
+            StaTestThread.Step("setting PlainTimeAt");
             hover.PlainTimeAt = t => true;
             Assert.NotNull(hover.PlainTimeAt);
 
+            StaTestThread.Step("hover.Clear()");
             hover.Clear();
+            StaTestThread.Step("reading PlainTimeAt after Clear()");
             return hover.PlainTimeAt;
         });
 

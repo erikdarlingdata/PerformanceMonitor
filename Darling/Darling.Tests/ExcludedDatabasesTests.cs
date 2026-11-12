@@ -26,6 +26,21 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ExcludedDatabasesPickerTests
 {
+    /* #7639: a failed read of the saved Extended Events list is reported as a failure, never as an empty list, so the dialog can turn
+       Save off. (The dialog's Save button and status line are WPF and are not reached here.) */
+    [Fact]
+    public async Task ReadXeSessionDatabases_AFailedRead_IsAFailure_NotAnEmptyList()
+    {
+        var failed = await ExcludedDatabasesDialog.ReadXeSessionDatabasesAsync(
+            () => throw new InvalidOperationException("The store is down."));
+        Assert.Equal("The store is down.", failed.Failure);
+
+        var read = await ExcludedDatabasesDialog.ReadXeSessionDatabasesAsync(
+            () => Task.FromResult(new System.Collections.Generic.List<string> { "alpha" }));
+        Assert.Null(read.Failure);
+        Assert.Equal(new[] { "alpha" }, read.List);
+    }
+
     [Fact]
     public void BuildDatabaseItems_CollectedAreCheckboxes_CheckedWhenExcluded_SortedByName()
     {
@@ -90,7 +105,7 @@ public sealed class ExcludedDatabasesPickerTests
         Assert.Contains("FROM v_database_size_stats", sql, StringComparison.Ordinal);
         Assert.Contains("UNION", sql, StringComparison.Ordinal);
         Assert.Contains("NOT IN ('master', 'model', 'msdb', 'tempdb')", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY database_name", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY lower(database_name), database_name", sql, StringComparison.Ordinal);
 
         /* Positional param, no bare now(), no N'' literals, no @-params. */
         Assert.Contains("$1", sql, StringComparison.Ordinal);

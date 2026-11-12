@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -168,7 +169,9 @@ public sealed partial class QueryStoreSliceRepairService
         await create.ExecuteNonQueryAsync(cancellationToken);
 
         using var insert = connection.CreateCommand();
-        insert.CommandText = $"INSERT INTO {MarkerTable} (completed_at, rows_removed) VALUES (CURRENT_TIMESTAMP, {rowsRemoved})";
+        /* #7200: bound UTC, not CURRENT_TIMESTAMP (local wall-clock). Nothing reads completed_at, only the row count. */
+        insert.CommandText = $"INSERT INTO {MarkerTable} (completed_at, rows_removed) VALUES ($1, {rowsRemoved})";
+        insert.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
         await insert.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -310,6 +313,9 @@ SELECT
         await create.ExecuteNonQueryAsync(CancellationToken.None);
 
         using var insert = connection.CreateCommand();
+        /* #7200: deliberately still CURRENT_TIMESTAMP (local). ReadAttemptsAsync orders by attempted_at DESC, and a store with
+           attempts already written in local time would sort a new UTC row (up to 14 hours earlier east of UTC) BEFORE the
+           old ones, so the "last attempt" shape would come from a stale row. No migration, so the column stays one clock. */
         insert.CommandText =
             $"INSERT INTO {AttemptTable} (attempted_at, hot_groups, archive_files, unreadable_files) VALUES (CURRENT_TIMESTAMP, {hotGroups}, {archiveFiles}, {unreadableFiles})";
         await insert.ExecuteNonQueryAsync(CancellationToken.None);
@@ -721,7 +727,7 @@ HAVING COUNT(*) > 1";
             }
 
             transaction.Commit();
-            progress?.Report($"Hot store: {survey.HotRowsRemoved:N0} row(s) removed from {survey.HotGroups:N0} split interval(s).");
+            progress?.Report($"Hot store: {CountText.Plural(survey.HotRowsRemoved, "row")} removed from {CountText.Plural(survey.HotGroups, "split interval")}.");
         }
 
         /* PER-FILE ISOLATION. One archive file that cannot be repaired must not stop the others: each file is
@@ -759,7 +765,7 @@ HAVING COUNT(*) > 1";
             {
                 failures.Add($"{Path.GetFileName(file.Path)}: {ex.Message}");
                 _logger?.LogError(ex, "#1912 archive repair failed for {File}; the original was left in place", file.Path);
-                progress?.Report($"Archive {Path.GetFileName(file.Path)}: NOT repaired — {ex.Message}");
+                progress?.Report($"Archive {Path.GetFileName(file.Path)} NOT repaired: {ex.Message}");
             }
         }
 
@@ -1048,7 +1054,7 @@ COPY (
 
         var afterBytes = new FileInfo(file.Path).Length;
 
-        progress?.Report($"Archive {name}: {file.RowsRemoved:N0} row(s) removed ({FormatBytes(beforeBytes)} -> {FormatBytes(afterBytes)}).");
+        progress?.Report($"Archive {name}: {CountText.Plural(file.RowsRemoved, "row")} removed ({FormatBytes(beforeBytes)} -> {FormatBytes(afterBytes)}).");
 
         /* The rewrite keeps the file's row order and its column types (#5653), so a repaired file is not expected to
            be bigger than the original. Before that, it could be: the old rewrite returned rows in hash order and

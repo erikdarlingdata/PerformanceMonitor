@@ -40,7 +40,7 @@ public sealed class DarlingMcpInvestigationFeedbackTools
         "<<GUIDE>>" +
         "request_id is the case's id (a GUID, from list_investigation_requests). Refused, writing nothing, for an unknown id, a case that is itself a practice request, a case with no report or no feedback, or one that already has a live practice request. " +
         "Answer: {status:\"opened\", request_id (the new practice request), source_request_id, opened_by, request: {before: null, after: {...}}, undo: null}. There is no undo: a practice request cannot be deleted; close_investigation_request closes it so no agent works it. " +
-        "Needs mcp.allowWrites; an agent investigation can never call it.")]
+        "Needs mcp.allowWrites or a named operator token; an agent investigation can never call it.")]
     public static async Task<string> StartPracticeRequest(
         NpgsqlDataSource postgres,
         [Description("The id of the judged case to replay (a GUID).")] string request_id,
@@ -51,7 +51,7 @@ public sealed class DarlingMcpInvestigationFeedbackTools
         {
             if (!Guid.TryParse(request_id, out var source))
             {
-                return McpHelpers.Refusal("request_id", "The request id is not a request id. Nothing was changed.");
+                return McpHelpers.Refusal("request_id", DarlingWebEndpoints.RequestIdNotGuidText + " Nothing was changed.");
             }
 
             var actor = DarlingMcpInvestigationAdminTools.Actor();
@@ -99,7 +99,7 @@ public sealed class DarlingMcpInvestigationFeedbackTools
         "Scope: leave server_name and tag_id out for the fleet's profile, give server_name (the name list_servers shows) for one server, or tag_id (from get_fleet_overview tags) for one tag; not both. profile_text is up to 4000 characters. " +
         "expected_modified_at guards against overwriting someone else's edit: give the modified_at of the profile you read (the 'before' of an earlier answer or the profile page), or leave it out when the scope has no profile yet. A profile changed, removed or newly created since is refused and nothing is written; the refusal names its modified_at. " +
         "Answer: {status:\"saved\"|\"removed\"|\"unchanged\", scope, profile: {before, after}, undo: null}; before and after are {profile_text, modified_at, modified_by} or null. To undo, save the 'before' profile_text again with expected_modified_at set to the 'after' modified_at (or blank it if before is null). " +
-        "Needs mcp.allowWrites; an agent investigation can never call it.")]
+        "Needs mcp.allowWrites or a named operator token; an agent investigation can never call it.")]
     public static async Task<string> SaveEnvironmentProfile(
         NpgsqlDataSource postgres,
         [Description("The profile text, up to 4000 characters. Blank removes the scope's profile.")] string? profile_text,
@@ -197,7 +197,7 @@ public sealed class DarlingMcpInvestigationFeedbackTools
         "<<GUIDE>>" +
         "request_id is the reported request's id. verdict is right, partly or wrong. corrected_verdict (optional) is real, false_positive or needs_person. missed_step and comment (optional) are up to 4000 characters each. A request that is unknown or has no report is refused and nothing is written. " +
         "Answer: {status:\"recorded\"|\"replaced\", request_id, author, feedback: {before, after}, undo: null}. The author is the token's name, never an argument. To undo a replacement, record the 'before' values again; a first record cannot be removed from the web or the Viewer. " +
-        "Needs mcp.allowWrites; an agent investigation can never call it.")]
+        "Needs mcp.allowWrites or a named operator token; an agent investigation can never call it.")]
     public static async Task<string> RecordInvestigationFeedback(
         NpgsqlDataSource postgres,
         [Description("The reported request's id (a GUID).")] string request_id,
@@ -212,7 +212,7 @@ public sealed class DarlingMcpInvestigationFeedbackTools
         {
             if (!Guid.TryParse(request_id, out var request))
             {
-                return McpHelpers.Refusal("request_id", "The request id is not a request id. Nothing was changed.");
+                return McpHelpers.Refusal("request_id", DarlingWebEndpoints.RequestIdNotGuidText + " Nothing was changed.");
             }
 
             /* The caller is the token (named, or the legacy token), shaped to the author rule as a sign-in name is on the web. */

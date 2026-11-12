@@ -240,6 +240,36 @@ public static class SameStatementPileupDetector
     /// </summary>
     public const int StaleSnapshotCutoffMinutes = 10;
 
+    /// <summary>
+    /// The row cap of one window read, 50,000: about 900 qualifying sessions a snapshot across the 55-minute window the
+    /// sweep reads at a one-minute cadence, past what a busy server sustains and well short of what a runaway snapshot
+    /// would cost in statement text (2,000 blocked sessions a minute over that window is 110,000 rows). A tripwire, not a
+    /// working bound. Both SKUs' readers bind one row more than this as the read's LIMIT, so a read that returns more than
+    /// the cap was cut by it, and one of exactly the cap is a whole window; a cut read asks <see cref="ReachesBaselineFloor"/>
+    /// whether its rows still cover the baseline the finding would state, and drops the extra row when they do (#8157).
+    /// </summary>
+    public const int WindowRowCap = 50_000;
+
+    /// <summary>
+    /// Whether <paramref name="rows"/> reach back from their newest instant past the baseline floor <see cref="Evaluate"/>
+    /// draws, <see cref="BaselineLookbackMinutes"/> behind it. A window reader that filled its row cap asks this before it
+    /// hands the rows on (#8157): a capped read that stopped short of the floor would have the finding state a baseline it
+    /// never read, so the sweep skips the evaluation instead. The floor is strict. A cap over newest-first rows cuts
+    /// mid-snapshot, and the baseline keeps the floor instant itself, so rows whose oldest sits exactly on the floor may be
+    /// a partial snapshot inside the baseline; only a row past the floor proves every baseline instant was read whole. A
+    /// cap that filled with the floor already passed changes nothing. No rows reach nothing.
+    /// </summary>
+    public static bool ReachesBaselineFloor(IReadOnlyList<SnapshotRow> rows)
+    {
+        if (rows is null || rows.Count == 0)
+        {
+            return false;
+        }
+
+        var newest = rows.Max(r => r.CollectionTime);
+        return rows.Min(r => r.CollectionTime) < newest.AddMinutes(-BaselineLookbackMinutes);
+    }
+
     /// <summary>How much statement text the drill-down's preview carries. Bounds one finding row's
     /// payload only — it filters nothing and takes no part in identity (the readers cap the projected
     /// text well above this, and the identity key is the DMV hash).</summary>
@@ -610,24 +640,24 @@ public static class SameStatementPileupDetector
 
         return FactAdvice.SerializeForStoryText(new AdviceBlock(
             Headline:
-                $"{sessions} concurrent sessions piled up on one statement in {db} — every copy past "
+                $"{sessions} concurrent sessions piled up on one statement in {db}: every copy past "
                 + $"{minElapsedMs / 1000.0:F0} seconds on a statement observed at {baselineMaxMs} ms minutes earlier",
             Investigation:
                 $"The active-query snapshot caught {sessions} sessions executing the SAME statement at one instant, "
-                + $"all past {minElapsedMs / 1000.0:F1} s elapsed, {ioWaiters} suspended on {waits} — while the same "
-                + $"statement's {baselineObservations} in-flight observation(s) over the prior {BaselineLookbackMinutes} minutes "
+                + $"all past {minElapsedMs / 1000.0:F1} s elapsed, {ioWaiters} suspended on {waits}, while the same "
+                + $"statement's {CountText.Plural(baselineObservations, "in-flight observation")} over the prior {BaselineLookbackMinutes} minutes "
                 + $"topped out at {baselineMaxMs} ms. That is the live signature of a shared parameterized plan flipping to an "
                 + "IO-heavy shape: every caller inherits the flip at once, the copies convoy on page reads, and client "
                 + "timeouts follow within seconds. The drill-down quotes the piled-up sessions (elapsed, waits, reads) and "
                 + "the sub-second baseline rows this conclusion is computed from.",
             Remediation:
                 "Confirm and clear the plan: find the statement's current plan in the plan cache and evict it "
-                + "(DBCC FREEPROCCACHE with the plan handle, or sp_recompile on the object) — the incident class "
+                + "(DBCC FREEPROCCACHE with the plan handle, or sp_recompile on the object), the incident class "
                 + "self-clears when the plan churns out, and eviction forces that churn now. Where Query Store is "
                 + "readable on this server, the PLAN_REGRESSION finding and its force-plan drill-down will surface the "
                 + "flip on the next analysis pass as confirmation and offer the durable fix (forcing the historical "
-                + "plan); this finding deliberately does not wait for it (#2296 deployments have no Query Store to "
-                + "read). If the pileup recurs — episodes fold onto one incident id — the statement is re-drawing its "
+                + "plan); this finding deliberately does not wait for it (a deployment with the Query Store readers disabled has no Query Store to "
+                + "read). If the pileup recurs (episodes fold onto one incident id), the statement is re-drawing its "
                 + "bad plan on plan-cache churn, and the parameter-sensitivity playbook applies to the statement itself."));
     }
 

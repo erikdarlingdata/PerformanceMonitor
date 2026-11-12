@@ -24,20 +24,64 @@ public static class InvestigationAlertStreak
     /// (this incident's own rise), after it, older than <see cref="InvestigationAlertRecurrence.Days"/> days, or farther than the
     /// window from the anchor's clock time (circular, across midnight).
     /// </summary>
-    public static int? DaysAgo(DateTime anchorUtc, DateTime fireUtc)
+    public static int? DaysAgo(DateTime anchorUtc, DateTime fireUtc) => DaysAgo(anchorUtc, fireUtc, null);
+
+    /// <summary>
+    /// <see cref="DaysAgo(DateTime, DateTime)"/> with the server's <paramref name="zone"/>. A fire also counts when it sits within the
+    /// window of the anchor's clock time moved by the difference between the zone's UTC offsets at the two instants, that is when a
+    /// DST change fell between them: a schedule kept in the server's local clock (an Agent job at 02:00) moves an hour in UTC at
+    /// such a change, and without this its streak reads 0 or 1 for the week after. A job the change skipped runs the moment the
+    /// clock lands, at the instant of the change itself, so the offset just before the fire's window is read as well. A null zone,
+    /// or one with no daylight rules, takes the plain rule only, so a UTC recurrence an hour off is still not a streak.
+    /// </summary>
+    public static int? DaysAgo(DateTime anchorUtc, DateTime fireUtc, TimeZoneInfo? zone)
     {
         var span = anchorUtc - fireUtc;
         var window = TimeSpan.FromMinutes(InvestigationAlertRecurrence.WindowMinutes);
-        if (span <= window || span > TimeSpan.FromDays(InvestigationAlertRecurrence.Days))
+        var lookBack = TimeSpan.FromDays(InvestigationAlertRecurrence.Days);
+        if (span <= window)
             return null;
 
-        var day = TimeSpan.TicksPerDay;
-        var offset = span.Ticks % day;
-        if (Math.Min(offset, day - offset) > window.Ticks)
+        if (span <= lookBack && OnTheClock(span.Ticks, window.Ticks))
+            return WholeDays(span.Ticks);
+
+        if (zone is null || !zone.SupportsDaylightSavingTime)
             return null;
 
-        return (int)((span.Ticks + day / 2) / day);
+        var anchorOffset = zone.GetUtcOffset(AsUtc(anchorUtc));
+        var fireOffset = zone.GetUtcOffset(AsUtc(fireUtc));
+        var shift = fireOffset - anchorOffset;
+        if (shift == TimeSpan.Zero)
+        {
+            /* The skipped hour: at a forward jump the clock lands on the far side of the gap, and a job scheduled inside the gap
+               runs at that instant, already at the new offset. Only a forward jump within the window before the fire counts;
+               at a fall-back nothing is skipped, and a fire just after one is at its own local time. */
+            var beforeOffset = zone.GetUtcOffset(AsUtc(fireUtc - window));
+            if (fireOffset > beforeOffset)
+                shift = beforeOffset - anchorOffset;
+        }
+        if (shift == TimeSpan.Zero)
+            return null;
+
+        /* The same local clock time on the two sides of the change is span = k days + (fire offset - anchor offset). The rise
+           and the look-back are judged on the moved span, so a fire the change pushed an hour past Days days back still counts. */
+        var moved = span.Ticks - shift.Ticks;
+        if (moved <= window.Ticks || moved > lookBack.Ticks || !OnTheClock(moved, window.Ticks))
+            return null;
+
+        return WholeDays(moved);
     }
+
+    private static bool OnTheClock(long spanTicks, long windowTicks)
+    {
+        var day = TimeSpan.TicksPerDay;
+        var offset = ((spanTicks % day) + day) % day;
+        return Math.Min(offset, day - offset) <= windowTicks;
+    }
+
+    private static int WholeDays(long spanTicks) => (int)((spanTicks + TimeSpan.TicksPerDay / 2) / TimeSpan.TicksPerDay);
+
+    private static DateTimeOffset AsUtc(DateTime utc) => new(DateTime.SpecifyKind(utc, DateTimeKind.Utc));
 
     /// <summary>
     /// The streak over the day numbers a metric fired on (each from <see cref="DaysAgo"/>): the run 1, 2, 3, ... that starts at
@@ -58,6 +102,10 @@ public static class InvestigationAlertStreak
     /// (<paramref name="firesUtc"/>, muted or not; the alert's own row and fires outside the window do not count). What
     /// <c>get_alert_history</c> reads per row.
     /// </summary>
-    public static int ForAlert(DateTime anchorUtc, IEnumerable<DateTime> firesUtc) =>
-        Length(firesUtc.Select(f => DaysAgo(anchorUtc, f)).Where(d => d.HasValue).Select(d => d!.Value));
+    public static int ForAlert(DateTime anchorUtc, IEnumerable<DateTime> firesUtc) => ForAlert(anchorUtc, firesUtc, null);
+
+    /// <summary><see cref="ForAlert(DateTime, IEnumerable{DateTime})"/> in the server's <paramref name="zone"/>, so a fire an hour off across
+    /// a DST change counts (<see cref="DaysAgo(DateTime, DateTime, TimeZoneInfo?)"/>).</summary>
+    public static int ForAlert(DateTime anchorUtc, IEnumerable<DateTime> firesUtc, TimeZoneInfo? zone) =>
+        Length(firesUtc.Select(f => DaysAgo(anchorUtc, f, zone)).Where(d => d.HasValue).Select(d => d!.Value));
 }

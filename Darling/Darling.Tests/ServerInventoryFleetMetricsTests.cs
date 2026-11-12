@@ -53,11 +53,11 @@ public sealed class ServerInventoryFleetMetricsTests
 
     // ── A server with no CPU sample gets no verdict ──
 
-    /// <summary>One fleet-read row shaped like <c>ServerMetricsSql</c>'s SELECT list (ordinals 0-20), so the
+    /// <summary>One fleet-read row shaped like <c>ServerMetricsSql</c>'s SELECT list (ordinals 0-21), so the
     /// verdict decision can be exercised without a store. Workers come back NULL, as they do for a server with
     /// no memory sample; the grant columns are COALESCEd to 0 by the SELECT.</summary>
     private static DbDataReader FleetRow(decimal? avgCpu, decimal? maxCpu, decimal? p95Cpu, int? engineEdition = null, string? edition = null,
-        long cpuSamples = 288, int? totalMemoryMb = null, int? bufferPoolMb = null)
+        long cpuSamples = 288, int? totalMemoryMb = null, int? bufferPoolMb = null, string? agReplicaRole = null)
     {
         var table = new DataTable();
         table.Columns.Add("server_id", typeof(int));
@@ -81,6 +81,7 @@ public sealed class ServerInventoryFleetMetricsTests
         table.Columns.Add("free_mb", typeof(decimal));
         table.Columns.Add("cpu_samples", typeof(long));
         table.Columns.Add("total_server_memory_mb", typeof(int));
+        table.Columns.Add("ag_replica_role", typeof(string));
 
         table.Rows.Add(
             1,
@@ -103,7 +104,8 @@ public sealed class ServerInventoryFleetMetricsTests
             DBNull.Value,
             DBNull.Value,
             cpuSamples,
-            (object?)totalMemoryMb ?? DBNull.Value);
+            (object?)totalMemoryMb ?? DBNull.Value,
+            (object?)agReplicaRole ?? DBNull.Value);
 
         var reader = table.CreateDataReader();
         Assert.True(reader.Read());
@@ -142,6 +144,20 @@ public sealed class ServerInventoryFleetMetricsTests
 
         Assert.Equal(ProvisioningVerdict.NotApplicable, ViewerDataService.FleetProvisioningStatusFor(master));
         Assert.Equal(ProvisioningVerdict.OverProvisioned, ViewerDataService.FleetProvisioningStatusFor(userDatabase));
+    }
+
+    /// <summary>#7705: an Availability Group secondary's own load says nothing about what it must carry after a failover, so the grid does not
+    /// call it OVER_PROVISIONED (or UNDER_PROVISIONED) from that load; the primary with the same figures is judged as before.</summary>
+    [Fact]
+    public void FleetProvisioningStatusFor_SecondaryReplica_IsNotJudgedFromItsOwnLoad()
+    {
+        using var idleSecondary = FleetRow(avgCpu: 0m, maxCpu: 0m, p95Cpu: 0m, agReplicaRole: "Secondary");
+        using var hotSecondary = FleetRow(avgCpu: 60m, maxCpu: 99m, p95Cpu: 95m, agReplicaRole: " secondary ");
+        using var idlePrimary = FleetRow(avgCpu: 0m, maxCpu: 0m, p95Cpu: 0m, agReplicaRole: "Primary");
+
+        Assert.Equal(ProvisioningVerdict.NotJudgedSecondary, ViewerDataService.FleetProvisioningStatusFor(idleSecondary));
+        Assert.Equal(ProvisioningVerdict.NotJudgedSecondary, ViewerDataService.FleetProvisioningStatusFor(hotSecondary));
+        Assert.Equal(ProvisioningVerdict.OverProvisioned, ViewerDataService.FleetProvisioningStatusFor(idlePrimary));
     }
 
     /// <summary>The other two verdicts are untouched: a hot server is still under-provisioned and a busy one

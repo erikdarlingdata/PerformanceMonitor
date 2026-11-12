@@ -14,24 +14,65 @@ namespace PerformanceMonitor.Darling.Service;
 /// store that setting is a validation error, so naming it (or "the admin login") sends the user to an option the store refuses. The sentence
 /// therefore depends on <see cref="PostgresConfig.Managed"/>: a managed store says the dashboard lists only and the Viewer app makes the change,
 /// a store the operator brought keeps the advice to give the web an admin store login. On the managed store with <c>web.allowAdminWrites</c>
-/// off (#6600) the sentence also names that switch.
+/// off (#6600) the sentence says changes are turned off and names that switch, and with it on the refusal is about the store login's privilege and names no switch (#7402).
 /// </summary>
 internal static class DarlingWebStoreWrites
 {
+    /// <summary>The <c>reason</c> a 403 refusal body carries beside its <c>error</c> sentence (#7955), so the page tells the kinds apart on this
+    /// code and shows the sentence as the service wrote it, never by matching the sentence's words. The sentence is the one text; the code is the one
+    /// machine-readable rule.</summary>
+    internal static class RefusalReason
+    {
+        /// <summary>The managed store's dashboard has no admin pool: <c>web.allowAdminWrites</c> is off.</summary>
+        internal const string AdminWritesOff = "admin_writes_off";
+
+        /// <summary>The store refused the write for privilege (SQLSTATE 42501, or no write grant): the web or admin login cannot make it.</summary>
+        internal const string StoreRefused = "store_refused";
+
+        /// <summary>The signed-in seat is read-only (the viewer role): the host's write gate refuses every change.</summary>
+        internal const string ReadOnlySeat = "read_only_seat";
+
+        /// <summary>The dashboard serves reads only (a tokenless loopback or a token under the length floor), so it makes no change for anyone.</summary>
+        internal const string ReadsOnlyDashboard = "reads_only_dashboard";
+
+        /// <summary>The change needs a signed-in admin and the request holds no such seat.</summary>
+        internal const string SignInRequired = "sign_in_required";
+
+        /// <summary>The reason for a store refusal: the switch when the managed store's dashboard has no admin pool, else the privilege.</summary>
+        internal static string ForStore(bool adminWritesOff) => adminWritesOff ? AdminWritesOff : StoreRefused;
+    }
+
+    /// <summary>The changes the managed store's dashboard makes only through its admin pool, as the start lines name them: <c>web.allowAdminWrites</c>
+    /// off turns these off and nothing else. docs/darling/configuration-web.md carries the full list.</summary>
+    internal const string AdminArmWrites =
+        "notification routes, environment profiles, threshold overrides, alert settings, people, report feedback, practice requests, pending notes, server actions and agent changes";
+
+    /// <summary>The changes a sign-in that can edit makes through the web login's own grants, whatever <c>web.allowAdminWrites</c> says. It finishes
+    /// "can ..." in the start lines.</summary>
+    internal const string EditSeatWrites = "add and edit monitored servers and write mute rules, dismissals and custom alert rules";
+
     /// <summary>Whether this config describes the managed store. A host with no config (a test that maps the routes directly) is not managed.</summary>
     internal static bool IsManaged(PostgresConfig? postgres) => postgres?.Managed == true;
 
     /// <summary>The 403 sentence for a write the web's store login cannot make. <paramref name="cannot"/> finishes "this dashboard cannot ..."
     /// (for example <c>record feedback</c>). <paramref name="instead"/> is the imperative that says where to do it, with no final period.
-    /// <paramref name="bringYourOwnExtra"/> is appended on a store you bring yourself only. <paramref name="adminWritesOff"/> is true on the
+    /// <paramref name="bringYourOwnExtra"/> is appended on a store you bring yourself only. <paramref name="webLoginWrite"/> is true for a
+    /// write the <c>web</c> role holds the grant for (the store refused the dashboard's login for privilege): on a store you bring yourself the
+    /// sentence then points at the <c>web</c> role, not the admin login. <paramref name="adminWritesOff"/> is true on the
     /// managed store when the dashboard has no admin pool (<c>web.allowAdminWrites</c> is off), and then the sentence names the switch.</summary>
     internal static string Refused(string cannot, bool managedStore, string instead = "Use the Viewer app to make the change",
-        string? bringYourOwnExtra = null, bool adminWritesOff = false) =>
+        string? bringYourOwnExtra = null, bool adminWritesOff = false, bool webLoginWrite = false) =>
         managedStore
-            ? $"This dashboard lists only on this store, so it cannot {cannot}. {instead}."
-              + (adminWritesOff ? " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service." : "")
-            : $"This dashboard's store login cannot {cannot}. {instead}, or give the web an admin store login "
-              + "(set postgres.webConnectionString to an admin login)." + bringYourOwnExtra;
+            ? (adminWritesOff
+                  ? $"Changes from this page are turned off, so this dashboard cannot {cannot}. {instead}."
+                    + " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service."
+                  // #7402: with the switch on the refusal is about privilege (the admin login's credential is not stored yet, or the store refused the web login), so no switch is named.
+                  : $"This dashboard's store login has no write access, so it cannot {cannot}. {instead}.")
+            : webLoginWrite
+                ? $"This dashboard's store login cannot {cannot}. Point postgres.webConnectionString at the web role "
+                  + DarlingManagedRoles.ProvisionRolesScriptPath + " creates." + bringYourOwnExtra
+                : $"This dashboard's store login cannot {cannot}. {instead}, or give the web an admin store login "
+                  + "(set postgres.webConnectionString to an admin login)." + bringYourOwnExtra;
 
     /// <summary>Whether the managed store's dashboard has no admin pool, so its Admin writes are list-only until <c>web.allowAdminWrites</c> is on.</summary>
     internal static bool AdminWritesOff(bool managedStore, WebAdminArm? arm) => managedStore && arm is null;
@@ -39,7 +80,7 @@ internal static class DarlingWebStoreWrites
 
 /// <summary>
 /// The web dashboard's second, small connection pool for its Admin writes on the managed store (#6600). The dashboard reads as the
-/// <c>viewer</c> role there, which holds no write grant. This arm signs in as the managed <c>admin</c> role (the Viewer's login, which every
+/// <c>web</c> role there, which holds no grant for those writes. This arm signs in as the managed <c>admin</c> role (the Viewer's login, which every
 /// managed start already provisions with a stored credential file) and is used only for a request whose seat is a signed-in admin
 /// (<see cref="DarlingWebSeat.IsSignedInAdmin"/>), for the write and for the access check that tells the page whether to show its controls.
 /// Reads stay on the dashboard's own pool. It is built only on the managed store with <c>web.allowAdminWrites</c> on; a store the operator
@@ -67,17 +108,20 @@ public sealed class WebAdminArm : IDisposable
 
         if (!allowAdminWrites)
         {
-            logger.LogInformation("Web dashboard Admin writes are off (web.allowAdminWrites is false): it lists only on the managed store");
+            logger.LogInformation("Web dashboard Admin writes are off (web.allowAdminWrites is false): on the managed store the dashboard makes no change to "
+                + DarlingWebStoreWrites.AdminArmWrites + ". A sign-in that can edit can still " + DarlingWebStoreWrites.EditSeatWrites + ".");
             return null;
         }
 
-        logger.LogInformation("Web dashboard Admin writes are on (web.allowAdminWrites): a signed-in admin's Admin writes use the managed admin login. Set it to false to keep the dashboard list-only.");
+        logger.LogInformation("Web dashboard Admin writes are on (web.allowAdminWrites): a signed-in admin's Admin writes use the managed admin login. Set it to false to turn those writes off. "
+            + "A sign-in that can edit can " + DarlingWebStoreWrites.EditSeatWrites + " either way.");
         return new WebAdminArm(() => DarlingManagedPostgres.TryBuildWebAdminConnectionStringFromStoredCredential(postgres));
     }
 
     /// <summary>The start-up warning for OIDC sign-in with no role mapping (<c>web.network.oidc.roleClaim</c> unset): every user who signs in at the
-    /// identity provider then holds the edit seat. What that reaches depends on the store: on the managed store it is the Admin writes while
-    /// <paramref name="adminArm"/> exists, and nothing while it does not; on a store you bring it is whatever the web login's own grants allow
+    /// identity provider then holds the edit seat. What that reaches depends on the store: on the managed store it is the web login's own writes
+    /// (<see cref="DarlingWebStoreWrites.EditSeatWrites"/>, adding a server among them), plus the Admin writes while
+    /// <paramref name="adminArm"/> exists; on a store you bring it is whatever the web login's own grants allow
     /// (<c>postgres.webConnectionString</c>), which the service cannot see from here. Logs nothing when there is no OIDC sign-in or a role mapping
     /// exists (viewer-only included). Returns whether it warned.</summary>
     internal static bool WarnWhenOidcHasNoRoleMapping(DarlingWebOidcClient? oidc, bool managedStore, WebAdminArm? adminArm, ILogger logger)
@@ -91,7 +135,8 @@ public sealed class WebAdminArm : IDisposable
             ? "On this store you brought, what they can change depends on the web login's grants (postgres.webConnectionString): with a login that can write, every one of them can change thresholds, routes, webhook URLs and the agent switch."
             : adminArm is not null
                 ? "web.allowAdminWrites is on, so every user who signs in can make the dashboard's Admin writes."
-                : "web.allowAdminWrites is off, so the dashboard stays list-only for them.";
+                : "web.allowAdminWrites is off, and that turns off only the dashboard's Admin writes (" + DarlingWebStoreWrites.AdminArmWrites
+                  + "): every user who signs in can still " + DarlingWebStoreWrites.EditSeatWrites + ".";
         logger.LogWarning("web.network.oidc has no role mapping, so every user who signs in has the edit seat. {Effect} Set web.network.oidc.roleClaim with adminRoles and viewerRoles to limit who can edit.", effect);
         return true;
     }

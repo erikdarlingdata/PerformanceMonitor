@@ -21,6 +21,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 
@@ -76,8 +77,10 @@ internal static class DiagnosticsBundle
     internal static readonly string[] ConfigShapeProjected =
     {
         "DarlingConfig.Postgres", "DarlingConfig.Servers", "DarlingConfig.Analyzer", "DarlingConfig.CapturePlans",
-        "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.Reads", "ReadsConfig.MaxHeavyReads", "DarlingConfig.QueryStatsDeferredPlanFetch", "DarlingConfig.ProcedureStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
-        "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowInvestigations", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "McpConfig.DataDetail", "McpConfig.AllowTokenlessLoopback", "WebConfig.Enabled", "WebConfig.Network", "WebConfig.AllowTokenlessLoopback", "WebConfig.AllowAdminWrites", "WebConfig.AllowWindowsAuthOverUnverifiedTls",
+        "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.Reads", "ReadsConfig.MaxHeavyReads", "DarlingConfig.QueryStatsDeferredPlanFetch", "DarlingConfig.QueryTextTrigramIndexEnabled", "DarlingConfig.ProcedureStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
+        "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowInvestigations", "McpConfig.AllowAgentMuteRules", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "McpConfig.DataDetail", "McpConfig.AllowTokenlessLoopback", "WebConfig.Enabled", "WebConfig.Network", "WebConfig.AllowTokenlessLoopback", "WebConfig.AllowAdminWrites", "WebConfig.AllowWindowsAuthOverUnverifiedTls",
+        /* #8184: the health port is projected as its on/off flag, like mcp_enabled; its port and address stay out, like McpConfig.Port. */
+        "DarlingConfig.Health", "HealthConfig.Enabled",
         "MonitoredServer.Engine", "MonitoredServer.AlertDeliveryModeOverride",
     };
 
@@ -92,8 +95,9 @@ internal static class DiagnosticsBundle
         "DarlingConfig.PlanXmlCompression",
         "DarlingConfig.MaxConcurrentSweeps",
         "DarlingConfig.CollectSchemaChangeEvents",
-        "DarlingConfig.RawChunkIntervalReconcileEnabled",
+        "DarlingConfig.RawChunkIntervalReconcileEnabled", "DarlingConfig.DailySummaryWarmerEnabled",
         "DarlingConfig.ProcedureStatsPlanCycleInterval",
+        "DarlingConfig.XeRingBufferMaxEvents",
         "DarlingConfig.Alerts",
         "DarlingConfig.Smtp",
         "DarlingConfig.Webhooks",
@@ -104,6 +108,8 @@ internal static class DiagnosticsBundle
         "DarlingConfig.Heartbeat",
         /* #6840: the front door's block holds every store's address and access token. */
         "DarlingConfig.FrontDoor",
+        /* #8006: only a file: path or env: name, but it says where the password key lives, and the bundle never needs it. */
+        "DarlingConfig.PasswordKey",
         "PostgresConfig.WebConnectionString",
         "PostgresConfig.McpConnectionString",
         "PostgresConfig.Port",
@@ -113,6 +119,8 @@ internal static class DiagnosticsBundle
         /* #6542: named MCP tokens hold token names and secrets; the bundle shows only whether the legacy network block exists. */
         "McpConfig.Tokens",
         "WebConfig.Port",
+        "HealthConfig.Port",
+        "HealthConfig.Listen",
         "WebConfig.PublicBaseUrl",
         "MonitoredServer.Name",
         "MonitoredServer.Host",
@@ -129,6 +137,8 @@ internal static class DiagnosticsBundle
         /* #6254: the Query Store replica is a host (or listener name); the bundle seeds it into the host names. */
         "MonitoredServer.QueryStoreReplica",
         "MonitoredServer.ExcludedDatabases",
+        /* #7639: database names, like the excluded list beside it. */
+        "MonitoredServer.XeSessionDatabases",
         "MonitoredServer.MonthlyCostUsd",
         "MonitoredServer.StoredServerId",
         "MonitoredServer.PlanForceBotEnabled",
@@ -183,11 +193,13 @@ internal static class DiagnosticsBundle
             ["mcp_allow_writes"] = config.Mcp?.AllowWrites ?? false,
             ["mcp_allow_server_admin"] = config.Mcp?.AllowServerAdmin ?? false,
             ["mcp_allow_investigations"] = config.Mcp?.AllowInvestigations ?? false,
+            ["mcp_allow_agent_mute_rules"] = config.Mcp?.AllowAgentMuteRules ?? true,
             ["mcp_allow_windows_auth_over_unverified_tls"] = config.Mcp?.AllowWindowsAuthOverUnverifiedTls ?? false,
             ["mcp_allow_tokenless_loopback"] = config.Mcp?.AllowTokenlessLoopback ?? false,
             // The PARSED level word, never the raw text; an unknown value runs as metadataOnly, so it reports that.
             ["mcp_data_detail"] = McpDataDetailModes.Word(McpDataDetailModes.Resolve(config.Mcp?.DataDetail)),
             ["web_enabled"] = config.Web?.Enabled ?? false,
+            ["health_enabled"] = config.Health?.Enabled ?? false,
             ["web_network_exposed"] = WebNetworkExposed(config),
             ["web_allow_tokenless_loopback"] = config.Web?.AllowTokenlessLoopback ?? false,
             ["web_allow_admin_writes"] = config.Web?.AllowAdminWrites ?? false,
@@ -197,6 +209,8 @@ internal static class DiagnosticsBundle
             ["reads_max_heavy_reads"] = config.Reads?.MaxHeavyReads,
             ["capture_plans"] = config.CapturePlans,
             ["query_stats_deferred_plan_fetch"] = config.QueryStatsDeferredPlanFetch,
+            /* #7674: the opt-in trigram index on the plan-cache text; a plain bool, and what get_store_metrics query_text_index is read beside. */
+            ["query_text_trigram_index_enabled"] = config.QueryTextTrigramIndexEnabled,
             // The PARSED mode word, never the raw text (free config text); an unknown value runs as off, so it reports off.
             ["procedure_stats_deferred_plan_fetch"] = ProcedureStatsPlanFetchModes.TryParse(config.ProcedureStatsDeferredPlanFetch, out var psMode)
                 ? psMode.ToString().ToLowerInvariant() : "off",
@@ -455,6 +469,11 @@ internal static class DiagnosticsBundle
             aliaser.AddName(AliasKind.Login, server.Username);
             aliaser.AddName(AliasKind.Login, server.RemediationUsername);
             aliaser.AddName(AliasKind.Login, server.HypotheticalIndexUsername);
+            foreach (var listed in server.XeSessionDatabases ?? new List<string>())
+            {
+                aliaser.AddName(AliasKind.Database, listed);
+            }
+
             foreach (var excluded in server.ExcludedDatabases ?? new List<string>())
             {
                 aliaser.AddName(AliasKind.Database, excluded);
@@ -550,6 +569,10 @@ internal static class DiagnosticsBundle
             {
                 AddUrlHost(aliaser, proxy);
             }
+
+            /* #7656: the Slack bot's tokens are secrets, sealed or as stored. */
+            aliaser.AddSecret(hooks.SlackBotToken);
+            aliaser.AddSecret(hooks.SlackAppToken);
         }
 
         SeedHeartbeat(aliaser, config.Heartbeat);
@@ -598,7 +621,7 @@ internal static class DiagnosticsBundle
     {
         var hooks = config.Webhooks ?? new WebhooksConfig();
         var routes = config.NotificationRoutes ?? new List<PerformanceMonitor.Notifications.NotificationRoute>();
-        var anySealed = new[] { hooks.TeamsUrl, hooks.SlackUrl, hooks.GenericUrl, hooks.GenericHeaders, hooks.PagerDutyRoutingKey }.Any(PasswordSeal.IsSealed)
+        var anySealed = new[] { hooks.TeamsUrl, hooks.SlackUrl, hooks.GenericUrl, hooks.GenericHeaders, hooks.PagerDutyRoutingKey, hooks.SlackBotToken, hooks.SlackAppToken }.Any(PasswordSeal.IsSealed)
             || routes.Any(r => new[] { r.TeamsUrl, r.SlackUrl, r.GenericUrl, r.PagerDutyRoutingKey }.Any(PasswordSeal.IsSealed))
             || SigningTexts(hooks.GenericSigning).Concat(routes.SelectMany(r => SigningTexts(r.GenericSigning))).Any(PasswordSeal.IsSealed);
         if (!anySealed)
@@ -620,6 +643,8 @@ internal static class DiagnosticsBundle
         }
 
         aliaser.AddSecret(opened.Webhooks.PagerDutyRoutingKey);
+        aliaser.AddSecret(opened.Webhooks.SlackBotToken);
+        aliaser.AddSecret(opened.Webhooks.SlackAppToken);
         foreach (var route in opened.Routes)
         {
             aliaser.AddSecret(route.PagerDutyRoutingKey);
@@ -1247,7 +1272,8 @@ internal static class DiagnosticsBundle
     /// <para>With <paramref name="restricted"/> set, on Windows, the temp file is created with its access already
     /// limited to SYSTEM, Administrators and the account running the command (<see cref="DarlingFileSecurity.CreateHardenedFile"/>),
     /// instead of taking the output folder's inherited access, and the move keeps that access. The alias map is
-    /// written this way: it names the real server or host behind every alias.</para>
+    /// written this way: it names the real server or host behind every alias. Elsewhere the temp file is created with
+    /// owner read and write only (<see cref="InvestigationExportFile.CreateOwnerOnly"/>), whatever the umask.</para>
     /// </summary>
     internal static string? WriteAtomically(string path, string text, bool force, bool restricted = false)
     {
@@ -1265,8 +1291,10 @@ internal static class DiagnosticsBundle
         var moved = false;
         try
         {
-            using (var stream = restricted && OperatingSystem.IsWindows()
-                ? DarlingFileSecurity.CreateHardenedFile(temp, allowInteractiveRead: false)
+            using (var stream = restricted
+                ? (OperatingSystem.IsWindows()
+                    ? DarlingFileSecurity.CreateHardenedFile(temp, allowInteractiveRead: false)
+                    : InvestigationExportFile.CreateOwnerOnly(temp))
                 : new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
                 var bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(text);

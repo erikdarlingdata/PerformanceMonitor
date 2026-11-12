@@ -29,7 +29,7 @@ GRANT CONNECT ANY DATABASE TO [YourLogin];
    (the identity column capacity collector) and the AG catalog views return zero rows that look exactly like "no data" (see the AG note below). */
 GRANT VIEW ANY DEFINITION TO [YourLogin];
 
-/* The deadlock, blocked-process and attention Extended Events sessions, and the opt-in long-query trace session.
+/* The deadlock, blocked-process and attention Extended Events sessions, the opt-in long-query trace session and the schema-changes session of the opt-in schema tracking.
    A login without this shows PERMISSIONS for the collector instead of an error. */
 GRANT ALTER ANY EVENT SESSION TO [YourLogin];
 
@@ -62,6 +62,17 @@ GRANT SELECT ON dbo.sysnotifications TO [YourLogin]; -- the operators each Agent
 GRANT SELECT ON dbo.syssessions     TO [YourLogin];
 GRANT EXECUTE ON dbo.agent_datetime TO [YourLogin];
 GRANT SELECT ON dbo.backupset      TO [YourLogin];  -- Darling: the last full and log backup per database
+
+/* Optional: the query snapshots collector reads cdc_jobs to leave CDC capture jobs out of the Long-Running
+   Query alert. msdb grants public no SELECT on it (it does on backupset), so without this the read fails with
+   error 229 on every cycle on a server with CDC configured, and the collector matches capture jobs by name
+   instead. msdb creates the table the first time CDC is configured, and a GRANT on a missing object raises
+   error 15151, so the guard skips it on a server that has never used CDC. Run this block again after CDC is
+   first enabled. */
+IF OBJECT_ID(N'dbo.cdc_jobs') IS NOT NULL
+BEGIN
+    GRANT SELECT ON dbo.cdc_jobs TO [YourLogin];
+END;
 ```
 
 Two operational notes. The msdb grants live inside a system database that SQL Server setup can rewrite — re-check them after a CU or version upgrade. And if a security review rejects `CONNECT ANY DATABASE`, the documented fallback is a real user per database (the same shape as the [FinOps loop below](#finops-index-analysis-per-database-grants), minus the `sql_expression_dependencies` grant) — at the cost of not covering databases created later.
@@ -81,7 +92,7 @@ The principal is the SQL login that the server entry uses. With Windows authenti
 
 The connection test also names each of the four required grants that the login does not have: `VIEW SERVER STATE`, `CONNECT ANY DATABASE`, `VIEW ANY DEFINITION` and `ALTER ANY EVENT SESSION`. On Amazon RDS it checks the other three, because RDS refuses `CONNECT ANY DATABASE`. Beside a successful test, it shows a warning with the statement that adds each missing grant. With Windows authentication, only the service's own test does this check: the Viewer, the MCP tools and `test_connect`. `--test-connection` runs as the console user, so it skips the check.
 
-Darling uses the same target-server grants. Its bundled PostgreSQL store and service account are covered in the [Darling operator guide](../Darling/README.md). Darling can also monitor PostgreSQL servers, which need different grants (see [PostgreSQL targets](#postgresql-targets-darling)), and it has two optional extra logins (see [Optional Darling logins](#optional-darling-logins)). The deprecated Full edition's install/least-privilege grants are in [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md).
+Darling uses the same target-server grants. Its bundled PostgreSQL store and service account are covered in the [Darling operator guide](../Darling/README.md). Darling can also monitor PostgreSQL servers, which need different grants (see [PostgreSQL targets](#postgresql-targets-darling)), and it has two optional extra logins (see [Optional Darling logins](#optional-darling-logins)). The deprecated Full edition's install/least-privilege grants are in the Dashboard README inside the [frozen source zip](../deprecated/README.md).
 
 ### FinOps Index Analysis (per-database grants)
 
@@ -209,7 +220,7 @@ For a large fleet, grant an Entra **group** instead of provisioning each identit
 
 ### Azure SQL Managed Instance
 
-Works like on-premises. Use server-level logins with `VIEW SERVER STATE`. SQL Agent is available.
+Works like on-premises. Use server-level logins and run the on-premises grant block above unchanged. It has the four required server grants and the optional msdb reads. SQL Agent is available. One exception: the `agent_alerts` collector does not run on Managed Instance, and it is the only reader of `sysalerts` and `sysnotifications`, so those two grants are never used there. You can leave those two lines out, and granting them does no harm.
 
 ### AWS RDS for SQL Server
 
@@ -229,7 +240,7 @@ Without `CONNECT ANY DATABASE` the login enters no user database by itself, so e
 - It leaves out `CONNECT ANY DATABASE` and `ALTER SETTINGS`, each with a comment. Without `ALTER SETTINGS` the service does not set `blocked process threshold (s)`. Set it in the RDS parameter group instead.
 - It runs `CREATE USER ... FOR LOGIN ...` in every current online read-write user database, skipping system databases and `rdsadmin`. It uses the same per-database cursor as the FinOps block, and it is safe to run twice.
 - **A database created later has no user for the login.** Run the script again after you create a database, or run the same `CREATE USER [YourLogin] FOR LOGIN [YourLogin];` in it.
-- In msdb it keeps only the user and the three job reads RDS accepts. Without the other eight, a Long-Running Query alert cannot name the Agent job and step, Running Jobs and Agent Status do not collect on RDS, and Agent alerts and their operators are not collected on RDS. Job History reads `sysjobs` and `sysjobhistory` and still collects. RDS refuses the backup history grant too, and on the instance we tested the login could read backup history without it, so the backups and CHECKDB view still fills on RDS.
+- In msdb it keeps only the user and the three job reads RDS accepts. Without the other eight, a Long-Running Query alert cannot name the Agent job and step, Running Jobs and Agent Status do not collect on RDS, and Agent alerts and their operators are not collected on RDS. Job History reads `sysjobs` and `sysjobhistory` and still collects. RDS refuses the backup history grant too, and on the instance we tested the login could read backup history without it, so the backups and CHECKDB view still fills on RDS. The `cdc_jobs` grant is left out as well, since RDS lets the master user grant only those three job tables: on an RDS instance with CDC configured, the query snapshots collector matches CDC capture jobs by name instead.
 - With FinOps ticked, the same block also adds the FinOps per-database grants.
 
 Run the script as the RDS master user. The Add Server dialog picks the RDS form for a `*.rds.amazonaws.com` host. The command line does the same, or you can ask for it with `--rds` when a custom DNS name stands in front of the instance:
@@ -249,7 +260,7 @@ Only Darling monitors PostgreSQL servers. Lite does not. The SQL Server grants a
 
 - `pg_monitor` on the monitoring role.
 - `pg_read_all_data` on PostgreSQL 14 and later.
-- `pg_read_server_files` and `EXECUTE` on `pg_read_file`, on self-hosted targets only. Three collectors read the server log with them.
+- `pg_read_server_files`, and `EXECUTE` on `pg_read_file` and on `pg_read_binary_file(text, bigint, bigint)`, on self-hosted targets only. Three collectors read the server log with them. With the binary form granted, they switch to it on their own, and one byte in the log tail that is not valid UTF-8 no longer fails the whole read.
 - The `pg_stat_statements` extension, for the `pg_statement_stats` collector.
 
 The exact statements are in the Darling operator guide, in [Permissions on a PostgreSQL target](darling/postgresql-targets.md#permissions-on-a-postgresql-target).
@@ -258,5 +269,5 @@ The exact statements are in the Darling operator guide, in [Permissions on a Pos
 
 Darling can use two more logins, each with its own grants. Neither is part of the grant block above. The monitoring login stays read-only.
 
-- The remediation login runs the changes that an operator or an agent starts. These are: force or unforce a Query Store plan, evict a cached plan, and kill a session. Its grants are in the Darling operator guide, in [Configuration Reference](darling/configuration.md#servers-array-at-least-one-entry), under "Least privilege for the remediation credential".
+- The remediation login runs the changes that an operator or an agent starts. These are: force or unforce a Query Store plan, evict a cached plan, and kill a session. Its grants are in the Darling operator guide, in [Configuration Reference](darling/configuration.md#servers-array), under "Least privilege for the remediation credential".
 - The "Test an index" login is for PostgreSQL targets only. The check never runs under the monitoring login. The setup is in [Testing an index on PostgreSQL](darling/configuration.md#testing-an-index-on-postgresql).

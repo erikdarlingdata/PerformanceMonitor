@@ -10,7 +10,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpTempDbTools
 {
-    [McpServerTool(Name = "get_tempdb_trend"), Description("Gets TempDB space usage over time in time buckets: user objects, internal objects, version store, total reserved and unallocated space, and the top consumer session. High version store can indicate long-running transactions under RCSI/SNAPSHOT isolation.")]
+    [McpServerTool(Name = "get_tempdb_trend"), Description("Gets TempDB space usage over time in time buckets: user objects, internal objects, version store, total reserved and unallocated space, and the top consumer session. High version store can indicate long-running transactions under RCSI/SNAPSHOT isolation." + McpHelpers.UtcStampsDescription)]
     public static async Task<string> GetTempDbTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -28,19 +28,24 @@ public sealed class McpTempDbTools
             if (hoursError != null) return hoursError;
 
             /* #3960: bucketed as on Darling; the desktop chart's per-collection read (GetTempDbTrendAsync) is untouched. */
-            var budget = TrendBudget.Mcp(TrendBuckets.TempDbMaxPoints);
+            var budget = TrendBudget.Mcp(TrendBuckets.TempDbMcpAutoPoints, TrendBuckets.TempDbMaxPoints);
             var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
             if (bucketError != null) return bucketError;
 
             var points = await dataService.GetTempDbBucketsAsync(resolved.ServerId, hours_back, windowEnd, bucketMinutes);
             if (points.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "tempdb_stats", awsRdsKind: AwsRdsKind.None)
-                    ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "tempdb_stats")
-                    ?? McpHelpers.Status("unavailable", "No TempDB data available.");
+                /* #7005: the window notice (an empty answer only; not_collected and precondition say their own cause). */
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "tempdb_stats", awsRdsKind: AwsRdsKind.None)
+                        ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "tempdb_stats")
+                        ?? McpHelpers.Status("unavailable", "No TempDB data available."),
+                    dataService, QueryWindowRelation.TempDbStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "tempdb_stats");
             }
 
-            return TrendPayloads.TempDbTrend(resolved.DisplayName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
+            return await McpQueryTools.WithDataWindowNoticeAsync(
+                TrendPayloads.TempDbTrend(resolved.DisplayName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints),
+                dataService, QueryWindowRelation.TempDbStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "tempdb_stats");
         }
         catch (Exception ex)
         {

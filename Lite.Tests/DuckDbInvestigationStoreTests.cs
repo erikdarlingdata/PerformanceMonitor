@@ -37,7 +37,10 @@ public sealed class DuckDbInvestigationStoreTests : IDisposable
     /// databases in parallel, one of them can hold it past the shipped 5 s budget on a loaded CI runner. A test that makes
     /// 150 writes in a row (the journal page one) then hit <c>StoreLockTimeoutException</c> from ClaimAsync, which says
     /// nothing about the journal page. These tests are not about the lock budget, so they wait long enough for the holder
-    /// to finish. Lock timeout behaviour has its own tests (<c>WriteLockBudgetTests</c>, <c>StoreLockHolderTests</c>).</summary>
+    /// to finish. A budgeted writer polls with no queue position for all but the last second of its budget (#7256), and the writers
+    /// other classes park on the lock win every handoff, so this host starts every initializer parked for its whole budget
+    /// (<c>HostWriteLockPark</c>), which makes the budget a real bound on the wait (#8490). Lock timeout behaviour has its own tests
+    /// (<c>WriteLockBudgetTests</c>, <c>StoreLockHolderTests</c>).</summary>
     internal static readonly TimeSpan TestLockBudget = TimeSpan.FromMinutes(2);
 
     private readonly string _tempDir;
@@ -728,6 +731,74 @@ WHERE request_id = '{id}' AND event = 'link_recorded'"));
         foreach (var evt in new[] { "opened", "claimed", "reported" })
         {
             Assert.Equal(requests, read.Journal.Count(j => j.Event == evt));
+        }
+    }
+
+    public static TheoryData<string> ReadNames() => new()
+    {
+        "ClaimHolder", "RouteUse", "RequestExists", "ReadRequest", "ReadReports", "List", "OpenedSince", "ListPendingNotes",
+        "ListEvidenceCandidates", "ReadEvidence",
+    };
+
+    private Task ReadByName(string name) => name switch
+    {
+        "ClaimHolder" => _store.ClaimHolderAsync(Guid.NewGuid(), Guid.NewGuid(), Ct),
+        "RouteUse" => _store.RouteUseAsync(Ct),
+        "RequestExists" => _store.RequestExistsAsync(Guid.NewGuid(), Ct),
+        "ReadRequest" => _store.ReadRequestAsync(Guid.NewGuid(), Ct),
+        "ReadReports" => _store.ReadReportsAsync(null, null, T0.AddDays(-1), 10, 10, Ct),
+        "List" => _store.ListAsync(null, null, null, 10, Ct),
+        "OpenedSince" => _store.OpenedSinceAsync(T0.AddDays(-1), null, 10, Ct),
+        "ListPendingNotes" => _store.ListPendingNotesAsync(10, Ct),
+        "ListEvidenceCandidates" => _store.ListEvidenceCandidatesAsync(T0.AddDays(-1), 10,
+            new System.Collections.Generic.Dictionary<string, System.Collections.Generic.IReadOnlyList<string>>(), Ct),
+        "ReadEvidence" => _store.ReadEvidenceAsync(Guid.NewGuid(), Ct),
+        _ => throw new ArgumentOutOfRangeException(nameof(name)),
+    };
+
+    /// <summary>#7217: the archive reset takes the write lock to delete and re-create the database, and the write lock waits
+    /// only for readers that hold the read lock. A store read that opened its connection without the read lock was not waited
+    /// for, so it could hold a connection open across the reset. Here a writer (the reset's lock) holds the write lock on its
+    /// own thread: a read started meanwhile must not open a connection until the writer releases.
+    /// <para>The write lock is process-wide, and the classes running alongside take it while they build their own databases.
+    /// A budgeted writer polls for it with no queue position for all but the last second of its budget (#7256), and the
+    /// writers those classes park on the lock win every handoff, so the writer here parks for its whole budget instead: it
+    /// holds the lock as soon as the current holder releases, as the reset's unbudgeted writer does, and its budget is the
+    /// only bound on the wait, so a timeout surfaces as its own exception naming the holders (#8142).</para></summary>
+    [Theory]
+    [MemberData(nameof(ReadNames))]
+    public async Task EveryRead_WaitsForTheWriteLock_SoTheArchiveResetNeverRunsUnderAnOpenReadConnection(string name)
+    {
+        _db.WriteLockParkTail = TestLockBudget;
+        var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim(false);
+        var writer = Task.Factory.StartNew(() =>
+        {
+            using var writeLock = _db.AcquireWriteLock(TestLockBudget);
+            held.SetResult();
+            release.Wait(TimeSpan.FromMinutes(1));
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        try
+        {
+            await Task.WhenAny(held.Task, writer);
+            if (writer.IsFaulted)
+            {
+                await writer;
+            }
+
+            var read = Task.Run(() => ReadByName(name), CancellationToken.None);
+            var finishedWhileLocked = await Task.WhenAny(read, Task.Delay(TimeSpan.FromMilliseconds(500), Ct)) == read;
+            Assert.False(finishedWhileLocked, name + " opened a connection while the write lock was held");
+
+            release.Set();
+            await writer;
+            await read.WaitAsync(TestLockBudget, Ct);
+        }
+        finally
+        {
+            release.Set();
+            await writer;
         }
     }
 }

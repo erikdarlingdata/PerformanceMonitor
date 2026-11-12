@@ -36,7 +36,16 @@ public sealed class DarlingMcpPgStatementTools
     /// </summary>
     internal const int QueryTextPreviewLength = 400;
 
-    [McpServerTool(Name = "get_pg_top_queries"), Description("Gets top PostgreSQL query shapes by total execution time over the window ending at as_of (default 24h), from pg_stat_statements. Aurora adds an I/O source split, peak memory and WAL bytes; elsewhere null, not zero. query_text is null until hourly capture reaches that queryid (also true right after a major upgrade). queryid is a STRING: JSON doubles silently round a 64-bit value; compare and join as text. limit bounds the page only: pct_of_total_time divides by the WHOLE window's total_exec_time_ms, so shares never sum to 100%. <<GUIDE>> Gets the top PostgreSQL query shapes by total execution time over a time period, wherever pg_stat_statements is installed: on Amazon Aurora the collector reads aurora_stat_statements(), and on any other PostgreSQL the vanilla view, with the Aurora-only columns null rather than zero. On Aurora that includes the I/O source breakdown, which stock PostgreSQL cannot provide: a block 'read' may have come from the distributed storage volume or from the local NVMe Optimized Reads cache, and the two have very different costs. Also reports peak memory per statement (Aurora only), the closest PostgreSQL equivalent of a memory grant, and WAL bytes generated, which has no SQL Server DMV counterpart. Returns query_text for each statement, captured hourly and keyed on queryid, or null when none has been captured yet (a statement first seen minutes ago, or a queryid minted by a major-version upgrade). queryid itself is stable within a major version but changes across a major upgrade — which is exactly why the text is STORED rather than fetched live: after an upgrade the live view no longer holds the old ids, so their text would otherwise be unrecoverable and the history would read as a list of integers. queryid is returned as a STRING, not a number: it is a signed 64-bit value spread over the whole int8 range, so most ids exceed what a JSON number survives and a numeric wire form would be silently rounded by any parser that decodes numbers as IEEE-754 doubles — after which it matches nothing. Compare it and join on it as text. This is a separate tool from get_top_queries_by_cpu, which covers SQL Server. THE PAGE IS BOUNDED BY limit: queries_returned is how many shapes you got, truncated says the window held more, and the rows are the heaviest so the ones past the cap are lighter. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_total_time's denominator is total_exec_time_ms, the WHOLE window's execution time across every query shape, computed in the same statement as the rows - so a three-row page does not sum to 100%, and the gap between returned_exec_time_ms (what the page adds up to) and total_exec_time_ms is the work the cap left out; returned_pct_of_total is that ratio stated once. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each statement whole.")]
+    /// <summary>
+    /// #7428: the statement text a PostgreSQL grid row carries beside its query id. A preview unless
+    /// <paramref name="fullText"/>; <c>Truncated</c> says the preview cut it. Null in, null out, so a statement the hourly
+    /// capture has not reached (or id 0, or a null id) stays null rather than reading as an empty statement.
+    /// </summary>
+    internal static (string? Text, bool Truncated) StatementTextFor(string? queryText, bool fullText) =>
+        (fullText ? queryText : McpHelpers.TruncateStatement(queryText, QueryTextPreviewLength),
+         !fullText && queryText != null && queryText.Length > QueryTextPreviewLength);
+
+    [McpServerTool(Name = "get_pg_top_queries"), Description("Gets top PostgreSQL query shapes by total execution time over the window ending at as_of (default 24h), from pg_stat_statements. Aurora adds an I/O source split, peak memory and WAL bytes; elsewhere null, not zero. query_text is null until hourly capture reaches that queryid (also true right after a major upgrade). queryid is a STRING: JSON doubles silently round a 64-bit value; compare and join as text. database_name is 'database <id>' if uncollected. limit bounds the page only: pct_of_total_time divides by the WHOLE window's total_exec_time_ms, so shares never sum to 100%. <<GUIDE>> Gets the top PostgreSQL query shapes by total execution time over a time period, wherever pg_stat_statements is installed: on Amazon Aurora the collector reads aurora_stat_statements(), and on any other PostgreSQL the vanilla view, with the Aurora-only columns null rather than zero. On Aurora that includes the I/O source breakdown, which stock PostgreSQL cannot provide: a block 'read' may have come from the distributed storage volume or from the local NVMe Optimized Reads cache, and the two have very different costs. Also reports peak memory per statement (Aurora only), the closest PostgreSQL equivalent of a memory grant, and WAL bytes generated, which has no SQL Server DMV counterpart. Returns query_text for each statement, captured hourly and keyed on queryid, or null when none has been captured yet (a statement first seen minutes ago, or a queryid minted by a major-version upgrade). queryid itself is stable within a major version but changes across a major upgrade, which is exactly why the text is STORED rather than fetched live: after an upgrade the live view no longer holds the old ids, so their text would otherwise be unrecoverable and the history would read as a list of integers. queryid is returned as a STRING, not a number: it is a signed 64-bit value spread over the whole int8 range, so most ids exceed what a JSON number survives and a numeric wire form would be silently rounded by any parser that decodes numbers as IEEE-754 doubles, after which it matches nothing. Compare it and join on it as text. This is a separate tool from get_top_queries_by_cpu, which covers SQL Server. THE PAGE IS BOUNDED BY limit: queries_returned is how many shapes you got, truncated says the window held more, and the rows are the heaviest so the ones past the cap are lighter. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_total_time's denominator is total_exec_time_ms, the WHOLE window's execution time across every query shape, computed in the same statement as the rows - so a three-row page does not sum to 100%, and the gap between returned_exec_time_ms (what the page adds up to) and total_exec_time_ms is the work the cap left out; returned_pct_of_total is that ratio stated once. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each statement whole. SERVICE STATEMENTS: service_statement is true for a statement the monitoring service itself ran (its collectors' reads, the wait sampler's sleep). Such rows stay in the list, since a heavy collector is worth seeing, and their time is counted in the total_exec_time_ms denominator behind pct_of_total_time, so shares read lower than the application's own. Filter on the flag to read the application alone.")]
     public static async Task<string> GetPgTopQueries(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -93,13 +102,13 @@ public sealed class DarlingMcpPgStatementTools
                     ?? await DarlingServerOfflineNote.UnavailableAsync(
                         postgres, resolved.ServerId, resolved.DisplayName,
                         "No PostgreSQL query statistics for this server and window. Check that "
-                        + "pg_stat_statements is installed in the database the collector connects to — it is "
+                        + "pg_stat_statements is installed in the database the collector connects to: it is "
                         + "not installed by default, and on some clusters it exists only in the application "
                         + "database, not in postgres. Also expect an empty window from a SINGLE snapshot: the "
                         + "counters here are per-interval deltas, so the first collection after a restart has "
                         + "nothing to difference against and the window fills on the second. If the server is "
                         + "offline, nothing is being collected from it. Otherwise the store has not yet learned "
-                        + "that it is a PostgreSQL server — check list_servers.", cancellationToken);
+                        + "that it is a PostgreSQL server: check list_servers.", cancellationToken);
             }
 
             var evictions = await DarlingPgStatementReader.GetEvictionInfoAsync(
@@ -196,6 +205,9 @@ public sealed class DarlingMcpPgStatementTools
                    ASCII '-' whatever the host's locale would prefer. */
                 queryid = r.QueryId.ToString(CultureInfo.InvariantCulture),
                 database_id = r.DatabaseId,
+                /* #7731: the name beside the number, so one Query ID in two databases reads as two databases and not as a duplicate. A row
+                   stored before the name was collected has none, and says which id it is rather than leaving the field empty. */
+                database_name = r.DatabaseName ?? string.Create(CultureInfo.InvariantCulture, $"database {r.DatabaseId}"),
                 calls = r.Calls,
                 total_exec_time_ms = r.TotalExecTimeMs,
                 avg_exec_time_ms = r.Calls > 0 ? Math.Round((double)r.TotalExecTimeMs / r.Calls, 3) : 0,
@@ -228,6 +240,9 @@ public sealed class DarlingMcpPgStatementTools
                 /* #6131: a preview by default (full_text opts back in), flagged when it cut. */
                 query_text = fullText ? r.QueryText : McpHelpers.TruncateStatement(r.QueryText, QueryTextPreviewLength),
                 query_text_truncated = !fullText && r.QueryText != null && r.QueryText.Length > QueryTextPreviewLength,
+                /* #7567: one of the monitoring service's own statements (its collectors' reads, the wait sampler's sleep). Kept
+                   in the list, since a heavy collector is worth seeing, but marked so it is not read as the application's. */
+                service_statement = r.IsServiceStatement,
             };
         })
         .ToList();
@@ -270,7 +285,9 @@ public sealed class DarlingMcpPgStatementTools
     /// #4677: pg_stat_statements evicts its least-used entries (about 5% of pg_stat_statements.max per pass) when the
     /// table is full, so a rarely-run statement can be missing and a re-admitted one counts only from then. The count
     /// is eviction PASSES, not entries. Unknown (no run in the window observed the counter) is <c>known = false</c>
-    /// with a null count, never 0: 0 means the counter was read and no pass happened.
+    /// with a null count, never 0: 0 means the counter was read and no pass happened. <c>aurora_without_extension</c>
+    /// (#8075) is true when the unknown is explained by the Aurora native path: the target is Aurora and the extension
+    /// inventory shows pg_stat_statements created in no database, so the web's short sentence can name that cause.
     /// </summary>
     internal static object BuildEvictions(DarlingPgStatementReader.PgEvictionInfo? info)
     {
@@ -282,6 +299,7 @@ public sealed class DarlingMcpPgStatementTools
                 known = false,
                 eviction_passes_in_window = (long?)null,
                 max_entries = info?.MaxEntries,
+                aurora_without_extension = info is { AuroraWithoutExtension: true },
                 note,
             };
         }
@@ -293,6 +311,7 @@ public sealed class DarlingMcpPgStatementTools
             known = true,
             eviction_passes_in_window = (long?)passes,
             max_entries = info.MaxEntries,
+            aurora_without_extension = false,
             note,
         };
     }

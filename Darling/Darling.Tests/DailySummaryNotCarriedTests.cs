@@ -115,7 +115,10 @@ public sealed class DailySummaryNotCarriedTests
                each stays a per-day SubPlan; the candidate days are a fenced subquery holding probe one, and probe
                two filters its output, so the source is probed only on the days the rollup probe found empty.
                DailySummaryProbePlanLiveTests proves the resulting plan on a store. */
-            var member = lf[lf.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal)..];
+            /* The member ends where the next CTE (deadlocks) starts: it used to run to the end of the statement, so a fence in a later
+               CTE (#8549's bounded probe in coll) counted as one of this member's. */
+            var memberStart = lf.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal);
+            var member = lf[memberStart..lf.IndexOf("deadlocks AS (", memberStart, StringComparison.Ordinal)];
             Assert.Equal(3, member.Split("OFFSET 0").Length - 1);
             var rollupProbeAt = member.IndexOf($"SELECT 1 FROM collect.{relation} AS r", StringComparison.Ordinal);
             var fenceAt = member.IndexOf("        OFFSET 0\n    ) AS b\n    WHERE EXISTS (", StringComparison.Ordinal);
@@ -124,9 +127,12 @@ public sealed class DailySummaryNotCarriedTests
                 "probe one sits inside the fenced candidate-day subquery and probe two filters its output");
 
             /* The three members, in order: rollup half, raw tail, not-carried. */
-            Assert.Equal(2, sql.Split("UNION ALL").Length - 1);
+            /* Counted inside the queries CTE only: the blocking waits chain (BlockingWaits.HourlyChosenWaitsSql) holds its own UNION ALL. */
+            var queriesAt = sql.IndexOf("queries AS (", StringComparison.Ordinal);
+            Assert.Equal(2, sql[queriesAt..sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal)].Split("UNION ALL").Length - 1);
             var rollupAt = sql.IndexOf("SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash", StringComparison.Ordinal);
-            var rawAt = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
+            /* #8651: the raw tail reads collect.query_stats through the credited-pairs shape (DailySummarySql.CreditedPairs), no longer the view, so its pair select marks it. */
+            var rawAt = sql.IndexOf("SELECT p.d, p.query_hash", StringComparison.Ordinal);
             var notCarriedAt = sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal);
             Assert.True(rollupAt > 0 && rawAt > rollupAt && notCarriedAt > rawAt);
         }
@@ -232,14 +238,13 @@ public sealed class DailySummaryNotCarriedTests
 
         var tools = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHealthTools.cs");
         Assert.Equal(2, tools.Split("days_missing = ").Length - 1);
-        Assert.Contains("days_missing = range.DaysMissing.Select(day => day.ToString(\"yyyy-MM-dd\"))", tools, StringComparison.Ordinal);
+        Assert.Contains("days_missing = range.DaysMissing.Where(", tools, StringComparison.Ordinal); // #8682: filtered to the days the budget kept
         Assert.Contains("days_missing = row.UniqueQueries is null ? new[] { row.SummaryDate.ToString(\"yyyy-MM-dd\") } : Array.Empty<string>()", tools, StringComparison.Ordinal);
 
         var page = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         Assert.Contains("export function dailySummaryPanels(server)", page, StringComparison.Ordinal);
         Assert.Contains("row.unique_queries == null", page, StringComparison.Ordinal);
         Assert.Contains("[\"not materialized\"]", page, StringComparison.Ordinal);
-        Assert.Contains("...dailySummaryPanels(server),", page, StringComparison.Ordinal);
         /* The descriptor it replaced is gone: one fetch of the one read, as before. */
         Assert.DoesNotContain("\"Daily Health Calendar\",\n        \"get_daily_summary_range\"", page.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 
@@ -455,6 +460,142 @@ public sealed class DailySummaryNotCarriedLiveTests
         DarlingHealthReader.ResetRangeCacheForTests();
         var oldAfter = await DarlingHealthReader.GetDailySummaryRangeAsync(postgres, OldServerId, O(0), O(5), cancellationToken: ct);
         Assert.Equal(new[] { O(2) }, oldAfter.DaysMissing);
+    }
+
+    private const int PartialServerId = -936540;
+    private const string PartialServerName = "partial-rollup";
+
+    /// <summary>
+    /// #7505: the hourly rollup runs behind the clock, so the newest day it holds is only part of that day.
+    /// The month read used to count that day from the partial rollup (a burst of new queries read as 1 where
+    /// the three-day read, which answers from raw, read thousands). A day the rollup holds whole still reads
+    /// the rollup, a day raw has lost keeps the rollup's count, and every day is one row on every route.
+    /// </summary>
+    [Fact]
+    public async Task ADayTheHourlyRollupHoldsOnlyPartOf_ReadsTheLargerOfRollupAndRaw_OneRowPerDay_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live partial-rollup calendar test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled,
+            "The live partial-rollup calendar test needs TimescaleDB: a rollup tier exists only as a continuous aggregate.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+        await RegisterServerAsync(connection, PartialServerId, PartialServerName, ct);
+
+        var hourly = TimescaleSupport.QueryStatsHourlyView;
+        var successor = TimescaleSupport.QueryStatsIntervalHourlyView;
+        var daily = TimescaleSupport.QueryStatsDailyView;
+        var b = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-6), DateTimeKind.Unspecified);
+        DateTime D(int n) => b.AddDays(n);
+        var id = 0L;
+
+        async Task Plant(DateTime at, string hash, int interval = 1200)
+        {
+            await using var insert = new NpgsqlCommand(@"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, 'CalendarDb', $5, $5, 1000, 1000, 10, $6)", connection);
+            insert.Parameters.AddWithValue(7_505_000L + ++id);
+            insert.Parameters.AddWithValue(at);
+            insert.Parameters.AddWithValue(PartialServerId);
+            insert.Parameters.AddWithValue(PartialServerName);
+            insert.Parameters.AddWithValue(hash);
+            insert.Parameters.AddWithValue(interval);
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        /* D0 is closed and whole: three hashes at 01:00 and 23:30, so its newest bucket is the day's last (23:00).
+           A restart row (interval 0) that only raw counts makes raw read 4 against the successor rollup's 3, so
+           a 3 proves the day was read from the rollup. */
+        foreach (var h in new[] { "0xH0", "0xH1", "0xH2" })
+        {
+            await Plant(D(0).AddHours(1), h);
+            await Plant(D(0).AddHours(23.5), h);
+        }
+
+        await Plant(D(0).AddHours(5), "0xRESTART", interval: 0);
+        await RefreshAsync(connection, successor, D(0), D(1), ct);
+
+        /* D1 is the rollup's newest day and is partial: two hashes were rolled up at 01:00, then three more
+           arrived at 10:00 that the rollup has not reached, with a restart row (interval 0) the rollup will never
+           hold. The partial day's raw half leaves that row out, so D1 reads 5 and not 6. D2 is past the rollup
+           altogether (raw only). */
+        await Plant(D(1).AddHours(1), "0xH0");
+        await Plant(D(1).AddHours(1), "0xH1");
+        await RefreshAsync(connection, successor, D(1), D(2), ct);
+        foreach (var h in new[] { "0xH2", "0xH3", "0xH4" })
+        {
+            await Plant(D(1).AddHours(10), h);
+        }
+
+        await Plant(D(1).AddHours(10), "0xRESTART", interval: 0);
+        await Plant(D(2).AddHours(3), "0xH0");
+        await Plant(D(2).AddHours(3), "0xH1");
+
+        var sql = DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor);
+        var read = await ReadCalendarAsync(connection, sql, PartialServerId, D(0), D(3), ct);
+        Assert.Equal(new[] { D(0), D(1), D(2) }, read.Select(r => r.Day).ToArray());
+        Assert.Equal(new long?[] { 3L, 5L, 2L }, read.Select(r => r.UniqueQueries).ToArray());
+
+        /* The stitched read (legacy rollup below the successor's first whole day, successor from it) answers the
+           same for the successor's days. D0 comes from the legacy rollup, which admits the restart row. */
+        await RefreshAsync(connection, hourly, D(0), D(3), ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var coverage = await TimescaleSupport.DetectRollupCoverageAsync(postgres, await TimescaleSupport.DetectRollupsAsync(postgres, ct), ct);
+        Assert.True(coverage.StitchFloor(hourly, RollupCoverage.StitchTier.Hourly, D(0)).HasValue, "the stitch must apply for the stitched assertions to mean anything");
+        var stitched = await ReadCalendarAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Hourly, coverage, D(0)), PartialServerId, D(0), D(3), ct);
+        Assert.Equal(new[] { D(0), D(1), D(2) }, stitched.Select(r => r.Day).ToArray());
+        Assert.Equal(new long?[] { 4L, 5L, 2L }, stitched.Select(r => r.UniqueQueries).ToArray());
+
+        /* THE DAILY TIER IS UNCHANGED: its buckets are whole days, so its ceiling day (D0) reads the rollup,
+           including the restart row the legacy admits, and only the days after it read raw, unfiltered as they
+           always were, so D1 counts its restart row here. */
+        await RefreshAsync(connection, daily, D(0), D(1), ct);
+        var dailyTier = await ReadCalendarAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily), PartialServerId, D(0), D(3), ct);
+        Assert.Equal(new long?[] { 4L, 6L, 2L }, dailyTier.Select(r => r.UniqueQueries).ToArray());
+
+        /* RAW HAS LOST THE DAY (retention, or a rollup that stopped refreshing): the rollup's partial count
+           stays, never 0 and never fewer than it holds. */
+        await using (var purge = new NpgsqlCommand("DELETE FROM collect.query_stats WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3", connection))
+        {
+            purge.Parameters.AddWithValue(PartialServerId);
+            purge.Parameters.AddWithValue(D(1));
+            purge.Parameters.AddWithValue(D(2));
+            await purge.ExecuteNonQueryAsync(ct);
+        }
+
+        var purged = await ReadCalendarAsync(connection, sql, PartialServerId, D(0), D(3), ct);
+        Assert.Equal(new long?[] { 3L, 2L, 2L }, purged.Select(r => r.UniqueQueries).ToArray());
+
+        /* A QUIET SERVER: D3 is closed but its newest bucket (02:00) is not the day's last. Raw holds it and
+           agrees with the rollup, so the day reads 2 as one row; once raw has lost it the rollup's 2 stays. */
+        await Plant(D(3).AddHours(2), "0xH0");
+        await Plant(D(3).AddHours(2), "0xH1");
+        await RefreshAsync(connection, successor, D(2), D(4), ct);
+        var quiet = await ReadCalendarAsync(connection, sql, PartialServerId, D(0), D(4), ct);
+        Assert.Equal(new[] { D(0), D(1), D(2), D(3) }, quiet.Select(r => r.Day).ToArray());
+        Assert.Equal(new long?[] { 3L, 2L, 2L, 2L }, quiet.Select(r => r.UniqueQueries).ToArray());
+
+        await using (var purge = new NpgsqlCommand("DELETE FROM collect.query_stats WHERE server_id = $1 AND collection_time >= $2", connection))
+        {
+            purge.Parameters.AddWithValue(PartialServerId);
+            purge.Parameters.AddWithValue(D(3));
+            await purge.ExecuteNonQueryAsync(ct);
+        }
+
+        var quietPurged = await ReadCalendarAsync(connection, sql, PartialServerId, D(0), D(4), ct);
+        Assert.Equal(new long?[] { 3L, 2L, 2L, 2L }, quietPurged.Select(r => r.UniqueQueries).ToArray());
     }
 
     private sealed record CalendarRow(DateTime Day, long? UniqueQueries, int SignalSourcesPresent);

@@ -189,11 +189,11 @@ public sealed class WaitNameSpacedHistoryLivePostgresTests
         await InsertWaitingTaskAsync(connection, ct, t, Clean, waitDurationMs: 600);
         await InsertWaitingTaskAsync(connection, ct, t.AddMinutes(3), Spaced, waitDurationMs: 50);
 
-        var rows = await DarlingDataReader.GetWaitingTaskTrendAsync(postgres, ServerId, t.AddMinutes(-5), t.AddMinutes(5), ct);
+        var rows = await DarlingDataReader.GetWaitingTaskTrendAsync(postgres, ServerId, t.AddMinutes(-5), t.AddMinutes(5), 1, ct);
 
         Assert.Equal(
-            new[] { (t, Clean, 1000L), (t.AddMinutes(3), Clean, 50L) },
-            rows.Select(r => (r.CollectionTime, r.WaitType, r.TotalWaitMs)).ToArray());
+            new[] { (Clean, 1000L), (Clean, 50L) },
+            rows.Select(r => (r.WaitType, r.AvgWaitMs)).ToArray());
     });
 
     /* ─────────────────────────── daily summary, analysis ─────────────────────────── */

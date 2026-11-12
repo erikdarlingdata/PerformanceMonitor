@@ -92,7 +92,7 @@ namespace PerformanceMonitor.Analysis;
 /// <para>Stateless — mutates only <see cref="AnalysisStory.IncidentId"/> and, for the maintenance fold
 /// with facts supplied, <see cref="AnalysisStory.StoryText"/> on the passed stories, so it is directly
 /// unit-testable without any collector or store. The one-argument <c>Reconcile</c> is the pre-#3704
-/// signature, kept for the frozen <c>deprecated/Dashboard</c> twin: it folds by the same rule and
+/// signature, kept for the frozen Dashboard twin (now only in the source zip, #6973): it folds by the same rule and
 /// writes no sentence, because the sentence needs the fact.</para>
 /// </summary>
 public static class AnomalyIncidentReconciler
@@ -144,7 +144,7 @@ public static class AnomalyIncidentReconciler
     /// non-absolution stories or no regular stories to fold into. The pre-#3704 signature: folds by every
     /// rule the two-argument form does (including the maintenance arm, whose gate is structural) but
     /// cannot name the job, because the name is on the fact and this form is not given the facts. The
-    /// live SKUs call the two-argument form; this one remains for the frozen <c>deprecated/Dashboard</c>.
+    /// live SKUs call the two-argument form; this one remains for the frozen Dashboard source zip.
     /// </summary>
     public static void Reconcile(IReadOnlyList<AnalysisStory> stories) =>
         Reconcile(stories, facts: null);
@@ -271,8 +271,8 @@ public static class AnomalyIncidentReconciler
 
         var name = string.IsNullOrEmpty(jobFact.ObjectName) ? null : jobFact.ObjectName;
         var sentence = name is null
-            ? $" {JobSentenceMarker} — an Agent job was running well past its normal duration (the Running Jobs view names it) — so this anomaly and that job are ONE incident, not two: a long index rebuild, CHECKDB or reload drives exactly this write, log-flush and schema-lock pressure, and moving or shortening the job is the fix for both cards."
-            : $" {JobSentenceMarker} — Agent job `{name}` was running well past its normal duration — so this anomaly and that job are ONE incident, not two: a long index rebuild, CHECKDB or reload drives exactly this write, log-flush and schema-lock pressure, and moving or shortening the job is the fix for both cards.";
+            ? $" {JobSentenceMarker}, an Agent job was running well past its normal duration (the Running Jobs view names it), so this anomaly and that job are ONE incident, not two: a long index rebuild, CHECKDB or reload drives exactly this write, log-flush and schema-lock pressure, and moving or shortening the job is the fix for both cards."
+            : $" {JobSentenceMarker}, Agent job `{name}` was running well past its normal duration, so this anomaly and that job are ONE incident, not two: a long index rebuild, CHECKDB or reload drives exactly this write, log-flush and schema-lock pressure, and moving or shortening the job is the fix for both cards.";
 
         anomaly.StoryText = FactAdvice.SerializeForStoryText(advice with { Investigation = advice.Investigation + sentence });
     }

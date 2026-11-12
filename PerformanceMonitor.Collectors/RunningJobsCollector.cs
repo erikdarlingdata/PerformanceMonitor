@@ -151,9 +151,10 @@ OPTION(RECOMPILE);";
     /// so it collects there; on-prem collects too. AWS RDS is skipped: this query joins
     /// <c>msdb.dbo.syssessions</c>, which RDS blocks with "SELECT permission was denied" even for the
     /// master login (the table requires sysadmin, which RDS never grants), so it would ERROR every cycle.
-    /// A login without msdb access is also skipped: every table this reads lives in msdb. All three gates
-    /// live here in the shared AppliesTo — the single authoritative gate both SKUs consult (mirrors the
-    /// failed-jobs alert path's Azure/msdb skip).
+    /// Those two gates (Azure SQL Database, AWS RDS) live here in the shared AppliesTo — the single
+    /// authoritative gate both SKUs consult. A login without msdb access is NOT skipped (#2559): the
+    /// collector attempts and the denial lands as PERMISSIONS (error 916), which bands NO_PERMISSIONS and
+    /// raises no alert; see <see cref="CollectorTargetInfo.HasMsdbAccess"/>.
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
         !target.IsAzureSqlDb && !target.IsAwsRds;

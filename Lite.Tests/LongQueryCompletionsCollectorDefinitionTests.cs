@@ -261,6 +261,25 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
         Assert.Equal("ringdb", Assert.Single(rows).DatabaseName);
     }
 
+    /* #8146 */
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LongQuery_CreateSql_CarriesLimit(bool databaseScoped)
+    {
+        var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(Session, databaseScoped, 2_000_000, 2500);
+
+        Assert.Contains("max_events_limit = 2500", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LongQuery_CreateSql_WritesTheDefaultLimitExplicitly()
+    {
+        var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(Session, databaseScoped: false, 2_000_000);
+
+        Assert.Contains("max_events_limit = " + RingBufferTarget.DefaultMaxEvents, sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void BuildCreateSessionSql_ServerScoped_PredicateOnCompletedOnly_AttentionUnfiltered()
     {
@@ -659,5 +678,139 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
         Assert.Contains($"N'{other}'", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain(Session, plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("N'PerformanceMonitor_LongQueryCompletions'", plan.Text, StringComparison.Ordinal);
+    }
+
+    /* #8146: the loss accounting reads the ring-buffer position the trailing row carries. */
+    private static readonly DateTime s_ringCreated = new(2026, 7, 2, 6, 0, 0, DateTimeKind.Utc);
+    private static readonly DateTime s_ringReadAt = new(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc);
+
+    private static System.Collections.Generic.Dictionary<string, string> RingPrior(long total, long held, long dropped = 0) => new()
+    {
+        [RingBufferLossAccounting.StateKey] = PerformanceMonitor.Common.RingBufferLoss.ToStateValue(
+            new PerformanceMonitor.Common.RingBufferPrior(total, held, dropped, s_ringCreated, s_ringReadAt.AddSeconds(-60), false)),
+    };
+
+    private static object[] PositionColumns(object total, object held, object dropped) =>
+        new object[] { total, held, s_ringCreated, dropped, 1000L, s_ringReadAt };
+
+    private static long? Measured(CollectorContext context, string label) =>
+        context.Measurements.Where(m => m.Label == label).Select(m => (long?)m.Value).FirstOrDefault();
+
+    /* The gate row: execution_count, gated, then the three truncation columns, then the position. */
+    private static object[] GateRow(bool gated, object total, object held, object dropped) =>
+        new object[] { 5L, gated, gated ? DBNull.Value : false, 0L, DBNull.Value }
+            .Concat(PositionColumns(total, held, dropped)).ToArray();
+
+    private static CollectorContext RingContext(
+        bool azure = false, bool logicalServer = false, long priorTotal = 34, long priorHeld = 10, long priorDropped = 0) => new()
+    {
+        ServerId = 42,
+        ServerName = "test-server",
+        CollectionTime = s_ringReadAt,
+        Deltas = s_deltas,
+        Target = new CollectorTargetInfo { IsAzureSqlDb = azure },
+        AzureRegistrationIsLogicalServer = logicalServer,
+        State = RingPrior(priorTotal, priorHeld, priorDropped),
+    };
+
+    [Fact]
+    public async Task ReadAsync_TrailingPosition_MeasuresEviction()
+    {
+        var context = RingContext();
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(),
+            new[] { new object[] { false, 0L, DBNull.Value }.Concat(PositionColumns(59L, 10L, 0L)).ToArray() });
+
+        await LongQueryCompletionsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        context.LandStagedItemState();
+
+        Assert.Equal(15, Measured(context, "ring_buffer_evicted"));
+        Assert.True(context.PendingState.ContainsKey(RingBufferLossAccounting.StateKey));
+    }
+
+    /* #8146: a live session whose limit is below the setting asks the host to recreate this install's own session, staged
+       with the item so it lands only with the item's write. A missing session does not: production reads it as limit 1000
+       (the fragment's default) with no create_time, total, held or dropped. Nor does one with no count limit (0). */
+    [Theory]
+    [InlineData(1000L, true, true)]
+    [InlineData(5000L, true, false)]
+    [InlineData(1000L, false, false)]
+    [InlineData(0L, true, false)]
+    public async Task ReadAsync_SessionLimitBelowSetting_StagesARecreate(long sessionLimit, bool sessionRuns, bool expected)
+    {
+        var context = LimitContext(databaseName: null);
+        using var reader = sessionRuns ? LimitRead(sessionLimit) : MissingSessionRead();
+
+        await LongQueryCompletionsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(context.SessionRecreates);
+        context.LandStagedItemState();
+
+        if (expected)
+        {
+            var request = Assert.Single(context.SessionRecreates);
+            Assert.Null(request.DatabaseName);
+            Assert.Equal(1000, request.CurrentLimit);
+        }
+        else
+        {
+            Assert.Empty(context.SessionRecreates);
+        }
+    }
+
+    [Fact]
+    public async Task ReadAsync_SessionLimitBelowSetting_ADroppedItemRequestsNothing()
+    {
+        var context = LimitContext(databaseName: "alpha");
+        using var reader = LimitRead(1000L);
+
+        await LongQueryCompletionsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        context.DropStagedItemState();
+        context.LandStagedItemState();
+
+        Assert.Empty(context.SessionRecreates);
+    }
+
+    [Fact]
+    public async Task ReadAsync_SessionLimitBelowSetting_NamesTheDatabaseOfADatabaseScopedSession()
+    {
+        var context = LimitContext(databaseName: "alpha");
+        using var reader = LimitRead(1000L);
+
+        await LongQueryCompletionsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        context.LandStagedItemState();
+
+        Assert.Equal("alpha", Assert.Single(context.SessionRecreates).DatabaseName);
+    }
+
+    private static CollectorContext LimitContext(string? databaseName) => new()
+    {
+        ServerId = 42,
+        ServerName = "test-server",
+        CollectionTime = s_ringReadAt,
+        Deltas = s_deltas,
+        Target = new CollectorTargetInfo { IsAzureSqlDb = databaseName is not null },
+        RingBufferMaxEvents = 5000,
+        CurrentDatabaseName = databaseName,
+        State = RingPrior(34, 10),
+    };
+
+    /* No rows, then the trailing row: the three truncation columns, then the position with the session's limit. */
+    private static FakeCollectorDataReader LimitRead(object sessionLimit) =>
+        FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(),
+            new[] { new object[] { false, 0L, DBNull.Value, 40L, 10L, s_ringCreated, 0L, sessionLimit, s_ringReadAt } });
+
+    /* The trailing row RingBufferXml's position fragment returns for a session it cannot find: every session column NULL, the
+       limit at its 1000 default. */
+    private static FakeCollectorDataReader MissingSessionRead() =>
+        FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(),
+            new[] { new object[] { false, 0L, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, 1000L, s_ringReadAt } });
+
+    [Fact]
+    public void LongQuery_DeclaresRingPositionStateKey()
+    {
+        Assert.Contains("xe_ring_position", LongQueryCompletionsCollector.Instance.StateKeys);
     }
 }

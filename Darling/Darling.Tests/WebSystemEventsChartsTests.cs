@@ -84,13 +84,14 @@ public sealed class WebSystemEventsChartsBehaviourTests
         Assert.True(r.GetProperty("hides").GetBoolean());
     }
 
-    /// <summary>A counter collected as 0 draws a chart; a counter no bucket carried says so instead of drawing a zero line.</summary>
+    /// <summary>#7549: a counter that is 0 in every bucket, like one no bucket carried, says so in one line instead of drawing a flat chart.</summary>
     [Fact]
-    public void ACollectedZero_IsDrawn_AndAnAbsentCounter_SaysSo()
+    public void ACounterThatIsZeroInEveryBucket_SaysSoInOneLine_AndAnAbsentCounterSaysSo()
     {
         var r = Run();
 
-        Assert.True(r.GetProperty("zeroDrawn").GetProperty("hasChart").GetBoolean());
+        Assert.False(r.GetProperty("zeroDrawn").GetProperty("hasChart").GetBoolean());
+        Assert.Equal("No bad pages were recorded in this window.", r.GetProperty("zeroDrawn").GetProperty("text").GetString());
         Assert.False(r.GetProperty("absent").GetProperty("hasChart").GetBoolean());
         Assert.Equal("No latch warning count was reported in this window.", r.GetProperty("absent").GetProperty("text").GetString());
         var has = r.GetProperty("hasData");
@@ -98,6 +99,39 @@ public sealed class WebSystemEventsChartsBehaviourTests
         Assert.False(has.GetProperty("absent").GetBoolean());
         Assert.False(has.GetProperty("missingField").GetBoolean());
         Assert.False(has.GetProperty("none").GetBoolean());
+    }
+
+    /// <summary>#7549: on every counter chart a collected 0 in every bucket and a counter no bucket carried each draw one line, and the two lines differ: "was not reported" is false for a collected 0.</summary>
+    [Fact]
+    public void EveryCounterChart_SaysACollectedZeroDifferentlyFromAnAbsentCounter()
+    {
+        var all = Run().GetProperty("everyCounter").EnumerateArray().ToList();
+
+        Assert.Equal(6, all.Count);
+        foreach (var c in all)
+        {
+            var title = c.GetProperty("title").GetString();
+            var zero = c.GetProperty("zero").GetString();
+            var absent = c.GetProperty("absent").GetString();
+            Assert.False(c.GetProperty("zeroChart").GetBoolean(), title);
+            Assert.False(c.GetProperty("absentChart").GetBoolean(), title);
+            Assert.NotEqual(absent, zero);
+            Assert.DoesNotContain("reported", zero, StringComparison.Ordinal);
+            Assert.EndsWith(" in this window.", zero, StringComparison.Ordinal);
+            Assert.Contains("reported", absent, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>#7549: one bucket above 0 draws the chart, and a chart of two series keeps it when either series is above 0.</summary>
+    [Fact]
+    public void OneValueAboveZero_KeepsTheChart_InOneSeriesOrMany()
+    {
+        var r = Run();
+
+        Assert.True(r.GetProperty("oneAboveZero").GetProperty("hasChart").GetBoolean());
+        Assert.True(r.GetProperty("twoSeriesOneNonZero").GetProperty("hasChart").GetBoolean());
+        Assert.False(r.GetProperty("twoSeriesAllZero").GetProperty("hasChart").GetBoolean());
+        Assert.Equal("All zero.", r.GetProperty("twoSeriesAllZero").GetProperty("text").GetString());
     }
 
     /// <summary>One line per sick spinlock type, with a gap in the buckets that did not name it; no type named is an empty line, not a chart.</summary>
@@ -119,6 +153,20 @@ public sealed class WebSystemEventsChartsBehaviourTests
         Assert.Equal("No sick spinlock was reported in this window.", r.GetProperty("spinNone").GetProperty("text").GetString());
     }
 
+    /// <summary>#8187: when the window had more sick spinlock types than the read named, the chart says "top 2 of 6 types", as the Viewer's
+    /// Y label does; when it named them all, or an older read carries no count, the chart says nothing more.</summary>
+    [Fact]
+    public void SickSpinlocks_SayHowManyTypesThereWere_OnlyWhenSomeWereLeftOut()
+    {
+        var r = Run();
+
+        var top = r.GetProperty("spinTop");
+        Assert.True(top.GetProperty("hasChart").GetBoolean());
+        Assert.Contains("top 2 of 6 types", top.GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("types", r.GetProperty("spinAll").GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("types", r.GetProperty("spinDrawn").GetProperty("text").GetString(), StringComparison.Ordinal);
+    }
+
     /// <summary>#6439: the System Events intro that says the counters are "charted below" is shown only when a chart is drawn.</summary>
     [Fact]
     public void TheChartedBelowSentence_IsShownOnlyWhenAChartIsDrawn()
@@ -126,7 +174,8 @@ public sealed class WebSystemEventsChartsBehaviourTests
         var intro = Run().GetProperty("intro");
 
         Assert.Contains("charted below", intro.GetProperty("text").GetString(), StringComparison.Ordinal);
-        Assert.True(intro.GetProperty("zero").GetBoolean());
+        Assert.False(intro.GetProperty("zero").GetBoolean());
+        Assert.True(intro.GetProperty("oneAbove").GetBoolean());
         Assert.True(intro.GetProperty("spin").GetBoolean());
         Assert.False(intro.GetProperty("noRows").GetBoolean());
         Assert.False(intro.GetProperty("noData").GetBoolean());
@@ -156,10 +205,11 @@ public sealed class WebSystemEventsChartsBehaviourTests
         Assert.Null(buckets[0].IntervalDumpRequests);
     }
 
-    /// <summary>The sick spinlock series are the first five types in snapshot order, backoffs peak per bucket (1 when the snapshot names
-    /// the type without a count), and SQL Server's "none" (no spinlock is sick) is no series.</summary>
+    /// <summary>The sick spinlock series are the five types with the most backoffs in the window, busiest first and ties by name (#8187,
+    /// the order the Viewer's chart draws), the read says how many types there were, backoffs peak per bucket (1 when the snapshot
+    /// names the type without a count), and SQL Server's "none" (no spinlock is sick) is no series and no type.</summary>
     [Fact]
-    public void SickSpinlocks_AreTheFirstFiveTypesOldestFirst_PeakPerBucket_AndNoneIsNotASeries()
+    public void SickSpinlocks_AreTheFiveBusiestTypes_BusiestFirst_PeakPerBucket_AndNoneIsNotASeries()
     {
         var t = new DateTime(2026, 1, 2, 0, 0, 0, DateTimeKind.Utc);
         var rows = new[]
@@ -174,7 +224,10 @@ public sealed class WebSystemEventsChartsBehaviourTests
             Snap(t.AddMinutes(13), spin: "F", backoffs: 1),
         };
 
-        Assert.Equal(new[] { "A", "C", "B", "D", "E" }, DarlingMcpHealthParserTools.SickSpinlockTypes(rows));
+        /* A has 40 backoffs and B 5; C, D, E and F have 1 each (C's snapshot carries no count), so the quietest four tie and the name decides. */
+        var (top, total) = DarlingMcpHealthParserTools.SickSpinlockTypes(rows);
+        Assert.Equal(new[] { "A", "B", "C", "D", "E" }, top);
+        Assert.Equal(6, total);
         var first = DarlingMcpHealthParserTools.BucketCpu(rows, 10)[0];
         Assert.Equal(30, first.SickSpinlocks["A"]);
         Assert.Equal(1, first.SickSpinlocks["C"]);
@@ -246,6 +299,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             var root = doc.RootElement;
 
             Assert.Equal(new[] { "SOS_CACHESTORE" }, root.GetProperty("sick_spinlock_types").EnumerateArray().Select(x => x.GetString()).ToArray());
+            Assert.Equal(1, root.GetProperty("sick_spinlock_type_count").GetInt32());
             var entries = root.GetProperty("entries").EnumerateArray().ToArray();
             Assert.Equal(2, entries.Length);
             // The old fields are still there, unchanged in name.

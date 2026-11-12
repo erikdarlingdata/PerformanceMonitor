@@ -32,8 +32,8 @@ namespace PerformanceMonitor.Notifications;
 /// </summary>
 /// <param name="RouteId">The identity key, for the ledger's provenance and the editors' updates.</param>
 /// <param name="MetricMatch">A family name (<see cref="AlertFamily.All"/>, matched case-insensitively) or an
-/// exact metric name, or <c>Analysis: {category}</c> for every analysis finding of one category (#5632). Exact wins
-/// over category, and category over family, at resolution.</param>
+/// exact metric name, or <c>Analysis: {category}</c> for every analysis finding of one category (#5632), or <c>Analysis: *</c> for every analysis finding (#7999). Exact wins
+/// over category, category over <c>Analysis: *</c>, and that over family, at resolution.</param>
 /// <param name="TeamsUrl">Teams incoming-webhook URL, or empty to inherit.</param>
 /// <param name="SlackUrl">Slack incoming-webhook URL, or empty to inherit.</param>
 /// <param name="GenericUrl">The generic JSON-POST endpoint, or empty to inherit. Headers, body template and
@@ -64,7 +64,8 @@ public sealed record NotificationRoute(
     /// because a destination the route set could not be read (#5366). Not a stored column: the reader that could not open
     /// a saved value sets it. A channel that is off here sends nothing for this route's alerts, and does not fall back
     /// to the settings row or a less specific route, because the alert would then go somewhere it was not configured to
-    /// go. Null or empty means no channel is off.</summary>
+    /// go. Null or empty means no channel is off. Email is not among them from either store, because a recipient list is
+    /// not a secret that can fail to be read; the email path still honours the name if a writer sets it (#8246).</summary>
     public IReadOnlyCollection<string>? OffChannels { get; init; }
 
     /// <summary>The signing keys of this route's own generic URL (#5998, decision D2): sealed as the store holds them, opened
@@ -170,6 +171,28 @@ public sealed record NotificationRoute(
     /// before the filter), <see cref="NotificationRouteKinds.SeveritiesCritical"/> or <see cref="NotificationRouteKinds.SeveritiesWarning"/>.
     /// A route whose filter excludes an alert's severity does not match it, and matching goes on to the next route.</summary>
     public string Severities { get; init; } = NotificationRouteKinds.SeveritiesBoth;
+
+    /// <summary>Whether this route posts a chat notice when an agent files a report (<c>report_notice</c>, #6979):
+    /// <see cref="NotificationRouteKinds.ReportNoticeOff"/> (the default), <see cref="NotificationRouteKinds.ReportNoticeNeedsPersonOrChange"/>
+    /// or <see cref="NotificationRouteKinds.ReportNoticeAll"/>.</summary>
+    public string ReportNotice { get; init; } = NotificationRouteKinds.ReportNoticeOff;
+
+    /// <summary>Whether a Level 3 action on this route waits for a person's approval (<c>action_approval</c>, #7109):
+    /// <see cref="NotificationRouteKinds.ActionApprovalRequired"/> (the default) or <see cref="NotificationRouteKinds.ActionApprovalOff"/>.</summary>
+    public string ActionApproval { get; init; } = NotificationRouteKinds.ActionApprovalRequired;
+
+    /// <summary>Whether a person who asked for the action may also approve it on this route (<c>approval_single_person</c>, #7109). False by default.</summary>
+    public bool ApprovalSinglePerson { get; init; }
+
+    /// <summary>The Slack channel id the bot posts this route's investigation request threads into (<c>slack_bot_channel</c>, V252, #7656):
+    /// the id (<c>C</c> or <c>G</c>, then capital letters and digits), never the channel's name. Blank, the default, means no bot channel and
+    /// no thread. Darling only: Lite has no routes with a Slack bot.</summary>
+    public string SlackBotChannel { get; init; } = "";
+
+    /// <summary>When the route got its bot channel (<c>slack_bot_channel_set_at</c>, V252, #7656), UTC: set or moved when the channel goes from
+    /// blank to an id or to a different id, null when the channel is blank. The thread pass posts a request's parent only when the request
+    /// opened at or after it, so a route that gets its channel later does not post every open request's history. Darling only.</summary>
+    public DateTime? SlackBotChannelSetAt { get; init; }
 
     /// <summary>Whether this route's severity filter takes an alert of <paramref name="severity"/> (#6928). Null takes every route.</summary>
     public bool AcceptsSeverity(AlertSeverityLevel? severity) => NotificationRouteKinds.SeveritiesAccept(Severities, severity);
@@ -286,8 +309,40 @@ public sealed record NotificationRoute(
         }
 
         var category = match[AlertFamily.AnalysisMetricPrefix.Length..].Trim();
-        return category.Length == 0 ? null : category;
+        /* #7999: "Analysis: *" is the every-finding route, not a category named "*". */
+        return category.Length == 0 || string.Equals(category, WildcardMatch, StringComparison.Ordinal) ? null : category;
     }
+
+    /// <summary>The canonical spelling of the every-analysis-finding match (#7999): <c>Analysis: *</c>. Every writer stores this
+    /// text for any spelling <see cref="IsAnalysisAllMatch"/> accepts.</summary>
+    public const string AnalysisAllMatch = "Analysis: *";
+
+    /// <summary>Whether <paramref name="metricMatch"/> is the every-analysis-finding match (#7999): the <c>Analysis: </c> prefix
+    /// (any case, trimmed, the tolerance a category route gets) followed by exactly <c>*</c>. <c>Analysis:*</c> without the
+    /// space is neither this nor a category, the same as <c>Analysis:queries</c> today.</summary>
+    public static bool IsAnalysisAllMatch(string? metricMatch)
+    {
+        var match = metricMatch?.Trim();
+        return !string.IsNullOrEmpty(match)
+            && match.StartsWith(AlertFamily.AnalysisMetricPrefix, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(match[AlertFamily.AnalysisMetricPrefix.Length..].Trim(), WildcardMatch, StringComparison.Ordinal);
+    }
+
+    /// <summary>The text a writer should store for <paramref name="metricMatch"/> (#7999): <see cref="AnalysisAllMatch"/> for any
+    /// accepted spelling of the every-finding match, otherwise the input unchanged. One helper for the MCP writers, the web agent-setup form and both
+    /// edit dialogs, so no product canonicalises it differently.</summary>
+    public static string CanonicalMatch(string metricMatch) =>
+        IsAnalysisAllMatch(metricMatch) ? AnalysisAllMatch : metricMatch;
+
+    /// <summary>Whether this route is the every-analysis-finding route, <c>Analysis: *</c> (#7999).</summary>
+    public bool IsAnalysisAll => IsAnalysisAllMatch(MetricMatch);
+
+    /// <summary>Whether this route matches <paramref name="metricName"/> as an analysis finding of ANY category (#7999): the route
+    /// is <c>Analysis: *</c> and the metric has the finding shape, <c>Analysis: {category} [{hash8}]</c>. A digest title
+    /// (<c>Analysis Singles Digest</c>) and a name without the hash suffix are not findings. Less specific than a category route,
+    /// more specific than a family.</summary>
+    public bool MatchesAnalysisAll(string metricName) =>
+        IsAnalysisAll && AlertFamily.TryGetAnalysisCategory(metricName, out _);
 
     /// <summary>Whether this route matches <paramref name="metricName"/> by its analysis finding CATEGORY (#5632,
     /// ruling R5): the route is <c>Analysis: queries</c> and the metric is <c>Analysis: queries [1a2b3c4d]</c>. Less

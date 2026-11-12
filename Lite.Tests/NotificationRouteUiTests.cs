@@ -274,6 +274,49 @@ public sealed class NotificationRouteUiTests : IDisposable
         Assert.Equal("Not set", NotificationRouteUi.ChannelMarker(after, NotificationRouter.GenericChannel));
     }
 
+    /* #7999: both dialogs save through NotificationRouteKinds.MatchToSave; this is the helper-plus-store round trip. The dialog itself is driven in NotificationRouteAnalysisAllDialogTests and ViewerNotificationRouteAnalysisAllDialogTests. */
+    [Theory]
+    [InlineData(null)]
+    [InlineData(7101)]
+    public async Task TheEveryAnalysisFindingChoice_IsSavedCanonically_AndReloadsAsTheAnalysisAllRoute(int? server)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "NotificationRouteUiTests_" + Guid.NewGuid().ToString("N")[..8]);
+        _tempDirs.Add(dir);
+        Directory.CreateDirectory(dir);
+        using var initializer = new DuckDbInitializer(Path.Combine(dir, "lite.duckdb"));
+        await initializer.InitializeAsync();
+        var store = new DuckDbNotificationRouteStore(initializer, () => new[] { 7101 }, new FakeRouteSecrets().Access);
+
+        /* The combo item's tag is what a pick saves; a typed spelling in the exact box saves the same text. */
+        Assert.Equal(NotificationRoute.AnalysisAllMatch, NotificationRouteKinds.MatchToSave(NotificationRoute.AnalysisAllMatch, ""));
+        foreach (var typed in new[] { "Analysis: *", "  analysis:   * ", "ANALYSIS: *" })
+        {
+            Assert.Equal(NotificationRoute.AnalysisAllMatch, NotificationRouteKinds.MatchToSave(null, typed));
+        }
+
+        var id = await store.InsertAsync(Route(match: NotificationRouteKinds.MatchToSave(null, "  analysis:   * "), server: server, slack: SlackUrl));
+        var reloaded = (await store.GetAsync(id))!;
+
+        Assert.Equal("Analysis: *", reloaded.MetricMatch);
+        /* What the dialog's load path tests, in order, to pick the combo item. */
+        Assert.False(reloaded.IsWildcard);
+        Assert.True(reloaded.IsAnalysisAll);
+    }
+
+    [Theory]
+    [InlineData(null, "performance", "performance")]
+    [InlineData(null, "PERFORMANCE", "performance")]
+    [InlineData(null, " High CPU ", "High CPU")]
+    [InlineData(null, "Analysis: queries", "Analysis: queries")]
+    [InlineData("performance", "", "performance")]
+    [InlineData("*", "", "*")]
+    [InlineData("performance", "analysis:  *", "performance")]
+    [InlineData("*", "Blocking", "*")]
+    public void MatchToSave_KeepsEveryOtherChoiceAsTheDialogsSavedIt(string? tag, string typed, string expected)
+    {
+        Assert.Equal(expected, NotificationRouteKinds.MatchToSave(tag, typed));
+    }
+
     [Fact]
     public void TheStoresRefusals_ShowWithoutTheParameterSuffix()
     {

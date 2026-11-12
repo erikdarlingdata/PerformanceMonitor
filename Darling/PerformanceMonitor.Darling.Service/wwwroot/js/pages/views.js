@@ -25,16 +25,17 @@
  * descriptions) reaches the DOM through el()/textContent (R4 — never innerHTML).
  */
 
-import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, localizeAlertDetail, fmtNum, storeHash } from "../util.js";
+import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, localizeAlertDetail, fmtNum, isStateZero, storeHash } from "../util.js";
 import { rollingHoursPicker } from "../page-range.js";
 import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
-import { holdsPage, refreshGridInPlace, showAround, showPage, showRefreshError } from "../refresh-in-place.js";
+import { holdsPage, keepScroll, refreshGridInPlace, showAround, showPage, showRefreshError } from "../refresh-in-place.js";
 import { orderServers } from "../server-order.js";
 import { renderComposedPanelCard } from "../compose.js";
+import { keepLonePanelsWide } from "../panel-layout.js";
 import { renderMarkdown } from "../markdown.js";
 import { NOTEBOOK_TEMPLATES, isNotebookDefinition } from "../notebook.js";
 import { DASHBOARD_TEMPLATES } from "../view-templates.js";
-import { resolveReadTable } from "../read-fields.js";
+import { resolveReadTable, withCatalogWords } from "../read-fields.js";
 import * as api from "../views-api.js";
 import { refreshChoiceOf } from "../refresh-policy.js";
 import { buildRefreshControl } from "../refresh-control.js";
@@ -99,23 +100,50 @@ function viewRefreshControl(view, def, isNotebook, canEdit) {
 
 /* ─────────────────────────── list page ─────────────────────────── */
 
-export async function renderViewList(main) {
-  mount(main, [listHead(false, []), loadingStrip("Loading views…")]);
+/* #7925: the key the list page is held under (refresh-in-place.js), so the 60 s poll can tell that the list on screen is its own. */
+const LIST_KEY = "views";
+
+/* #7925: each card's count chips by view id, with the version they were read at. The counts come from the view's full definition,
+   which the list payload does not carry, so a card whose version is unchanged draws its chips from here instead of reading the
+   definition again on every poll. */
+const chipCache = new Map();
+
+export async function renderViewList(main, opts) {
+  /* #7925: the poll over the list on screen leaves it there while the list is read again. The import JSON a reader has pasted, an open
+     Import or template menu and the server picked for a template are what they are working with, and a "Loading views…" strip in
+     their place would throw them away. When the new list arrives only the cards are redrawn. */
+  const inPlace = holdsPage(main, LIST_KEY, !!(opts && opts.poll === true));
+  if (!inPlace) mount(main, [listHead(false, []), loadingStrip("Loading views…")]);
 
   /* #6243: the list needs only the session and the view list. The fleet read exists for the dashboard templates' server
      picker, so the list is drawn the moment those two answer; a slow or hung fleet read used to hold the page on
-     "Loading views…". The picker is filled in when the fleet answers, if the page is still this one. */
+     "Loading views…". The picker is filled in when the fleet answers, if the page is still this one. The poll reads the
+     fleet too: a server added since the first paint reaches the picker on screen once the read answers. */
   const serversRead = loadServerNames();
   const [session, res] = await Promise.all([api.getSession(), api.listViews()]);
   const canEdit = !!session.can_edit;
   const ourHash = location.hash;
 
+  /* The page is kept through the poll only while it shows the hero or the cards. A first paint that failed left an error page under the
+     key, and that is drawn again: there is no earlier list to keep under a refresh notice, and an empty list must draw the hero. */
+  const held = inPlace && holdsPage(main, LIST_KEY, true) && showsViews(main);
+
   if (res.kind === "error") {
-    mount(main, [listHead(canEdit, []), errorStrip(res.message)]);
+    if (held && showRefreshError(main, LIST_KEY, res.message)) return;
+    showPage(main, LIST_KEY, [listHead(canEdit, []), errorStrip(res.message)]);
     return;
   }
 
   const views = Array.isArray(res.data) ? res.data : [];
+  /* The affordances follow the session: a seat whose can_edit differs from what the page was drawn for (a probe that failed at the first
+     paint and has since answered, #7928) gets the page drawn again. Only the cards are swapped otherwise, and the fleet answer goes into
+     the pickers on screen when it arrives, so a slow fleet read does not hold the cards. */
+  if (held && editShown(main) === canEdit && swapCards(main, views)) {
+    const servers = await serversRead;
+    if (location.hash === ourHash && holdsPage(main, LIST_KEY, true)) refreshPickers(main, servers);
+    return;
+  }
+
   const head = listHead(canEdit, []);
   const nodes = [head];
 
@@ -127,16 +155,86 @@ export async function renderViewList(main) {
     if (canEdit) nodes.push(importPanel());
     nodes.push(el("div", { class: "view-cards" }, views.map((v) => viewCard(v))));
   }
-  mount(main, nodes);
+  showPage(main, LIST_KEY, nodes);
 
   const servers = await serversRead;
   if (!servers.length || location.hash !== ourHash || main.firstChild !== head) return;
   if (!views.length) {
-    mount(main, [listHead(canEdit, servers), firstRunHero(canEdit, servers)]);
+    showPage(main, LIST_KEY, [listHead(canEdit, servers), firstRunHero(canEdit, servers)]);
     return;
   }
-  /* Only the head holds the picker: swap it in place so the cards, and their own reads, are not rebuilt. */
-  main.replaceChild(listHead(canEdit, servers), head);
+  /* Only the head holds the picker: its children are swapped in place so the cards, their own reads and the import box are not
+     rebuilt, and the head stays the first child the poll knows the page by. */
+  mount(head, Array.from(listHead(canEdit, servers).children));
+}
+
+/* #7925: the poll's redraw of a list that is on screen. The cards are replaced in one step, with the reader's scroll position kept,
+   and the head and the import panel stay as they are; an earlier poll's failure notice comes down. True only when the page on screen
+   still fits the list: the cards with views to draw into them, or the hero over a store that still has no views, which stays as it is.
+   False otherwise, and the caller draws the whole page: the hero when views now exist, a list whose views are all gone, and an error
+   page, which shows neither. */
+function swapCards(main, views) {
+  const children = () => Array.from(main.children || []);
+  const live = children().find((n) => hasClass(n, "view-cards"));
+  if (!live) return !views.length && children().some((n) => hasClass(n, "views-hero"));
+  if (!views.length) return false;
+  keepScroll(() => {
+    const stale = children().find((n) => hasClass(n, "refresh-error"));
+    if (stale) main.removeChild(stale);
+    main.replaceChild(el("div", { class: "view-cards" }, views.map((v) => viewCard(v))), live);
+  });
+  return true;
+}
+
+/* True while the page shows the hero or the cards, the two pages a poll keeps on screen. An error page is neither. */
+function showsViews(main) {
+  return Array.from(main.children || []).some((n) => hasClass(n, "view-cards") || hasClass(n, "views-hero"));
+}
+
+/* The can_edit the page on screen was drawn for. The template menu is drawn only for a seat that can edit, in the head and in the hero
+   alike, so its presence says which variant is up. */
+function editShown(main) {
+  return findAll(main, (n) => hasClass(n, "template-menu")).length > 0;
+}
+
+/* #7925: the poll's fleet answer, put into the pickers on screen: the head's template menu, and over the hero its menu and its starter
+   row. A picker that is up keeps its element and its picked server, so an open menu stays open and a pick stays picked; only its
+   options follow the fleet. A menu or starter row drawn while the fleet had no server gains the picker. An empty answer (a fleet with
+   no server, or a failed read) leaves the pickers as they are, as the first paint leaves them. */
+function refreshPickers(main, servers) {
+  if (!servers.length) return;
+  for (const menu of findAll(main, (n) => hasClass(n, "template-menu"))) {
+    const select = findAll(menu, (n) => hasClass(n, "starter-select"))[0];
+    const list = findAll(menu, (n) => hasClass(n, "template-list"))[0];
+    if (select) refreshServerSelect(select, servers);
+    else if (list) mount(list, Array.from(findAll(templateMenu(servers), (n) => hasClass(n, "template-list"))[0].children));
+  }
+  const row = findAll(main, (n) => hasClass(n, "hero-suggest"))[0];
+  if (row) {
+    const select = findAll(row, (n) => hasClass(n, "starter-select"))[0];
+    if (select) refreshServerSelect(select, servers);
+    else mount(row, Array.from(starterRow(servers).children));
+  }
+}
+
+/* The picker's options follow the fleet, and the picked server stays picked while the fleet still has it. A fleet that matches the
+   options already shown changes nothing. */
+function refreshServerSelect(select, servers) {
+  const shown = Array.from(select.children || []);
+  if (shown.length === servers.length && shown.every((o, i) => o.getAttribute("value") === servers[i].value && o.textContent === servers[i].label)) return;
+  const picked = select.value;
+  mount(select, servers.map((s) => el("option", { value: s.value, text: s.label })));
+  select.value = servers.some((s) => s.value === picked) ? picked : servers[0].value;
+}
+
+function hasClass(n, name) {
+  return typeof n.className === "string" && (" " + n.className + " ").includes(" " + name + " ");
+}
+
+function findAll(node, pred, out = []) {
+  if (pred(node)) out.push(node);
+  for (const c of Array.from(node.children || [])) findAll(c, pred, out);
+  return out;
 }
 
 /* First-run hero (M4): a centered pitch + a prominent New view + a few starting-point ideas + the (secondary)
@@ -158,8 +256,8 @@ function firstRunHero(canEdit, servers) {
     el("div", {
       class: "hero-pitch",
       text:
-        "Build a DASHBOARD — pick a metric, aggregate it, group and filter it, and chart it as a line, bar, pie, " +
-        "stacked area, or stat — or a NOTEBOOK that mixes markdown notes with those same charts into a guided " +
+        "Build a DASHBOARD: pick a metric, aggregate it, group and filter it, and chart it as a line, bar, pie, " +
+        "stacked area, or stat. Or build a NOTEBOOK that mixes markdown notes with those same charts into a guided " +
         "investigation. Both save for every seat and re-scope live by server and time range. No SQL to write.",
     }),
     el("div", { class: "hero-ctas" }, [
@@ -325,48 +423,57 @@ function viewCard(v) {
   const href = storeHash((isNotebook ? "#/notebook/" : "#/view/") + encodeURIComponent(v.id));
   const card = el("a", { class: "view-card card", href }, [
     el("div", { class: "vc-name" }, [
-      el("span", { class: "vc-name-text", text: v.name }),
+      el("span", { class: "vc-name-text", text: v.name, title: v.name }),
       isNotebook ? el("span", { class: "notebook-badge", text: "Notebook" }) : null,
     ]),
     v.description ? el("div", { class: "vc-desc", text: v.description }) : null,
     chips,
     el("div", { class: "vc-meta", text: meta }),
   ]);
-  enrichCard(v.id, chips, isNotebook);
+  enrichCard(v.id, v.version, chips, isNotebook);
   return card;
 }
 
 /* The list summary carries `kind` (link + badge already set in viewCard) but NOT the panel/cell counts, so those
    are fetched per card and filled in progressively — the card renders immediately and never blocks on this fetch,
    and a failed/empty fetch just leaves the (display:none-when-empty) chip row absent. `isNotebook` comes from the
-   summary; the fetched definition is a robust fallback for the count shape. */
-async function enrichCard(id, chips, isNotebook) {
+   summary; the fetched definition is a robust fallback for the count shape. The chips a read gave are kept by view id
+   and version (#7925), so a card whose version the list still reports draws them without a read. */
+async function enrichCard(id, version, chips, isNotebook) {
+  const kept = chipCache.get(String(id));
+  if (kept && kept.version === version) {
+    mount(chips, kept.chips.map((c) => el("span", { class: c.cls, text: c.text })));
+    return;
+  }
   const res = await api.getView(id);
   if (res.kind !== "data" || !res.data) return;
-  const def = res.data.definition || {};
+  const texts = chipTexts(res.data.definition || {}, isNotebook);
+  chipCache.set(String(id), { version, chips: texts });
+  mount(chips, texts.map((c) => el("span", { class: c.cls, text: c.text })));
+}
 
+/* The count chips for a definition, as class and text: a notebook's cells and the panels among them, or a dashboard's panels and
+   the viz types they use. Empty for a definition with nothing to count. */
+function chipTexts(def, isNotebook) {
   if (isNotebook || isNotebookDefinition(def)) {
     const cells = Array.isArray(def.cells) ? def.cells : [];
-    if (!cells.length) return;
+    if (!cells.length) return [];
     const panelCount = cells.filter((c) => c && c.type === "panel").length;
-    const nodes = [el("span", { class: "vc-chip count", text: cells.length + (cells.length === 1 ? " cell" : " cells") })];
-    if (panelCount) nodes.push(el("span", { class: "vc-chip", text: panelCount + (panelCount === 1 ? " panel" : " panels") }));
-    mount(chips, nodes);
-    return;
+    const texts = [{ cls: "vc-chip count", text: cells.length + (cells.length === 1 ? " cell" : " cells") }];
+    if (panelCount) texts.push({ cls: "vc-chip", text: panelCount + (panelCount === 1 ? " panel" : " panels") });
+    return texts;
   }
 
   const panels = Array.isArray(def.panels) ? def.panels : [];
-  if (!panels.length) return;
+  if (!panels.length) return [];
   const vizTypes = [];
   for (const p of panels) {
     const viz = p && typeof p.viz === "string" ? p.viz : null;
     if (viz && !vizTypes.includes(viz)) vizTypes.push(viz);
   }
-  const nodes = [
-    el("span", { class: "vc-chip count", text: panels.length + (panels.length === 1 ? " panel" : " panels") }),
-  ];
-  for (const viz of vizTypes) nodes.push(el("span", { class: "vc-chip viz", text: viz }));
-  mount(chips, nodes);
+  const texts = [{ cls: "vc-chip count", text: panels.length + (panels.length === 1 ? " panel" : " panels") }];
+  for (const viz of vizTypes) texts.push({ cls: "vc-chip viz", text: viz });
+  return texts;
 }
 
 /* Paste-to-import (can_edit only): parse -> client-validate against the catalog -> POST (backend re-validates).
@@ -580,9 +687,10 @@ export async function renderView(main, id, opts) {
   const view = res.data || {};
   const def = view.definition || {};
 
-  /* A notebook is the same stored row with a kind:"notebook" definition — render it as a document, not a grid. */
+  /* A notebook is the same stored row with a kind:"notebook" definition — render it as a document, not a grid. On a poll it is
+     refreshed in place like the grid below (#7924), so it is told whether the page is held and under which key. */
   if (isNotebookDefinition(def)) {
-    renderNotebookDoc(main, { mode: "saved", view, session, catalog, fleetRes });
+    renderNotebookDoc(main, { mode: "saved", view, session, catalog, fleetRes, hold, pageKey });
     return;
   }
 
@@ -590,7 +698,7 @@ export async function renderView(main, id, opts) {
   /* #6214: another person's personal view can be read but not changed, so Edit goes and Delete is disabled. */
   const access = viewAccess(view, session);
   const canEdit = !!session.can_edit && !access.readOnly;
-  const readSet = new Set((catalog.reads || []).map((r) => r.name));
+  const readSet = new Map((catalog.reads || []).map((r) => [r.name, r])); /* a Map: the name check is .has, and #8630 reads each read's parameters */
   const sourceSet = new Set(((catalog.compose || {}).measures || []).map((m) => m.source));
 
   const status = el("div", { class: "view-status" });
@@ -636,9 +744,14 @@ export async function renderView(main, id, opts) {
      keep drawing into it. */
   const liveGrid = hold ? Array.from(main.children).find((n) => n.className === "panel-grid") : null;
   const gridBox = liveGrid || el("div", { class: "panel-grid" });
+  if (!liveGrid) keepLonePanelsWide(gridBox); /* #7534: a half-width panel with no partner on its row takes the whole row. */
+  /* #7257: the panels of a render start their reads two at a time. A new render ends the one before it. */
+  let panelRender = null;
   function buildGrid() {
     if (scopeNote) scopeNote.textContent = panelServerNote(state, panelServer);
-    return panels.map((p, i) => panelOrError(panelUnderScope(p, state, panelServer), readSet, sourceSet, currentScope(), undefined, i));
+    if (panelRender) panelRender.end();
+    const render = (panelRender = newPanelRender(ourHash));
+    return panels.map((p, i) => panelOrError(panelUnderScope(p, state, panelServer), readSet, sourceSet, currentScope(), undefined, i, render.gate));
   }
   function renderGrid() {
     mount(gridBox, buildGrid());
@@ -658,7 +771,13 @@ export async function renderView(main, id, opts) {
 
   if (liveGrid) {
     showAround(main, pageKey, liveGrid, [head, status, controls, scopeNote].filter(Boolean));
-    cancelViewRefresh = refreshGridInPlace(liveGrid, buildGrid());
+    const staged = buildGrid();
+    const stagedRender = panelRender;
+    const cancelSwap = refreshGridInPlace(liveGrid, staged);
+    cancelViewRefresh = () => {
+      cancelSwap();
+      stagedRender.end();
+    };
   } else {
     showPage(main, pageKey, [head, status, controls, scopeNote, gridBox]);
     renderGrid();
@@ -684,7 +803,10 @@ export async function renderView(main, id, opts) {
  */
 /**
  * `opts`:
- *   { mode: "saved", view, session, catalog, fleetRes }                          — an ordinary saved notebook.
+ *   { mode: "saved", view, session, catalog, fleetRes, hold, pageKey }           — an ordinary saved notebook. `hold` is
+ *     renderView's holdsPage answer: on a poll over the notebook already on screen (#7924) the document stays where it is and
+ *     each cell is refreshed in place once its own new read returns, the way a dashboard's grid is; `pageKey` is the page key
+ *     showPage/showAround remember it under.
  *   { mode: "alert", definition, alert, status, notes, canEdit, catalog, server, provenance, isLive, onOpenLive }
  *     — #4222's read-only alert-notebook render: an IN-MEMORY definition bound to one firing (no saved `view`
  *     row, no /api/fleet read — the server is fixed — and no scope bar, since there is nothing to re-scope).
@@ -720,8 +842,15 @@ export async function renderNotebookDoc(main, opts) {
      uses: a read the catalog lists must render, not fail as "Unknown read" (it did while this was always the
      empty catalog). The empty catalog is only what an alert-mode caller that passes none gets. */
   const catalog = isAlert ? (opts.catalog || { reads: [], compose: {} }) : opts.catalog;
-  const readSet = new Set((catalog.reads || []).map((r) => r.name));
+  const readSet = new Map((catalog.reads || []).map((r) => [r.name, r])); /* a Map: the name check is .has, and #8630 reads each read's parameters */
   const sourceSet = new Set(((catalog.compose || {}).measures || []).map((m) => m.source));
+
+  /* #8555: a row that declares no notebook (the report rows) shows only the notes its caller drew: no "Alert notebook" header,
+     no Save as notebook or Open live buttons, no "no cells yet" line, none of which has anything to act on. */
+  if (isAlert && opts.noNotebook) {
+    mount(main, []);
+    return;
+  }
 
   const status = el("div", { class: "view-status" });
   const head = isAlert
@@ -787,26 +916,58 @@ export async function renderNotebookDoc(main, opts) {
       variables: variables.map((v) => ({ name: v.name, dimension: v.dimension, default: v.default || undefined })),
       values: { ...state.values },
     });
-    const onChange = () => { rememberScope(opts.view.id, state); renderDoc(); };
+    /* A scope change draws new-scope cells, so an in-place refresh still outstanding is for the old scope and must not land over them. */
+    const onChange = () => {
+      if (cancelViewRefresh) {
+        cancelViewRefresh();
+        cancelViewRefresh = null;
+      }
+      rememberScope(opts.view.id, state);
+      renderDoc();
+    };
     controls = hasPanels ? buildViewControls(fleet, variables, state, defaultHours, onChange) : null;
   }
 
-  const docBox = el("div", { class: "notebook-doc" });
+  /* #7924: on a poll the document already on screen stays and is refreshed in place (refreshGridInPlace pairs its cells by index), so
+     the scope controls built above keep drawing into it. */
+  const liveDoc = !isAlert && opts.hold ? Array.from(main.children).find((n) => n.className === "notebook-doc") : null;
+  const docBox = liveDoc || el("div", { class: "notebook-doc" });
   const limiter = isAlert ? new InFlightLimiter(3) : null;
-  function renderDoc() {
+  const ourHash = location.hash;
+  let panelRender = null;
+  function buildDoc() {
     if (isAlert) {
       /* Alert-mode cells load top to bottom, at most 3 in flight (#4222's cost rule) — renderCell/renderPanel
          return synchronously with the fetch outstanding, so the limiter gates ACQUIRING a slot before the cell
          node is even built, then releases it off renderPanel's onSettled callback. */
       const scope = currentScope();
-      mount(docBox, cells.map((cell, i) => renderAlertCell(cell, i, readSet, sourceSet, scope, opts, limiter)));
-    } else {
-      refreshScopeNote();
-      mount(docBox, cells.map((cell) => renderCell(cellUnderScope(cell), readSet, sourceSet, currentScope())));
+      return cells.map((cell, i) => renderAlertCell(cell, i, readSet, sourceSet, scope, opts, limiter));
     }
+    refreshScopeNote();
+    /* #7257: a saved notebook starts its panel reads two at a time, and a new render (a scope change) ends the one before it. */
+    if (panelRender) panelRender.end();
+    const render = (panelRender = newPanelRender(ourHash));
+    /* The cell's index is its slot: the identity under which a composed panel cell holds its zoom and drill (#7923), so the
+       poll's rebuild of the cell draws them again. */
+    return cells.map((cell, i) => renderCell(cellUnderScope(cell), readSet, sourceSet, currentScope(), undefined, render.gate, i));
+  }
+  function renderDoc() {
+    mount(docBox, buildDoc());
   }
 
-  mount(main, [head, status, controls, scopeNote, docBox]);
+  if (liveDoc) {
+    showAround(main, opts.pageKey, liveDoc, [head, status, controls, scopeNote].filter(Boolean));
+    const staged = buildDoc();
+    const stagedRender = panelRender;
+    const cancelSwap = refreshGridInPlace(liveDoc, staged);
+    cancelViewRefresh = () => {
+      cancelSwap();
+      stagedRender.end();
+    };
+    return;
+  }
+  if (isAlert) mount(main, [head, status, controls, scopeNote, docBox]);
+  else showPage(main, opts.pageKey, [head, status, controls, scopeNote, docBox]);
   renderDoc();
 }
 
@@ -859,7 +1020,7 @@ function renderAlertCell(cell, index, readSet, sourceSet, scope, opts, limiter) 
     if (!cell.read || !readSet.has(cell.read) || !cell.viz || !VIZ[cell.viz]) {
       return panelErrorCard(cell.title, "Unknown read '" + (cell.read || "") + "' or visualization '" + (cell.viz || "") + "'.");
     }
-    return gatedCell(opts, limiter, (release) => renderPanel(resolveReadTable(cell), release));
+    return gatedCell(opts, limiter, (release) => renderPanel(resolveReadTable(withAsOfSupport(cell, readSet)), release));
   }
   /* A markdown cell is prose: no load, so no slot — the same air-gapped renderMarkdown a saved notebook uses. */
   if (cell.type === "markdown") {
@@ -918,6 +1079,12 @@ function notShownCard(title, message) {
   ]);
 }
 
+/* One side of the alert's value line: a state-only row's stored 0 (util.js's isStateZero, the rule Alert History applies) is not a
+   reading and shows as the dash Alert History shows; anything else is the number, in this page's format. */
+function stateOrNum(a, key) {
+  return isStateZero(a, key) ? "—" : fmtNum(a[key], 1);
+}
+
 /* The header cell: the endpoint's own alert facts, rendered directly (no read — they arrived with the envelope).
    A null `alert` (stale/no match) renders the honest empty state instead of blank fields. */
 function renderAlertHeaderCell(cell, opts) {
@@ -932,14 +1099,26 @@ function renderAlertHeaderCell(cell, opts) {
     if (a.database) rows.push(["Database", a.database]);
     if (typeof a.total_occurrences === "number") rows.push(["Total occurrences", String(a.total_occurrences)]);
     /* current_value/threshold_value (#4368): same fmtNum(_, 1) triage.js's alertFields uses for the matched
-       alert card, so the two pages format the same fields the same way. Omitted only when BOTH are absent —
-       fmtNum already renders a lone missing side as "\u2014" rather than dropping the whole line. */
+       alert card, so the two pages format the same fields the same way. Omitted when both sides are absent, or when both
+       are a state-only row's stored zeros (below); fmtNum renders a lone missing side as "\u2014" rather than dropping
+       the whole line. */
     if (typeof a.current_value === "number" || typeof a.threshold_value === "number") {
-      rows.push(["Value vs threshold", "current " + fmtNum(a.current_value, 1) + " vs threshold " + fmtNum(a.threshold_value, 1)]);
+      /* A state-only row's stored zeros are not readings (stateOrNum): the line is left out when both sides are dashes
+         rather than print 0 against 0, the way Alert History shows a dash in each column. */
+      const current = stateOrNum(a, "current_value");
+      const threshold = stateOrNum(a, "threshold_value");
+      if (current !== "—" || threshold !== "—") {
+        rows.push(["Value vs threshold", "current " + current + " vs threshold " + threshold]);
+      }
     }
   }
   const body = a
     ? [
+        /* #7918: a dismissed firing is still the firing the link names. The card says it was dismissed, so the reader
+           knows the alert was acknowledged and why Alert History does not list it. */
+        a.dismissed === true
+          ? noticeStrip("This alert was dismissed. It still fired; dismissal only hides it from Alert History unless Show dismissed is on.")
+          : null,
         el("div", { class: "detail-fields" }, rows.map(([k, v]) =>
           el("div", { class: "detail-field" }, [el("span", { class: "fk", text: k }), el("span", { class: "fv", text: v })])
         )),
@@ -987,19 +1166,21 @@ function openLiveButton(onOpenLive) {
 /* One notebook cell -> a document block: a markdown cell renders through renderMarkdown (XSS-safe); a panel cell
    through the shared panelOrError (unknown source/viz -> a clean strip, exactly as in the dashboard grid).
    `onSettled` is optional and only the alert notebook passes it (its in-flight limiter's release): see panelOrError. */
-function renderCell(cell, readSet, sourceSet, scope, onSettled) {
+/* `slot` is the cell's index in a saved notebook: the stable identity a composed panel cell holds its zoom and drill under across
+   the poll's rebuild (#7924). The alert notebook passes none, so its cells hold nothing, like the editor preview. */
+function renderCell(cell, readSet, sourceSet, scope, onSettled, gate = null, slot = null) {
   if (!cell || typeof cell !== "object") return null;
   if (cell.type === "markdown") {
     return el("div", { class: "notebook-md markdown-body" }, [renderMarkdown(cell.text)]);
   }
   if (cell.type === "panel") {
-    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled)]);
+    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled, slot, gate)]);
   }
   /* A `read` cell (design D7, #4222) is a v1 read panel, FLAT like a panel cell: routed through the exact same
      panelOrError -> renderPanel path a dashboard read panel uses (its own fixed params, scope-independent).
      Minimal routing only; renderNotebookDoc's broader refactor is a later slice's job. */
   if (cell.type === "read") {
-    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled)]);
+    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled, slot, gate)]);
   }
   return null;
 }
@@ -1135,33 +1316,86 @@ function checkRow(label, checked, onToggle) {
    `onSettled` (optional; the alert notebook's in-flight limiter release, #4222) is called exactly once per call: by
    the renderer when its load ends, or right here when the panel cannot start a load and becomes an error card —
    so a bad cell cannot hold a limiter slot. Every other caller omits it. */
-function panelOrError(p, readSet, sourceSet, scope, onSettled, slot = null) {
-  const fail = (title, message) => {
+function panelOrError(p, readSet, sourceSet, scope, onSettled, slot = null, gate = null) {
+  const bad = panelProblem(p, readSet, sourceSet);
+  if (bad) {
     if (onSettled) onSettled();
-    return panelErrorCard(title, message);
-  };
+    return panelErrorCard(bad.title, bad.message);
+  }
+  if (p.source != null) {
+    return renderComposedPanelCard(p, scope, onSettled, slot, gate);
+  }
+  /* #8492: a read table that carries its own columns takes the catalog's words and rules for the same keys (withCatalogWords), so a saved
+     view's alert-history table shows a state-only row's stored zeros as the dash Alert History shows. A panel with no columns of its own
+     is unchanged. */
+  return renderPanel(withCatalogWords(withAsOfSupport(p, readSet)), onSettled, gate);
+}
+
+/* #8630: a read cell that names an `as_of` is drawn "Pinned" only when its tool takes one. The catalog lists each read's parameters, so a
+   read with no `as_of` of its own (get_server_summary, get_collection_health) is marked `asOfIgnored` and the cell says it shows the
+   current state. This covers a template cell and a custom notebook's alike, so no template has to drop its `as_of`. */
+function withAsOfSupport(cell, readSet) {
+  const read = cell && cell.read ? readSet.get(cell.read) : null;
+  if (!read || !cell.params || cell.params.as_of == null) return cell;
+  return (read.params || []).some((x) => x.name === "as_of") ? cell : { ...cell, asOfIgnored: true };
+}
+
+/* Why a panel cannot start a read (the catalog check), as {title, message}, or null when it can. A panel with a problem
+   draws an error card and takes no limiter slot, and no Retry button, since running it again cannot fix it (#7257). */
+function panelProblem(p, readSet, sourceSet) {
   if (!p || typeof p !== "object") {
-    return fail("Invalid panel", "This panel is not an object.");
+    return { title: "Invalid panel", message: "This panel is not an object." };
   }
   if (p.path != null) {
-    return fail(p.title, "This panel uses raw 'path' mode, which is not supported.");
+    return { title: p.title, message: "This panel uses raw 'path' mode, which is not supported." };
   }
   if (p.source != null) {
     if (!sourceSet.has(p.source)) {
-      return fail(p.title, "Unknown source '" + p.source + "'. It may have been renamed or removed.");
+      return { title: p.title, message: "Unknown source '" + p.source + "'. It may have been renamed or removed." };
     }
     if (!p.viz) {
-      return fail(p.title, "This composed panel has no chart type.");
+      return { title: p.title, message: "This composed panel has no chart type." };
     }
-    return renderComposedPanelCard(p, scope, onSettled, slot);
+    return null;
   }
   if (!p.read || !readSet.has(p.read)) {
-    return fail(p.title, "Unknown read '" + (p.read || "") + "'. It may have been renamed or removed.");
+    return { title: p.title, message: "Unknown read '" + (p.read || "") + "'. It may have been renamed or removed." };
   }
   if (!p.viz || !VIZ[p.viz]) {
-    return fail(p.title, "Unknown visualization '" + (p.viz || "") + "'.");
+    return { title: p.title, message: "Unknown visualization '" + (p.viz || "") + "'." };
   }
-  return renderPanel(p, onSettled);
+  return null;
+}
+
+/* #7257: the most long reads one saved view starts at once. The service default for reads.maxHeavyReads is 4 (#7357) and the
+   page cannot read the service's limit. The page stays at 2 so one saved view leaves slots for other readers. */
+const SAVED_VIEW_READS = 2;
+
+/* One render of a saved dashboard or notebook: its own limiter (the alert notebook's InFlightLimiter) and a way to end it.
+   A render ends when a newer one replaces it (a scope change, an in-place refresh that was cancelled) or the route changes.
+   A panel of an ended render that still waits for a slot never starts its read (#6933), and gives the slot straight back. */
+function newPanelRender(ourHash) {
+  const limiter = new InFlightLimiter(SAVED_VIEW_READS);
+  const render = {
+    ended: false,
+    end() { render.ended = true; },
+    /* `start` runs the panel's read and returns its promise. The slot is held until that settles, busy retry wait included.
+       A retry is the viewer's own click on a panel that drew, so it runs even after a poll's refresh has ended the render. */
+    gate(start, retry = false) {
+      return limiter.acquire().then(async () => {
+        if (!retry && (render.ended || location.hash !== ourHash)) {
+          limiter.release();
+          return;
+        }
+        try {
+          await start();
+        } finally {
+          limiter.release();
+        }
+      });
+    },
+  };
+  return render;
 }
 
 function panelErrorCard(title, message) {

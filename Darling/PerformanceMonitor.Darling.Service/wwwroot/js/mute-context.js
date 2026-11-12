@@ -32,6 +32,17 @@ export function isWithheldMarker(text) {
   return typeof text === "string" && text.trim() === WITHHELD_MARKER;
 }
 
+/** #7548: what the page says in place of the withheld marker. The stored text keeps its issue number because rows are matched by the exact
+ *  text, so the page maps it at display time, and only the exact marker: a statement that merely contains "(#4348)" shows as written. */
+export const WITHHELD_STATEMENT_WORDS = "Statement text withheld by the statement filter.";
+export const WITHHELD_PLAN_WORDS = "This plan was withheld by the statement filter.";
+
+/** The one place a statement or plan cell turns the stored marker into words (codeDisclosure, the block chain and deadlock graph SQL,
+ *  the generic grid cell). Anything else, a comment holding "(#123)" included, comes back untouched. */
+export function withheldDisplayText(text) {
+  return isWithheldMarker(text) ? WITHHELD_STATEMENT_WORDS : text;
+}
+
 /** Parses an alert's detail text into the mute-context dimensions. Mirrors AlertMuteContext.PopulateFromDetailText:
  *  indented "Label: value" lines, a multi-line query value, and no parse at all for a custom alert. */
 export function parseDetailContext(detailText, metricName) {

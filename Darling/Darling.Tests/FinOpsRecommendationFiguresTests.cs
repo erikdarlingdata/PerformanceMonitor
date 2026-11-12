@@ -26,18 +26,31 @@ public sealed class FinOpsRecommendationFiguresTests
     private static UtilizationEfficiencyDto Util(int physicalMemoryMb) =>
         new(5m, 10, 10m, 100L, 1000, 1000, physicalMemoryMb, 500, 0.5m, 0L, 0L, 0L, 0m, 100, null, 8, 3, "OK");
 
-    private static void InEnUs(Action body)
+    private static void InEnUs(Action body) => InCulture("en-US", body);
+
+    private static void InCulture(string name, Action body)
     {
         var previous = CultureInfo.CurrentCulture;
         try
         {
-            CultureInfo.CurrentCulture = new CultureInfo("en-US");
+            CultureInfo.CurrentCulture = new CultureInfo(name);
             body();
         }
         finally
         {
             CultureInfo.CurrentCulture = previous;
         }
+    }
+
+    [Fact]
+    public void Dormant_OnAGermanDesktop_WritesTheCountAndTheGbTotalInOneConvention()
+    {
+        // #8522: CountText writes "2" and "1,500" the same on every desktop, so the GB figure beside it does too.
+        InCulture("de-DE", () =>
+        {
+            var two = FinOpsRecommendationFigures.Dormant(Idle(2, 1536m), 0m, 0m)!;
+            Assert.Equal("2 idle databases consuming 3.0GB", two.Finding);
+        });
     }
 
     // ── Memory right-sizing (original :269 sampleCount >= 16, :272-276 ratio, target and GB compare, :282 severity, :288 savings) ──
@@ -216,7 +229,7 @@ public sealed class FinOpsRecommendationFiguresTests
         InEnUs(() =>
         {
             var two = FinOpsRecommendationFigures.Dormant(Idle(2, 1536m), 0m, 0m)!;
-            Assert.Equal("2 idle database(s) consuming 3.0GB", two.Finding);
+            Assert.Equal("2 idle databases consuming 3.0GB", two.Finding);
             Assert.Equal("Medium", two.Severity);
             Assert.Equal("High", two.Confidence);
             Assert.Equal("Databases", two.Category);
@@ -251,7 +264,7 @@ public sealed class FinOpsRecommendationFiguresTests
         {
             var names = Enumerable.Range(1, 11).Select(i => $"dev{i}").ToList();
             var row = FinOpsRecommendationFigures.DevTest(names)!;
-            Assert.Equal("11 possible dev/test database(s) on production server", row.Finding);
+            Assert.Equal("11 possible dev/test databases on production server", row.Finding);
             Assert.Equal("Databases matching dev/test patterns: dev1, dev2, dev3, dev4, dev5, dev6, dev7, dev8, dev9, dev10 and 1 more" +
                          ". If these are non-production workloads, consider moving to a lower-cost tier or separate server.", row.Detail);
             Assert.Equal("Environment", row.Category);
@@ -299,6 +312,23 @@ public sealed class FinOpsRecommendationFiguresTests
     public void StorageTier_NoRows_IsNull()
     {
         Assert.Null(FinOpsRecommendationFigures.StorageTier(new List<StorageTierIo>()));
+    }
+
+    [Fact]
+    public void StorageTier_ADatabaseWithNoWrites_ReadsNoWrites_AndTheSentenceSaysItWasJudgedOnReads()
+    {
+        InEnUs(() =>
+        {
+            // #7706: no writes is not a 0.0 ms write latency. The database still qualifies on its reads.
+            var row = FinOpsRecommendationFigures.StorageTier(new[] { Io("quiet", 1000, 900, 0, 0), Io("busy", 1000, 900, 100, 100) })!;
+            Assert.Contains("quiet (read 0.9ms, no writes)", row.Detail, StringComparison.Ordinal);
+            Assert.Contains("busy (read 0.9ms, write 1.0ms)", row.Detail, StringComparison.Ordinal);
+            Assert.DoesNotContain("write 0.0ms", row.Detail, StringComparison.Ordinal);
+            Assert.EndsWith("A database with no writes was judged on reads only.", row.Detail, StringComparison.Ordinal);
+
+            var allWrite = FinOpsRecommendationFigures.StorageTier(new[] { Io("busy", 1000, 900, 100, 100) })!;
+            Assert.DoesNotContain("judged on reads only", allWrite.Detail, StringComparison.Ordinal);
+        });
     }
 
     [Fact]

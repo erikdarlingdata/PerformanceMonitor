@@ -41,19 +41,29 @@ WHERE d.name = @database_name;", connection);
     }
 
     /// <summary>
-    /// Gets top queries by CPU for a server over a time period.
+    /// Gets the Top Queries strip's buckets for a server over a time period, at the width <see cref="SlicerBuckets"/> picks for the
+    /// window: a minute over a short window, an hour over a day.
     /// </summary>
     public async Task<List<TimeSliceBucket>> GetQueryStatsSlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+        var bucketMinutes = SlicerBuckets.MinutesFor(startTime, endTime);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<TimeSliceBucket>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        /* $4 is the bucket width in minutes, on the grid every width of SlicerBuckets divides. */
+        var bucket = $"time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql})";
 
         command.CommandText = @"
 SELECT
-    date_trunc('hour', collection_time) AS bucket,
+    " + bucket + @" AS bucket,
     COUNT(DISTINCT query_hash) AS query_count,
     COALESCE(SUM(delta_worker_time), 0) / 1000.0 AS total_cpu_ms,
     COALESCE(SUM(delta_elapsed_time), 0) / 1000.0 AS total_elapsed_ms,
@@ -64,12 +74,14 @@ FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3" + dbClause + @"
-GROUP BY date_trunc('hour', collection_time)
+GROUP BY " + bucket + @"
 ORDER BY bucket";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -92,6 +104,7 @@ ORDER BY bucket";
         }
         return items;
     }
+        }
 
     /// <summary>
     /// The statement behind <see cref="GetTopQueriesByCpuAsync"/>, split out so a test can run it beside the pre-#5381
@@ -99,7 +112,36 @@ ORDER BY bucket";
     /// <paramref name="candidates"/> is the ranking cut TopFill asked for.
     /// </summary>
     internal static string TopQueriesByCpuSql(string dbClause, int candidates) => @"
-WITH ranked AS (
+WITH winners AS (
+    /* #8549 pass 1 of 2, as Darling's reads do (#5226): rank every group of the window on the NARROW columns, the grouping key and the
+       ranking sum. The wide row below (forty aggregates and a distinct count that hashes every row's text) used to share the GROUP BY
+       that ranks, so the whole window paid for it, groups that never reached the page included. Everything that decides which groups
+       exist or survive is the old statement's, unchanged: the window, the last-execution floor, the database, exclusion and tag
+       filters, the grouping key, both HAVING predicates, the ordering and its tie-break. */
+    SELECT
+        database_name AS win_database_name,
+        query_hash AS win_query_hash,
+        host_object_name AS win_host_object_name
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + @"
+    GROUP BY database_name, query_hash, host_object_name
+    HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
+    /* #3541 A13: the parallelism floor is part of the QUERY, on the grouped population before the ranking
+       and the cap - see the method's note. $6 = 0 admits every group; NULL max_dop (never captured) reads
+       as 0 and stays out of a filtered page, as the C# arm it replaces did. */
+    AND   COALESCE(MAX(max_dop), 0) >= $6
+    /* #5299 round 3 (O16): the ranking ends on the whole group key, so a tie at the candidate cut picks the same keys in every
+       refill round, as the Darling and Viewer twins do. */
+    ORDER BY SUM(delta_worker_time) DESC, database_name, query_hash, host_object_name
+    LIMIT " + candidates + @"
+),
+ranked AS (
+    /* #8549 pass 2 of 2: the wide row, built for pass 1's winners only, over the same window and floor. The join is the exact
+       NULL-safe match on the grouping key (host_object_name is NULL on every ad-hoc row), and a winner is unique per key, so no
+       row repeats and every figure is what the single pass gave. */
     SELECT
         database_name,
         query_hash,
@@ -151,40 +193,38 @@ WITH ranked AS (
            display count. */
         COUNT(DISTINCT hash(query_text)) AS distinct_texts,
         host_object_name
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + @"
+    FROM v_query_stats AS q
+    JOIN winners AS w
+      ON  q.database_name IS NOT DISTINCT FROM w.win_database_name
+      AND q.query_hash IS NOT DISTINCT FROM w.win_query_hash
+      AND q.host_object_name IS NOT DISTINCT FROM w.win_host_object_name
+    WHERE q.server_id = $1
+    AND   q.collection_time >= $2
+    AND   q.collection_time <= $3
+    AND   q.last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE
     GROUP BY database_name, query_hash, host_object_name
-    HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
-    /* #3541 A13: the parallelism floor is part of the QUERY, on the grouped population before the ranking
-       and the cap — see the method's note. $6 = 0 admits every group; NULL max_dop (never captured) reads
-       as 0 and stays out of a filtered page, as the C# arm it replaces did. */
-    AND   COALESCE(MAX(max_dop), 0) >= $6
-    /* #5299 round 3 (O16): the ranking ends on the whole group key, so a tie at the candidate cut picks the same keys in every
-       refill round, as the Darling and Viewer twins do. */
-    ORDER BY SUM(delta_worker_time) DESC, database_name, query_hash, host_object_name
-    LIMIT " + candidates + @"
 ),
 module AS (
     /* #1568 module attribution: one procedure_stats identity per sql_handle (latest collection_time
        wins) so a statement whose sql_handle matches a cached procedure/function/trigger inherits its
        db.schema.object and the query_stats row never fans out. Both stores persist the SAME normalized
-       CONVERT(varchar(130), ..., 1) handle text, so the join key lines up; unmatched -> ad hoc. */
+       CONVERT(varchar(130), ..., 1) handle text, so the join key lines up; unmatched -> ad hoc.
+       #7256: this one stays on v_procedure_stats. Its answer is the NEWEST row of each handle over all history, not the window's, so
+       reading the hot table alone could drop a module whose only row is archived. */
+    /* #8549: the newest row of each handle comes from one aggregate, no sort. This was a ROW_NUMBER over every row of the ranked
+       handles, which sorts them (295 ms against 64 ms for 3.46 million procedure_stats rows). arg_max over (collection_time,
+       collection_id) keeps the same tie-break, the row collected last. The three names travel in one struct so they come from the
+       same row: arg_max skips a NULL argument, and a module whose newest row has NULL names must still answer NULL, as before. */
     SELECT
         sql_handle,
-        object_name,
-        schema_name,
-        database_name
+        newest.o AS object_name,
+        newest.s AS schema_name,
+        newest.d AS database_name
     FROM
     (
         SELECT
             sql_handle,
-            object_name,
-            schema_name,
-            database_name,
-            ROW_NUMBER() OVER (PARTITION BY sql_handle ORDER BY collection_time DESC, collection_id DESC) AS rn
+            arg_max({'o': object_name, 's': schema_name, 'd': database_name}, (collection_time, collection_id)) AS newest
         FROM v_procedure_stats
         WHERE server_id = $1
         AND   sql_handle IS NOT NULL
@@ -195,8 +235,8 @@ module AS (
            sql_handle alone, so a handle outside the ranked groups was never used, and a handle inside them keeps the
            same newest row. */
         AND   sql_handle IN (SELECT sql_handle FROM ranked)
-    ) ranked_modules
-    WHERE rn = 1
+        GROUP BY sql_handle
+    ) AS ranked_modules
 ),
 texts AS (
     /* #5381: the representative text is fetched AFTER the ranking, for the candidate groups only, and from the
@@ -309,13 +349,22 @@ SELECT
     /// returned top-N page in C#, and a box whose hottest plans were all serial answered an empty page while
     /// the window held parallel plans. Darling's <c>TopQueriesSql</c> carries the same floor as its $6.
     /// </summary>
-    public async Task<List<QueryStatsRow>> GetTopQueriesByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, ServerClock? serverClock = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int minMaxDop = 0, QueryTagReadScope? tags = null)
+    public async Task<List<QueryStatsRow>> GetTopQueriesByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, ServerClock? serverClock = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int minMaxDop = 0, QueryTagReadScope? tags = null, IReadOnlyList<string>? excludeDatabaseNames = null)
     {
         using var _q = TimeQuery("GetTopQueriesByCpuAsync", "v_query_stats top N by CPU");
-        using var connection = await OpenConnectionAsync();
-
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. The view opens every Parquet file
+           of query_stats (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStatsRow>> ReadAsync(string relation)
+        {
+        using var connection = await OpenConnectionAsync();
         var dbClause = BuildDbInClause(databaseNames, "database_name", 7, out var dbValues);
+        /* #7725: the databases the server dropped, left out of the listed-databases ranking (the fill reads them with databaseNames).
+           NULL-safe like the procedures read: a row with no database name stays. */
+        dbClause += BuildDbExcludeClause(excludeDatabaseNames, "database_name", 7 + dbValues.Count, out var excludeValues);
         /* #5992: the query tag filter rides the same place as the database filter, before the ranking and the cap. */
         var tagValues = new List<object>();
         if (tags is not null) { dbClause += QueryTagReadScope.HashToken("query_hash"); tagValues.AddRange(tags.ParameterValues); }
@@ -325,7 +374,8 @@ SELECT
         {
         using var command = connection.CreateCommand();
         command.CommandText = TopQueriesByCpuSql(dbClause, candidates);
-        if (tags is not null) command.CommandText = tags.Apply(command.CommandText, 7 + dbValues.Count);
+        if (tags is not null) command.CommandText = tags.Apply(command.CommandText, 7 + dbValues.Count + excludeValues.Count);
+        if (relation != "v_query_stats") command.CommandText = command.CommandText.Replace("v_query_stats", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -337,6 +387,8 @@ SELECT
         command.Parameters.Add(new DuckDBParameter { Value = (serverClock ?? ServerClock.Utc).OffsetMinutesAt(startTime) });
         command.Parameters.Add(new DuckDBParameter { Value = minMaxDop });
         foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
+        foreach (var db in excludeValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
         foreach (var tagValue in tagValues)
             command.Parameters.Add(new DuckDBParameter { Value = tagValue });
@@ -408,6 +460,7 @@ SELECT
         }
 
         return await TopFill.RunAsync(top, RunRoundAsync);
+        }
     }
 
     /// <summary>
@@ -421,6 +474,11 @@ SELECT
         IReadOnlyList<string>? databaseNames = null)
     {
         using var _q = TimeQuery("GetQueryStatsComparisonAsync", "v_query_stats comparison");
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", currentStart < baselineStart ? currentStart : baselineStart, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStatsComparisonItem>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
@@ -499,6 +557,7 @@ FULL OUTER JOIN baseline_period b
   ON  c.database_name IS NOT DISTINCT FROM b.database_name
   AND c.query_hash IS NOT DISTINCT FROM b.query_hash;";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = currentStart });
         command.Parameters.Add(new DuckDBParameter { Value = currentEnd });
@@ -528,6 +587,7 @@ FULL OUTER JOIN baseline_period b
         }
 
         return items;
+        }
     }
 
     /// <summary>
@@ -535,9 +595,15 @@ FULL OUTER JOIN baseline_period b
     /// </summary>
     public async Task<List<QueryStatsHistoryRow>> GetQueryStatsHistoryAsync(int serverId, string databaseName, string queryHash, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStatsHistoryRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -595,6 +661,7 @@ AND   collection_time >= $4
 AND   collection_time <= $5
 ORDER BY collection_time";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
         command.Parameters.Add(new DuckDBParameter { Value = queryHash });
@@ -659,15 +726,22 @@ ORDER BY collection_time";
 
         return items;
     }
+        }
 
     /// <summary>
     /// Gets collection-level history for a specific procedure (for drilldown).
     /// </summary>
     public async Task<List<ProcedureStatsHistoryRow>> GetProcedureStatsHistoryAsync(int serverId, string databaseName, string schemaName, string objectName, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("procedure_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<ProcedureStatsHistoryRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -715,6 +789,7 @@ AND   collection_time >= $5
 AND   collection_time <= $6
 ORDER BY collection_time";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "procedure_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
         command.Parameters.Add(new DuckDBParameter { Value = schemaName });
@@ -766,6 +841,7 @@ ORDER BY collection_time";
 
         return items;
     }
+        }
 
     /// <summary>
     /// #5449: the rows the per-procedure history CHART plots: the history rows plus a zero row at each collector run that
@@ -993,19 +1069,29 @@ OPTION(RECOMPILE);',
     }
 
     /// <summary>
-    /// Gets top procedures by CPU for a server.
+    /// Gets the Top Procedures strip's buckets for a server, at the width <see cref="SlicerBuckets"/> picks for the window: a minute
+    /// over a short window, an hour over a day.
     /// </summary>
     public async Task<List<TimeSliceBucket>> GetProcStatsSlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+        var bucketMinutes = SlicerBuckets.MinutesFor(startTime, endTime);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("procedure_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<TimeSliceBucket>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        /* $4 is the bucket width in minutes, on the grid every width of SlicerBuckets divides. */
+        var bucket = $"time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql})";
 
         command.CommandText = @"
 SELECT
-    date_trunc('hour', collection_time) AS bucket,
+    " + bucket + @" AS bucket,
     /* #5449: a procedure that did no work in a cycle has no stored row now (old data still has its zero-delta row), so
        the count is of procedures WITH work: the same number on both. */
     COUNT(DISTINCT object_name) FILTER (WHERE COALESCE(delta_execution_count, 0) > 0 OR COALESCE(delta_worker_time, 0) > 0 OR COALESCE(delta_elapsed_time, 0) > 0) AS proc_count,
@@ -1018,12 +1104,14 @@ FROM v_procedure_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3" + dbClause + @"
-GROUP BY date_trunc('hour', collection_time)
+GROUP BY " + bucket + @"
 ORDER BY bucket";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "procedure_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -1050,14 +1138,20 @@ ORDER BY bucket";
         }
         return items;
     }
+        }
 
     public async Task<List<ProcedureStatsRow>> GetTopProceduresByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, ServerClock? serverClock = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, IReadOnlyList<string>? excludeDatabaseNames = null, QueryTagReadScope? tags = null)
     {
         using var _q = TimeQuery("GetTopProceduresByCpuAsync", "v_procedure_stats top N by CPU");
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("procedure_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<ProcedureStatsRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
 
         /* #5633 review: databases the server dropped, left out of an all-databases ranking. NULL-safe: a row with no database name stays. */
@@ -1100,7 +1194,9 @@ AND   collection_time <= $3
 AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + excludeClause + (tags is null ? "" : QueryTagReadScope.ObjectToken("database_name", "schema_name", "object_name")) + @"
 GROUP BY database_name, schema_name, object_name, object_type
 HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-ORDER BY SUM(delta_worker_time) DESC
+/* #7908: the ranking ends on the whole group key, so procedures tied at the cut (zero CPU on a quiet window) come back in
+   one order every time, as the queries read and Darling's procedures read do. */
+ORDER BY SUM(delta_worker_time) DESC, database_name, schema_name, object_name, object_type
 LIMIT $4";
         if (tags is not null)
         {
@@ -1108,6 +1204,7 @@ LIMIT $4";
             tagValues.AddRange(tags.ParameterValues);
         }
 
+        command.CommandText = SwapArchiveView(command.CommandText, "procedure_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -1160,6 +1257,7 @@ LIMIT $4";
 
         return items;
     }
+        }
 
     /// <summary>
     /// The statement behind <see cref="GetProcedureStatsComparisonAsync"/>, split out so a test can run it beside the
@@ -1287,12 +1385,20 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
         IReadOnlyList<string>? databaseNames = null)
     {
         using var _q = TimeQuery("GetProcedureStatsComparisonAsync", "v_procedure_stats comparison");
+        /* #7256: the statement reads procedure_stats and query_stats (the text lookup), and each is read as its hot table alone when its own
+           archive holds nothing at or after the start of the earlier range. */
+        string[] tables = ["procedure_stats", "query_stats"];
+        return await ReadWindowSkippingEmptyArchivesAsync(tables, "collection_time", currentStart < baselineStart ? currentStart : baselineStart, ReadAsync, CancellationToken.None);
+
+        async Task<List<ProcedureStatsComparisonItem>> ReadAsync(Func<string, string> relationFor)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
 
         command.CommandText = ProcedureStatsComparisonSql(dbClause);
 
+        command.CommandText = SwapViews(command.CommandText, tables, relationFor);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = currentStart });
         command.Parameters.Add(new DuckDBParameter { Value = currentEnd });
@@ -1323,6 +1429,7 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
         }
 
         return items;
+        }
     }
 
     /// <summary>
@@ -1373,21 +1480,30 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
     /// <summary>
     /// The shared body of the two bucketed duration-trend chart reads (#4234): <see cref="GetQueryDurationTrendAsync"/>
     /// and <see cref="GetProcedureDurationTrendAsync"/> differ only in which view they read, via
-    /// <paramref name="relation"/> — one of the two constants those callers pass, never caller text — so the SQL
+    /// <paramref name="view"/> — one of the two constants those callers pass, never caller text — so the SQL
     /// text (<see cref="DurationTrendChartSql"/>) and the row-buffering/stamping below are written once.
     /// </summary>
     private async Task<List<QueryTrendPoint>> ReadDurationTrendChartAsync(
-        string relation, int serverId, int hoursBack, DateTime? fromDate, DateTime? toDate, IReadOnlyList<string>? databaseNames, DateTime? asOfUtc)
+        string view, int serverId, int hoursBack, DateTime? fromDate, DateTime? toDate, IReadOnlyList<string>? databaseNames, DateTime? asOfUtc)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        /* #7256: a table whose archive holds nothing at or after the start of what the statement reads is read as the hot table alone. The procedure grain
+           also reads the collection log its axis comes from. The statement is built with the view's name, because the procedure form is chosen by it,
+           and each view is swapped for its hot table afterwards. */
+        var tables = view == "v_procedure_stats" ? new[] { "procedure_stats", "collection_log" } : new[] { "query_stats" };
+        return await ReadWindowSkippingEmptyArchivesAsync(tables, "collection_time", startTime.AddSeconds(-CollectorDeltaCalculator.DefaultMaxGapSeconds), ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryTrendPoint>> ReadAsync(Func<string, string> relationFor)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var widthParamIndex = 4 + dbValues.Count;
         var bucketMinutes = AutoChartBucketMinutes(startTime, endTime);
 
-        command.CommandText = DurationTrendChartSql(relation, dbClause, widthParamIndex);
+        command.CommandText = SwapViews(DurationTrendChartSql(view, dbClause, widthParamIndex), tables, relationFor);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -1396,7 +1512,7 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
             command.Parameters.Add(new DuckDBParameter { Value = db });
         command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var rows = new List<(DateTime BucketStart, double? ElapsedMsPerSecond, double? ExecutionsPerSecond, DateTime FirstCollectionTime, long CollectionCount)>();
+        var rows = new List<(DateTime BucketStart, double? ElapsedMsPerSecond, double? ExecutionsPerSecond, DateTime FirstCollectionTime, long CollectionCount, long? ExecutionCount)>();
         var everyBucketSingleton = true;
 
         using var reader = await command.ExecuteReaderAsync();
@@ -1407,13 +1523,15 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
                 everyBucketSingleton = false;
 
             /* NULL stays NULL (#3541 A12, at the bucket level): a bucket whose every collection was unrated
-               (a restart, or the window's first pre-v61 collection with no LAG) is kept rather than dropped. */
+               (a restart, or the window's first pre-v61 collection with no LAG) is kept rather than dropped,
+               its count null with its rates (#8073: the executions summed are the rated collections'). */
             rows.Add((
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1)),
                 reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2)),
                 reader.GetDateTime(3),
-                collectionCount));
+                collectionCount,
+                reader.IsDBNull(5) ? null : ToInt64(reader.GetValue(5))));
         }
 
         var items = new List<QueryTrendPoint>(rows.Count);
@@ -1423,13 +1541,14 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
             {
                 CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
                 Value = row.ElapsedMsPerSecond,
-                ExecutionCount = row.ExecutionsPerSecond.HasValue ? (long)row.ExecutionsPerSecond.Value : null,
+                ExecutionCount = row.ExecutionCount,
                 ExecutionsPerSecond = row.ExecutionsPerSecond
             });
         }
 
         return items;
     }
+        }
 
     /// <summary>
     /// The narrowest ladder width (#4234) that keeps a single-series chart near <see cref="TrendBudget.Chart"/>'s
@@ -1455,24 +1574,7 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
     /// never shifts, mirroring the wait/perfmon trend reads' own width parameter.
     /// </summary>
     internal static string DurationTrendChartSql(string relation, string dbClause, int widthParamIndex) => $@"
-WITH {(relation == "v_procedure_stats" ? ProcedureCollectionsSql(dbClause) : $@"raw AS
-(
-    SELECT
-        collection_time,
-        {FilteredSum("delta_elapsed_time", dbClause)} / 1000.0 AS total_elapsed_ms,
-        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
-        /* The stored interval, three-state (#3653 A11): MAX 0 = every row unknowable (a restart) -> NULL, so
-           the collection is unrated; NULL = pre-v61, the LAG stands in; n = measured. */
-        CASE WHEN MAX(sample_interval_seconds) IS NULL
-             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-             ELSE NULLIF(MAX(sample_interval_seconds), 0)
-        END AS interval_seconds{(dbClause.Length == 0 ? "" : $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows")}
-    FROM {relation}
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    GROUP BY collection_time
-),")}
+WITH {(relation == "v_procedure_stats" ? ProcedureCollectionsSql(dbClause) : QueryCollectionsSql(relation, dbClause, includeElapsed: true))}
 rated AS
 (
     SELECT
@@ -1489,10 +1591,58 @@ SELECT
     SUM(rated_elapsed_ms) / SUM(rated_seconds) AS elapsed_ms_per_second,
     CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
     MIN(collection_time) AS first_collection_time,
-    COUNT(*) AS collection_count
+    COUNT(*) AS collection_count,
+    SUM(rated_executions) AS execution_count
 FROM rated{(dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)")}
 GROUP BY 1
 ORDER BY 1";
+
+    /// <summary>
+    /// #7161: the collections of the query grain, as the leading <c>raw</c> CTE of the bucketed duration-trend and execution-count
+    /// reads (<c>total_elapsed_ms</c> only when <paramref name="includeElapsed"/>, <c>total_executions</c>, <c>interval_seconds</c>,
+    /// and <c>matched_rows</c> under a database filter). A collection's seconds are its gap to the previous collection, never the
+    /// longest <c>sample_interval_seconds</c> of any one query in it: the collector keeps only queries that ran in the last ten
+    /// minutes, so a query that runs every 15 or 30 minutes returns with its own long interval beside siblings at 60 s, and
+    /// <c>MAX</c> over the collection stretched the whole minute to that length and cut the rate about 15-fold. The gap is NULL
+    /// (unrated) past <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/>, the collector's own limit. The three states
+    /// stay distinct: every row stored 0 (a restart) is unrated whatever the gap, and the first collection of the store, which
+    /// has no previous one, keeps its stored interval. The table is read from an hour before <c>$2</c> so the first in-window
+    /// collection has its previous one, and the collections before <c>$2</c> are dropped after the LAG.
+    /// Darling's twin is <c>DurationTrendRouting.RawCollectionsCte</c>.
+    /// </summary>
+    internal static string QueryCollectionsSql(string relation, string dbClause, bool includeElapsed)
+    {
+        const int gap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
+        var elapsed = includeElapsed ? $"\n            {FilteredSum("delta_elapsed_time", dbClause)} / 1000.0 AS total_elapsed_ms," : "";
+        var elapsedOut = includeElapsed ? "\n        total_elapsed_ms," : "";
+        var matched = dbClause.Length == 0 ? "" : $",\n            COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows";
+        var matchedOut = dbClause.Length == 0 ? "" : ",\n        matched_rows";
+        return $@"raw AS
+(
+    SELECT
+        collection_time,{elapsedOut}
+        total_executions,
+        CASE
+            WHEN stored_interval = 0 THEN NULL
+            WHEN gap_seconds IS NOT NULL THEN CASE WHEN gap_seconds <= {gap} THEN gap_seconds END
+            ELSE NULLIF(stored_interval, 0)
+        END AS interval_seconds{matchedOut}
+    FROM
+    (
+        SELECT
+            collection_time,{elapsed}
+            {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
+            MAX(sample_interval_seconds) AS stored_interval,
+            extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS gap_seconds{matched}
+        FROM {relation}
+        WHERE server_id = $1
+        AND   collection_time >= $2 - to_seconds({gap})
+        AND   collection_time <= $3
+        GROUP BY collection_time
+    ) AS g
+    WHERE collection_time >= $2
+),";
+    }
 
     /// <summary>
     /// #5449: the collections of the procedure grain, as the leading CTEs of both bucketed duration-trend reads, ending in
@@ -1641,7 +1791,7 @@ LIMIT 1";
     /// <para>#4234: bucketed the same way and for the same reason as <see cref="GetQueryDurationTrendAsync"/> —
     /// see that method's own #4234 paragraph for the shape, the summed-rate rule and the singleton-window
     /// stamping. This read supplies <c>v_procedure_stats</c> as <see cref="ReadDurationTrendChartAsync"/>'s
-    /// <c>relation</c>; everything else is shared.</para>
+    /// <c>view</c>; everything else is shared.</para>
     /// </summary>
     public Task<List<QueryTrendPoint>> GetProcedureDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null) =>
         ReadDurationTrendChartAsync("v_procedure_stats", serverId, hoursBack, fromDate, toDate, databaseNames, asOfUtc);
@@ -1659,16 +1809,23 @@ LIMIT 1";
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetExecutionCountTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime.AddSeconds(-CollectorDeltaCalculator.DefaultMaxGapSeconds), ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryTrendPoint>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var widthParamIndex = 4 + dbValues.Count;
         var bucketMinutes = AutoChartBucketMinutes(startTime, endTime);
 
         command.CommandText = ExecutionCountTrendChartSql(dbClause, widthParamIndex);
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -1705,6 +1862,7 @@ LIMIT 1";
         }
         return items;
     }
+        }
 
     /// <summary>
     /// The SQL for the bucketed execution-count trend chart (#4234): the same <c>raw</c>/<c>rated</c>/bucketed
@@ -1713,22 +1871,7 @@ LIMIT 1";
     /// parameter). Reads <c>v_query_stats</c> only; there is no procedure-side execution-count chart.
     /// </summary>
     internal static string ExecutionCountTrendChartSql(string dbClause, int widthParamIndex) => $@"
-WITH raw AS
-(
-    SELECT
-        collection_time,
-        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
-        /* The stored interval, three-state (#3653 A11) — see GetQueryDurationTrendAsync. */
-        CASE WHEN MAX(sample_interval_seconds) IS NULL
-             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-             ELSE NULLIF(MAX(sample_interval_seconds), 0)
-        END AS interval_seconds{(dbClause.Length == 0 ? "" : $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows")}
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    GROUP BY collection_time
-),
+WITH {QueryCollectionsSql("v_query_stats", dbClause, includeElapsed: false)}
 rated AS
 (
     SELECT
@@ -1891,6 +2034,11 @@ ORDER BY 1";
            AcquireReadLock's recursion escape. A range with no row at all still answers the empty result below. */
         var columnsStart = await GetHeatmapColumnsStartAsync(serverId, startTime, endTime);
 
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<HeatmapResult> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
@@ -1925,13 +2073,14 @@ SELECT
         WHEN metric_value < 100000 THEN 5
         ELSE 6
     END AS bucket_index,
-    COUNT(*) AS query_count,
+    COUNT(DISTINCT COALESCE(query_hash, '')) AS query_count, /* #7881: distinct queries, not sample rows; a NULL hash is one group */
     ARG_MAX(query_hash, delta_execution_count) AS top_query_hash,
     ARG_MAX(query_preview, delta_execution_count) AS top_query_text
 FROM per_query
 GROUP BY time_bin, bucket_index
 ORDER BY time_bin, bucket_index";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -1981,6 +2130,7 @@ ORDER BY time_bin, bucket_index";
             BucketLabels = BucketLabelsMap[metric],
             CellDetails = cellDetails
         };
+        }
     }
 }
 
@@ -2021,14 +2171,19 @@ public class QueryTrendPoint
 {
     public DateTime CollectionTime { get; set; }
     public double? Value { get; set; }
+    /// <summary>
+    /// The executions summed over the point (#8073): the numerator <see cref="ExecutionsPerSecond"/> was built
+    /// from, so a caller summing it over a window gets the executions that ran. On the plan-cache trends it sums
+    /// the point's rated collections only (an unrated collection's deltas were never measured, so a point with no
+    /// rated collection carries null); a Query Store interval always stores its count, so that trend carries it
+    /// even on an unrated point. Darling's twin is <c>QueryDurationTrendPoint.ExecutionCount</c>.
+    /// </summary>
     public long? ExecutionCount { get; set; }
 
     /// <summary>
-    /// The SAME quantity as <see cref="ExecutionCount"/> - executions per second - without the truncation.
-    /// <para>The long shipped first and the charts have always plotted it; on a server doing three
-    /// executions a second that rounds harmlessly, and on a quiet one doing 0.4 it reports ZERO, which reads
-    /// as an idle server rather than a slow one. Kept alongside rather than replacing it so nothing reading
-    /// the long breaks. Darling's twin is <c>QueryDurationTrendPoint.ExecutionsPerSecond</c>.</para>
+    /// Executions per second, the rate the charts plot: a double, because a server doing 0.4 executions a second
+    /// is quiet rather than idle and only a double can say so. Darling's twin is
+    /// <c>QueryDurationTrendPoint.ExecutionsPerSecond</c>.
     /// </summary>
     public double? ExecutionsPerSecond { get; set; }
 
@@ -2048,6 +2203,12 @@ public class QueryTrendPoint
     /// <summary>How many of a bucketed point's collections had no knowable rate and were left out of it (#3897).
     /// Null on an unbucketed point, which is its own single collection — unrated or not, per <see cref="HasRate"/>.</summary>
     public long? UnratedInBucket { get; set; }
+
+    /// <summary>#8575: set only on a Query Store point whose interval was still OPEN when it was last captured: the seconds its
+    /// totals cover (the newest snapshot that stored one of its rows, less the interval's start), shorter than the interval's length.
+    /// The rates are over this, not over the whole interval, and are null when it is under 60 seconds. Null on a closed interval and
+    /// on every other trend. Darling's twin is <c>QueryDurationTrendPoint.PartialCoveredSeconds</c>.</summary>
+    public double? PartialCoveredSeconds { get; set; }
 }
 
 public class QueryStatsRow
@@ -2062,6 +2223,10 @@ public class QueryStatsRow
     public bool CanGetActualPlan => !string.IsNullOrEmpty(QueryText);
 
     public string DatabaseName { get; set; } = "";
+    /// <summary>#7725: true for a row from a database the server no longer lists (the ranking puts the listed databases first and fills what the limit leaves from the dropped ones).</summary>
+    public bool IsDropped { get; set; }
+    /// <summary>#7725: what the grid's database cell shows: the name, with " (dropped)" after a database the server no longer lists.</summary>
+    public string DatabaseDisplay => PerformanceMonitor.Common.DroppedDatabaseMark.Display(DatabaseName, IsDropped);
     public string QueryHash { get; set; } = "";
     public DateTime? LastExecutionTime { get; set; }
     public DateTime? CreationTime { get; set; }
@@ -2157,6 +2322,10 @@ public class ProcedureStatsRow
     public bool CanAssignQueryTag => Helpers.QueryTagGrid.TargetOf(this) != null;
 
     public string DatabaseName { get; set; } = "";
+    /// <summary>#7725: true for a row from a database the server no longer lists (the ranking puts the listed databases first and fills what the limit leaves from the dropped ones).</summary>
+    public bool IsDropped { get; set; }
+    /// <summary>#7725: what the grid's database cell shows: the name, with " (dropped)" after a database the server no longer lists.</summary>
+    public string DatabaseDisplay => PerformanceMonitor.Common.DroppedDatabaseMark.Display(DatabaseName, IsDropped);
     public string SchemaName { get; set; } = "";
     public string ObjectName { get; set; } = "";
     public string ObjectType { get; set; } = "";
@@ -2209,8 +2378,10 @@ public class QueryStatsHistoryRow
     public long DeltaPhysicalReads { get; set; }
     public long DeltaRows { get; set; }
     public long DeltaSpills { get; set; }
-    public int MinDop { get; set; }
-    public int MaxDop { get; set; }
+    public int? MinDop { get; set; }
+    public int? MaxDop { get; set; }
+    /// <summary>How many distinct plan hashes the point's rows carry (#7608). Set by get_query_trend's fold.</summary>
+    public int PlanCount { get; set; }
     public long MinCpuUs { get; set; }
     public long MaxCpuUs { get; set; }
     public long MinElapsedUs { get; set; }

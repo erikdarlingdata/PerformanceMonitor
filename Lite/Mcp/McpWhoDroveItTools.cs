@@ -43,7 +43,7 @@ public sealed class McpWhoDroveItTools
         "procedure_cpu_ms is the procedure stats' CPU, shown beside cpu_ms and NEVER added to it: a procedure's statements are already in cpu_ms. cpu_source and procedure_cpu_source name where each figure came from. <<GUIDE>> " +
         "Lite reads its raw query_stats and procedure_stats only (no hourly rollup), so effective_start and window_truncated say how far the window reached; Darling's statements_window and procedures_window are not here. " +
         "Rows: database_name, cpu_ms, share, elapsed_ms, executions, statements, top_statement (query_hash, cpu_ms, share_of_database, executions, query_text preview masked by mcp.dataDetail), procedure_cpu_ms, top_procedure. " +
-        "An empty answer says why: the plan cache was not collected, or the window held no statement CPU. databases_returned/truncated: top caps at 100 and truncated says more databases matched. Deltas only, so a plan evicted between samples loses its CPU, the same limit get_top_queries_by_cpu has.")]
+        "An empty answer says why: the plan cache was not collected, or the window held no statement CPU. databases_returned/truncated: top caps at 100 and truncated says more databases matched. Deltas only, so a plan evicted between samples loses its CPU, the same limit get_top_queries_by_cpu has." + McpHelpers.UtcStampsDescription)]
     public static async Task<string> GetCpuByDatabase(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -73,10 +73,10 @@ public sealed class McpWhoDroveItTools
             if (page.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("empty",
-                        $"No statement CPU for {resolved.DisplayName} in the last {hours_back} hour(s): the plan cache collector wrote no interval with executions in the window. "
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
+                        $"No statement CPU for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}: the plan cache collector wrote no interval with executions in the window. "
                         + "Procedure stats are not a substitute, because they count the same work.",
-                        notice.AsHints());
+                        notice.AsHints()), start);
             }
 
             var serverCpuUs = page[0].ServerCpuUs;
@@ -118,6 +118,7 @@ public sealed class McpWhoDroveItTools
                 cpu_source = "query_stats",
                 procedure_cpu_source = "procedure_stats",
                 overlap_note = "cpu_ms counts every statement the plan cache sampled, including the statements inside procedures. procedure_cpu_ms is the procedures' own total for the same work: read it beside cpu_ms, never added to it.",
+                coverage_note = QueryStatsCoverage.StoredRowsNote,
                 share_note = "share is a database's cpu_ms over server_cpu_ms, the CPU of every database in the window, so it does not change with top.",
                 databases_returned = databases.Count,
                 truncated = cut,
@@ -148,10 +149,10 @@ public sealed class McpWhoDroveItTools
     [McpServerTool(Name = "get_load_by_caller"), Description(
         "Groups the active-query snapshots of a window ending at as_of by caller (host_name, program_name, login_name), ranked by CPU, with requests, CPU, elapsed time, shares of the window and top statements. " +
         "Each request counts once, at the largest CPU any capture saw. Shares are of the window, not of the page. login_name and host_name are masked by mcp.dataDetail. <<GUIDE>> " +
-        "A request is a session and its start (capture time minus its elapsed time, to the second). Its cpu_ms and elapsed_ms are the largest cumulative figures any capture saw, so a request seen in ten captures is one request. A request that started before the window or ran on after it counts only what the captures saw, and one shorter than the capture interval may not be seen at all. " +
+        "A request is a session and its start (capture time minus its elapsed time, to the second). Its cpu_ms is the largest cumulative figure any capture saw, so a request seen in ten captures is one request; its elapsed_ms is that figure cut to the window, so a request that started before the window counts only the elapsed inside it (the capture time less the window start), never its whole lifetime. A request that ran on after the window counts only what the captures saw, and one shorter than the capture interval may not be seen at all. " +
         "requests counts the distinct requests, samples the snapshots (one per running request per capture), captures the distinct capture times. " +
-        "Rows: host_name, program_name, login_name (null = the snapshot carried none), requests, samples, captures, cpu_ms, cpu_share, elapsed_ms, elapsed_share, sample_share, first_seen, last_seen, top_statements (query_hash, requests, samples, cpu_ms, query_text preview masked by mcp.dataDetail). WAITFOR shells are dropped, as get_active_queries drops them. " +
-        "An empty answer says why: query_snapshots was not collected, or the window held no active request. top caps at 100 groups and truncated says more matched; statements per group default 3, at most 10. Reads the snapshots the collector wrote; it does not see a request that finished between two captures.")]
+        "Rows: host_name, program_name, login_name (null = the snapshot carried none), requests, samples, captures, cpu_ms, cpu_share, elapsed_ms, elapsed_share, sample_share, first_seen, last_seen, top_statements (query_hash, requests, samples, cpu_ms, query_text preview masked by mcp.dataDetail). WAITFOR shells are dropped, as get_active_queries drops them, and so is the sp_server_diagnostics session (the health-check request that runs for the life of the instance), as the long-running-query alert drops it. " +
+        "An empty answer says why: query_snapshots was not collected, or the window held no active request. top caps at 100 groups and truncated says more matched; statements per group default 3, at most 10. Reads the snapshots the collector wrote; it does not see a request that finished between two captures." + McpHelpers.UtcStampsDescription)]
     public static async Task<string> GetLoadByCaller(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -186,9 +187,9 @@ public sealed class McpWhoDroveItTools
             if (page.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_snapshots", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("empty",
-                        $"No active-query snapshots for {resolved.DisplayName} in the last {hours_back} hour(s): nothing was running at a capture, or the collector did not run in the window.",
-                        notice.AsHints());
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
+                        $"No active-query snapshots for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}: nothing was running at a capture, or the collector did not run in the window.",
+                        notice.AsHints()), start);
             }
 
             static double? Share(double part, double whole) => whole > 0 ? Math.Round(part / whole, 4) : null;
@@ -232,7 +233,7 @@ public sealed class McpWhoDroveItTools
                 total_samples = first.TotalSamples,
                 total_cpu_ms = Math.Round(first.TotalCpuMs, 1),
                 total_elapsed_ms = Math.Round(first.TotalElapsedMs, 1),
-                sampling_note = "Each request counts once, by its largest cumulative cpu_ms and elapsed_ms over the captures that saw it (a request is a session and its start, to the second). A request that started before the window or ran on after it counts only what the captures saw, and one shorter than the capture interval may not be seen at all. Shares are of the window's total over every caller, not of the page.",
+                sampling_note = "Each request counts once, by its largest cumulative cpu_ms over the captures that saw it and by its elapsed_ms cut to the window (a request is a session and its start, to the second). A request that started before the window counts only the elapsed inside it; one that ran on after the window counts only what the captures saw, and one shorter than the capture interval may not be seen at all. WAITFOR shells and the sp_server_diagnostics session are not counted. Shares are of the window's total over every caller, not of the page.",
                 callers_returned = callers.Count,
                 truncated = cut,
                 callers,
@@ -254,7 +255,7 @@ public sealed class McpWhoDroveItTools
         "A session counts once per capture. <<GUIDE>> " +
         "Waits are session counts per wait_type at the capture itself (none = running, no wait). That collector (dmv_blocking_snapshots, the always-on blocking snapshot) writes rows only while something is blocked. " +
         "Rows: collection_time, query_hash, sessions, blocked_sessions (sessions with blocking_session_id set at the capture), max_wait_ms, waits [{wait_type, sessions}], query_text preview masked by mcp.dataDetail, head_blocker {spid, blocked_sessions (everything behind it, directly or not), wait_time_ms, login_name, host_name, program_name, database_name, query_text} and blocking_snapshot_time. " +
-        "min_sessions default 5, at least 2; top caps at 100. An empty answer says why: no capture in the window had that many sessions on one statement, or query_snapshots was not collected. WAITFOR shells are dropped, as get_active_queries drops them. The pile-up is seen only at captures, so a pile-up that came and went between two captures is not listed.")]
+        "min_sessions default 5, at least 2; top caps at 100. An empty answer says why: no capture in the window had that many sessions on one statement, or query_snapshots was not collected. WAITFOR shells are dropped, as get_active_queries drops them. The pile-up is seen only at captures, so a pile-up that came and went between two captures is not listed." + McpHelpers.UtcStampsDescription)]
     public static async Task<string> GetQueryPileups(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -287,10 +288,10 @@ public sealed class McpWhoDroveItTools
             if (page.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_snapshots", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("empty",
-                        $"No capture in the last {hours_back} hour(s) on {resolved.DisplayName} had {min_sessions} or more sessions running the same query_hash. "
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
+                        $"No capture {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))} on {resolved.DisplayName} had {min_sessions} or more sessions running the same query_hash. "
                         + "A pile-up between two captures is not seen; a lower min_sessions or a longer window may find one.",
-                        notice.AsHints());
+                        notice.AsHints()), start);
             }
 
             /* The head blocker of each pile-up, from the DMV blocking snapshot nearest its time. */

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
@@ -53,7 +54,7 @@ WITH windowed AS (
     SELECT
         database_name, file_name, physical_name, file_type_desc, collection_time,
         total_size_mb, auto_growth_mb, is_percent_growth, growth_pct, max_size_mb,
-        volume_mount_point, volume_total_mb, volume_free_mb,
+        " + VolumeKey.Sql + @" AS volume_mount_point, volume_total_mb, volume_free_mb,
         ROW_NUMBER() OVER (PARTITION BY database_name, file_name ORDER BY collection_time DESC) AS rn_new,
         ROW_NUMBER() OVER (PARTITION BY database_name, file_name ORDER BY collection_time ASC)  AS rn_old
     FROM v_database_size_stats
@@ -86,18 +87,26 @@ WHERE c.rn_new = 1
 AND   c.total_size_mb IS NOT NULL
 ORDER BY c.database_name, c.file_name";
 
+    /* #7256: reads the hot table alone when the Parquet archive of database_size_stats holds nothing inside the lookback,
+       instead of opening every archive file on each alert tick. */
     public async Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthAsync(int serverId, int lookbackMinutes)
     {
-        using var connection = await OpenConnectionAsync();
+        using var _q = TimeQuery("GetDatabaseFileGrowthAsync", "v_database_size_stats file growth");
+        var windowStart = DateTime.UtcNow.AddMinutes(-Math.Max(1, lookbackMinutes));
+        return await ReadWindowSkippingEmptyArchiveAsync("database_size_stats", "collection_time", windowStart,
+            view => ReadDatabaseFileGrowthAsync(DatabaseFileGrowthSql.Replace("v_database_size_stats", view, StringComparison.Ordinal), serverId, windowStart),
+            CancellationToken.None);
+    }
+
+    private async Task<List<DatabaseFileGrowthInfo>> ReadDatabaseFileGrowthAsync(string sql, int serverId, DateTime windowStart)
+    {
+        using var connection = await OpenConnectionAsync(timer: null, CancellationToken.None, holderMember: nameof(GetDatabaseFileGrowthAsync));
         using var command = connection.CreateCommand();
 
-        command.CommandText = DatabaseFileGrowthSql;
+        command.CommandText = sql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter
-        {
-            Value = DateTime.UtcNow.AddMinutes(-Math.Max(1, lookbackMinutes))
-        });
+        command.Parameters.Add(new DuckDBParameter { Value = windowStart });
 
         var items = new List<DatabaseFileGrowthInfo>();
         using var reader = await command.ExecuteReaderAsync();

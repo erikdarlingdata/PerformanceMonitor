@@ -61,6 +61,12 @@ public static class QueryTagMapStore
     /// The keys of one server whose sightings changed after the cursor, oldest first, at most $5. $1 server_id,
     /// $2 the cursor's time, $3 and $4 the cursor's kind and key (the tie-break among keys with the same time: one
     /// batch stamps every key it touches with one <c>now()</c>, so a time alone could not step past a full page).
+    /// <para>A re-sighting of a stored row moves <c>last_seen</c> at most once an hour (#8716), while an insert always takes
+    /// <c>now()</c>. That is enough: a key's resolution reads only the key, the caller fields, the database and the first
+    /// text sample, and the only way those change between rule versions is a NEW sighting row (a new database, application,
+    /// login or host), which is an insert, or a conflict that fills an object name or sample the row lacked, which the
+    /// writer stamps too. A plain re-sighting changes nothing the resolver reads, so missing it costs nothing, and the
+    /// hourly bump brings each active key up about once an hour, where the map write skips a row that already says the same.</para>
     /// </summary>
     internal const string ChangedKeysSql = """
 SELECT key_kind, key, last_seen

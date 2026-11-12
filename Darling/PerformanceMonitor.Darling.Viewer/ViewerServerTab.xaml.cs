@@ -89,11 +89,14 @@ public partial class ViewerServerTab : UserControl
     internal const int PgStorageInnerTabIndex = 25;
 
     private readonly ViewerDataService _dataService;
-    private readonly DarlingServer _server;
+    private DarlingServer _server;
     private readonly ViewerServerStore? _serverStore;
 
     private bool _refreshInFlight;
     private bool _refreshRequested;
+
+    /* #8549: when the refresh now queued (_refreshRequested) was first asked for, as a Stopwatch timestamp. The queued load's clock starts there. */
+    private long _refreshQueuedAt;
 
     /* #1319: per-server global database filter (display-only). Empty set = "All" (unfiltered). */
     private readonly HashSet<string> _selectedDatabases = new(StringComparer.OrdinalIgnoreCase);
@@ -108,6 +111,20 @@ public partial class ViewerServerTab : UserControl
 
     /// <summary>Raised after a load so MainWindow can surface progress/errors in its status bar.</summary>
     public event Action<string>? StatusChanged;
+
+    /* #8549: the first open's clock. A tab's first open spent its time before the landing sub-tab's own load began (the server clock, data start,
+       freshness and permission reads, the picker, the tab's construction) and wrote no SlowLoad line, because the only clock started inside
+       LoadInnerTabAsync. One clock now runs from the tab's activation to the first stamp and the landing load's reads book on it too. */
+    private readonly System.Diagnostics.Stopwatch _constructClock = System.Diagnostics.Stopwatch.StartNew();
+    private long _constructMs;
+    private ViewerLoadTimer? _firstOpenTimer;
+    private bool _firstOpenTaken;
+
+    /// <summary>Where a slow first open's line goes: the Viewer log's "SlowLoad" source. A test swaps it to read the line.</summary>
+    internal Action<string> SlowLoadSink { get; set; } = line => ViewerLogger.Warn("SlowLoad", line);
+
+    /// <summary>The first open's slow-load threshold. A test lowers it to read a line without waiting three seconds.</summary>
+    internal int FirstOpenSlowThresholdMs { get; set; } = ViewerLoadTimer.SlowLoadThresholdMs;
 
     /// <param name="preferences">
     /// The user's persisted viewer defaults (Settings window) that seed this tab's toolbar — default time
@@ -133,15 +150,26 @@ public partial class ViewerServerTab : UserControl
             }
         }
         InitializeComponent();
+        PerformanceMonitor.Ui.ChartPairLayout.Attach(CurrentWaitsScroll, CurrentWaitsGrid, CurrentWaitsFirstCard, CurrentWaitsSecondCard, CurrentWaitsGrid.RowDefinitions[2]); // #8219: side by side when the tab is too short for both stacked
+        DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
+        ViewerChartCards.Attach(this); // #8151: "0 throughout" in a card whose chart plots only zeros
+        ApplyTheme(WaitStatsChart);
+        _chartHelper.RefreshEmptyChart(WaitStatsChart, "Wait Stats", ""); // #8086: not the default -10 to 10 axes before the first read
         // #6652: the stacked-chart tabs scroll at small sizes; the wheel over a chart stays that chart's zoom.
         PerformanceMonitor.Ui.ChartLayout.KeepWheelOnPlot(
             QueryDurationTrendChart, ProcDurationTrendChart, QueryStoreDurationTrendChart, ExecutionCountTrendChart,
             FileIoReadChart, FileIoWriteChart, TempDbChart, TempDbSizeChart, TempDbFileIoChart,
-            LockWaitTrendChart, BlockingTrendChart, DeadlockTrendChart);
+            LockWaitTrendChart, BlockingTrendChart, DeadlockTrendChart,
+            // #7385: the other chart groups that now scroll the same way
+            MemoryGrantSizingChart, MemoryGrantActivityChart, FileIoReadThroughputChart, FileIoWriteThroughputChart,
+            BlockingDurationChart, BlockingTotalDurationChart, DeadlockWaitChart, DeadlockTotalWaitChart,
+            CurrentWaitsDurationChart, CurrentWaitsBlockedChart, LatchStatsChart, SpinlockStatsChart,
+            BadPagesChart, DumpRequestsChart, AccessViolationsChart, WriteAccessViolationsChart,
+            NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart, CpuChart);
         /* #5565: every filtered grid below this tab keeps its column filters across a restart under this server. */
         ColumnFilterScope.SetServer(this, _server.ServerName);
 
-        /* Per-server toolbar identity label: the display name is static (it also heads the tab), while the
+        /* Per-server toolbar identity label (UpdateServer refreshes it after a rename (#7212)); the
            freshness readout to its right is filled on the first (and every) refresh from the shared
            collection-time read (UpdateServerFreshnessLabelAsync). */
         ServerNameText.Text = _server.DisplayName;
@@ -200,6 +228,9 @@ public partial class ViewerServerTab : UserControl
         /* Collection Health's Duration Trends chart (copied from Lite): up-front theme + hover. */
         InitializeCollectionHealthChart();
 
+        /* #8103: a read-only seat sees Collection Health's write buttons off with the reason, before it clicks one. */
+        InitializeCollectionHealthSeat();
+
         /* System Events inner tab (system_health parity): register the category grids' filter managers. */
         InitializeSystemEventsTab();
 
@@ -239,6 +270,53 @@ public partial class ViewerServerTab : UserControl
         /* Per-row double-click history windows (ViewerServerTab.History.cs) on the three query grids — a
            different event from the SelectionChanged slicer overlay wired just above; both coexist. */
         WireHistoryDrillDowns();
+        _constructMs = _constructClock.ElapsedMilliseconds;
+    }
+
+    /// <summary>#8549: starts the first open's clock when the shell makes this tab visible, so the wait behind another tab's refresh counts. A
+    /// tab built in the background (a restored session) is not slow until the reader first shows it, so a later show restarts the clock until
+    /// the first load has begun. The tab's construction time is carried in as the clock's starting stretch.</summary>
+    internal void BeginFirstOpen()
+    {
+        if (_firstOpenTaken)
+        {
+            return;
+        }
+
+        _firstOpenTimer = new ViewerLoadTimer(FirstOpenSlowThresholdMs, _constructMs);
+        _firstOpenTimer.BookStep("tab construction", _constructMs);
+    }
+
+    /// <summary>#8549: the clock of a refresh that waited behind the one in flight. It starts at the moment the refresh was asked for, and the
+    /// wait is booked as a phase, so the queued load's slow-load line counts the wait and names it.</summary>
+    private ViewerLoadTimer QueuedRefreshTimer()
+    {
+        var waitedMs = (long)System.Diagnostics.Stopwatch.GetElapsedTime(_refreshQueuedAt).TotalMilliseconds;
+        var timer = new ViewerLoadTimer(ViewerLoadTimer.SlowLoadThresholdMs, waitedMs);
+        timer.BookPhaseEndingNow("waited for the refresh in flight", 0);
+        return timer;
+    }
+
+    /// <summary>The first open's clock for the load now starting, or null when this is not the tab's first load. Handed out once.</summary>
+    private ViewerLoadTimer? TakeFirstOpenTimer()
+    {
+        if (_firstOpenTaken)
+        {
+            return null;
+        }
+
+        _firstOpenTaken = true;
+        var timer = _firstOpenTimer;
+        if (timer is null)
+        {
+            /* A host that never showed the tab through the shell (a test, a deep link): the clock starts at the first load. */
+            timer = new ViewerLoadTimer(FirstOpenSlowThresholdMs, _constructMs);
+            timer.BookStep("tab construction", _constructMs);
+        }
+
+        timer.Lead = "server tab first open > ";
+        _firstOpenTimer = null;
+        return timer;
     }
 
     /// <summary>The server this tab is bound to; MainWindow keys open tabs by this for dedupe/close.</summary>
@@ -246,6 +324,19 @@ public partial class ViewerServerTab : UserControl
 
     /// <summary>The server record, for the tab header label and status text.</summary>
     public DarlingServer Server => _server;
+
+    /// <summary>
+    /// Swaps in the reloaded server record after the operator renamed it (#7212), so the export file names and the Block Chain
+    /// and Deadlock window titles use the new display name without closing and reopening the tab. The id is the same, so
+    /// every read keeps its key.
+    /// </summary>
+    public void UpdateServer(DarlingServer server)
+    {
+        ArgumentNullException.ThrowIfNull(server);
+        _server = server;
+        ServerNameText.Text = server.DisplayName;
+        ApplyPlanCorrectionEmptyTexts(PlanCorrectionTarget());
+    }
 
     /// <summary>
     /// Lazy per-inner-tab load: switching inner tabs loads the newly visible one. SelectionChanged is
@@ -265,6 +356,9 @@ public partial class ViewerServerTab : UserControl
         /* Compare works on three Queries sub-tabs only; off everywhere else (walk finding V10b). */
         UpdateCompareDropdownState();
 
+        /* #8647: the sub-tab just picked says "Loading..." where its empty-state sentence goes until its first read returns. */
+        ShowFirstPaintLoading();
+
         /* A drill-down navigation switches the inner tab programmatically and runs its own targeted read;
            skip the generic loader so it doesn't race that (mirrors the sub-tab handlers' guard). */
         if (_suppressDrillDownAutoRefresh)
@@ -281,34 +375,65 @@ public partial class ViewerServerTab : UserControl
     /// so after each load we loop when the selection moved on and load again — leaving no inner tab
     /// stranded. A trigger that arrives mid-load (the auto-refresh tick, an inner-tab switch) sets
     /// <see cref="_refreshRequested"/> instead of being dropped, so the running loop reloads once more.
+    /// <para>The load runs through <see cref="Dispatcher.Invoke{TResult}(Func{TResult})"/>, which on this tab's own thread runs it at once
+    /// with the dispatcher's synchronization context installed, so the code after each of its awaits resumes on this thread whatever
+    /// context the caller's thread had. The app's UI thread has that context already, and the load runs as it would without the call. A
+    /// host that drives the tab on its dispatcher thread with no context installed would otherwise resume the load on the thread pool and
+    /// touch the time range picker from the wrong thread (#8506).</para>
     /// </summary>
-    public async Task RefreshActiveInnerTabAsync()
+    public Task RefreshActiveInnerTabAsync() => Dispatcher.Invoke(RefreshActiveInnerTabUnderDispatcherContextAsync);
+
+    /// <summary>The body of <see cref="RefreshActiveInnerTabAsync"/>, entered with the dispatcher's synchronization context current.</summary>
+    private async Task RefreshActiveInnerTabUnderDispatcherContextAsync()
     {
         if (_refreshInFlight)
         {
+            if (!_refreshRequested)
+            {
+                _refreshQueuedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+            }
+
             _refreshRequested = true;
             return;
         }
 
         _refreshInFlight = true;
+        /* #8549: the first load of the tab runs on the first open's clock, so the reads below, which run before or beside the landing
+           sub-tab's own load, are booked by name. Null for every later refresh. */
+        var open = TakeFirstOpenTimer();
+        /* The clock of the load this refresh starts. A later refresh (a sub-tab pick, a range change, the auto-refresh tick) runs the same
+           reads, so its clock starts here too: its slow-load line names them and its total counts the ones its sub-tab's load waits for. */
+        var timer = open ?? new ViewerLoadTimer();
         try
         {
+            /* The time from the tab's activation to this point: the shell's refresh slot was taken by another tab's refresh, or its own
+               chrome ran first. Booked as a wait, not a read or a UI step. */
+            open?.BookPhaseEndingNow("waited for the shell to start this refresh", _constructMs);
+
             /* Point the process-wide time helper at THIS server's UTC offset before rendering — only the
                visible tab renders (the viewer's visible-only rule), so its offset wins. Loaded once, cached. */
-            await RefreshServerClockAsync();
-            ApplyServerClockToHelper();
+            await Timed(timer, "server clock read", RefreshServerClockAsync());
+            ClientStep(timer, "apply server clock", ApplyServerClockToHelper);
+
+            /* #7386: the server's data start, for the charts' X axis. One cached read for the whole tab. */
+            await Timed(timer, "server data start read", RefreshServerDataStartAsync());
 
             /* Refresh the toolbar freshness readout in the same pass (after the offset is applied so it renders
-               in the active display mode). Non-critical chrome — its own try/catch keeps it off the load path. */
-            await UpdateServerFreshnessLabelAsync();
+               in the active display mode). Non-critical chrome — its own try/catch keeps it off the load path.
+               #8549: it fills the header, and the sub-tab's load reads nothing from it, so it starts here and runs beside that load
+               instead of ahead of it. It writes the readout from this thread when its read answers. */
+            var freshnessRead = Timed(timer, "server freshness read", UpdateServerFreshnessLabelAsync());
 
             /* #1591: same slot, same reasoning — a permission-denied collector is only visible on the Collection
-               Health tab, which is why it went unnoticed. Badge it so it is discoverable from any tab. */
-            await UpdatePermissionDeniedBadgeAsync();
+               Health tab, which is why it went unnoticed. Badge it so it is discoverable from any tab.
+               #8549: beside the load too. Each of the two is booked on the load's clock when it ends, so one that ends while the load
+               runs is on the load's slow-load line with its own time. One still out when the load ends is not on that line, and the
+               line's total, which stops at the load's end, never counts it. */
+            var permissionRead = Timed(timer, "permission denied count read", UpdatePermissionDeniedBadgeAsync());
 
             /* #5562: redraw the picker's resolved range from the clock (a range that slides with now) and refresh its
                "collected every N minutes" note (set for the page on screen in the load loop below, before each tab's load). */
-            RefreshRangePicker();
+            ClientStep(timer, "range picker redraw", RefreshRangePicker);
 
             do
             {
@@ -318,12 +443,30 @@ public partial class ViewerServerTab : UserControl
                 do
                 {
                     loadedTab = InnerTabs.SelectedIndex;
+                    ShowFirstPaintLoading(); // #8647: also the landing sub-tab of the first open, which has no selection event
                     /* L3: a tab switched to during this load changes the page on screen, so its note is set here too, not only
                        at the top of the pass. */
-                    await UpdateSampleIntervalAsync();
-                    await LoadInnerTabAsync(loadedTab);
+                    await Timed(timer, "collection interval read", UpdateSampleIntervalAsync());
+                    /* The first pass hands this refresh's clock on, so the sub-tab's reads land in the same line; a second pass
+                       (the reader switched tabs mid-load) is an ordinary load on its own clock. */
+                    await LoadInnerTabAsync(loadedTab, timer);
+                    timer = null;
+                    /* #8647: whatever on the sub-tab still says "Loading..." after its read was never filled; it must not outlive the read. */
+                    if (InnerTabs.SelectedIndex == loadedTab) FirstPaint.Resolve((InnerTabs.SelectedItem as TabItem)?.Content as DependencyObject);
                 }
                 while (InnerTabs.SelectedIndex != loadedTab);
+
+                /* #8549: the header's two reads are awaited here, so the refresh ends with the readout and the badge written. A refresh
+                   already asked for loads first, with the reads still beside it, and one asked for while they are awaited is seen by
+                   the check below, so it is served and not left behind. Awaiting them a second time costs nothing. */
+                if (!_refreshRequested)
+                {
+                    await freshnessRead;
+                    await permissionRead;
+                }
+
+                /* A refresh asked for while this one ran loads next. Its clock starts at the ask, with the wait behind this load booked. */
+                timer = _refreshRequested ? QueuedRefreshTimer() : null;
             }
             while (_refreshRequested);
         }
@@ -334,8 +477,8 @@ public partial class ViewerServerTab : UserControl
     }
 
     /// <summary>
-    /// #1591: badges the Collection Health tab header with the number of collectors that were permission-denied.
-    /// Mirrors Lite's <c>RefreshPermissionDeniedBadgeAsync</c>. Best-effort chrome like the freshness readout
+    /// #1591, #7241: badges the Collection Health tab header with the number of collectors refused on their latest
+    /// attempt after their last success (<c>denied_since_last_success</c> in <c>get_collection_health</c>). Mirrors Lite's <c>RefreshPermissionDeniedBadgeAsync</c>. Best-effort chrome like the freshness readout
     /// above — a read failure leaves the plain header rather than disturbing the tab load.
     /// <see cref="ViewerDataService.GetPermissionDeniedCollectorCountAsync"/> reads the shared fleet-by-server
     /// rollup read (#4226), not a raw <c>collection_log</c> scan of its own — this refresh (auto default 1 min,
@@ -377,10 +520,12 @@ public partial class ViewerServerTab : UserControl
     {
         try
         {
-            var freshness = await _dataService.GetServerFreshnessAsync();
+            var freshness = await _dataService.GetServerCollectionStateAsync();
+            var found = freshness.TryGetValue(_server.ServerId, out var state);
             ServerFreshnessText.Text = FreshnessLabel(
-                freshness.TryGetValue(_server.ServerId, out var lastUtc) ? lastUtc : null,
-                _server.RegisteredAt, DateTime.UtcNow, TabDisplayZone);
+                found ? state.LastCollectionUtc : null,
+                _server.RegisteredAt, DateTime.UtcNow, TabDisplayZone, _server.ConnectDownSince, _server.LastConnectError,
+                attempted: found ? state.Attempted : _server.Attempted);
         }
         catch
         {
@@ -395,21 +540,38 @@ public partial class ViewerServerTab : UserControl
     /// The time is written in <paramref name="zone"/>, the tab's own server clock, because the process-wide clock may belong to
     /// another server's tab by the time this awaited read returns.
     /// </summary>
-    internal static string FreshnessLabel(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, TimeZoneInfo? zone = null)
+    internal static string FreshnessLabel(
+        DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, TimeZoneInfo? zone = null,
+        DateTime? connectDownSinceUtc = null, string? lastConnectError = null, bool attempted = false)
     {
-        var offline = ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, registeredAtUtc, nowUtc) == ServerFreshness.Offline;
+        connectDownSinceUtc = ServerHealthClassifier.EffectiveConnectDownSince(lastCollectionUtc, connectDownSinceUtc);
+        var offline = ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, registeredAtUtc, nowUtc, connectDownSinceUtc, attempted) == ServerFreshness.Offline;
+        /* #7590: the service's connect failed. The header says so, with the last values' age and the error, in place of the age-based note. */
+        if (connectDownSinceUtc.HasValue)
+        {
+            var known = ServerHealthClassifier.LastKnownLabel(lastCollectionUtc, nowUtc);
+            return $"{ServerHealthClassifier.UnreachableReason(connectDownSinceUtc.Value, lastConnectError).TrimEnd('.')}. Values shown are {known}";
+        }
+
         if (lastCollectionUtc is null)
         {
-            return offline ? "no collection retained" : "no data collected yet";
+            /* #8464: a server the collectors reach and are refused by on every attempt is offline with nothing collected, so the header
+               says the collectors fail rather than pointing at retention; "no collection retained" is the server whose history retention
+               dropped, and "no data collected yet" the one no collector has reached. */
+            return offline
+                ? attempted ? "offline: collecting, but every collection fails" : "no collection retained"
+                : "no data collected yet";
         }
 
         var collected = $"collected {ViewerTimeHelper.FormatForDisplay(lastCollectionUtc.Value, zone ?? ViewerTimeHelper.CurrentDisplayZone(), "yyyy-MM-dd HH:mm")}";
         return offline ? $"{collected}. {FleetRollup.OfflineNote}" : collected;
     }
 
-    private async Task LoadInnerTabAsync(int tabIndex)
+    /// <param name="tabIndex">The inner tab to load.</param>
+    /// <param name="loadTimer">The load's phase clock; null starts a new one. A test hands in its own to read the phases the load booked (#8549).</param>
+    internal async Task LoadInnerTabAsync(int tabIndex, ViewerLoadTimer? loadTimer = null)
     {
-        var timer = new ViewerLoadTimer();
+        var timer = loadTimer ?? new ViewerLoadTimer();
         try
         {
             /* #6155: a PostgreSQL panel's healthy sentence needs to know whether the server is offline before it is written. */
@@ -424,7 +586,7 @@ public partial class ViewerServerTab : UserControl
                     await LoadWaitStatsAsync();
                     break;
                 case LatchSpinlockInnerTabIndex:
-                    await LoadLatchSpinlockAsync();
+                    await LoadLatchSpinlockAsync(timer);
                     break;
                 case QueriesInnerTabIndex:
                     await LoadQueriesAsync(timer);
@@ -438,7 +600,7 @@ public partial class ViewerServerTab : UserControl
                     await LoadBlockingAsync();
                     break;
                 case PerfmonInnerTabIndex:
-                    await LoadPerfmonAsync();
+                    await LoadPerfmonAsync(timer);
                     break;
                 case SessionStatsInnerTabIndex:
                     await LoadSessionStatsAsync();
@@ -453,10 +615,10 @@ public partial class ViewerServerTab : UserControl
                     await LoadConfigChangesAsync();
                     break;
                 case DailySummaryInnerTabIndex:
-                    await LoadDailySummaryAsync();
+                    await LoadDailySummaryAsync(timer);
                     break;
                 case HealthInnerTabIndex:
-                    await LoadHealthAsync();
+                    await LoadHealthAsync(timer);
                     break;
                 case CpuInnerTabIndex:
                     await LoadCpuAsync();
@@ -468,7 +630,7 @@ public partial class ViewerServerTab : UserControl
                     await LoadTempDbAsync();
                     break;
                 case FileIoInnerTabIndex:
-                    await LoadFileIoAsync();
+                    await LoadFileIoAsync(timer);
                     break;
                 case SystemEventsInnerTabIndex:
                     await LoadSystemEventsAsync();
@@ -506,11 +668,16 @@ public partial class ViewerServerTab : UserControl
 
                 case OverviewInnerTabIndex:
                 default:
-                    await LoadOverviewChartsAsync();
+                    await LoadOverviewChartsAsync(timer);
                     break;
             }
 
-            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {DateTime.Now:HH:mm:ss}");
+            /* #8549: a refresh queued behind this one reads the window the picker names now, and this load read the one before it,
+               so it does not stamp "refreshed" over a header that already says the new range. The queued load stamps. */
+            if (ViewerRangeRefreshStatus.StampsRefreshed(_refreshRequested))
+            {
+                StatusChanged?.Invoke($"{_server.DisplayName}: refreshed {ViewerTimeHelper.RefreshedStamp()}");
+            }
         }
         catch (Exception ex)
         {
@@ -526,7 +693,7 @@ public partial class ViewerServerTab : UserControl
                rename it. */
             if (slow is not null)
             {
-                ViewerLogger.Warn("SlowLoad", $"[{_server.DisplayName}] {slow}");
+                SlowLoadSink($"[{_server.DisplayName}] {slow}");
             }
         }
     }
@@ -536,13 +703,16 @@ public partial class ViewerServerTab : UserControl
     internal static string InnerTabLoadName(int tabIndex, object? header) =>
         header is string text && !string.IsNullOrWhiteSpace(text) ? text.Trim() : $"inner tab {tabIndex}";
 
-    private async Task LoadOverviewChartsAsync()
+    private async Task LoadOverviewChartsAsync(ViewerLoadTimer? timer = null)
     {
         /* The lanes control reads its own six feeds + four baselines concurrently over the toolbar's
            window: hours-back for a preset, or the custom From/To when the user picked a custom range
            (the lanes bound their own X-axis to it). Replaces wave-4's CPU-trend + wait-category charts. */
         var (fromDate, toDate) = GetOverviewCustomRange();
-        await OverviewLanes.RefreshAsync(GetWindowHoursBack(), fromDate, toDate);
+        var failedReads = await OverviewLanes.RefreshAsync(GetWindowHoursBack(), fromDate, toDate, timer);
+        /* A lane that did not read is drawn as failed, and the tab is not refreshed: the status line names the reads instead. */
+        if (failedReads is not null)
+            throw new InvalidOperationException(failedReads);
     }
 
     /* LoadHealthAsync now lives in ViewerServerTab.CollectionHealth.cs (W1i moved it there with the

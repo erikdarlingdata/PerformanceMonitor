@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -20,7 +21,10 @@ public sealed partial class PgTargetFactCollector
     /// The three components of the buffer-cache composite, each differenced over the window in its own CTE
     /// and joined into ONE row: block hits and reads from <c>pg_database_stats</c> (every flavour, every
     /// major), <c>shared_buffers</c> evictions from <c>pg_io_stats</c> (PG 16+), and the bgwriter counters
-    /// from <c>pg_write_stats</c> (PG 14+). <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window.
+    /// from <c>pg_write_stats</c> (PG 14+). <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window, <c>$4</c>
+    /// <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/> (#8156: in every arm, a difference whose own
+    /// interval is longer than the gap policy spans a collector outage and is left out, as the coverage witness
+    /// leaves its seconds out of the observed time the rates divide by).
     ///
     /// <para><b>The differencing is <c>DarlingPgDatabaseReader.PgDatabaseSql</c>'s, verbatim for the
     /// <c>pg_database_stats</c> arm and applied unchanged to the other two tables' reset stamps</b>: per-series
@@ -44,12 +48,13 @@ public sealed partial class PgTargetFactCollector
     /// <c>CROSS JOIN</c> never loses the arms that DO have data.</para>
     /// </summary>
     public const string PgTargetBufferCompositeSql = @"
-WITH db_sampled AS (
+WITH db_differenced AS (
     SELECT
         database_name,
         collection_time,
         blks_read - LAG(blks_read) OVER series AS raw_blks_read,
         blks_hit  - LAG(blks_hit)  OVER series AS raw_blks_hit,
+        extract(epoch FROM (collection_time - LAG(collection_time) OVER series)) AS interval_sec,
         (ROW_NUMBER() OVER series > 1
          AND stats_reset IS DISTINCT FROM LAG(stats_reset) OVER series) AS reset_here
     FROM pg_database_stats
@@ -61,6 +66,15 @@ WITH db_sampled AS (
         ORDER BY collection_time
     )
 ),
+db_sampled AS (
+    /* #8156: in each arm, a difference across an interval longer than the gap policy ($4) spans a collector outage
+       and is left out, as the coverage witness leaves its seconds out of the observed time. */
+    SELECT
+        reset_here,
+        CASE WHEN interval_sec <= $4 THEN raw_blks_read END AS raw_blks_read,
+        CASE WHEN interval_sec <= $4 THEN raw_blks_hit  END AS raw_blks_hit
+    FROM db_differenced
+),
 db AS (
     SELECT
         CAST(coalesce(SUM(GREATEST(raw_blks_read, 0)), 0) AS bigint) AS blks_read,
@@ -69,10 +83,11 @@ db AS (
         CAST(count(*) AS integer)                                    AS db_sample_count
     FROM db_sampled
 ),
-io_sampled AS (
+io_differenced AS (
     SELECT
         collection_time,
         evictions - LAG(evictions) OVER series AS raw_evictions,
+        extract(epoch FROM (collection_time - LAG(collection_time) OVER series)) AS interval_sec,
         (ROW_NUMBER() OVER series > 1
          AND stats_reset IS DISTINCT FROM LAG(stats_reset) OVER series) AS reset_here,
         (evictions IS NOT NULL) AS evictions_tracked
@@ -87,6 +102,13 @@ io_sampled AS (
         ORDER BY collection_time
     )
 ),
+io_sampled AS (
+    SELECT
+        reset_here,
+        evictions_tracked,
+        CASE WHEN interval_sec <= $4 THEN raw_evictions END AS raw_evictions
+    FROM io_differenced
+),
 io AS (
     SELECT
         CAST(coalesce(SUM(GREATEST(raw_evictions, 0)), 0) AS bigint) AS evictions,
@@ -95,12 +117,13 @@ io AS (
         CAST(count(*) AS integer)                                    AS io_sample_count
     FROM io_sampled
 ),
-bg_sampled AS (
+bg_differenced AS (
     SELECT
         collection_time,
         buffers_clean    - LAG(buffers_clean)    OVER series AS raw_buffers_clean,
         maxwritten_clean - LAG(maxwritten_clean) OVER series AS raw_maxwritten_clean,
         buffers_alloc    - LAG(buffers_alloc)    OVER series AS raw_buffers_alloc,
+        extract(epoch FROM (collection_time - LAG(collection_time) OVER series)) AS interval_sec,
         (ROW_NUMBER() OVER series > 1
          AND bgwriter_stats_reset IS DISTINCT FROM LAG(bgwriter_stats_reset) OVER series) AS reset_here,
         (maxwritten_clean IS NOT NULL) AS bgwriter_tracked
@@ -109,6 +132,15 @@ bg_sampled AS (
     AND   collection_time >= $2
     AND   collection_time <= $3
     WINDOW series AS (ORDER BY collection_time)
+),
+bg_sampled AS (
+    SELECT
+        reset_here,
+        bgwriter_tracked,
+        CASE WHEN interval_sec <= $4 THEN raw_buffers_clean    END AS raw_buffers_clean,
+        CASE WHEN interval_sec <= $4 THEN raw_maxwritten_clean END AS raw_maxwritten_clean,
+        CASE WHEN interval_sec <= $4 THEN raw_buffers_alloc    END AS raw_buffers_alloc
+    FROM bg_differenced
 ),
 bg AS (
     SELECT
@@ -174,6 +206,7 @@ CROSS JOIN bg";
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            cmd.Parameters.AddWithValue(CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;

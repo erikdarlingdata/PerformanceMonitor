@@ -37,6 +37,8 @@ public sealed class AlertResolutionSettingsRungTests
     private const int RungVersion = 187;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+    /* Npgsql leaves the password out of the ConnectionString read back from a data source or an opened connection, so what the body opens by connection string comes from the scratch store's own string. */
+    private string _storeConnectionString = "";
 
     private static readonly string[] FlagChannels =
     {
@@ -100,7 +102,7 @@ public sealed class AlertResolutionSettingsRungTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V187 rung's live test (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -152,7 +154,7 @@ public sealed class AlertResolutionSettingsRungTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V187 round trips (they mint their own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
         {
             await migrate.OpenAsync(ct);
@@ -249,7 +251,7 @@ public sealed class AlertResolutionSettingsRungTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the #6715 seed round trip (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
         {
             await migrate.OpenAsync(ct);
@@ -339,10 +341,11 @@ public sealed class AlertResolutionSettingsRungTests
         return Enumerable.Range(0, s_webhookColumns.Length).Select(reader.GetString).ToArray();
     }
 
-    private static async Task WithSeededScratchStoreAsync(Func<StoreConfigProvider, NpgsqlDataSource, CancellationToken, Task> body)
+    private async Task WithSeededScratchStoreAsync(Func<StoreConfigProvider, NpgsqlDataSource, CancellationToken, Task> body)
     {
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
+        _storeConnectionString = scratch.ConnectionString;
         await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
         {
             await migrate.OpenAsync(ct);
@@ -454,7 +457,7 @@ public sealed class AlertResolutionSettingsRungTests
 
             /* Save a key bound to the generic URL's plain text, with the Viewer's own binding, sealer and write statement. The Viewer's
                Generate action refuses a URL that is not sealed yet, so the test composes its steps itself. */
-            await using var viewer = new ViewerDataService(dataSource.ConnectionString);
+            await using var viewer = new ViewerDataService(_storeConnectionString);
             var state = await viewer.GetSettingsSigningKeyStateAsync(ct);
             Assert.NotNull(state);
             Assert.Equal(SeedGeneric, state.StoredUrl);

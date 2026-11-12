@@ -20,11 +20,16 @@ namespace PerformanceMonitor.Darling.Analysis;
 
 public sealed partial class PgDrillDownCollector
 {
+    /// <summary>
+    /// The newest plan handle for the hash in the finding's database (<c>$3</c>), or in any database when
+    /// <c>$3</c> is empty (#8317). Byte-identical to Lite's <c>CollectPlanAnalysis</c> text.
+    /// </summary>
     public const string PlanHandleLookupSql = @"
 SELECT plan_handle
 FROM v_query_stats
 WHERE server_id = $1
 AND   query_hash = $2
+AND   ($3 = '' OR database_name = $3)
 AND   plan_handle IS NOT NULL AND plan_handle != ''
 ORDER BY collection_time DESC
 LIMIT 1";
@@ -46,7 +51,7 @@ LIMIT 1";
         var queryHash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
         if (string.IsNullOrEmpty(queryHash)) return;
 
-        // Look up plan_handle from the store for this query_hash
+        // Look up plan_handle from the store for this query_hash in the finding's database (#8317)
         string? planHandle = null;
         try
         {
@@ -55,6 +60,7 @@ LIMIT 1";
             using var cmd = new NpgsqlCommand(PlanHandleLookupSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(queryHash);
+            cmd.Parameters.AddWithValue(finding.DatabaseName ?? "");
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (await reader.ReadAsync(context.CancellationToken) && !reader.IsDBNull(0))
@@ -86,9 +92,9 @@ LIMIT 1";
             if (!string.IsNullOrWhiteSpace(plan.ParseError))
                 return;
 
-            // #4530/#4597: one store read per drill-down call so rule 38 can see the server's edition/MAXDOP. No
-            // database name is known at this call site (query_hash lookup only), so Database stays null.
-            var metadata = await DarlingServerMetadataReader.ReadAsync(_postgres, context.ServerId, cancellationToken: context.CancellationToken);
+            // #4530/#4597: one store read per drill-down call so rule 38 can see the server's edition/MAXDOP. The
+            // finding's database scopes the read when the fact carries one (#8317).
+            var metadata = await DarlingServerMetadataReader.ReadAsync(_postgres, context.ServerId, finding.DatabaseName, context.CancellationToken);
             PlanAnalysisPipeline.Run(plan, _analyzerConfig, metadata, context.CancellationToken);
 
             // #4514: includes statements nested inside a stored procedure or UDF body, so a
@@ -137,20 +143,7 @@ LIMIT 1";
         }
     }
 
-    public const string PlanAdvisoryXmlSql = @"
-SELECT query_plan_xml, query_plan_gz
-FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-/* #2069: plan content written since V54 lives as gzip bytes (query_plan_gz) with the text
-   column NULL, so the presence guard and the projection both carry BOTH forms and the read
-   loop resolves text-else-gz (PayloadDimensions.ResolveContent). A guard on query_plan_xml
-   alone matches nothing on a store using the default plan_xml_compression = 'gzip', which
-   costs this collector every MISSING_INDEX and PLAN_WARNING it exists to emit. */
-AND   (query_plan_xml IS NOT NULL OR query_plan_gz IS NOT NULL)
-ORDER BY delta_worker_time DESC
-LIMIT 10";
+    public const string PlanAdvisoryXmlSql = PgFactCollector.PlanAdvisorySql;
 
     /// <summary>
     /// WS4: re-parses the top collected query plans (the same top-10-by-cost set the fact collector

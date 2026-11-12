@@ -13,7 +13,8 @@
    each server's own clock, and the browser's clock cannot be subtracted from it. */
 
 import { VIZ } from "../../panels.js";
-import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { PG_NOT_COLLECTED } from "./gate.js";
+import { el, mount, loadingStrip, emptyStrip, captionStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
 
 const LIMIT = 200;
 // The "Show removed servers" choice, kept here so the tab's periodic rebuild does not untick it.
@@ -24,6 +25,8 @@ const PROVISIONING = {
   OVER_PROVISIONED: ["OVER PROVISIONED", "Warning"],
   UNDER_PROVISIONED: ["UNDER PROVISIONED", "Critical"],
   NOT_APPLICABLE: ["N/A", null],
+  /* ProvisioningVerdict.NotJudgedSecondaryLabel (#7705): a secondary replica's own load does not size it. */
+  NOT_JUDGED_SECONDARY: ["Not judged (secondary replica)", null],
   /* The Viewer's grid words (ProvisioningVerdict.NotEnoughDataShortLabel): too few CPU samples in the window for a verdict. */
   NOT_ENOUGH_DATA: ["not enough data yet", null],
 };
@@ -58,9 +61,22 @@ const COLUMNS = [
 
 // The row as shown: a hardware-note code becomes the legend's text, the verdict token becomes its label, and the
 // severity names come from the payload's own band and verdict. A key the read omitted stays missing and shows "—".
+/* #7562: where the host info view does not exist the collector falls back to the end of @@VERSION, "Windows Server 2016 Datacenter 10.0 <X64> (Build 14393: ) (Hypervisor)".
+   The name is what comes before the version number and the platform tag. */
+export function shortHostOs(text) {
+  if (typeof text !== "string") return text;
+  /* #7699: the same cut as HostOsText.Clean, which the read applies first: at the architecture mark, the kernel version number before it
+     dropped, and a "Windows NT 6.3" value keeps its number (it is all the name there is). */
+  const arch = text.indexOf(" <");
+  if (arch < 0) return text;
+  const head = text.slice(0, arch).trimEnd();
+  return head.startsWith("Windows NT") ? head : head.replace(/(?<=\S)\s+\d+\.\d+$/, "");
+}
+
 function displayRow(r, legend) {
   return {
     ...r,
+    host_os_version: shortHostOs(r.host_os_version),
     hardware_note: r.hardware_note == null ? null : (legend[r.hardware_note] ?? r.hardware_note),
     provisioning_status: r.provisioning_status == null ? null : (PROVISIONING[r.provisioning_status]?.[0] ?? r.provisioning_status.replace(/_/g, " ")),
     provisioning_sev: PROVISIONING[r.provisioning_status]?.[1] ?? null,
@@ -94,12 +110,13 @@ export const tab = {
         if (mine !== seq) return;
         if (res.kind === "aborted" || res.kind === "auth") return;
         if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-        if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+        /* #8555: a store with only PostgreSQL targets never collects server properties, so "yet" would promise something that never comes. */
+        if (res.kind === "empty") return mount(body, emptyStrip(ctx && ctx.onlyPostgres ? PG_NOT_COLLECTED : res.message));
         const data = res.data || {};
         const legend = data.hardware_note_legend || {};
         const rows = (data.servers || []).map((r) => displayRow(r, legend));
         mount(body, [
-          noticeStrip(noticeText(data, rows.length)),
+          captionStrip(noticeText(data, rows.length), data.truncated === true),
           VIZ.table({ servers: rows }, { rowsKey: "servers", columns: COLUMNS, emptyText: "No server property data collected yet." }),
         ]);
       } catch (e) {

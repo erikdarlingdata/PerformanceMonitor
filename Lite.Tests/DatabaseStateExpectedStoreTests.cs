@@ -184,6 +184,93 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         await cmd.ExecuteNonQueryAsync();
     }
 
+    private static readonly DateTime Stale = new(2000, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+
+    private async Task RunAsync(string sql)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private async Task<DateTime?> UpdatedAtAsync(string database)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT updated_at FROM config_database_state_expected WHERE server_id = $1 AND database_name = $2";
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = database });
+        var value = await cmd.ExecuteScalarAsync();
+        return value is null or DBNull ? null : (DateTime)value;
+    }
+
+    private Task StaleAllAsync() =>
+        RunAsync($"UPDATE config_database_state_expected SET updated_at = TIMESTAMP '2000-01-01 00:00:00' WHERE server_id = {ServerId}");
+
+    /// <summary>
+    /// #7200: updated_at is UTC from every writer (the seed, the #2189 heal, the override and the reset) whatever zone the DuckDB
+    /// session runs in. The zone is forced to UTC+14 (a zone no CI machine uses), so the old now()::TIMESTAMP writes land
+    /// fourteen hours ahead of the window around UtcNow. Each step ages the row to year 2000 first, so a stamp inside the window can
+    /// only have come from the writer under test. The seed and the heal ride the best-effort maintenance block, so each is retried
+    /// like the sweeps above.
+    /// </summary>
+    [Fact]
+    public async Task EveryWriter_StampsUpdatedAtInUtc_WhateverTheSessionZone()
+    {
+        await RunAsync("SET GLOBAL TimeZone = 'Pacific/Kiritimati'");
+        try
+        {
+            var service = new LocalDataService(_duckDb);
+            var before = DateTime.UtcNow.AddMinutes(-1);
+            var after = DateTime.UtcNow.AddMinutes(1);
+
+            /* Seed: "seeded" has no row yet, one snapshot is enough to learn it. */
+            await SeedExpectedAsync("healed", "RESTORING", isOverride: false);
+            await SeedSnapshotAsync(T0, ("seeded", "ONLINE", false), ("healed", "ONLINE", false));
+            await StaleAllAsync();
+            for (var attempt = 0; attempt < 5 && await UpdatedAtAsync("seeded") is null; attempt++)
+            {
+                await service.GetDatabaseStateDeviationsAsync(ServerId);
+            }
+
+            var seeded = await UpdatedAtAsync("seeded");
+            Assert.NotNull(seeded);
+            Assert.InRange(seeded.Value, before, after);
+
+            /* Heal: needs two snapshots, and re-learns the poisoned RESTORING baseline as ONLINE. */
+            await SeedSnapshotAsync(T0.AddMinutes(1), ("seeded", "ONLINE", false), ("healed", "ONLINE", false));
+            for (var attempt = 0; attempt < 5 && await UpdatedAtAsync("healed") == Stale; attempt++)
+            {
+                await service.GetDatabaseStateDeviationsAsync(ServerId);
+            }
+
+            var healed = await UpdatedAtAsync("healed");
+            Assert.NotNull(healed);
+            Assert.InRange(healed.Value, before, after);
+
+            /* Override. */
+            await StaleAllAsync();
+            await service.SetDatabaseStateExpectedAsync(ServerId, "seeded", "OFFLINE");
+            var overridden = await UpdatedAtAsync("seeded");
+            Assert.NotNull(overridden);
+            Assert.InRange(overridden.Value, before, after);
+
+            /* Reset to current. */
+            await StaleAllAsync();
+            await service.ResetDatabaseStateExpectedToCurrentAsync(ServerId, "seeded");
+            var reset = await UpdatedAtAsync("seeded");
+            Assert.NotNull(reset);
+            Assert.InRange(reset.Value, before, after);
+        }
+        finally
+        {
+            await RunAsync("RESET GLOBAL TimeZone");
+        }
+    }
+
     [Fact]
     public async Task FirstObservation_SeedsBaseline_AndReportsNoDeviation()
     {

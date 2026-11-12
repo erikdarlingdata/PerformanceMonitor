@@ -326,7 +326,7 @@ public sealed class ViewerTrendRoutingPortTests
         var truncated = ViewerServerTab.DescribeTrendCoverage(new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Hourly, head, true));
         Assert.StartsWith("Source: hourly rollup (one point per hour). Data begins ", truncated, StringComparison.Ordinal);
         Assert.Contains(ViewerTimeHelper.ForDisplay(head).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture), truncated, StringComparison.Ordinal);
-        Assert.EndsWith(" because the store no longer holds the rest of this window at this tier.", truncated, StringComparison.Ordinal);
+        Assert.EndsWith(" because the store holds nothing earlier in this window at this tier.", truncated, StringComparison.Ordinal);
 
         /* The word the chart leads with is the word the tool publishes. */
         foreach (var tier in new[] { RetentionTier.Raw, RetentionTier.Hourly })
@@ -598,13 +598,16 @@ CROSS JOIN (VALUES (1, 'DbA'), (3, 'DbB')) AS d(n, name)", connection))
         Assert.Equal(routed.Points.Count, executions.Points.Count);
         Assert.All(executions.Points, p => Assert.Equal(40.0 / 3600.0, p.Value, 6));
 
-        /* A recent window stays raw, drops its unrated first collection, and says raw. */
+        /* A recent window stays raw and says raw. #7161: the raw statement reads the collections from the collector's 3600 s gap
+           policy before the window start, so the first in-window collection is rated over its gap to the one before the
+           window (here exactly 3600 s, inside the policy) instead of being dropped as unrated: seven collections in the
+           window, seven points. The rollup tiers above are unchanged. */
         var recent = await viewer.GetQueryDurationTrendAsync(ServerId, nowHour.AddHours(-6), end, nowUtc: now, cancellationToken: ct);
         Assert.Equal(RetentionTier.Raw, recent.Tier);
         Assert.Equal("raw", recent.Source);
-        Assert.Equal(6, recent.Points.Count); /* seven collections in the window; the first has no rate */
-        Assert.Equal(nowHour.AddHours(-5), recent.Points[0].CollectionTime);
-        Assert.Equal(nowHour.AddHours(-5), recent.EffectiveStartUtc);
+        Assert.Equal(7, recent.Points.Count);
+        Assert.Equal(nowHour.AddHours(-6), recent.Points[0].CollectionTime);
+        Assert.Equal(nowHour.AddHours(-6), recent.EffectiveStartUtc);
         Assert.False(recent.Truncated); /* one cadence late is inside the 90-minute slack */
         Assert.All(recent.Points, p => Assert.Equal(8000.0 / 3600.0, p.Value, 6));
 

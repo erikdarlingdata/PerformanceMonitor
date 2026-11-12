@@ -109,7 +109,7 @@ public sealed class DatabaseWatermarkCacheRunnerLiveTests
         public static async Task<Rig> OpenAsync(CancellationToken ct)
         {
             var rig = new Rig();
-            rig.Scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+            rig.Scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
             rig.Connection = new NpgsqlConnection(rig.Scratch.ConnectionString);
             await rig.Connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(rig.Connection, ct);

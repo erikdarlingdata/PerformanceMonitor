@@ -231,7 +231,7 @@ public static class CollectorRuntimePrecondition
     private const string PreconditionEpilogue =
         "This is a runtime PRECONDITION, not a permanent engine capability gap and not a collection outage: " +
         "it can be satisfied on the monitored server, and this read re-derives it on EVERY call rather than " +
-        "deciding it once at connect time — so the first collection cycle after it is satisfied is the one " +
+        "deciding it once at connect time, so the first collection cycle after it is satisfied is the one " +
         "this read starts answering from, with nothing to restart on the monitoring side.";
 
     /// <summary>
@@ -248,7 +248,7 @@ public static class CollectorRuntimePrecondition
     private const string ConnectScopedEpilogue =
         "This is a runtime PRECONDITION, not a permanent engine capability gap and not a collection outage: " +
         "it can be satisfied on the monitored server. But unlike most preconditions this one is NOT " +
-        "re-derived every cycle — it is read once when the service connects to this server and cached for " +
+        "re-derived every cycle: it is read once when the service connects to this server and cached for " +
         "that connection's life, so satisfying it is not enough on its own: the service has to reconnect " +
         "(restart it, or change this server's configuration, which drops the cached connection) before " +
         "collection resumes. Retrying this read before that will return exactly this answer again.";
@@ -288,7 +288,7 @@ public static class CollectorRuntimePrecondition
     /// <c>runtimePreconditionText</c> in plain-text.js.
     /// </summary>
     public const string DegradedClientSentence =
-        "Act on that sentence — it is what the monitored server itself answered, and it distinguishes the states this " +
+        "Act on that sentence: it is what the monitored server itself answered, and it distinguishes the states this " +
         "one status carries: a grant the login was refused, a source object that does not exist " +
         "on this target, and a feature the platform does not implement or has switched off.";
 
@@ -314,7 +314,7 @@ public static class CollectorRuntimePrecondition
                    $"collector reads: its last run{observed} recorded {CaptureSessionMissingStatus}, so " +
                    $"{CapturePathOf(collectorName)} is not being captured at all.{said} The app creates " +
                    "its capture sessions when it connects to a server and ensures them again at least once an hour, " +
-                   "so it creates a missing session and starts a stopped one within the hour — if the " +
+                   "so it creates a missing session and starts a stopped one within the hour, if the " +
                    "session is still missing after that, check that the monitoring login holds " +
                    "ALTER ANY EVENT SESSION, because the create needs it. " +
                    PreconditionEpilogue;
@@ -325,7 +325,7 @@ public static class CollectorRuntimePrecondition
             return $"The {collectorName} collector is running against {serverName} but the PostgreSQL " +
                    $"extension it reads is not installed there: its last run{observed} was recorded as a " +
                    $"named non-fatal skip, so nothing from {CapturePathOf(collectorName)} is being stored.{said} " +
-                   "The stored sentence names the extension and the database to create it in — installing " +
+                   "The stored sentence names the extension and the database to create it in. Installing " +
                    "it is the remedy, and no grant will change this. An optional extension left " +
                    "uninstalled is also a legitimate resting state; the skip simply keeps that choice " +
                    "visible. " +
@@ -515,6 +515,40 @@ public static class CollectorRuntimePrecondition
         string.Join(
             " ",
             collectorName.Split('_').Select(w => w.Length == 0 ? w : char.ToUpperInvariant(w[0]) + w[1..]));
+
+    /// <summary>
+    /// #7410: the structured fields the web page builds its one plain sentence from, so it never has to read the tool's message. The
+    /// <c>message</c> beside them is unchanged. <c>reason</c> is <c>extension_missing</c> (with <c>extensions</c>, the names the
+    /// collector declares it needs, and <c>restart_required</c> when one of them has to be in shared_preload_libraries),
+    /// <c>source_unreadable</c> (the skip that is a refused grant or a source this server does not have) or <c>capture_session_missing</c>.
+    /// Null for any other status, which keeps the bare envelope. Lite and Darling both call it, so a SQL Server collector's precondition reply carries the same fields on both.
+    /// </summary>
+    public static object? StructuredReason(string collectorName, string? status)
+    {
+        if (string.Equals(status, ExtensionMissingStatus, StringComparison.OrdinalIgnoreCase))
+        {
+            var required = CollectorCatalog.Find(collectorName)?.RequiredPgExtensions ?? Array.Empty<PgExtensionDependency>();
+            return new
+            {
+                reason = "extension_missing",
+                collector = collectorName,
+                extensions = required.Select(r => r.ExtensionName).ToArray(),
+                restart_required = required.Any(r => r.InstallKind == PgExtensionInstallKind.SharedPreloadLibraries),
+            };
+        }
+
+        if (string.Equals(status, DegradedStatus, StringComparison.OrdinalIgnoreCase))
+        {
+            return new { reason = "source_unreadable", collector = collectorName };
+        }
+
+        if (string.Equals(status, CaptureSessionMissingStatus, StringComparison.OrdinalIgnoreCase))
+        {
+            return new { reason = "capture_session_missing", collector = collectorName };
+        }
+
+        return null;
+    }
 
     /// <summary>
     /// #6453: the sentence for a read that found no stored rows while the collector serving it is HEALTHY, or null when it is
@@ -756,8 +790,10 @@ public static class CollectorRuntimePrecondition
     /// the fact that matters: DESIRED READ_WRITE with ACTUAL READ_ONLY is the classic silent failure, and a
     /// message that read the desired state would call that database healthy.
     /// </summary>
+    /// <param name="ReadonlyReason">The engine's <c>readonly_reason</c> bitmap for the database, or null when it was not read.
+    /// Bit 8 is a secondary replica; the storage cap is another bit.</param>
     public readonly record struct QueryStoreDatabaseState(
-        string DatabaseName, string? ActualState, long? IntervalLengthMinutes = null);
+        string DatabaseName, string? ActualState, long? IntervalLengthMinutes = null, int? ReadonlyReason = null);
 
     /// <summary>The Query Store statistics interval when no database reports one: the engine's default.</summary>
     public const int DefaultQueryStoreIntervalMinutes = 60;
@@ -865,7 +901,7 @@ public static class CollectorRuntimePrecondition
                    "READ_WRITE and ALTER DATABASE [name] SET QUERY_STORE = ON is already in effect and will " +
                    "not repair it. Run sys.sp_query_store_consistency_check inside the affected database " +
                    "first; if that does not clear it, ALTER DATABASE [name] SET QUERY_STORE CLEAR, or cycle " +
-                   "it OFF and back ON — both of which discard the Query Store data already held. " +
+                   "it OFF and back ON, both of which discard the Query Store data already held. " +
                    PreconditionEpilogue;
         }
 
@@ -874,6 +910,37 @@ public static class CollectorRuntimePrecondition
            the operator to re-run an ALTER that is already in effect. */
         if (readOnly.Count > 0)
         {
+            /* #8541: readonly_reason says why. A database whose reason carries the secondary-replica bit is READ_ONLY because
+               of its role, and no storage setting changes that, so it is named with that cause; the storage cap advice goes
+               only to a READ_ONLY database without the bit. */
+            var secondary = readOnly.Where(s => ((s.ReadonlyReason ?? 0) & ReadableSecondaryReadonlyBit) != 0).ToList();
+            if (secondary.Count == readOnly.Count)
+            {
+                return $"Query Store is READ_ONLY on {Describe(readOnly)} of {serverName}{observed} because " +
+                       (readOnly.Count == 1 ? "the database is a secondary replica" : "each database is a secondary replica") +
+                       " (readonly_reason 8), and no database this read covers is in READ_WRITE. READ_ONLY is a " +
+                       "secondary replica's normal state, not a fault: its Query Store is the primary's, replicated, " +
+                       "and no setting on this server makes it writable, so there is no storage cap to raise and no " +
+                       "ALTER DATABASE to run here. Read Query Store on the primary. get_query_store_health shows " +
+                       "each database's readonly_reason.";
+            }
+
+            if (secondary.Count > 0)
+            {
+                var capped = readOnly.Where(s => ((s.ReadonlyReason ?? 0) & ReadableSecondaryReadonlyBit) == 0).ToList();
+                return $"Query Store is READ_ONLY and recording nothing new on {Names(capped)} of {serverName}{observed}, " +
+                       $"{capped.Count.ToString(CultureInfo.InvariantCulture)} of the {states.Count.ToString(CultureInfo.InvariantCulture)} " +
+                       "databases this read covers, and none of them is in READ_WRITE. A READ_ONLY Query Store still answers " +
+                       "queries about what it already holds, which is why this looks like a quiet server rather than a " +
+                       $"stopped one. For {Names(capped)} it is almost always the storage cap: check readonly_reason with " +
+                       "get_query_store_health, raise MAX_STORAGE_SIZE_MB or clear space, then ALTER DATABASE [name] SET " +
+                       "QUERY_STORE (OPERATION_MODE = READ_WRITE). " +
+                       (secondary.Count == 1
+                           ? $"{Names(secondary)} is READ_ONLY for another reason: it is a secondary replica (readonly_reason 8), its normal state, and needs no change. "
+                           : $"{Names(secondary)} are READ_ONLY for another reason: each is a secondary replica (readonly_reason 8), its normal state, and needs no change. ") +
+                       PreconditionEpilogue;
+            }
+
             return $"Query Store is READ_ONLY and recording nothing new on {Describe(readOnly)} of " +
                    $"{serverName}{observed}, and no database this read covers is in READ_WRITE. A READ_ONLY " +
                    "Query Store still answers queries about what it already holds, which is why this looks " +
@@ -892,6 +959,46 @@ public static class CollectorRuntimePrecondition
 
     /// <summary>The engine's readable-secondary bit in <c>readonly_reason</c> (the same bit the collectors gate on, #1558).</summary>
     public const int ReadableSecondaryReadonlyBit = 8;
+
+    /// <summary>
+    /// #8541: the collection_log note of a <c>query_store_hints</c> run that captured no database because every database whose
+    /// Query Store is on is a readable secondary. The run read each database's own <c>readonly_reason</c>, so the note is the
+    /// standing record of that once the <c>query_store_health</c> capture has aged out of retention.
+    /// </summary>
+    public const string QueryStoreAllSecondaryRunNote =
+        "No database captured: every database whose Query Store is on is a read-only secondary replica (readonly_reason 8).";
+
+    /// <summary>
+    /// The <c>status</c> word that goes with <see cref="QueryStoreDisabledMessage"/> for the same states:
+    /// <see cref="NotCollectedStatusWord"/> when the message is the secondary-replica one (no database in ERROR, and every
+    /// READ_ONLY database carries the bit), because nothing on the server is in the way and there is no step to take;
+    /// <see cref="StatusWord"/> otherwise.
+    /// </summary>
+    public static string QueryStoreDisabledStatusWord(IReadOnlyList<QueryStoreDatabaseState> states)
+    {
+        if (states is null || states.Any(s => IsErrored(s.ActualState)))
+        {
+            return StatusWord;
+        }
+
+        var readOnly = states.Where(s => IsReadOnly(s.ActualState)).ToList();
+        return readOnly.Count > 0 && readOnly.All(s => ((s.ReadonlyReason ?? 0) & ReadableSecondaryReadonlyBit) != 0)
+            ? NotCollectedStatusWord
+            : StatusWord;
+    }
+
+    /// <summary>Database names alone, for a sentence about some of the databases a read covers: "A", "A and B", "A, B and C", or the first three and how many more.</summary>
+    private static string Names(IReadOnlyList<QueryStoreDatabaseState> states)
+    {
+        var names = states.Select(s => s.DatabaseName).ToList();
+        return names.Count switch
+        {
+            1 => names[0],
+            2 => $"{names[0]} and {names[1]}",
+            3 => $"{names[0]}, {names[1]} and {names[2]}",
+            _ => $"{names[0]}, {names[1]}, {names[2]} and {(names.Count - 3).ToString(CultureInfo.InvariantCulture)} more",
+        };
+    }
 
     /// <summary>The <c>status</c> word of <see cref="QueryStoreReadableSecondaryMessage"/>: the data is not collected here, and the reason is not a fault to repair.</summary>
     public const string NotCollectedStatusWord = "not_collected";
@@ -979,6 +1086,35 @@ public static class CollectorRuntimePrecondition
         return $" Query Store is not READ_WRITE on {named}{more}{DescribeObserved(observedUtc)}, so it records nothing new there and " +
                "an empty read can mean that rather than a quiet database. get_query_store_health shows the actual and " +
                "desired state and the read-only reason.";
+    }
+
+    /// <summary>
+    /// The note a Query Store read that RETURNED rows carries when a database those rows come from is in the ERROR state (#7675), or
+    /// <c>null</c> when none is. <see cref="QueryStoreNotWritingHint"/> speaks only on an empty read; an ERROR store still has its old
+    /// rows, so a read of them answers with data and nothing says the data has stopped changing. Only a database that
+    /// <paramref name="rowDatabases"/> names counts (null means every database in <paramref name="states"/>), so a healthy
+    /// database's rows carry no note because a sibling is in error.
+    /// </summary>
+    public static string? QueryStoreErrorNote(IReadOnlyList<QueryStoreDatabaseState> states, DateTime? observedUtc, IEnumerable<string>? rowDatabases)
+    {
+        if (states is null || states.Count == 0)
+        {
+            return null;
+        }
+
+        HashSet<string>? wanted = rowDatabases is null ? null : new HashSet<string>(rowDatabases, StringComparer.OrdinalIgnoreCase);
+        var errored = states.Where(s => IsErrored(s.ActualState) && (wanted is null || wanted.Contains(s.DatabaseName))).ToList();
+        if (errored.Count == 0)
+        {
+            return null;
+        }
+
+        var named = string.Join(", ", errored.Take(3).Select(s => s.DatabaseName));
+        var more = errored.Count > 3 ? $" and {errored.Count - 3} more" : string.Empty;
+        var noun = errored.Count == 1 ? "database" : "databases";
+        return $"These rows come from a Query Store in the ERROR state on the {noun} {named}{more}{DescribeObserved(observedUtc)}. " +
+               "It stopped on an internal error, so its newest rows are old and nothing new is being recorded there. " +
+               "Turn Query Store off and on again, or run sp_query_store_consistency_check. get_query_store_health shows the state.";
     }
 
     /// <summary>

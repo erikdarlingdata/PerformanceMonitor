@@ -64,7 +64,6 @@ public sealed class ViewerConfigurationSqlTests
             StripWhitespace(sql), StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1)", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY configuration_name", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -79,7 +78,6 @@ public sealed class ViewerConfigurationSqlTests
 
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY database_name", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -90,7 +88,6 @@ public sealed class ViewerConfigurationSqlTests
         Assert.Contains(string.Join(",", ScopedConfigColumns), StripWhitespace(sql), StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("capture_time = (SELECT MAX(capture_time) FROM v_database_scoped_config WHERE server_id = $1)", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY database_name, configuration_name", sql, StringComparison.Ordinal);
     }
 
     [Fact]

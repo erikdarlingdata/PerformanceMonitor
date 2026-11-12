@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -90,7 +91,8 @@ public partial class DatabaseProtectionTab : UserControl
             if (_loads.Superseded(nameof(LoadAsync), gen)) return;
 
             Show(read);
-            LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.FormatFleetWide(DateTime.UtcNow, "HH:mm:ss");
+            LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.RefreshedStamp();
+            StatusChanged?.Invoke($"database protection: refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
@@ -106,6 +108,7 @@ public partial class DatabaseProtectionTab : UserControl
         {
             StatusLine.Text = "";
             DatabasesDataGrid.ItemsSource = new List<ViewerDatabaseProtectionRow>();
+            PlatformColumn.Visibility = Visibility.Collapsed;
             EmptyMessage.Visibility = Visibility.Collapsed;
             return;
         }
@@ -113,6 +116,7 @@ public partial class DatabaseProtectionTab : UserControl
         StatusLine.Text = ViewerDatabaseProtectionText.StatusLine(read);
         var rows = ViewerDatabaseProtectionText.Rows(read);
         DatabasesDataGrid.ItemsSource = rows;
+        PlatformColumn.Visibility = ViewerDatabaseProtectionText.ShowsPlatformColumn(rows) ? Visibility.Visible : Visibility.Collapsed;
         EmptyMessage.Text = ViewerDatabaseProtectionText.EmptyText(read);
         EmptyMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }

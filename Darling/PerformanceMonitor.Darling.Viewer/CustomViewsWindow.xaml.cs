@@ -346,7 +346,8 @@ public partial class CustomViewsWindow : Window
     private void Validate_Click(object sender, RoutedEventArgs e)
     {
         var refusal = ViewerDataService.ValidateCustomViewDefinition(DefinitionBox.Text);
-        SetStatus(refusal ?? "The definition is valid.", refusal is null);
+        var warnings = refusal is null ? ViewerDataService.CustomViewDefinitionWarnings(DefinitionBox.Text) : Array.Empty<string>();
+        SetStatus(refusal ?? (warnings.Count == 0 ? "The definition is valid." : "The definition is valid, with warnings: " + string.Join(" ", warnings)), refusal is null && warnings.Count == 0);
     }
 
     private async void Save_Click(object sender, RoutedEventArgs e)
@@ -359,6 +360,7 @@ public partial class CustomViewsWindow : Window
         try
         {
             CustomViewResult result;
+            var warnings = ViewerDataService.CustomViewDefinitionWarnings(DefinitionBox.Text);
             if (_pending is { } pending)
             {
                 result = await _dataService.CreateCustomViewAsync(pending.Name, pending.Description, DefinitionBox.Text, pending.Folder);
@@ -373,6 +375,12 @@ public partial class CustomViewsWindow : Window
             if (!await ShowResultAsync(result, "saved"))
             {
                 return;
+            }
+
+            if (warnings.Count > 0)
+            {
+                /* #7565: the view saved, but the validator says it will not draw what it means. */
+                SetStatus($"The view was saved (version {_loaded!.Version}), with warnings: " + string.Join(" ", warnings), false);
             }
         }
         catch (Exception ex)

@@ -29,11 +29,13 @@
 
 import { el, mount, apiGetFleet, readToolWithinKeptHistory, storeHash } from "./util.js";
 import { renderPanel, VIZ } from "./panels.js";
+import { withCatalogWords } from "./read-fields.js";
 import { orderServers } from "./server-order.js";
 import { SERIES_COLORS, normalizeColor } from "./charts.js";
 import { renderComposedPanelCard } from "./compose.js";
 import { buildCreateAlertAction } from "./alert-seed.js";
 import * as api from "./views-api.js";
+import { buildSaveWarningsStrip, savedViewWarnings } from "./view-save-warnings.js";
 import { refreshChoiceOf } from "./refresh-policy.js";
 import { buildRefreshControl } from "./refresh-control.js";
 import { buildViewMetaFields } from "./view-meta-fields.js";
@@ -42,7 +44,7 @@ import * as derive from "./derive.js";
 import { rollingHoursPicker } from "./page-range.js";
 
 /** The FORMATTERS keys the format pickers offer (mirrors util.js FORMATTERS). */
-const FORMAT_OPTIONS = ["text", "int", "num1", "num2", "rate", "pct", "ms", "mb", "bytes", "time", "reltime", "bool"];
+const FORMAT_OPTIONS = ["text", "int", "num1", "num2", "rate", "pct", "ms", "mb", "mbfit", "bytes", "time", "reltime", "bool"];
 const PREVIEW_DEBOUNCE_MS = 350;
 
 /** The view-level default time-range choices (hours) offered in the composer + the rendered view's chrome. */
@@ -80,7 +82,7 @@ export async function renderEditor(main, id) {
       backHead(id),
       el("div", { class: "strip empty" }, [
         session.probe_failed
-          ? "Couldn't confirm your session, so the composer is read-only for now. Reload the page to edit; " +
+          ? "Couldn't confirm your session yet, so editing is not available. Reload the page to try again; " +
             "you can still open and export views."
           : "Your account has read-only access, so the composer is read-only. You can still open and export " +
             "views.",
@@ -521,6 +523,18 @@ function buildEditor(main, ctx) {
     }
 
     if (res.kind === "data" && res.data) {
+      /* #7565: a save the service accepted with warnings stays on the page, so the advice is read before the redirect.
+         The saved view is now the one being edited, so a second Save updates it rather than creating a twin. */
+      const warnings = savedViewWarnings(res.data);
+      if (warnings.length > 0) {
+        ctx.editingId = res.data.id;
+        ctx.loadedVersion = res.data.version;
+        saveBtn.textContent = "Save changes"; /* the saved view has an id now, so the button updates it rather than creating */
+        saveBtn.disabled = false;
+        mount(saveStatus, buildSaveWarningsStrip(warnings, storeHash("#/view/") + encodeURIComponent(res.data.id)));
+        return;
+      }
+
       location.hash = storeHash("#/view/") + encodeURIComponent(res.data.id);
       return;
     }
@@ -699,6 +713,9 @@ function buildKindToggle(p, index, ctx) {
 function buildReadPanelEditor(p, index, ctx, kindToggle) {
   const { catalog, fleet, model } = ctx;
   let lastSample = null;
+  /* #7937: the number of the latest sample read. A reply that is not the latest, or whose read or parameters are no longer the
+     panel's, is dropped, so a slow sample cannot fill the fields or pick the chart for a read the author has moved on from. */
+  let sampleSeq = 0;
   let previewTimer = null;
 
   const paramsBox = el("div", { class: "params-box" });
@@ -712,6 +729,9 @@ function buildReadPanelEditor(p, index, ctx, kindToggle) {
     p.read = readSelect.value;
     p.params = defaultParams(catalog, p.read);
     p.vizcfg = {};
+    /* #7937: the old read's sample is gone, so a chart picked before the new read's sample lands derives nothing from it, and the
+       fields are derived from the new sample when it lands. */
+    lastSample = null;
     rebuildParams();
     rebuildBody(); // reveal Parameters (or the "choose a read" hint) as prerequisites are met (M5)
     refreshHead();
@@ -865,14 +885,18 @@ function buildReadPanelEditor(p, index, ctx, kindToggle) {
       lastSample = null;
       return;
     }
+    const sample = startSample();
+    const vizBefore = p.viz;
     const res = await readToolWithinKeptHistory(p.read, cleanParams(p.params));
+    if (sample.stale()) return;
     if (res.kind !== "data" || !res.data) {
       lastSample = null;
       if (force) mount(vizcfgBox, el("div", { class: "muted", text: sampleUnavailableText(res) }));
       return;
     }
     lastSample = res.data;
-    if (resetViz || !p.viz) {
+    /* The chart is suggested from the sample only while the author has not picked one since the read was sent. */
+    if ((resetViz && p.viz === vizBefore) || !p.viz) {
       p.viz = derive.suggestViz(lastSample);
       vizSelect.value = p.viz;
     }
@@ -886,11 +910,22 @@ function buildReadPanelEditor(p, index, ctx, kindToggle) {
   /* Prime a sample for an EXISTING panel (populates the field dropdowns) WITHOUT clobbering its saved config. */
   async function primeSample() {
     if (!p.read || missingRequired(p, catalog).length) return;
+    const sample = startSample();
     const res = await readToolWithinKeptHistory(p.read, cleanParams(p.params));
+    if (sample.stale()) return;
     if (res.kind === "data" && res.data) {
       lastSample = res.data;
       rebuildVizcfg();
     }
+  }
+
+  /* #7937: a sample read starting now. `stale()` is true once a later sample read has started, or the panel's read or its
+     parameters are no longer what this read was sent with. */
+  function startSample() {
+    const seq = ++sampleSeq;
+    const read = p.read;
+    const params = JSON.stringify(cleanParams(p.params));
+    return { stale: () => seq !== sampleSeq || p.read !== read || JSON.stringify(cleanParams(p.params)) !== params };
   }
 
   function schedulePreview() {
@@ -904,7 +939,9 @@ function buildReadPanelEditor(p, index, ctx, kindToggle) {
       mount(previewBox, el("div", { class: "strip empty", text: problem }));
       return;
     }
-    mount(previewBox, renderPanel(panelToDesc(p)));
+    /* #8492: the preview takes the catalog's words and rules for a read table's own columns (withCatalogWords), the step the saved view
+       takes on its way to renderPanel, so the two draw the same cells. */
+    mount(previewBox, renderPanel(withCatalogWords(panelToDesc(p))));
   }
 
   rebuildParams();

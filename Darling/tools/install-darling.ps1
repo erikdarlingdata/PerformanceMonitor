@@ -384,13 +384,17 @@ function Test-DarlingServiceWrittenFileName([string]$name) {
 # PowerShell 5.1 leaves it empty when the file cannot be opened for read (another process holds it with no read
 # sharing, or this account is denied read), so a hard link read as no link at all. Returns -1 when the count cannot be
 # read, and every caller treats that as more than one name: a file whose names cannot be counted is never trusted, made
-# service-owned, granted anything or reset (#5649). Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+# service-owned, granted anything or reset (#5649). The same class also lists every name a file has (ListNames: FindFirstFileNameW and
+# FindNextFileNameW, each name spelled with its volume), which the hard link refusal in upgrade-darling.ps1 reads (#7267).
+# Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingFileNameCount([string]$path) {
     try {
         if (-not ('DarlingNativeFileNames' -as [type])) {
             Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 public static class DarlingNativeFileNames
@@ -429,6 +433,52 @@ public static class DarlingNativeFileNames
             return (int)information.NumberOfLinks;
         }
     }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr FindFirstFileNameW(string fileName, uint flags, ref uint length, StringBuilder linkName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool FindNextFileNameW(IntPtr find, ref uint length, StringBuilder linkName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FindClose(IntPtr find);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool GetVolumePathNameW(string fileName, StringBuilder volumePathName, uint length);
+
+    // Every name the file has, each one spelled with its volume (the API returns paths relative to the volume), or null when
+    // the names could not be read. The buffer holds the longest path NTFS allows, so ERROR_MORE_DATA does not come up, and the
+    // list ends with ERROR_HANDLE_EOF (38).
+    public static string[] ListNames(string path)
+    {
+        StringBuilder volume = new StringBuilder(1024);
+        if (!GetVolumePathNameW(path, volume, (uint)volume.Capacity)) { return null; }
+        string prefix = volume.ToString().TrimEnd('\\');
+        string extended = path;
+        if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) { extended = path; }
+        else if (path.StartsWith(@"\\", StringComparison.Ordinal)) { extended = @"\\?\UNC\" + path.Substring(2); }
+        else { extended = @"\\?\" + path; }
+        StringBuilder buffer = new StringBuilder(32768);
+        uint length = (uint)buffer.Capacity;
+        IntPtr find = FindFirstFileNameW(extended, 0, ref length, buffer);
+        if (find == new IntPtr(-1)) { return null; }
+        try
+        {
+            List<string> names = new List<string>();
+            while (true)
+            {
+                names.Add(prefix + buffer.ToString());
+                length = (uint)buffer.Capacity;
+                if (!FindNextFileNameW(find, ref length, buffer))
+                {
+                    if (Marshal.GetLastWin32Error() == 38) { break; }
+                    return null;
+                }
+            }
+            return names.ToArray();
+        }
+        finally { FindClose(find); }
+    }
 }
 '@
         }
@@ -449,7 +499,21 @@ public static class DarlingNativeFileNames
 # was set; 1 when the count is not 1 (detail is the count); 2 when it could not be opened and 3 when the count could not be read
 # (detail is the Win32 error); 4 when the owner could not be set (detail is the error); 5 when the opened object is not inside
 # the root, or no root is open, or its real path could not be read (nothing was changed). attributes is the object's attribute
-# bits as read from the handle, so a caller can tell a folder from a link without opening it again. EnablePrivileges turns on
+# bits as read from the handle, so a caller can tell a folder from a link without opening it again. ResetDacl (#7267) opens and
+# judges an object the same way and, in place of the owner, replaces its access list with what its parent passes down, which is the
+# result of icacls /reset. That list is worked out from the parent's own descriptor, read through the parent's own handle
+# (CreatePrivateObjectSecurityEx, the parent's inheritable entries flagged as inherited and nothing explicit), and written through the
+# object's own handle with SetKernelObjectSecurity, so the owner step and the reset step of the store repair never follow a link or
+# touch a file with more than one name. It returns the same results, and 6 when the object is a link (nothing was changed). Reading
+# the parent's descriptor needs READ_CONTROL on the PARENT, opened by path: when the parent's list does not name the account that runs
+# this (and SeBackupPrivilege is not on, which a backup-semantics open uses to read what a list denies), the first object below it
+# answers 4 with error 5. In the four steps the parent is the store folder, whose step 3 list names Administrators. A parent with no
+# inheritable entries gives the process token's default list (SYSTEM, Administrators and the account itself, none of it inherited),
+# where icacls /reset gives an empty one, and the auto-inherited flag icacls leaves set is not kept. Neither changes who has access
+# in the four steps, because step 3's list is inherited by files and folders.
+# SetKernelObjectSecurity does not pass anything down, and SetSecurityInfo writes a folder's inheritable entries to
+# everything below it, the other name of a hard link included, before a walk could refuse that link (#7267). SetFolderDacl does the same
+# for the root folder alone, with the list the caller describes. EnablePrivileges turns on
 # SeTakeOwnershipPrivilege and SeBackupPrivilege (backup semantics let an object that denies Administrators read access open)
 # for this process's token, keeps what AdjustTokenPrivileges reports as their previous state and returns false if either could
 # not be turned on; RestorePrivileges puts back exactly that previous state. Kept byte-identical in install-darling.ps1 and
@@ -488,6 +552,27 @@ public static class DarlingNativeOwner
     private static SafeFileHandle rootHandle;
     private static string rootPath;
     private static TokenPrivilege[] previousStates = new TokenPrivilege[0];
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GenericMapping { public uint Read; public uint Write; public uint Execute; public uint All; }
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetKernelObjectSecurity(SafeFileHandle handle, uint requestedInformation, byte[] descriptor, uint length, out uint lengthNeeded);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint securityInformation, IntPtr descriptor);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool CreatePrivateObjectSecurityEx(IntPtr parent, IntPtr creator, out IntPtr newDescriptor, IntPtr objectType, bool isContainer, uint autoInheritFlags, IntPtr token, ref GenericMapping mapping);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool DestroyPrivateObjectSecurity(ref IntPtr descriptor);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr descriptor, out uint size);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFileW(string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
@@ -637,6 +722,129 @@ public static class DarlingNativeOwner
             uint error = SetSecurityInfo(handle, 1, 1, ownerSid, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
             if (error != 0) { detail = (int)error; return 4; }
             return 0;
+        }
+    }
+
+    // The access list an object gets from its parent, worked out from the parent's own descriptor read through the parent's own handle
+    // (the folder above the object's real path, opened as itself): CreatePrivateObjectSecurityEx with SEF_DACL_AUTO_INHERIT (1) and the
+    // file generic mapping and the process token (TOKEN_QUERY: the call fails with ERROR_NO_TOKEN without one), no explicit entries of
+    // its own, so what comes back is the parent's inheritable entries flagged as inherited.
+    // Returns 0 with the descriptor to free with DestroyPrivateObjectSecurity, or 4 with the Win32 error.
+    private static int InheritedDescriptor(string realPath, bool container, out IntPtr inherited, out int error)
+    {
+        inherited = IntPtr.Zero;
+        error = 0;
+        int cut = realPath.TrimEnd('\\').LastIndexOf('\\');
+        if (cut < 4) { error = 87; return 4; }
+        string parent = realPath.Substring(0, cut);
+        if (parent.IndexOf('\\', 4) < 0) { parent += @"\"; }
+        using (SafeFileHandle handle = CreateFileW(parent, 0x80 | 0x00020000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
+        {
+            if (handle.IsInvalid) { error = Marshal.GetLastWin32Error(); return 4; }
+            uint needed;
+            byte[] buffer = new byte[2048];
+            if (!GetKernelObjectSecurity(handle, 7, buffer, (uint)buffer.Length, out needed))
+            {
+                error = Marshal.GetLastWin32Error();
+                if (error != 122) { return 4; }
+                buffer = new byte[needed];
+                if (!GetKernelObjectSecurity(handle, 7, buffer, (uint)buffer.Length, out needed)) { error = Marshal.GetLastWin32Error(); return 4; }
+                error = 0;
+            }
+            GCHandle pinned = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+            try
+            {
+                GenericMapping mapping = new GenericMapping();
+                mapping.Read = 0x120089u;
+                mapping.Write = 0x120116u;
+                mapping.Execute = 0x1200A0u;
+                mapping.All = 0x1F01FFu;
+                IntPtr token;
+                if (!OpenProcessToken(GetCurrentProcess(), 0x8, out token)) { error = Marshal.GetLastWin32Error(); return 4; }
+                try
+                {
+                    if (!CreatePrivateObjectSecurityEx(pinned.AddrOfPinnedObject(), IntPtr.Zero, out inherited, IntPtr.Zero, container, 1u, token, ref mapping))
+                    {
+                        error = Marshal.GetLastWin32Error();
+                        return 4;
+                    }
+                    return 0;
+                }
+                finally { CloseHandle(token); }
+            }
+            finally { pinned.Free(); }
+        }
+    }
+
+    // WRITE_DAC | FILE_READ_ATTRIBUTES; share read, write and delete; OPEN_EXISTING;
+    // FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS. The object's access list is replaced with the one its parent passes
+    // down (InheritedDescriptor), which is what icacls /reset does, and it is written through this handle with SetKernelObjectSecurity
+    // (DACL_SECURITY_INFORMATION). That call changes this object only: SetSecurityInfo propagates a folder's inheritable entries to
+    // everything below it, including the other name of a hard link that sits below it, before any walk could refuse that link (#7267).
+    // Whatever is below a folder is reset by the walk, one judged object at a time. The object is opened for its attributes and WRITE_DAC
+    // only: the parent's descriptor is read through the parent's own handle (InheritedDescriptor, READ_CONTROL on the parent).
+    public static int ResetDacl(string path, out int detail, out uint attributes)
+    {
+        detail = 0;
+        attributes = 0;
+        using (SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x80 | 0x00040000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
+        {
+            if (handle.IsInvalid) { detail = Marshal.GetLastWin32Error(); return 2; }
+            int pathError;
+            string real = RealPath(handle, out pathError);
+            string root = rootPath;
+            if (real == null || root == null) { detail = pathError; return 5; }
+            string prefix = root.EndsWith(@"\", StringComparison.Ordinal) ? root : root + @"\";
+            if (!string.Equals(real, root, StringComparison.Ordinal) && !real.StartsWith(prefix, StringComparison.Ordinal)) { return 5; }
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(handle, out information)) { detail = Marshal.GetLastWin32Error(); return 3; }
+            attributes = information.FileAttributes;
+            detail = (int)information.NumberOfLinks;
+            if ((information.FileAttributes & 0x400) != 0) { return 6; }
+            if (information.NumberOfLinks != 1) { return 1; }
+            IntPtr inherited;
+            int error;
+            if (InheritedDescriptor(real, (information.FileAttributes & 0x10) != 0, out inherited, out error) != 0) { detail = error; return 4; }
+            try
+            {
+                if (!SetKernelObjectSecurity(handle, 0x00000004u, inherited)) { detail = Marshal.GetLastWin32Error(); return 4; }
+                return 0;
+            }
+            finally { DestroyPrivateObjectSecurity(ref inherited); }
+        }
+    }
+
+    // Replaces the access list of the ROOT folder (the path must be the open root's own real path) with the one the SDDL text describes,
+    // written through the folder's own handle with SetKernelObjectSecurity, so nothing is passed down to what is below it. The text
+    // carries the protected flag (D:P...), which is what keeps the folder from inheriting. It returns the same results as ResetDacl:
+    // 0 changed, 2 not opened, 3 count unreadable, 4 not changed (detail is the error), 5 not the root or no root open, 6 a link.
+    public static int SetFolderDacl(string path, string sddl, out int detail, out uint attributes)
+    {
+        detail = 0;
+        attributes = 0;
+        using (SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x80 | 0x00040000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
+        {
+            if (handle.IsInvalid) { detail = Marshal.GetLastWin32Error(); return 2; }
+            int pathError;
+            string real = RealPath(handle, out pathError);
+            string root = rootPath;
+            if (real == null || root == null) { detail = pathError; return 5; }
+            if (!string.Equals(real, root, StringComparison.Ordinal)) { return 5; }
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(handle, out information)) { detail = Marshal.GetLastWin32Error(); return 3; }
+            attributes = information.FileAttributes;
+            detail = (int)information.NumberOfLinks;
+            if ((information.FileAttributes & 0x400) != 0) { return 6; }
+            if ((information.FileAttributes & 0x10) == 0) { return 5; }
+            IntPtr descriptor;
+            uint size;
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out descriptor, out size)) { detail = Marshal.GetLastWin32Error(); return 4; }
+            try
+            {
+                if (!SetKernelObjectSecurity(handle, 0x00000004u, descriptor)) { detail = Marshal.GetLastWin32Error(); return 4; }
+                return 0;
+            }
+            finally { LocalFree(descriptor); }
         }
     }
 }
@@ -2163,12 +2371,14 @@ if (-not $SkipPreflight) {
 }
 
 # -- 3. Event Log source --------------------------------------------------------------------------
-try {
-    New-EventLog -LogName Application -Source $serviceName -ErrorAction Stop
-    Write-Host "Registered Event Log source '$serviceName'."
-}
-catch [System.InvalidOperationException] {
+# The .NET calls, not New-EventLog: PowerShell 7 runs New-EventLog through the Windows PowerShell compatibility
+# session, where an already-registered source fails with a type the catch below never matched (#6982).
+if ([System.Diagnostics.EventLog]::SourceExists($serviceName)) {
     Write-Host "Event Log source '$serviceName' already registered."
+}
+else {
+    [System.Diagnostics.EventLog]::CreateEventSource($serviceName, 'Application')
+    Write-Host "Registered Event Log source '$serviceName'."
 }
 
 }  # end of the PreStart-and-by-hand block that starts at 1a
@@ -2441,14 +2651,14 @@ elseif ($existing) {
     }
 
     $scExit = Invoke-ScWithQuotedBinPath 'config' ''
-    if ($scExit -ne 0) { Fail "sc config failed ($scExit)." }
+    if ($scExit -ne 0) { Fail "sc.exe could not update the service '$serviceName' (exit $scExit). The service was stopped first and is not started again. Run 'sc.exe qc `"$serviceName`"' to see how it is registered, fix the cause, and re-run this script." }
 }
 else {
     # The space after binPath=/start=/obj= is sc.exe syntax. The virtual service account is
     # password-less, per-service, unprivileged - and mandatory-in-practice for the bundled
     # PostgreSQL, which refuses to run with administrative privileges (LocalSystem bricks it).
     $scExit = Invoke-ScWithQuotedBinPath 'create' "start= auto obj= `"NT SERVICE\$serviceName`""
-    if ($scExit -ne 0) { Fail "sc create failed ($scExit)." }
+    if ($scExit -ne 0) { Fail "sc.exe could not create the service '$serviceName' (exit $scExit). Run 'sc.exe query `"$serviceName`"' to see whether anything was registered, fix the cause, and re-run this script." }
     Write-Host "Created service '$serviceName' (NT SERVICE virtual account, automatic start)."
 }
 
@@ -2781,8 +2991,9 @@ function Get-DarlingStoreFolder([string]$configPath) {
 # and WRITE_DAC always and WRITE_OWNER on request; Error is the Win32 error when it could not open (IsOpen is false then). FinalPath is the real
 # path the open handle resolves to, and ResolvedPath the real path of an existing folder with every link followed, so a
 # link anywhere on the way to the folder shows as a difference between the two. ReadSecurity returns the owner, group and DACL
-# as a self-relative descriptor. WriteDacl installs a protected DACL from its binary form, WriteOwner an owner from a SID's
-# binary form; both return 0 or the Win32 error. IsReparsePoint and Attributes are read from the handle. Written for the C#
+# as a self-relative descriptor. WriteDacl installs a protected DACL from its binary form (and passes the folder's inheritable
+# entries to everything below it), WriteDaclHere installs one from a self-relative descriptor without passing anything down, WriteOwner
+# an owner from a SID's binary form; all return 0 or the Win32 error. IsReparsePoint and Attributes are read from the handle. Written for the C#
 # of Windows PowerShell 5.1.
 function Initialize-DarlingNativeStoreFolder {
     if ('DarlingNativeStoreFolder' -as [type]) { return }
@@ -2832,6 +3043,9 @@ public sealed class DarlingNativeStoreFolder : IDisposable
 
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern uint SetSecurityInfo(SafeFileHandle handle, int objectType, uint securityInfo, byte[] owner, IntPtr group, byte[] dacl, IntPtr sacl);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint securityInformation, byte[] descriptor);
 
     private SafeFileHandle handle;
     public int Error;
@@ -2957,6 +3171,14 @@ public sealed class DarlingNativeStoreFolder : IDisposable
         return (int)SetSecurityInfo(handle, 1, 0x00000004u | 0x80000000u, null, IntPtr.Zero, dacl, IntPtr.Zero);
     }
 
+    // The same list as WriteDacl, from a self-relative descriptor, written with SetKernelObjectSecurity, which changes this folder only
+    // and passes nothing down to what is below it (SetSecurityInfo is the call that can write a folder's inheritable entries to every
+    // name below it, the other name of a hard link included). For a folder whose inheritable entries do not change. 0 or the Win32 error.
+    public int WriteDaclHere(byte[] descriptor)
+    {
+        return SetKernelObjectSecurity(handle, 0x00000004u | 0x80000000u, descriptor) ? 0 : Marshal.GetLastWin32Error();
+    }
+
     // OWNER_SECURITY_INFORMATION.
     public int WriteOwner(byte[] ownerSid)
     {
@@ -3045,6 +3267,38 @@ function Get-DarlingItemOwnerProblem([string]$path, $trusted) {
     return "$path is owned by $ownerName, which is not SYSTEM, Administrators or the service account, so another user may have made it."
 }
 
+# #7267: the one command sequence that makes a whole store folder acceptable at once. A store folder made by hand carries the
+# maker's owner and explicit or inherited grants on items far below the folder, and the earlier advice (one /setowner, then an
+# /inheritance:r on the single item a start named) cleared one item per attempt. In order: Administrators own the folder and
+# everything in it (/T), the folder itself is cleared of its own and inherited access, the folder is protected and granted to SYSTEM,
+# Administrators and the service account only, and then everything below it is reset so it inherits that protected folder. The
+# principals are SIDs, so no account name has to translate on the machine. $serviceSid is the service account's SID (empty leaves its
+# grant out). Each step is an object with the icacls arguments (Args) and the line to show an operator (Text).
+function Get-DarlingStoreRepairSteps([string]$folder, [string]$serviceSid = '') {
+    $f = $folder.TrimEnd('\')
+    $grants = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F')
+    if ($serviceSid) { $grants += "*${serviceSid}:(OI)(CI)F" }
+    $lists = New-Object System.Collections.Generic.List[object]
+    $lists.Add(@($f, '/setowner', '*S-1-5-32-544', '/T', '/C', '/L'))
+    $lists.Add(@($f, '/reset', '/C', '/L'))
+    $lists.Add(@($f, '/inheritance:r', '/grant') + $grants)
+    $lists.Add(@("$f\*", '/reset', '/T', '/C', '/L'))
+    foreach ($list in $lists) {
+        $shown = @($list | ForEach-Object { if ($_ -match '[\s*()]') { '"' + $_ + '"' } else { "$_" } })
+        [pscustomobject]@{ Args = [string[]]$list; Text = 'icacls ' + ($shown -join ' ') }
+    }
+}
+
+# The steps above as the lines an operator runs from an elevated prompt, one per line, after the one sentence about links: icacls
+# follows a junction or symbolic link into whatever it points at even with /L (which governs only a link named on the command line),
+# so a link anywhere under the folder sends the owner change and the reset to its target (#7267). Every printed copy of the four
+# commands carries that sentence because this is the one place that builds them.
+function Get-DarlingStoreRepairText([string]$folder, [string]$serviceSid = '') {
+    $f = $folder.TrimEnd('\')
+    $links = "icacls follows a junction or symbolic link into whatever it points at and changes that too, so list the links under the folder with dir /s /a:l `"$f`", remove each one (rmdir `"<link>`" removes the link and keeps its target), run these four commands, then make the links again:"
+    return ($links + "`n" + ((Get-DarlingStoreRepairSteps $folder $serviceSid | ForEach-Object { '    ' + $_.Text }) -join "`n"))
+}
+
 # Creates $folder if it is missing, makes Administrators its owner, and gives it the DACL described above.
 # Throws with the reason when it cannot leave the folder in that state, so the caller stops before the
 # service starts. Nothing about the folder is decided by name: the folder is created with its DACL in the call that
@@ -3130,11 +3384,11 @@ function Initialize-DarlingStoreFolder([string]$folder, [string]$serviceAccount,
         if ($existed -and $trusted -notcontains $owner) {
             try { $ownerName = $owner.Translate([System.Security.Principal.NTAccount]).Value }
             catch { $ownerName = $owner.Value }
-            throw "$folder already exists and is owned by $ownerName, which is not SYSTEM, Administrators or the service account, so another user may have made it. If you did not create it, delete it and re-run this script: this script does not take over a folder it did not make. If it is your existing store (for example you changed the service's Log On account), make Administrators the owner of everything in it first, from an elevated prompt, then re-run this script: icacls `"$folder`" /setowner *$($adminsSid.Value) /T /C /L"
+            throw "$folder already exists and is owned by $ownerName, which is not SYSTEM, Administrators or the service account, so another user may have made it. If you did not create it, delete it and re-run this script: this script does not take over a folder it did not make. If it is your existing store (for example you made the folder yourself, or you changed the service's Log On account), fix the whole folder at once from an elevated prompt, then re-run this script.`n$(Get-DarlingStoreRepairText $full $serviceSid.Value)"
         }
         if ($existed) {
             $contents = Get-DarlingStoreContentsProblem $full $dataDirectory $trusted
-            if ($contents) { throw "$contents If you did not create $folder, delete it (take ownership first if Windows refuses) and re-run this script. If it is your existing store, give Administrators ownership of, and full control over, everything in it from an elevated prompt, then re-run this script: icacls `"$folder`" /setowner *$($adminsSid.Value) /T /C /L" }
+            if ($contents) { throw "$contents If you did not create $folder, delete it (take ownership first if Windows refuses) and re-run this script. If it is your existing store, fix the whole folder at once from an elevated prompt, then re-run this script.`n$(Get-DarlingStoreRepairText $full $serviceSid.Value)" }
         }
 
         # A folder this script made is owned by whoever created it: Administrators, or the installing user's own account
@@ -3146,7 +3400,17 @@ function Initialize-DarlingStoreFolder([string]$folder, [string]$serviceAccount,
             $error1 = $lock.WriteOwner($adminsBytes)
             if ($error1 -ne 0) { throw "could not make Administrators the owner of ${folder} (Windows error $error1)." }
         }
-        $error2 = $lock.WriteDacl($daclBytes)
+        # SetSecurityInfo (WriteDacl) is the call that can hand the folder's inheritable entries to everything below it, through a hard
+        # link's outside name too, which is a window for a link planted after the walk that judged the tree (#7267). It is only needed
+        # when those entries change. A folder that is already protected and already carries exactly the inheritable entries this lock grants (the upgrade's
+        # in-place repair has just written them to the folder and reset everything below it) only gets the operator's traverse entry,
+        # and that one is not inherited, so it is written to this folder alone (WriteDaclHere).
+        $inheritableOf = {
+            param($security)
+            @($security.GetAccessRules($true, $true, $sidType) | Where-Object { $_.InheritanceFlags -ne $inheritFlags::None } | ForEach-Object { '{0}|{1}|{2}|{3}|{4}|{5}' -f $_.IdentityReference.Value, [int]$_.FileSystemRights, [int]$_.InheritanceFlags, [int]$_.PropagationFlags, $_.AccessControlType, $_.IsInherited } | Sort-Object)
+        }
+        $sameInheritable = $before.AreAccessRulesProtected -and ((& $inheritableOf $before) -join ';') -eq ((& $inheritableOf $acl) -join ';')
+        if ($sameInheritable) { $error2 = $lock.WriteDaclHere($descriptor) } else { $error2 = $lock.WriteDacl($daclBytes) }
         if ($error2 -ne 0) { throw "could not set the permissions of ${folder} (Windows error $error2)." }
 
         # VERIFY rather than assume, through the same handle: the folder must now be protected, owned by Administrators,

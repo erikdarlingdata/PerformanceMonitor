@@ -137,6 +137,11 @@ internal static class DarlingServiceKeyFile
                 return RefuseDirectory<TKey>(path, directory, distrust, exists);
             }
 
+            if (!exists && UnreadableDirectoryReason(directory) is { } unreadable)
+            {
+                return Refuse<TKey>(path, unreadable, untrusted: true, discarded, exists: true);
+            }
+
             if (exists)
             {
                 var untrusted = DarlingManagedRoles.UntrustedComposeCredentialReason(new FileInfo(path));
@@ -209,6 +214,11 @@ internal static class DarlingServiceKeyFile
                 return RefuseDirectory<TKey>(path, directory, distrust, exists);
             }
 
+            if (!exists && UnreadableDirectoryReason(directory) is { } unreadable)
+            {
+                return Refuse<TKey>(path, unreadable, untrusted: true, discarded, exists: true);
+            }
+
             /* #5366: a directory that was there before this write is an operator's: an account that can write to it can
                swap the temporary file for another between its close and the move, or rename the key away. The service
                does not re-permission it; it says what to change. A directory the service just made was hardened as it
@@ -245,12 +255,36 @@ internal static class DarlingServiceKeyFile
 
         if (owner.UserId != modes.EffectiveUserId)
         {
-            return "it is owned by another user than the one the service runs as";
+            var euid = modes.EffectiveUserId;
+            return $"it is owned by user {owner.UserId.ToString(CultureInfo.InvariantCulture)}, not by user {euid.ToString(CultureInfo.InvariantCulture)}, "
+                + "which the service runs as; "
+                + (DarlingManagedRoles.ImageOwnedCredentialAdvice(euid, path, owner.UserId)
+                    ?? $"to give it to that user, run: {DarlingManagedRoles.CredentialOwnershipFix(euid, path)}");
         }
 
         return owner.Links == 1
             ? null
             : $"it has {owner.Links.ToString(CultureInfo.InvariantCulture)} names, not one";
+    }
+
+    /// <summary>How <see cref="UnreadableDirectoryReason"/> begins, so a caller can tell that reason from the others (#8141).</summary>
+    internal const string UnreadableDirectoryLead = "it cannot be read (permission denied)";
+
+    /// <summary>Why a key that looks absent is not known to be (#8141): the service's user cannot list
+    /// <paramref name="directory"/>, so a file in it would read as missing. Null when it can, when the directory is not
+    /// there, or when this platform has no Unix modes.</summary>
+    internal static string? UnreadableDirectoryReason(string directory)
+    {
+        if (ComposeCredentialDirectoryGuard.Current.UnixModes is not { } modes
+            || !Directory.Exists(directory)
+            || modes.CanList(directory))
+        {
+            return null;
+        }
+
+        var euid = modes.EffectiveUserId;
+        return $"{UnreadableDirectoryLead}: user {euid.ToString(CultureInfo.InvariantCulture)}, which the service runs as, cannot list {directory}; "
+            + $"to give it to that user, run: {DarlingManagedRoles.CredentialOwnershipFix(euid, directory)}";
     }
 
     private static bool AnythingAtOrFalse(string path)
@@ -277,6 +311,21 @@ internal static class DarlingServiceKeyFile
         where TKey : class =>
         $"it is larger than {spec.MaxBytes.ToString(CultureInfo.InvariantCulture)} bytes, which no key this service writes is";
 
+    /// <summary>Reads <paramref name="stream"/> into <paramref name="buffer"/> until the stream ends or the buffer is full,
+    /// and returns how many bytes were read. A caller sizes the buffer to its limit plus one byte, so a count above the
+    /// limit means the file is larger, and no more than that is ever read, whatever the file grows to (#5366, #8006).</summary>
+    internal static int ReadBounded(Stream stream, byte[] buffer)
+    {
+        var length = 0;
+        int read;
+        while (length < buffer.Length && (read = stream.Read(buffer, length, buffer.Length - length)) > 0)
+        {
+            length += read;
+        }
+
+        return length;
+    }
+
     /// <summary>Reads the key from <paramref name="held"/>, the stream <see cref="Load{TKey}"/> judged the file through,
     /// or from the path when there is none (Unix, where mode and owner are the shared check's).</summary>
     private static ServiceKeyFileResult<TKey> Read<TKey>(string path, ServiceKeyFileSpec<TKey> spec, FileStream? held, string? discarded)
@@ -296,13 +345,7 @@ internal static class DarlingServiceKeyFile
             }
 
             buffer = new byte[spec.MaxBytes + 1];
-            var length = 0;
-            int read;
-            while (length < buffer.Length && (read = stream.Read(buffer, length, buffer.Length - length)) > 0)
-            {
-                length += read;
-            }
-
+            var length = ReadBounded(stream, buffer);
             if (length > spec.MaxBytes)
             {
                 return Refuse<TKey>(path, TooLarge(spec), untrusted: false, discarded);

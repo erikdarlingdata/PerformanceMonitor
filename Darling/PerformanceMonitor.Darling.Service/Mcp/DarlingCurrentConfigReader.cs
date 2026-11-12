@@ -48,7 +48,7 @@ internal static class DarlingCurrentConfigReader
         FROM v_server_config
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1)
-        ORDER BY configuration_name
+        ORDER BY lower(configuration_name), configuration_name
         """;
 
     public static async Task<LatestSnapshot<ServerConfigReadRow>> GetLatestServerConfigAsync(
@@ -101,7 +101,7 @@ internal static class DarlingCurrentConfigReader
         FROM v_database_config
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)
-        ORDER BY database_name
+        ORDER BY lower(database_name), database_name
         """;
 
     /// <summary>The ordinal of the appended <c>capture_time</c> column in <see cref="DatabaseConfigSql"/> — one

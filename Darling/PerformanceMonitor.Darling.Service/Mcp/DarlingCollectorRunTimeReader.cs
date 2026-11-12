@@ -167,7 +167,7 @@ internal static class DarlingCollectorRunTimeReader
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
         {
             warn("get_collection_health: the MCP role cannot read config.config_collector_run_times (42501), so collector run times are not shown. "
-                + "Re-run provision-roles.sql to grant it SELECT.");
+                + "Run " + DarlingManagedRoles.ProvisionRolesScriptPath + " on the store to grant it SELECT.");
             return Array.Empty<RunTimeOverride>();
         }
     }

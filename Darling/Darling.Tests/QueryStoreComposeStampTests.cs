@@ -176,13 +176,14 @@ public sealed class QueryStoreComposeStampTests
         /* The build lag is read off the STORE's clock, the one the row trigger's WHEN uses; the service's clock is only the retention floor. */
         /* #5867: the store clock moved into the plan's clock CTE, which the failure filter reads too. */
         Assert.Contains("SELECT coalesce($3::timestamp, now() AT TIME ZONE 'UTC') AS at", plan, StringComparison.Ordinal);
-        Assert.Contains("date_trunc('hour', clock.at - interval '3 hours')", plan, StringComparison.Ordinal);
+        /* #7762: the lag is built from QueryStoreComposeStamp.BuildLagMinutes; the live test BuildLag_AndThePlansBoundary_Agree proves the planner's boundary. */
+        Assert.Contains("date_trunc('hour', clock.at - interval '" + QueryStoreComposeStamp.BuildLagMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture) + " minutes')", plan, StringComparison.Ordinal);
         Assert.DoesNotContain("$1::timestamp - interval", plan, StringComparison.Ordinal);
         Assert.Contains("greatest($1::timestamp,", plan, StringComparison.Ordinal);
         Assert.Contains("filled_since", plan, StringComparison.Ordinal);
         Assert.Contains("sv.is_enabled", plan, StringComparison.Ordinal);
 
-        Assert.Equal(TimeSpan.FromHours(3), QueryStoreComposeStamp.BuildLag);
+        Assert.Equal(TimeSpan.FromMinutes(QueryStoreComposeStamp.BuildLagMinutes), QueryStoreComposeStamp.BuildLag);
         Assert.Equal(6, QueryStoreComposeStamp.MaxBuildsPerTick);
         Assert.Equal(60, QueryStoreComposeStamp.BuildStatementTimeoutSeconds);
         Assert.Equal(TimeSpan.FromMinutes(10), QueryStoreComposeStamp.MaxTickDuration);
@@ -229,12 +230,14 @@ public sealed class QueryStoreComposeStampTests
         Assert.DoesNotContain("backend_xid", sql, StringComparison.Ordinal);
         /* A writer whose start is not readable counts as open (L1); a readable one counts while it began before H + 2 h. */
         Assert.Contains("w.xact_start IS NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("(w.xact_start AT TIME ZONE 'UTC') < $1 + interval '2 hours'", sql, StringComparison.Ordinal);
+        Assert.Contains("(w.xact_start AT TIME ZONE 'UTC') < $1 + " + QueryStoreComposeStamp.WriterGuardSql, sql, StringComparison.Ordinal);
         /* The log names the writer; it never reads the session's query text. */
         Assert.Contains("a.application_name, a.backend_type", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("query", QueryStoreComposeStamp.OldestWriterSql.Replace("query_store_interval_wide", string.Empty, StringComparison.Ordinal), StringComparison.OrdinalIgnoreCase);
-        /* The 2 hours are the build lag less the trigger's offset: a row of hour H is unmarked only before H + 3 h - 1 h. */
-        Assert.Equal(TimeSpan.FromHours(2), QueryStoreComposeStamp.BuildLag - QueryStoreComposeStamp.WhenOffset);
+        /* The guard is the hour plus the trigger's offset: a row of hour H is unmarked only before H + 1 h + WhenOffset, and the build (H + BuildLag) is
+           later by the margin a writer transaction must outlast to defer it (#7762). */
+        Assert.True(QueryStoreComposeStamp.BuildLag - (TimeSpan.FromHours(1) + QueryStoreComposeStamp.WhenOffset) >= TimeSpan.FromMinutes(30),
+            "the build must start at least 30 minutes after the guard's hour, so a build defers only for a transaction open over 30 minutes");
     }
 
     [Fact]
@@ -247,7 +250,7 @@ public sealed class QueryStoreComposeStampTests
         Assert.Contains("coalesce(w.xact_start AT TIME ZONE 'UTC', '-infinity'::timestamp)", plan, StringComparison.Ordinal);
         Assert.Contains("'infinity'::timestamp", plan, StringComparison.Ordinal);
         /* Both arms carry the bound, and it is the guard's strict comparison. */
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(plan, @"interval '2 hours' > cutoff\.since").Count);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(plan, System.Text.RegularExpressions.Regex.Escape(QueryStoreComposeStamp.WriterGuardSql) + @" > cutoff\.since").Count);
     }
 
     [Fact]
@@ -434,48 +437,29 @@ public sealed class QueryStoreComposeStampTests
         {
             Assert.Contains("clock_timestamp() AT TIME ZONE 'UTC'", when, StringComparison.Ordinal);
             Assert.DoesNotContain("now()", when, StringComparison.Ordinal);
-            Assert.Contains("- " + QueryStoreComposeStamp.WhenOffsetSql, when, StringComparison.Ordinal);
+            /* V173's literal is frozen: it still subtracts the one-hour offset. V251 (LateMarkOffsetZeroSql) is the rung that moves it to zero. */
+            Assert.Contains("- interval '1 hour'", when, StringComparison.Ordinal);
         }
 
         Assert.Contains("OLD.collection_time <", whens[1], StringComparison.Ordinal);
         Assert.Contains("NEW.collection_time <", whens[1], StringComparison.Ordinal);
         Assert.DoesNotContain("now()", sql.Replace("transaction start", string.Empty, StringComparison.Ordinal)[sql.IndexOf("DECLARE", StringComparison.Ordinal)..], StringComparison.Ordinal);
-        Assert.Equal(TimeSpan.FromHours(1), QueryStoreComposeStamp.WhenOffset);
-        Assert.True(QueryStoreComposeStamp.WhenOffset < QueryStoreComposeStamp.BuildLag, "the trigger must mark an hour before the builder reads it");
+        /* V251 (#7762): the replacement rung marks from the hour of the writer's clock, with no offset, and the builder reads an hour only after it. */
+        Assert.Equal(TimeSpan.Zero, QueryStoreComposeStamp.WhenOffset);
+        Assert.True(TimeSpan.FromHours(1) + QueryStoreComposeStamp.WhenOffset < QueryStoreComposeStamp.BuildLag, "the trigger must mark an hour before the builder reads it");
+        var rung = NormalizeEol(QueryStoreComposeStamp.LateMarkOffsetZeroSql);
+        var rungWhens = Regex.Matches(rung, @"WHEN \((?<cond>.*?)\)\s*EXECUTE", RegexOptions.Singleline).Select(m => m.Groups["cond"].Value).ToList();
+        Assert.Equal(2, rungWhens.Count);
+        foreach (var rungWhen in rungWhens)
+        {
+            Assert.Contains(QueryStoreComposeStamp.LateMarkThresholdSql, rungWhen, StringComparison.Ordinal);
+            Assert.DoesNotContain("- interval", rungWhen, StringComparison.Ordinal);
+        }
     }
 
     private static string NormalizeEol(string value) => value.Replace("\r\n", "\n", StringComparison.Ordinal);
 
     /* ---- the sentinel, the version map, the tick ---------------------------------------------------- */
-
-    [Fact]
-    public void TheTick_IsANinthTenant_OutsideTheGate_BeforeTheIoRollup_WithItsOwnCatchAll()
-    {
-        var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
-        var code = CSharpSourceWalker.StripCommentsAndStrings(worker);
-        var tickStart = code.IndexOf("private async Task RunStoreMaintenanceTickAsync(CancellationToken stoppingToken)", StringComparison.Ordinal);
-        Assert.True(tickStart >= 0, "could not locate RunStoreMaintenanceTickAsync");
-        var tickEnd = code.IndexOf("private async Task RefreshModuleMapRecentAsync(CancellationToken stoppingToken)", tickStart, StringComparison.Ordinal);
-        Assert.True(tickEnd > tickStart, "could not bound RunStoreMaintenanceTickAsync");
-        var tick = code[tickStart..tickEnd];
-
-        const string Stamp = "await BuildQueryStoreComposeStampAsync(stoppingToken);";
-        const string Io = "await BuildPgIoStatsHourlyAsync(stoppingToken);";
-        Assert.Equal(1, tick.Split(Stamp).Length - 1);
-        Assert.Equal(1, code.Split(Stamp).Length - 1);
-        var stampAt = tick.IndexOf(Stamp, StringComparison.Ordinal);
-        var ioAt = tick.IndexOf(Io, StringComparison.Ordinal);
-        Assert.True(ioAt > stampAt, "the rollup tick is awaited before the I/O rollup");
-        Assert.True(string.IsNullOrWhiteSpace(tick[(stampAt + Stamp.Length)..ioAt]), "nothing sits between the two tenants");
-        Assert.True(stampAt > tick.IndexOf("else", StringComparison.Ordinal), "the rollup tick sits after the gated if/else, outside the TimescaleDB gate");
-
-        var builder = code[code.IndexOf("private async Task BuildQueryStoreComposeStampAsync(CancellationToken stoppingToken)", StringComparison.Ordinal)..];
-        builder = builder[..builder.IndexOf("private async Task", 60, StringComparison.Ordinal)];
-        Assert.Contains("catch (Exception ex) when (ex is not OperationCanceledException)", builder, StringComparison.Ordinal);
-        Assert.Contains("QueryStoreComposeStamp.RunTickAsync(", builder, StringComparison.Ordinal);
-        Assert.Contains("DarlingRetention.QueryStoreIntervalWideRetentionDays", builder, StringComparison.Ordinal);
-        Assert.DoesNotContain("throw", builder, StringComparison.Ordinal);
-    }
 
     private static QueryStoreComposeStamp.Build Backlog(int hoursAgo) => B(hoursAgo, true) with { Backlog = true };
 

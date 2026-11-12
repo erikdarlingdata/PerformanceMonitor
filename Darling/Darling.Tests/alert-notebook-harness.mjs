@@ -6,6 +6,7 @@
    dropped. Everything else is views.js as shipped: the catalog check, the cell routing, the in-flight limiter. */
 import fs from "node:fs";
 import vm from "node:vm";
+import { isStateZero } from "../PerformanceMonitor.Darling.Service/wwwroot/js/util.js";
 
 const [viewsPath, scenario] = process.argv.slice(-2);
 
@@ -39,7 +40,9 @@ const context = vm.createContext({
   relTime: String,
   localTime: String,
   fmtNum: String,
-  renderPanel: (desc, onSettled) => { calls.reads.push({ read: desc.read, title: desc.title, rowsKey: desc.rowsKey || null, columns: Array.isArray(desc.columns) ? desc.columns.length : 0, viz: desc.viz, series: Array.isArray(desc.series) ? desc.series.length : 0, stats: Array.isArray(desc.stats) ? desc.stats.length : 0, xKey: desc.xKey || null }); settleLater(onSettled); return card(desc.title, "read"); },
+  // The real shared predicate, so the header's dash rule is the product's and not a stand-in.
+  isStateZero,
+  renderPanel: (desc, onSettled) => { calls.reads.push({ read: desc.read, title: desc.title, rowsKey: desc.rowsKey || null, columns: Array.isArray(desc.columns) ? desc.columns.length : 0, stateZeroDash: Array.isArray(desc.columns) ? desc.columns.filter((c) => c.stateZeroDash === true).map((c) => c.key) : [], viz: desc.viz, series: Array.isArray(desc.series) ? desc.series.length : 0, stats: Array.isArray(desc.stats) ? desc.stats.length : 0, xKey: desc.xKey || null }); settleLater(onSettled); return card(desc.title, "read"); },
   setPanelSignal: () => {},
   VIZ: { table: () => null, line: () => null, stat: () => null, bandlist: () => null },
   renderComposedPanelCard: (spec, scope, onSettled) => {
@@ -82,6 +85,24 @@ const scenarios = {
   displayNameOnly: { cells: [header, panel("Lock modes", "pie")], opts: { alert: { ...alert, server_name: "Orders (display name)" }, catalog, server: "Orders (display name)" } },
   // No alert row and no server on the link: nothing to scope a chart to.
   noServer: { cells: [header, panel("Lock modes", "pie")], opts: { alert: null, catalog } },
+  // The link's firing was dismissed: the card says so, beside the alert's own facts.
+  dismissed: { cells: [header], opts: { alert: { ...alert, dismissed: true }, catalog, scopeServer: "SRV1" } },
+  // A resolution row: state_only, with the stored 0 that is not a reading on both sides, as get_alert_history serves it.
+  resolution: { cells: [header], opts: { alert: { ...alert, metric_name: "Client Timeouts Cleared", current_value: 0, threshold_value: 0, state_only: true }, catalog, scopeServer: "SRV1" } },
+  // A state-only row whose current value is a real number beside a stored-zero threshold.
+  stateMeasured: { cells: [header], opts: { alert: { ...alert, metric_name: "Database State", current_value: 3, threshold_value: 0, state_only: true }, catalog, scopeServer: "SRV1" } },
+  // A measured row, and a measured row whose reading really is 0.
+  measured: { cells: [header], opts: { alert: { ...alert, current_value: 90, threshold_value: 80, state_only: false }, catalog, scopeServer: "SRV1" } },
+  measuredZero: { cells: [header], opts: { alert: { ...alert, current_value: 0, threshold_value: 0, state_only: false }, catalog, scopeServer: "SRV1" } },
+  // The notebook's own Alert History table cell: its value columns carry the state-zero dash rule the Alert History page applies.
+  historyTable: {
+    cells: [header, { type: "read", read: "get_alert_history", viz: "table", title: "Alert history", params: { server: "SRV1", hours: "24" } }],
+    opts: { alert, catalog: { reads: [{ name: "get_alert_history" }], compose: { measures: [] } }, scopeServer: "SRV1" },
+  },
+  // #8555: a report row declares no notebook; its caller shows the note, and the page draws nothing of its own.
+  noNotebook: { cells: [], opts: { alert: null, catalog, noNotebook: true } },
+  // An ordinary alert with no cells: the notebook header, its buttons and the empty line stay.
+  emptyNotebook: { cells: [], opts: { alert: null, catalog } },
   // A cell kind the page has no renderer for must say so.
   unknownKind: { cells: [header, { type: "sparkline", title: "Mystery cell" }], opts: { alert, catalog } },
   // Three panels that cannot start a load, then a read: if a bad panel held its limiter slot the read never draws.
@@ -148,12 +169,34 @@ const walkTitles = (n) => {
   n.kids.forEach(walkTitles);
 };
 walkTitles(main);
+// The header card's labelled fields, as [label, value] pairs in the order drawn.
+const fields = [];
+const walkFields = (n) => {
+  if (!n || typeof n !== "object") return;
+  if (n.tag === "div" && n.cls === "detail-field") fields.push([n.kids[0] && n.kids[0].text, n.kids[1] && n.kids[1].text]);
+  n.kids.forEach(walkFields);
+};
+walkFields(main);
+// The page's own heading and button texts (the notebook header and its Save as notebook / Open live buttons).
+const heads = [];
+const buttons = [];
+const walkChrome = (n) => {
+  if (!n || typeof n !== "object") return;
+  if (n.tag === "h2") heads.push(n.text);
+  if (n.tag === "button") buttons.push(n.text);
+  n.kids.forEach(walkChrome);
+};
+walkChrome(main);
 
 console.log(JSON.stringify({
   errors: strips("error"),
   notices: strips("notice"),
+  empties: strips("empty"),
+  heads,
+  buttons,
   loading: strips("loading").length,
   titles,
+  fields,
   reads: calls.reads,
   composed: calls.composed,
   markdown: calls.markdown,

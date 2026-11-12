@@ -75,6 +75,7 @@ public class PgStatementStatsDeltaSkipTests
         statsSince.HasValue ? (object)statsSince.Value : DBNull.Value,
         targetNow ?? T0,
         DBNull.Value,
+        DBNull.Value,  /* #7731: database_name */
     };
 
     private static async Task<List<PgStatementStatsCollector.Row>> ReadAsync(

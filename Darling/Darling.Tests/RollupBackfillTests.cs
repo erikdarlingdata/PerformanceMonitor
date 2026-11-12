@@ -1071,4 +1071,43 @@ public sealed class RollupBackfillTests
         Assert.Contains("--dry-run", usage, StringComparison.Ordinal);
         Assert.All(usage, ch => Assert.True(ch < 128, $"usage text must be ASCII; found U+{(int)ch:X4}"));
     }
+
+    /// <summary>
+    /// #7981: a slice the engine counts as built is one no invalidation entry overlaps. The entries are the
+    /// materialization invalidation log of a daily rollup measured on TimescaleDB 2.30.1 after a full refresh over
+    /// raw with an outage gap: everything before 2026-10-09 (the oldest day with data) and from 2026-11-07 on is
+    /// still invalid, and the gap days kept their entry. The rollup's own retention then dropped the days before
+    /// the gap without writing an entry, so a day inside that range is counted as built, while a day inside the
+    /// head, a gap day and the open end are not. The engine's internal time is microseconds since the Unix epoch.
+    /// </summary>
+    [Fact]
+    public void CountedAsBuilt_IsTrueOnlyWhereNoInvalidationEntryOverlaps_InTheEnginesInternalTime()
+    {
+        var log = new[]
+        {
+            (long.MinValue, 1791503999999999L),
+            (1794009600000000L, long.MaxValue),
+            (1793232000000000L, 1793663999999999L),
+        };
+
+        Assert.Equal(1791504000000000L, RollupBackfill.ToInternalMicroseconds(new DateTime(2026, 10, 9, 0, 0, 0, DateTimeKind.Unspecified)));
+
+        /* A day the retention dropped: nothing in the log, so a plain refresh over it does nothing. */
+        Assert.True(RollupBackfill.CountedAsBuilt(log, new DateTime(2026, 10, 20), new DateTime(2026, 10, 21)));
+
+        /* The oldest day with data, right after the still-invalid head: the entry ends one microsecond before it. */
+        Assert.True(RollupBackfill.CountedAsBuilt(log, new DateTime(2026, 10, 9), new DateTime(2026, 10, 10)));
+
+        /* A day inside the head, a gap day, the last gap day and the open end all overlap an entry. */
+        Assert.False(RollupBackfill.CountedAsBuilt(log, new DateTime(2026, 10, 8), new DateTime(2026, 10, 9)));
+        Assert.False(RollupBackfill.CountedAsBuilt(log, new DateTime(2026, 10, 30), new DateTime(2026, 10, 31)));
+        Assert.False(RollupBackfill.CountedAsBuilt(log, new DateTime(2026, 11, 2), new DateTime(2026, 11, 3)));
+        Assert.False(RollupBackfill.CountedAsBuilt(log, new DateTime(2026, 11, 7), new DateTime(2026, 11, 8)));
+
+        /* A slice straddling the gap's start overlaps it too. */
+        Assert.False(RollupBackfill.CountedAsBuilt(log, new DateTime(2026, 10, 28), new DateTime(2026, 10, 30)));
+
+        /* No entries at all says nothing about the rollup; the caller treats it as unknown, not as built. */
+        Assert.True(RollupBackfill.CountedAsBuilt(Array.Empty<(long, long)>(), new DateTime(2026, 10, 20), new DateTime(2026, 10, 21)));
+    }
 }

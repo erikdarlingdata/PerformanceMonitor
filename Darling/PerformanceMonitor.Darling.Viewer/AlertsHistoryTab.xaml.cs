@@ -47,6 +47,10 @@ public partial class AlertsHistoryTab : UserControl
     private ColumnFilterPopup? _filterPopupContent;
     private DateTime? _lastRefreshed;
 
+    /// <summary>#7211: the newest <see cref="LoadAlertsAsync"/> claims the tab, so a slower read for a server or window the operator
+    /// has since moved off cannot land over a newer one (the Job History tab's rule, #5703).</summary>
+    private readonly ScopedLoadGenerations _loads = new();
+
     /// <summary>The read's row cap (D7): the newest 500 alerts. <see cref="LoadAlertsAsync"/> passes it to the read and
     /// the count text (<see cref="JobHistoryCap.CountText(int, int, int, string)"/>) says "showing the newest 500" when
     /// the read reached it.</summary>
@@ -72,7 +76,7 @@ public partial class AlertsHistoryTab : UserControl
         /* #6136: each column is at least as wide as its own header ("Channel" was cut to "Channe"). */
         Loaded += (_, _) => DataGridHeaderFit.Apply(this);
         /* #5562: the shared picker; the old combo defaulted to the last 24 hours. */
-        TimeRangePickerControl.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
+        TimeRangePickerControl.ZoneProvider = PickerZone;
         TimeRangePickerControl.Value = TimeRangePresets.Find("1d")!;
         /* #5562 R8: the old list's "All" is one choice again, the span the alert table keeps (90 days), not a year. */
         TimeRangePickerControl.SetLongestChoice(ViewerTimeRangeWindow.AlertHistoryLongestChoice, "All");
@@ -82,22 +86,37 @@ public partial class AlertsHistoryTab : UserControl
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }
 
+    /// <summary>The Tag on the row context menu's write items (#8547), which a read-only seat disables.</summary>
+    internal const string AlertWriteMenuItemTag = "AlertWriteItem";
+
+    /// <summary>The tooltip on every alert write control a read-only seat has disabled: the two Dismiss buttons and the row menu's write items.</summary>
+    private const string ReadOnlyAlertWriteTip = "This viewer is connected read-only, so alert dismissal and muting are disabled. " + ViewerReadOnlyException.HowToConnectAsAdmin;
+
     /// <summary>Wires the data service and the column-filter manager, and starts the stale-data ticker.</summary>
     public void Initialize(ViewerDataService dataService)
     {
         _dataService = dataService;
         _filterManager = new DataGridFilterManager<ViewerAlertRow>(AlertsDataGrid);
 
-        /* V8 security hardening: a read-only (viewer-role) connection can't dismiss alerts, so disable
-           the Dismiss buttons up front with an explaining tooltip (the Dismiss Selected button is also
-           selection-gated below). Mute-from-alert and context-menu Dismiss stay clickable but surface
-           the read-only message via StatusChanged if used — the reactive backstop. */
+        /* V8 security hardening: a read-only (viewer-role) connection can't dismiss or mute alerts, so the Dismiss
+           buttons and the three write items of the row context menu (Mute This Alert, Mute Similar Alerts, Dismiss
+           Selected) are disabled up front with an explaining tooltip (the Dismiss Selected button is also
+           selection-gated below). The three handlers also return early on a read-only seat (#8547), so no other path
+           opens the Create Mute Rule dialog or dismisses. */
         if (dataService.IsReadOnly)
         {
-            const string readOnlyTip = "This viewer is connected read-only (postgres.connectAs = \"viewer\"); alert dismissal is disabled.";
             DismissAllButton.IsEnabled = false;
-            DismissAllButton.ToolTip = readOnlyTip;
-            DismissSelectedButton.ToolTip = readOnlyTip;
+            DismissAllButton.ToolTip = ReadOnlyAlertWriteTip;
+            DismissSelectedButton.ToolTip = ReadOnlyAlertWriteTip;
+            if (TryFindResource("DataGridContextMenu") is ContextMenu rowMenu)
+            {
+                foreach (var item in rowMenu.Items.OfType<MenuItem>().Where(m => (m.Tag as string) == AlertWriteMenuItemTag))
+                {
+                    item.IsEnabled = false;
+                    item.ToolTip = ReadOnlyAlertWriteTip;
+                    ToolTipService.SetShowOnDisabled(item, true);
+                }
+            }
         }
 
         _staleDataTimer.Start();
@@ -122,76 +141,169 @@ public partial class AlertsHistoryTab : UserControl
         }
     }
 
+    /* #8549: the first open's clock (see ViewerFirstOpen): the shell starts it when the tab becomes visible and the tab's first load runs on it. */
+    private readonly ViewerFirstOpen _firstOpen = new();
+
+    /// <summary>Where a slow load's line goes; null is the Viewer log's "SlowLoad" source. A test swaps it to read the line.</summary>
+    internal Action<string>? SlowLoadSink { get; set; }
+
+    /// <summary>The first open's slow-load threshold. A test lowers it to read a line without waiting three seconds.</summary>
+    internal int FirstOpenSlowThresholdMs { get => _firstOpen.SlowThresholdMs; set => _firstOpen.SlowThresholdMs = value; }
+
+    /// <summary>#8549: the shell calls this when it makes the tab visible, so a wait behind another tab's refresh counts in a slow first open's line.</summary>
+    internal void BeginFirstOpen() => _firstOpen.Begin();
+
+    /// <summary>#8549: the shell calls this when the fleet lane starts the tab's refresh.</summary>
+    internal void FirstOpenRefreshStarted() => _firstOpen.RefreshStarted();
+
     /// <summary>Reloads the alert history (the shell calls this when the Alerts tab becomes visible / on the timer).</summary>
     public Task RefreshAlertsAsync() => LoadAlertsAsync();
 
-    private async Task LoadAlertsAsync()
+    /// <summary><see cref="RefreshAlertsAsync"/> on a load clock the caller owns, so a test reads the phases the load booked (#8549).</summary>
+    internal Task RefreshAlertsAsync(ViewerLoadTimer timer) => LoadAlertsAsync(timer);
+
+    /// <summary>The distinct servers this tab's reads have listed. A list that has shown more than one server is a list of several
+    /// servers for the rest of its life, whatever one read returns.</summary>
+    private readonly HashSet<int> _serversSeen = new();
+
+    /// <summary>
+    /// True while the list spans servers: no server is picked in the Server filter and the reads have listed more than one. Such
+    /// a list reads on one clock (<see cref="MultiServerTime"/>), and the header, the range picker and the rows all take it from
+    /// here, so the clock does not change when a read comes back empty or the range changes.
+    /// </summary>
+    internal bool ListSpansServers => GetSelectedServerId() is null && _serversSeen.Count > 1;
+
+    /// <summary>The clock each server's rows carried in the reads so far (#8645), so the picker words a range in the zone the rows beside it use.</summary>
+    private readonly Dictionary<int, PerformanceMonitor.Analysis.Baselines.ServerClock> _rowClocks = new();
+
+    /// <summary>The zone the range picker reads typed times in, and the window is worked out in (#8645): the picked server's clock, else the one
+    /// server every read so far listed, else the clock a view of several servers reads on. Never the active server tab's
+    /// (<see cref="ViewerTimeHelper.ListZoneFor"/>).</summary>
+    private TimeZoneInfo PickerZone()
+    {
+        int? serverId = ListSpansServers ? null : GetSelectedServerId() ?? (_serversSeen.Count == 1 ? _serversSeen.First() : null);
+        return ViewerTimeHelper.ListZoneFor(ViewerTimeHelper.CurrentDisplayMode, serverId, _rowClocks, TimeZoneInfo.Local);
+    }
+
+    /// <summary>Puts one read's rows on the grid and writes the empty message, the clock header and the count text. Returns how many
+    /// rows the grid shows. Split out of the load so a test can drive it with rows.</summary>
+    internal int ShowAlerts(List<ViewerAlertRow> alerts)
+    {
+        _serversSeen.UnionWith(alerts.Select(a => a.ServerId));
+        foreach (var row in alerts)
+        {
+            if (row.Clock is { } rowClock) _rowClocks[row.ServerId] = rowClock;
+        }
+
+        if (ListSpansServers)
+        {
+            /* One read of a list of several servers may hold one server's rows: they still draw on the list's clock. */
+            foreach (var row in alerts)
+            {
+                row.MixedServers = true;
+            }
+        }
+
+        if (_filterManager != null)
+        {
+            _filterManager.UpdateData(alerts);
+        }
+        else
+        {
+            AlertsDataGrid.ItemsSource = alerts;
+        }
+
+        var displayCount = AlertsDataGrid.Items.Count;
+        NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
+        DismissAllButton.IsEnabled = displayCount > 0 && _dataService?.IsReadOnly != true;
+        AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ViewerTimeHelper.CurrentDisplayMode, ListSpansServers); // D5: the column names its clock
+        TimeRangePickerControl.Refresh(); // the range label names the same clock
+        DataGridHeaderFit.Apply(AlertsDataGrid); // #6136: a longer title widens its column
+        /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
+        _lastReadRowCount = alerts.Count;
+        AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert");
+        return displayCount;
+    }
+
+    /// <param name="loadTimer">The load's phase clock; null starts one that logs a slow load itself (#8549: the tab had no SlowLoad line).</param>
+    private async Task LoadAlertsAsync(ViewerLoadTimer? loadTimer = null)
     {
         if (_dataService == null)
         {
             return;
         }
 
+        var timer = loadTimer ?? _firstOpen.Take() ?? new ViewerLoadTimer();
+        var gen = _loads.Claim(nameof(LoadAlertsAsync));
+
         try
         {
             var (sinceUtc, untilUtc, isLive) = GetSelectedWindow();
             int? serverId = GetSelectedServerId();
 
-            var alerts = await _dataService.GetAlertHistoryWindowAsync(sinceUtc, isLive ? null : untilUtc, serverId, RowCap);
+            var alerts = await ViewerServerTab.Timed(timer, "alert history read", _dataService.GetAlertHistoryWindowAsync(sinceUtc, isLive ? null : untilUtc, serverId, RowCap));
 
-            if (_filterManager != null)
+            /* #7211: nothing awaits between this check and the bind below, so an older read never lands over a newer one. */
+            if (_loads.Superseded(nameof(LoadAlertsAsync), gen))
             {
-                _filterManager.UpdateData(alerts);
-            }
-            else
-            {
-                AlertsDataGrid.ItemsSource = alerts;
+                return;
             }
 
-            var displayCount = AlertsDataGrid.Items.Count;
-            NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-            AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ViewerTimeHelper.CurrentDisplayMode, alerts.Any(a => a.MixedServers)); // D5: the column names its clock
-            DataGridHeaderFit.Apply(AlertsDataGrid); // #6136: a longer title widens its column
-            /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
-            _lastReadRowCount = alerts.Count;
-            AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert(s)");
+            var displayCount = timer.Step("alert grid bind", () => ShowAlerts(alerts));
+            /* #8549: the grid's rows are measured and drawn after this method's own code, so the clock waits for that pass and the line names it. */
+            await timer.SettleLayoutAsync(Dispatcher);
 
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
 
-            PopulateServerFilter(alerts);
+            ViewerServerTab.ClientStep(timer, "server filter build", () => PopulateServerFilter(alerts));
+            StatusChanged?.Invoke($"alert history: refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
+            /* A load the operator has moved past does not report its failure over the newer load's status. */
+            if (_loads.Superseded(nameof(LoadAlertsAsync), gen)) return;
+
             StatusChanged?.Invoke($"failed to load alert history: {ex.Message}");
+        }
+        finally
+        {
+            /* #8549: a slow load names the read or step that was slow. A caller that passed its own clock reads it and logs nothing. */
+            if (loadTimer is null)
+            {
+                timer.FinishAndLog("Alert History", SlowLoadSink);
+            }
         }
     }
 
     /// <summary>
-    /// Rebuilds the Server filter combo from the servers present in the current read (Lite's
-    /// PopulateServerFilter): "All Servers" first, then each distinct server, preserving the selection.
+    /// Brings the Server filter combo up to date after a read (#7211): "All Servers" first, then every server already on offer plus
+    /// those in the read. The list only grows (<see cref="JobHistoryFilterChoices.MergeServers"/>, as on the Job History tab, #5703), so
+    /// a read narrowed to one server, or to a window where the picked server has no alerts, never removes a choice and the operator can
+    /// always pick another server or go back to All. The picked server is kept, and a pick that cannot be found falls back to
+    /// "All Servers" on purpose instead of leaving the combo blank while the grid reads every server.
     /// </summary>
-    private void PopulateServerFilter(List<ViewerAlertRow> alerts)
+    internal void PopulateServerFilter(List<ViewerAlertRow> alerts)
     {
-        var servers = alerts
-            .Select(a => (a.ServerId, a.ServerName))
-            .Where(s => !string.IsNullOrEmpty(s.ServerName))
-            .Distinct()
-            .OrderBy(s => s.ServerName)
+        var offered = ServerFilterComboBox.Items
+            .OfType<ComboBoxItem>()
+            .Skip(1)
+            .Where(i => int.TryParse(i.Tag?.ToString(), out _))
+            .Select(i => new JobHistoryFilterChoices.ServerChoice(int.Parse(i.Tag!.ToString()!), i.Content?.ToString() ?? string.Empty))
             .ToList();
 
         var currentSelection = ServerFilterComboBox.SelectedIndex > 0
             ? (ServerFilterComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString()
             : null;
 
-        var existingIds = ServerFilterComboBox.Items
-            .OfType<ComboBoxItem>()
-            .Skip(1)
-            .Select(i => i.Tag?.ToString())
-            .ToList();
+        var servers = JobHistoryFilterChoices.MergeServers(
+            offered,
+            [],
+            alerts.Select(a => new JobHistoryFilterChoices.ServerChoice(a.ServerId, a.ServerName ?? string.Empty)));
 
         var newIds = servers.Select(s => s.ServerId.ToString()).ToList();
-        if (newIds.SequenceEqual(existingIds))
+        var existingIds = offered.Select(o => o.ServerId.ToString()).ToList();
+        if (newIds.SequenceEqual(existingIds) && ServerFilterComboBox.SelectedIndex >= 0)
         {
             return;
         }
@@ -212,25 +324,27 @@ public partial class AlertsHistoryTab : UserControl
             });
         }
 
+        var picked = 0;
         if (currentSelection != null)
         {
             for (var i = 1; i < ServerFilterComboBox.Items.Count; i++)
             {
                 if ((ServerFilterComboBox.Items[i] as ComboBoxItem)?.Tag?.ToString() == currentSelection)
                 {
-                    ServerFilterComboBox.SelectedIndex = i;
+                    picked = i;
                     break;
                 }
             }
         }
 
+        ServerFilterComboBox.SelectedIndex = picked;
         ServerFilterComboBox.SelectionChanged += ServerFilterComboBox_SelectionChanged;
     }
 
     /// <summary>The picker's window now (#5562): start, end and whether the end slides with now. Both the grid read and
     /// Dismiss All use it, so Dismiss All touches exactly the rows the grid shows.</summary>
     private (DateTime StartUtc, DateTime EndUtc, bool IsLive) GetSelectedWindow()
-        => ViewerTimeRangeWindow.Window(TimeRangePickerControl.Value, DateTime.UtcNow, ViewerTimeHelper.CurrentDisplayZone());
+        => ViewerTimeRangeWindow.Window(TimeRangePickerControl.Value, DateTime.UtcNow, PickerZone());
 
     /// <summary>The window's span as whole hours back (at least one), for the dismissal log line.</summary>
     private int GetSelectedHoursBack()
@@ -239,7 +353,7 @@ public partial class AlertsHistoryTab : UserControl
         return ViewerTimeRangeWindow.HoursBack(startUtc, endUtc);
     }
 
-    private int? GetSelectedServerId()
+    internal int? GetSelectedServerId()
     {
         if (ServerFilterComboBox.SelectedIndex > 0 &&
             ServerFilterComboBox.SelectedItem is ComboBoxItem item &&
@@ -277,7 +391,7 @@ public partial class AlertsHistoryTab : UserControl
 
         ColumnFilterState? existingFilter = null;
         _filterManager?.Filters.TryGetValue(columnName, out existingFilter);
-        _filterPopupContent!.Initialize(columnName, existingFilter);
+        _filterPopupContent!.Initialize(columnName, existingFilter, columnHeader: ColumnFilterPopup.ColumnHeaderFor(button));
 
         _filterPopup.PlacementTarget = button;
         _filterPopup.IsOpen = true;
@@ -291,7 +405,7 @@ public partial class AlertsHistoryTab : UserControl
         }
 
         _filterManager?.SetFilter(e.FilterState);
-        AlertCountIndicator.Text = JobHistoryCap.CountText(AlertsDataGrid.Items.Count, _lastReadRowCount, RowCap, "alert(s)");
+        AlertCountIndicator.Text = JobHistoryCap.CountText(AlertsDataGrid.Items.Count, _lastReadRowCount, RowCap, "alert");
     }
 
     private void FilterPopup_FilterCleared(object? sender, EventArgs e)
@@ -352,7 +466,7 @@ public partial class AlertsHistoryTab : UserControl
 
     private async void DismissSelected_Click(object sender, RoutedEventArgs e)
     {
-        if (_dataService == null)
+        if (_dataService == null || _dataService.IsReadOnly)
         {
             return;
         }
@@ -371,11 +485,11 @@ public partial class AlertsHistoryTab : UserControl
             if (LogDismissals)
             {
                 ViewerLogger.Info("AlertsHistory", affected < selected.Count
-                    ? $"Dismissed {affected} of {selected.Count} selected alert(s) (some were already dismissed)"
-                    : $"Dismissed {affected} selected alert(s)");
+                    ? $"Dismissed {affected} of {CountText.Plural(selected.Count, "selected alert")} (some were already dismissed)"
+                    : $"Dismissed {CountText.Plural(affected, "selected alert")}");
             }
             await LoadAlertsAsync();
-            StatusChanged?.Invoke($"dismissed {affected} alert(s) — {DateTime.Now:HH:mm:ss}");
+            StatusChanged?.Invoke($"dismissed {CountText.Plural(affected, "alert")} at {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
@@ -396,8 +510,12 @@ public partial class AlertsHistoryTab : UserControl
             return;
         }
 
+        /* #7160: the window write ignores column filters and the row cap, so with either in play it would dismiss alerts
+           the grid never showed. Then dismiss the rows on screen by key, the way Dismiss Selected does. */
+        var dismissShownRows = AlertDismissScope.UseShownRows(_filterManager?.AnyFilterActive == true, _lastReadRowCount, RowCap);
+
         var result = MessageBox.Show(
-            $"Dismiss {allAlerts.Count} alert(s)?\n\nDismissed alerts are hidden from this view but remain in the store.",
+            $"Dismiss {CountText.Plural(allAlerts.Count, "alert")}?\n\nDismissed alerts are hidden from this view but remain in the store.",
             "Dismiss All Alerts",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question);
@@ -413,14 +531,16 @@ public partial class AlertsHistoryTab : UserControl
             int? serverId = GetSelectedServerId();
             /* The same window the grid read (#5562): a range that ended in the past dismisses only the rows up to its end. */
             var (sinceUtc, untilUtc, isLive) = GetSelectedWindow();
-            var affected = await _dataService.DismissAllVisibleAlertsWindowAsync(sinceUtc, isLive ? null : untilUtc, serverId);
+            var affected = dismissShownRows
+                ? await _dataService.DismissAlertsAsync(allAlerts)
+                : await _dataService.DismissAllVisibleAlertsWindowAsync(sinceUtc, isLive ? null : untilUtc, serverId);
             if (LogDismissals)
             {
-                var scope = serverId.HasValue ? $"server {serverId.Value}" : "all servers";
+                var scope = dismissShownRows ? "the rows shown" : serverId.HasValue ? $"server {serverId.Value}" : "all servers";
                 ViewerLogger.Info("AlertsHistory", $"Dismissed all {affected} visible alert(s) ({scope}, last {hoursBack}h)");
             }
             await LoadAlertsAsync();
-            StatusChanged?.Invoke($"dismissed {affected} alert(s) — {DateTime.Now:HH:mm:ss}");
+            StatusChanged?.Invoke($"dismissed {CountText.Plural(affected, "alert")} at {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
@@ -452,14 +572,8 @@ public partial class AlertsHistoryTab : UserControl
             return;
         }
 
-        /* Walk up from the click target to the DataGridRow; ignore header / empty-area clicks. */
-        var source = e.OriginalSource as DependencyObject;
-        while (source != null && source is not DataGridRow && source is not DataGridColumnHeader)
-        {
-            source = System.Windows.Media.VisualTreeHelper.GetParent(source);
-        }
-
-        if (source is not DataGridRow row || row.DataContext is not ViewerAlertRow item)
+        /* Ignore header / scrollbar / empty-area clicks (#7210). */
+        if (DataGridRowHit.RowOf(e.OriginalSource) is not { } row || row.DataContext is not ViewerAlertRow item)
         {
             return;
         }
@@ -482,20 +596,48 @@ public partial class AlertsHistoryTab : UserControl
         ShowDetail(item);
     }
 
-    private void ShowDetail(ViewerAlertRow item)
+    private async void ShowDetail(ViewerAlertRow item)
     {
-        var detailWindow = new AlertDetailWindow(item, FullChainOpener?.Invoke(item), DetailWindowSizeStore);
+        /* #7084 part 4: an engine alert's detail lists the findings that attached to it instead of paging, read when it
+           opens. A failed read leaves the list off: the rest of the detail is the row's own and is complete without it. */
+        IReadOnlyList<string>? attached = null;
+        if (_dataService is { } data && OpenEngineAlerts.IsAttachable(item.MetricName))
+        {
+            try
+            {
+                attached = await data.GetAttachedFindingsAsync(item);
+            }
+            catch (Exception ex)
+            {
+                ViewerLogger.Error("AlertsHistoryTab", "Could not read the findings attached to " + item.MetricName, ex);
+            }
+        }
+
+        var detailWindow = new AlertDetailWindow(item, FullChainOpener?.Invoke(item), DetailWindowSizeStore, attached);
         var owner = Window.GetWindow(this);
         if (owner != null)
         {
             detailWindow.Owner = owner;
         }
-        detailWindow.ShowDialog();
+        ShowDetailDialog(detailWindow, Dispatcher);
+    }
+
+    /// <summary>
+    /// #7554: shows the Alert Details window, and when its link was clicked runs the link's action only after the dialog has closed
+    /// and focus has gone back to the grid, at input priority so the tab it selects is not taken back by that focus change.
+    /// </summary>
+    internal static void ShowDetailDialog(AlertDetailWindow window, Dispatcher dispatcher)
+    {
+        window.ShowDialog();
+        if (window.DeferredOpen is { } open)
+        {
+            dispatcher.BeginInvoke(DispatcherPriority.Input, open);
+        }
     }
 
     private async void MuteThisAlert_Click(object sender, RoutedEventArgs e)
     {
-        if (_dataService == null || sender is not MenuItem menuItem)
+        if (_dataService == null || _dataService.IsReadOnly || sender is not MenuItem menuItem)
         {
             return;
         }
@@ -513,7 +655,7 @@ public partial class AlertsHistoryTab : UserControl
 
     private async void MuteSimilarAlerts_Click(object sender, RoutedEventArgs e)
     {
-        if (_dataService == null || sender is not MenuItem menuItem)
+        if (_dataService == null || _dataService.IsReadOnly || sender is not MenuItem menuItem)
         {
             return;
         }
@@ -539,7 +681,7 @@ public partial class AlertsHistoryTab : UserControl
             return;
         }
 
-        var dialog = new MuteRuleEditDialog(context) { Owner = Window.GetWindow(this) };
+        var dialog = new MuteRuleEditDialog(context, await _dataService.SupportsMuteRecurrenceAsync()) { Owner = Window.GetWindow(this) };
         if (dialog.ShowDialog() != true)
         {
             return;
@@ -567,7 +709,7 @@ public partial class AlertsHistoryTab : UserControl
                     $"Created mute rule (server={dialog.Rule.ServerName ?? "any"}, metric={dialog.Rule.MetricName ?? "any"}, expires={expiry})");
             }
             await LoadAlertsAsync();
-            StatusChanged?.Invoke($"mute rule created — {DateTime.Now:HH:mm:ss}");
+            StatusChanged?.Invoke($"mute rule created at {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {

@@ -159,10 +159,10 @@ public sealed class QueryStoreTrendIntervalRateTests
         var sql = Squash(QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter));
 
         Assert.Contains(
-            Squash("NULL AS own_interval_seconds, TRUE AS from_rollup FROM rollup_points"),
+            Squash("NULL AS own_interval_seconds, NULL AS open_covered_seconds, TRUE AS from_rollup FROM rollup_points"),
             sql, StringComparison.Ordinal);
         Assert.Contains(
-            Squash("own_interval_seconds, FALSE AS from_rollup FROM raw_points"),
+            Squash("own_interval_seconds, open_covered_seconds, FALSE AS from_rollup FROM raw_points"),
             sql, StringComparison.Ordinal);
         Assert.Contains(
             Squash("CASE WHEN from_rollup THEN " + DurationTrendRouting.HourlyBucketSecondsSql + " ELSE COALESCE(own_interval_seconds,"),

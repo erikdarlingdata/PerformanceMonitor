@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -28,10 +29,17 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 {
     private readonly List<LaneInfo> _lanes = new();
     private readonly Popup _tooltip;
+    private readonly Border _tooltipFrame;
     private readonly TextBlock _tooltipText;
+    private SolidColorBrush _defaultBrush = Frozen(0xE0, 0xE0, 0xE0);
+    private SolidColorBrush _dimBrush = Frozen(0x90, 0x96, 0xA0);
+    private SolidColorBrush _aboveBrush = Frozen(0xFF, 0x52, 0x52);
+    private SolidColorBrush _belowBrush = Frozen(0x69, 0xF0, 0x69);
     private DateTime _lastUpdate;
     private double _lastPixelX = double.NaN;
     private bool _needsReanchor = true;
+    private FrameworkElement? _themeHost;
+    private bool _listensToTheme;
 
     /// <summary>
     /// The display zone when the lanes' X is the UTC instant (#4766), else <c>null</c>: X is then the server-time
@@ -44,10 +52,14 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 
     public CorrelatedCrosshairManager()
     {
-        _tooltipText = new TextBlock
+        _tooltipText = new TextBlock { FontSize = 13 };
+
+        _tooltipFrame = new Border
         {
-            Foreground = new SolidColorBrush(Color.FromRgb(0xE0, 0xE0, 0xE0)),
-            FontSize = 13
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(3),
+            Padding = new Thickness(8, 4, 8, 4),
+            Child = _tooltipText
         };
 
         _tooltip = new Popup
@@ -55,17 +67,74 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
             Placement = PlacementMode.Relative,
             IsHitTestVisible = false,
             AllowsTransparency = true,
-            Child = new Border
-            {
-                Background = new SolidColorBrush(Color.FromRgb(0x33, 0x33, 0x33)),
-                BorderBrush = new SolidColorBrush(Color.FromRgb(0x55, 0x55, 0x55)),
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(3),
-                Padding = new Thickness(8, 4, 8, 4),
-                Child = _tooltipText
-            }
+            Child = _tooltipFrame
         };
+
+        PaintTooltip();
     }
+
+    /* #8306: the tooltip takes the theme's tooltip colours (the ToolTip style's background, border and text), and the arrows the
+       theme's error and success colours. Painted when the manager is built, when the host given to FollowThemeWhileLoaded loads, and
+       on every theme switch while that host stays loaded, so a theme picked while the app runs reaches a tooltip that already exists. */
+    private void PaintTooltip()
+    {
+        _tooltipFrame.Background = ThemeBrush("BackgroundLightBrush", 0x33, 0x33, 0x33);
+        _tooltipFrame.BorderBrush = ThemeBrush("BorderLightBrush", 0x55, 0x55, 0x55);
+        _defaultBrush = ThemeBrush("ForegroundBrush", 0xE0, 0xE0, 0xE0);
+        _dimBrush = ThemeBrush("ForegroundMutedBrush", 0x90, 0x96, 0xA0);
+        _aboveBrush = ThemeBrush("ErrorBrush", 0xFF, 0x52, 0x52);
+        _belowBrush = ThemeBrush("SuccessBrush", 0x69, 0xF0, 0x69);
+        _tooltipText.Foreground = _defaultBrush;
+    }
+
+    private void OnThemeChanged(string theme) => PaintTooltip();
+
+    /// <summary>
+    /// Keeps the tooltip in the theme's colours while <paramref name="host"/>, the control that owns the lanes, is loaded: the tooltip is
+    /// painted when the host loads, and again on every theme switch until it unloads. The <see cref="ThemeManager.ThemeChanged"/>
+    /// subscription is taken on Loaded and dropped on Unloaded, so the static event never holds a closed tab through its manager, its plots
+    /// and their data, and a theme switched while the host is unloaded reaches the tooltip when the host loads again.
+    /// </summary>
+    public void FollowThemeWhileLoaded(FrameworkElement host)
+    {
+        DropThemeHost();
+        _themeHost = host;
+        host.Loaded += OnHostLoaded;
+        host.Unloaded += OnHostUnloaded;
+        if (host.IsLoaded) ListenToTheme();
+    }
+
+    private void OnHostLoaded(object sender, RoutedEventArgs e) => ListenToTheme();
+    private void OnHostUnloaded(object sender, RoutedEventArgs e) => StopListeningToTheme();
+
+    /// <summary>Paints the tooltip for the theme in force and, once, subscribes to theme switches.</summary>
+    private void ListenToTheme()
+    {
+        PaintTooltip();
+        if (_listensToTheme) return;
+        _listensToTheme = true;
+        ThemeManager.ThemeChanged += OnThemeChanged;
+    }
+
+    private void StopListeningToTheme()
+    {
+        if (!_listensToTheme) return;
+        _listensToTheme = false;
+        ThemeManager.ThemeChanged -= OnThemeChanged;
+    }
+
+    private void DropThemeHost()
+    {
+        StopListeningToTheme();
+        if (_themeHost is null) return;
+        _themeHost.Loaded -= OnHostLoaded;
+        _themeHost.Unloaded -= OnHostUnloaded;
+        _themeHost = null;
+    }
+
+    /// <summary>The theme's brush under <paramref name="key"/>, or a frozen brush of the given colour when the app has no theme (a headless host).</summary>
+    private static SolidColorBrush ThemeBrush(string key, byte r, byte g, byte b) =>
+        Application.Current?.TryFindResource(key) as SolidColorBrush ?? Frozen(r, g, b);
 
     /// <summary>
     /// Registers a chart lane for crosshair synchronization.
@@ -101,6 +170,16 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         _lanes.Add(lane);
     }
 
+    /// <summary>
+    /// Changes the unit printed after a lane's value, for a lane whose unit depends on the data drawn (#7219: the blocking lane
+    /// counts blocked-process reports, or DMV snapshot rows when the window holds no reports).
+    /// </summary>
+    public void SetLaneUnit(ScottPlot.WPF.WpfPlot chart, string unit)
+    {
+        var lane = _lanes.Find(l => l.Chart == chart);
+        if (lane != null) lane.Unit = unit;
+    }
+
     private void OnLaneVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e) => ForceReanchor();
     private void OnLaneUnloaded(object sender, RoutedEventArgs e) => ForceReanchor();
     private void OnLaneLoaded(object sender, RoutedEventArgs e) => ForceReanchor();
@@ -126,13 +205,40 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         lane.BaselineUpper = upper;
         lane.MinAnomalyValue = minAnomalyValue;
         lane.IsEventBased = isEventBased;
+        lane.BaselineSteps = null;
+    }
+
+    /// <summary>
+    /// #7644: the stepped form of <see cref="SetLaneBaseline"/>. The tooltip's arrow judges the value against the step its X falls in;
+    /// an X in an hour with no step gets no arrow.
+    /// </summary>
+    public void SetLaneBaselineSteps(ScottPlot.WPF.WpfPlot chart, IReadOnlyList<BaselineBand.HourStep> steps,
+        double minAnomalyValue = 0, bool isEventBased = false)
+    {
+        var lane = _lanes.Find(l => l.Chart == chart);
+        if (lane == null) return;
+        lane.BaselineSteps = steps;
+        lane.BaselineLower = null;
+        lane.BaselineUpper = null;
+        lane.MinAnomalyValue = minAnomalyValue;
+        lane.IsEventBased = isEventBased;
+    }
+
+    /// <summary>The band that applies at <paramref name="xValue"/>: the lane's flat band, or the step the X falls in (none when its hour has no step).</summary>
+    private static (double? Upper, double? Lower) BandAt(LaneInfo lane, double xValue)
+    {
+        if (lane.BaselineSteps is null)
+            return (lane.BaselineUpper, lane.BaselineLower);
+        var step = BaselineBand.HourStep.At(lane.BaselineSteps, xValue);
+        return step is null ? (null, null) : (step.Upper, step.Lower);
     }
 
     /// <summary>
     /// Sets a single data series for a lane (most lanes have one series).
     /// </summary>
     public void SetLaneData(ScottPlot.WPF.WpfPlot chart, double[] times, double[] values,
-        bool isEventBased = false, double hoverToleranceDays = EventLaneGeometry.MinHoverToleranceDays)
+        bool isEventBased = false, double hoverToleranceDays = EventLaneGeometry.MinHoverToleranceDays,
+        long[]? reads = null, long minReads = 0)
     {
         var lane = _lanes.Find(l => l.Chart == chart);
         if (lane == null) return;
@@ -144,7 +250,9 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
             Times = times,
             Values = values,
             IsEventBased = isEventBased,
-            HoverToleranceDays = hoverToleranceDays
+            HoverToleranceDays = hoverToleranceDays,
+            Reads = reads,
+            MinReads = minReads
         });
     }
 
@@ -191,12 +299,29 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         _comparisonLabel = null;
         foreach (var lane in _lanes)
         {
-            lane.Series.Clear();
+            Forget(lane);
             lane.VLine = null;
-            lane.BaselineUpper = null;
-            lane.BaselineLower = null;
-            lane.MinAnomalyValue = 0;
         }
+    }
+
+    /// <summary>
+    /// Forgets one lane's series and bands, so the hover reads nothing from it until the lane is given data again. A lane whose
+    /// read failed is cleared this way, as its chart is (#8368); its VLine stays for <see cref="ReattachVLines"/> to replace.
+    /// </summary>
+    public void ClearLane(ScottPlot.WPF.WpfPlot chart)
+    {
+        var lane = _lanes.Find(l => l.Chart == chart);
+        if (lane == null) return;
+        Forget(lane);
+    }
+
+    private static void Forget(LaneInfo lane)
+    {
+        lane.Series.Clear();
+        lane.BaselineUpper = null;
+        lane.BaselineLower = null;
+        lane.BaselineSteps = null;
+        lane.MinAnomalyValue = 0;
     }
 
     /// <summary>
@@ -278,7 +403,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         var time = DateTime.FromOADate(xValue);
         _tooltipText.Inlines.Add(new Run(FormatCrosshairTime(time, DisplayZoneProvider)));
         if (_comparisonLabel != null)
-            _tooltipText.Inlines.Add(new Run($"  (dashed = {_comparisonLabel})") { Foreground = DimBrush });
+            _tooltipText.Inlines.Add(new Run($"  (dashed = {_comparisonLabel})") { Foreground = _dimBrush });
 
         foreach (var lane in _lanes)
         {
@@ -293,20 +418,15 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
                 var series = lane.Series[0];
                 double? value = FindNearestValue(series, xValue);
 
+                // Tooltip: value, plus an arrow when the value is outside the lane's baseline band
+                _tooltipText.Inlines.Add(new Run("\n" + LaneLine(lane.Label, value, lane.Unit)) { Foreground = _defaultBrush });
                 if (value.HasValue)
                 {
-                    var indicator = GetBaselineIndicator(lane, value.Value, 0);
-
-                    // Tooltip: value, plus an arrow when the value is outside the lane's baseline band
-                    _tooltipText.Inlines.Add(new Run($"\n{lane.Label}: {value.Value:N1} {lane.Unit}") { Foreground = DefaultBrush });
+                    var indicator = ToIndicator(SingleSeriesArrow(lane, series, value.Value, xValue));
                     if (indicator != null)
                     {
                         _tooltipText.Inlines.Add(new Run($" {indicator.Value.Symbol}") { Foreground = indicator.Value.Brush });
                     }
-                }
-                else
-                {
-                    _tooltipText.Inlines.Add(new Run($"\n{lane.Label}: —") { Foreground = DefaultBrush });
                 }
             }
             else if (lane.Series.Count > 1)
@@ -315,21 +435,18 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
                 {
                     var series = lane.Series[seriesIndex];
                     double? value = FindNearestValue(series, xValue);
-                    string unit = series.Unit ?? lane.Unit;
+                    _tooltipText.Inlines.Add(new Run("\n" + LaneLine(series.Name, value, series.Unit ?? lane.Unit)) { Foreground = _defaultBrush });
                     if (value.HasValue)
                     {
-                        _tooltipText.Inlines.Add(new Run($"\n{series.Name}: {value.Value:N0} {unit}") { Foreground = DefaultBrush });
-                        var indicator = GetBaselineIndicator(lane, value.Value, seriesIndex);
+                        var indicator = GetBaselineIndicator(lane, value.Value, seriesIndex, xValue);
                         if (indicator != null)
                             _tooltipText.Inlines.Add(new Run($" {indicator.Value.Symbol}") { Foreground = indicator.Value.Brush });
                     }
-                    else
-                        _tooltipText.Inlines.Add(new Run($"\n{series.Name}: —") { Foreground = DefaultBrush });
                 }
             }
             else
             {
-                _tooltipText.Inlines.Add(new Run($"\n{lane.Label}: —") { Foreground = DefaultBrush });
+                _tooltipText.Inlines.Add(new Run($"\n{lane.Label}: —") { Foreground = _defaultBrush });
             }
 
             lane.Chart.Refresh();
@@ -352,15 +469,80 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// #7624: the ▲/▼ for a single-series lane at <paramref name="xValue"/>: none when the nearest point has fewer reads than the lane's
+    /// floor (its red dot is not drawn either), else the lane's baseline arrow for the value.
+    /// </summary>
+    private static string? SingleSeriesArrow(LaneInfo lane, DataSeries series, double value, double xValue)
+        => BelowReadFloor(series, xValue)
+            ? null
+            : BandArrow(lane, xValue, 0, value);
+
+    /// <summary>
+    /// #8187: one tooltip line, "name: value unit", or "name: —" when the series has no value at the cursor. Every lane's every series
+    /// prints through here, so a lane's value reads the same whether the lane holds one series or several.
+    /// </summary>
+    private static string LaneLine(string name, double? value, string unit)
+        => value.HasValue ? $"{name}: {FormatLaneValue(value.Value)} {unit}" : $"{name}: —";
+
+    /// <summary>
+    /// #8187: a lane's value at the precision its magnitude needs, the same for every series count: a whole number plain, ten and over
+    /// to one decimal, one and over to two, and under one to its two leading significant digits. (The chart hover prints by the same
+    /// rule in its own helper; each surface keeps its own so neither changes with the other.)
+    /// </summary>
+    internal static string FormatLaneValue(double value)
+    {
+        if (double.IsNaN(value) || double.IsInfinity(value))
+            return value.ToString(CultureInfo.CurrentCulture);
+
+        var magnitude = Math.Abs(value);
+        if (magnitude == Math.Floor(magnitude))
+            return value.ToString("N0", CultureInfo.CurrentCulture);
+        if (magnitude >= 10)
+            return value.ToString("N1", CultureInfo.CurrentCulture);
+        if (magnitude >= 1)
+            return value.ToString("N2", CultureInfo.CurrentCulture);
+
+        /* 0.5 -> 0.5, 0.046 -> 0.046, 0.0456 -> 0.046: the decimals that reach the second significant digit, trailing zeros dropped. */
+        var decimals = Math.Min(15, (int)Math.Ceiling(-Math.Log10(magnitude)) + 1);
+        return value.ToString("0." + new string('#', decimals), CultureInfo.CurrentCulture);
+    }
+
+    /// <summary>The tooltip's lines for the lane on <paramref name="chart"/> at <paramref name="xValue"/>, one per series, as the hover prints them, without the ▲/▼.</summary>
+    internal IReadOnlyList<string> HoverLinesAt(ScottPlot.WPF.WpfPlot chart, double xValue)
+    {
+        var lane = _lanes.Find(l => l.Chart == chart);
+        if (lane == null) return Array.Empty<string>();
+        if (lane.Series.Count == 1)
+            return new[] { LaneLine(lane.Label, FindNearestValue(lane.Series[0], xValue), lane.Unit) };
+        return lane.Series.Select(series => LaneLine(series.Name, FindNearestValue(series, xValue), series.Unit ?? lane.Unit)).ToList();
+    }
+
+    /// <summary>The ▲/▼ the tooltip shows for a single-series lane at <paramref name="xValue"/>, or null (the same decision the hover makes).</summary>
+    internal string? HoverArrowAt(ScottPlot.WPF.WpfPlot chart, double xValue)
+    {
+        var lane = _lanes.Find(l => l.Chart == chart);
+        if (lane == null || lane.Series.Count != 1) return null;
+        var series = lane.Series[0];
+        var value = FindNearestValue(series, xValue);
+        return value.HasValue ? SingleSeriesArrow(lane, series, value.Value, xValue) : null;
+    }
+
+    /// <summary>
+    /// #7624: whether the nearest point of a series with a read floor has fewer reads than the floor, so the tooltip draws no ▲/▼ the chart has
+    /// no dot for. A point with no entry in <see cref="DataSeries.Reads"/> counts as 0 reads, as <c>UpdateLane</c> counts it when it draws the dots.
+    /// </summary>
+    private static bool BelowReadFloor(DataSeries series, double targetX)
+    {
+        if (series.Reads == null || series.MinReads <= 0 || series.Times == null || series.Times.Length == 0)
+            return false;
+        var index = EventLaneGeometry.NearestIndex(series.Times, targetX);
+        var reads = index < series.Reads.Length ? series.Reads[index] : 0;
+        return reads < series.MinReads;
+    }
+
     private static double? FindNearestValue(DataSeries series, double targetX)
         => EventLaneGeometry.NearestValue(series.Times, series.Values, targetX, series.IsEventBased, series.HoverToleranceDays);
-
-    private static readonly SolidColorBrush RedBrush = Frozen(0xFF, 0x52, 0x52);
-    private static readonly SolidColorBrush GreenBrush = Frozen(0x69, 0xF0, 0x69);
-    private static readonly SolidColorBrush DimBrush = Frozen(0x90, 0x96, 0xA0);
-    /* Reused on every mouse-move; cached + frozen so each move doesn't allocate a brush and they
-       carry no dispatcher-affinity / change-notification overhead. */
-    private static readonly SolidColorBrush DefaultBrush = Frozen(0xE0, 0xE0, 0xE0);
 
     private static SolidColorBrush Frozen(byte r, byte g, byte b)
     {
@@ -371,13 +553,21 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 
     private record struct BaselineIndicator(string Symbol, SolidColorBrush Brush);
 
-    private static BaselineIndicator? GetBaselineIndicator(LaneInfo lane, double value, int seriesIndex)
+    private BaselineIndicator? GetBaselineIndicator(LaneInfo lane, double value, int seriesIndex, double xValue)
+        => ToIndicator(BandArrow(lane, xValue, seriesIndex, value));
+
+    private static string? BandArrow(LaneInfo lane, double xValue, int seriesIndex, double value)
     {
-        var symbol = BaselineArrowSymbol(lane.BaselineUpper, lane.BaselineLower, lane.MinAnomalyValue, lane.IsEventBased, seriesIndex, value);
+        var (upper, lower) = BandAt(lane, xValue);
+        return BaselineArrowSymbol(upper, lower, lane.MinAnomalyValue, lane.IsEventBased, seriesIndex, value);
+    }
+
+    private BaselineIndicator? ToIndicator(string? symbol)
+    {
         return symbol switch
         {
-            "▲" => new BaselineIndicator(symbol, RedBrush),
-            "▼" => new BaselineIndicator(symbol, GreenBrush),
+            "▲" => new BaselineIndicator(symbol, _aboveBrush),
+            "▼" => new BaselineIndicator(symbol, _belowBrush),
             _ => null
         };
     }
@@ -437,6 +627,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 
     public void Dispose()
     {
+        DropThemeHost();
         _tooltip.IsOpen = false;
         foreach (var lane in _lanes)
         {
@@ -460,6 +651,10 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         public double[]? Times { get; set; }
         public double[]? Values { get; set; }
         public bool IsEventBased { get; set; }
+        /// <summary>#7624: the reads behind each value (the I/O lane only), parallel to <see cref="Values"/>. Null for a lane with no read floor.</summary>
+        public long[]? Reads { get; set; }
+        /// <summary>#7624: a value with fewer <see cref="Reads"/> than this gets no ▲/▼, as its red dot is not drawn either.</summary>
+        public long MinReads { get; set; }
         /// <summary>How far from a bucket an event series still reads that bucket's count (#6284).</summary>
         public double HoverToleranceDays { get; set; } = EventLaneGeometry.MinHoverToleranceDays;
     }
@@ -475,6 +670,8 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         public List<DataSeries> Series { get; set; } = new();
         public double? BaselineUpper { get; set; }
         public double? BaselineLower { get; set; }
+        /// <summary>#7644: the stepped band, when the lane has one; the flat bounds above are then null.</summary>
+        public IReadOnlyList<BaselineBand.HourStep>? BaselineSteps { get; set; }
         public double MinAnomalyValue { get; set; }
         public bool IsEventBased { get; set; }
     }

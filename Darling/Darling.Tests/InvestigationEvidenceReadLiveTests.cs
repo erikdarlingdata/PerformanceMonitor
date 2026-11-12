@@ -139,6 +139,32 @@ public sealed class InvestigationEvidenceReadLiveTests
         });
     }
 
+    /// <summary>
+    /// #8090 item 5: a <c>sections</c> name no evidence section carries is refused by name, with the known sections listed, rather than
+    /// answered <c>empty</c>, which reads as "the request has no evidence". A known section the request has no row for stays <c>empty</c>.
+    /// </summary>
+    [Fact]
+    public async Task AnUnknownSectionName_IsRefused_NamingTheSections()
+    {
+        await RunAsync(async (store, ct) =>
+        {
+            var requestId = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
+            await store.RecordEvidenceAsync(requestId, ServerId, new[] { new InvestigationEvidenceWrite("top_statements", "ready", Content()) }, ct);
+
+            var refused = JsonNode.Parse(await DarlingMcpInvestigationTools.EvidenceAsync(
+                store, McpDataDetail.Full, requestId.ToString(), new[] { "nonsense" }, null, ct))!;
+            Assert.Equal("invalid", refused["status"]!.GetValue<string>());
+            var message = refused["message"]!.GetValue<string>();
+            Assert.Contains("nonsense", message, StringComparison.Ordinal);
+            Assert.Contains("top_statements", message, StringComparison.Ordinal);
+            Assert.Contains("blocking_chains", message, StringComparison.Ordinal);
+
+            var known = JsonNode.Parse(await DarlingMcpInvestigationTools.EvidenceAsync(
+                store, McpDataDetail.Full, requestId.ToString(), new[] { "waits" }, null, ct))!;
+            Assert.Equal("empty", known["status"]!.GetValue<string>());
+        });
+    }
+
     private static async Task RunAsync(Func<InvestigationRequestStore, CancellationToken, Task> body)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");

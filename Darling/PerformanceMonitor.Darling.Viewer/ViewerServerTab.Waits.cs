@@ -191,7 +191,7 @@ public partial class ViewerServerTab
             ApplyTheme(WaitStatsChart);
             _waitStatsHover?.Clear();
 
-            if (selected.Count == 0) { WaitStatsChart.Refresh(); return; }
+            if (selected.Count == 0) { RefreshEmptyChart(WaitStatsChart, "Wait Stats", ""); return; }
 
             bool useAvgPerWait = WaitStatsMetricCombo?.SelectedIndex == 1;
             if (_waitStatsHover != null) _waitStatsHover.Unit = useAvgPerWait ? "ms/wait" : "ms/sec";
@@ -227,16 +227,19 @@ public partial class ViewerServerTab
             WaitStatsChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             var rangeStart = startUtc;
             var rangeEnd = endUtc;
-            WaitStatsChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+            WaitStatsChart.Plot.Axes.SetLimitsX(ChartXStart(WaitStatsChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(WaitStatsChart);
-            WaitStatsChart.Plot.YLabel(useAvgPerWait ? "Avg Wait Time (ms/wait)" : "Wait Time (ms/sec)");
+            WaitStatsChart.Plot.YLabel(useAvgPerWait ? "ms/wait" : "ms/sec");
             SetChartYLimitsWithLegendPadding(WaitStatsChart, 0, globalMax > 0 ? globalMax : 100);
             ShowChartLegend(WaitStatsChart);
             WaitStatsChart.Refresh();
         }
-        catch
+        catch (Exception ex)
         {
-            /* Ignore chart update errors */
+            /* The chart was cleared above, so a failed read reaches the status line, as a slicer's does; a superseded run says nothing. */
+            var status = PickerChartReadFailure.StatusText("wait-stats", ex, gen, _waitStatsPickerGen);
+            if (status is not null)
+                StatusChanged?.Invoke(status);
         }
     }
 

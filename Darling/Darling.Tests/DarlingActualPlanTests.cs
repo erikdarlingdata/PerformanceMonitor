@@ -268,7 +268,7 @@ public sealed class ActualPlanRequestTests
         Assert.Equal(ActualPlanStoredQuery.QueryStatsResolveSql, DarlingWorker.ResolveStoredQueryForActualPlanSql);
 
         var root = RepoRoot();
-        var service = File.ReadAllText(Path.Combine(root, "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var service = RepoFile.ReadRepoFile(Path.Combine(root, "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
         var viewer = File.ReadAllText(Path.Combine(root, "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.ActualPlan.cs"));
         Assert.Contains("ResolveStoredQueryForActualPlanSql = ActualPlanStoredQuery.QueryStatsResolveSql;", service, StringComparison.Ordinal);
         Assert.Contains("CreateCommand(ActualPlanStoredQuery.QueryStatsResolveSql)", viewer, StringComparison.Ordinal);
@@ -460,7 +460,7 @@ public sealed class ActualPlanRequestTests
     [Fact]
     public void TheHandler_ChecksTheRequestBeforeTheStoreAndTheDigestBeforeTheRun()
     {
-        var source = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var source = RepoFile.ReadRepoFile(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
         var start = source.IndexOf("private async Task<CommandOutcome> RunExecuteActualPlanAsync(", StringComparison.Ordinal);
         Assert.True(start > 0);
         var body = source[start..source.IndexOf("internal static string? RefuseActualPlanRequest(", start, StringComparison.Ordinal)];

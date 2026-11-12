@@ -13,6 +13,9 @@
  * stands alone and the page computes no figure: every number is the read's. The deadlock table says one deadlock counts once for each tag
  * among its processes. A click on a tag sends it back as the read's `tag` parameter, so the server answers with that tag's subtree; the
  * page never trims a list itself. Choosing Fleet omits the server, and the read answers with one block per server and a fleet line.
+ * #8083: the page asks list_query_tags first; a store with no tag gets one line pointing at Manage Query Tags, and the by-tag read is not sent,
+ * because every row of every section would be untagged. A block whose rows are all untagged is one line with the untagged figures, not a
+ * two-row table whose untagged row repeats its total.
  * All server text reaches the DOM through el()/textContent.
  */
 
@@ -37,6 +40,26 @@ export const SECTIONS = [
 ];
 
 export const DEADLOCK_NOTE = "One deadlock counts once for each tag among its processes, so the deadlock rows do not add up to the total.";
+
+/** #8083: the whole page when the store defines no query tag. The link opens Manage Query Tags, which creates one. */
+export const NO_TAGS_TEXT = "No query tags are defined. Define one in Manage Query Tags to see resource use by tag.";
+export const MANAGE_TAGS_HASH = "#/manage-query-tags";
+
+/** The page's one line for a store with no query tag: the sentence, with the page that defines one as a link. */
+export function noTagsStrip() {
+  return el("div", { class: "strip empty no-tags" }, [
+    "No query tags are defined. Define one in ",
+    el("a", { href: MANAGE_TAGS_HASH, text: "Manage Query Tags" }),
+    " to see resource use by tag.",
+  ]);
+}
+
+/** #8083: whether list_query_tags answered that the store defines no tag: the empty envelope, or a data answer whose tag list is empty. */
+export function storeHasNoTags(res) {
+  if (!res) return false;
+  if (res.kind === "empty") return true;
+  return res.kind === "data" && !!res.data && Array.isArray(res.data.tags) && res.data.tags.length === 0;
+}
 
 const MEASURE_LABELS = {
   cpu_ms: "CPU (ms)",
@@ -97,6 +120,8 @@ function fmtFigure(v) {
   if (v == null) return "—";
   const n = Number(v);
   if (!isFinite(n)) return "—";
+  /* #7945: a figure under 0.1 keeps two significant digits (0.04), as fmtPlain does, so a small share never reads 0.0. */
+  if (!Number.isInteger(n) && Math.abs(n) < 0.1) return n.toLocaleString(undefined, { maximumSignificantDigits: 2 });
   return Number.isInteger(n) ? fmtInt(n) : fmtNum(n, 1);
 }
 
@@ -116,7 +141,23 @@ export function sectionTable(block, onTag) {
       [el("td", {}, [label]), ...keys.map((k) => el("td", { class: "num", text: fmtFigure(r.figures[k]) }))]
     );
   });
-  return el("table", { class: "data" }, [el("thead", {}, [head]), el("tbody", {}, body)]);
+  /* #7479: a table with no scroll box of its own ran past the panel at 600 px (653 px of table in a 600 px page); in a .table-wrap it scrolls inside the panel. */
+  return el("div", { class: "table-wrap" }, [el("table", { class: "data" }, [el("thead", {}, [head]), el("tbody", {}, body)])]);
+}
+
+/**
+ * #8083: a block the read answered ok with no tag row, only the `untagged` row and the total: every row in it is untagged, so a table would say
+ * the same figures twice. Under a tag filter there is no untagged row, so that block keeps its table.
+ */
+export function untaggedOnly(block) {
+  return !!block && block.status === "ok" && Array.isArray(block.tag_rows) && block.tag_rows.length === 0
+    && !!block.untagged && typeof block.untagged === "object" && !!block.total && typeof block.total === "object" && block.total_scope !== "tag_subtree";
+}
+
+/** The one line an untagged-only block draws in place of its table: every measure of the untagged row, which is also the total. */
+export function untaggedLine(block) {
+  const keys = measureKeys(block);
+  return el("div", { class: "muted untagged-only", text: "Nothing here is tagged. The total is all untagged: " + keys.map((k) => measureLabel(k) + " " + fmtFigure(block.untagged[k])).join(", ") + "." });
 }
 
 /** "the last 24 hours", "the last 7 days", or "this time range" when the window is not a plain preset. */
@@ -196,6 +237,11 @@ function isEmptyBlock(block) {
   return !!block && block.status === "empty";
 }
 
+/** #7376: a section (or one server's part of it) this server does not collect at all: its message is the whole answer, with no table of zeros under it. */
+function isNotCollectedBlock(block) {
+  return !!block && block.status === "not_collected";
+}
+
 /** One section: its heading, then one table (a server) or one table per server with the fleet line (Fleet). */
 export function sectionCard(section, block, onTag, range = "this time range", servers = []) {
   const parts = [el("h3", {}, [section.title, el("span", { class: "panel-sub", text: block && block.source ? " " + sourceText(block.source) : "" })])];
@@ -216,8 +262,12 @@ export function sectionCard(section, block, onTag, range = "this time range", se
   }
   const note = statusLine(block);
   if (note) parts.push(note);
+  if (isNotCollectedBlock(block) && !Array.isArray(block.servers)) return el("div", { class: "panel", "data-section": section.name }, parts);
   if (Array.isArray(block.servers)) {
-    for (const s of block.servers) {
+    /* #7402: the sections run in the sidebar's order (favourites first, then the display name), through the one shared helper, not the connection key's order. */
+    const row = (s) => (Array.isArray(servers) ? servers.find((r) => r && r.server_name === s.server) : undefined);
+    const named = block.servers.map((s) => ({ s, server_name: s.server, display_name: displayNameFor(servers, s.server), server_id: row(s)?.server_id }));
+    for (const { s } of orderServers(named)) {
       /* #6157: the heading is the display name of the server; the read names it by its connection key. */
       parts.push(el("h4", { text: displayNameFor(servers, s.server) }));
       if (isEmptyBlock(s)) {
@@ -226,9 +276,10 @@ export function sectionCard(section, block, onTag, range = "this time range", se
       }
       const sn = statusLine(s);
       if (sn) parts.push(sn);
-      parts.push(sectionTable(s, onTag));
+      if (isNotCollectedBlock(s)) continue;
+      parts.push(untaggedOnly(s) ? untaggedLine(s) : sectionTable(s, onTag));
     }
-    if (block.fleet_total) {
+    if (block.fleet_total && !isNotCollectedBlock(block)) {
       const keys = Object.keys(block.fleet_total);
       parts.push(
         el("div", { class: "fleet-total" }, [
@@ -238,7 +289,7 @@ export function sectionCard(section, block, onTag, range = "this time range", se
       );
     }
   } else {
-    parts.push(sectionTable(block, onTag));
+    parts.push(untaggedOnly(block) ? untaggedLine(block) : sectionTable(block, onTag));
   }
   return el("div", { class: "panel", "data-section": section.name }, parts);
 }
@@ -331,6 +382,18 @@ export function renderQueryTagUsage(main) {
     );
     mount(body, loadingStrip("Loading query tag usage…"));
     const w = currentWindow();
+    /* #8083: the tag list first (a small read). A store with no tag gets the one line and no by-tag read: with nothing to compare, the fleet
+       aggregation would only say that every section's untagged figure is its total. A failed list read is not shown; the by-tag read answers on its own. */
+    const tagsRes = await readTool("list_query_tags", {}, signal);
+    if (ticket !== loadSeq) return;
+    if (tagsRes.kind === "aborted" || tagsRes.kind === "auth") return;
+    if (storeHasNoTags(tagsRes)) {
+      /* A tag the page was opened on is gone with the rest, so its "Showing ..." strip goes too. */
+      state.tag = "";
+      state.tagLabel = "";
+      mount(tagSlot, []);
+      return mount(body, noTagsStrip());
+    }
     /* #6800: the fleet read is a long read once its history says so, so it can be refused busy while other long reads hold every
        slot. The page says so and asks once more after the Retry-After, instead of showing the refusal as a failure. */
     const res = await retryOnceWhenBusy(

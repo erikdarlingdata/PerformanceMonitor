@@ -48,7 +48,7 @@ export const LIMITS = [100, 250, 500, 1000];
 export const JOB_HISTORY_COLUMNS = [
   { key: "run_time", label: "Run Time", format: "time" },
   { key: "server", label: "Server" },
-  { key: "job_name", label: "Job" },
+  { key: "job_name", label: "Job", name: true },
   { key: "category", label: "Category" },
   { key: "step", label: "Step" },
   { key: "status", label: "Status" },
@@ -110,8 +110,13 @@ function serverRows(data) {
 /** #6178: the sentence for a server whose engine is Azure SQL Database, which has no SQL Agent, so no job will ever match. The service
     says "not_collected" and names the engine for it; any other answer keeps its own sentence. */
 const AZURE_NO_AGENT_LINE = "Azure SQL Database has no SQL Agent, so it has no job history.";
-export function noAgentLine(res) {
-  return res && res.status === "not_collected" && /runs on Azure SQL Database \(EngineEdition 5\)/.test(String(res.message || "")) ? AZURE_NO_AGENT_LINE : null;
+/** #8095: the sentence under All servers when the answer is not_collected: the service answers that way for the fleet only when no registered
+    server can run the job history collector (a store of PostgreSQL targets), so a sentence about "this server" would have no server to mean. */
+export const FLEET_NO_AGENT_LINE = "None of this store's servers runs SQL Agent, so there is no job history.";
+export function noAgentLine(res, server) {
+  if (!res || res.status !== "not_collected") return null;
+  if (/runs on Azure SQL Database \(EngineEdition 5\)/.test(String(res.message || ""))) return AZURE_NO_AGENT_LINE;
+  return server === "" ? FLEET_NO_AGENT_LINE : null;
 }
 
 /* Agent history exists only on SQL Server targets; a server whose engine is not stamped yet stays on offer. */
@@ -161,16 +166,17 @@ function fill(sel, options, value) {
 
 /** The read takes whole hours back from the end, so a range of 30 minutes comes back as the whole hour. The runs are newest first, so
  *  the row limit drops only the OLDEST ones and cutting at the range's start cannot hide a run inside it; the end is bounded in
- *  the reader (R6), never here. */
+ *  the reader (R6), never here.
+ *  #7960: a run the trim removes lies before the window's start, so the row limit's cut, older still, did too: every run inside the
+ *  window is on the page, and `truncated` is cleared so the limit note is not drawn for runs the person did not ask for. When the trim
+ *  removes nothing the flag stays as the read set it. */
 export function trimRunsToStart(data, w) {
   if (!w || !Array.isArray(data.runs)) return data;
-  return {
-    ...data,
-    runs: data.runs.filter((r) => {
-      const t = Date.parse(r && r.run_time);
-      return !Number.isFinite(t) || t >= w.startMs;
-    }),
-  };
+  const runs = data.runs.filter((r) => {
+    const t = Date.parse(r && r.run_time);
+    return !Number.isFinite(t) || t >= w.startMs;
+  });
+  return runs.length < data.runs.length ? { ...data, runs, truncated: false } : { ...data, runs };
 }
 
 /** The window the held range reads as of now, or the default one when it cannot resolve. */
@@ -198,8 +204,8 @@ export function retainedNote(data) {
   if (!data || data.window_truncated !== true) return null;
   const from = typeof data.effective_start === "string" && data.effective_start ? localTime(data.effective_start) : null;
   return from
-    ? "partial window: the store keeps job history from " + from + ", after the window's start, so earlier runs are not shown."
-    : "partial window: the store keeps less job history than the window asks for, so earlier runs are not shown.";
+    ? "Partial window: the store keeps job history from " + from + ", after the window's start, so earlier runs are not shown."
+    : "Partial window: the store keeps less job history than the window asks for, so earlier runs are not shown.";
 }
 
 /** The notice for a list the row limit cut, or null. `server` is the Server pick ("" for All servers): a list already scoped to one server is not told to pick one. */
@@ -366,7 +372,7 @@ export function renderJobHistory(main) {
       if (res.kind === "empty") {
         /* An answer with no runs (an Azure SQL Database has no SQL Agent) offers only the categories this server has been seen to have. */
         fill(category.sel, categoryOptions(), state.category);
-        return mount(body, [kept, noticeFor(retainedNote(res.hints)), emptyStrip(noAgentLine(res) || res.message)]);
+        return mount(body, [kept, noticeFor(retainedNote(res.hints)), emptyStrip(noAgentLine(res, state.server) || res.message)]);
       }
       for (const r of data.runs || []) if (r.category) seenFor(state.server).add(r.category);
       fill(category.sel, categoryOptions(), state.category);

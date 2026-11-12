@@ -87,4 +87,15 @@ public sealed class McpToolGuideHeadsDataTests
         Assert.DoesNotContain("peer_fleets", served.Served, StringComparison.Ordinal);
         Assert.DoesNotContain("peer_fleets", served.Tail!, StringComparison.Ordinal);
     }
+
+    /// <summary>get_cpu_utilization stamps each bucket on the monitored server's clock, and its head says so. The
+    /// Darling twin stamps in UTC and says that, so an agent reading both servers can tell the two clocks apart
+    /// from the tool text alone.</summary>
+    [Fact]
+    public void GetCpuUtilization_HeadNamesItsClock()
+    {
+        var served = McpToolGuideTests.Served("get_cpu_utilization").Served;
+        Assert.Contains("sample_time is on the monitored server's clock, not UTC", served, StringComparison.Ordinal);
+        Assert.Contains("get_server_properties has its utc_offset_minutes", served, StringComparison.Ordinal);
+    }
 }

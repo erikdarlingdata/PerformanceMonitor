@@ -16,6 +16,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 using PerformanceMonitor.Darling.Storage;
 
@@ -63,7 +64,7 @@ public partial class ViewerServerTab
     /// <c>SafeQueryAsync</c> wraps a read (<see cref="ReadOrEmptyAsync{T}"/>), so it blanks the chart and nothing else. What the
     /// tab draws once its reads are in, and in which order, is <see cref="ShowCollectionHealthAsync"/>.
     /// </summary>
-    private async Task LoadHealthAsync()
+    private async Task LoadHealthAsync(ViewerLoadTimer? timer = null)
     {
         /* Health Summary stays Lite's fixed 7-day per-collector rollup (its staleness banding needs a
            stable horizon regardless of the toolbar window). The Collection Log + Duration Trends honor the
@@ -80,6 +81,12 @@ public partial class ViewerServerTab
            and leave both grids, the note and the caveats undrawn. */
         var durationTask = ReadOrEmptyAsync(() => _dataService.GetCollectorDurationTrendAsync(_server.ServerId, startUtc, endUtc), "Collection Health duration chart");
         var caveatsTask = _dataService.GetCollectionCaveatsAsync(_server.ServerId);
+        /* #8549: each read is booked by name (Track hands the task back unchanged), so a slow Collection Health says which read it was. */
+        _ = timer?.Track("health summary read", healthTask);
+        _ = timer?.Track("collection log data start read", dataStartTask);
+        _ = timer?.Track("collection log read", logTask);
+        _ = timer?.Track("duration trend read", durationTask);
+        _ = timer?.Track("caveats read", caveatsTask);
         await AwaitReadWatchingProbeAsync(Task.WhenAll(healthTask, logTask, durationTask, caveatsTask), dataStartTask, "Collection Log");
 
         /* The four reads are done: end the declared width here, before the data-start note below awaits its probe (#4966), so that
@@ -91,8 +98,75 @@ public partial class ViewerServerTab
             healthTask.Result, logTask.Result, durationTask.Result, caveatsTask.Result, dataStartTask, startUtc, CollectionLogTruncationBanner,
             _collectionHealthFilterMgr!.UpdateData, _collectionLogFilterMgr!.UpdateData, RenderCollectorDurationChart, ShowCollectionCaveats);
 
-        await ShowSkippedCyclesAsync();
-        await ShowSweepPressureAsync();
+        ShowServerConnectionState();
+        ShowConnectionFailures(healthTask.Result);
+        /* #8549: the two reads that follow the join are store reads too, so they are named rather than counted as client work. */
+        await Timed(timer, "skipped slots read", ShowSkippedCyclesAsync());
+        await Timed(timer, "sweep pressure read", ShowSweepPressureAsync());
+    }
+
+    /// <summary>
+    /// #8101: one connection failure that reached several collectors in one cycle is worded once above the grid, in the display
+    /// zone the rows print their instants in, rather than left as one ERROR on each of their rows with nothing to join them.
+    /// Collapsed when the rows' newest errors hold no such event.
+    /// </summary>
+    private void ShowConnectionFailures(List<CollectorHealthRow> health)
+    {
+        var line = CollectionConnectionFailures.SummaryLine(
+            health.Select(row => new CollectorErrorSample(row.CollectorName, row.LastErrorTime, row.LastError, row.ErrorCount)),
+            utc => ViewerTimeHelper.FormatForDisplay(utc, "yyyy-MM-dd HH:mm:ss"));
+        ConnectionFailureLine.Text = line ?? string.Empty;
+        ConnectionFailureLine.Visibility = line is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>The web's tooltip for "Run all collectors now" while the server is unreachable (collector-run.js OFFLINE_TIP).</summary>
+    internal const string OfflineRunTip = "This server is offline: the service has no connection to it, so a collector run would be skipped. Collection resumes on its own when the server is reachable again.";
+
+    /// <summary>
+    /// #7590: while the service's connect to this server has failed, the Collection Health tab says collection is waiting on the connection
+    /// (since when, the last error, the next retry) and "Run all collectors now" is off with the offline tip, since a run would be skipped.
+    /// The collector rows are not relabelled. A reachable server shows neither. The button's state comes from
+    /// <see cref="ViewerCollectorRun.RunAllState"/>, which says a read-only seat first (#8103).
+    /// </summary>
+    internal void ShowServerConnectionState()
+    {
+        var down = _server.ConnectDownSince.HasValue;
+        ServerConnectionLine.Text = down
+            ? ServerHealthClassifier.WaitingOnConnectionText(_server.ConnectDownSince!.Value, _server.LastConnectError, _server.NextConnectAttemptUtc, DateTime.UtcNow)
+            : string.Empty;
+        ServerConnectionLine.Visibility = down ? Visibility.Visible : Visibility.Collapsed;
+        ApplyButtonState(RunAllCollectorsButton, ViewerCollectorRun.RunAllState(_dataService.IsReadOnly, down, _collectorRunActive));
+    }
+
+    /// <summary>
+    /// #8103: a read-only seat sees "Purge Now..." and "Run all collectors now" off from the moment the tab is built, with the reason as the
+    /// tooltip of the disabled button, as Alert History's Dismiss buttons are. Called from the constructor after <c>InitializeComponent</c>.
+    /// A writable seat's buttons are as the XAML draws them. The Health Summary rows' "Run now" take theirs as each is built
+    /// (<see cref="RunCollectorNowButton_Initialized"/>). The click handlers' own read of the seat stays as the backstop for grants that
+    /// change while the tab is open.
+    /// </summary>
+    private void InitializeCollectionHealthSeat()
+    {
+        ApplyButtonState(PurgeNowButton, ViewerCollectorRun.PurgeState(_dataService.IsReadOnly));
+        ApplyButtonState(RunAllCollectorsButton, ViewerCollectorRun.RunAllState(_dataService.IsReadOnly, _server.ConnectDownSince.HasValue, _collectorRunActive));
+    }
+
+    /// <summary>
+    /// #8103: a Health Summary row's "Run now" takes its seat state as the row template builds it. <c>Initialized</c> rather than <c>Loaded</c>:
+    /// it fires as the button is made, before the row's first layout, so the state is on the button as soon as the row exists.
+    /// </summary>
+    private void RunCollectorNowButton_Initialized(object? sender, EventArgs e)
+    {
+        if (sender is Button button)
+        {
+            ApplyButtonState(button, ViewerCollectorRun.RunOneState(_dataService.IsReadOnly));
+        }
+    }
+
+    private static void ApplyButtonState(Button button, (bool IsEnabled, string? ToolTip) state)
+    {
+        button.IsEnabled = state.IsEnabled;
+        button.ToolTip = state.ToolTip;
     }
 
     /// <summary>
@@ -288,8 +362,9 @@ public partial class ViewerServerTab
     /// "Purge Now" (Collection Health): runs the daily retention purge on demand via the fleet-wide
     /// <c>purge_now</c> control command, after a confirm — it permanently deletes collected data older than the
     /// configured retention horizons across ALL monitored servers (the purge is fleet-wide over the shared
-    /// store). A read-only viewer seat can't enqueue commands, so it shows an explanation instead (same rule as
-    /// Pause / live-plan fetch). #4825: a current service starts the purge in the background, paced, and answers
+    /// store). A read-only viewer seat can't enqueue commands: its button is off with the reason (#8103,
+    /// <see cref="InitializeCollectionHealthSeat"/>), and the seat check here is the backstop for grants that changed while the tab
+    /// is open. #4825: a current service starts the purge in the background, paced, and answers
     /// at once, with the time it started; this then watches the collection log for the purge's totals
     /// (<see cref="StartPurgeWatch"/>) and reloads the tab when they turn up. "Already running" shows as it is and
     /// starts no watch. An older service still runs the purge inline and answers with its totals, which are shown,
@@ -300,9 +375,9 @@ public partial class ViewerServerTab
         if (_dataService.IsReadOnly)
         {
             MessageBox.Show(
-                "Purging asks the service to run the retention purge, which it does by running a command — a " +
+                "Purging asks the service to run the retention purge, which it does by running a command: a " +
                 "read-only viewer seat can't enqueue commands. The command is queued in the MONITORING STORE, " +
-                "and the purge only ever deletes from the store — never from a monitored server. Reconnect " +
+                "and the purge only ever deletes from the store, never from a monitored server. Reconnect " +
                 "with a read-write store profile to purge.",
                 "Read-Only Viewer", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
@@ -312,7 +387,7 @@ public partial class ViewerServerTab
             "Run the retention purge now?\n\n" +
             "This permanently deletes collected data older than the configured retention horizons across ALL " +
             "monitored servers (the purge is fleet-wide over the shared store). It is exactly what the service " +
-            "does automatically once a day — running it now just does it immediately. This cannot be undone.",
+            "does automatically once a day. Running it now just does it immediately. This cannot be undone.",
             "Purge Now", MessageBoxButton.YesNo, MessageBoxImage.Warning);
         if (confirm != MessageBoxResult.Yes)
         {
@@ -350,7 +425,7 @@ public partial class ViewerServerTab
         catch (ViewerReadOnlyException)
         {
             /* Grants changed under us (the enqueue already threw). */
-            PurgeNowIndicator.Text = "Read-only viewer — cannot purge";
+            PurgeNowIndicator.Text = "Read-only viewer: cannot purge";
         }
         catch (Exception ex)
         {
@@ -482,7 +557,7 @@ public partial class ViewerServerTab
 
             var tables = root.TryGetProperty("tablesPurged", out var t) && t.TryGetInt32(out var ti) ? ti : 0;
             var rows = root.TryGetProperty("rowsPurged", out var r) && r.TryGetInt32(out var ri) ? ri : 0;
-            return $"Purged {rows:N0} row(s)/chunk(s) across {tables:N0} table(s)";
+            return $"Purged {CountText.Plural(rows, "row/chunk", "rows/chunks")} across {CountText.Plural(tables, "table")}";
         }
         catch (JsonException)
         {
@@ -509,7 +584,8 @@ public partial class ViewerServerTab
     /// Sends the <c>snapshot_now</c> command for this server (<see cref="ViewerDataService.RequestCollectorRunAsync"/>), the command
     /// the Active Queries "Latest Snapshot" button and the web's run route send, and says the web's words about the result
     /// (<see cref="ViewerCollectorRun"/>). A finished run reloads the tab so its grids show the new rows. A read-only seat cannot send
-    /// commands (the same rule as Purge Now and Latest Snapshot) and is told so on the status line.
+    /// commands: its buttons are off with the reason (#8103), and the seat check here, which says so on the status line, is the backstop
+    /// for grants that changed while the tab is open.
     /// </summary>
     private async Task RunCollectorsNowAsync(IReadOnlyList<string>? collectors)
     {
@@ -521,6 +597,12 @@ public partial class ViewerServerTab
         if (_dataService.IsReadOnly)
         {
             ShowCollectorRunStatus(ViewerCollectorRun.ReadOnlyText);
+            return;
+        }
+
+        if (_server.ConnectDownSince.HasValue)
+        {
+            ShowCollectorRunStatus(OfflineRunTip);
             return;
         }
 
@@ -548,7 +630,7 @@ public partial class ViewerServerTab
         finally
         {
             _collectorRunActive = false;
-            RunAllCollectorsButton.IsEnabled = true;
+            ApplyButtonState(RunAllCollectorsButton, ViewerCollectorRun.RunAllState(_dataService.IsReadOnly, _server.ConnectDownSince.HasValue, runActive: false));
         }
     }
 
@@ -573,7 +655,7 @@ public partial class ViewerServerTab
             }
         }
 
-        if (CollectionHealthGrid.SelectedItem is not CollectorHealthRow item) return;
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource) || CollectionHealthGrid.SelectedItem is not CollectorHealthRow item) return;
 
         var window = new CollectionLogWindow(_dataService, _server.ServerId, item.CollectorName)
         {
@@ -614,7 +696,7 @@ public partial class ViewerServerTab
         if (data.Count == 0)
         {
             CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-            CollectorDurationChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+            CollectorDurationChart.Plot.Axes.SetLimitsX(ChartXStart(CollectorDurationChart.Plot, rangeStart, rangeEnd), rangeEnd);
             ReapplyAxisColors(CollectorDurationChart);
             CollectorDurationChart.Refresh();
             return;
@@ -625,9 +707,9 @@ public partial class ViewerServerTab
 
         CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ReapplyAxisColors(CollectorDurationChart);
-        CollectorDurationChart.Plot.YLabel("Slowest run per bucket (ms)");
+        CollectorDurationChart.Plot.YLabel("ms");
         CollectorDurationChart.Plot.Axes.AutoScaleY();
-        CollectorDurationChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        CollectorDurationChart.Plot.Axes.SetLimitsX(ChartXStart(CollectorDurationChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ShowChartLegend(CollectorDurationChart);
         CollectorDurationChart.Refresh();
     }
@@ -645,9 +727,13 @@ public partial class ViewerServerTab
     internal static void PlotCollectorDurationSeries(ScottPlot.WPF.WpfPlot chart, ChartHoverHelper? hover, IReadOnlyList<CollectorDurationSeries> series)
     {
         int colorIdx = 0;
+        /* #8644: a collector with two or three buckets has no cadence of its own to judge a gap by, so it drew a straight line across
+           hours in which nothing was collected. The spans where no collector drew a bucket break every line, as the others do. */
+        var outages = TimeSeriesGaps.OutagesAcross(series.Select(s => s.Times));
         foreach (var line in series)
         {
-            var scatter = chart.Plot.Add.TimeSeries(line.Times, line.MaxMs);
+            var (gapXs, gapYs) = TimeSeriesGaps.BreakAtGaps(line.Times, line.MaxMs, outages);
+            var scatter = chart.Plot.Add.Scatter(gapXs, gapYs);
             scatter.LegendText = line.Collector;
             scatter.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
             ChartStyle.StyleScatter(scatter);

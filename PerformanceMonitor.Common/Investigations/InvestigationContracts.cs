@@ -61,6 +61,10 @@ public static class InvestigationTriggerKinds
     /// <summary>A change watch window ended with a measure moved.</summary>
     public const string ChangeWatch = "change_watch";
 
+    /// <summary>A person asked in a chat (#6980, not opened by any code yet). Its Level 3 actions always need a person's approval, whatever
+    /// the route says (<c>ActionApprovalRules.ForRequest</c>).</summary>
+    public const string Chat = "chat";
+
     /// <summary>The metric name a change-watch request carries as its first alert (the route match and the brief's alert row).</summary>
     public const string ChangeWatchMetric = "Change Watch";
 }
@@ -307,6 +311,9 @@ public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired)
 
     /// <summary>#6008: how many follow-up requests this pass opened (each with its <c>follow_up</c> event).</summary>
     public int FollowUps { get; init; }
+
+    /// <summary>#7109: how many action proposals this pass moved (voided, expired, or approved with no outcome to unknown).</summary>
+    public int Proposals { get; init; }
 }
 
 /// <summary>
@@ -316,8 +323,20 @@ public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired)
 /// </summary>
 public sealed record AgentAction(Guid RequestId, Guid ClaimId, string AgentId, string Reason, string EvidenceJson);
 
-/// <summary>What a Level 2 change targets (#5912): the server, the object's id when it has one, and the database.</summary>
-public sealed record AgentActionTarget(int ServerId, string ServerName, string? Id, string? Database);
+/// <summary>
+/// What a Level 2 change targets (#5912): the server, the object's id when it has one, and the database. A target that names no
+/// server (a rule for every server, an id that matches nothing) is built with <see cref="NoServer"/>. Every whole number other
+/// than 0 is a server's id, so no id stands for "no server": the gate reads <see cref="NamesServer"/> and refuses such a target
+/// as another server's, whatever the request's server id is.
+/// </summary>
+public sealed record AgentActionTarget(int ServerId, string ServerName, string? Id, string? Database)
+{
+    /// <summary>False for a target that names no server. Its <see cref="ServerId"/> is 0, which is no server's id.</summary>
+    public bool NamesServer { get; init; } = true;
+
+    /// <summary>A target that names no server. <paramref name="description"/> is what a refusal calls it.</summary>
+    public static AgentActionTarget NoServer(string description, string? id) => new(0, description, id, null) { NamesServer = false };
+}
 
 /// <summary>
 /// The fixed list of server actions (#5632, step 5), the words of <c>config.config_server_actions.action</c>'s CHECK. Nothing
@@ -441,8 +460,24 @@ public static class AgentActionCodes
     /// <summary>The server-action gate: the remediation slot holds a stored password, not an <c>env:</c> or <c>file:</c> reference.</summary>
     public const string CredentialNotReference = "credential_not_reference";
 
+    /// <summary>The write's re-check of a server action (#7109): the request needs a person's approval (a route set to <c>required</c>, or a
+    /// chat request), so the agent's own write never runs it. The gate never refuses with it: it reports the approval to the tool, which
+    /// stores a proposal instead of writing.</summary>
+    public const string ApprovalRequired = "approval_required";
+
+    /// <summary>The shared server-action conditions (#7109): a person closed the request, so no action runs under it.</summary>
+    public const string RequestClosed = "request_closed";
+
+    /// <summary>The shared server-action conditions (#7109): a kill on an alert request whose alert has resolved. A kill is about the session
+    /// now, and the alert that showed it is gone.</summary>
+    public const string AlertResolved = "alert_resolved";
+
     /// <summary>The server-action gate: the action is not one of the fixed list.</summary>
     public const string UnknownServerAction = "unknown_server_action";
+
+    /// <summary>The shared server-action conditions (#7659): a Level 3 action on a chat request whose askers do not all hold <c>request_level_3</c>
+    /// with the action's kind for the server.</summary>
+    public const string AskerGrant = "asker_grant";
 
     /// <summary>The one <see cref="ClaimNotLive"/> message.</summary>
     public const string ClaimNotLiveMessage =

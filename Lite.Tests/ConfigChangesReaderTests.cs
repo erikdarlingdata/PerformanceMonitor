@@ -89,6 +89,25 @@ public sealed class ConfigChangesReaderTests : IClassFixture<SharedDuckDbFixture
     }
 
     [Fact]
+    public async Task ServerConfigChange_CarriesTheCaptureBeforeIt_AndTheGridCellSaysBetween()
+    {
+        /* #7662: the time is the first capture that held the new value; Lite captures on connect only, so the cell names the capture before it too. */
+        var service = new LocalDataService(_duckDb);
+        var older = Truncate(DateTime.UtcNow.AddHours(-30));
+        var newer = Truncate(DateTime.UtcNow.AddHours(-2));
+        await SeedServerConfigAsync(older, "max degree of parallelism", 0, 0, isDynamic: true, isAdvanced: true);
+        await SeedServerConfigAsync(newer, "max degree of parallelism", 4, 4, isDynamic: true, isAdvanced: true);
+
+        var change = Assert.Single(await service.GetServerConfigChangesAsync(ServerId, hoursBack: 48));
+
+        Assert.Equal(older, change.PreviousCaptureTime);
+        Assert.Equal(
+            "between " + ServerTimeHelper.FormatServerTime(older, "yyyy-MM-dd HH:mm:ss") + " and " + ServerTimeHelper.FormatServerTime(newer, "yyyy-MM-dd HH:mm:ss"),
+            change.ChangeTimeLocal);
+        Assert.Equal(ServerTimeHelper.FormatServerTime(newer, "yyyy-MM-dd HH:mm:ss"), ConfigChangeRowFormat.FirstSeen(newer, null));
+    }
+
+    [Fact]
     public async Task ServerConfigChanges_RequiresRestart_DerivedFromDynamicAndValueMismatch()
     {
         var service = new LocalDataService(_duckDb);

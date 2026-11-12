@@ -236,7 +236,7 @@ public sealed class CollectionCaveatLedger
     /// rather than a store read.
     /// </summary>
     public string Note() =>
-        "The analysis pass's own reads of the collectors' tables — a DIFFERENT layer from the collector rows above, which say whether the data was written. A family here means verdicts about it are absent from analyze_server for that pass, whatever the collector's own row says. Process memory since "
+        "The analysis pass's own reads of the collectors' tables: a DIFFERENT layer from the collector rows above, which say whether the data was written. A family here means verdicts about it are absent from analyze_server for that pass, whatever the collector's own row says. Process memory since "
         + StartedUtc.ToString("o", CultureInfo.InvariantCulture)
         + "; a service restart forgets, so an absent block is never evidence that every pass was clean.";
 

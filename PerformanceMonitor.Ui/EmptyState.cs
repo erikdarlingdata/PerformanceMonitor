@@ -6,9 +6,12 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Documents;
 using System.Windows.Media;
 
 namespace PerformanceMonitor.Ui;
@@ -17,9 +20,10 @@ namespace PerformanceMonitor.Ui;
 /// The "nothing here" text for a grid or chart that came back empty (Lite click-through F15). Without it a user cannot
 /// tell "nothing happened in this window" from "not collected": the grid is a bare header row, the chart a bare axis.
 ///
-/// <para>The text is a <see cref="TextBlock"/> that sits in the SAME grid cell as the surface, centred, in the style the
-/// System Events sub-tabs' own <c>*NoDataMessage</c> elements use (italic, dim, wrapped). It is made the first time a
-/// surface is empty and only toggled afterwards, so a surface that always has rows never pays for one.</para>
+/// <para>The text is a <see cref="TextBlock"/> that sits in the SAME grid cell as the surface, in the look of the shared
+/// <c>EmptyHint</c> style (muted, upright, centred) and wrapping at the cell's width, never a narrower one, so a wide pane shows
+/// it on one line. It is made the first time a surface is empty and only toggled afterwards, so a surface that always has rows
+/// never pays for one.</para>
 ///
 /// <para>A surface whose cell already holds a <c>*NoDataMessage</c> element (the System Events grids, whose message also
 /// carries the "this collector does not run on this server" wording) or any other <c>*Message</c> element (Alert History's
@@ -29,7 +33,7 @@ namespace PerformanceMonitor.Ui;
 public static class EmptyState
 {
     /// <summary>What a grid says when its caller gave no wording of its own.</summary>
-    public const string DefaultGridText = "No data for the selected time range.";
+    public const string DefaultGridText = "No data in the selected time window.";
 
     /// <summary>The name given to the element this class makes, so it is found again and never doubled.</summary>
     public const string ElementName = "EmptyStateText";
@@ -50,13 +54,10 @@ public static class EmptyState
     /// </summary>
     public static void Show(FrameworkElement surface, bool isEmpty, string? text = null, bool clearOfBaseline = false)
     {
-        /* A chart is often wrapped in a Border for its margin; the text then sits in the Border's cell. */
-        FrameworkElement anchor = surface;
-        while (anchor.Parent is Border border)
-        {
-            anchor = border;
-        }
+        /* #8647: a read came back, so the sentence that held the place until it did is done, whichever answer the read gave. */
+        ShowLoading(surface, false);
 
+        var anchor = Anchor(surface);
         if (anchor.Parent is not Grid parent)
         {
             return;
@@ -88,11 +89,9 @@ public static class EmptyState
                 Margin = clearOfBaseline ? new Thickness(0, 36, 0, 0) : new Thickness(0),
                 TextAlignment = TextAlignment.Center,
                 TextWrapping = TextWrapping.Wrap,
-                MaxWidth = 520,
-                FontStyle = FontStyles.Italic,
                 IsHitTestVisible = false,
             };
-            existing.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundDimBrush");
+            existing.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundMutedBrush");
             Grid.SetRow(existing, row);
             Grid.SetColumn(existing, column);
             Grid.SetRowSpan(existing, Grid.GetRowSpan(anchor));
@@ -102,6 +101,190 @@ public static class EmptyState
 
         existing.Text = text ?? GetText(surface) ?? DefaultGridText;
         existing.Visibility = isEmpty ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>What a surface says between the moment its tab is picked and the moment its first read returns (#8647).</summary>
+    public const string LoadingText = "Loading...";
+
+    /// <summary>The name given to the loading element this class makes, so it is found again and never doubled.</summary>
+    public const string LoadingElementName = "LoadingText";
+
+    /// <summary>
+    /// #8647: shows <see cref="LoadingText"/> over <paramref name="surface"/> when <paramref name="loading"/>, hides it otherwise.
+    /// The text sits where <see cref="Show"/>'s sentence sits and wears the same muted look, so the empty-state sentence replaces it
+    /// in place once a read returns no rows. Nothing happens when the surface has no Grid cell to put it in.
+    /// </summary>
+    public static void ShowLoading(FrameworkElement surface, bool loading)
+    {
+        var anchor = Anchor(surface);
+        if (anchor.Parent is not Grid parent)
+        {
+            return;
+        }
+
+        var name = LoadingElementName + "_" + SurfaceKey(surface);
+        var existing = parent.Children.OfType<TextBlock>().FirstOrDefault(t => t.Name == name);
+
+        if (existing is null)
+        {
+            if (!loading)
+            {
+                return;
+            }
+
+            existing = new TextBlock
+            {
+                Name = name,
+                Text = LoadingText,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = TextAlignment.Center,
+                TextWrapping = TextWrapping.Wrap,
+                IsHitTestVisible = false,
+            };
+            existing.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundMutedBrush");
+            Grid.SetRow(existing, Grid.GetRow(anchor));
+            Grid.SetColumn(existing, Grid.GetColumn(anchor));
+            Grid.SetRowSpan(existing, Grid.GetRowSpan(anchor));
+            Grid.SetColumnSpan(existing, Grid.GetColumnSpan(anchor));
+            Panel.SetZIndex(existing, 5);
+            parent.Children.Add(existing);
+        }
+
+        existing.Visibility = loading ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>True when <see cref="ShowLoading"/> has ever put its text on <paramref name="surface"/>, shown or since hidden.</summary>
+    public static bool HasLoadingText(FrameworkElement surface)
+        => Anchor(surface).Parent is Grid parent
+            && parent.Children.OfType<TextBlock>().Any(t => t.Name == LoadingElementName + "_" + SurfaceKey(surface));
+
+    /// <summary>True while <see cref="LoadingText"/> is on screen over <paramref name="surface"/>.</summary>
+    public static bool IsShowingLoading(FrameworkElement surface)
+        => Anchor(surface).Parent is Grid parent
+            && parent.Children.OfType<TextBlock>().Any(t => t.Name == LoadingElementName + "_" + SurfaceKey(surface) && t.Visibility == Visibility.Visible);
+
+    /// <summary>
+    /// #8647: puts <see cref="LoadingText"/> over a grid nobody has given rows to yet (its <see cref="ItemsControl.ItemsSource"/> is
+    /// null) and takes it away the moment a read assigns one, rows or none: the empty-state sentence or the rows then take its place.
+    /// Done once per grid: a grid that already carries the text, shown or hidden, is left alone, so a tab picked again never
+    /// says "Loading..." over rows it already holds. Returns true when it put the text up.
+    /// </summary>
+    public static bool ShowLoadingUntilRead(DataGrid grid)
+    {
+        if (grid.ItemsSource is not null || HasLoadingText(grid))
+        {
+            return false;
+        }
+
+        ShowLoading(grid, true);
+        if (!HasLoadingText(grid))
+        {
+            return false;
+        }
+
+        /* #8535: the grid's own binding watches its ItemsSource, not DependencyPropertyDescriptor.AddValueChanged. That one records the
+           grid in a table that lives as long as the process until RemoveValueChanged runs, and it ran only when rows arrived. A grid
+           whose read never assigned any (a sub-tab never picked, a read that failed, a tab closed first) stayed in that table, and
+           through the grid's column templates the whole closed server tab stayed with it: every chart's device-pixel bitmap, 600 to
+           700 MB a tab at 250% display scaling. A binding keeps its listener on the grid itself, so it is collected with the grid. */
+        BindingOperations.SetBinding(grid, RowsArrivedWatchProperty, new Binding
+        {
+            Source = grid,
+            Path = new PropertyPath(ItemsControl.ItemsSourceProperty),
+            Mode = BindingMode.OneWay,
+        });
+        return true;
+    }
+
+    /// <summary>
+    /// Bound to a grid's own <see cref="ItemsControl.ItemsSource"/> by <see cref="ShowLoadingUntilRead"/> while its "Loading..." text
+    /// is up: the first non-null value takes the text away and ends the binding.
+    /// </summary>
+    private static readonly DependencyProperty RowsArrivedWatchProperty = DependencyProperty.RegisterAttached(
+        "RowsArrivedWatch",
+        typeof(object),
+        typeof(EmptyState),
+        new PropertyMetadata(null, OnRowsArrived));
+
+    private static void OnRowsArrived(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (e.NewValue is null || d is not DataGrid grid)
+        {
+            return;
+        }
+
+        BindingOperations.ClearBinding(grid, RowsArrivedWatchProperty);
+        ShowLoading(grid, false);
+    }
+
+    /// <summary>The name given to the filtered-out element, so it is found again and never doubled.</summary>
+    public const string FilteredOutElementName = "FilteredOutText";
+
+    /// <summary>What a grid says when its column filters hide every row it has (#8187).</summary>
+    public const string FilteredOutText = "No rows match the column filters.";
+
+    /// <summary>The link under that text that clears the filters.</summary>
+    public const string ClearFiltersLinkText = "Clear filters";
+
+    /// <summary>
+    /// #8187: shows <see cref="FilteredOutText"/> with a <see cref="ClearFiltersLinkText"/> link over <paramref name="surface"/> when
+    /// <paramref name="allHidden"/>, hides it otherwise. The link runs <paramref name="clearFilters"/>. The text sits in the surface's
+    /// cell as <see cref="Show"/>'s does, and unlike that text it takes the mouse, so the link can be clicked. A grid with no rows at
+    /// all is <see cref="Show"/>'s case, never this one, so the two texts are never drawn together.
+    /// </summary>
+    public static void ShowFilteredOut(FrameworkElement surface, bool allHidden, Action clearFilters)
+    {
+        var anchor = Anchor(surface);
+        if (anchor.Parent is not Grid parent)
+        {
+            return;
+        }
+
+        var name = FilteredOutElementName + "_" + SurfaceKey(surface);
+        var existing = parent.Children.OfType<TextBlock>().FirstOrDefault(t => t.Name == name);
+
+        if (existing is null)
+        {
+            if (!allHidden)
+            {
+                return;
+            }
+
+            var link = new Hyperlink(new Run(ClearFiltersLinkText));
+            link.Click += (_, _) => clearFilters();
+
+            existing = new TextBlock
+            {
+                Name = name,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = TextAlignment.Center,
+                TextWrapping = TextWrapping.Wrap,
+            };
+            existing.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundMutedBrush");
+            existing.Inlines.Add(new Run(FilteredOutText + " "));
+            existing.Inlines.Add(link);
+            Grid.SetRow(existing, Grid.GetRow(anchor));
+            Grid.SetColumn(existing, Grid.GetColumn(anchor));
+            Grid.SetRowSpan(existing, Grid.GetRowSpan(anchor));
+            Grid.SetColumnSpan(existing, Grid.GetColumnSpan(anchor));
+            parent.Children.Add(existing);
+        }
+
+        existing.Visibility = allHidden ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>A chart is often wrapped in a Border for its margin; the text then sits in the Border's cell.</summary>
+    private static FrameworkElement Anchor(FrameworkElement surface)
+    {
+        FrameworkElement anchor = surface;
+        while (anchor.Parent is Border border)
+        {
+            anchor = border;
+        }
+
+        return anchor;
     }
 
     /// <summary>Two surfaces in one cell (the Memory Grants charts are stacked by row, but a cell can hold two) each get their own text.</summary>

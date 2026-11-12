@@ -49,6 +49,31 @@ public static class QueryStoreRegressionRules
         $"COALESCE(({alias}.recent_cpu_ms - {alias}.base_cpu_ms) * 100.0 / NULLIF({alias}.base_cpu_ms, 0) > {CostGatePercent}"
         + $" AND ({alias}.recent_cpu_ms - {alias}.base_cpu_ms) * {alias}.recent_execs >= {CostMinAddedCpuMs}, false)";
 
+    /// <summary>
+    /// #7592: a cost row ranks LOW, whatever its percent, when it added less than this many milliseconds of duration over the
+    /// window (its recent runs times the rise in duration per run) AND less than <see cref="GradeMinAddedPerRunMs"/> per run. One
+    /// minute: 162 runs of a 13 ms query that was 5 ms (+168%) add 1.3 s, and read CRITICAL on a quiet server. The row stays listed,
+    /// because the percent is true. Spelled "1 minute" in the tools' text, by hand, as <see cref="CostMinAddedCpuMs"/> is.
+    /// </summary>
+    public const int GradeMinAddedDurationMs = 60_000;
+
+    /// <summary>
+    /// #7592: the per-run half of the grade floor. A row under <see cref="GradeMinAddedDurationMs"/> in total keeps its percent
+    /// bands when each run got at least this many milliseconds slower: 4 runs that went from 0.12 ms to 3,263 ms add 13 s in total
+    /// but are a real slowdown for whoever hit them. One second, spelled "1 second" in the tools' text.
+    /// </summary>
+    public const int GradeMinAddedPerRunMs = 1_000;
+
+    /// <summary>
+    /// #7592: true for a cost row too small to grade above LOW: under <see cref="GradeMinAddedDurationMs"/> of added duration over
+    /// the window AND under <see cref="GradeMinAddedPerRunMs"/> of added duration per run. One text for Darling's read and Lite's,
+    /// over a row with <c>base_dur_ms</c>, <c>recent_dur_ms</c> (ms per run) and <c>recent_execs</c> under <paramref name="alias"/>.
+    /// A NULL figure is false, so the percent bands decide, as they did before.
+    /// </summary>
+    public static string GradeFloorSql(string alias) =>
+        $"COALESCE(({alias}.recent_dur_ms - {alias}.base_dur_ms) * {alias}.recent_execs < {GradeMinAddedDurationMs}"
+        + $" AND ({alias}.recent_dur_ms - {alias}.base_dur_ms) < {GradeMinAddedPerRunMs}, false)";
+
     /// <summary>The closing sentence of the regressions read's <c>truncation_note</c> when the window starts at <c>baseline_start</c>
     /// and the store holds only part of the baseline. One definition for Darling's and Lite's reads, and the text the web page's
     /// <c>plain-text.js</c> rewrites, so a reword here breaks the web test instead of leaving a field name on the page (#6649).</summary>
@@ -58,9 +83,8 @@ public static class QueryStoreRegressionRules
     /// <summary>The closing sentence of <c>truncation_note</c> when the store starts at or after <c>baseline_end</c> (#6750): the
     /// baseline holds no hours, so <see cref="BaselineWindowTail"/> ("holds only the part from effective_start to baseline_end")
     /// would name an empty or backwards span. The sentence says what can still be flagged: timeouts and errors on recent runs alone, and
-    /// cost only from an interval that ran before <c>baseline_end</c> and was collected after it. Darling's baseline keeps rows on their last
-    /// run time, so such an interval can enter it, and a per-execution average needs no hours. Lite's baseline rows are filtered on
-    /// collection time, so no such interval enters there and the sentence holds for both. Chosen by <see cref="TailFor"/>, and rewritten by the web page's
+    /// cost only from an interval that ran before <c>baseline_end</c> and was collected after it. Both products keep baseline rows on their last
+    /// run time (Lite since #7875), so such an interval can enter it, and a per-execution average needs no hours. Chosen by <see cref="TailFor"/>, and rewritten by the web page's
     /// <c>plain-text.js</c> as <see cref="BaselineWindowTail"/> is.</summary>
     public const string EmptyBaselineTail =
         "Here effective_start is at or after baseline_end, so the baseline holds no hours: timeouts and errors are flagged on recent runs alone, and a cost flag can come only from an interval that ran before baseline_end and was collected after it.";

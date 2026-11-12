@@ -173,7 +173,7 @@ VALUES (900000001, @server_id, 'qsempty', 'query_store', now() - INTERVAL '19 da
 
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         var hints = root.GetProperty("hints");
-        Assert.StartsWith("The window reaches further back", hints.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
+        Assert.StartsWith("This range reaches past the detailed history", hints.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
         var effective = DateTime.Parse(hints.GetProperty("effective_start").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains($"Query Store history starts {effective.ToString("MMM d", CultureInfo.InvariantCulture)} and the baseline window", message, StringComparison.Ordinal);
@@ -264,7 +264,7 @@ VALUES (900000001, @server_id, 'qsempty', 'query_store', now() - INTERVAL '19 da
         Assert.Equal("interval_table", hit.TryGetProperty("history_source", out var source) ? source.GetString() : "interval_table");
         var carrier = hit.TryGetProperty("truncation_note", out _) ? hit : hit.GetProperty("hints");
         var dayNote = carrier.GetProperty("truncation_note").GetString()!;
-        Assert.StartsWith("The window reaches further back", dayNote, StringComparison.Ordinal);
+        Assert.StartsWith("This range reaches past the detailed history", dayNote, StringComparison.Ordinal);
         Assert.DoesNotContain(QueryStoreRegressionRules.BaselineWindowTail, dayNote, StringComparison.Ordinal);
         if (hit.TryGetProperty("cost_baseline_start", out var costStart))
         {

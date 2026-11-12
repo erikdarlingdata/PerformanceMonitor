@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -52,6 +53,30 @@ public partial class AvailabilityGroupsTab : UserControl
     {
         InitializeComponent();
         AgCards.ItemsSource = _cards;
+        _boundTheme = ThemeManager.CurrentTheme;
+        Loaded += (_, _) =>
+        {
+            ThemeManager.ThemeChanged += OnThemeChanged;
+            if (_boundTheme != ThemeManager.CurrentTheme)
+            {
+                BindCardsAgain();
+            }
+        };
+        Unloaded += (_, _) => ThemeManager.ThemeChanged -= OnThemeChanged;
+    }
+
+    /// <summary>The theme the cards were last bound under.</summary>
+    private string _boundTheme;
+
+    private void OnThemeChanged(string _) => BindCardsAgain();
+
+    /// <summary>#8221: a card's severity brushes are read from the theme when it is bound (<see cref="SeverityBrushConverter"/>), so a
+    /// theme change binds the cards again; the collection and its cards are the same ones.</summary>
+    private void BindCardsAgain()
+    {
+        _boundTheme = ThemeManager.CurrentTheme;
+        AgCards.ItemsSource = null;
+        AgCards.ItemsSource = _cards;
     }
 
     /// <summary>Wires the data service. Nothing is read until the first refresh.</summary>
@@ -82,6 +107,8 @@ public partial class AvailabilityGroupsTab : UserControl
             var digest = AgTopology.ComputeDigest(groups);
             if (_lastDigest == digest)
             {
+                /* Nothing to rebind; the line stands again, so a failure reported since the last render does not outlive the read that recovered. */
+                StatusChanged?.Invoke(StatusLine(groups.Count));
                 return;
             }
 
@@ -114,10 +141,13 @@ public partial class AvailabilityGroupsTab : UserControl
         AgCards.Visibility = groups.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
         SummaryText.Text = BuildSummary(groups);
 
-        StatusChanged?.Invoke(groups.Count == 0
-            ? "No Availability Groups observed."
-            : $"Availability Groups: {SummaryText.Text}");
+        StatusChanged?.Invoke(StatusLine(groups.Count));
     }
+
+    /// <summary>The tab's status line for a loaded topology: the summary, or that none was observed.</summary>
+    private string StatusLine(int groupCount) => groupCount == 0
+        ? "No Availability Groups observed."
+        : $"Availability Groups: {SummaryText.Text}";
 
     /// <summary>
     /// The counts, and why there are two of them: an AG whose replicas are all monitored produces one CARD per

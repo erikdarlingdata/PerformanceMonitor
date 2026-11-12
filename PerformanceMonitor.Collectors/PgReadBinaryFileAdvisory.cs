@@ -46,6 +46,12 @@ public static class PgReadBinaryFileAdvisory
     /// <summary>How often a target may be noted again. Settable for tests; a real process never sets it.</summary>
     public static TimeSpan NoteInterval { get; set; } = TimeSpan.FromHours(24);
 
+    /// <summary>The clock <see cref="ShouldNote"/> reads. Null, the default, is the wall clock; a test sets a clock it
+    /// steps across <see cref="NoteInterval"/> instead of waiting the interval out. A real process never sets it.</summary>
+    internal static Func<DateTime>? ClockForTests { get; set; }
+
+    private static DateTime UtcNow() => ClockForTests?.Invoke() ?? DateTime.UtcNow;
+
     /* Process-wide and static for the reason the type header gives. Ordinal keys: targetKey is
        CollectorContext.ServerName / ServerRuntime.StorageName, compared exactly as PgReadBinaryFileCapability
        already compares it. */
@@ -62,7 +68,7 @@ public static class PgReadBinaryFileAdvisory
     {
         ArgumentNullException.ThrowIfNull(targetKey);
 
-        var now = DateTime.UtcNow;
+        var now = UtcNow();
 
         /* #4732: a stamp ahead of the clock (it stepped back since the note) is replaced by this reading and counted
            from there. This project references PerformanceMonitor.Common, but the COMPILED assembly must carry no

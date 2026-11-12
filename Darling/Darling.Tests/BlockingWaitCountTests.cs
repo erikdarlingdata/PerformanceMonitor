@@ -520,6 +520,59 @@ public sealed class BlockingWaitCountTests
     }
 
     /// <summary>
+    /// #7028: the per-hour source choice (<see cref="BlockingWaits.HourlyChosenWaitsSql"/>, in its single-bucket form
+    /// the alert's rolling hour) counts the same waits as the alert's own C# rule
+    /// (<see cref="AlertContextBuilders.BlockingWaitRows"/>) on the same rows: an hour with blocked-process waits
+    /// takes only those, an hour with DMV waits alone takes those, and a parallel query's self-wait is no report, so
+    /// an hour whose only blocked-process rows are self-waits falls back to the DMV waits.
+    /// </summary>
+    [Fact]
+    public async Task PostgresHourlyChooser_AgreesWithTheAlertsCSharpRule_OnXeOnlyDmvOnlyMixedAndSelfWaitHours()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString), "Set DARLING_TEST_PG to run the live wait-count SQL test.");
+
+        const string dmv = BlockedProcessAlertRow.DmvSnapshotSource;
+        var cases = new (string Name, List<BlockedProcessAlertRow> Rows, int Expected)[]
+        {
+            ("XE only", Concat(OneWait(102, 100, T0, 6), OneWait(103, 100, T0.AddMinutes(5), 4)), 2),
+            ("DMV only", Concat(OneWait(102, 100, T0, 6, source: dmv), OneWait(103, 100, T0.AddMinutes(5), 4, source: dmv), OneWait(104, 100, T0.AddMinutes(9), 3, source: dmv)), 3),
+            ("a mix: the XE waits win", Concat(OneWait(102, 100, T0, 6), OneWait(103, 100, T0.AddMinutes(5), 4, source: dmv), OneWait(104, 100, T0.AddMinutes(9), 3, source: dmv), OneWait(105, 100, T0.AddMinutes(20), 3, source: dmv)), 1),
+            ("self waits only in XE: the DMV waits count", Concat(OneWait(59, 59, T0, 5), OneWait(103, 100, T0.AddMinutes(5), 4, source: dmv), OneWait(104, 100, T0.AddMinutes(9), 3, source: dmv)), 2),
+            ("a real XE wait beside a self wait", Concat(OneWait(59, 59, T0, 5), OneWait(102, 100, T0.AddMinutes(5), 4), OneWait(103, 100, T0.AddMinutes(9), 3, source: dmv)), 1),
+            ("DMV self waits are no waits", Concat(OneWait(59, 59, T0, 5, source: dmv), OneWait(103, 100, T0.AddMinutes(9), 3, source: dmv)), 1),
+        };
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        foreach (var (name, rows, expected) in cases)
+        {
+            var xe = rows.Where(r => r.Source == BlockedProcessAlertRow.XeReportSource).ToList();
+            var dmvRows = rows.Where(r => r.Source == dmv).ToList();
+            var sql = "WITH " + BlockingWaits.WaitsCteSql(BlockingWaits.SqlDialect.Postgres, "xe_waits", SourceOrEmpty(xe), new[] { "server_id" })
+                + "," + BlockingWaits.WaitsCteSql(BlockingWaits.SqlDialect.Postgres, "dmv_waits", SourceOrEmpty(dmvRows), new[] { "server_id" })
+                + "," + BlockingWaits.HourlyChosenWaitsSql("chosen", "xe_waits", "dmv_waits", "TIMESTAMP '2026-10-09 10:00:00'", singleBucket: true, new[] { "server_id" })
+                + " SELECT COUNT(*), COALESCE(MAX(wait_time_ms), 0) FROM chosen";
+            await using var command = new NpgsqlCommand(sql, connection);
+            await using var reader = await command.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+
+            var alertWaits = AlertContextBuilders.BlockingWaitRows(rows, Array.Empty<string>());
+            Assert.True(expected == alertWaits.Count, $"{name}: the alert's C# rule counts {alertWaits.Count}, expected {expected}");
+            Assert.True(
+                alertWaits.Count == Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture),
+                $"{name}: the SQL chooser counts {reader.GetValue(0)}, the alert's C# rule {alertWaits.Count}");
+            Assert.Equal(alertWaits.Count == 0 ? 0 : alertWaits.Max(w => w.WaitTimeMs), Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture));
+        }
+    }
+
+    private static string SourceOrEmpty(IReadOnlyList<BlockedProcessAlertRow> rows) => rows.Count > 0
+        ? ValuesSource(rows, 1)
+        : "SELECT 1 AS server_id, NULL::integer AS blocked_spid, NULL::integer AS blocking_spid, NULL::timestamp AS event_time, NULL::bigint AS wait_time_ms WHERE FALSE";
+
+    private static List<BlockedProcessAlertRow> Concat(params List<BlockedProcessAlertRow>[] lists) => lists.SelectMany(l => l).ToList();
+
+    /// <summary>
     /// Blocked-process reports are untouched by #5743: two waits whose starts are 6 s apart are two waits, one
     /// eleven-report wait is one, and <c>wait_reports</c> still counts each wait's reports (1 and 2, then 11).
     /// </summary>

@@ -1,0 +1,15 @@
+namespace PerformanceMonitor.Darling.Viewer;
+
+/// <summary>
+/// #8115: the count beside the FinOps Recommendations sub-tab's caption. While the read is in flight it says so, because
+/// column headers under a finished-looking caption are the same picture as an empty result.
+/// </summary>
+public static class FinOpsRecommendationsCountText
+{
+    public const string Loading = "Loading recommendations…";
+
+    /// <summary>What the count says when the read threw, so a failed read does not keep saying it is loading.</summary>
+    public const string Failed = "Recommendations could not be read";
+
+    public static string For(int count) => count > 0 ? PerformanceMonitor.Common.CountText.Plural(count, "recommendation") : "no recommendations";
+}

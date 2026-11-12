@@ -277,12 +277,12 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
 
         foreach (var text in new[] { onPrem2016, onPrem2019, azure })
         {
-            Assert.Contains("query_capture_mode = qso.query_capture_mode_desc", text, StringComparison.Ordinal);
+            Assert.Contains("query_capture_mode = PerformanceMonitorLite.query_capture_mode_desc", text, StringComparison.Ordinal);
         }
 
         Assert.DoesNotContain("wait_stats_capture_mode", onPrem2016, StringComparison.Ordinal);
-        Assert.Contains("wait_stats_capture_mode = qso.wait_stats_capture_mode_desc", onPrem2019, StringComparison.Ordinal);
-        Assert.Contains("wait_stats_capture_mode = qso.wait_stats_capture_mode_desc", azure, StringComparison.Ordinal);
+        Assert.Contains("wait_stats_capture_mode = PerformanceMonitorLite.wait_stats_capture_mode_desc", onPrem2019, StringComparison.Ordinal);
+        Assert.Contains("wait_stats_capture_mode = PerformanceMonitorLite.wait_stats_capture_mode_desc", azure, StringComparison.Ordinal);
 
         /* The collector says what it now gates, in the words a reader of the class doc will look for. */
         var collector = RepoFile.ReadRepoFile("PerformanceMonitor.Collectors", "QueryStoreHealthCollector.cs");

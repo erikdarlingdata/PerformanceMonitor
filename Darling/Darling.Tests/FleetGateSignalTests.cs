@@ -158,6 +158,38 @@ public sealed class FleetGateStatsTests
         Assert.Equal(100.0 * 8 / 13, snapshot.SkippedPercent, 6);
     }
 
+    /// <summary>#4938: a slot the grid counted as run and the single-flight gate then refused is one skipped slot and no run,
+    /// in the full and the judged counts. The run is taken from the minute that holds it when the minute turned over between
+    /// the two records, and a run no minute in the window holds any more leaves only the skip: no count goes below zero.</summary>
+    [Fact]
+    public void AMoveOfARunToSkipped_TakesTheRunFromTheNewestMinuteThatHoldsOne_AndNeverGoesBelowZero()
+    {
+        var now = T0;
+        var stats = new FleetGateStats(() => now, () => TimeSpan.FromMinutes(DarlingSelfAlertEvaluator.FleetGateStartupMinutes + 1));
+
+        stats.RecordSlot(0);
+        stats.MoveRunToSkipped();
+        var sameMinute = stats.Snapshot();
+        Assert.Equal(0, sameMinute.Run);
+        Assert.Equal(1, sameMinute.Skipped);
+        Assert.Equal(0, stats.SnapshotJudged().Run);
+        Assert.Equal(1, stats.SnapshotJudged().Skipped);
+
+        now = T0.AddMinutes(5);
+        stats.RecordSlot(0);
+        now = T0.AddMinutes(6);
+        stats.MoveRunToSkipped();
+        var turnedOver = stats.Snapshot();
+        Assert.Equal(0, turnedOver.Run);
+        Assert.Equal(2, turnedOver.Skipped);
+
+        now = T0.AddMinutes(70);
+        stats.MoveRunToSkipped();
+        var noRunLeft = stats.Snapshot();
+        Assert.Equal(0, noRunLeft.Run);
+        Assert.Equal(1, noRunLeft.Skipped);
+    }
+
     [Fact]
     public void TheWindow_KeepsSixtyMinutes_AndDropsTheOldBuckets()
     {
@@ -384,6 +416,37 @@ public sealed class FleetGateSelfAlertTests
 
     private static DarlingSelfAlertEvaluator.FleetGateReport Report(long run, long skipped, DateTime end) =>
         new(run, skipped, QueueWaits: 12, QueueWaitTotal: TimeSpan.FromSeconds(6), QueueWaitMax: TimeSpan.FromSeconds(2), GateWidth: 4, WindowEndUtc: end);
+
+    [Fact]
+    public async Task HoldsForThirtyMinutes_WritingOneHeldRow_ThenPagesOnce()
+    {
+        /* #7086 part 4: the fleet gate is evaluated every minute. Twenty minutes in: one held row, no page, and no page-cooldown
+           stamp. Thirty minutes in, the page goes out once, then follows the shared repeat policy as before. */
+        var h = new DarlingSelfAlertTests.Harness();
+        h.HoldSelfHealth = true;
+        var e = h.Build();
+
+        for (var minute = 0; minute <= 20; minute++)
+        {
+            await e.ApplyFleetGateAsync(Report(run: 380, skipped: 20, h.Now), Ct);
+            h.Now = h.Now.AddMinutes(1);
+        }
+
+        var held = Assert.Single(h.Deliverer.Outcomes);
+        Assert.NotNull(held.Hold);
+        Assert.Equal(DarlingSelfAlertEvaluator.FleetGateMetric, held.MetricName);
+
+        for (var minute = 21; minute <= 35; minute++)
+        {
+            await e.ApplyFleetGateAsync(Report(run: 380, skipped: 20, h.Now), Ct);
+            h.Now = h.Now.AddMinutes(1);
+        }
+
+        var pages = h.Deliverer.Outcomes.Where(o => o.Hold is null).ToList();
+        var page = Assert.Single(pages);
+        Assert.Equal(DarlingSelfAlertEvaluator.FleetGateMetric, page.MetricName);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
 
     [Fact]
     public async Task FiresAtFivePercentAndTwentySlots_NamingTheCountsTheGateWidthAndTheHour()
@@ -854,7 +917,7 @@ public sealed class WorkerLoopTimerClockStepTests
     [InlineData("NextCustomAlertSweep", "s_customAlertSweepInterval", "DateTime.UtcNow.Add(s_customAlertSweepInterval)")]
     [InlineData("NextAlertSweep", "s_alertSweepInterval", "DateTime.UtcNow.Add(s_alertSweepInterval)")]
     [InlineData("NextPileupSweep", "s_alertSweepInterval", "DateTime.UtcNow.Add(s_alertSweepInterval)")]
-    [InlineData("NextAnalysisDue", "TimeSpan.FromMinutes(analysisIntervalMinutes)", "DateTime.UtcNow.AddMinutes(analysisIntervalMinutes)")]
+    [InlineData("NextAnalysisDue", "TimeSpan.FromMinutes(analysisIntervalMinutes)", "nowUtc.AddMinutes(analysisIntervalMinutes)")]
     [InlineData("FirstSweepDueUtc", "TimeSpan.FromSeconds(ColdStartSpreadSeconds)", null)]
     public void APerServerTimer_IsReadThroughStampIsDue_WithTheSpanItsStampIsWrittenWith(string stamp, string span, string? writer)
     {

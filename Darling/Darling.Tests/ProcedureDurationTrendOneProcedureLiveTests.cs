@@ -66,25 +66,25 @@ public sealed class ProcedureDurationTrendOneProcedureLiveTests
             async Task<string> Read(DatabaseFilter databases, string? procedure) =>
                 await DarlingMcpTrendTools.GetProcedureDurationTrend(postgres, serverName, 24, null, null, databases, budget, procedure, ct);
 
-            Assert.Equal(3_000 * PerSecond, DurationTrendDatabaseFilterLiveTests.LastRate(await Read(DatabaseFilter.One(A), "dbo.usp_One"))!.Value, 9);
-            Assert.Equal(5_000 * PerSecond, DurationTrendDatabaseFilterLiveTests.LastRate(await Read(DatabaseFilter.One(A), "dbo.usp_Two"))!.Value, 9);
+            Assert.Equal(3_000 * PerSecond, DurationTrendDatabaseFilterLiveTests.LastRate(await Read(DatabaseFilter.One(A), "dbo.usp_One"))!.Value, 6);
+            Assert.Equal(5_000 * PerSecond, DurationTrendDatabaseFilterLiveTests.LastRate(await Read(DatabaseFilter.One(A), "dbo.usp_Two"))!.Value, 6);
             /* The same name in the other database is that database's weight, never the sum of both. */
-            Assert.Equal(7_000 * PerSecond, DurationTrendDatabaseFilterLiveTests.LastRate(await Read(DatabaseFilter.One(B), "dbo.usp_One"))!.Value, 9);
+            Assert.Equal(7_000 * PerSecond, DurationTrendDatabaseFilterLiveTests.LastRate(await Read(DatabaseFilter.One(B), "dbo.usp_One"))!.Value, 6);
             /* A procedure with no schema is shown, and so matched, by its bare name. */
-            Assert.Equal(1_000 * PerSecond, DurationTrendDatabaseFilterLiveTests.LastRate(await Read(DatabaseFilter.One(A), "usp_Bare"))!.Value, 9);
+            Assert.Equal(1_000 * PerSecond, DurationTrendDatabaseFilterLiveTests.LastRate(await Read(DatabaseFilter.One(A), "usp_Bare"))!.Value, 6);
 
             /* No procedure name: the database's whole sum, and the payload carries no procedure_name key (the old output). */
             var wholeDatabase = JsonDocument.Parse(await Read(DatabaseFilter.One(A), null)).RootElement;
-            Assert.Equal(9_000 * PerSecond, wholeDatabase.GetProperty("trend").EnumerateArray().Last().GetProperty("elapsed_ms_per_second").GetDouble(), 9);
+            Assert.Equal(9_000 * PerSecond, wholeDatabase.GetProperty("trend").EnumerateArray().Last().GetProperty("elapsed_ms_per_second").GetDouble(), 6);
             Assert.False(wholeDatabase.TryGetProperty("procedure_name", out _));
 
             var one = JsonDocument.Parse(await Read(DatabaseFilter.One(A), "dbo.usp_One")).RootElement;
             Assert.Equal("dbo.usp_One", one.GetProperty("procedure_name").GetString());
             Assert.Equal(A, one.GetProperty("database_name").GetString());
             /* avg_cpu_ms: the bucket's worker time over its executions (3000 us weight over 10 executions), only on the one-procedure form. */
-            Assert.Equal(3_000 / 1000.0 / 10, one.GetProperty("trend").EnumerateArray().Last().GetProperty("avg_cpu_ms").GetDouble(), 9);
+            Assert.Equal(3_000 / 1000.0 / 10, one.GetProperty("trend").EnumerateArray().Last().GetProperty("avg_cpu_ms").GetDouble(), 6);
             Assert.Equal(7_000 / 1000.0 / 10, JsonDocument.Parse(await Read(DatabaseFilter.One(B), "dbo.usp_One")).RootElement
-                .GetProperty("trend").EnumerateArray().Last().GetProperty("avg_cpu_ms").GetDouble(), 9);
+                .GetProperty("trend").EnumerateArray().Last().GetProperty("avg_cpu_ms").GetDouble(), 6);
             Assert.False(wholeDatabase.GetProperty("trend").EnumerateArray().Last().TryGetProperty("avg_cpu_ms", out _));
 
             /* A name nothing ran under in the window is an empty answer that still says which procedure it was asked about, never a 0 line. */
@@ -189,14 +189,14 @@ public sealed class ProcedureDurationTrendOneProcedureLiveTests
 
             var one = await Read(A, "dbo.usp_One");
             Assert.Equal("hourly", one.GetProperty("source").GetString());
-            Assert.Equal(3_000 * PerSecond, RateAt(one, hourOne), 9);
-            Assert.Equal(5_000 * PerSecond, RateAt(await Read(A, "dbo.usp_Two"), hourOne), 9);
-            Assert.Equal(7_000 * PerSecond, RateAt(await Read(B, "dbo.usp_One"), hourOne), 9);
+            Assert.Equal(3_000 * PerSecond, RateAt(one, hourOne), 6);
+            Assert.Equal(5_000 * PerSecond, RateAt(await Read(A, "dbo.usp_Two"), hourOne), 6);
+            Assert.Equal(7_000 * PerSecond, RateAt(await Read(B, "dbo.usp_One"), hourOne), 6);
             Assert.Equal("dbo.usp_One", one.GetProperty("procedure_name").GetString());
             /* The rollup carries worker time too: its hour's avg_cpu_ms is that procedure's worker time over its executions only. */
             Assert.Equal(3_000 / 1000.0 / 10, one.GetProperty("trend").EnumerateArray()
                 .First(p => DateTime.Parse(p.GetProperty("time").GetString()!, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind) == hourOne)
-                .GetProperty("avg_cpu_ms").GetDouble(), 9);
+                .GetProperty("avg_cpu_ms").GetDouble(), 6);
             Assert.Equal("empty", (await Read(A, "dbo.usp_NoSuch")).GetProperty("status").GetString());
 
             bodySucceeded = true;

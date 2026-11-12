@@ -72,6 +72,23 @@ public sealed class ViewerFleetScreenWalkFixesTests : IDisposable
         Assert.Equal("2026-10-07 23:30:00", text);
     }
 
+    /// <summary>In Server Time the card's Last Collect names the offset of the clock it is worded on; in UTC it is the stored
+    /// instant with no label.</summary>
+    [Fact]
+    public void LastCollect_InServerTime_NamesTheOffsetOfTheClockItReads()
+    {
+        /* A fixed day in the past, so the stamp carries its date whatever today is. */
+        var card = new ServerSummaryItem { LastCollectionTime = Utc(2026, 9, 25, 9, 56, 40), Clock = ServerClock.FixedOffset(-240) };
+
+        /* The card reads its own server's clock (#8645), never the last-opened tab's, so a different active clock must change nothing. */
+        ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(120);
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.Equal("2026-09-25 05:56:40 (UTC-04:00)", card.LastCollectionDisplay);
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+        Assert.Equal("2026-09-25 09:56:40", card.LastCollectionDisplay);
+    }
+
     // ── D5: one named clock on the time columns ─────────────────────────────────────────────────────
 
     [Theory]
@@ -103,26 +120,26 @@ public sealed class ViewerFleetScreenWalkFixesTests : IDisposable
     [Fact]
     public void AlertCount_AtTheCap_SaysShowingTheNewest()
     {
-        Assert.Equal("500 alert(s) (showing the newest 500)", JobHistoryCap.CountText(500, 500, 500, "alert(s)"));
+        Assert.Equal("500 alerts (showing the newest 500)", JobHistoryCap.CountText(500, 500, 500, "alert"));
     }
 
     [Fact]
     public void AlertCount_ColumnFilterNarrowingTheGrid_KeepsTheReadsCapNote()
     {
-        Assert.Equal("120 alert(s) (showing the newest 500)", JobHistoryCap.CountText(120, 500, 500, "alert(s)"));
+        Assert.Equal("120 alerts (showing the newest 500)", JobHistoryCap.CountText(120, 500, 500, "alert"));
     }
 
     [Fact]
     public void AlertCount_BelowTheCap_HasNoNote_AndNothingShownIsBlank()
     {
-        Assert.Equal("37 alert(s)", JobHistoryCap.CountText(37, 37, 500, "alert(s)"));
-        Assert.Equal("", JobHistoryCap.CountText(0, 500, 500, "alert(s)"));
+        Assert.Equal("37 alerts", JobHistoryCap.CountText(37, 37, 500, "alert"));
+        Assert.Equal("", JobHistoryCap.CountText(0, 500, 500, "alert"));
     }
 
     [Fact]
     public void JobCount_WordingIsUnchanged()
     {
-        Assert.Equal("2000 run(s) (showing the newest 2,000)", JobHistoryCap.CountText(2000, 2000, 2000));
+        Assert.Equal("2,000 runs (showing the newest 2,000)", JobHistoryCap.CountText(2000, 2000, 2000));
     }
 
     [Fact]
@@ -148,7 +165,7 @@ public sealed class ViewerFleetScreenWalkFixesTests : IDisposable
 
         Assert.Equal(4, rollup.TotalServers);
         Assert.Null(rollup.FilteredOfTotal);
-        Assert.Equal("Monitoring 4 servers", rollup.MonitoringText);
+        Assert.Equal("Monitoring 4 enabled servers", rollup.MonitoringText);
         Assert.Equal(2, rollup.WorstServers.Count);
     }
 
@@ -161,7 +178,7 @@ public sealed class ViewerFleetScreenWalkFixesTests : IDisposable
 
         Assert.Equal(2, rollup.TotalServers);
         Assert.Equal(4, rollup.FilteredOfTotal);
-        Assert.Equal("Monitoring 2 of 4 servers", rollup.MonitoringText);
+        Assert.Equal("Monitoring 2 of 4 enabled servers", rollup.MonitoringText);
         Assert.Equal(new[] { "prod-b" }, rollup.WorstServers.Select(w => w.DisplayName).ToArray());
         Assert.Equal(0, rollup.UnknownCount);
     }
@@ -173,8 +190,38 @@ public sealed class ViewerFleetScreenWalkFixesTests : IDisposable
 
         var rollup = OverviewCardView.BuildRollup(cards, new FleetTotals(), registeredCount: 1, search: "zzz");
 
-        Assert.Equal("Monitoring 0 of 1 server", rollup.MonitoringText);
+        Assert.Equal("Monitoring 0 of 1 enabled server", rollup.MonitoringText);
         Assert.Empty(rollup.WorstServers);
+    }
+
+    /// <summary>#7354: typing a term that matches no server hid the whole Fleet Health block, Search box included,
+    /// because the block was gated on the matched count. It must stay drawn so the term can be cleared, and
+    /// must not claim "All 0 enabled servers healthy".</summary>
+    [Fact]
+    public void Rollup_WithASearchThatMatchesNothing_KeepsTheBlockAndNeverClaimsAllHealthy()
+    {
+        var cards = new List<ServerSummaryItem> { Healthy("prod-a", 1), Offline("prod-b", 2) };
+
+        var rollup = OverviewCardView.BuildRollup(cards, new FleetTotals(), registeredCount: 2, search: "037qqqqq");
+
+        Assert.Equal(0, rollup.TotalServers);
+        Assert.True(OverviewCardView.ShowsRollup(rollup));
+        Assert.False(OverviewCardView.ShowsAllClear(rollup));
+        Assert.Equal(ServerOverviewFilter.NoMatchText, OverviewCardView.CountText(cards, shown: 0, attentionOnly: false, search: "037qqqqq"));
+
+        // Clearing the term brings the whole fleet back.
+        var cleared = OverviewCardView.BuildRollup(cards, new FleetTotals(), registeredCount: 2, search: "");
+        Assert.True(OverviewCardView.ShowsRollup(cleared));
+        Assert.Equal(2, cleared.TotalServers);
+    }
+
+    [Fact]
+    public void Rollup_WithNothingRegistered_StaysHidden()
+    {
+        var rollup = OverviewCardView.BuildRollup(new List<ServerSummaryItem>(), new FleetTotals(), registeredCount: 0, search: null);
+
+        Assert.False(OverviewCardView.ShowsRollup(rollup));
+        Assert.False(OverviewCardView.ShowsAllClear(rollup));
     }
 
     // ── D10: an Availability Group on old data is Stale, never Healthy ──────────────────────────────

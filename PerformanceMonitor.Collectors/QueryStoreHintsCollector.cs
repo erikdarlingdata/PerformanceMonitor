@@ -91,11 +91,7 @@ public sealed class QueryStoreHintsCollector : CollectorDefinitionBase<QueryStor
 
     /// <summary>The view is SQL Server 2022 (v16) and later; Azure SQL DB and Managed Instance are not version-gated; unknown (0) is assumed newest.</summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-        target is null
-        || target.SqlMajorVersion == 0
-        || target.SqlMajorVersion >= FirstMajorVersion
-        || target.IsAzureSqlDb
-        || target.IsAzureManagedInstance;
+        target is null || target.MeetsMinimumVersion(FirstMajorVersion, unknownIsNewest: true);
 
     /// <summary>Azure SQL DB rejects three-part names, so the host connects per database there instead.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target is not null && target.IsAzureSqlDb;
@@ -129,11 +125,31 @@ BEGIN
     RETURN;
 END;
 
+IF EXISTS
+(
+    SELECT
+        1
+    FROM sys.database_query_store_options AS PerformanceMonitorLite
+    WHERE actual_state IN (1, 2, 4)
+    AND   readonly_reason & 8 <> 0
+)
+BEGIN
+    SELECT /* PerformanceMonitorLite */
+        query_hint_id = CONVERT(bigint, NULL),
+        query_id = CONVERT(bigint, NULL),
+        query_hint_text = CONVERT(nvarchar(max), NULL),
+        last_query_hint_failure_reason = CONVERT(nvarchar(128), NULL),
+        query_hint_failure_count = CONVERT(bigint, NULL),
+        source = CONVERT(nvarchar(60), N'{ReadableSecondarySentinel}');
+
+    RETURN;
+END;
+
 IF NOT EXISTS
 (
     SELECT
         1
-    FROM sys.database_query_store_options
+    FROM sys.database_query_store_options AS PerformanceMonitorLite
     WHERE actual_state IN (1, 2, 4)
     AND   readonly_reason & 8 = 0
 )
@@ -159,14 +175,14 @@ SELECT
 FROM
 (
     SELECT TOP ({MaxRowsPerDatabase})
-        qh.query_hint_id,
-        qh.query_id,
-        qh.query_hint_text,
-        qh.last_query_hint_failure_reason_desc,
-        qh.query_hint_failure_count,
-        qh.source_desc
-    FROM sys.query_store_query_hints AS qh
-    ORDER BY qh.query_id, qh.query_hint_id
+        PerformanceMonitorLite.query_hint_id,
+        PerformanceMonitorLite.query_id,
+        PerformanceMonitorLite.query_hint_text,
+        PerformanceMonitorLite.last_query_hint_failure_reason_desc,
+        PerformanceMonitorLite.query_hint_failure_count,
+        PerformanceMonitorLite.source_desc
+    FROM sys.query_store_query_hints AS PerformanceMonitorLite
+    ORDER BY PerformanceMonitorLite.query_id, PerformanceMonitorLite.query_hint_id
 ) AS h
 ORDER BY
     query_id,
@@ -208,7 +224,14 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
         var scrub = context.BeginStatementScrub();
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(ReadRow(reader, item, scrub));
+            var row = ReadRow(reader, item, scrub);
+            if (IsReadableSecondarySentinel(row))
+            {
+                context.QueryStoreSecondaryDatabases++;
+                continue;
+            }
+
+            rows.Add(row);
         }
     }
 
@@ -223,11 +246,28 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(ReadRow(reader, databaseName, scrub));
+            var row = ReadRow(reader, databaseName, scrub);
+            if (IsReadableSecondarySentinel(row))
+            {
+                context.QueryStoreSecondaryDatabases++;
+                continue;
+            }
+
+            rows.Add(row);
         }
 
         return rows;
     }
+
+    /// <summary>
+    /// #8541: the <c>source</c> of the one row the payload returns for a database whose Query Store is a readable secondary's
+    /// (<c>readonly_reason</c> bit 8). The readers count it on the context and store nothing for it, so the table holds no row for
+    /// such a database, and the run can say that every database it read was one.
+    /// </summary>
+    internal const string ReadableSecondarySentinel = "PerformanceMonitor:readable_secondary";
+
+    private static bool IsReadableSecondarySentinel(Row row) =>
+        row.QueryHintId is null && string.Equals(row.Source, ReadableSecondarySentinel, StringComparison.Ordinal);
 
     /// <summary>Ordinals follow the SELECT list of <see cref="BuildPayloadBody"/>.</summary>
     private static Row ReadRow(DbDataReader reader, string databaseName, SensitiveStatements.Session scrub) =>

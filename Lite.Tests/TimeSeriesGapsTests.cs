@@ -143,4 +143,116 @@ public class TimeSeriesGapsTests
 
         Assert.Same(xs, outXs);
     }
+
+    /* #7508: the Query Store Duration Trend is hourly points, then one point per interval from the seam (routing.raw_from). */
+    private const double Start = 45_000.0;
+    private static double Hours(int h) => Start + h / 24.0;
+    private static double Minutes(double afterHours, int m) => Start + afterHours / 24.0 + m / 1440.0;
+
+    private static (double[] Xs, double[] Seam) TwoGrains(int[] hourlyAt, int rawMinutes, int[]? rawSkipped = null)
+    {
+        var xs = hourlyAt.Select(Hours).Concat(
+            Enumerable.Range(0, rawMinutes).Where(m => rawSkipped is null || !rawSkipped.Contains(m)).Select(m => Minutes(22, m))).ToArray();
+        return (xs, new[] { Hours(22) });
+    }
+
+    private static int Breaks(double[] ys) => ys.Count(double.IsNaN);
+
+    [Fact]
+    public void ASeriesJoiningTwoGrains_WithNoSeam_ShattersTheHourlyPart_AsItAlwaysDid()
+    {
+        var (xs, _) = TwoGrains(Enumerable.Range(0, 22).ToArray(), 90);
+        var ys = xs.Select(_ => 1.0).ToArray();
+
+        var (_, outYs) = TimeSeriesGaps.BreakAtGaps(xs, ys);
+
+        Assert.Equal(22, Breaks(outYs));
+    }
+
+    [Fact]
+    public void ASeriesJoiningTwoGrains_WithTheSeam_DrawsOneLine()
+    {
+        var (xs, seam) = TwoGrains(Enumerable.Range(0, 22).ToArray(), 90);
+        var ys = xs.Select(_ => 1.0).ToArray();
+
+        var (outXs, outYs) = TimeSeriesGaps.BreakAtGaps(xs, ys, seam[0]);
+
+        Assert.Equal(0, Breaks(outYs));
+        Assert.Same(xs, outXs);
+    }
+
+    [Fact]
+    public void AnOutageInsideTheHourlySide_StillBreaks_WithTheSeam()
+    {
+        var (xs, seam) = TwoGrains(Enumerable.Range(0, 10).Concat(Enumerable.Range(16, 6)).ToArray(), 90);
+        var ys = xs.Select(_ => 1.0).ToArray();
+
+        var (_, outYs) = TimeSeriesGaps.BreakAtGaps(xs, ys, seam[0]);
+
+        Assert.Equal(1, Breaks(outYs));
+    }
+
+    [Fact]
+    public void AnOutageInsideTheRawSide_StillBreaks_WithTheSeam()
+    {
+        var (xs, seam) = TwoGrains(Enumerable.Range(0, 22).ToArray(), 90, Enumerable.Range(30, 20).ToArray());
+        var ys = xs.Select(_ => 1.0).ToArray();
+
+        var (_, outYs) = TimeSeriesGaps.BreakAtGaps(xs, ys, seam[0]);
+
+        Assert.Equal(1, Breaks(outYs));
+    }
+
+    [Fact]
+    public void AnOutageAcrossTheSeam_StillBreaks_WhenTheHourlySideIsTooShortForASpacing()
+    {
+        /* Hourly points at 00:00 and 01:00, a silence, then one-minute points from 20:00. The hourly side borrows the raw side's
+           threshold, so the one-hour step and the silence both break. */
+        var xs = new[] { Hours(0), Hours(1) }.Concat(Enumerable.Range(0, 60).Select(m => Minutes(20, m))).ToArray();
+        var ys = xs.Select(_ => 1.0).ToArray();
+
+        var (_, outYs) = TimeSeriesGaps.BreakAtGaps(xs, ys, Hours(20));
+
+        Assert.Equal(2, Breaks(outYs));
+    }
+
+    [Fact]
+    public void AnOutageInsideARawSideTooShortForASpacing_StillBreaks()
+    {
+        /* 22 hourly points, then 2 raw points 19 hours apart. The raw side borrows the hourly side's threshold. */
+        var xs = Enumerable.Range(0, 22).Select(h => Hours(h)).Concat(new[] { Hours(22), Hours(41) }).ToArray();
+        var ys = xs.Select(_ => 1.0).ToArray();
+
+        var (_, outYs) = TimeSeriesGaps.BreakAtGaps(xs, ys, Hours(22));
+
+        Assert.Equal(1, Breaks(outYs));
+    }
+
+    [Fact]
+    public void WithNeitherSideLongEnoughForASpacing_TheSeamAddsNothing()
+    {
+        var xs = new[] { Hours(0), Hours(1), Hours(20), Minutes(20, 1) };
+        var ys = xs.Select(_ => 1.0).ToArray();
+
+        var plain = TimeSeriesGaps.BreakAtGaps(xs, ys);
+        var seamed = TimeSeriesGaps.BreakAtGaps(xs, ys, Hours(20));
+
+        Assert.Equal(1, Breaks(plain.Ys));
+        Assert.Equal(plain.Xs, seamed.Xs);
+    }
+
+    [Fact]
+    public void ASeamWithEveryPointOnOneSideOfIt_IsThePlainRule()
+    {
+        var xs = MinuteCadence(30).Concat(MinuteCadence(30, 45_000.5)).ToArray();
+        var ys = xs.Select(_ => 1.0).ToArray();
+
+        var plain = TimeSeriesGaps.BreakAtGaps(xs, ys);
+        var past = TimeSeriesGaps.BreakAtGaps(xs, ys, 46_000.0);
+        var before = TimeSeriesGaps.BreakAtGaps(xs, ys, 44_000.0);
+
+        Assert.Equal(1, Breaks(plain.Ys));
+        Assert.Equal(plain.Xs, past.Xs);
+        Assert.Equal(plain.Xs, before.Xs);
+    }
 }

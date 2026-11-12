@@ -143,7 +143,7 @@ public sealed class AgentSetupWebLiveTests
                     {
                         context.Response.StatusCode = StatusCodes.Status403Forbidden;
                         context.Response.ContentType = "application/json; charset=utf-8";
-                        await context.Response.WriteAsync("{\"error\": \"This account has read-only access.\"}");
+                        await context.Response.WriteAsync(JsonSerializer.Serialize(new { error = DarlingWebEndpoints.ReadOnlyAccountText }));
                         return;
                     }
                 }
@@ -237,6 +237,12 @@ public sealed class AgentSetupWebLiveTests
             Assert.Equal($"blocking|{ServerId}|1|5|40|20|300|true", await ScalarAsync(owner,
                 $"SELECT metric_match || '|' || scope_server_id || '|' || agent_level || '|' || agent_max_per_hour || '|' || agent_max_per_day || '|' || agent_lease_minutes || '|' || agent_expiry_minutes || '|' || enabled::text FROM config_notification_routes WHERE route_id = {id}", ct));
 
+            /* #7999: any spelling of the every-analysis-finding match is stored as `Analysis: *`, fleet-wide. */
+            var analysisAll = await Send("POST", "/api/notification-routes", Json, "{\"metric_match\":\"  analysis:   * \",\"agent_level\":1}");
+            Assert.Equal(200, analysisAll.Status);
+            Assert.Equal("Analysis: *", await ScalarAsync(owner,
+                $"SELECT metric_match FROM config_notification_routes WHERE route_id = {(int)analysisAll.Body!["route_id"]!}", ct));
+
             /* Edit: only the fields sent change, and a route's saved email destination is carried forward untouched. */
             var seeded = await SeedRouteAsync(owner, "Analysis: Waits", ct);
             var edited = await Send("PUT", $"/api/notification-routes/{seeded}", Json,
@@ -266,12 +272,12 @@ public sealed class AgentSetupWebLiveTests
             /* Delete clears every other route's fallback to it, then removes it; a second delete is a 404. */
             Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, $"{{\"fallback_route_id\":{id}}}")).Status);
             Assert.Equal(id.ToString(CultureInfo.InvariantCulture), await ScalarAsync(owner, $"SELECT fallback_route_id FROM config_notification_routes WHERE route_id = {seeded}", ct));
-            var deleted = await Send("DELETE", $"/api/notification-routes/{id}", null);
+            var deleted = await Send("DELETE", $"/api/notification-routes/{id}", Json);
             Assert.Equal(200, deleted.Status);
             Assert.Equal("deleted", (string)deleted.Body!["status"]!);
             Assert.Equal("0", await ScalarAsync(owner, $"SELECT count(*) FROM config_notification_routes WHERE route_id = {id}", ct));
             Assert.Equal("", await ScalarAsync(owner, $"SELECT fallback_route_id FROM config_notification_routes WHERE route_id = {seeded}", ct));
-            Assert.Equal(404, (await Send("DELETE", $"/api/notification-routes/{id}", null)).Status);
+            Assert.Equal(404, (await Send("DELETE", $"/api/notification-routes/{id}", Json)).Status);
             Assert.Equal(404, (await Send("PUT", $"/api/notification-routes/{id}", Json, "{\"agent_level\":1}")).Status);
         });
     }
@@ -386,6 +392,26 @@ public sealed class AgentSetupWebLiveTests
         }, ring);
     }
 
+    /// <summary>#8611: DELETE /api/notification-routes/{id} carries no body, so a cross-site form or fetch could send it with no JSON content
+    /// type. The mute routes refuse that with 415; this one does too, and the route stays. The dashboard's own call sends the JSON type and
+    /// still deletes.</summary>
+    [Fact]
+    public async Task DeleteRoute_WithoutAJsonContentType_Is415_AndKeepsTheRoute_WithItItDeletes()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            var seeded = await SeedRouteAsync(owner, "performance", ct);
+
+            Assert.Equal(415, (await Send("DELETE", $"/api/notification-routes/{seeded}", null)).Status);
+            Assert.Equal(415, (await Send("DELETE", $"/api/notification-routes/{seeded}", "text/plain")).Status);
+            Assert.Equal("1", await ScalarAsync(owner, $"SELECT count(*) FROM config_notification_routes WHERE route_id = {seeded}", ct));
+
+            var deleted = await Send("DELETE", $"/api/notification-routes/{seeded}", Json);
+            Assert.Equal(200, deleted.Status);
+            Assert.Equal("0", await ScalarAsync(owner, $"SELECT count(*) FROM config_notification_routes WHERE route_id = {seeded}", ct));
+        });
+    }
+
     [Fact]
     public async Task AgentRoutes_RefuseWhatTheViewerRefuses_WithTheSharedSentence_AndWriteNothing()
     {
@@ -430,7 +456,7 @@ public sealed class AgentSetupWebLiveTests
     [Fact]
     public async Task AgentSetup_AsTheManagedViewerRole_Lists_ButEveryWriteIs403_AndChangesNothing()
     {
-        await WithWebRoutesAsync("viewer", async (owner, viewer, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, viewer, Send, ct) =>
         {
             var seeded = await SeedRouteAsync(owner, "performance", ct);
             await new InvestigationRequestStore(owner, 30).SaveProfileAsync(null, null, "fleet: OLTP", "tester", null, ct);
@@ -454,7 +480,7 @@ public sealed class AgentSetupWebLiveTests
                 ("PUT", "/api/environment-profiles", "{\"profile_text\":\"changed\"}"),
             })
             {
-                var answer = await Send(method, path, method == "DELETE" ? null : Json, json);
+                var answer = await Send(method, path, Json, json);
                 Assert.Equal(403, answer.Status);
                 Assert.Equal(DarlingWebAgentSetup.RefusedMessage(false), (string)answer.Body!["error"]!);
             }
@@ -474,7 +500,7 @@ public sealed class AgentSetupWebLiveTests
     [InlineData(false)]
     public async Task TheViewerRoles403_NamesTheAdminLoginOption_OnlyOnAStoreYouBringYourself(bool managedStore)
     {
-        await WithWebRoutesAsync("viewer", async (owner, viewer, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, viewer, Send, ct) =>
         {
             var seeded = await SeedRouteAsync(owner, "performance", ct);
             foreach (var (method, path, json) in new[]
@@ -484,7 +510,7 @@ public sealed class AgentSetupWebLiveTests
                 ("PUT", "/api/environment-profiles", "{\"profile_text\":\"changed\"}"),
             })
             {
-                var answer = await Send(method, path, method == "DELETE" ? null : Json, json);
+                var answer = await Send(method, path, Json, json);
                 Assert.Equal(403, answer.Status);
                 var said = (string)answer.Body!["error"]!;
                 Assert.Equal(DarlingWebAgentSetup.RefusedMessage(managedStore, adminWritesOff: managedStore), said);
@@ -553,7 +579,7 @@ public sealed class AgentSetupWebLiveTests
     [Fact]
     public async Task OnTheManagedStore_ASignedInAdminSeat_WritesThroughTheArm_AndTheAccessFlagsAreTrue()
     {
-        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, _, Send, ct) =>
         {
             var seeded = await SeedRouteAsync(owner, "performance", ct);
 
@@ -566,7 +592,7 @@ public sealed class AgentSetupWebLiveTests
             Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"agent_level\":3}")).Status);
             var created = await Send("POST", "/api/notification-routes", Json, "{\"metric_match\":\"blocking\",\"agent_level\":1}");
             Assert.Equal(200, created.Status);
-            Assert.Equal(200, (await Send("DELETE", $"/api/notification-routes/{(int)created.Body!["route_id"]!}", null)).Status);
+            Assert.Equal(200, (await Send("DELETE", $"/api/notification-routes/{(int)created.Body!["route_id"]!}", Json)).Status);
 
             Assert.Equal("person:alice", await ScalarAsync(owner, "SELECT modified_by FROM config.agent_environment_profiles", ct));
             Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed' AND actor = 'person:alice' AND route_id = " + seeded, ct));
@@ -578,7 +604,7 @@ public sealed class AgentSetupWebLiveTests
     [Fact]
     public async Task OnTheManagedStore_AReadOnlySeat_NeverOpensTheArm_AndAnswersAsToday()
     {
-        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, _, Send, ct) =>
         {
             var seeded = await SeedRouteAsync(owner, "performance", ct);
 
@@ -597,7 +623,7 @@ public sealed class AgentSetupWebLiveTests
     [Fact]
     public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminStillListsOnly()
     {
-        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, _, Send, ct) =>
         {
             var access = await Send("GET", "/api/agent-setup/access", null);
             Assert.False((bool)access.Body!["can_edit_routes"]!);
@@ -640,7 +666,7 @@ public sealed class AgentSetupWebLiveTests
             var profile = await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\"}");
             var edit = await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"agent_level\":3}");
             var create = await Send("POST", "/api/notification-routes", Json, "{\"metric_match\":\"blocking\"}");
-            var delete = await Send("DELETE", $"/api/notification-routes/{seeded}", null);
+            var delete = await Send("DELETE", $"/api/notification-routes/{seeded}", Json);
             foreach (var answer in new[] { profile, edit, create, delete })
             {
                 Assert.Equal(400, answer.Status);
@@ -670,9 +696,9 @@ public sealed class AgentSetupWebLiveTests
                 ("PUT", "/api/environment-profiles", "{\"profile_text\":\"changed\"}"),
             })
             {
-                var answer = await Send(method, path, method == "DELETE" ? null : Json, json);
+                var answer = await Send(method, path, Json, json);
                 Assert.Equal(403, answer.Status);
-                Assert.Equal("This account has read-only access.", (string)answer.Body!["error"]!);
+                Assert.Equal(DarlingWebEndpoints.ReadOnlyAccountText, (string)answer.Body!["error"]!);
             }
 
             Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config_notification_routes WHERE agent_level IS NULL", ct));
@@ -701,7 +727,7 @@ public sealed class AgentSetupWebLiveTests
                 ("PUT", "/api/environment-profiles", "{\"profile_text\":\"changed\"}"),
             })
             {
-                var answer = await Send(method, path, method == "DELETE" ? null : Json, json);
+                var answer = await Send(method, path, Json, json);
                 Assert.Equal(403, answer.Status);
                 Assert.Equal("Sign in to the web as an admin to make this change, or use the Viewer.", (string)answer.Body!["error"]!);
             }
@@ -836,7 +862,7 @@ public sealed class AgentSetupWebLiveTests
                 + "FROM config.investigation_journal WHERE event = 'route_agent_changed' ORDER BY journal_id DESC LIMIT 1", ct));
             Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{off}", Json, "{\"enabled\":true}")).Status);
             Assert.Equal("2", await ScalarAsync(owner, Journal, ct));
-            Assert.Equal(200, (await Send("DELETE", $"/api/notification-routes/{off}", null)).Status);
+            Assert.Equal(200, (await Send("DELETE", $"/api/notification-routes/{off}", Json)).Status);
             Assert.Equal($"person:alice|{off}|deleted route|{ServerId}|0", await ScalarAsync(owner,
                 "SELECT actor || '|' || route_id || '|' || reason || '|' || server_id || '|' || (detail->'before'->>'agent_level') "
                 + "FROM config.investigation_journal WHERE event = 'route_agent_changed' ORDER BY journal_id DESC LIMIT 1", ct));
@@ -958,11 +984,10 @@ public sealed class AgentSetupWebLiveTests
         }, seat: new DarlingWebSeat("alice", true));
     }
 
-    /* #6400: the server side of the tag test above. The profile table has no foreign key to a server either, so a profile for server 0 (or
-       below), or for a server id that is not registered (no row in config.config_monitored_servers), is a 400 with one sentence and writes
+    /* #6400: the server side of the tag test above. The profile table has no foreign key to a server either, so a profile for server 0, or for a server id that is not registered (no row in config.config_monitored_servers), is a 400 with one sentence and writes
        nothing; a registered server still saves, and a blank save still removes the profile of a server that has gone. */
     [Fact]
-    public async Task EnvironmentProfiles_AServerThatIs0OrBelowOrIsNotRegistered_Is400_AndWritesNothing_ViaTheWebAndTheStore()
+    public async Task EnvironmentProfiles_AServerThatIs0OrIsNotRegistered_Is400_AndWritesNothing_ViaTheWebAndTheStore()
     {
         await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
         {
@@ -987,7 +1012,7 @@ public sealed class AgentSetupWebLiveTests
             var fleetStamp = await ScalarAsync(owner, "SELECT modified_at::text FROM config.agent_environment_profiles", ct);
             Assert.Equal("1", await ScalarAsync(owner, Journal, ct));
 
-            /* Server 0, a negative server and an unregistered server are refused, with text and blank, and the fleet profile is not touched. */
+            /* Server 0, an unregistered negative server and an unregistered server are refused, with text and blank, and the fleet profile is not touched. */
             foreach (var refused in new[] { 0, -1, unregistered })
             {
                 var answer = await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{refused},\"profile_text\":\"for no server\"}}");
@@ -1019,6 +1044,45 @@ public sealed class AgentSetupWebLiveTests
             Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{unregistered},\"profile_text\":\"orphan, edited\"}}")).Status);
             Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{unregistered},\"profile_text\":\"\"}}")).Status);
             Assert.Equal("3", await ScalarAsync(owner, Rows, ct));
+        }, seat: new DarlingWebSeat("alice", true));
+    }
+
+    /* #7975: a Darling server id is a 32-bit hash of the storage name and negative for about half of all servers. A registered server with
+       a negative id saves, reads back, edits and is removed again, through the web and through the store; an unregistered negative id is
+       still refused by the registry check, and server 0 by the scope rule. */
+    [Fact]
+    public async Task EnvironmentProfiles_AServerWithANegativeId_Saves_ReadsBack_AndIsRemoved_ViaTheWebAndTheStore()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            const int negativeServer = -1_714_925_380;
+            const int negativeUnregistered = -1_714_925_381;
+            var store = new InvestigationRequestStore(owner, 30);
+            await ExecAsync(owner, $"INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ({negativeServer}, 'LcAgentSetupNegative', 'host-negative')", ct);
+
+            var saved = await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{negativeServer},\"profile_text\":\"payroll runs 01:00-03:00\"}}");
+            Assert.Equal(200, saved.Status);
+            Assert.Equal("saved", (string)saved.Body!["status"]!);
+
+            var listed = (await Send("GET", "/api/environment-profiles", null)).Body!["profiles"]!.AsArray();
+            var row = Assert.Single(listed, p => (int?)p!["scope_server_id"] == negativeServer)!;
+            Assert.Equal("payroll runs 01:00-03:00", (string)row["profile_text"]!);
+
+            var stored = Assert.Single(await store.ListProfilesAsync(ct), p => p.ScopeServerId == negativeServer);
+            Assert.Equal("payroll runs 01:00-03:00", stored.ProfileText);
+
+            Assert.True(await store.SaveProfileAsync(negativeServer, null, "payroll runs 01:00-04:00", "dave", stored.ModifiedAtUtc, ct));
+            stored = Assert.Single(await store.ListProfilesAsync(ct), p => p.ScopeServerId == negativeServer);
+            Assert.Equal("payroll runs 01:00-04:00", stored.ProfileText);
+
+            foreach (var refused in new[] { negativeUnregistered, 0 })
+            {
+                await Assert.ThrowsAsync<ArgumentException>(() => store.SaveProfileAsync(refused, null, "for no server", "dave", null, ct));
+                Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{refused},\"profile_text\":\"for no server\"}}")).Status);
+            }
+
+            Assert.True(await store.SaveProfileAsync(negativeServer, null, "   ", "dave", stored.ModifiedAtUtc, ct));
+            Assert.Empty(await store.ListProfilesAsync(ct));
         }, seat: new DarlingWebSeat("alice", true));
     }
 

@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
@@ -58,6 +59,58 @@ public sealed class QueryTagUsageBehaviourTests
     private static string[][] Rows(JsonElement e) =>
         e.EnumerateArray().Select(r => r.EnumerateArray().Select(c => c.GetString()!).ToArray()).Where(r => r.Length > 0).ToArray();
 
+    /// <summary>
+    /// #8083: on a store with no query tag the page asks <c>list_query_tags</c>, draws one line that links to Manage Query Tags, and never sends
+    /// <c>get_resource_use_by_tag</c>: no section panel, no table, no per-server heading.
+    /// </summary>
+    [Fact]
+    public void AStoreWithNoQueryTag_ShowsOneLineThatLinksToManageQueryTags_AndSendsNoByTagRead()
+    {
+        var run = Run().GetProperty("noTags");
+        Assert.Equal(1, run.GetProperty("tagListReads").GetInt32());
+        Assert.Equal(0, run.GetProperty("byTagReads").GetInt32());
+        var strip = Assert.Single(run.GetProperty("strips").EnumerateArray());
+        Assert.Contains("empty", strip.GetProperty("cls").GetString(), StringComparison.Ordinal);
+        Assert.Equal("No query tags are defined. Define one in Manage Query Tags to see resource use by tag.", strip.GetProperty("text").GetString());
+        var link = Assert.Single(run.GetProperty("links").EnumerateArray());
+        Assert.Equal("#/manage-query-tags", link.GetProperty("href").GetString());
+        Assert.Equal("Manage Query Tags", link.GetProperty("text").GetString());
+        Assert.Equal(0, run.GetProperty("panels").GetInt32());
+        Assert.Equal(0, run.GetProperty("tables").GetInt32());
+        Assert.Equal(0, run.GetProperty("headings").GetInt32());
+    }
+
+    /// <summary>
+    /// #8083: with tags defined, a block the read answered with no tag row (only <c>untagged</c> and the total) is one line carrying the untagged
+    /// figures, not a two-row table that says them twice. A block with a tag row keeps its table; so does one under a tag filter, which has no
+    /// untagged row.
+    /// </summary>
+    [Fact]
+    public void ABlockWhoseRowsAreAllUntagged_IsOneLineWithItsFigures_NotATwoRowTable()
+    {
+        var run = Run();
+        var fleet = run.GetProperty("untaggedOnlyFleet");
+        Assert.Equal(1, fleet.GetProperty("tables").GetInt32());
+        var line = Assert.Single(fleet.GetProperty("lines").EnumerateArray()).GetString()!;
+        Assert.Contains("untagged", line, StringComparison.Ordinal);
+        Assert.Contains("CPU (ms) 4", line, StringComparison.Ordinal);
+        Assert.Contains("Executions 2", line, StringComparison.Ordinal);
+        // The servers run in the sidebar's order (the display name, so "b" before "Server A"), and the untagged-only one keeps its heading.
+        Assert.Equal(new[] { "b", "Server A" }, fleet.GetProperty("headings").EnumerateArray().Select(h => h.GetString()).ToArray());
+
+        var server = run.GetProperty("untaggedOnlyServer");
+        Assert.Equal(0, server.GetProperty("tables").GetInt32());
+        Assert.Single(server.GetProperty("lines").EnumerateArray());
+
+        var tagged = run.GetProperty("taggedServer");
+        Assert.Equal(1, tagged.GetProperty("tables").GetInt32());
+        Assert.Empty(tagged.GetProperty("lines").EnumerateArray());
+
+        var underTag = run.GetProperty("untaggedOnlyUnderTag");
+        Assert.Equal(1, underTag.GetProperty("tables").GetInt32());
+        Assert.Empty(underTag.GetProperty("lines").EnumerateArray());
+    }
+
     [Fact]
     public void TheByTagPage_ShowsEachTagUntaggedAndTheTotal_ForThePlanCacheSection()
     {
@@ -91,6 +144,22 @@ public sealed class QueryTagUsageBehaviourTests
         Assert.Contains("a", text);
         Assert.Contains("b", text);
         Assert.Contains("Fleet total", text);
+    }
+
+    [Fact]
+    public void ANotCollectedSection_ShowsItsMessageOnly_WithNoTableOfZeros()
+    {
+        // #7376: a server the read answers not_collected (a readable secondary's Query Store, a PostgreSQL server) is the message alone. The server beside it keeps its table.
+        var run = Run();
+        var mixed = run.GetProperty("notCollectedMixed");
+        Assert.Equal(1, mixed.GetProperty("tables").GetInt32());
+        Assert.Contains(mixed.GetProperty("text").EnumerateArray(), n => n.GetString()!.Contains("sec-one", System.StringComparison.Ordinal));
+        var single = run.GetProperty("notCollectedSingle");
+        Assert.Equal(0, single.GetProperty("tables").GetInt32());
+        Assert.Contains(single.GetProperty("text").EnumerateArray(), n => n.GetString()!.Contains("readable secondary", System.StringComparison.Ordinal));
+        var all = run.GetProperty("notCollectedAll");
+        Assert.Equal(0, all.GetProperty("tables").GetInt32());
+        Assert.Equal(["each server says why.", "reason one", "reason two"], all.GetProperty("text").EnumerateArray().Select(n => n.GetString()).ToArray());
     }
 
     [Fact]
@@ -155,9 +224,9 @@ public sealed class QueryTagUsageBehaviourTests
     [Fact]
     public void TheFleetSections_NameEachServerByDisplayName_AndKeepTheKeyWhenThereIsNone()
     {
-        // #6157: the read names a server by its connection key; the heading is the display name list_servers gives it.
+        // #6157: the read names a server by its connection key; the heading is the display name list_servers gives it. The sections run in display-name order (#7402), so the key-named "b" comes before "Server A".
         var headings = Run().GetProperty("fleetHeadings").EnumerateArray().Select(h => h.GetString()).ToArray();
-        Assert.Equal(new[] { "Server A", "b" }, headings);
+        Assert.Equal(new[] { "b", "Server A" }, headings);
     }
 
     [Fact]
@@ -233,7 +302,8 @@ public sealed class QueryTagUsageBehaviourTests
     {
         var busy = Run().GetProperty("busyOnce");
         Assert.Equal(1, busy.GetProperty("readsBefore").GetInt32());
-        Assert.Contains("strip notice", StripClasses(busy.GetProperty("stripsBefore")));
+        /* #7934: the strip waiting to send the read again carries busy-retry, which marks a panel that has not drawn yet. */
+        Assert.Contains("strip notice busy-retry", StripClasses(busy.GetProperty("stripsBefore")));
         Assert.DoesNotContain("strip error", StripClasses(busy.GetProperty("stripsBefore")));
         Assert.Equal(2, busy.GetProperty("readsAfter").GetInt32());
         Assert.True(busy.GetProperty("planCardAfter").GetBoolean());
@@ -248,5 +318,26 @@ public sealed class QueryTagUsageBehaviourTests
         Assert.Equal(2, busy.GetProperty("readsAfter").GetInt32());
         Assert.Contains("strip error", StripClasses(busy.GetProperty("stripsAfter")));
         Assert.False(busy.GetProperty("planCardAfter").GetBoolean());
+    }
+
+    /// <summary>#8417: the harness advances the Retry-After wait itself, so an event loop stalled past the Retry-After (the load a busy
+    /// test run puts on the machine) does not send the second read before the harness has counted the first.</summary>
+    [Fact]
+    public void ABusyRetry_WhileTheEventLoopStallsPastTheRetryAfter_IsSentOnlyWhenTheHarnessAdvancesTheWait()
+    {
+        var busy = Run().GetProperty("busyUnderLoad");
+        Assert.Equal(1, busy.GetProperty("readsBefore").GetInt32());
+        Assert.Equal(2, busy.GetProperty("readsAfter").GetInt32());
+        Assert.True(busy.GetProperty("planCardAfter").GetBoolean());
+    }
+
+    /// <summary>#7945: a small figure such as 0.04 executions keeps two significant digits instead of reading 0.0; a figure from 0.1 up keeps one
+    /// decimal, and a whole number prints whole.</summary>
+    [Fact]
+    public void ASmallFigure_KeepsTwoSignificantDigits_InsteadOfReadingZero()
+    {
+        var rows = Rows(Run().GetProperty("smallFigureRows"));
+        var tag = Assert.Single(rows, r => r[0] == "T");
+        Assert.Equal(new[] { "T", "0.04", "1,234.6", "7" }, tag);
     }
 }

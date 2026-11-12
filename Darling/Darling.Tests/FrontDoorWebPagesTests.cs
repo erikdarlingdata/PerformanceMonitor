@@ -113,6 +113,32 @@ public sealed class FrontDoorWebPagesTests
         Assert.Equal(new[] { "use1", "use2" }, Stores(Run("joined")));
     }
 
+    /// <summary>
+    /// #8633: an idle Fleet Overview tick behind three stores read every store's /api/fleet twice, the sidebar's read and the
+    /// page's poll re-render a few seconds after it had landed. Now the poll takes the sidebar's roll-up: one request per store
+    /// per tick. A navigation, a second poll in the same tick, a poll that trails by more than the share window and a poll
+    /// after a failed sidebar read each still send their own.
+    /// </summary>
+    [Fact]
+    public void AFleetTick_ReadsEachStoresRollUpOnce_AndOnlyThePollsReReadTakesTheSidebarsRead()
+    {
+        var r = Run("fleetTick");
+        static int[] Counts(JsonElement e) => e.EnumerateArray().Select(x => x.GetInt32()).ToArray();
+
+        // one request per store per tick, over two ticks (two per store per tick before the fix)
+        foreach (var store in new[] { "use1", "use2", "use3" })
+        {
+            Assert.Equal(1, r.GetProperty("tick1").GetProperty(store).GetInt32());
+            Assert.Equal(2, r.GetProperty("tick2").GetProperty(store).GetInt32());
+        }
+
+        Assert.True(r.GetProperty("pageGotCards").GetBoolean());
+        Assert.Equal(new[] { 1, 1, 1 }, Counts(r.GetProperty("navigationAdded")));
+        Assert.Equal(new[] { 1, 1, 1 }, Counts(r.GetProperty("secondPollAdded")));
+        Assert.Equal(new[] { 1, 1, 1 }, Counts(r.GetProperty("latePollAdded")));
+        Assert.Equal(new[] { 1, 1, 1 }, Counts(r.GetProperty("afterFailedSidebarAdded")));
+    }
+
     [Fact]
     public void BrowserState_KeyedByAStoreLocalId_FollowsTheStore_AndStateKeyedByAServerIdFollowsTheServer()
     {

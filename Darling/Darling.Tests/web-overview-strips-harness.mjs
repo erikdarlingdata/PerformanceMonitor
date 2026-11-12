@@ -1,7 +1,7 @@
 /* Runs the web viewer's shipped pages/overview-strips.js (the Overview's five stacked strips, #6291) against a stand-in DOM and
    prints what one scenario drew as one line of JSON. WebOverviewStripsBehaviourTests starts it as
        node web-overview-strips-harness.mjs <path to wwwroot/js> <scenario>
-   Scenarios: crosshair, zoom, empty, baselines, firstload, localtime. */
+   Scenarios: crosshair, zoom, empty, baselines, firstload, localtime, failedread, mixedempty. */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -59,6 +59,8 @@ const find = (node, pred, out = []) => { if (pred(node)) out.push(node); node.ch
 const T0 = Date.UTC(2026, 0, 1, 12, 0, 0);
 const MIN = 60000;
 const iso = (m) => new Date(T0 + m * MIN).toISOString().slice(0, 19);
+/* #7644: the reply carries each lane as hourly steps. A flat bucket is one step that covers the whole harness window. */
+const laneOf = (bk) => (bk ? { steps: [{ from: new Date(T0 - 60 * MIN).toISOString(), to: new Date(T0 + 180 * MIN).toISOString(), ...bk }] } : null);
 
 /* Six reads that each sample on their own clock: CPU every minute, waits every 5, memory every 10, file I/O every 15 (two files),
    blocking at minutes 12 and 47, no deadlocks (an empty envelope). */
@@ -98,12 +100,24 @@ if (scenario === "crosshair") {
   out.at38Text = readoutTexts(drawn.node);
   /* minute 12.2 sits on the blocking bucket; the deadlock series (empty) has no sample */
   out.at12 = { blocking: pick(at(12.2), "blocking") };
+  out.at12Text = readoutTexts(drawn.node);
   /* minute 30: the file I/O bucket of both files, weighted 900:100 -> (2*900 + 12*100)/1000 = 3 ms */
   out.at30 = { io: pick(at(30), "io") };
   /* a pointer move over the plot drives the same lookup */
   drawn.node.listeners.pointermove[0]({ clientX: xAt(30) });
   out.pointerText = readoutTexts(drawn.node);
   out.hoverLines = find(drawn.node, (n) => n.attrs.class === "hover-line").length;
+} else if (scenario === "snapshot") {
+  /* #7219: a window with no blocked-process reports is counted from DMV snapshot rows; the read's `source` key says so, and the strip
+     must not call those rows reports. */
+  const snap = { ...reads, blocking: data({ source: "DMV snapshot", trend: [{ time: iso(12), count: 3 }] }) };
+  const built = strips.buildStrips(snap);
+  out.series = built.find((s) => s.key === "blocking").series.map((s) => s.label);
+  const drawn = strips.drawStrips(built, domain, 1000, null);
+  drawn.crosshairAt(T0 + 12.2 * MIN);
+  out.at12Text = readoutTexts(drawn.node);
+  out.reportsSeries = strips.buildStrips({ ...reads, blocking: data({ source: "blocked-process-report", trend: [{ time: iso(12), count: 3 }] }) })
+    .find((s) => s.key === "blocking").series.map((s) => s.label);
 } else if (scenario === "zoom") {
   const built = strips.buildStrips(reads);
   let zoomed = null;
@@ -131,7 +145,7 @@ if (scenario === "crosshair") {
   out.stripsDrawnZoomed = find(z.node, (n) => n.attrs["data-strip"]).length;
 } else if (scenario === "baselines") {
   const window = { windowStart: T0, windowEnd: T0 + 60 * MIN };
-  const baseline = (cpu, waits, io, blocking) => ({ kind: "data", data: { baselines: { cpu, waits, io, blocking } } });
+  const baseline = (cpu, waits, io, blocking) => ({ kind: "data", data: { baselines: { cpu: laneOf(cpu), waits: laneOf(waits), io: laneOf(io), blocking: laneOf(blocking) } } });
   const b = (mean, sd) => ({ mean, effective_std_dev: sd, sample_count: 40, tier: "Full" });
   const fresh = () => strips.buildStrips(reads);
   const byKey = (list, key) => list.find((s) => s.key === key);
@@ -148,8 +162,8 @@ if (scenario === "crosshair") {
   out.waitMarkedValues = byKey(a, "waits").markers.map((m) => m.v);
   out.ioMarkerCount = byKey(a, "io").markers.length;
 
-  /* The floor: 1.5 ms is above a 0.7 ms band but under the 2 ms floor, so only 2.5 ms is marked; a point under the band is marked at any value. */
-  const lone = [{ key: "io", series: [{ points: [{ t: 1, v: 1.5 }, { t: 2, v: 2.5 }, { t: 3, v: 0.1 }] }] }];
+  /* The floor: 1.5 ms is above a 0.7 ms band but under the 2 ms floor, so only 2.5 ms is marked (each bucket holds 1000 reads, over the 250 read floor); a point under the band is marked at any value. */
+  const lone = [{ key: "io", series: [{ points: [{ t: T0 + 1, v: 1.5, reads: 1000 }, { t: T0 + 2, v: 2.5, reads: 1000 }, { t: T0 + 3, v: 0.1, reads: 1000 }] }] }];
   strips.applyBaselines(lone, baseline(null, null, b(0.5, 0.1), null), window, {});
   out.floorMarkedValues = lone[0].markers.map((m) => m.v);
 
@@ -178,7 +192,7 @@ if (scenario === "crosshair") {
   const g = (key) => find(drawn.node, (n) => n.attrs["data-strip"] === key)[0];
   const count = (key, cls) => find(g(key), (n) => n.attrs.class === cls).length;
   out.drawn = {
-    cpu: { band: count("cpu", "strip-band"), mean: count("cpu", "strip-band-mean"), dots: count("cpu", "strip-anomaly") },
+    cpu: { band: count("cpu", "strip-band"), mean: count("cpu", "strip-band-mean"), dots: count("cpu", "strip-anomaly"), runs: count("cpu", "strip-anomaly-run") },
     waits: { band: count("waits", "strip-band"), dots: count("waits", "strip-anomaly"), note: find(g("waits"), (n) => n.attrs.class === "strip-baseline-note").map((n) => n.textContent) },
     blocking: { band: count("blocking", "strip-band"), dots: count("blocking", "strip-anomaly") },
     memory: { band: count("memory", "strip-band") },
@@ -215,12 +229,204 @@ if (scenario === "crosshair") {
   out.afterFill = sizes();
   observers.forEach((o) => o.cb([]));
   out.afterObserver = sizes();
+} else if (scenario === "latebaseline") {
+  /* #7644: the baseline read is slow (up to 23 s on a busy server). The six series reads answer at once; the strips must be drawn while the
+     baseline is still pending, and the band appears when it arrives. A second fill where the baseline read fails keeps the lines. */
+  const now = Date.now();
+  const sample = (m) => new Date(now - m * MIN).toISOString().slice(0, 19);
+  const bodies = {
+    get_cpu_utilization: { samples: Array.from({ length: 30 }, (_, i) => ({ sample_time: sample(i * 2), sql_server_cpu: 10 + i, other_process_cpu: 5 })) },
+    get_server_trend: { trend: Array.from({ length: 12 }, (_, i) => ({ time: sample(i * 5), wait_time_ms_per_second: 100 + i })) },
+    get_blocking_trend: { trend: [{ time: sample(20), count: 2 }] },
+    get_deadlock_trend: { trend: [] },
+    get_memory_trend: { trend: Array.from({ length: 6 }, (_, i) => ({ time: sample(i * 10), buffer_pool_mb: 2000 + i })) },
+    get_file_io_trend: { trend: Array.from({ length: 4 }, (_, i) => ({ time: sample(i * 15), database_name: "A", file_type: "ROWS", reads: 10, avg_read_latency_ms: 2 })) },
+  };
+  /* The page asks for the real last hour, so the step covers the current clock, not the harness's January window. */
+  const nowStep = { from: new Date(now - 120 * MIN).toISOString(), to: new Date(now + 60 * MIN).toISOString(), mean: 20, effective_std_dev: 5, sample_count: 40, tier: "Full" };
+  const baselineBody = { status: "ok", baselines: { cpu: { steps: [nowStep] } } };
+  let releaseBaseline;
+  const baselineGate = new Promise((r) => { releaseBaseline = r; });
+  let failBaseline = false;
+  globalThis.fetch = async (url) => {
+    const tool = String(url).split("/api/read/")[1].split("?")[0];
+    if (tool === "get_overview_baselines") {
+      await baselineGate;
+      if (failBaseline) return { status: 500, ok: false, text: async () => "boom" };
+      return { status: 200, ok: true, text: async () => JSON.stringify(baselineBody) };
+    }
+    return { status: 200, ok: true, text: async () => JSON.stringify(bodies[tool] || {}) };
+  };
+  const body = document.createElement("div");
+  strips.fillOverviewStrips(body, "A", { hours: 1, label: "1h", signal: null });
+  await new Promise((r) => setTimeout(r, 50));
+  const stats = (root) => ({
+    lines: find(root, (n) => n.tag === "polyline").length,
+    bands: find(root, (n) => n.attrs.class === "strip-band").length,
+    notes: find(root, (n) => n.attrs.class === "strip-baseline-note").length,
+  });
+  out.whilePending = stats(body);
+  releaseBaseline();
+  await new Promise((r) => setTimeout(r, 50));
+  out.afterBaseline = stats(body);
+  /* The baseline read fails: the lines are drawn, with a note and no band. */
+  failBaseline = true;
+  const body2 = document.createElement("div");
+  strips.fillOverviewStrips(body2, "A", { hours: 1, label: "1h", signal: null });
+  await new Promise((r) => setTimeout(r, 50));
+  out.afterFailure = stats(body2);
 } else if (scenario === "waitsaxis") {
   /* the waits sample runs 100..220 ms/sec; the strip's lower axis label must be 0, not the series minimum */
   const drawn = strips.drawStrips(strips.buildStrips(reads), domain, 1000, null);
   const labels = (key) => find(find(drawn.node, (n) => n.attrs["data-strip"] === key)[0], (n) => n.tag === "text" && n.parent && n.parent.attrs.class === "axis").map((n) => n.textContent);
   out.waits = labels("waits");
   out.memory = labels("memory");
+} else if (scenario === "iogaps") {
+  /* #7572: 15 minute buckets with reads at minutes 0, 15 and 45 only. The strip must not run a line from minute 15 to minute 45, and the lone
+     bucket at 45 is a dot. The bucket at 45 holds ONE read at 81 ms in the first run (no red dot: under the 250 read floor) and 300 reads in the second. */
+  const ioRows = (reads45) => [
+    { time: iso(0), database_name: "A", file_type: "ROWS", reads: 400, avg_read_latency_ms: 0.5 },
+    { time: iso(15), database_name: "A", file_type: "ROWS", reads: 300, avg_read_latency_ms: 0.6 },
+    { time: iso(30), database_name: "A", file_type: "ROWS", reads: 0, avg_read_latency_ms: null },
+    { time: iso(45), database_name: "A", file_type: "ROWS", reads: reads45, avg_read_latency_ms: 81 },
+  ];
+  const window = { windowStart: T0, windowEnd: T0 + 60 * MIN };
+  const baseline = { kind: "data", data: { baselines: { io: laneOf({ mean: 1, effective_std_dev: 0.5, sample_count: 40, tier: "Full" }) } } };
+  const one = (reads45) => {
+    const built = strips.applyBaselines(strips.buildStrips({ ...reads, io: data({ bucket_minutes: 15, trend: ioRows(reads45) }) }), baseline, window, {});
+    const io = built.find((s) => s.key === "io");
+    const drawn = strips.drawStrips(built, domain, 1000, null);
+    const g = find(drawn.node, (n) => n.attrs["data-strip"] === "io")[0];
+    return {
+      markers: io.markers.length,
+      lines: find(g, (n) => n.tag === "polyline").map((n) => n.attrs.points.split(" ").length),
+      dots: find(g, (n) => n.tag === "circle" && n.attrs.class !== "strip-anomaly").length,
+      anomalyDots: find(g, (n) => n.attrs.class === "strip-anomaly").length,
+    };
+  };
+  out.oneRead = one(1);
+  out.manyReads = one(300);
+  /* A collector scheduled every 5 minutes on a chart of 1 minute buckets (the Chart budget for a day): six rows 5 minutes apart. Every step is longer
+     than the bucket, but it is the rows' own cadence, so the strip stays one line. The last row holds `last` reads at 81 ms: the floor is per bucket
+     width, 250 per 15 minutes, so a 1 minute bucket needs 17 reads and a 30 minute bucket needs 500. */
+  const slow = (bucketMinutes, last, stepMinutes = 5) => {
+    const rows = Array.from({ length: 6 }, (_, i) => ({ time: iso(i * stepMinutes), database_name: "A", file_type: "ROWS", reads: i === 5 ? last : 1000, avg_read_latency_ms: i === 5 ? 81 : 0.5 }));
+    const built = strips.applyBaselines(strips.buildStrips({ ...reads, io: data({ bucket_minutes: bucketMinutes, trend: rows }) }), baseline, { windowStart: T0, windowEnd: T0 + 60 * MIN }, {});
+    const g = find(strips.drawStrips(built, domain, 1000, null).node, (n) => n.attrs["data-strip"] === "io")[0];
+    return {
+      lines: find(g, (n) => n.tag === "polyline").map((n) => n.attrs.points.split(" ").length),
+      dots: find(g, (n) => n.tag === "circle" && n.attrs.class !== "strip-anomaly").length,
+      markers: built.find((s) => s.key === "io").markers.length,
+    };
+  };
+  out.slowCollector = slow(1, 1000);
+  /* The same 5 minute collector: a row holds 5 minutes of reads, so the floor is 84 (250 per 15 minutes over 5), not the 17 of one 1 minute bucket. */
+  out.floorSlowCollector = { short: slow(1, 83).markers, enough: slow(1, 84).markers };
+  out.floorOneMinute = { enough: slow(1, 17, 1).markers, short: slow(1, 16, 1).markers };
+  out.floorThirtyMinute = { short: slow(30, 499, 30).markers, enough: slow(30, 500, 30).markers };
+  out.points = strips.weightedReadLatency(ioRows(1)).map((p) => p.reads);
+} else if (scenario === "steps") {
+  /* #7644: a window across two hour buckets. Hour A (T0 - 30 min to T0 + 30 min) is a band around 10 (mean 10, sigma 1: 8 to 12), hour B
+     (T0 + 30 min to T0 + 90 min) is a band around 50 (48 to 52). A third hour (after T0 + 90 min) has no step. */
+  const hour = (fromMin, toMin, mean) => ({ from: new Date(T0 + fromMin * MIN).toISOString(), to: new Date(T0 + toMin * MIN).toISOString(), mean, effective_std_dev: 1, sample_count: 40, tier: "Full" });
+  const window = { windowStart: T0, windowEnd: T0 + 120 * MIN };
+  const res = { kind: "data", data: { baselines: { cpu: { steps: [hour(-30, 30, 10), hour(30, 90, 50)] } } } };
+  const pt = (m, v) => ({ t: T0 + m * MIN, v });
+  /* 11 at +0 is inside hour A's band; 49 at +10 is above it (marked); 11 at +40 is under hour B's band (marked); 49 at +50 is inside hour B's band;
+     100 at +100 and 0 at +110 are in the hour with no step, so nothing judges them. */
+  const line = [pt(0, 11), pt(10, 49), pt(40, 11), pt(50, 49), pt(100, 100), pt(110, 0)];
+  const cpu = [{ key: "cpu", series: [{ points: line }] }];
+  strips.applyBaselines(cpu, res, window, {});
+  out.steps = cpu[0].band.map((x) => ({ from: (x.from - T0) / MIN, to: (x.to - T0) / MIN, lower: x.lower, upper: x.upper }));
+  out.markedTimes = cpu[0].markers.map((m) => (m.t - T0) / MIN);
+  /* An hour whose step is unusable (no samples, or no spread) is dropped, so its points mark nothing. */
+  const half = { kind: "data", data: { baselines: { cpu: { steps: [hour(-30, 30, 10), { ...hour(30, 90, 50), sample_count: 0 }] } } } };
+  const cpu2 = [{ key: "cpu", series: [{ points: line }] }];
+  strips.applyBaselines(cpu2, half, window, {});
+  out.droppedStepBands = cpu2[0].band.length;
+  out.droppedStepMarked = cpu2[0].markers.map((m) => (m.t - T0) / MIN);
+} else if (scenario === "baselinereasons") {
+  /* #7663: why a lane has no band. A step with samples and no spread is a metric that sat at 0 (the reply marks it zero_activity); a lane that is
+     null, or a step with no samples, is "not enough history". */
+  const window = { windowStart: T0, windowEnd: T0 + 60 * MIN };
+  const step = (extra) => ({ from: new Date(T0 - 60 * MIN).toISOString(), to: new Date(T0 + 180 * MIN).toISOString(), tier: "Full", ...extra });
+  const zero = step({ mean: 0, effective_std_dev: 0, sample_count: 300, zero_activity: true });
+  const usable = step({ mean: 20, effective_std_dev: 5, sample_count: 300 });
+  const noSamples = step({ mean: 0, effective_std_dev: 0, sample_count: 0 });
+  const note = (cpu) => {
+    const list = strips.applyBaselines(strips.buildStrips(reads), { kind: "data", data: { baselines: { cpu } } }, window, {});
+    const s = list.find((x) => x.key === "cpu");
+    return { note: s.baselineNote, band: s.band ? s.band.length : 0, markers: s.markers ? s.markers.length : 0 };
+  };
+  out.zero = note({ steps: [zero] });
+  out.nullLane = note(null);
+  out.noSamples = note({ steps: [noSamples] });
+  out.mixed = note({ steps: [zero, noSamples] });
+  out.zeroPlusBand = note({ steps: [zero, usable] });
+  out.unmarkedZero = note({ steps: [step({ mean: 0, effective_std_dev: 0, sample_count: 300 })] });
+  /* The sentence is drawn in the strip's header. */
+  const drawn = strips.drawStrips(strips.applyBaselines(strips.buildStrips(reads), { kind: "data", data: { baselines: { cpu: { steps: [zero] } } } }, window, {}), domain, 1000, null);
+  out.drawnNote = find(find(drawn.node, (n) => n.attrs["data-strip"] === "cpu")[0], (n) => n.attrs.class === "strip-baseline-note").map((n) => n.textContent);
+} else if (scenario === "markerruns") {
+  /* #7678: a run of neighbouring points above the band is one mark, a lone point is one small dot, never a circle per point. 600 points: the waits
+     line sits at 100 and is above the band (mean 105, sigma 66: top 237) in three runs (60, 200 and 130 points) and at two lone points. */
+  const n = 600;
+  const above = new Set();
+  for (let i = 100; i < 160; i++) above.add(i);
+  for (let i = 250; i < 450; i++) above.add(i);
+  for (let i = 470; i < 620 && i < n; i++) above.add(i);
+  above.add(10); above.add(30);
+  const line = Array.from({ length: n }, (_, i) => ({ t: T0 + i * MIN, v: above.has(i) ? 300 : 100 }));
+  const wide = { windowStart: T0, windowEnd: T0 + n * MIN };
+  const wideDomain = { from: T0, to: T0 + n * MIN };
+  const res = { kind: "data", data: { baselines: { waits: { steps: [{ from: new Date(T0 - 60 * MIN).toISOString(), to: new Date(T0 + (n + 60) * MIN).toISOString(), mean: 105, effective_std_dev: 66, sample_count: 600, tier: "Full" }] } } } };
+  for (const width of [1280, 2560]) {
+    const list = [{ key: "waits", title: "Waits", unit: "ms/s", min: 0, series: [{ label: "Wait time", color: "#ffb74d", points: line }] }];
+    strips.applyBaselines(list, res, wide, {});
+    const drawn = strips.drawStrips(list, wideDomain, width, null);
+    const g = find(drawn.node, (x) => x.attrs["data-strip"] === "waits")[0];
+    out["w" + width] = {
+      markedPoints: list[0].markers.length,
+      circles: find(g, (x) => x.attrs.class === "strip-anomaly").length,
+      runs: find(g, (x) => x.attrs.class === "strip-anomaly-run").length,
+      runPointCounts: find(g, (x) => x.attrs.class === "strip-anomaly-run").map((x) => x.attrs.points.split(" ").length),
+      allCircles: find(g, (x) => x.tag === "circle").length,
+    };
+  }
+} else if (scenario === "markerrungap") {
+  /* #7678: a marked run is broken where collection stopped, as the line is. Points every minute, none from minute 100 to 199 (the service was
+     off), and the points either side of the gap (90 to 99 and 200 to 209) are all above the band: two runs, not one polyline across the gap. */
+  const above = (i) => (i >= 90 && i < 100) || (i >= 200 && i < 210);
+  const line = [];
+  for (let i = 0; i < 300; i++) {
+    if (i >= 100 && i < 200) continue;
+    line.push({ t: T0 + i * MIN, v: above(i) ? 300 : 100 });
+  }
+  const wide = { windowStart: T0, windowEnd: T0 + 300 * MIN };
+  const wideDomain = { from: T0, to: T0 + 300 * MIN };
+  const res = { kind: "data", data: { baselines: { waits: { steps: [{ from: new Date(T0 - 60 * MIN).toISOString(), to: new Date(T0 + 360 * MIN).toISOString(), mean: 105, effective_std_dev: 66, sample_count: 600, tier: "Full" }] } } } };
+  const list = [{ key: "waits", title: "Waits", unit: "ms/s", min: 0, series: [{ label: "Wait time", color: "#ffb74d", points: line }] }];
+  strips.applyBaselines(list, res, wide, {});
+  const drawn = strips.drawStrips(list, wideDomain, 1280, null);
+  const g = find(drawn.node, (x) => x.attrs["data-strip"] === "waits")[0];
+  out.markedPoints = list[0].markers.length;
+  out.runPointCounts = find(g, (x) => x.attrs.class === "strip-anomaly-run").map((x) => x.attrs.points.split(" ").length);
+  out.circles = find(g, (x) => x.attrs.class === "strip-anomaly").length;
+} else if (scenario === "linuxcpu") {
+  /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU: other_process_cpu is null on every sample. The CPU strip draws the SQL line
+     alone and says so; a Total line over a null Other would sit on the SQL line and claim the host was measured. */
+  const linux = { ...reads, cpu: data({ samples: Array.from({ length: 61 }, (_, i) => ({ sample_time: iso(i), sql_server_cpu: 10 + i, other_process_cpu: null, total_cpu: null })) }) };
+  const built = strips.buildStrips(linux);
+  const drawn = strips.drawStrips(built, domain, 1000, null);
+  const g = find(drawn.node, (n) => n.attrs["data-strip"] === "cpu")[0];
+  out.series = built.find((s) => s.key === "cpu").series.map((s) => s.label);
+  out.lines = find(g, (n) => n.tag === "polyline").length;
+  out.notes = find(g, (n) => n.attrs.class === "strip-baseline-note").map((n) => n.textContent);
+  /* #7682: the strip's texts each start at their own point. The host note once sat at the title's x and y, so the two drew over each other. */
+  const starts = find(g, (n) => n.tag === "text" && n.textContent).map((n) => n.attrs.x + "," + n.attrs.y);
+  out.sharedTextStarts = starts.length - new Set(starts).size;
+  out.measuredSeries = strips.buildStrips(reads).find((s) => s.key === "cpu").series.map((s) => s.label);
+  out.measuredNotes = find(find(strips.drawStrips(strips.buildStrips(reads), domain, 1000, null).node, (n) => n.attrs["data-strip"] === "cpu")[0], (n) => n.attrs.class === "strip-baseline-note").length;
 } else if (scenario === "empty") {
   const none = {
     cpu: { kind: "empty", message: "No CPU samples in this window." },
@@ -238,5 +444,55 @@ if (scenario === "crosshair") {
   out.waits = { lines: find(g("waits"), (n) => n.tag === "polyline").length, text: none_("waits") };
   out.blocking = { bars: find(g("blocking"), (n) => n.tag === "rect").length, text: none_("blocking") };
   out.memoryLines = find(g("memory"), (n) => n.tag === "polyline").length;
+} else if (scenario === "failedread") {
+  /* #7921: the blocking strip has two reads. When one fails and the other answers points, the strip draws the points and says in its header
+     which read failed, so the missing series is not read as "no blocking". With both answering there is no such note. */
+  const blocking = (over) => {
+    const drawn = strips.drawStrips(strips.buildStrips({ ...reads, ...over }), domain, 1000, null);
+    const g = find(drawn.node, (n) => n.attrs["data-strip"] === "blocking")[0];
+    return {
+      bars: find(g, (n) => n.tag === "rect").length,
+      none: find(g, (n) => n.attrs.class === "strip-none").map((n) => n.textContent),
+      header: find(g, (n) => n.attrs.class === "strip-title")[0].textContent,
+    };
+  };
+  /* The blocking strip with a null blocking baseline lane, so applyBaselines gives it the "not enough history" note. The right-anchored note and a
+     header that names a failed read sit on one baseline, so the note is not drawn beside an error. Counts the note's text nodes (the tspans share its class). */
+  const blockingWithBaseline = (over) => {
+    const window = { windowStart: T0, windowEnd: T0 + 60 * MIN };
+    const list = strips.applyBaselines(strips.buildStrips({ ...reads, ...over }), { kind: "data", data: { baselines: { blocking: null } } }, window, {});
+    const note = list.find((s) => s.key === "blocking").baselineNote;
+    const g = find(strips.drawStrips(list, domain, 1000, null).node, (n) => n.attrs["data-strip"] === "blocking")[0];
+    return {
+      note,
+      noteTexts: find(g, (n) => n.tag === "text" && n.attrs.class === "strip-baseline-note").length,
+      errorTspans: find(g, (n) => n.attrs.class === "strip-baseline-note strip-error-note").length,
+      header: find(g, (n) => n.attrs.class === "strip-title")[0].textContent,
+    };
+  };
+  out.blockingFailed = blocking({ blocking: { kind: "error", message: "The blocking trend read timed out." }, deadlocks: data({ trend: [{ time: iso(12), count: 1 }] }) });
+  out.deadlocksFailed = blocking({ deadlocks: { kind: "error", message: "The deadlock trend read timed out." } });
+  out.bothAnswered = blocking({ deadlocks: data({ trend: [{ time: iso(12), count: 1 }] }) });
+  out.failedWithBaselineNote = blockingWithBaseline({ blocking: { kind: "error", message: "The blocking trend read timed out." }, deadlocks: data({ trend: [{ time: iso(12), count: 1 }] }) });
+  out.answeredWithBaselineNote = blockingWithBaseline({ deadlocks: data({ trend: [{ time: iso(12), count: 1 }] }) });
+} else if (scenario === "mixedempty") {
+  /* #7921: one of the six reads fails and the other five answer empty. The page names the failed read instead of only "No overview samples in this
+     window", which is what a server with nothing collected says. With every read empty it says that sentence alone, and with every read failed
+     the first error alone. */
+  const fill = async (failing, failAll) => {
+    globalThis.fetch = async (url) => {
+      const tool = String(url).split("/api/read/")[1].split("?")[0];
+      if (tool === "get_overview_baselines") return { status: 200, ok: true, text: async () => JSON.stringify({ status: "empty", message: "No baselines." }) };
+      if (failAll || tool === failing) return { status: 500, ok: false, text: async () => JSON.stringify({ error: "The " + tool + " read timed out." }) };
+      return { status: 200, ok: true, text: async () => JSON.stringify({ status: "empty", message: "Nothing in this window." }) };
+    };
+    const body = document.createElement("div");
+    strips.fillOverviewStrips(body, "A", { hours: 1, label: "1h", signal: null });
+    await new Promise((r) => setTimeout(r, 50));
+    return find(body, (n) => typeof n.className === "string" && n.className.startsWith("strip")).map((n) => ({ kind: n.className, text: n.textContent }));
+  };
+  out.oneFailed = await fill("get_blocking_trend", false);
+  out.allEmpty = await fill(null, false);
+  out.allFailed = await fill(null, true);
 }
 console.log(JSON.stringify(out));

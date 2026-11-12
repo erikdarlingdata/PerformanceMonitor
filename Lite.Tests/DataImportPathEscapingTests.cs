@@ -71,9 +71,9 @@ public sealed class DataImportPathEscapingTests : IDisposable
             create.ExecuteNonQuery();
         }
 
-        var (locked, tablesFlushed) = DataImportService.FlushOldDatabase(folder);
+        var (failure, tablesFlushed, _) = DataImportService.FlushOldDatabase(folder);
 
-        Assert.False(locked, "the temp database is not held open by anything");
+        Assert.Equal(DataImportOpenFailure.None, failure);
         Assert.Equal(1, tablesFlushed);
 
         /* The per-table catch turns a COPY failure into a logged warning and a zero count, so prove the file

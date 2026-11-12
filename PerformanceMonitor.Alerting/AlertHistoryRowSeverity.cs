@@ -109,12 +109,20 @@ public static class AlertHistoryRowSeverity
     /// folded away because the two are not equally strong evidence: a "critical" read off the row is what
     /// the operator was paged with; a "critical" read off the name is what the map says about the name.
     /// </summary>
-    public static (string Severity, string Source) Describe(string? metricName, string? contextJson)
+    public static (string Severity, string Source) Describe(string? metricName, string? contextJson) =>
+        DescribeFired(metricName, FiredAt(contextJson));
+
+    /// <summary>
+    /// <see cref="Describe"/> for a caller that already holds the tier the row fired at (<see cref="FiredAt"/>'s answer), so a
+    /// read that groups rows in the store (the web's alert badge, #8551) decides severity by this one rule without carrying
+    /// every row's context JSON out of the store.
+    /// </summary>
+    public static (string Severity, string Source) DescribeFired(string? metricName, AlertSeverityLevel? firedAt)
     {
         if (AlertMetricClassifier.IsResolution(metricName))
             return ("resolution", SourceMetricName);
 
-        if (FiredAt(contextJson) is { } fired)
+        if (firedAt is { } fired)
         {
             return (fired == AlertSeverityLevel.Critical ? "critical" : "warning", SourceFired);
         }

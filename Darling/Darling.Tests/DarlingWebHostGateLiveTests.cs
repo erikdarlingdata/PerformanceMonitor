@@ -486,28 +486,28 @@ public sealed class DarlingWebHostGateLiveTests
     }
 
     /// <summary>
-    /// A navigation the person started (a click or a typed address) carries <c>Sec-Fetch-User: ?1</c>; a script
-    /// redirect, a meta refresh or a popup nobody clicked does not. The re-navigation page is for the first kind only.
+    /// #7846: a link that passes through a redirect (Safe Links, a mail gateway) reaches this host as a script
+    /// navigation from the other site, which carries no <c>Sec-Fetch-User</c> (or carries <c>?0</c>). Any cross-site
+    /// top-level GET gets the re-navigation page, whatever the header says, so the live session opens the page.
     /// </summary>
     [Theory]
     [InlineData(null)]
     [InlineData("?0")]
     [InlineData("1")]
     [InlineData("true")]
-    public async Task ACrossSitePageRequest_NotStartedByAPerson_GetsTheSignInForm_AsBefore(string? fetchUser)
+    public async Task ACrossSitePageRequest_WithoutAUserActivationFlag_GetsTheReNavigationPage(string? fetchUser)
     {
         using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
 
-        var (ctx, body) = await SendPage(server, "/triage", string.Empty, "localhost", IPAddress.Loopback, "cross-site", fetchUser: fetchUser);
-        var (_, plain) = await SendPage(server, "/triage", string.Empty, "localhost", IPAddress.Loopback, fetchSite: null, fetchMode: null, fetchDest: null, fetchUser: null);
+        var (ctx, body) = await SendPage(server, "/triage", "?server=s1", "localhost", IPAddress.Loopback, "cross-site", fetchUser: fetchUser);
 
         Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
-        Assert.DoesNotContain(DarlingWebHostService.ReNavigationScriptBlock, body, StringComparison.Ordinal);
-        Assert.Equal(plain, body);
-        Assert.Contains("<form", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(DarlingWebHostService.ReNavigationScriptBlock, body, StringComparison.Ordinal);
+        Assert.Equal(DarlingWebHostService.ReNavigationPagePolicy, ctx.Response.Headers["Content-Security-Policy"].ToString());
+        Assert.DoesNotContain("<form", body, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>The same click-started cross-site request does get the re-navigation page, and only a GET does.</summary>
+    /// <summary>The same cross-site request does get the re-navigation page, and only a GET does.</summary>
     [Theory]
     [InlineData("HEAD")]
     [InlineData("OPTIONS")]
@@ -705,6 +705,7 @@ public sealed class DarlingWebHostGateLiveTests
         Assert.Equal(StatusCodes.Status403Forbidden, write.Response.StatusCode);
         var body = await new StreamReader(write.Response.Body).ReadToEndAsync();
         Assert.Contains("reads only", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("reads_only_dashboard", System.Text.Json.JsonDocument.Parse(body).RootElement.GetProperty("reason").GetString());
     }
 
     /// <summary>No token configured, loopback-only: with <c>web.allowTokenlessLoopback</c> on the dashboard serves
@@ -739,8 +740,8 @@ public sealed class DarlingWebHostGateLiveTests
 
         Assert.True(resolved.Refuse);
         Assert.Equal("", resolved.Token);
-        Assert.Contains(log.Lines, l => l.Contains("Web dashboard token", StringComparison.Ordinal)
-            && l.Contains("refusing to serve", StringComparison.Ordinal));
+        Assert.Contains(log.Lines, l => l.Contains("Web dashboard token", StringComparison.OrdinalIgnoreCase)
+            && l.Contains("web dashboard is not started", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
     }
 
@@ -802,8 +803,8 @@ public sealed class DarlingWebHostGateLiveTests
 
         Assert.False(started, "a configured token that cannot be used must stop the start in network mode");
         Assert.False(answered, "nothing may answer on the loopback port");
-        Assert.Contains(log.Lines, l => l.Contains("Web dashboard token", StringComparison.Ordinal)
-            && l.Contains("web dashboard not started", StringComparison.Ordinal));
+        Assert.Contains(log.Lines, l => l.Contains("Web dashboard token", StringComparison.OrdinalIgnoreCase)
+            && l.Contains("web dashboard is not started", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
     }
 

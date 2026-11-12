@@ -72,6 +72,11 @@ public sealed class DarlingMcpFinOpsInventoryTools
             var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
             var inventory = await DarlingFinOpsInventoryReader.GetServerInventoryAsync(
                 postgres, McpCommandDeadlines.ReadSeconds, include_removed, cancellationToken);
+            if (DarlingServerResolver.WebAllowedServerIds is { } allowedIds)
+            {
+                inventory = inventory.Where(server => allowedIds.Contains(server.ServerId)).ToList();
+            }
+
             if (inventory.Count == 0)
             {
                 return McpHelpers.Status("empty",
@@ -139,8 +144,8 @@ public sealed class DarlingMcpFinOpsInventoryTools
             cores_per_socket = denied ? null : FinOpsInventoryFigures.CoresPerSocket(s.EngineEdition, s.CoresPerSocket),
             hardware_note = note,
             provisioning_status = m.ProvisioningStatus,
-            avg_cpu_pct = m.AvgCpuPct is decimal cpu ? Math.Round(cpu, 1, MidpointRounding.AwayFromZero) : (decimal?)null,
-            storage_total_gb = m.StorageTotalGb is decimal gb ? Math.Round(gb, 1, MidpointRounding.AwayFromZero) : (decimal?)null,
+            avg_cpu_pct = FinOpsWireFigures.Pct(m.AvgCpuPct),
+            storage_total_gb = m.StorageTotalGb is decimal gb ? FinOpsWireFigures.Clean(Math.Round(gb, 1, MidpointRounding.AwayFromZero)) : (decimal?)null,
             idle_db_count = m.IdleDbCount,
             health_score = score,
             health_band = score is int scoreValue ? FinOpsUtilizationFigures.HealthBand(scoreValue) : null,

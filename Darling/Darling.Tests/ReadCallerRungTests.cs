@@ -72,7 +72,7 @@ public sealed class ReadCallerRungTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the V183 migration pin.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -115,7 +115,7 @@ SELECT count(*) || '|' || count(*) FILTER (WHERE caller IS NULL) FROM collect.sl
             "Set DARLING_TEST_PG to a Postgres connection string to run the V183 caller round trip.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
         {
             await migrate.OpenAsync(ct);

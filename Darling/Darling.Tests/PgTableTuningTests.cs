@@ -67,7 +67,7 @@ public sealed class PgTableTuningTests
 
         /* Every remaining index is idempotent (no-op where a field box already hand-applied it, or a prior
            start made it); every #4247 drop is idempotent the same way (IF EXISTS no-ops once it is gone). */
-        Assert.Equal(7, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* server_hash_time; server_db_query_plan_time; #3573 forced-plan covering index; #4972 legacy-row partial index; #4605 two restart-row partial indexes; #3934 store-metrics skip-scan index */
+        Assert.Equal(8, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* #7147 the plain-store wait_stats daily-summary cover; server_hash_time; server_db_query_plan_time; #3573 forced-plan covering index; #4972 legacy-row partial index; #4605 two restart-row partial indexes; #3934 store-metrics skip-scan index */
         Assert.Equal(5, CountOccurrences(sql, "DROP INDEX IF EXISTS"));         /* #4247: the two handle indexes + the three composer covering indexes */
         Assert.DoesNotContain("CREATE INDEX ON", sql, StringComparison.Ordinal);
 
@@ -87,7 +87,7 @@ public sealed class PgTableTuningTests
         Assert.Contains("ALTER TABLE collect.query_plan_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("collect.query_plan_dim SET (autovacuum_vacuum_insert_scale_factor", sql, StringComparison.Ordinal);
 
-        Assert.Equal(17, PgTableTuning.Statements.Count);   /* 7 CREATE INDEX (#4972 added the legacy-row partial index, #4605 the two restart-row ones) + 5 DROP INDEX + 5 ALTER TABLE */
+        Assert.Equal(18, PgTableTuning.Statements.Count);   /* 8 CREATE INDEX (#4972 added the legacy-row partial index, #4605 the two restart-row ones, #7147 the plain-store wait_stats daily-summary cover) + 5 DROP INDEX + 5 ALTER TABLE */
     }
 
     /// <summary>

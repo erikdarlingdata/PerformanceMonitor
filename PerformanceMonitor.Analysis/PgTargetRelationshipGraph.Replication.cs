@@ -39,23 +39,23 @@ public sealed partial class PgTargetRelationshipGraph
     {
         /* slot xmin ↔ xmin hold: one horizon, two reads of it (the slot's own row, the cluster's winning holder). */
         AddEdge(PgTargetFactKeys.SlotXmin, PgTargetFactKeys.XminHold, ReplicationCategory,
-            "PG_XMIN_HOLD fired — the cluster's winning horizon holder is graded chronic; vacuum cannot advance past what this slot exports",
+            "PG_XMIN_HOLD fired: the cluster's winning horizon holder is graded chronic; vacuum cannot advance past what this slot exports",
             facts => FiredBase(facts, PgTargetFactKeys.XminHold));
         AddEdge(PgTargetFactKeys.XminHold, PgTargetFactKeys.SlotXmin, ReplicationCategory,
-            "PG_SLOT_XMIN fired — a replication slot's xmin or catalog_xmin is the horizon being held, read from the slot's own rows",
+            "PG_SLOT_XMIN fired: a replication slot's xmin or catalog_xmin is the horizon being held, read from the slot's own rows",
             facts => FiredBase(facts, PgTargetFactKeys.SlotXmin));
 
         /* lag → retention → slot xmin: the standby's unreplayed WAL is retained WAL; a retaining slot may also pin the horizon. */
         AddEdge(PgTargetFactKeys.ReplicationLag, PgTargetFactKeys.SlotRetention, ReplicationCategory,
-            "PG_SLOT_RETENTION fired — the WAL this standby has not replayed is WAL its slot makes the primary keep; the lag is also a disk-fill path",
+            "PG_SLOT_RETENTION fired: the WAL this standby has not replayed is WAL its slot makes the primary keep; the lag is also a disk-fill path",
             facts => FiredBase(facts, PgTargetFactKeys.SlotRetention));
         AddEdge(PgTargetFactKeys.SlotRetention, PgTargetFactKeys.SlotXmin, ReplicationCategory,
-            "PG_SLOT_XMIN fired — a slot is pinning the vacuum horizon as well as the disk: the second independent harm of an abandoned slot",
+            "PG_SLOT_XMIN fired, a slot is pinning the vacuum horizon as well as the disk: the second independent harm of an abandoned slot",
             facts => FiredBase(facts, PgTargetFactKeys.SlotXmin));
 
         /* anomaly → the fact it folds into: the baseline-relative judgment leads to the standby and stage. */
         AddEdge(PgTargetFactKeys.AnomalyReplicationLag, PgTargetFactKeys.ReplicationLag, ReplicationCategory,
-            "PG_REPLICATION_LAG fired — the anomalous lag is a named standby's drift or a peak past the slot alert's bar, not only a statistical shift",
+            "PG_REPLICATION_LAG fired: the anomalous lag is a named standby's drift or a peak past the slot alert's bar, not only a statistical shift",
             facts => FiredBase(facts, PgTargetFactKeys.ReplicationLag));
     }
 

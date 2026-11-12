@@ -116,13 +116,15 @@ public static class DeltaSeriesShaping
 
     /// <summary>The Y label when the picker mixes bases — the one honest label for one axis carrying more than
     /// one kind of number: the parts present, in this order, joined by <see cref="MixedAxisSeparator"/>. The
-    /// full three-way spelling is <c>per second (rates) · Δ per interval (others) · value (gauges)</c>; a
-    /// two-way mix carries only its two parts. Composed by <see cref="YAxisLabel"/>, never read as a whole.</summary>
+    /// full three-way spelling is <c>per second · Δ per interval · value</c>; a two-way mix carries only its two
+    /// parts. Short, because the label is drawn rotated along the plot's height and a long one is shrunk and cut
+    /// there (#8224); the legend names each counter, and a counter's name carries its own unit. Composed by
+    /// <see cref="YAxisLabel"/>, never read as a whole.</summary>
     public static readonly IReadOnlyDictionary<DeltaBasis, string> MixedAxisParts = new Dictionary<DeltaBasis, string>
     {
-        [DeltaBasis.PerSecond] = "per second (rates)",
-        [DeltaBasis.PerInterval] = "Δ per interval (others)",
-        [DeltaBasis.Level] = "value (gauges)",
+        [DeltaBasis.PerSecond] = "per second",
+        [DeltaBasis.PerInterval] = "Δ per interval",
+        [DeltaBasis.Level] = "value",
     };
 
     /// <summary>What separates the parts of a mixed axis label.</summary>

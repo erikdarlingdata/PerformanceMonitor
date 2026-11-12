@@ -99,8 +99,9 @@ public static class DarlingFinOpsStorageGrowthReader
     }
 
     /// <summary>How far from its mark (7 or 30 days ago) a baseline snapshot may be: one day either side. Beyond that the baseline
-    /// is not "N days ago" and the grid says there is no sample from that long ago.</summary>
-    public static readonly TimeSpan BaselineTolerance = TimeSpan.FromDays(1);
+    /// is not "N days ago" and the grid says there is no sample from that long ago. The table-size read judges its baselines by
+    /// the same day (<see cref="GrowthBaselineReach"/>), so a database's "7 days ago" and a table's are one span.</summary>
+    public static readonly TimeSpan BaselineTolerance = GrowthBaselineReach.Tolerance;
 
     /// <summary>
     /// The snapshot NEAREST <paramref name="mark"/> (7 or 30 days before now), only when it is within <see cref="BaselineTolerance"/>
@@ -432,7 +433,7 @@ LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table
 ORDER BY growth_mb DESC NULLS LAST, l.schema_name, l.table_name
 LIMIT $5";
 
-    /// <summary>Daily reserved-MB series for the ranked top-N objects (heatmap). $1 server_id, $2 database, $3 window start, $4 latest instant, $5 earliest instant, $6 topN — the two instants come from <see cref="ObjectGrowthBoundsSql"/>.</summary>
+    /// <summary>Daily reserved-MB series for the ranked top-N objects (heatmap). $1 server_id, $2 database, $3 window start, $4 latest instant, $5 earliest instant, $6 topN — the two instants come from <see cref="ObjectGrowthBoundsSql"/> — $7 the days' labels (date[]), $8 their starts and $9 their ends (timestamp[], naive UTC, half-open): one element per <see cref="DayBucket"/>. Each sample lands in the day whose range holds it, so a column is a day of the caller's calendar: UTC, or the selected time display's.</summary>
     public const string ObjectGrowthSeriesSql = @"
 WITH latest AS (
     SELECT schema_name, table_name, SUM(reserved_mb) AS cur_reserved_mb
@@ -453,26 +454,47 @@ ranked AS (
     LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table_name
     ORDER BY growth_mb DESC NULLS LAST, l.schema_name, l.table_name
     LIMIT $6
+),
+days AS (
+    SELECT day, start_utc, end_utc
+    FROM unnest($7::date[], $8::timestamp[], $9::timestamp[]) AS d(day, start_utc, end_utc)
 )
 SELECT
     ios.schema_name,
     ios.table_name,
-    date_trunc('day', ios.collection_time) AS the_day,
+    d.day AS the_day,
     SUM(ios.reserved_mb) AS reserved_mb
 FROM v_index_object_stats ios
 JOIN ranked r ON r.schema_name = ios.schema_name AND r.table_name = ios.table_name
+JOIN days d
+  ON ios.collection_time >= d.start_utc
+ AND ios.collection_time < d.end_utc
 WHERE ios.server_id = $1 AND ios.database_name = $2 AND ios.collection_time >= $3
-GROUP BY ios.schema_name, ios.table_name, date_trunc('day', ios.collection_time)
+GROUP BY ios.schema_name, ios.table_name, d.day
 ORDER BY ios.schema_name, ios.table_name, the_day";
+
+    /// <summary>
+    /// Object-growth heatmap data for a single database (#1138 §3A) with the samples bucketed by UTC day, the day a caller with no
+    /// display, such as the MCP tools, names: the UTC days of the window, from <paramref name="windowStart"/> to the instant
+    /// <paramref name="daysBack"/> days after it.
+    /// </summary>
+    public static Task<(List<ObjectSizeGrowthDto> Objects, List<FinOpsObjectDaySample> Samples)> GetObjectGrowthHeatmapDataAsync(
+        NpgsqlDataSource dataSource, int serverId, string databaseName, DateTime windowStart, int daysBack, int topN,
+        int commandTimeoutSeconds, CancellationToken cancellationToken) =>
+        GetObjectGrowthHeatmapDataAsync(
+            dataSource, serverId, databaseName, windowStart, daysBack,
+            DarlingFinOpsUtilizationReader.UtcDays(windowStart, windowStart.AddDays(daysBack)), topN, commandTimeoutSeconds, cancellationToken);
 
     /// <summary>
     /// Object-growth heatmap data for a single database (#1138 §3A): the ranked top-N summary rows and the
     /// long-form daily reserved-MB samples (pivoted to a matrix by FinOpsHeatmapBuilder). Two pooled
     /// commands (mirrors Lite's two-command split for DuckDB's one-result-set-per-command limit).
     /// <paramref name="windowStart"/> is the naive-UTC window start the caller computed from <paramref name="daysBack"/>.
+    /// <paramref name="days"/> are the days the samples are bucketed by (<see cref="DayBucket"/>): UTC days for a caller with no
+    /// display, and the selected time display's days for the Viewer, so each sample's Day is a day of the caller's calendar.
     /// </summary>
     public static async Task<(List<ObjectSizeGrowthDto> Objects, List<FinOpsObjectDaySample> Samples)> GetObjectGrowthHeatmapDataAsync(
-        NpgsqlDataSource dataSource, int serverId, string databaseName, DateTime windowStart, int daysBack, int topN,
+        NpgsqlDataSource dataSource, int serverId, string databaseName, DateTime windowStart, int daysBack, IReadOnlyList<DayBucket> days, int topN,
         int commandTimeoutSeconds, CancellationToken cancellationToken)
     {
         var objects = new List<ObjectSizeGrowthDto>();
@@ -503,6 +525,8 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
         {
             return (objects, samples);
         }
+
+        days = DarlingFinOpsUtilizationReader.DaysThrough(days, latest);
 
         await using (var command = dataSource.CreateCommand(ObjectGrowthSummarySql))
         {
@@ -541,6 +565,7 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = latest });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = earliest });
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
+            DarlingFinOpsUtilizationReader.AddDayBuckets(command, days);
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -556,7 +581,10 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
         return (objects, samples);
     }
 
-    /// <summary>Per-index size + usage for one object at its database's latest snapshot (Storage Growth index drill).</summary>
+    /// <summary>Per-index size + usage for one object at its database's latest snapshot (Storage Growth index drill).
+    /// $1 server_id, $2 database, $3 schema, $4 table, $5 collection_time: the database's newest snapshot
+    /// <see cref="GetLatestObjectIndexSnapshotAsync"/> resolved first, bound as a literal so the planner excludes every
+    /// other chunk at plan time (#8013).</summary>
     public const string ObjectIndexDetailSql = @"
 SELECT
     database_name,
@@ -590,22 +618,73 @@ WHERE server_id = $1
 AND   database_name = $2
 AND   schema_name = $3
 AND   table_name = $4
-AND   collection_time = (
-    SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1 AND database_name = $2)
+AND   collection_time = $5
 ORDER BY index_id";
+
+    /// <summary>The windowed half of <see cref="GetLatestObjectIndexSnapshotAsync"/>: $1 server_id, $2 database, $3 window
+    /// start. No upper bound, for the reason <see cref="DatabaseSizeLatestSnapshotWindowedProbeSql"/> has none.</summary>
+    public const string ObjectIndexSnapshotWindowedProbeSql = @"
+SELECT MAX(collection_time)
+FROM v_index_object_stats
+WHERE server_id = $1
+AND   database_name = $2
+AND   collection_time >= $3";
+
+    /// <summary>The unbounded fallback half of <see cref="GetLatestObjectIndexSnapshotAsync"/>, reached only when the windowed
+    /// probe finds nothing. $1 server_id, $2 database.</summary>
+    public const string ObjectIndexSnapshotFallbackProbeSql = @"
+SELECT MAX(collection_time)
+FROM v_index_object_stats
+WHERE server_id = $1
+AND   database_name = $2";
+
+    /// <summary>#8013: one database's newest <c>index_object_stats</c> snapshot, the anchor <see cref="ObjectIndexDetailSql"/>
+    /// binds. A windowed probe first (three days, one missed daily run still inside it), falling back to an unbounded probe
+    /// only when the window is empty, so the result equals an unbounded <c>MAX(collection_time)</c> in every case. Null when
+    /// the database has no index history.</summary>
+    public static async Task<DateTime?> GetLatestObjectIndexSnapshotAsync(
+        NpgsqlDataSource dataSource, int serverId, string databaseName, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var windowStart = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-3), DateTimeKind.Unspecified);
+
+        await using (var probe = dataSource.CreateCommand(ObjectIndexSnapshotWindowedProbeSql))
+        {
+            probe.CommandTimeout = commandTimeoutSeconds;
+            probe.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            probe.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
+            probe.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+            if (await probe.ExecuteScalarAsync(cancellationToken) is DateTime windowedStamp)
+            {
+                return windowedStamp;
+            }
+        }
+
+        await using var fallback = dataSource.CreateCommand(ObjectIndexSnapshotFallbackProbeSql);
+        fallback.CommandTimeout = commandTimeoutSeconds;
+        fallback.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        fallback.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
+        return await fallback.ExecuteScalarAsync(cancellationToken) is DateTime unboundedStamp ? unboundedStamp : null;
+    }
 
     public static async Task<List<IndexUsageDto>> GetObjectIndexDetailAsync(
         NpgsqlDataSource dataSource, int serverId, string databaseName, string schemaName, string tableName,
         int commandTimeoutSeconds, CancellationToken cancellationToken)
     {
+        var items = new List<IndexUsageDto>();
+        var snapshotTime = await GetLatestObjectIndexSnapshotAsync(dataSource, serverId, databaseName, commandTimeoutSeconds, cancellationToken);
+        if (snapshotTime is null)
+        {
+            return items;
+        }
+
         await using var command = dataSource.CreateCommand(ObjectIndexDetailSql);
         command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = schemaName });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = tableName });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(snapshotTime.Value, DateTimeKind.Unspecified) });
 
-        var items = new List<IndexUsageDto>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

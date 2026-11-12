@@ -145,6 +145,20 @@ public sealed class QueryStoreHistoryBehaviourTests
     }
 
     [Fact]
+    public void TwoPlansInOneSnapshot_ShareOneChartEntry_AndTheTooltipNamesBoth()
+    {
+        // #7920: the read answers one point per (time, plan); the chart's hover reads every series from the one entry nearest the pointer.
+        var r = Run("twoPlansOneTime");
+        Assert.Equal(2, r.GetProperty("points").GetInt32());
+        var shared = r.GetProperty("atShared");
+        Assert.Equal(1, shared.GetArrayLength());
+        Assert.Equal(new[] { "p7", "p9" }, shared[0].EnumerateArray().Select(e => e.GetString()));
+        var tip = r.GetProperty("tooltip");
+        Assert.Equal("100 ms", tip.GetProperty("Plan 7").GetString());
+        Assert.Equal("10 ms", tip.GetProperty("Plan 9").GetString());
+    }
+
+    [Fact]
     public void ACutPointList_SaysTheNewestAreShown()
     {
         var notices = Run("cutNotice").GetProperty("notices");

@@ -34,9 +34,35 @@ public partial class FinOpsTab
     /// banners. When no index statistics have been collected yet (no rollups), shows the empty hint and clears
     /// the grids/banners.
     /// </summary>
-    private async Task LoadFinOpsIndexAnalysisAsync()
+    /// <summary>
+    /// The two Index Analysis grids and their section titles show only while a read has rows. Before a read, or after one that
+    /// finds nothing, they stay collapsed and the one message over them (Grid.RowSpan 4) is the whole empty state, instead of a
+    /// message under a bare rollup grid (#8621). The horizontal scroll bar follows the same rule: the grids are wider than the
+    /// page, so it is right only while they hold rows.
+    /// </summary>
+    private void IndexAnalysisGridsHoldRows(bool hasRows)
     {
-        var read = await _dataService.GetIndexAnalysisWithSnapshotTimesAsync(_server.ServerId);
+        var scroll = hasRows ? ScrollBarVisibility.Auto : ScrollBarVisibility.Hidden;
+        var visibility = hasRows ? Visibility.Visible : Visibility.Collapsed;
+        FinOpsIndexAnalysisRollupGrid.HorizontalScrollBarVisibility = scroll;
+        FinOpsIndexAnalysisDetailGrid.HorizontalScrollBarVisibility = scroll;
+        FinOpsIndexAnalysisRollupGrid.Visibility = visibility;
+        FinOpsIndexAnalysisDetailGrid.Visibility = visibility;
+        FinOpsIndexAnalysisRollupTitle.Visibility = visibility;
+        FinOpsIndexAnalysisDetailTitle.Visibility = visibility;
+    }
+
+    private async Task LoadFinOpsIndexAnalysisAsync() => await LoadFinOpsIndexAnalysisAsync(null);
+
+    /// <summary>#8549: the read is booked on the load's clock by name, and the projection of its rows and the grid and banner binds as a client step.</summary>
+    private async Task LoadFinOpsIndexAnalysisAsync(ViewerLoadTimer? timer)
+    {
+        var read = await ViewerServerTab.Timed(timer, "index analysis read", _dataService.GetIndexAnalysisWithSnapshotTimesAsync(_server.ServerId));
+        ViewerServerTab.ClientStep(timer, "index analysis bind", () => BindIndexAnalysis(read));
+    }
+
+    private void BindIndexAnalysis(PerformanceMonitor.Darling.Storage.FinOps.IndexAnalysisWithSnapshotTimes read)
+    {
         var result = read.Result;
 
         var nothingCollected = result.DatabaseRollups.Count == 0;
@@ -45,6 +71,7 @@ public partial class FinOpsTab
         {
             _finopsIndexAnalysisRollupFilterMgr!.UpdateData(new List<IndexCleanupRollupRow>());
             _finopsIndexAnalysisFilterMgr!.UpdateData(new List<IndexCleanupRecommendationRow>());
+            IndexAnalysisGridsHoldRows(false);
             FinOpsIndexAnalysisBannerPanel.Children.Clear();
             FinOpsIndexAnalysisBannerScroller.Visibility = Visibility.Collapsed;
             FinOpsIndexAnalysisNoDataMessage.Visibility = Visibility.Visible;
@@ -52,18 +79,19 @@ public partial class FinOpsTab
             return;
         }
 
-        var recs = ViewerDataService.ProjectRecommendations(result, read.SnapshotTimes);
-        var rollups = ViewerDataService.ProjectRollups(result, read.SnapshotTimes);
+        var recs = ViewerDataService.ProjectRecommendations(result, read.SnapshotTimes, read.LeftOverDatabaseIds);
+        var rollups = ViewerDataService.ProjectRollups(result, read.SnapshotTimes, read.LeftOverDatabaseIds);
 
         _finopsIndexAnalysisRollupFilterMgr!.UpdateData(rollups);
         _finopsIndexAnalysisFilterMgr!.UpdateData(recs);
+        IndexAnalysisGridsHoldRows(rollups.Count > 0 || recs.Count > 0);
 
         BuildIndexAnalysisBanners(result);
 
         FinOpsIndexAnalysisNoDataMessage.Visibility = Visibility.Collapsed;
         FinOpsIndexAnalysisCountIndicator.Text = recs.Count > 0
-            ? $"{recs.Count} recommendation(s)"
-            : "no cleanup recommendations — indexes look clean";
+            ? PerformanceMonitor.Common.CountText.Plural(recs.Count, "recommendation")
+            : "no cleanup recommendations: indexes look clean";
     }
 
     /// <summary>Rebuilds the banner strip: the &lt;14-day uptime caveat, the dedupe-only notice, and every analyzer Note (its stated limitations).</summary>
@@ -75,14 +103,14 @@ public partial class FinOpsTab
         if (result.ShowUptimeCaveat)
         {
             AddIndexAnalysisBanner(
-                "Server uptime is under 14 days — index usage data may be incomplete, so some \"Unused Index\" findings could be premature.",
+                "Server uptime is under 14 days: index usage data may be incomplete, so some \"Unused Index\" findings could be premature.",
                 "#F39C12", "#33290F");
         }
 
         if (result.DedupeOnlyApplied)
         {
             AddIndexAnalysisBanner(
-                "Dedupe-only mode is in effect — unused indexes were NOT flagged (server uptime is 7 days or less). Only duplicate/consolidation and compression findings are shown.",
+                "Dedupe-only mode is in effect: unused indexes were NOT flagged (server uptime is 7 days or less). Only duplicate/consolidation and compression findings are shown.",
                 "#3498DB", "#0F2433");
         }
 

@@ -13,7 +13,7 @@
    computes nothing. */
 
 import { VIZ } from "../../panels.js";
-import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, applyFormat, relTime, localTime } from "../../util.js";
+import { el, mount, loadingStrip, emptyStrip, captionStrip, noticeStrip, readErrorStrip, errorStrip, readTool, applyFormat, relTime, localTime } from "../../util.js";
 import { gatedEmptyStrip, gatedSections } from "./gate.js";
 import { finopsWindowControl } from "./window.js";
 
@@ -51,14 +51,30 @@ function accessText(v) {
   return v == null ? v : String(v).slice(0, 16).replace("T", " ");
 }
 
+/* #7706: a size in MB reads as the Database Sizes tab prints it (mbfit: "648 MB", "1.2 GB"), so the header carries no unit. A blank baseline is a dash,
+   and the server's sentence for why ("No sample from 30 days ago") is the cell's hint: the sentence in a number column made the grid wider than its frame. */
+function sizeColumn(key, label, noteKey) {
+  return {
+    key,
+    label,
+    format: "mbfit",
+    render: (row) => {
+      const value = row[key];
+      if (value != null) return document.createTextNode(applyFormat("mbfit", value));
+      const why = noteKey ? row[noteKey] : null;
+      return el("span", { title: why || null, text: "—" });
+    },
+  };
+}
+
 const DATABASE_COLUMNS = [
-  { key: "database_name", label: "Database" },
-  { key: "current_size_mb", label: "Current (MB)", format: "num2" },
-  { key: "size_7d_ago_mb", label: "7 days ago (MB)", format: "num2", nullKey: "size_7d_ago_note" },
-  { key: "size_30d_ago_mb", label: "30 days ago (MB)", format: "num2", nullKey: "size_30d_ago_note" },
-  { key: "growth_7d_mb", label: "Growth 7 days (MB)", format: "num2" },
-  { key: "growth_30d_mb", label: "Growth 30 days (MB)", format: "num2" },
-  { key: "daily_growth_rate_mb", label: "Daily rate (MB)", format: "num2" },
+  { key: "database_name", label: "Database", name: true },
+  sizeColumn("current_size_mb", "Current"),
+  sizeColumn("size_7d_ago_mb", "7 days ago", "size_7d_ago_note"),
+  sizeColumn("size_30d_ago_mb", "30 days ago", "size_30d_ago_note"),
+  sizeColumn("growth_7d_mb", "Growth 7 days"),
+  sizeColumn("growth_30d_mb", "Growth 30 days"),
+  sizeColumn("daily_growth_rate_mb", "Daily rate"),
   { key: "growth_pct_30d", label: "Growth % 30 days", format: "num1" },
   { key: "note", label: "Note", hideWhenEmpty: true, wrap: true },
 ];
@@ -119,6 +135,7 @@ function indexNotice(s) {
 function drillColumn(label, onPick) {
   return {
     label,
+    sortable: false, // a column of buttons has nothing to order by (#7706)
     render: (row) => el("button", { type: "button", class: "btn", text: label, onClick: () => onPick(row) }),
   };
 }
@@ -159,7 +176,7 @@ function heatmap(section) {
 // One section by its own status: ok shows the notice and the table, empty an empty strip, not_collected its message.
 function sectionContent(section, columns, emptyText, notice, lead) {
   const s = section || {};
-  if (s.status === "ok") return [noticeStrip(notice(s)), VIZ.table(s, { rowsKey: "rows", columns: lead ? [lead, ...columns] : columns, emptyText })];
+  if (s.status === "ok") return [captionStrip(notice(s), s.truncated === true), VIZ.table(s, { rowsKey: "rows", columns: lead ? [lead, ...columns] : columns, emptyText })];
   if (s.status === "empty") return [emptyStrip(emptyText)];
   return [noticeStrip(s.message ?? "This section was not collected.")];
 }
@@ -257,7 +274,7 @@ export const tab = {
           const s = data.objects || {};
           const parts = [el("h3", { text: "Objects by Growth" })];
           if (data.database && data.database.status === "empty") parts.push(noticeStrip("This database is not in the latest snapshot."));
-          if (s.status === "ok") parts.push(noticeStrip(objectNotice(s)), noticeStrip(OBJECT_GROWTH_NOTE), heatmap(s), VIZ.table(s, { rowsKey: "rows", columns: [drillColumn("Show indexes", openIndexes), ...OBJECT_COLUMNS], emptyText: "No object size data for this database yet." }));
+          if (s.status === "ok") parts.push(captionStrip(objectNotice(s), s.truncated === true), noticeStrip(OBJECT_GROWTH_NOTE), heatmap(s), VIZ.table(s, { rowsKey: "rows", columns: [drillColumn("Show indexes", openIndexes), ...OBJECT_COLUMNS], emptyText: "No object size data for this database yet." }));
           else parts.push(...sectionContent(s, OBJECT_COLUMNS, "No object size data for this database yet.", objectNotice));
           chrome(parts);
         } else {

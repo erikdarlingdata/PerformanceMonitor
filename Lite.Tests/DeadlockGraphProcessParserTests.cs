@@ -238,4 +238,59 @@ public class DeadlockGraphProcessParserTests
         Assert.NotNull(processes);
         Assert.Empty(processes);
     }
+
+    /* ---------------- Every lock kind a graph can carry gives its processes a mode and a resource name, not only
+       the row-level kinds: an sp_getapplock queue deadlocks on an applicationlock, a schema change on a
+       metadatalock, and hobtlock, allocunitlock and filegrouplock appear in the same resource-list. ---------------- */
+
+    /// <summary>A two-process graph whose one resource is a <paramref name="lockElement"/> with process2 owning and process1 waiting.</summary>
+    private static string GraphWithLock(string lockElement) => $"""
+        <deadlock>
+          <victim-list>
+            <victimProcess id="process1" />
+          </victim-list>
+          <process-list>
+            <process id="process1" spid="81" currentdbname="AppDb" waitresource="APPLICATION: 5:0:[Queue]:(a1b2c3d4)" waittime="2200" lockMode="X" isolationlevel="read committed (2)" logused="0" trancount="1" clientapp="Worker" hostname="HOST1" loginname="app" status="suspended" transactionname="user_transaction" priority="0">
+              <inputbuf>EXEC sp_getapplock @Resource = 'Queue', @LockMode = 'Exclusive'</inputbuf>
+            </process>
+            <process id="process2" spid="82" currentdbname="AppDb" waitresource="KEY: 5:72" waittime="2100" lockMode="X" isolationlevel="read committed (2)" logused="400" trancount="1" clientapp="Worker" hostname="HOST2" loginname="app" status="suspended" transactionname="user_transaction" priority="0">
+              <inputbuf>UPDATE dbo.t SET c = 2</inputbuf>
+            </process>
+          </process-list>
+          <resource-list>
+            <{lockElement} id="lock1" dbid="5" objectname="0:[Queue]:(a1b2c3d4)" mode="X">
+              <owner-list>
+                <owner id="process2" mode="X" />
+              </owner-list>
+              <waiter-list>
+                <waiter id="process1" mode="X" requestType="wait" />
+              </waiter-list>
+            </{lockElement}>
+          </resource-list>
+        </deadlock>
+        """;
+
+    [Theory]
+    [InlineData("applicationlock")]
+    [InlineData("metadatalock")]
+    [InlineData("hobtlock")]
+    [InlineData("allocunitlock")]
+    [InlineData("filegrouplock")]
+    public void Parse_AnyLockKind_GivesOwnerAndWaiterTheirModeAndTheResourceName(string lockElement)
+    {
+        var input = new[]
+        {
+            new DeadlockGraphInput(GraphWithLock(lockElement), DeadlockTime, VictimSqlText: null, VictimQueryPlanXml: null),
+        };
+
+        var details = DeadlockGraphProcessParser.Parse<DeadlockProcessInfo>(input);
+
+        var waiter = details.Single(d => d.Spid == 81);
+        Assert.Equal("X", waiter.WaiterMode);
+        Assert.Equal("0:[Queue]:(a1b2c3d4)", waiter.ObjectNames);
+
+        var owner = details.Single(d => d.Spid == 82);
+        Assert.Equal("X", owner.OwnerMode);
+        Assert.Equal("0:[Queue]:(a1b2c3d4)", owner.ObjectNames);
+    }
 }

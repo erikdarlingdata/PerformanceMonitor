@@ -354,9 +354,9 @@ public sealed class PgIndexBloatGridReachTests
             var prose = page.Composition;
 
             Assert.Contains(
-                N(answerlessInGrid) + " index(es) with NO answer", prose, StringComparison.Ordinal);
+                N(answerlessInGrid) + (answerlessInGrid == 1 ? " index" : " indexes") + " with NO answer", prose, StringComparison.Ordinal);
             Assert.Contains(
-                N(answeredInGrid) + " answered index(es) behind them", prose, StringComparison.Ordinal);
+                N(answeredInGrid) + (answeredInGrid == 1 ? " answered index" : " answered indexes") + " behind " + (answerlessInGrid == 1 ? "it" : "them") + " ranked by reclaimable bytes", prose, StringComparison.Ordinal);
 
             /* CLOSED: no other number may appear. Each permitted figure is either a count of the grid, a
                count of a READ that the sentence labels as one, or the cap the grid was given.
@@ -401,13 +401,33 @@ public sealed class PgIndexBloatGridReachTests
             {
                 Assert.Equal(cap, page.AnswerlessShown + page.AnsweredShown);
                 Assert.Contains(
-                    "took " + N(answeredInGrid) + " of the " + N(cap) + " row(s)",
+                    "took " + N(answeredInGrid) + " of the " + N(cap) + (cap == 1 ? " row" : " rows"),
                     prose,
                     StringComparison.Ordinal);
                 Assert.Contains(
                     "CUT at " + N(answerlessInGrid) + " of the ", prose, StringComparison.Ordinal);
             }
         }
+    }
+
+    /// <summary>One answerless index and one answered index past the grid: the prose says "behind it", "ranks below" and
+    /// "is not in the grid", where the many-case says "behind them", "rank below" and "are not in the grid".</summary>
+    [Fact]
+    public void TheProseReadsSingular_ForOneAnswerlessIndexAndOneAnsweredIndexPastTheGrid()
+    {
+        var cap = ViewerRowCap();
+        var (leading, answered) = Reads(1, cap, cap);
+        var page = Compose(leading, answered, cap);
+
+        Assert.Equal(1, page.AnswerlessShown);
+        Assert.Equal(cap - 1, page.AnsweredShown);
+        Assert.Equal(1, page.AnsweredNotShown);
+        Assert.Contains(
+            "THIS GRID holds 1 index with NO answer, listed first, and " + N(cap - 1) + " answered indexes behind it ranked by reclaimable bytes",
+            page.Composition, StringComparison.Ordinal);
+        Assert.Contains(
+            "1 further answered index this read returned ranks below the ones shown and is not in the grid.",
+            page.Composition, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -481,7 +501,7 @@ public sealed class PgIndexBloatGridReachTests
         /* AND THE DEFAULT PANEL IS UNTOUCHED. Reach, not order: the panel that leads with the gaps must not
            have acquired the filter, or this change hid what #3278 exists to show.
 
-           Scoped to that panel's OWN descriptor - its title through the close of its table() call - and not
+           Scoped to that panel's OWN descriptor - its title through the close of its tablePanel() call - and not
            to the text between the two titles, which contains the design comment explaining the filter and
            would satisfy this assertion by accident. */
         var estimated = tabs.IndexOf("\"Index Bloat (estimated)\"", StringComparison.Ordinal);
@@ -544,7 +564,7 @@ public sealed class PgIndexBloatGridReachTests
         var fanout = tabs[composite..(fanoutEnd > 0 ? fanoutEnd : tabs.Length)];
 
         Assert.Contains("getPath(res.data, spec.noteKey)", fanout, StringComparison.Ordinal);
-        Assert.Contains("noticeStrip(note)", fanout, StringComparison.Ordinal);
+        Assert.Contains("noteStrip(spec, note, res.data)", fanout, StringComparison.Ordinal);
     }
 
     /// <summary>

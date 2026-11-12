@@ -124,7 +124,7 @@ public partial class RemoteCollectorService
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(cancellationToken);
         using var command = connection.CreateCommand();
-        command.CommandText = LocalDataService.ServerClockSql;
+        command.CommandText = LocalDataService.ServerClockSqlFor(await LocalDataService.ServerPropertiesWithOffsetRelationAsync(connection, storageServerId));
         command.Parameters.Add(new DuckDBParameter { Value = storageServerId });
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);

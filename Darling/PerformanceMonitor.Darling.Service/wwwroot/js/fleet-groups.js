@@ -54,16 +54,44 @@ export function buildTagGroups(forest, cards, sortFn) {
   return groups;
 }
 
+/* The bound on a walk up the tag forest: the desktop rules' TagTreeRules.MaxWalkSteps, far above the four levels the
+   tag writers allow, so it only ever ends a malformed chain. */
+export const MAX_TAG_WALK_STEPS = 64;
+
+/* #7984: tag id -> the names of the tags above it, nearest first, from the forest /api/fleet returns (each tag with its
+   parent_id). A parent id with no row ends the walk, a cycle ends it at the first tag seen twice, and no walk takes more
+   than MAX_TAG_WALK_STEPS steps. Built once per render and handed to cardMatches. */
+export function tagAncestorNames(forest) {
+  const byId = new Map((forest || []).map((t) => [t.id, t]));
+  const names = new Map();
+  for (const t of byId.values()) {
+    const seen = new Set([t.id]);
+    const up = [];
+    let current = t;
+    for (let step = 0; step < MAX_TAG_WALK_STEPS && current.parent_id != null; step++) {
+      const parent = byId.get(current.parent_id);
+      if (!parent || seen.has(parent.id)) break;
+      seen.add(parent.id);
+      up.push(parent.name || "");
+      current = parent;
+    }
+    names.set(t.id, up);
+  }
+  return names;
+}
+
 /* Name/tag filter, matching the desktop apps' ServerOverviewFilter rule: an empty term matches everything,
-   otherwise a case-insensitive substring of the display name, the instance name, or any of the server's tag
-   names (#2020) — so `prod` finds both sql-prod-01 and everything tagged Production, as on the desktop. */
-export function cardMatches(c, q) {
+   otherwise a case-insensitive substring of the display name, the instance name, any of the server's tag
+   names (#2020), or the name of any tag above one of its tags (#7984, `ancestorNames` from tagAncestorNames) — so
+   `prod` finds sql-prod-01, everything tagged Production and everything tagged under Production, as on the desktop. */
+export function cardMatches(c, q, ancestorNames) {
   const needle = (q || "").trim().toLowerCase();
   if (!needle) return true;
+  const has = (s) => (s || "").toLowerCase().includes(needle);
   return (
-    (c.display_name || "").toLowerCase().includes(needle) ||
-    (c.server_name || "").toLowerCase().includes(needle) ||
-    (c.tags || []).some((t) => (t.name || "").toLowerCase().includes(needle))
+    has(c.display_name) ||
+    has(c.server_name) ||
+    (c.tags || []).some((t) => has(t.name) || ((ancestorNames && ancestorNames.get(t.id)) || []).some(has))
   );
 }
 
@@ -85,7 +113,8 @@ export function cardMatches(c, q) {
  * the term left nothing to show.
  */
 export function sidebarRows(cards, forest, opts) {
-  const matched = cards.filter((c) => cardMatches(c, opts.term));
+  const ancestors = tagAncestorNames(forest || []);
+  const matched = cards.filter((c) => cardMatches(c, opts.term, ancestors));
   const sortFn = opts.sortFn;
   if (!opts.grouped) {
     return { rows: matched.slice().sort(sortFn).map((card) => ({ kind: "server", card, depth: 0 })), empty: matched.length === 0 };

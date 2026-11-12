@@ -391,14 +391,14 @@ public static partial class PgTargetScorer
                 [
                     new()
                     {
-                        Description = "PG_BAD_ACTOR fired for the same queryid — the statement that regressed also holds a large share of the window's execution time",
+                        Description = "PG_BAD_ACTOR fired for the same queryid: the statement that regressed also holds a large share of the window's execution time",
                         /* unmeasured: PlanCoFireBoost, chosen, not measured — see its declaration. */
                         Boost = PlanCoFireBoost,
                         Predicate = facts => SameStatementFired(facts, PgTargetFactKeys.PlanRegression, PgTargetFactKeys.BadActorKeyPrefix),
                     },
                     new()
                     {
-                        Description = "ANOMALY_PG_PLAN_REGRESSION fired — this statement's per-call time moved against its own hour-of-week baseline this window (or, on the cold fallback series, the server's did)",
+                        Description = "ANOMALY_PG_PLAN_REGRESSION fired: this statement's per-call time moved against its own hour-of-week baseline this window (or, on the cold fallback series, the server's did)",
                         /* unmeasured: PlanCoFireBoost, chosen, not measured — see its declaration. */
                         Boost = PlanCoFireBoost,
                         Predicate = PlanRegressionAnomalyCorroborates,
@@ -410,7 +410,7 @@ public static partial class PgTargetScorer
                 [
                     new()
                     {
-                        Description = "PG_PLAN_REGRESSION fired on the same queryid — the plan variance the skewed column explains stepped the statement's per-call time this window",
+                        Description = "PG_PLAN_REGRESSION fired on the same queryid: the plan variance the skewed column explains stepped the statement's per-call time this window",
                         /* unmeasured: ParameterSensitivityCoFireBoost — 0.4 × 1.5 = 0.6, the D5 line. */
                         Boost = ParameterSensitivityCoFireBoost,
                         Predicate = facts => SameStatementFired(facts, PgTargetFactKeys.ParameterSensitivity, PgTargetFactKeys.PlanRegression),
@@ -422,7 +422,7 @@ public static partial class PgTargetScorer
                 [
                     new()
                     {
-                        Description = "PG_BAD_ACTOR or PG_PLAN_REGRESSION fired for the statement behind the top scanned pair — the scan shape has a measured cost this window",
+                        Description = "PG_BAD_ACTOR or PG_PLAN_REGRESSION fired for the statement behind the top scanned pair: the scan shape has a measured cost this window",
                         /* unmeasured: SeqScanCoFireBoost — 0.5 × 1.3 = 0.65, inside the advisory band. */
                         Boost = SeqScanCoFireBoost,
                         Predicate = SeqScanStatementCoFired,

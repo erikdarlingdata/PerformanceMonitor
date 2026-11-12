@@ -60,7 +60,10 @@ public sealed class DailySummaryStitchedRangeTests
         var coverage = new RollupCoverage(
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { [Legacy] = DaysAgo(90), [Successor] = successorFloor },
             new Dictionary<string, DateTime>(StringComparer.Ordinal),
-            RollupAvailability.All);
+            /* #8549: the wait rollup is a different routing from the queries stitch these two compare, and takes the same statement out of
+               byte-identity with the two-argument form by design, so the availability leaves it out. */
+            /* The interval daily's closed-day count (#8549) also changes the hourly tier's text, and has its own live test. */
+            RollupAvailability.All with { WaitStatsDaily = false, QueryGrainIntervalDaily = false });
 
         var windowStart = DaysAgo(10);
         var stitched = DailySummarySql.RangeSqlFor(RetentionTier.Hourly, coverage, windowStart);
@@ -78,7 +81,8 @@ public sealed class DailySummaryStitchedRangeTests
         var coverage = new RollupCoverage(
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { [Legacy] = DaysAgo(80), [Successor] = successorFloor },
             new Dictionary<string, DateTime>(StringComparer.Ordinal),
-            RollupAvailability.All);
+            /* #8549: the interval daily's closed-day count reads the successor half differently, and has its own live test. */
+            RollupAvailability.All with { QueryGrainIntervalDaily = false });
 
         var windowStart = DaysAgo(10);
         var sql = DailySummarySql.RangeSqlFor(RetentionTier.Hourly, coverage, windowStart);
@@ -99,7 +103,10 @@ public sealed class DailySummaryStitchedRangeTests
 
         /* The not-carried ("NOT EXISTS") probe appears TWICE — once per relation name, decision 3 — each
            restricted to its side of F, and each keeps its own ceiling. */
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, "NOT EXISTS").Count);
+        /* #7028: counted inside the queries CTE only (it ends where deadlocks begins): the blocking waits chain that
+           follows (BlockingWaits.HourlyChosenWaitsSql) holds its own NOT EXISTS and UNION ALL. */
+        var queriesCte = sql[sql.IndexOf("queries AS (", StringComparison.Ordinal)..sql.IndexOf("deadlocks AS (", StringComparison.Ordinal)];
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(queriesCte, "NOT EXISTS").Count);
         Assert.Contains($"SELECT 1 FROM collect.{Legacy} AS r", sql, StringComparison.Ordinal);
         Assert.Contains($"SELECT 1 FROM collect.{Successor} AS r", sql, StringComparison.Ordinal);
         Assert.Contains("queries_ceiling_legacy", sql, StringComparison.Ordinal);
@@ -155,7 +162,10 @@ public sealed class DailySummaryStitchedRangeTests
         var coverage = new RollupCoverage(
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { [DailyLegacy] = DaysAgo(200) },
             new Dictionary<string, DateTime>(StringComparer.Ordinal),
-            RollupAvailability.All);
+            /* #8549: the wait rollup is a different routing from the queries stitch these two compare, and takes the same statement out of
+               byte-identity with the two-argument form by design, so the availability leaves it out. */
+            /* The interval daily's closed-day count (#8549) also changes the hourly tier's text, and has its own live test. */
+            RollupAvailability.All with { WaitStatsDaily = false, QueryGrainIntervalDaily = false });
 
         var stitched = DailySummarySql.RangeSqlFor(RetentionTier.Daily, coverage, DaysAgo(10));
         var plain = DailySummarySql.RangeSqlFor(RetentionTier.Daily);
@@ -209,7 +219,10 @@ public sealed class DailySummaryStitchedRangeTests
         Assert.Contains($"FROM collect.{DailySuccessor}", sql, StringComparison.Ordinal);
         Assert.Contains($"bucket >= $2 AND bucket < $3 AND bucket < {literal}", sql, StringComparison.Ordinal);
         Assert.Contains($"bucket >= $2 AND bucket < $3 AND bucket >= {literal}", sql, StringComparison.Ordinal);
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, "NOT EXISTS").Count);
+        /* #7028: counted inside the queries CTE only (it ends where deadlocks begins): the blocking waits chain that
+           follows (BlockingWaits.HourlyChosenWaitsSql) holds its own NOT EXISTS and UNION ALL. */
+        var queriesCte = sql[sql.IndexOf("queries AS (", StringComparison.Ordinal)..sql.IndexOf("deadlocks AS (", StringComparison.Ordinal)];
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(queriesCte, "NOT EXISTS").Count);
         Assert.Contains("queries_ceiling_legacy", sql, StringComparison.Ordinal);
         Assert.Contains("queries_ceiling_successor", sql, StringComparison.Ordinal);
 

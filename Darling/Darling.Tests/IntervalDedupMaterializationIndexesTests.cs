@@ -125,8 +125,8 @@ public sealed class IntervalDedupMaterializationIndexesTests
         var sql = TimescaleSupport.IntervalDedupMaterializationGroupIndexesSql;
 
         Assert.Contains($"ca.view_name = '{TimescaleSupport.QueryStoreStatsIntervalHourlyView}'", sql, StringComparison.Ordinal);
-        Assert.Contains(@"i.indexdef ~ 'USING btree \([a-z_]+, bucket DESC\)$'", sql, StringComparison.Ordinal);
-        Assert.Contains("i.tablename = ca.materialization_hypertable_name", sql, StringComparison.Ordinal);
+        Assert.Contains(@"i.index_def ~ 'USING btree \([a-z_]+, bucket DESC\)$'", sql, StringComparison.Ordinal);
+        Assert.Contains("x.indrelid = mat.relid", sql, StringComparison.Ordinal);
         /* Resolved from the view name, never a hard-coded _materialized_hypertable_N. */
         Assert.DoesNotContain("_materialized_hypertable_", sql, StringComparison.Ordinal);
     }
@@ -191,6 +191,7 @@ public sealed class IntervalDedupMaterializationIndexesTests
 
         /* A settled store: nothing to find, nothing dropped. */
         Assert.Equal(0, await TimescaleSupport.EnsureIntervalDedupMaterializationIndexesAsync(connection, null, ct));
+        Assert.Equal(0, await CountProbeRowsAsync(connection, ct));
 
         /* (2) Plant what an earlier build's CREATE left behind, in TimescaleDB's own name and shape. */
         var planted = matName + "_server_id_bucket_idx";
@@ -202,6 +203,26 @@ public sealed class IntervalDedupMaterializationIndexesTests
 
         Assert.Equal(2, (await IndexDefinitionsAsync(connection, matSchema, matName, ct)).Count);
 
+        /* (2b) The probe statement itself (#7016): it reads the one materialization's indexes through pg_index, so
+           it must still return exactly the planted index (the bucket index never matches the shape), and size
+           the parent index PLUS each chunk's copy of it. An empty materialization has no chunk, so first
+           give it one: the copy is named by TimescaleDB, and the sized total has to grow by it. */
+        var sizeWithoutChunk = await ProbePlantedAsync(connection, planted, ct);
+        await using (var chunk = new NpgsqlCommand(@"
+SELECT _timescaledb_functions.create_chunk(format('%I.%I', $1::text, $2::text)::regclass,
+    jsonb_build_object(d.column_name, jsonb_build_array(1577836800000000::bigint, 1577836800000000::bigint + extract(epoch FROM d.time_interval)::bigint * 1000000)))
+FROM timescaledb_information.dimensions AS d
+WHERE d.hypertable_schema = $1 AND d.hypertable_name = $2 AND d.dimension_type = 'Time'", connection))
+        {
+            chunk.Parameters.AddWithValue(matSchema);
+            chunk.Parameters.AddWithValue(matName);
+            await chunk.ExecuteNonQueryAsync(ct);
+        }
+
+        var sizeWithChunk = await ProbePlantedAsync(connection, planted, ct);
+        Assert.True(sizeWithChunk > sizeWithoutChunk,
+            $"the chunk's copy of the group index should be sized too ({sizeWithoutChunk} -> {sizeWithChunk})");
+
         Assert.Equal(1, await TimescaleSupport.EnsureIntervalDedupMaterializationIndexesAsync(connection, null, ct));
         var afterDrop = await IndexDefinitionsAsync(connection, matSchema, matName, ct);
         var survivor = Assert.Single(afterDrop);
@@ -209,6 +230,7 @@ public sealed class IntervalDedupMaterializationIndexesTests
         Assert.EndsWith("USING btree (bucket DESC)", survivor, StringComparison.Ordinal);
 
         Assert.Equal(0, await TimescaleSupport.EnsureIntervalDedupMaterializationIndexesAsync(connection, null, ct));
+        Assert.Equal(0, await CountProbeRowsAsync(connection, ct));
 
         /* (4) The aggregate still materializes without the group indexes. Fixed instants, not now-relative. */
         var hour = new DateTime(2026, 3, 4, 10, 0, 0, DateTimeKind.Unspecified);
@@ -243,6 +265,32 @@ FROM generate_series(0, 9) AS i CROSS JOIN generate_series(0, 2) AS k", connecti
             /* Ten query_hash groups, one per identity; the child sums L1's deduped counts, never the raw snapshots. */
             Assert.Equal(300L, Convert.ToInt64(await corrected.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture));
         }
+    }
+
+    private static async Task<int> CountProbeRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var rows = 0;
+        await using var command = new NpgsqlCommand(TimescaleSupport.IntervalDedupMaterializationGroupIndexesSql, connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows++;
+        }
+
+        return rows;
+    }
+
+    /// <summary>Runs the probe and returns the sized bytes of the one row, which must be the named index.</summary>
+    private static async Task<long> ProbePlantedAsync(NpgsqlConnection connection, string expectedIndex, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(TimescaleSupport.IntervalDedupMaterializationGroupIndexesSql, connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct), "the planted group index should be found");
+        Assert.Equal(expectedIndex, reader.GetString(1));
+        Assert.Contains("USING btree (server_id, bucket DESC)", reader.GetString(2), StringComparison.Ordinal);
+        var bytes = Convert.ToInt64(reader.GetValue(3), System.Globalization.CultureInfo.InvariantCulture);
+        Assert.False(await reader.ReadAsync(ct), "only the group index matches, never the bucket index");
+        return bytes;
     }
 
     private static async Task<(string Schema, string Name)> MaterializationOfAsync(NpgsqlConnection connection, string view, CancellationToken ct)

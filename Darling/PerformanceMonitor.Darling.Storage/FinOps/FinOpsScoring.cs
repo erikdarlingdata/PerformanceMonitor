@@ -56,9 +56,10 @@ public static class FinOpsHealthCalculator
 
     /// <summary>The tooltip on the dash shown in place of a health score when the last 24 hours hold no CPU sample.</summary>
     public const string NoScoreNote = "No health score: the last 24 hours hold no CPU sample.";
-    /// <summary>The tooltip on the dash shown in place of a health score on the Server Inventory. That score is null for two reasons: the last 24 hours hold no
-    /// CPU sample, or no memory sample has been collected (memory_stats off in the schedule, or not yet run on a new server). The row does not say which,
-    /// so the note names both. The Utilization view keeps <see cref="NoScoreNote"/>: it has no row at all without a memory sample.</summary>
+    /// <summary>The note on an MCP Server Inventory row with no health score. That score is null for two reasons: the last 24 hours hold no
+    /// CPU sample, or no memory sample has been collected (memory_stats off in the schedule, or not yet run on a new server), and the note
+    /// names both. The Viewer's grid names the one that applies (<see cref="PerformanceMonitor.Common.ProvisioningVerdict.NoHealthScoreNote"/>).
+    /// The Utilization view keeps <see cref="NoScoreNote"/>: it has no row at all without a memory sample.</summary>
     public const string NoInventoryScoreNote = "No health score: the last 24 hours hold no CPU sample, or no memory sample has been collected.";
 
     public static string ScoreColor(int score) => score switch
@@ -88,7 +89,7 @@ public static class HighImpactScorer
         foreach (var hash in allRows.OrderByDescending(r => r.TotalDurationMs).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
         foreach (var hash in allRows.OrderByDescending(r => r.TotalReads).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
         foreach (var hash in allRows.OrderByDescending(r => r.TotalWrites).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
-        foreach (var hash in allRows.OrderByDescending(r => r.TotalMemoryMb).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
+        foreach (var hash in allRows.OrderByDescending(r => r.PeakMemoryMb).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
         foreach (var hash in allRows.OrderByDescending(r => r.TotalExecutions).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
 
         var filtered = allRows.Where(r => interesting.Contains(r.QueryHash)).ToList();
@@ -99,14 +100,14 @@ public static class HighImpactScorer
         var durationValues = filtered.Select(r => r.TotalDurationMs).OrderBy(v => v).ToList();
         var readsValues = filtered.Select(r => (decimal)r.TotalReads).OrderBy(v => v).ToList();
         var writesValues = filtered.Select(r => (decimal)r.TotalWrites).OrderBy(v => v).ToList();
-        var memoryValues = filtered.Select(r => r.TotalMemoryMb).OrderBy(v => v).ToList();
+        var memoryValues = filtered.Select(r => r.PeakMemoryMb).OrderBy(v => v).ToList();
         var execValues = filtered.Select(r => (decimal)r.TotalExecutions).OrderBy(v => v).ToList();
 
         var totalCpu = filtered.Sum(r => r.TotalCpuMs);
         var totalDuration = filtered.Sum(r => r.TotalDurationMs);
         var totalReads = filtered.Sum(r => (decimal)r.TotalReads);
         var totalWrites = filtered.Sum(r => (decimal)r.TotalWrites);
-        var totalMemory = filtered.Sum(r => r.TotalMemoryMb);
+        var totalMemory = filtered.Sum(r => r.PeakMemoryMb);
         var totalExecs = filtered.Sum(r => (decimal)r.TotalExecutions);
 
         foreach (var row in filtered)
@@ -115,14 +116,14 @@ public static class HighImpactScorer
             var durationPctl = PercentRank(durationValues, row.TotalDurationMs);
             var readsPctl = PercentRank(readsValues, (decimal)row.TotalReads);
             var writesPctl = PercentRank(writesValues, (decimal)row.TotalWrites);
-            var memoryPctl = PercentRank(memoryValues, row.TotalMemoryMb);
+            var memoryPctl = PercentRank(memoryValues, row.PeakMemoryMb);
             var execsPctl = PercentRank(execValues, (decimal)row.TotalExecutions);
 
             row.CpuShare = totalCpu > 0 ? Math.Round(100m * row.TotalCpuMs / totalCpu, 1) : 0;
             row.DurationShare = totalDuration > 0 ? Math.Round(100m * row.TotalDurationMs / totalDuration, 1) : 0;
             row.ReadsShare = totalReads > 0 ? Math.Round(100m * row.TotalReads / totalReads, 1) : 0;
             row.WritesShare = totalWrites > 0 ? Math.Round(100m * row.TotalWrites / totalWrites, 1) : 0;
-            row.MemoryShare = totalMemory > 0 ? Math.Round(100m * row.TotalMemoryMb / totalMemory, 1) : 0;
+            row.MemoryShare = totalMemory > 0 ? Math.Round(100m * row.PeakMemoryMb / totalMemory, 1) : 0;
             row.ExecutionsShare = totalExecs > 0 ? Math.Round(100m * row.TotalExecutions / totalExecs, 1) : 0;
 
             var pctlSum = cpuPctl + durationPctl + readsPctl + writesPctl + memoryPctl + execsPctl;

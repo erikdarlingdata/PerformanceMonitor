@@ -426,6 +426,53 @@ public sealed class RollupFloorCacheTests
         Assert.DoesNotContain("min(collection_time)", sql, StringComparison.Ordinal);
     }
 
+    /* ─────────────────────────── the ceilings a probe reports (#7240) ─────────────────────────── */
+
+    [Fact]
+    public void ComposeRollupCeilings_AFloorServedFromTheCacheWithAStaleCeiling_ReportsTheWatermarkReadNow()
+    {
+        /* The floor is two hours old, so it is served as it stands and queued to the drain, and the ceiling cached with it is
+           eighteen hours behind. The probe still reports the watermark it read this time. */
+        var staleCeiling = Now.AddHours(-18);
+        var freshCeiling = Now.AddHours(-1);
+        var held = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
+        {
+            [TimescaleSupport.QueryStatsIoHourlyView] = Entry("_hyper_1_1_chunk", SomeFloor, Now.AddHours(-2)) with { Ceiling = staleCeiling },
+        };
+        var fresh = new Dictionary<string, DateTime>(StringComparer.Ordinal)
+        {
+            [TimescaleSupport.QueryStatsIoHourlyView] = freshCeiling,
+        };
+
+        var ceilings = TimescaleSupport.ComposeRollupCeilings(held, fresh);
+
+        Assert.Equal(freshCeiling, ceilings[TimescaleSupport.QueryStatsIoHourlyView]);
+    }
+
+    [Fact]
+    public void ComposeRollupCeilings_TheWatermarkReadFailed_ReportsTheCachedCeilingForAnyViewWithoutAWatermark()
+    {
+        var cachedCeiling = Now.AddHours(-5);
+        var held = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
+        {
+            [TimescaleSupport.QueryStatsIoHourlyView] = Entry("_hyper_1_1_chunk", SomeFloor, Now.AddHours(-2)) with { Ceiling = cachedCeiling },
+            [TimescaleSupport.ProcedureStatsIoHourlyView] = Entry("_hyper_1_2_chunk", SomeFloor),
+        };
+
+        var wholeStatementFailed = TimescaleSupport.ComposeRollupCeilings(held, fresh: null);
+        Assert.Equal(cachedCeiling, wholeStatementFailed[TimescaleSupport.QueryStatsIoHourlyView]);
+        Assert.False(wholeStatementFailed.ContainsKey(TimescaleSupport.ProcedureStatsIoHourlyView));
+
+        /* One view without a watermark in the answer keeps its cached ceiling while the other takes the fresh one. */
+        var freshProcedures = Now.AddHours(-1);
+        var oneViewMissing = TimescaleSupport.ComposeRollupCeilings(held, new Dictionary<string, DateTime>(StringComparer.Ordinal)
+        {
+            [TimescaleSupport.ProcedureStatsIoHourlyView] = freshProcedures,
+        });
+        Assert.Equal(cachedCeiling, oneViewMissing[TimescaleSupport.QueryStatsIoHourlyView]);
+        Assert.Equal(freshProcedures, oneViewMissing[TimescaleSupport.ProcedureStatsIoHourlyView]);
+    }
+
     /// <summary>Every view a cycle does not serve as it stands: <see cref="TimescaleSupport.PlanRollupFloorMeasurements"/>'s
     /// Inline and Background sets together (#5808 removed the production wrapper that did this).</summary>
     private static IReadOnlySet<string> FloorsToMeasure(

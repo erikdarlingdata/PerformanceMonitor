@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Diagnostics;
 using System.Globalization;
 using System.Threading;
@@ -158,6 +159,57 @@ internal static class OversizedPlanBacklogSweep
     internal const int MaxPlansPerServerPerTick = 10;
 
     /// <summary>
+    /// #8404: the most rows a day of passes can take off one server's backlog when every pass finishes inside
+    /// <see cref="SweepInterval"/>: <see cref="MaxPlansPerServerPerTick"/> times the passes a day holds at that interval.
+    /// The claim bounds captured plus expired together, so this bounds the day's DRAIN, not captures alone. It is the
+    /// interval's ceiling, not the reachable figure: the worker launches a pass only after the previous one has
+    /// finished, so a pass that overruns its interval costs the next slot, and the passes that ran in a day can sit
+    /// below the interval's count. <c>get_oversized_plan_backlog</c> reports this beside <see cref="ReachableRowsPerServer"/>
+    /// for the passes its run records show. Derived from the two constants, so it moves with them.
+    /// </summary>
+    internal static int RowsPerServerPerDayCeiling => MaxPlansPerServerPerTick * (int)(TimeSpan.FromDays(1) / SweepInterval);
+
+    /// <summary>
+    /// #8404: the most rows the given number of passes could have taken off one server's backlog, each pass claiming at
+    /// most <see cref="MaxPlansPerServerPerTick"/>, captured and expired together. The figure a day's drain is held
+    /// against, for the passes that FINISHED in the day: the run record is written when a pass ends and captures are
+    /// stamped during it, so a pass in flight adds up to one claim to the drain with no record yet. The count is
+    /// store-wide and includes passes that reached no server, so this is an upper bound; a server drained at or near
+    /// it with pending rows waiting was at the cap for those passes, and with no pass finished nothing reads against it.
+    /// </summary>
+    internal static int ReachableRowsPerServer(int passes) => passes * MaxPlansPerServerPerTick;
+
+    /// <summary>
+    /// #8567: the most never-tried pending rows one server keeps: what <see cref="RowsPerServerPerDayCeiling"/> drains
+    /// in one retention period (<see cref="DarlingRetention.OversizedPlanBacklogRetentionDays"/>), 960 a day for 30
+    /// days, 28,800. Each pass drops the least recently sighted rows past it unfetched
+    /// (<c>OversizedPlanBacklog.DropOverCapSql</c>). Derived from the two figures, so it moves with either.
+    ///
+    /// <para>It does not slow or widen the drain: <see cref="MaxPlansPerServerPerTick"/> is still what one pass
+    /// fetches. It bounds what waits, so a server whose over-cap plans arrive faster than that ceiling stops
+    /// accumulating rows the claim's largest-first order would never reach.</para>
+    /// </summary>
+    internal static int PendingRowsPerServerCap =>
+        RowsPerServerPerDayCeiling * DarlingRetention.OversizedPlanBacklogRetentionDays;
+
+    /// <summary>
+    /// #8567: the most rows one trim statement drops for one server in one pass. A server far over what a pass can
+    /// usefully keep is brought down over several passes rather than in one statement, so no trim approaches
+    /// <c>OversizedPlanBacklog.CommandTimeoutSeconds</c> and none writes more than this many narrow rows at once.
+    /// Twenty thousand is about forty times the most one server was measured adding between two passes, so the trim
+    /// gains on any arrival seen, and a server holding three hundred thousand stale rows is clear in fifteen passes.
+    /// </summary>
+    internal const int MaxRowsDroppedPerServerPerTick = 20_000;
+
+    /// <summary>
+    /// #8567: the day <c>get_oversized_plan_backlog</c> counts <c>rows_dropped_last_day</c> over. Since #8691 it is how long the
+    /// trim keeps its per-hour drop counts (<c>OversizedPlanBacklog.PurgeDropCountsSql</c>), and how long a row an older build
+    /// dropped and held stays in the table (<c>OversizedPlanBacklog.PurgeDroppedSql</c>), so every drop of that day is still
+    /// there to count and none outlives it.
+    /// </summary>
+    internal static readonly TimeSpan DroppedRowHold = TimeSpan.FromDays(1);
+
+    /// <summary>
     /// WALL-CLOCK ceiling for one plan's fetch — connect, execute AND drain. It is the binding constraint,
     /// for the reason <c>ICollectorSchemaInfo.PerItemWallClockBudget</c> records: a command timeout bounds the
     /// wait for a network read and SqlClient RESETS it on every read that arrives, so a large result that
@@ -259,6 +311,15 @@ WHERE tqp.query_plan IS NOT NULL;";
         /// <summary>Fetches that could not complete. The rows stay claimable, so this is a retry count.</summary>
         internal int FetchFailures { get; set; }
 
+        /// <summary>#8567: never-tried rows dropped unfetched because a newer sighting of the same query is waiting.</summary>
+        internal int RowsSuperseded { get; set; }
+
+        /// <summary>#8567: never-tried rows dropped unfetched because the server was past <see cref="PendingRowsPerServerCap"/>.</summary>
+        internal int RowsOverCap { get; set; }
+
+        /// <summary>#8567: servers whose trim did not complete. Their claim still ran, on an untrimmed backlog.</summary>
+        internal int TrimFaults { get; set; }
+
         /// <summary>Milliseconds inside <see cref="FetchOnePlanAsync"/> — what <c>sql_duration_ms</c> means.</summary>
         internal long TargetMs { get; set; }
 
@@ -283,20 +344,34 @@ WHERE tqp.query_plan IS NOT NULL;";
     {
         ArgumentNullException.ThrowIfNull(tally);
 
-        var status = tally.FetchFailures == 0 && tally.ServersFaulted == 0 && !tally.Interrupted
+        var status = tally.FetchFailures == 0 && tally.ServersFaulted == 0 && tally.TrimFaults == 0 && !tally.Interrupted
             ? "SUCCESS"
             : "WARNING";
 
         var message =
-            $"Swept {tally.ServersSwept.ToString(CultureInfo.InvariantCulture)} server(s): "
-            + $"{tally.PlansClaimed.ToString(CultureInfo.InvariantCulture)} plan(s) claimed, "
+            $"Swept {CountText.Plural(tally.ServersSwept, "server")}: "
+            + $"{CountText.Plural(tally.PlansClaimed, "plan")} claimed, "
             + $"{tally.PlansCaptured.ToString(CultureInfo.InvariantCulture)} captured, "
             + $"{tally.PlansExpired.ToString(CultureInfo.InvariantCulture)} expired, "
-            + $"{tally.FetchFailures.ToString(CultureInfo.InvariantCulture)} fetch failure(s)";
+            + $"{CountText.Plural(tally.FetchFailures, "fetch failure")}";
+
+        /* #8567: the rows the pass dropped unfetched, with the reason for each, only on a pass that dropped some. */
+        if (tally.RowsSuperseded > 0 || tally.RowsOverCap > 0)
+        {
+            message +=
+                $", {(tally.RowsSuperseded + tally.RowsOverCap).ToString(CultureInfo.InvariantCulture)} dropped unfetched "
+                + $"({tally.RowsSuperseded.ToString(CultureInfo.InvariantCulture)} superseded by a newer sighting of the same query, "
+                + $"{tally.RowsOverCap.ToString(CultureInfo.InvariantCulture)} past the pending cap)";
+        }
+
+        if (tally.TrimFaults > 0)
+        {
+            message += $", the trim did not complete on {CountText.Plural(tally.TrimFaults, "server")}";
+        }
 
         if (tally.ServersFaulted > 0)
         {
-            message += $", {tally.ServersFaulted.ToString(CultureInfo.InvariantCulture)} server(s) faulted (see prior warnings)";
+            message += $", {CountText.Plural(tally.ServersFaulted, "server")} faulted (see prior warnings)";
         }
 
         if (tally.Interrupted)
@@ -465,7 +540,7 @@ WHERE tqp.query_plan IS NOT NULL;";
         ILogger? logger,
         CancellationToken cancellationToken)
     {
-        var pending = await ClaimAsync(postgres, server.ServerId, cancellationToken).ConfigureAwait(false);
+        var pending = await ClaimAsync(postgres, server.ServerId, cancellationToken, tally, logger).ConfigureAwait(false);
         tally.PlansClaimed += pending.Count;
 
         /* #4348: one standalone scrub session per batch (a pass over one server's claimed plans), so the 15-second
@@ -548,18 +623,34 @@ WHERE tqp.query_plan IS NOT NULL;";
     }
 
     /// <summary>
-    /// This server's next few un-captured rows, oldest ATTEMPT first. Reads only; the claim takes no lock and
-    /// marks nothing, because the sweep is the single writer on this path and a lock held across a
-    /// target fetch is the one shape a bound must never take.
+    /// One server's step before any fetch: the trim (<see cref="TrimAsync"/>), then this server's next few
+    /// un-captured rows, oldest ATTEMPT first, on one store connection. The trim's statements each commit on
+    /// their own before the claim reads, and the claim itself reads only: it takes no lock and marks nothing,
+    /// because the sweep is the single writer on this path and a lock held across a target fetch is the one
+    /// shape a bound must never take.
     /// </summary>
+    /// <param name="tally">The pass's tally, which takes the trim's counts. Null when no pass is being recorded.</param>
     internal static async Task<List<OversizedPlanBacklog.PendingPlan>> ClaimAsync(
         NpgsqlDataSource postgres,
         int serverId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        SweepTally? tally = null,
+        ILogger? logger = null)
     {
         var claimed = new List<OversizedPlanBacklog.PendingPlan>(MaxPlansPerServerPerTick);
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+
+        await TrimAsync(connection, serverId, DateTime.UtcNow, tally, logger, cancellationToken).ConfigureAwait(false);
+
+        /* A trim that failed can leave the connection closed. The claim does not depend on the trim, so it gets
+           an open one either way. */
+        if (connection.State != ConnectionState.Open)
+        {
+            await connection.CloseAsync().ConfigureAwait(false);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         await using var command = new NpgsqlCommand(
             OversizedPlanBacklog.ClaimSql(MaxPlansPerServerPerTick), connection)
         {
@@ -586,6 +677,116 @@ WHERE tqp.query_plan IS NOT NULL;";
         }
 
         return claimed;
+    }
+
+    /// <summary>
+    /// #8567: holds one server's waiting rows to what the claim can serve, before the claim reads them. Four
+    /// statements, each its own transaction: remove the rows an older build dropped and held more than <see cref="DroppedRowHold"/>
+    /// ago, remove the drop counts older than that (#8691), drop every never-tried row last sighted before the newest sighting of
+    /// its query, then drop the least recently sighted never-tried rows past <see cref="PendingRowsPerServerCap"/>. A drop deletes
+    /// the row and adds it to the hour's count in the same statement (#8691), so the read counts the day's drops without the
+    /// rows, and a later sighting of the plan inserts it again.
+    ///
+    /// <para>Never throws, short of a shutdown: a trim that fails is counted on the tally, which makes the pass's
+    /// run record a WARNING that says so, and the claim then runs on the backlog as it stands. Reaches no
+    /// monitored server.</para>
+    /// </summary>
+    /// <param name="connection">The claim's open store connection.</param>
+    /// <param name="utcNow">The pass's clock: the stamp a dropped row takes, and what the hold is measured back from.</param>
+    internal static async Task TrimAsync(
+        NpgsqlConnection connection,
+        int serverId,
+        DateTime utcNow,
+        SweepTally? tally,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        /* Naive-UTC storage — see PgCollectorRowWriter. */
+        var now = DateTime.SpecifyKind(utcNow, DateTimeKind.Unspecified);
+
+        try
+        {
+            await using (var purge = new NpgsqlCommand(OversizedPlanBacklog.PurgeDroppedSql, connection)
+            {
+                CommandTimeout = OversizedPlanBacklog.CommandTimeoutSeconds,
+            })
+            {
+                purge.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+                purge.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now - DroppedRowHold });
+                await purge.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using (var purgeCounts = new NpgsqlCommand(OversizedPlanBacklog.PurgeDropCountsSql, connection)
+            {
+                CommandTimeout = OversizedPlanBacklog.CommandTimeoutSeconds,
+            })
+            {
+                purgeCounts.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now - DroppedRowHold });
+                await purgeCounts.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            int superseded;
+            await using (var supersede = new NpgsqlCommand(OversizedPlanBacklog.SupersedeSql, connection)
+            {
+                CommandTimeout = OversizedPlanBacklog.CommandTimeoutSeconds,
+            })
+            {
+                supersede.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+                supersede.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now });
+                supersede.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now - DroppedRowHold });
+                supersede.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = MaxRowsDroppedPerServerPerTick });
+                superseded = Convert.ToInt32(await supersede.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
+            }
+
+            if (tally is not null)
+            {
+                tally.RowsSuperseded += superseded;
+            }
+
+            /* The cap is held against rows that are each the newest sighting of their query. A supersede that
+               stopped at its limit has more of them to drop, so the cap waits for a pass where it did not: cutting
+               by sighting age first would drop a query's only row while another query's stale re-keys stayed. */
+            var overCap = 0;
+            if (superseded < MaxRowsDroppedPerServerPerTick)
+            {
+                await using var cap = new NpgsqlCommand(OversizedPlanBacklog.DropOverCapSql, connection)
+                {
+                    CommandTimeout = OversizedPlanBacklog.CommandTimeoutSeconds,
+                };
+
+                cap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+                cap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now });
+                cap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now - DroppedRowHold });
+                cap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = PendingRowsPerServerCap });
+                cap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = MaxRowsDroppedPerServerPerTick });
+                overCap = Convert.ToInt32(await cap.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
+            }
+
+            if (tally is not null)
+            {
+                tally.RowsOverCap += overCap;
+            }
+
+            if (superseded > 0 || overCap > 0)
+            {
+                logger?.LogInformation(
+                    "Oversized-plan backlog: dropped {Superseded} pending row(s) on server {ServerId} unfetched for a newer sighting of the same query and {OverCap} past the {Cap}-row pending cap (#8567)",
+                    superseded, serverId, overCap, PendingRowsPerServerCap);
+            }
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            /* Isolated, so a store fault in the trim costs this pass the trim and not the claim. A shutdown is not
+               a fault and is not caught: the pass's own handler ends the pass on it. */
+            if (tally is not null)
+            {
+                tally.TrimFaults++;
+            }
+
+            logger?.LogDebug(
+                "Oversized-plan backlog: the trim on server {ServerId} did not complete: {Message} (#8567)",
+                serverId, ex.Message);
+        }
     }
 
     /// <summary>

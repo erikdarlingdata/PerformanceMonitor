@@ -9,6 +9,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -52,7 +53,7 @@ public static partial class PgTargetAdvice
         if (spill is null)
         {
             return new AdviceBlock(
-                Headline: "Temp-file spill — sorts and hashes are exceeding work_mem and writing to disk",
+                Headline: "Temp-file spill: sorts and hashes are exceeding work_mem and writing to disk",
                 Investigation:
                     "When a sort, hash or materialize node's working set exceeds work_mem, PostgreSQL writes the overflow to " +
                     "temp files under pgsql_tmp, and pg_stat_database counts every such file and byte per database " +
@@ -80,12 +81,12 @@ public static partial class PgTargetAdvice
         if (spill is null || spill.BaseSeverity <= 0)
         {
             return new AdviceBlock(
-                Headline: $"work_mem is {stated} — a value alone is not a finding",
+                Headline: $"work_mem is {stated}: a value alone is not a finding",
                 Investigation:
                     "`work_mem` is evidence-gated (D5): there is no right value without the workload, and raising it on a " +
                     "convention is the classic overcommit path, because it is allocated per sort or hash node per backend. " +
-                    "This card exists only as the leaf of a PG_TEMP_SPILL story — temp files written at or above the floor " +
-                    "over the observed window — and roots nothing on its own. " + (knob is null
+                    "This card exists only as the leaf of a PG_TEMP_SPILL story (temp files written at or above the floor " +
+                    "over the observed window), and roots nothing on its own. " + (knob is null
                         ? "The setting was not read this pass."
                         : $"On this host it is {stated}" + (knob.Value <= PgTargetScorer.WorkMemBootValMb ? ", the shipped default." : ".")),
                 Remediation:
@@ -104,7 +105,7 @@ public static partial class PgTargetAdvice
         var bytes = spill.Metadata.GetValueOrDefault(PgTargetScorer.TempSpillBytesKey);
         var files = spill.Metadata.GetValueOrDefault(PgTargetScorer.TempSpillFilesKey);
         var sb = new StringBuilder(160);
-        sb.Append("Temp-file spill: ").Append(RatePerSec(spill.Value)).Append(" of observed time — ")
+        sb.Append("Temp-file spill: ").Append(RatePerSec(spill.Value)).Append(" of observed time, ")
           .Append(KnobBytes(bytes)).Append(" across ").Append(TempCount(files)).Append(" temp files in the window");
         if (!string.IsNullOrEmpty(spill.DatabaseName))
         {
@@ -125,7 +126,7 @@ public static partial class PgTargetAdvice
         sb.Append("When a sort, hash or materialize node's working set exceeds `work_mem`, PostgreSQL writes the overflow to temp " +
                   "files under pgsql_tmp; pg_stat_database counts every such file and byte per database. Over ")
           .Append(TempHours(observedHours)).Append(" of observed time this server wrote ")
-          .Append(KnobBytes(bytes)).Append(" in ").Append(TempCount(files)).Append(" temp files — ")
+          .Append(KnobBytes(bytes)).Append(" in ").Append(TempCount(files)).Append(" temp files: ")
           .Append(RatePerSec(spill.Value)).Append(", ")
           .Append(spill.Metadata.GetValueOrDefault(PgTargetScorer.TempSpillFilesPerSecKey).ToString("0.###", CultureInfo.InvariantCulture))
           .Append(" files/s, an average of ")
@@ -147,15 +148,15 @@ public static partial class PgTargetAdvice
           .Append(" intervals");
         if (resets > 0 || rewinds > 0)
         {
-            sb.Append("; the counters were reset ").Append(TempCount(resets)).Append(" time(s) in the window (")
-              .Append(TempCount(rewinds)).Append(" rewind(s) seen), each clamped to zero rather than read as a negative rate, so the total under-counts by the clamped intervals");
+            sb.Append("; the counters were reset ").Append(CountText.Plural((long)resets, "time")).Append(" in the window (")
+              .Append(CountText.Plural((long)rewinds, "rewind")).Append(" seen), each clamped to zero rather than read as a negative rate, so the total under-counts by the clamped intervals");
         }
 
         sb.Append(". ");
 
         sb.Append("The floor this fact fired at (")
           .Append(RatePerSec(PgTargetScorer.TempSpillConcerningBytesPerSec))
-          .Append(") is fleet-measured — about the 99.7th percentile of the measured fleet's five-minute spill rates (threshold_lineage = 1); the baseline-relative comparison " +
+          .Append(") is fleet-measured, about the 99.7th percentile of the measured fleet's five-minute spill rates (threshold_lineage = 1); the baseline-relative comparison " +
                   "against this database's own hour-of-week temp rate is the later slice. ");
 
         sb.Append(WorkMemStatement(knob, spill));
@@ -174,7 +175,7 @@ public static partial class PgTargetAdvice
             ? knob.Value * 1024 * 1024
             : KnobMeta(spill, PgTargetScorer.TempSpillWorkMemBytesKey);
         if (workMemBytes is null)
-            return "work_mem on this host is not known here — the config snapshot has not been collected — so the per-sort budget these files exceeded cannot be stated.";
+            return "work_mem on this host is not known here (the config snapshot has not been collected), so the per-sort budget these files exceeded cannot be stated.";
 
         var sb = new StringBuilder(240);
         sb.Append("work_mem on this host is ").Append(KnobBytes(workMemBytes.Value));
@@ -191,7 +192,7 @@ public static partial class PgTargetAdvice
                   "blocks, and a sort that can be avoided (a different join order, a narrower sort key, an existing index " +
                   "that returns rows in the order asked for) or a hash whose estimate was wrong is fixed at the statement. " +
                   "For a statement that legitimately needs more, set work_mem for that session, role or function (SET LOCAL " +
-                  "work_mem inside the transaction) — targeted, and without the global multiplier. ");
+                  "work_mem inside the transaction): targeted, and without the global multiplier. ");
 
         var workMemBytes = knob is not null
             ? knob.Value * 1024 * 1024
@@ -230,7 +231,7 @@ public static partial class PgTargetAdvice
     private static string TempHours(double hours) => hours switch
     {
         < 1 => $"{hours * 60:0} minutes",
-        < 48 => $"{hours:0.#} hours",
-        _ => $"{hours / 24:0.#} days",
+        < 48 => $"{hours:#,##0.#} hours",
+        _ => $"{hours / 24:#,##0.#} days",
     };
 }

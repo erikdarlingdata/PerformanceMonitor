@@ -57,7 +57,7 @@ public sealed partial class DarlingMcpPlanForceTools
     [McpServerTool(Name = "force_query_store_plan"), Description(
         "Agent arm, SQL Server only: forces one Query Store plan for a query on the monitored server (replaces another plan of the query that is forced now). Dry run by default: returns the exact statement and the before state, writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's force_plan switch and remediation login; ships off. " +
         "<<GUIDE>>" +
-        "Call get_plan_force_precheck first and weigh its warnings; it only warns. This tool blocks only a call that cannot do anything: plan_not_found (the plan is not among that query's Query Store rows) or plan_already_forced. " +
+        "Call get_plan_force_precheck first and weigh its warnings; it only warns. This tool blocks only a call that cannot do anything: plan_not_collected (no Query Store row Darling collected for that server holds that database_name, query_id and plan_id together: take all three from one get_query_store_top row; the store keeps them for about ten days after the plan was last collected, and the message names the database it does hold the pair for), plan_query_changed (the query behind that query_id on the server is not the one Darling collected the pair for: a restored or re-created database restarts its Query Store ids, so read the query again and pass current ids), plan_not_found (the plan is not among that query's Query Store rows) or plan_already_forced. " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind plan_force) with the plan that was forced before and how (forcing_type MANUAL or AUTO on SQL Server 2022 and later, else unknown), so the way back is known. " +
         "After a write, check with get_forced_plans. Nothing in Darling unforces on its own: unforce_query_store_plan is the way back, and a person can undo a force from the Agent changes list. Answers status dry_run, done, refused (reason) or failed, with before, after, statement and journal_id. A done answer also carries undo: the tool and arguments that put the change back (undoing a force that replaced an AUTO force says that forcing it again makes it manual).")]
     public static Task<string> ForceQueryStorePlan(
@@ -77,7 +77,7 @@ public sealed partial class DarlingMcpPlanForceTools
     [McpServerTool(Name = "unforce_query_store_plan"), Description(
         "Agent arm, SQL Server only: removes the forced plan of one Query Store plan on the monitored server. Dry run by default: returns the exact statement and the before state, writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's force_plan switch and remediation login; ships off. " +
         "<<GUIDE>>" +
-        "Call get_plan_force_precheck first. This tool blocks only a call that cannot do anything: plan_not_found or plan_not_forced. An agent may unforce any force, including one automatic plan correction or a person placed; the change is journaled in Agent changes (kind plan_unforce) with how that plan was forced, so it can be forced again, and a person can undo it from the Agent changes list. " +
+        "Call get_plan_force_precheck first. This tool blocks only a call that cannot do anything: plan_not_collected (that database_name, query_id and plan_id are not together in any Query Store row Darling collected for that server: take all three from one get_query_store_top row), plan_query_changed (the query behind that query_id on the server is not the one Darling collected the pair for), plan_not_found or plan_not_forced. An agent may unforce any force, including one automatic plan correction or a person placed; the change is journaled in Agent changes (kind plan_unforce) with how that plan was forced, so it can be forced again, and a person can undo it from the Agent changes list. " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too. After a write, check with get_forced_plans. Nothing in Darling unforces on its own. Answers status dry_run, done, refused (reason) or failed, with before, after, statement and journal_id. A done answer also carries undo: force_query_store_plan with the same plan (a plan that automatic plan correction forced says that forcing it again makes it manual).")]
     public static Task<string> UnforceQueryStorePlan(
         NpgsqlDataSource postgres,
@@ -96,13 +96,13 @@ public sealed partial class DarlingMcpPlanForceTools
     [McpServerTool(Name = "evict_cached_plan"), Description(
         "Agent arm, SQL Server only: evicts ONE plan handle from the monitored server's plan cache, so the next run compiles a new plan. Dry run by default: returns the exact statement, what Darling collected for that handle and any warnings, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's evict_plan switch and remediation login (with ALTER SERVER STATE); ships off. " +
         "<<GUIDE>>" +
-        "plan_handle is the 0x hex text that get_top_queries_by_cpu and get_procedure_stats return. It evicts every statement of the batch that handle covers; the answer says how many Darling collected. There is no undo: an evicted plan cannot be put back, and the next run compiles a new plan, so a done answer carries undo null. " +
-        "This tool blocks only a call that cannot do anything: bad_plan_handle, evict_unsupported_on_platform (Azure SQL Database), evict_permission_denied (the login lacks ALTER SERVER STATE) or plan_not_cached. A batch of several statements, or a handle Darling never collected, is a warning, not a refusal. " +
+        "plan_handle is the 0x hex text that get_top_queries_by_cpu and get_top_procedures_by_cpu return. It evicts every statement of the batch that handle covers; the answer says how many Darling collected. There is no undo: an evicted plan cannot be put back, and the next run compiles a new plan, so a done answer carries undo null. " +
+        "This tool blocks only a call that cannot do anything: bad_plan_handle, evict_unsupported_on_platform (Azure SQL Database), evict_permission_denied (the remediation login lacks the server-state permission the description names) or plan_not_cached. A batch of several statements, or a handle Darling never collected, is a warning, not a refusal. " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind plan_evict) with the statements Darling collected for the handle. " +
         "After a write, wait for the next query_stats collection (about a minute), then call get_compiles_after_evict with the journal_id to see whether the next compile used the same plan shape. Answers status dry_run, done, refused (reason) or failed, with statement, before, warnings and journal_id.")]
     public static Task<string> EvictCachedPlan(
         NpgsqlDataSource postgres,
-        [Description("The plan_handle (0x and hex) from get_top_queries_by_cpu or get_procedure_stats.")] string plan_handle,
+        [Description("The plan_handle (0x and hex) from get_top_queries_by_cpu or get_top_procedures_by_cpu.")] string plan_handle,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Required: the agent_action object (request_id, claim_id, agent_id, reason, evidence); see the tool guide. The reason is recorded with the change.")] string? agent_action = null,
         [Description("Default true: return the exact statement and what Darling collected, write nothing. Pass false to write.")] bool dry_run = true,
@@ -120,8 +120,8 @@ public sealed partial class DarlingMcpPlanForceTools
         "Azure SQL Database: also pass database_name, the database_name of the get_blocking row you read. A session is reached only from inside its own database, so the kill connects there (never master), read-write, and checks that the session's database is that one. The database must be the server's registered database or one Darling collected a blocking row from in the last day, and not excluded. Hyperscale: the kill reaches only the primary; a session on a named replica or a read-only secondary answers session_gone. " +
         "PostgreSQL: pass backend_id exactly as get_pg_blocking (root_backend_id) or get_pg_session_states (backend_id) returns it, a string of digits, and session_id as the pid the same read returned (root_pid or pid); leave login_time out. backend_id is the session's start time in epoch seconds followed by its pid in seven digits, and session_id must agree with it. The pid and the start second are checked in the SAME statement that calls pg_terminate_backend, so a pid given to a session that started in another second is never ended. On Windows a pid can come back within about a second, so there a new session can share the pid and the start second. A login that cannot signal the session (no pg_signal_backend, a superuser's session, or no pg_read_all_stats to see its start time) is refused before any kill is tried. Only client sessions are ended. " +
         "The tool sets no limit of its own. Whether to kill a running session, an idle one, one with an open transaction, or a login on a protected list is the agent's instruction file's call, not this tool's. " +
-        "On SQL Server the answer lists the session's login_name, host_name, program_name, status, open_transaction_count, last_request_end_time and log_bytes_used (no statement text). If log_bytes_used is above 0 the kill rolls the work back: the session keeps its locks until the rollback ends, so do not kill it again, and read get_blocking to see it clear. After a write, rollback says whether a rollback is running and its percent_complete, read once. On PostgreSQL it lists the backend_id, login_name, application_name, client_addr, database, state, wait_event, backend_type, backend_start, xact_start and state_change (no statement text); ending a session rolls its open transaction back, except a session waiting for a synchronous standby, which has already committed. After a write, still_there says whether the backend was still there when read right after the signal. There is no undo. " +
-        "Refusals: Azure SQL Database only: database_required, database_excluded, database_not_monitored, wrong_database, not_primary, view_state_permission_denied, session_in_other_database, database_unavailable (paused or resuming serverless, nothing sent) fails. Every engine: tool_login_session (a session of Darling itself: its program or application name starts with PerformanceMonitorDarling AND its login is the monitoring or remediation login, or any session of the remediation login), own_session, session_gone, session_reused (the id now belongs to another session; nothing about that session is returned), backend_id_has_no_session_start (PostgreSQL: the id holds the server's start time because the monitoring login lacks pg_read_all_stats), not_user_session, kill_permission_denied (SQL Server: the login lacks ALTER ANY CONNECTION), not_permitted (PostgreSQL: the login cannot signal that session; the message names the missing grant), bad_session_id, bad_login_time, bad_backend_id, server_clock_unknown (no clock collected for the server yet), sign_in_not_strong_enough (PostgreSQL: the server does not offer SCRAM-SHA-256 sign-in over TLS, which only a person can change on the server) and search_path_not_pinned (PostgreSQL: the connection did not get the pinned search_path, as when a connection pooler drops the startup options; point the server entry at the server directly). " +
+        "On SQL Server the answer lists the session's login_name, host_name, program_name, database_name (the database it is in now), status, open_transaction_count, last_request_end_time and log_bytes_used (no statement text). If log_bytes_used is above 0 the kill rolls the work back: the session keeps its locks until the rollback ends, so do not kill it again, and read get_blocking to see it clear. After a write, rollback says whether a rollback is running and its percent_complete, read once. On PostgreSQL it lists the backend_id, login_name, application_name, client_addr, database, state, wait_event, backend_type, backend_start, xact_start and state_change (no statement text); ending a session rolls its open transaction back, except a session waiting for a synchronous standby, which has already committed. After a write, still_there says whether the backend was still there when read right after the signal. There is no undo. " +
+        "Refusals: Azure SQL Database only: database_required, database_not_monitored, wrong_database, not_primary, view_state_permission_denied, session_in_other_database, database_unavailable (paused or resuming serverless, nothing sent) fails. SQL Server and Azure SQL Database: database_excluded (the database is excluded in the server's entry: on SQL Server the database the session is in now, read in the same batch as its login_time; on Azure SQL Database the database_name passed), database_changed (the session's running request moved it to another database since the dry run; nothing was killed, dry run it again). SQL Server only: session_database_unknown (the server's entry excludes databases and the remediation login cannot name the session's database, as when VIEW ANY DATABASE is denied; a person grants it, or gives the login a user in that database). Every engine: tool_login_session (a session of Darling itself: its program or application name starts with PerformanceMonitorDarling AND its login is the monitoring or remediation login, or any session of the remediation login), own_session, session_gone, session_reused (the id now belongs to another session; nothing about that session is returned), session_changed (the session ran something new since the dry run: its last request ended at another time on SQL Server, or its transaction or state changed on PostgreSQL; nothing was killed, dry run it again), backend_id_has_no_session_start (PostgreSQL: the id holds the server's start time because the monitoring login lacks pg_read_all_stats), not_user_session, kill_permission_denied (SQL Server: the login lacks ALTER ANY CONNECTION), not_permitted (PostgreSQL: the login cannot signal that session; the message names the missing grant), bad_session_id, bad_login_time, bad_backend_id, server_clock_unknown (no clock collected for the server yet), sign_in_not_strong_enough (PostgreSQL: the server does not offer SCRAM-SHA-256 sign-in over TLS, which only a person can change on the server) and search_path_not_pinned (PostgreSQL: the connection did not get the pinned search_path, as when a connection pooler drops the startup options; point the server entry at the server directly). " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind session_kill). Answers status dry_run, done, refused (reason), failed, or outcome_unknown (the kill was sent and its reply was lost, so the session may have ended; read get_blocking or get_pg_session_states before trying again), with session, warnings, rollback and journal_id.")]
     public static Task<string> KillSession(
         NpgsqlDataSource postgres,
@@ -274,43 +274,29 @@ public sealed partial class DarlingMcpPlanForceTools
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
-            /* 3: the server row through the owner data source, and the executor built from it. */
-            var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
-            if (row is null)
-                return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
+            /* #7109: the gate passed and the action needs a person's approval. A real call runs the prepare step with a dry run, stores a proposal
+               with the binding facts and writes nothing to the server. */
+            var proposing = decision.NeedsApproval && !dry_run;
 
-            /* 3b: a database the server's entry excludes is one Darling does not act in (#5632), the same refusal recompile_module and the plan guide tools make. Refused before the dry run reads anything. */
-            if (IsExcludedDatabase(row.ExcludedDatabases, database_name.Trim()))
-            {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, agentTokenName, ct);
-                return DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database_name.Trim()));
-            }
+            /* 3: the prepare step: the server row, the excluded database, the store's collected rows for the database, query and plan, the before state, the block reason and, on a dry run, the executor's own checks. */
+            var prepared = await PrepareForcePlanAsync(postgres, owner, logger, permit, resolved.ServerId, resolved.DisplayName, force, database_name.Trim(), query_id, plan_id, dry_run || proposing,
+                (reason, token) => store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, reason, agentTokenName, token), ct);
+            if (proposing && prepared.Facts is { } proposed)
+                return await ProposeAsync(owner, utcNow, decision, action!, tool, ServerActionNames.ForcePlan, resolved.ServerId, resolved.DisplayName,
+                    new { database = proposed.Database, query_id = proposed.QueryId, plan_id = proposed.PlanId },
+                    ForcePlanBinding(proposed),
+                    new { statement = proposed.Statement, before = proposed.Before }, ct);
+            if (prepared.Answer is { } preparedAnswer)
+                return preparedAnswer;
+            var facts = prepared.Facts!;
+            var executor = prepared.Executor!;
+            var beforeState = facts.Before;
+            var statement = facts.Statement;
 
-            var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
-
-            /* 4: the before state, read on the server. */
-            var before = await executor.ReadPlanStateAsync(permit, query_id, plan_id, ct);
-            if (before.State is not { } beforeState)
-                return await NotRunAsync(store, action!, tool, before.Outcome, before.Reason, before.Message, agentTokenName, ct);
-
-            if (BlockReason(beforeState, force) is { } block)
-            {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, block.Reason, agentTokenName, ct);
-                return Answer("refused", block.Reason, block.Message, new { dry_run, before = beforeState });
-            }
-
-            var statement = PlanForceStatement.For(beforeState.Database, query_id, plan_id, force);
-
-            /* 5: a dry run runs the executor's own checks and journals nothing. */
-            if (dry_run)
-            {
-                var dry = force
-                    ? await executor.ForcePlanAsync(permit, query_id, plan_id, dryRun: true, ct)
-                    : await executor.UnforcePlanAsync(permit, query_id, plan_id, dryRun: true, ct);
-                return dry.Outcome == RemediationOutcome.Done
-                    ? Answer("dry_run", null, dry.Message, new { dry_run = true, statement = dry.Statement ?? statement, before = beforeState })
-                    : Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message, new { dry_run = true, statement, before = beforeState });
-            }
+            /* The write, the read after it and the journal name the database as the store spells it, which is where the prepare step read the before state:
+               the agent's spelling, when it differs by case alone, is replaced by the permit and the target the prepare step settled on. */
+            var writePermit = prepared.Permit ?? permit;
+            var writeTarget = string.Equals(target.Database, facts.Database, StringComparison.Ordinal) ? target : target with { Database = facts.Database };
 
             /* 6: the write, journaled. */
             PlanForceState? after = null;
@@ -322,13 +308,11 @@ public sealed partial class DarlingMcpPlanForceTools
                 var hooks = new AgentActionHooks
                 {
                     ServerChange = changed,
-                    LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
+                    LoadRoutes = (connection, _, token) => DarlingAgentActionGate.LoadRoutesAsync(connection, logger, token),
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(beforeState)),
                     Write = async (_, _, token) =>
                     {
-                        var written = force
-                            ? await executor.ForcePlanAsync(permit, query_id, plan_id, dryRun: false, token)
-                            : await executor.UnforcePlanAsync(permit, query_id, plan_id, dryRun: false, token);
+                        var written = await WriteForcePlanAsync(executor, writePermit, facts, token);
                         /* The executor says the server accepted the write: from here the store's journal never says failed (#5632, step 13). */
                         if (written.Wrote)
                             changed.MarkServerChanged();
@@ -346,7 +330,7 @@ public sealed partial class DarlingMcpPlanForceTools
                         /* The read after the write is a warning when it fails, not an error for a change that was made (#5632, step 13). */
                         try
                         {
-                            var read = await executor.ReadPlanStateAsync(permit, query_id, plan_id, token);
+                            var read = await executor.ReadPlanStateAsync(writePermit, query_id, plan_id, token);
                             after = read.State;
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -358,7 +342,7 @@ public sealed partial class DarlingMcpPlanForceTools
                         return JsonSerializer.Serialize(new { statement, state = after, message = written.Message });
                     },
                 };
-                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, kind, action!, target, agentTokenName), hooks, ct);
+                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, kind, action!, writeTarget, agentTokenName), hooks, ct);
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
                 if (result.OutcomeUnknown && unknown is not null)
@@ -366,7 +350,7 @@ public sealed partial class DarlingMcpPlanForceTools
                     /* A force whose reply was lost may still have taken effect: read the plan again, and when it is forced, journal action_done late so the
                        post-force checks run. A read that fails or shows it not forced leaves the call as it is, with no result row. */
                     if (force && result.CalledId is long unknownCalled)
-                        await RecordUnknownForceTookEffectAsync(store, executor, permit, logger, action!, resolved.ServerId, unknownCalled, statement, query_id, plan_id);
+                        await RecordUnknownForceTookEffectAsync(store, executor, writePermit, logger, action!, resolved.ServerId, unknownCalled, statement, query_id, plan_id);
                     return Answer("outcome_unknown", null, unknown.Message, new { dry_run = false, statement, before = beforeState, journal_id = result.CalledId });
                 }
 
@@ -389,28 +373,49 @@ public sealed partial class DarlingMcpPlanForceTools
     /// <summary>How long the read after a force with an unknown outcome may take. It has its own token: the call's may be the one that fired.</summary>
     private static readonly TimeSpan UnknownForceReadTimeout = TimeSpan.FromSeconds(30);
 
+    /// <summary>What the journal and the answer say when a force's reply was lost and the plan was then read forced.</summary>
+    internal const string LostForceFoundForcedMessage = "The reply to the force was lost, and the plan was found forced when the server was read again.";
+
     /// <summary>
     /// A forward force was sent and its reply was lost (#5632): the plan may be forced, and a force with no <c>action_done</c> gets no post-force
-    /// checks. Reads the plan's state again with a fresh token (on the executor's own connection, which is a fresh one per call) and, when the plan is
-    /// forced now, journals <c>action_done</c> marked <c>recorded_late</c>, as for a force the store could not record. Best effort: a read or a
-    /// write that fails, or a plan that is not forced, leaves the call with no result row, which reads as "result unknown".
+    /// checks. Reads the plan's state again (<see cref="ReadForcedAfterLostReplyAsync"/>) and, when the plan is forced now, journals
+    /// <c>action_done</c> marked <c>recorded_late</c>, as for a force the store could not record. Best effort: a read or a write that fails, or a
+    /// plan that is not forced, leaves the call with no result row, which reads as "result unknown".
     /// </summary>
     private static async Task RecordUnknownForceTookEffectAsync(InvestigationRequestStore store, SqlServerRemediationExecutor executor, ServerActionPermit permit,
         ILogger logger, AgentAction action, int serverId, long calledId, string statement, long queryId, long planId)
+    {
+        if (await ReadForcedAfterLostReplyAsync(executor, permit, logger, queryId, planId) is not { } state)
+            return;
+        try
+        {
+            var after = JsonSerializer.Serialize(new { statement, state, message = LostForceFoundForcedMessage });
+            await store.RecordForceTookEffectAsync(action.RequestId, serverId, action.AgentId, calledId, after, LostForceFoundForcedMessage);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("The late result of the force of plan {PlanId} for query {QueryId} with an unknown outcome was not journaled: {Message}", planId, queryId, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The read after a forward force whose reply was lost (#5632), shared by the agent's call and an approved proposal's press (#7109): the plan's
+    /// state read again with a fresh token (the call's may be the one that fired), on the executor's own connection, which is a fresh one per call.
+    /// The state when the requested plan is forced now. Null when it is not forced or the read fails, so the outcome stays unknown.
+    /// </summary>
+    internal static async Task<PlanForceState?> ReadForcedAfterLostReplyAsync(SqlServerRemediationExecutor executor, ServerActionPermit permit,
+        ILogger logger, long queryId, long planId)
     {
         try
         {
             using var fresh = new CancellationTokenSource(UnknownForceReadTimeout);
             var read = await executor.ReadPlanStateAsync(permit, queryId, planId, fresh.Token);
-            if (read.State is not { } state || state.RequestedPlan is not { IsForced: true })
-                return;
-            var after = JsonSerializer.Serialize(new { statement, state, message = "The reply to the force was lost; the plan was found forced when the server was read again." });
-            await store.RecordForceTookEffectAsync(action.RequestId, serverId, action.AgentId, calledId, after,
-                "The reply to the force was lost; the plan was found forced when the server was read again.");
+            return read.State is { RequestedPlan.IsForced: true } state ? state : null;
         }
         catch (Exception ex)
         {
             logger.LogWarning("The state read after the force of plan {PlanId} for query {QueryId} with an unknown outcome failed: {Message}", planId, queryId, ex.Message);
+            return null;
         }
     }
 
@@ -458,29 +463,23 @@ public sealed partial class DarlingMcpPlanForceTools
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
-            var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
-            if (row is null)
-                return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
-            var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
-
-            /* 4: the before image comes from the store, not the server: what Darling collected for this handle in the last 24 hours. */
-            var (statements, objectName) = await DarlingPlanEvictStore.ReadBeforeAsync(postgres, resolved.ServerId, handle, DateTime.UtcNow, ct);
-            var warnings = EvictWarnings(statements.Count);
-            var before = new { plan_handle = handle, object_name = objectName, statements };
-            var statement = PlanEvictStatement.For(handle);
-
-            /* 5: the executor's own checks run on a dry run and before a write: edition, the grant, and that the handle is cached now. */
-            var dry = await executor.EvictPlanAsync(permit, handle, dryRun: true, ct);
-            if (dry.Outcome != RemediationOutcome.Done)
-            {
-                if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
-                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, agentTokenName, ct);
-                return Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message,
-                    new { dry_run, statement = dry.Statement ?? statement, before, warnings });
-            }
-
-            if (dry_run)
-                return Answer("dry_run", null, dry.Message + " An eviction has no undo.", new { dry_run = true, statement = dry.Statement ?? statement, before, warnings });
+            /* 4: the prepare step: the server row, the before image from the store (what Darling collected for this handle in the last 24 hours), and the executor's own checks
+               (edition, the grant, and that the handle is cached now). */
+            var proposing = decision.NeedsApproval && !dry_run;
+            var prepared = await PrepareEvictPlanAsync(postgres, owner, logger, permit, resolved.ServerId, resolved.DisplayName, handle, dry_run || proposing,
+                (reason, token) => store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, reason, agentTokenName, token), ct);
+            /* #7109: the action needs a person's approval: store a proposal, write nothing. */
+            if (proposing && prepared.Facts is { } proposed)
+                return await ProposeAsync(owner, utcNow, decision, action!, tool, ServerActionNames.EvictPlan, resolved.ServerId, resolved.DisplayName,
+                    new { plan_handle = proposed.Handle }, EvictPlanBinding(proposed),
+                    new { statement = proposed.Statement, before = proposed.Before, warnings = proposed.Warnings }, ct);
+            if (prepared.Answer is { } preparedAnswer)
+                return preparedAnswer;
+            var facts = prepared.Facts!;
+            var executor = prepared.Executor!;
+            var before = facts.Before;
+            var warnings = facts.Warnings;
+            var statement = facts.Statement;
 
             /* 6: the write, journaled. action_called holds the store's before image; action_done holds the statement and the message. */
             try
@@ -489,11 +488,11 @@ public sealed partial class DarlingMcpPlanForceTools
                 var hooks = new AgentActionHooks
                 {
                     ServerChange = changed,
-                    LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
+                    LoadRoutes = (connection, _, token) => DarlingAgentActionGate.LoadRoutesAsync(connection, logger, token),
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(before, McpHelpers.JsonOptions)),
                     Write = async (_, _, token) =>
                     {
-                        var written = await executor.EvictPlanAsync(permit, handle, dryRun: false, token);
+                        var written = await WriteEvictPlanAsync(executor, permit, facts, token);
                         if (written.Wrote)
                             changed.MarkServerChanged();
                         if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
@@ -582,51 +581,31 @@ public sealed partial class DarlingMcpPlanForceTools
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
-            /* 4: login_time is the engine's own local clock. Without the server's clock Darling cannot say what the UTC value means there, and it does not guess. */
-            var clock = await DarlingServerClockReader.ReadOrNullAsync(postgres, resolved.ServerId, ct);
-            if (clock is null)
-            {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, ServerClockUnknown, agentTokenName, ct);
-                return Answer("refused", ServerClockUnknown,
-                    $"Darling has not collected {resolved.DisplayName}'s clock yet, so it cannot turn login_time into that server's own time. Nothing was run.");
-            }
+            /* 4 to 5: the prepare step (#7108): the server's clock, its settings row, the Azure database checks, and the one batch that decides, for a
+               dry run and before a write: the engine, own session, gone, reused, not a user session, the grant. */
+            var prepared = await PrepareKillSessionAsync(postgres, owner, logger, permit, resolved.ServerId, resolved.DisplayName, azure, sessionId, loginUtc, targetDatabase, ct);
+            if (prepared.RecordReason is not null)
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, prepared.RecordReason, agentTokenName, ct);
+            if (prepared.FixedAnswer is not null)
+                return prepared.FixedAnswer;
+            if (prepared.NotDone is { } notDone)
+                return KillNotDone(notDone, prepared.Clock!, dry_run);
 
-            var loginLocal = clock.ToServerLocal(loginUtc);
-
-            var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
-            if (row is null)
-                return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
-            var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger, row.MonitoringUserName);
-
-            /* 4b: Azure SQL Database. The database is never free-form: it is checked against the registry entry and the collected data. */
-            if (azure)
-            {
-                var refusal = await AzureKillDatabaseAsync(postgres, resolved.ServerId, row, targetDatabase!, ct);
-                if (refusal is not null)
-                {
-                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, refusal.Reason, agentTokenName, ct);
-                    return DarlingAgentActionGate.RefusalAnswer(refusal);
-                }
-            }
-
-            /* The Azure kill reads its database from the permit, the one the gate was asked about. */
-            Task<RemediationResult> Kill(bool dryRun, CancellationToken token) => !azure
-                ? executor.KillSessionAsync(permit, sessionId, loginLocal, dryRun, token)
-                : executor.KillAzureSessionAsync(permit, sessionId, loginLocal, dryRun, token);
-
-            /* 5: one batch decides, for a dry run and before a write: the engine, own session, gone, reused, not a user session, the grant. */
-            var dry = await Kill(true, ct);
-            if (dry.Outcome != RemediationOutcome.Done)
-            {
-                if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
-                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, agentTokenName, ct);
-                return KillNotDone(dry, clock, dry_run);
-            }
-
-            var before = KillSessionImage(dry.Session, clock);
-            var warnings = KillWarnings(dry.Session);
+            var clock = prepared.Clock!;
+            var executor = prepared.Executor!;
+            var binding = prepared.Binding!;
+            var dry = prepared.Dry!;
+            var before = prepared.Before;
+            var warnings = prepared.Warnings;
             if (dry_run)
                 return Answer("dry_run", null, dry.Message + " There is no undo.", new { dry_run = true, session = before, warnings });
+
+            /* #7109: the action needs a person's approval. The prepare step ran the dry batch; store a proposal with its facts and kill nothing. */
+            if (decision.NeedsApproval)
+                return await ProposeAsync(owner, null, decision, action!, tool, ServerActionNames.KillSession, resolved.ServerId, resolved.DisplayName,
+                    new { session_id = sessionId, login_time = loginUtc, database = targetDatabase, azure },
+                    SqlKillBindingObject(binding),
+                    new { session = before, warnings }, ct);
 
             RemediationResult? killed = null;
             RemediationResult? unknown = null;
@@ -639,11 +618,11 @@ public sealed partial class DarlingMcpPlanForceTools
                 var hooks = new AgentActionHooks
                 {
                     ServerChange = changed,
-                    LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
+                    LoadRoutes = (connection, _, token) => DarlingAgentActionGate.LoadRoutesAsync(connection, logger, token),
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(new { session = before }, McpHelpers.JsonOptions)),
                     Write = async (_, _, token) =>
                     {
-                        var written = await Kill(false, token);
+                        var written = await WriteKillSessionAsync(executor, permit, azure, binding, token);
                         if (written.Wrote)
                             changed.MarkServerChanged();
                         if (written.Outcome == RemediationOutcome.Unknown)
@@ -738,24 +717,30 @@ public sealed partial class DarlingMcpPlanForceTools
         var permit = decision.Permit!;
         _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
-        var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
-        if (row is null)
-            return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
-        var executor = new PostgresRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger, row.MonitoringUserName);
+        /* 3: the prepare step (#7108): the settings row, then the read that decides, for a dry run and before a write: gone, own session, start time,
+           reused, client session, and what the login may do. */
+        var prepared = await PrepareKillBackendAsync(owner, logger, permit, resolved.ServerId, resolved.DisplayName, pid, startEpoch, ct);
+        if (prepared.RecordReason is not null)
+            await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, prepared.RecordReason, agentTokenName, ct);
+        if (prepared.FixedAnswer is not null)
+            return prepared.FixedAnswer;
+        if (prepared.NotDone is { } notDone)
+            return PgKillNotDone(notDone, dry_run);
 
-        /* 3: the read decides, for a dry run and before a write: gone, own session, start time, reused, client session, and what the login may do. */
-        var dry = await executor.KillBackendAsync(permit, pid, startEpoch, dryRun: true, ct);
-        if (dry.Outcome != RemediationOutcome.Done)
-        {
-            if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, agentTokenName, ct);
-            return PgKillNotDone(dry, dry_run);
-        }
-
-        var before = PgKillSessionImage(dry.PgSession);
-        var warnings = PgKillWarnings(dry.PgSession);
+        var executor = prepared.Executor!;
+        var binding = prepared.Binding!;
+        var dry = prepared.Dry!;
+        var before = prepared.Before;
+        var warnings = prepared.Warnings;
         if (dry_run)
             return Answer("dry_run", null, dry.Message + " There is no undo.", new { dry_run = true, session = before, warnings });
+
+        /* #7109: the action needs a person's approval. The prepare step ran the dry read; store a proposal with its facts and end nothing. */
+        if (decision.NeedsApproval)
+            return await ProposeAsync(owner, null, decision, action!, tool, ServerActionNames.KillSession, resolved.ServerId, resolved.DisplayName,
+                new { pid, backend_start_epoch = startEpoch },
+                PgKillBindingObject(binding),
+                new { session = before, warnings }, ct);
 
         RemediationResult? killed = null;
         RemediationResult? unknown = null;
@@ -768,11 +753,11 @@ public sealed partial class DarlingMcpPlanForceTools
             var hooks = new AgentActionHooks
             {
                 ServerChange = changed,
-                LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
+                LoadRoutes = (connection, _, token) => DarlingAgentActionGate.LoadRoutesAsync(connection, logger, token),
                 ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(new { session = before }, McpHelpers.JsonOptions)),
                 Write = async (_, _, token) =>
                 {
-                    var written = await executor.KillBackendAsync(permit, pid, startEpoch, dryRun: false, token);
+                    var written = await WriteKillBackendAsync(executor, permit, binding, token);
                     /* The server took the signal: from here the store's journal never says failed (#5632, step 13). */
                     if (written.Wrote)
                         changed.MarkServerChanged();
@@ -901,6 +886,7 @@ public sealed partial class DarlingMcpPlanForceTools
         login_name = facts.LoginName,
         host_name = facts.HostName,
         program_name = facts.ProgramName,
+        database_name = facts.DatabaseName,
         status = facts.Status,
         open_transaction_count = facts.OpenTransactionCount,
         last_request_end_time = UtcText(clock, facts.LastRequestEndTime),
@@ -908,7 +894,7 @@ public sealed partial class DarlingMcpPlanForceTools
         log_bytes_used = facts.LogBytesUsed,
     };
 
-    private static object? KillRollbackImage(KillRollback? rollback) =>
+    internal static object? KillRollbackImage(KillRollback? rollback) =>
         rollback is null ? null : new { in_progress = rollback.InProgress, percent_complete = rollback.PercentComplete };
 
     /// <summary>What a kill will cost, with no threshold: any log used means a rollback. A warning, never a refusal.</summary>
@@ -1044,6 +1030,18 @@ public sealed partial class DarlingMcpPlanForceTools
         }
 
         var stateNode = JsonSerializer.SerializeToNode(state);
+
+        /* The journaled before image names the query the agent's call acted on by its query_hash. A database restored or re-created since restarts its Query Store
+           ids, so the same query_id and plan_id can name another query's plan now, and the undo would force or unforce that one. An image or a server without a
+           hash has nothing to compare, and the server-state checks below decide on their own. */
+        if (!CollectedQueryMatches([facts.BeforeQueryHash], state.QueryHash))
+        {
+            await session.RecordRefusalAsync(PlanQueryChanged, ct);
+            return new PlanUndoAnswer(PlanUndoAnswer.RefusedStatus, PlanQueryChanged,
+                $"The query behind query_id {facts.QueryId} in {state.Database} on {facts.ServerName} is not the one this change acted on: the server's query_hash is {state.QueryHash}, and the change was journaled with {facts.BeforeQueryHash}. Query Store ids restart when a database is restored or re-created, so the same query_id and plan_id now name another query's plan. Nothing was written.",
+                null, stateNode);
+        }
+
         var plan = PlanUndoDecision.Decide(facts, state);
         if (plan.Refusal is { } refused)
         {
@@ -1136,15 +1134,6 @@ public sealed partial class DarlingMcpPlanForceTools
         return null;
     }
 
-    /// <summary>The before read could not finish: a refusal of the remediation code (no login, a slot that cannot be read) is journaled once an hour; a failure is only answered.</summary>
-    private static async Task<string> NotRunAsync(InvestigationRequestStore store, AgentAction action, string tool, RemediationOutcome outcome,
-        string? reason, string message, string? agentTokenName, CancellationToken ct)
-    {
-        if (outcome == RemediationOutcome.Refused && reason is not null)
-            await store.RecordAgentActionRefusalAsync(action.RequestId, action.AgentId, tool, reason, agentTokenName, ct);
-        return Answer(outcome == RemediationOutcome.Refused ? "refused" : "failed", reason, message);
-    }
-
     private sealed record ServerRow(RemediationServer Server, string? UserName, string? SecretSlot, string? MonitoringUserName = null,
         string[]? ExcludedDatabases = null);
 
@@ -1172,6 +1161,9 @@ WHERE server_id = $1";
 
     internal const string AzureDatabaseRequired = RemediationResult.Reasons.DatabaseRequired;
     internal const string AzureDatabaseExcluded = "database_excluded";
+
+    /// <summary>SQL Server: the server's entry excludes databases and the remediation login cannot name the session's database, so the kill does not run.</summary>
+    internal const string SessionDatabaseUnknown = "session_database_unknown";
     internal const string AzureDatabaseUnknown = "database_not_monitored";
 
     /// <summary>

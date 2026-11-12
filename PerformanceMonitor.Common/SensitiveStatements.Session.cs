@@ -246,7 +246,8 @@ public static partial class SensitiveStatements
                         return false;
                     },
                     PlaceholderText,
-                    _budget.AddElapsed);
+                    _budget.AddElapsed,
+                    clock: _budget.Clock);
 
                 // A value judged after the budget ran out came back as named without being judged, so the
                 // document in hand cannot be trusted to be minimal: the whole document is the marker.

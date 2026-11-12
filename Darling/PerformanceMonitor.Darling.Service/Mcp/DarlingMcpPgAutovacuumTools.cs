@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -87,6 +88,7 @@ public sealed class DarlingMcpPgAutovacuumTools
         [Description("Hours of history to analyze, used for the dead-tuple growth comparison. Default 24.")] int hours_back = 24,
         [Description("Maximum tables to return, worst first. Default 20. This is what bounds the page - read truncated to know whether more tables had pending work than were returned.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
@@ -105,9 +107,28 @@ public sealed class DarlingMcpPgAutovacuumTools
                honest page in the repository speaks. This replaced `limit_reached = tables.Count >= limit`, which
                read a server with exactly `limit` tables behind on vacuum as a cut page and told the caller to
                raise a limit that had nothing more to give. */
-            var fetched = await DarlingPgAutovacuumReader.GetPgAutovacuumAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, cancellationToken);
-            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
+            /* #7878: the collector stores a table only while it has pending work, so a table vacuumed clean stops being written
+               and its newest row is its last pre-vacuum sample. Such a row is not graded, ranked, counted or compared for
+               growth: the read marks it (DarlingPgAutovacuumReader, PgCurrentCapture) and sorts it after every current table,
+               and it is named in cleared_tables instead. */
+            var allFetched = await DarlingPgAutovacuumReader.GetPgAutovacuumAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, includeCleared: true, cancellationToken: cancellationToken);
+            var currentFetched = allFetched.Where(r => r.IsCurrent).ToList();
+            var (rows, truncated) = McpHelpers.BoundPage(currentFetched, limit);
+            var cleared = allFetched.Where(r => !r.IsCurrent).Select(r => new
+            {
+                database = r.DatabaseName,
+                table = $"{r.SchemaName}.{r.TableName}",
+                last_measured_at = r.MeasuredAt,
+                last_dead_tuples = r.DeadTuples,
+            }).ToList();
+            var clearedNote = cleared.Count == 0
+                ? null
+                : $"{CountText.Plural(cleared.Count, "table")} had a stored sample in the window but {(cleared.Count == 1 ? "is" : "are")} not in the collector's newest complete capture "
+                  + string.Create(System.Globalization.CultureInfo.InvariantCulture, $"(its last capture was {allFetched[0].LatestCaptureAt:yyyy-MM-dd HH:mm:ss} UTC), which stores a table only ")
+                  + $"while it has pending work. {(cleared.Count == 1 ? "It" : "They")} may have been vacuumed or analyzed clean, dropped, or fallen out of scope; "
+                  + $"the store cannot tell which. {(cleared.Count == 1 ? "It is" : "They are")} not graded, ranked or counted. last_measured_at is the sample {(cleared.Count == 1 ? "it was" : "they were")} last seen in; the list holds only the tables "
+                  + "this page read reached.";
 
             if (rows.Count == 0)
             {
@@ -121,15 +142,29 @@ public sealed class DarlingMcpPgAutovacuumTools
                     return gated;
                 }
 
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, JsonSerializer.Serialize(new
+                /* #7010: the collector stores a table only while it has pending work, so the probe reads its logged runs (the web's
+                   source for this read). The all-clear is an empty answer and carries the window floor under hints. */
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                    postgres, "get_pg_autovacuum_health", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, logger, cancellationToken);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,
                     hours_back,
                     status = "empty",
-                    finding = "No table on this server has dead tuples, pending analyze work, inserts since "
-                            + "its last vacuum, or autovacuum disabled. The collector records only tables with "
-                            + "pending work, so an empty result is the healthy case rather than missing data.",
-                }, McpHelpers.JsonOptions), cancellationToken);
+                    hints = emptyNotice.AsHints(),
+                    cleared_tables = cleared,
+                    cleared_note = clearedNote,
+                    finding = McpHelpers.QuietUnlessCut(
+                        emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                        factual: cleared.Count > 0
+                            ? "No table on this server has dead tuples, pending analyze work, inserts since its last vacuum, or "
+                                + "autovacuum disabled in the collector's newest complete capture; the tables in cleared_tables had it earlier "
+                                + "in the window and are not in that capture"
+                            : "No table on this server has dead tuples, pending analyze work, inserts since "
+                            + "its last vacuum, or autovacuum disabled in the captures the store holds for the window",
+                        coveredClaim: ". The collector records only tables with "
+                            + "pending work, so an empty result is the healthy case rather than missing data."),
+                }, McpHelpers.JsonOptions), emptyNotice), cancellationToken, now.AddHours(-hours_back));
             }
 
             /* #3603: the cost half, read once for every table on the page and attached per table below. The
@@ -230,10 +265,18 @@ public sealed class DarlingMcpPgAutovacuumTools
 
             var tablesWithRuns = tables.Count(t => t.recent_runs is not null);
 
-            return JsonSerializer.Serialize(new
+            /* #7010: the dead-tuple growth comparison and the run history are read over the window, so the answer names where the
+               store's coverage of it starts. */
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_autovacuum_health", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, logger, cancellationToken);
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
+                /* #7010: the window floor, right after hours_back. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 status = "tables_with_pending_maintenance",
                 /* The page's count under the page's name (#3594: a page count is never a total, and it is
                    spelled *_returned so a reader can tell it from one). */
@@ -246,6 +289,8 @@ public sealed class DarlingMcpPgAutovacuumTools
                 past_threshold_count = tables.Count(t => t.threshold_ratio >= 1 || t.insert_threshold_ratio >= 1),
                 growing_count = tables.Count(t => t.dead_tuples_growing == true),
                 truncated,
+                cleared_tables = cleared,
+                cleared_note = clearedNote,
                 worst_table = tables[0].table_name,
                 worst_severity = tables[0].severity,
                 /* #3603: how much of the page the cost half could speak for, and — when it is none — the
@@ -265,7 +310,7 @@ public sealed class DarlingMcpPgAutovacuumTools
                       + "collector recorded); or nothing on this page was vacuumed in the window, which for a "
                       + "table far past its threshold is itself the finding.",
                 tables,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -59,7 +59,7 @@ public sealed class RawPurgeTriggerGateErrorTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4391 gate_error pin.");
 
-        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default);
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default, emptyStore: true);
         NpgsqlConnection? connection = null;
         /* A skip (no TimescaleDB) or a failed setup throws before the caller owns the store, so the opener drops it
            here. Left alone it would survive to the process-exit drain, which the test runner waits only 10 s for. */

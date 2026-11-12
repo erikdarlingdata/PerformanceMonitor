@@ -563,7 +563,7 @@ public sealed class CollectorRunTimeRungLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;
@@ -633,7 +633,7 @@ public sealed class CollectorRunTimeRungLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;
@@ -682,7 +682,7 @@ public sealed class CollectorRunTimeRungLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;
@@ -723,7 +723,7 @@ public sealed class CollectorRunTimeRungLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;
@@ -779,7 +779,7 @@ public sealed class CollectorRunTimeRungLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;
@@ -828,7 +828,7 @@ public sealed class CollectorRunTimeRungLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;
@@ -888,7 +888,7 @@ public sealed class CollectorRunTimeRungLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;
@@ -931,7 +931,7 @@ public sealed class CollectorRunTimeRungLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;
@@ -970,7 +970,7 @@ public sealed class CollectorRunTimeRungLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;

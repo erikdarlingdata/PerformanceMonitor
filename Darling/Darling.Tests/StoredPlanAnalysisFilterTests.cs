@@ -29,6 +29,10 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class StoredPlanAnalysisFilterTests
 {
+    /// <summary>Runs the statement filter's start-up warm-up first, as the service does: the first plan or JSON judged in a
+    /// fresh test process would otherwise pay for cold code inside the 1.5 s read budget (#7134).</summary>
+    public StoredPlanAnalysisFilterTests() => StatementFilterWarmUp.Ensure();
+
     [Theory]
     [InlineData("query_stats", "abc123")]
     [InlineData("procedure_stats", "0x0200abcd")]
@@ -74,7 +78,7 @@ public sealed class StoredPlanAnalysisFilterTests
             : DarlingMcpPlanTools.AnalyzeFilteredPlan(plan, "srv", source, "id", null, null, default);
 
         using var doc = JsonDocument.Parse(result);
-        Assert.Equal("This plan was withheld by the statement filter (#4348), so it was not analysed.",
+        Assert.Equal("This plan was withheld by the statement filter, which hides text it treats as sensitive, so it was not analysed.",
             doc.RootElement.GetProperty("message").GetString());
         Assert.DoesNotContain("could not be read", result);
     }

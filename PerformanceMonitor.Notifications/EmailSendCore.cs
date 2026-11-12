@@ -30,6 +30,41 @@ namespace PerformanceMonitor.Notifications;
 /// </summary>
 public sealed class EmailSendCore
 {
+    /// <summary>The most addresses one recipient list holds.</summary>
+    public const int MaxRecipients = 50;
+
+    /// <summary>
+    /// The refusal for a recipient list, or null when it is fine or blank (#6231, #7184). The list is comma separated, as the send
+    /// splits it, and each entry must be one plain address (no display name, no group). One copy for the Viewer's and Lite's SMTP
+    /// settings, the Viewer's route window and the MCP tools: a single entry the send cannot parse (an Outlook-style
+    /// <c>a@x.com;b@x.com</c>) makes <c>MailAddressCollection.Add</c> throw and the whole message fails, and <c>a@x.com; b@x.com</c> parses
+    /// as one recipient, <c>b@x.com</c>, with the first address as its display name, so the first is silently dropped. The text never carries an address.
+    /// </summary>
+    public static string? RecipientsRefusal(string? recipients)
+    {
+        if (string.IsNullOrWhiteSpace(recipients))
+        {
+            return null;
+        }
+
+        var entries = recipients.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (entries.Length > MaxRecipients)
+        {
+            return string.Create(System.Globalization.CultureInfo.InvariantCulture, $"A recipient list holds at most {MaxRecipients} email addresses.");
+        }
+
+        foreach (var entry in entries)
+        {
+            if (!MailAddress.TryCreate(entry, out var address) || !string.Equals(address.Address, entry, StringComparison.Ordinal)
+                || !string.IsNullOrEmpty(address.DisplayName))
+            {
+                return "The email recipients are a comma separated list of plain addresses such as name@example.com. (The value is not echoed.)";
+            }
+        }
+
+        return null;
+    }
+
     private readonly IAlertSettings _settings;
     private readonly WebhookAlertService _webhookAlertService;
     private readonly AlertBranding _branding;
@@ -67,6 +102,20 @@ public sealed class EmailSendCore
             seedLastSentUtc: (serverId, metricName, dedupKey) =>
                 historyStore.GetLastEmailSentUtcAsync(serverId, metricName, dedupKey));
     }
+
+    /// <summary>
+    /// Whether SMTP is configured well enough for an alert email to be attempted: enabled, with a server and a from address,
+    /// and somebody named to receive it (#4751: the default recipient list, or an enabled route's recipients; a route's
+    /// recipients alone are enough, because the host, from address and credentials still come from the parent). The one
+    /// expression that decides whether email is attempted, answers "is any channel configured at all", and says whether the
+    /// Email entry in <see cref="WebhookAlertService.GetChannelFailureCounts"/> still has a destination (#8245).
+    /// </summary>
+    public static bool SmtpConfigured(IAlertSettings settings) =>
+        settings.SmtpEnabled &&
+        !string.IsNullOrWhiteSpace(settings.SmtpServer) &&
+        !string.IsNullOrWhiteSpace(settings.SmtpFromAddress) &&
+        (!string.IsNullOrWhiteSpace(settings.SmtpRecipients) ||
+         NotificationRouter.AnyRouteConfiguresEmail(settings.NotificationRoutes));
 
     /// <summary>
     /// Attempts email delivery (if SMTP is configured and outside the per-metric cooldown)
@@ -137,12 +186,7 @@ public sealed class EmailSendCore
            #4751: somebody has to be named to receive it — the default recipient list, or an enabled route's
            recipients. A route's recipients alone are enough: the host, from address and credentials still come
            from the parent, and which firing they cover is decided per firing below. */
-        var smtpConfigured =
-            _settings.SmtpEnabled &&
-            !string.IsNullOrWhiteSpace(_settings.SmtpServer) &&
-            !string.IsNullOrWhiteSpace(_settings.SmtpFromAddress) &&
-            (!string.IsNullOrWhiteSpace(_settings.SmtpRecipients) ||
-             NotificationRouter.AnyRouteConfiguresEmail(_settings.NotificationRoutes));
+        var smtpConfigured = SmtpConfigured(_settings);
 
         var anyChannelConfigured = smtpConfigured || _webhookAlertService.AnyWebhookConfigured;
 
@@ -202,6 +246,21 @@ public sealed class EmailSendCore
                     metricName, serverName, currentValue, thresholdValue, _settings.EmailCooldownMinutes, _branding,
                     render.Context, render.Prose, displayName, triageUrl);
 
+                /* #7041: a scheduled report that rendered its own page (the Daily Health Report) supplies the HTML
+                   view and the subject. Read from the ORIGINAL context: the delivery filter's copy carries only what
+                   the channel builders render. The plain view stays the template's own, built from the report's
+                   text, so a client that shows plain text still gets the report. The HTML is used as given and is
+                   not run through the template's escaping a second time. */
+                if (!string.IsNullOrEmpty(context?.EmailHtmlBody))
+                {
+                    htmlBody = context.EmailHtmlBody;
+                }
+
+                if (!string.IsNullOrWhiteSpace(context?.EmailSubject))
+                {
+                    subject = context.EmailSubject.Trim();
+                }
+
                 /* #3598: WHO receives this firing — an exact-metric route's recipients, else its family route's,
                    else the parent's list. Resolved here, after the cooldown and the budget, so a throttled alert
                    never consults a route; with zero routes the list IS _settings.SmtpRecipients and the send is the
@@ -210,8 +269,11 @@ public sealed class EmailSendCore
                    asks that SOME enabled route names recipients, so the fall-through to the parent's list can now
                    be blank — a firing no route covers, with no default list, has nobody to send to. */
                 emailRoute = NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings, NotificationRouter.ParseServerId(serverId),
-                    AlertSeverity.RouteLevelOf(metricName, context?.SeverityOverride));
-                var recipients = emailRoute.Email.Destination ?? _settings.SmtpRecipients;
+                    AlertSeverity.RouteTierOf(metricName, context));
+                /* #8246: a route that turns email off for this firing means no email, not the default list, as the webhook
+                   fan-out reads an off channel. No route store writes Email into OffChannels today (a recipient list is not
+                   a secret that can fail to be read), so this arm is the fallback's safety, not a path an operator can set. */
+                var recipients = emailRoute.Email.IsOff ? null : emailRoute.Email.Destination ?? _settings.SmtpRecipients;
 
                 if (string.IsNullOrWhiteSpace(recipients))
                 {
@@ -223,8 +285,9 @@ public sealed class EmailSendCore
                        failed row and a consecutive-failure count. `emailRoute` stays set: it is the firing's
                        routing record for the alert log. */
                     _repeatBudget.Release(budget);
-                    _logger.LogDebug(
-                        $"Alert email for {metricName} on {serverName} skipped: no notification route covers it and no default recipients are set");
+                    _logger.LogDebug(emailRoute.Email.IsOff
+                        ? $"Alert email for {metricName} on {serverName} skipped: a notification route turns email off for it"
+                        : $"Alert email for {metricName} on {serverName} skipped: no notification route covers it and no default recipients are set");
                 }
                 else
                 {
@@ -250,6 +313,11 @@ public sealed class EmailSendCore
                         _consecutiveFailures = 0;
                         _lastFailureError = null;
 
+                        /* #8245: the Email entry of the shared channel ledger, which both hosts' "Notification Channel
+                           Failing" checks read beside the webhook destinations. One ledger per webhook service, so the
+                           alert core and the analysis-page core, which share a relay, share the entry. */
+                        _webhookAlertService.RecordEmailDelivered();
+
                         _logger.LogInformation($"Alert email sent for {metricName} on {serverName}");
                     }
                     catch (Exception ex)
@@ -262,14 +330,15 @@ public sealed class EmailSendCore
                         sendError = ex.Message;
                         _consecutiveFailures++;
                         _lastFailureError = ex.Message;
+                        _webhookAlertService.RecordEmailFailure(ex.Message);
 
                         if (_consecutiveFailures <= 3)
                         {
-                            _logger.LogError($"ALERT EMAIL FAILED ({_consecutiveFailures}x): {ex.GetType().Name}: {ex.Message}");
+                            _logger.LogError(ex, $"ALERT EMAIL FAILED ({_consecutiveFailures}x): {ex.GetType().Name}: {ex.Message}");
                         }
                         else if (_consecutiveFailures % 50 == 0)
                         {
-                            _logger.LogError($"ALERT EMAIL STILL FAILING: {_consecutiveFailures} consecutive failures. Last error: {ex.Message}");
+                            _logger.LogError(ex, $"ALERT EMAIL STILL FAILING: {_consecutiveFailures} consecutive failures. Last error: {ex.Message}");
                         }
                     }
                 }
@@ -353,7 +422,7 @@ public sealed class EmailSendCore
         }
         catch (Exception ex)
         {
-            _logger.LogError($"ALERT RESOLUTION EMAIL FAILED for {title} on {serverName}: {ex.GetType().Name}: {ex.Message}");
+            _logger.LogError(ex, $"ALERT RESOLUTION EMAIL FAILED for {title} on {serverName}: {ex.GetType().Name}: {ex.Message}");
             return ex.Message;
         }
     }
@@ -375,7 +444,7 @@ public sealed class EmailSendCore
         }
         catch (Exception ex)
         {
-            _logger.LogError($"NOTICE EMAIL FAILED for {title} on {serverName}: {ex.GetType().Name}: {ex.Message}");
+            _logger.LogError(ex, $"NOTICE EMAIL FAILED for {title} on {serverName}: {ex.GetType().Name}: {ex.Message}");
             return ex.Message;
         }
     }
@@ -438,6 +507,15 @@ public sealed class EmailSendCore
     /// parent's <see cref="IAlertSettings.SmtpRecipients"/>.</param>
     private static async Task SendEmailAsync(IAlertSettings settings, string subject, string htmlBody, string plainTextBody, AlertContext? context = null, string? recipients = null)
     {
+        /* #7184: a default list stored before the settings windows checked it is re-checked here. Left alone,
+           "a@x.com; b@x.com" mailed only b@x.com with nothing in alert history, and "a@x.com;b@x.com" failed with the
+           raw FormatException text. The send still fails, now before any message is built and with the sentence the
+           settings windows show. Route lists already pass this rule when they are saved. */
+        if (RecipientsRefusal(recipients ?? settings.SmtpRecipients) is { } recipientsRefusal)
+        {
+            throw new InvalidOperationException(recipientsRefusal);
+        }
+
         using var smtpClient = new SmtpClient(settings.SmtpServer, settings.SmtpPort)
         {
             EnableSsl = settings.SmtpUseSsl,

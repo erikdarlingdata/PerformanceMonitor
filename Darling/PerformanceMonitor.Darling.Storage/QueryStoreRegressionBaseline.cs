@@ -1099,8 +1099,9 @@ public static class QueryStoreRegressionBaseline
     /// <see cref="FailureMinRecentRuns"/> recent runs. The per-hour rates divide by each window's own length (the baseline
     /// window is [baseline start, window start), the recent window [window start, window end]).
     ///
-    /// <para><b>Severity.</b> A cost row keeps the duration bands (CRITICAL over 100%, HIGH over 50%, MEDIUM over 25%, else LOW).
-    /// A failure row is HIGH when its rate is at least <see cref="FailureHighMultiple"/> times the baseline's or the baseline
+    /// <para><b>Severity.</b> A cost row keeps the duration bands (CRITICAL over 100%, HIGH over 50%, MEDIUM over 25%, else LOW),
+    /// except that a cost row which added under a minute of duration over the window and under a second per run is LOW whatever
+    /// its percent (#7592). A failure row is HIGH when its rate is at least <see cref="FailureHighMultiple"/> times the baseline's or the baseline
     /// had none, else MEDIUM; a row with both takes the higher band. A failure never reads CRITICAL: that stays the band of a
     /// query whose duration more than doubled, so a timeout flood cannot outrank the worst cost regressions.</para>
     ///
@@ -1255,6 +1256,8 @@ public static class QueryStoreRegressionBaseline
                 f.*,
                 CASE
                     WHEN NOT f.is_cost THEN 0
+                    /* #7592: a cost row that added under a minute of duration over the window and under a second per run is LOW, whatever its percent. */
+                    WHEN {{PerformanceMonitor.Common.QueryStoreRegressionRules.GradeFloorSql("f")}} THEN 1
                     WHEN f.duration_regression_percent > 100 THEN 4
                     WHEN f.duration_regression_percent > 50 THEN 3
                     WHEN f.duration_regression_percent > 25 THEN 2

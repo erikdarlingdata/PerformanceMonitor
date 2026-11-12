@@ -240,6 +240,8 @@ public sealed class CpuSchedulerGridRow
     public string Metric { get; init; } = "";
     public string Value { get; init; } = "";
     public bool IsWarning { get; init; }
+    /// <summary>The row's tooltip (#7578), or null for a row that has none.</summary>
+    public string? Hint { get; init; }
     public DateTime CollectionTime { get; init; }
 
     public string CollectionTimeLocal => HistoryTime.CollectionLocal(CollectionTime);
@@ -255,7 +257,7 @@ public sealed class CpuSchedulerGridRow
 
         foreach (var metric in CpuSchedulerMetrics.BuildMetrics(snapshot))
         {
-            rows.Add(new CpuSchedulerGridRow { Metric = metric.Metric, Value = metric.Value, IsWarning = metric.IsWarning, CollectionTime = snapshot.CollectionTime });
+            rows.Add(new CpuSchedulerGridRow { Metric = metric.Metric, Value = metric.Value, IsWarning = metric.IsWarning, Hint = metric.Hint, CollectionTime = snapshot.CollectionTime });
         }
 
         return rows;

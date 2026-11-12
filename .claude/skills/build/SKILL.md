@@ -1,7 +1,7 @@
 ---
 name: build
 description: Build and locate the PerformanceMonitor executables
-argument-hint: [lite|darling|viewer|dashboard|installer]
+argument-hint: [lite|darling|viewer]
 disable-model-invocation: false
 ---
 
@@ -18,11 +18,9 @@ Build a component of PerformanceMonitor and report the result. All paths are rel
 | `lite` | `Lite/PerformanceMonitorLite.csproj` | `net10.0-windows` |
 | `darling` or `service` | `Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj` | `net10.0` |
 | `viewer` | `Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj` | `net10.0-windows` |
-| `dashboard` or `full` | `deprecated/Dashboard/Dashboard.csproj` | DEPRECATED since v3.3.0 |
-| `installer` | `deprecated/Installer/PerformanceMonitorInstaller.csproj` | DEPRECATED since v3.3.0 |
 | (empty) | build whatever is in the current working directory, or ask | |
 
-Lite, the Darling service, and the Darling Viewer are the shipping artifacts. The full Dashboard and the CLI Installer moved to `deprecated/` in v3.3.0. They still build and their tests still run in CI, but they ship no release artifacts and get bug-fix support only.
+Lite, the Darling service, and the Darling Viewer are the shipping artifacts. The full Dashboard and the CLI Installer are frozen in `deprecated/dashboard-installer-source.zip`. Nothing builds, tests or releases them from this repository, so there is no `dashboard` or `installer` argument. `deprecated/README.md` says how to build them from the zip.
 
 ## Steps
 

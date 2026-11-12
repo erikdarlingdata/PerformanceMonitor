@@ -40,23 +40,8 @@ public sealed class WebWaitsActivityTrendsPageTests
     [Fact]
     public void TheActivityTab_DrawsTheSessionStatsTrend()
     {
-        var activity = Between(Js(), "    id: \"activity\",\n    label: \"Activity\",\n    build:", "      table(\n        \"Running Jobs\"");
+        var activity = Between(Js(), "    id: \"activity\",\n    label: \"Activity\",\n    build:", "      tablePanel(\n        \"Running Jobs\"");
         Assert.Contains("sessionStatsTrendPanel(server, ctx)", activity);
-    }
-
-    [Fact]
-    public void EveryTrendRead_GoesThroughTheKeptHistoryRead_WithTheRangeAndTheNamesParameter()
-    {
-        var js = Js();
-        var session = Between(js, "export function sessionStatsTrendPanel(", "export function memoryPressurePanels(");
-        Assert.Contains("readToolWithinKeptHistory(\"get_server_trend\", { server, metric: \"session_stats\", hours: ctx.hours }, ctx && ctx.signal)", session);
-        var panel = Between(js, "export function namedTrendPanel(", "export async function drawNamedTrends(");
-        Assert.Contains("readToolWithinKeptHistory(spec.optionsTool, { server, hours: ctx.hours, top: MAX_NAMES_CHARTED }, ctx && ctx.signal)", panel);
-        var draw = Between(js, "export async function drawNamedTrends(", "const SESSION_TREND_SERIES");
-        Assert.Contains("{ server, metric: kind, hours: ctx.hours, names: names.join(\",\") }", draw);
-        Assert.Contains("data.missing_names", draw);
-        Assert.Contains("data.hints.missing_names", draw);
-        Assert.Contains("discontinuityNotes(trend.data)", draw);
     }
 
     [Fact]
@@ -73,7 +58,10 @@ public sealed class WebWaitsActivityTrendsPageTests
     [Fact]
     public void TheCharts_AreZoomable_AndRenderNoInnerHtml()
     {
-        var section = Between(Js(), "const NAMED_TRENDS = {", "export function memoryPressurePanels(");
+        /* #7027: the named-trend module's text from NAMED_TRENDS on, plus sessionStatsTrendPanel, which now sits in another file. */
+        var waitsModule = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs", "sql-waits.js").ReplaceLineEndings("\n");
+        var section = waitsModule[waitsModule.IndexOf("const NAMED_TRENDS = {", System.StringComparison.Ordinal)..]
+            + Between(Js(), "export function sessionStatsTrendPanel(", "\n}\n");
         Assert.Contains("zoomableLineChart(", section);
         Assert.DoesNotContain("innerHTML", section);
     }

@@ -27,8 +27,12 @@ public sealed class DarlingPasswordKeyStateTests
 
     private static PasswordKeyFacts Facts(
         bool filePresent = false, bool untrusted = false, string? refusal = null, byte[]? fileSpki = null,
-        bool afterOpen = false, PublishedKey? current = null, bool retired = false) =>
-        new(filePresent, untrusted, refusal, fileSpki, afterOpen, current, retired);
+        bool afterOpen = false, PublishedKey? current = null, bool retired = false, bool fromSetting = false) =>
+        new(filePresent, untrusted, refusal, fileSpki, afterOpen, current, retired, fromSetting);
+
+    private static string Display(byte[] spki) => PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(spki));
+
+    private static PublishedKey Inconsistent(byte[] spki) => new("not-a-key-id with text", (byte[])spki.Clone());
 
     [Fact]
     public void An_untrusted_file_is_refused_and_never_replaced_whatever_else_is_true()
@@ -179,6 +183,204 @@ public sealed class DarlingPasswordKeyStateTests
 
         Assert.Equal(PasswordKeyAction.Use, d.Action);
         Assert.False(d.RetireFileFirst);
+    }
+
+    [Fact]
+    public void FromSetting_AnUnusableKey_IsRefusedWithItsReason()
+    {
+        var refused = DarlingPasswordKeyState.Decide(Facts(
+            filePresent: true, untrusted: true, refusal: "passwordKey: x", current: Published(SpkiA), retired: true, fromSetting: true));
+        var unreadable = DarlingPasswordKeyState.Decide(Facts(filePresent: true, current: Published(SpkiA), fromSetting: true));
+
+        Assert.Equal(PasswordKeyAction.Refused, refused.Action);
+        Assert.False(refused.RetireFileFirst);
+        Assert.Null(refused.RetireAs);
+        Assert.Equal("passwordKey: x", refused.Reason);
+        Assert.Equal(PasswordKeyAction.Refused, unreadable.Action);
+        Assert.Contains("passwordKey", unreadable.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FromSetting_NoPublishedKey_PublishesIt()
+    {
+        var d = DarlingPasswordKeyState.Decide(Facts(filePresent: true, fileSpki: SpkiA, fromSetting: true));
+
+        Assert.Equal(PasswordKeyAction.PublishFile, d.Action);
+        Assert.False(d.RetireFileFirst);
+        Assert.Null(d.RetireAs);
+        Assert.Null(d.Reason);
+        Assert.Null(d.Warning);
+    }
+
+    [Fact]
+    public void FromSetting_TheSameKey_IsUsed()
+    {
+        var d = DarlingPasswordKeyState.Decide(Facts(
+            filePresent: true, fileSpki: SpkiA, current: Published(SpkiA), retired: true, fromSetting: true));
+
+        Assert.Equal(PasswordKeyAction.Use, d.Action);
+        Assert.False(d.RetireFileFirst);
+        Assert.Null(d.Reason);
+        Assert.Null(d.Warning);
+    }
+
+    [Fact]
+    public void FromSetting_AnotherKey_IsAMismatchNamingPasswordKey()
+    {
+        var d = DarlingPasswordKeyState.Decide(Facts(
+            filePresent: true, fileSpki: SpkiA, current: Published(SpkiB), fromSetting: true));
+
+        Assert.Equal(PasswordKeyAction.Mismatch, d.Action);
+        Assert.False(d.RetireFileFirst);
+        Assert.Equal(DarlingPasswordKeyState.SettingMismatchReason(SpkiA, Published(SpkiB)), d.Reason);
+        Assert.Contains("passwordKey", d.Reason, StringComparison.Ordinal);
+        Assert.Equal(
+            $"The password key from passwordKey ({Display(SpkiA)}) is not the key the store publishes ({Display(SpkiB)}). "
+            + "Put the published key back in the passwordKey source, or run --reset-password-key and enter the saved passwords again.",
+            d.Reason);
+    }
+
+    [Fact]
+    public void FromSetting_AResetKey_AwaitsANewKey_AndNeverGenerates()
+    {
+        var d = DarlingPasswordKeyState.Decide(Facts(
+            filePresent: true, fileSpki: SpkiA, current: null, retired: true, fromSetting: true));
+
+        Assert.Equal(PasswordKeyAction.AwaitNewKey, d.Action);
+        Assert.False(d.RetireFileFirst);
+        Assert.Null(d.RetireAs);
+        Assert.Equal(DarlingPasswordKeyState.SettingResetReason(PasswordSeal.KeyIdFor(SpkiA)), d.Reason);
+        Assert.Equal(
+            $"The password key {Display(SpkiA)} from passwordKey was reset. Put a new key in the passwordKey source "
+            + "(make one with --new-password-key), then restart the service. Saved passwords must be entered again.",
+            d.Reason);
+    }
+
+    [Fact]
+    public void FromSetting_AnInconsistentPublishedKey_IsAMismatch()
+    {
+        var other = DarlingPasswordKeyState.Decide(Facts(
+            filePresent: true, fileSpki: SpkiA, current: Inconsistent(SpkiB), fromSetting: true));
+        var sameBytes = DarlingPasswordKeyState.Decide(Facts(
+            filePresent: true, fileSpki: SpkiB, current: Inconsistent(SpkiB), retired: true, fromSetting: true));
+
+        Assert.Equal(PasswordKeyAction.Mismatch, other.Action);
+        Assert.False(other.RetireFileFirst);
+        Assert.Equal(DarlingPasswordKeyState.SettingMismatchReason(SpkiA, Inconsistent(SpkiB)), other.Reason);
+        Assert.DoesNotContain("not-a-key-id", other.Reason, StringComparison.Ordinal);
+        Assert.Equal(PasswordKeyAction.Mismatch, sameBytes.Action);
+        Assert.Equal(DarlingPasswordKeyState.SettingMismatchReason(SpkiB, Inconsistent(SpkiB)), sameBytes.Reason);
+    }
+
+    [Fact]
+    public void FromSetting_TheSweepSentences_NamePasswordKey_AndTheKeysWorkedOutFromTheirBytes()
+    {
+        Assert.Equal(
+            "The password key was reset. Put a new key in the passwordKey source (make one with --new-password-key), "
+            + "then restart the service. Saved passwords must be entered again.",
+            DarlingPasswordKeyState.SettingSweepResetReason);
+        Assert.Equal(
+            $"The store now publishes the password key {Display(SpkiB)}, not the key this service holds from passwordKey ({Display(SpkiA)}). "
+            + "Put the published key back in the passwordKey source and restart the service.",
+            DarlingPasswordKeyState.SettingSweepMismatchReason(PasswordSeal.KeyIdFor(SpkiB), PasswordSeal.KeyIdFor(SpkiA)));
+    }
+
+    /// <summary>Every combination of an unusable key, the key held (none, A, B), the key published (none, A, B, or one
+    /// whose id does not match its bytes) and the replaced flag.</summary>
+    public static TheoryData<bool, int, int, bool> SettingCombinations()
+    {
+        var data = new TheoryData<bool, int, int, bool>();
+        foreach (var untrusted in new[] { false, true })
+        {
+            for (var held = 0; held <= 2; held++)
+            {
+                for (var published = 0; published <= 3; published++)
+                {
+                    foreach (var retired in new[] { false, true })
+                    {
+                        data.Add(untrusted, held, published, retired);
+                    }
+                }
+            }
+        }
+
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(SettingCombinations))]
+    public void FromSetting_NeverRetiresOrGenerates_WhateverTheFacts(bool untrusted, int held, int published, bool retired)
+    {
+        var heldSpki = held switch { 1 => SpkiA, 2 => SpkiB, _ => null };
+        var current = published switch { 1 => Published(SpkiA), 2 => Published(SpkiB), 3 => Inconsistent(SpkiA), _ => null };
+
+        var d = DarlingPasswordKeyState.Decide(Facts(
+            filePresent: true, untrusted: untrusted, refusal: untrusted ? "passwordKey: x" : null, fileSpki: heldSpki,
+            afterOpen: true, current: current, retired: retired, fromSetting: true));
+
+        Assert.NotEqual(PasswordKeyAction.Generate, d.Action);
+        Assert.NotEqual(PasswordKeyAction.Missing, d.Action);
+        Assert.False(d.RetireFileFirst);
+        Assert.Null(d.RetireAs);
+        Assert.Null(d.Warning);
+    }
+
+    [Fact]
+    public void WithoutTheSetting_EveryExistingRowIsUnchanged()
+    {
+        static string Mismatch(byte[] file, byte[] store) =>
+            $"The password key in the credentials directory ({Display(file)}) is not the key the store publishes ({Display(store)}). "
+            + "Restore the credentials volume that holds the key, or run --reset-password-key and enter the saved passwords again.";
+        static string Missing(byte[] store) =>
+            $"The password key {Display(store)} is missing from the credentials directory. "
+            + "Restore the credentials volume, or run --reset-password-key and enter the saved passwords again.";
+
+        var rows = new (string Row, PasswordKeyFacts Facts, PasswordKeyDecision Expected)[]
+        {
+            ("untrusted", Facts(filePresent: true, untrusted: true, refusal: "The key file is not usable.", fileSpki: SpkiA, afterOpen: true, current: Published(SpkiA), retired: true),
+                new(PasswordKeyAction.Refused, false, null, "The key file is not usable.", null)),
+            ("untrusted, no refusal", Facts(filePresent: true, untrusted: true),
+                new(PasswordKeyAction.Refused, false, null, "The password key file cannot be used.", null)),
+            ("inconsistent, file", Facts(filePresent: true, fileSpki: SpkiA, current: Inconsistent(SpkiB)),
+                new(PasswordKeyAction.Mismatch, false, null, Mismatch(SpkiA, SpkiB), null)),
+            ("inconsistent, file with the same bytes", Facts(filePresent: true, fileSpki: SpkiB, current: Inconsistent(SpkiB)),
+                new(PasswordKeyAction.Mismatch, false, null, Mismatch(SpkiB, SpkiB), null)),
+            ("inconsistent, no file", Facts(current: Inconsistent(SpkiB)),
+                new(PasswordKeyAction.Refused, false, null,
+                    "The store's published password key is inconsistent: its id does not match the key. "
+                    + "Run --reset-password-key and enter the saved passwords again.", null)),
+            ("open directory, same key", Facts(filePresent: true, fileSpki: SpkiA, afterOpen: true, current: Published(SpkiA)),
+                new(PasswordKeyAction.Use, false, null, null, DarlingPasswordKeyState.OpenDirectoryWarning)),
+            ("open directory, nothing published", Facts(filePresent: true, fileSpki: SpkiA, afterOpen: true),
+                new(PasswordKeyAction.Generate, true, "discarded",
+                    "The password key file was found while its directory was open to other users and does not match the store, so it was set aside.", null)),
+            ("open directory, another key", Facts(filePresent: true, fileSpki: SpkiA, afterOpen: true, current: Published(SpkiB)),
+                new(PasswordKeyAction.Missing, true, "discarded", Missing(SpkiB), null)),
+            ("no file, nothing published", Facts(),
+                new(PasswordKeyAction.Generate, false, null, null, null)),
+            ("no file, a published key", Facts(current: Published(SpkiA)),
+                new(PasswordKeyAction.Missing, false, null, Missing(SpkiA), null)),
+            ("unreadable file", Facts(filePresent: true, current: Published(SpkiA)),
+                new(PasswordKeyAction.Refused, false, null, "The password key file could not be read.", null)),
+            ("file, nothing published", Facts(filePresent: true, fileSpki: SpkiA),
+                new(PasswordKeyAction.PublishFile, false, null, null, null)),
+            ("file, nothing published, retired", Facts(filePresent: true, fileSpki: SpkiA, retired: true),
+                new(PasswordKeyAction.Generate, true, "retired", null, null)),
+            ("file, same key", Facts(filePresent: true, fileSpki: SpkiA, current: Published(SpkiA)),
+                new(PasswordKeyAction.Use, false, null, null, null)),
+            ("file, same key, retired", Facts(filePresent: true, fileSpki: SpkiA, current: Published(SpkiA), retired: true),
+                new(PasswordKeyAction.Use, false, null, null, null)),
+            ("file, another key", Facts(filePresent: true, fileSpki: SpkiA, current: Published(SpkiB)),
+                new(PasswordKeyAction.Mismatch, false, null, Mismatch(SpkiA, SpkiB), null)),
+            ("file, same id other bytes", Facts(filePresent: true, fileSpki: SpkiA, current: new PublishedKey(PasswordSeal.KeyIdFor(SpkiA), SpkiB)),
+                new(PasswordKeyAction.Mismatch, false, null, Mismatch(SpkiA, SpkiB), null)),
+        };
+
+        foreach (var (row, facts, expected) in rows)
+        {
+            Assert.False(facts.FromSetting);
+            Assert.Equal((row, expected), (row, DarlingPasswordKeyState.Decide(facts)));
+        }
     }
 
     [Fact]

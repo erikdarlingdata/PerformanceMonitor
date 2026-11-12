@@ -251,7 +251,8 @@ ORDER BY d.datname";
            differenced, and the -1 "not applicable" sentinel the LEVEL collectors use would produce a
            garbage interval when subtracted from a real value. NULL propagates through the subtraction and
            drops out of the sum instead. stats_reset is genuinely NULL until the first reset ever, which is
-           the common case and means exactly "never reset". */
+           the common case and means "no reset recorded" - a crash restart discards the counters without
+           setting it (#7456), which is why the read also watches the counters fall. */
         static long? Long(DbDataReader r, int ordinal) => r.IsDBNull(ordinal) ? null : r.GetInt64(ordinal);
     }
 

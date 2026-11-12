@@ -437,7 +437,7 @@ public sealed class ActiveQueriesLiveWebTests
             /* The function is created by the owner, as the managed batch does; the batch's own EXECUTE grant, retargeted. */
             await ExecAsync(owner, DarlingManagedRoles.BuildRequestActiveQueriesLiveFunctionSql("config"), ct);
             await ExecAsync(owner, $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
-            foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName, "viewer"))
+            foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName, "web"))
             {
                 await ExecAsync(owner, statement, ct);
             }
@@ -445,7 +445,7 @@ public sealed class ActiveQueriesLiveWebTests
             var execute = ViewerGrantReplay.BatchStatements().Single(s =>
                 s.StartsWith("GRANT EXECUTE ON FUNCTION config.request_active_queries_live", StringComparison.Ordinal));
             var at = execute.LastIndexOf(" TO ", StringComparison.Ordinal);
-            Assert.Equal("viewer", execute[(at + 4)..].Trim());
+            Assert.Equal("web", execute[(at + 4)..].Trim());
             await ExecAsync(owner, execute[..at] + " TO " + roleName, ct);
 
             await using var asRole = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString)

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
@@ -56,7 +57,7 @@ public sealed class CustomTabHeaderInkTests
     [InlineData("Dark")]
     [InlineData("CoolBreeze")]
     [InlineData("Light")]
-    public void PlanSubTabHeader_SelectedUsesAccentInk_UnselectedUsesForegroundInk(string theme)
+    public void PlanSubTabHeader_InkFollowsTheTab_SelectedFullInk_UnselectedDimInk(string theme)
     {
         StaTestThread.Run(() =>
         {
@@ -73,15 +74,17 @@ public sealed class CustomTabHeaderInkTests
 
             Assert.True(second.IsSelected);
             Assert.False(first.IsSelected);
-            Assert.Equal(Ink(dict, "AccentForegroundBrush"), HeaderInk(second));
-            Assert.Equal(Ink(dict, "ForegroundBrush"), HeaderInk(first));
+            /* #8169: the flat tab has no accent fill, so the selected ink is ForegroundBrush and the rest are dim. The dim ink
+               only reaches a custom header through the shadow style, so the unselected header proves the shadow works. */
+            Assert.Equal(Ink(dict, "ForegroundBrush"), HeaderInk(second));
+            Assert.Equal(Ink(dict, "ForegroundDimBrush"), HeaderInk(first));
         });
     }
 
     [Theory]
     [InlineData("Dark")]
     [InlineData("CoolBreeze")]
-    public void AddTabHeader_TextBlockAsHeader_UsesAccentInkWhenSelected(string theme)
+    public void AddTabHeader_TextBlockAsHeader_FollowsTheTabInk_DimWhenUnselected(string theme)
     {
         StaTestThread.Run(() =>
         {
@@ -89,12 +92,15 @@ public sealed class CustomTabHeaderInkTests
             var tabs = new TabControl();
             var host = new Border { Child = tabs };
             host.Resources.MergedDictionaries.Add(dict);
-            new StandalonePlanViewerController(tabs).EnsureInitialized();
+            var controller = new StandalonePlanViewerController(tabs);
+            controller.EnsureInitialized();
+            var sub = controller.AddNewEmptyPlanSubTab();
+            tabs.SelectedItem = sub;
             Layout(host);
 
-            var plus = (TabItem)tabs.Items[0];
-            Assert.True(plus.IsSelected, "premise: the sole '+' tab is auto-selected and the insert is deferred, never pumped here.");
-            Assert.Equal(Ink(dict, "AccentForegroundBrush"), ((SolidColorBrush)((TextBlock)plus.Header).Foreground).Color);
+            var plus = tabs.Items.OfType<TabItem>().Single(t => t.Header is TextBlock);
+            Assert.False(plus.IsSelected, "premise: the '+' tab is not the selected one.");
+            Assert.Equal(Ink(dict, "ForegroundDimBrush"), ((SolidColorBrush)((TextBlock)plus.Header).Foreground).Color);
         });
     }
 
@@ -103,7 +109,7 @@ public sealed class CustomTabHeaderInkTests
     [Theory]
     [InlineData("Dark")]
     [InlineData("CoolBreeze")]
-    public void Premise_BarePanelHeader_KeepsForegroundInkOnAccent(string theme)
+    public void Premise_BarePanelHeader_KeepsTheAppForegroundInkWhenUnselected(string theme)
     {
         StaTestThread.Run(() =>
         {
@@ -112,12 +118,14 @@ public sealed class CustomTabHeaderInkTests
             header.Children.Add(new TextBlock { Text = "Server" });
             var tab = new TabItem { Header = header, Content = new Grid() };
             var tabs = new TabControl();
+            tabs.Items.Add(new TabItem { Header = "Selected", Content = new Grid() });
             tabs.Items.Add(tab);
+            tabs.SelectedIndex = 0;
             var host = new Border { Child = tabs };
             host.Resources.MergedDictionaries.Add(dict);
             Layout(host);
 
-            Assert.True(tab.IsSelected);
+            Assert.False(tab.IsSelected);
             Assert.Equal(Ink(dict, "ForegroundBrush"), HeaderInk(tab));
         });
     }

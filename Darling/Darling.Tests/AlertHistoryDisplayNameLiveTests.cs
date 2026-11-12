@@ -145,6 +145,40 @@ VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, NULL, NULL)",
         }
     }
 
+    /// <summary>#7646: the real tool reply carries <c>state_only</c>, which the web Value and Threshold columns key on to show a dash for
+    /// a stored 0: true for a Database State row, false for a measured alert. The web test's mocked reply cannot catch the tool dropping it.</summary>
+    [Fact]
+    public async Task GetAlertHistory_CarriesStateOnly_TrueForDatabaseState_FalseForAMeasuredAlert()
+    {
+        var cs = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await SeedAsync(connection, now, ct);
+            await InsertAlertAsync(connection, ct, now.AddMinutes(-3), DisplayName, "Database State");
+            await using var postgres = OpenDataSource(cs);
+
+            var json = await DarlingMcpAlertTools.GetAlertHistory(postgres, server_name: DisplayName, hours_back: 1, limit: 50, cancellationToken: ct);
+            using var doc = JsonDocument.Parse(json);
+            var byMetric = doc.RootElement.GetProperty("alerts").EnumerateArray()
+                .ToDictionary(a => a.GetProperty("metric_name").GetString()!, a => a.GetProperty("state_only").GetBoolean());
+            Assert.True(byMetric["Database State"]);
+            Assert.False(byMetric[EngineMetric]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs, bodySucceeded, DeleteAsync);
+        }
+    }
+
     [Fact]
     public async Task TheViewerGrid_ShowsTheDisplayName_WhileTheMuteContextKeepsTheStoredSpelling()
     {

@@ -40,7 +40,7 @@ public sealed class DarlingMcpPgIndexUsageTools
     /// <c>scans_in_window</c> is a difference rather than a single reading, and the tool says how many
     /// samples it actually had so a caller can judge whether two was enough for their question.
     /// </summary>
-    internal const int MinimumSamplesForADisuseClaim = 2;
+    internal const int MinimumSamplesForADisuseClaim = DarlingPgIndexUsageReader.MinimumSamplesForADisuseClaim;
 
     /// <summary>
     /// Why an index that nothing scanned may still not be droppable — and this is the whole reason the tool
@@ -66,6 +66,14 @@ public sealed class DarlingMcpPgIndexUsageTools
                  + "waiting on the index it was meant to become.";
         }
 
+        /* #8572: the text is chosen from the row's own flags and its scans. A constraint index that was scanned is not "zero scans", and a
+           unique index that backs no constraint (supports_constraint false) is not a constraint index at all. */
+        if (r.IsPrimaryKey && scansInWindow > 0)
+        {
+            return "Backs the PRIMARY KEY and was scanned during this window, so it is in use for reads as well. This cannot be "
+                 + "dropped without dropping the constraint.";
+        }
+
         if (r.IsPrimaryKey)
         {
             return "Backs the PRIMARY KEY. Zero scans does NOT mean unused: enforcing the key on every "
@@ -73,12 +81,31 @@ public sealed class DarlingMcpPgIndexUsageTools
                  + "dropping the constraint.";
         }
 
-        if (r.SupportsConstraint || r.IsUnique)
+        if (r.SupportsConstraint && scansInWindow > 0)
+        {
+            return "Backs a UNIQUE or EXCLUSION constraint and was scanned during this window, so it is in use for reads as "
+                 + "well. Dropping the index drops the constraint with it, which changes what data the table will accept.";
+        }
+
+        if (r.SupportsConstraint)
         {
             return "Backs a UNIQUE or EXCLUSION constraint. Zero scans does NOT mean unused - a uniqueness "
                  + "check is not counted as a scan - and dropping the index drops the constraint with it, "
                  + "which changes what data the table will accept. Treat the scan count as irrelevant here "
                  + "unless you have already decided the constraint itself is not wanted.";
+        }
+
+        if (r.IsUnique && scansInWindow > 0)
+        {
+            return "In use: scanned during this window. It is also a UNIQUE index that backs no constraint, so dropping it would "
+                 + "remove the uniqueness check it enforces as well as the reads it serves.";
+        }
+
+        if (r.IsUnique)
+        {
+            return "This is a UNIQUE index that backs no constraint. Zero scans does NOT mean unused: a uniqueness check is not "
+                 + "counted as a scan, and dropping the index removes the uniqueness it enforces. Decide whether that uniqueness is "
+                 + "wanted (if it is, a UNIQUE constraint should own it) before treating the scan count as a reason to drop it.";
         }
 
         if (r.IsReplicaIdentity)
@@ -91,7 +118,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         if (sampleCount < MinimumSamplesForADisuseClaim)
         {
             return "Not enough history to say anything about disuse: this read has "
-                 + sampleCount.ToString(CultureInfo.InvariantCulture) + " sample(s) of this index, and a "
+                 + CountText.Plural(sampleCount, "sample") + " of this index, and a "
                  + "windowed scan count is a DIFFERENCE that needs at least two. PostgreSQL records no "
                  + "index creation time anywhere, so how long we have been watching is the only evidence "
                  + "available that an index is old enough to judge.";
@@ -100,6 +127,17 @@ public sealed class DarlingMcpPgIndexUsageTools
         if (scansInWindow > 0)
         {
             return "In use - scanned during this window. Nothing to do.";
+        }
+
+        /* #7456: the counters were lost inside the window, so the zero is "none since they were lost", not
+           "none in the window". Crash recovery does this without recording a reset anywhere. */
+        if (r.StatsWereResetInWindow)
+        {
+            return "Zero scans since the statistics counters were lost or reset inside this window, which "
+                 + "is not evidence of disuse: the scans before that point are gone from the counter. "
+                 + "Crash recovery and an immediate shutdown discard the counters without recording a "
+                 + "reset. Wait for a full cycle of your slowest scheduled job after the restart, then "
+                 + "read again before judging this index.";
         }
 
         /* Zero scans in the window, no structural blocker, enough history to say so. Even here the remedy
@@ -125,12 +163,36 @@ public sealed class DarlingMcpPgIndexUsageTools
     }
 
     /// <summary>
+    /// What the lifetime scan count covers (#7456). A NULL <c>stats_reset</c> says no reset was recorded, not that
+    /// none happened: crash recovery and an immediate shutdown discard the statistics without recording one, and
+    /// the note must not read as proof the counter covers the whole life of the database. A counter that fell
+    /// between two stored samples is the store's own evidence that this happened.
+    /// </summary>
+    internal static string StatsResetNote(DarlingPgIndexUsageReader.PgIndexUsageRow r)
+    {
+        if (r.StatsReset is not null)
+        {
+            return "Lifetime scan counts cover only the period since this reset.";
+        }
+
+        return r.StatsWereResetInWindow
+            ? "No reset is recorded for this database, but this index's scan counter fell between two samples "
+              + "in the window. That is what crash recovery or an immediate shutdown does: they discard the "
+              + "statistics without recording a reset. The lifetime scan count covers only the period since "
+              + "then; get_pg_write_stats reports the postmaster restart."
+            : "No reset is recorded for this database. That does not prove the lifetime scan count covers its "
+              + "whole life: crash recovery and an immediate shutdown discard the statistics without "
+              + "recording a reset. The postmaster start time says when the counters last restarted; "
+              + "get_pg_write_stats reports postmaster_restarted for a restart inside the window.";
+    }
+
+    /// <summary>
     /// What the index costs, in the units the cost is actually paid in. Size is the headline because
     /// storage, write amplification and vacuum cleanup all scale with it — but <c>blocks_hit</c> is what
     /// makes the cost visible on an index that is never read: those accesses are the write path maintaining
     /// it, counted by the server rather than inferred from the size.
     /// </summary>
-    internal static string CostFinding(long indexBytes, long tableBytes, long blocksHit, long blocksRead)
+    internal static string CostFinding(long indexBytes, long tableBytes, long blocksHit, long blocksRead, long scansInWindow = 0)
     {
         if (indexBytes < 0)
         {
@@ -142,10 +204,19 @@ public sealed class DarlingMcpPgIndexUsageTools
             : string.Empty;
 
         var maintenance = blocksHit + blocksRead > 0
-            ? $" The server recorded {(blocksHit + blocksRead).ToString(CultureInfo.InvariantCulture)} block "
-            + "accesses against it. On an index with no scans those are the WRITE path maintaining it and "
-            + "VACUUM cleaning it, which is the cost being paid stated in the server's own units."
+            ? $" The server recorded {(blocksHit + blocksRead).ToString("N0", CultureInfo.InvariantCulture)} block "
+            + (scansInWindow > 0
+                ? "accesses against it. The scans that read it are part of that figure, beside the WRITE path maintaining it and "
+                  + "VACUUM cleaning it."
+                : "accesses against it. On an index with no scans those are the WRITE path maintaining it and "
+                  + "VACUUM cleaning it, which is the cost being paid stated in the server's own units.")
             : string.Empty;
+
+        if (scansInWindow > 0)
+        {
+            return $"{DescribeBytes(indexBytes)}." + share + maintenance
+                 + " Every write maintains it and every VACUUM cleans it, so its size is also paid on the write path.";
+        }
 
         return $"{DescribeBytes(indexBytes)}." + share + maintenance
              + " On PostgreSQL an unused index costs more than the space: it is maintained by every write "
@@ -251,8 +322,7 @@ public sealed class DarlingMcpPgIndexUsageTools
             var start = end.AddHours(-hours_back);
             /* #3653 (one vocabulary): the page cut is OBSERVED off a limit + 1 fetch through McpHelpers.BoundPage
                (the #3594 dialect), replacing `limit_reached = indexes.Count >= limit` — which read a server with
-               exactly `limit` reportable indexes as a cut page. Bound BEFORE the aggregates below, so every count
-               is a count of the page. */
+               exactly `limit` reportable indexes as a cut page. */
             var fetched = await DarlingPgIndexUsageReader.GetPgIndexUsageAsync(
                 postgres, resolved.ServerId, start, end, limit + 1, cancellationToken);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
@@ -271,12 +341,22 @@ public sealed class DarlingMcpPgIndexUsageTools
                 "scans_in_window is a difference between samples and covers only effective_start onward, so a short history undercounts: an index can look unused only because it has been watched briefly.",
                 logger: logger, cancellationToken: cancellationToken);
 
-            var unscanned = rows.Where(r => r.ScansInWindow == 0 && r.IsValid && !r.IsPrimaryKey
-                                            && !r.SupportsConstraint && !r.IsUnique && !r.IsReplicaIdentity
-                                            && r.SampleCount >= MinimumSamplesForADisuseClaim).ToList();
-            var reclaimable = unscanned.Sum(r => Math.Max(r.IndexBytes, 0));
-            var invalidCount = rows.Count(r => !r.IsValid);
-            var resetSeen = rows.Any(r => r.StatsWereResetInWindow);
+            /* #7575: the tiles are the whole window's, from one aggregate read that splices in the same unscanned and invalid
+               conditions the page selects, so a server with more indexes than the limit no longer undercounts them. Read only when
+               the page was cut: an uncut page IS the window, and its rows carry the same SQL-classed flag. A cut page runs two reads, the page
+               and this one, and indexes_in_window below comes from this one too, so the tiles and the count are one snapshot. */
+            var totals = truncated
+                ? await DarlingPgIndexUsageReader.GetPgIndexUsageTotalsAsync(postgres, resolved.ServerId, start, end, cancellationToken)
+                : new DarlingPgIndexUsageReader.PgIndexUsageTotals(
+                    rows.Count,
+                    rows.Count(r => r.IsUnscannedCandidate),
+                    rows.Where(r => r.IsUnscannedCandidate).Sum(r => Math.Max(r.IndexBytes, 0)),
+                    rows.Count(r => !r.IsValid),
+                    rows.Any(r => r.StatsWereResetInWindow));
+            var unscannedCount = totals.UnscannedCount;
+            var reclaimable = totals.UnscannedBytes;
+            var invalidCount = totals.InvalidCount;
+            var resetSeen = totals.StatsWereResetInWindow;
 
             var indexes = rows.Select(r => new
             {
@@ -308,14 +388,11 @@ public sealed class DarlingMcpPgIndexUsageTools
                     + "since the statistics were last reset; on 15 and below the server does not record "
                     + "this at all, so its absence says nothing."
                     : null,
-                /* The denominator for the lifetime counter. NULL means never reset, which is the ordinary
-                   state and means the counters run back to the start of the statistics system - not that
-                   the value is unknown. */
+                /* The denominator for the lifetime counter. NULL means no reset was RECORDED, which is not the
+                   same as never reset (#7456): crash recovery and an immediate shutdown discard every counter
+                   without writing a stats_reset, and from PostgreSQL 15 the column then stays NULL. */
                 stats_reset = r.StatsReset?.ToString("o"),
-                stats_reset_note = r.StatsReset is null
-                    ? "This database's statistics have never been reset, so the lifetime scan count covers "
-                    + "the whole life of the statistics system."
-                    : "Lifetime scan counts cover only the period since this reset.",
+                stats_reset_note = StatsResetNote(r),
                 stats_were_reset_in_window = r.StatsWereResetInWindow,
                 is_unique = r.IsUnique,
                 is_primary_key = r.IsPrimaryKey,
@@ -332,7 +409,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                    against production. */
                 index_definition = r.IndexDefinition,
                 droppability_finding = DroppabilityFinding(r, r.ScansInWindow, r.SampleCount),
-                cost_finding = CostFinding(r.IndexBytes, r.TableBytes, r.BlocksHit, r.BlocksRead),
+                cost_finding = CostFinding(r.IndexBytes, r.TableBytes, r.BlocksHit, r.BlocksRead, r.ScansInWindow),
                 sample_count = r.SampleCount,
                 first_seen_at = r.FirstSeenAt.ToString("o"),
                 measured_at = r.MeasuredAt.ToString("o"),
@@ -349,38 +426,39 @@ public sealed class DarlingMcpPgIndexUsageTools
                 status = "index_usage",
                 /* The page's count under the page's name (#3594). */
                 indexes_returned = indexes.Count,
+                /* Every index the window held (#7551), so a cut page can say how much of the server it shows: the totals read's count on a cut page. */
+                indexes_in_window = truncated ? totals.IndexCount : indexes.Count,
                 /* Deliberately NOT called "droppable". These are the indexes with no scans in the window
                    and no structural blocker - which is a shortlist to investigate, not a work queue. The
                    field name has to survive being read by something that will act on it. */
-                unscanned_without_a_structural_blocker = unscanned.Count,
+                unscanned_without_a_structural_blocker = unscannedCount,
                 bytes_held_by_those_indexes = reclaimable,
                 mb_held_by_those_indexes = Math.Round(reclaimable / 1024.0 / 1024, 2),
                 invalid_index_count = invalidCount,
                 statistics_were_reset_in_window = resetSeen,
-                /* Same discipline as get_pg_database_stats: every total above covers the rows the LIMIT let
-                   through, and the caller has to be able to tell when the cut bit. */
+                /* The tiles above cover the whole window (#7575), not the rows the LIMIT let through; this says the grid below is cut. */
                 truncated,
                 note = "An index with no scans is a CANDIDATE, never a conclusion. Three things this data "
                      + "cannot see, in the order they bite: an index backing a constraint enforces it "
                      + "without ever registering a scan; a query that runs less often than "
-                     + $"{hours_back} hour(s) looks identical to a dead index; and a rare query may only be "
+                     + $"{CountText.Plural(hours_back, "hour")} looks identical to a dead index; and a rare query may only be "
                      + "acceptable because this index exists. Counts are cumulative since each database's "
                      + "statistics were last reset, which is reported per index. Indexes under 64 kB are "
                      + "deliberately not reported here, so this count is LOWER than get_pg_index_bloat's "
-                     + "complete btree census — the difference is that floor, not a missing read."
+                     + "complete btree census: the difference is that floor, not a missing read."
                      + (resetSeen
-                         ? " At least one index's database had its statistics RESET inside this window, so "
-                         + "its windowed scan count is clamped at zero rather than negative and is a lower "
-                         + "bound."
+                         ? " At least one index's database had its statistics RESET, or lost to a crash restart, inside "
+                         + "this window, so its windowed scan count is clamped at zero rather than negative "
+                         + "and is a lower bound. A zero there is not counted among the unscanned indexes."
                          : string.Empty)
                      + (invalidCount > 0
-                         ? $" {invalidCount} INVALID index(es) are present and sorted to the top - those are "
+                         ? $" {CountText.Plural(invalidCount, "INVALID index", "INVALID indexes")} {(invalidCount == 1 ? "is" : "are")} present and sorted to the top - those are "
                          + "failed CREATE INDEX CONCURRENTLY leftovers, maintained by writes and used by "
                          + "nobody."
                          : string.Empty)
                      + (truncated
-                         ? $" TRUNCATED: the server held more indexes than the {limit} returned, so the totals "
-                         + "cover only the indexes returned. Raise limit for the full picture."
+                         ? $" TRUNCATED: the server held more indexes than the {limit} returned. The totals cover every "
+                         + "index in the window, but the indexes list is cut. Raise limit to see the rest."
                          : string.Empty),
                 indexes,
             }, McpHelpers.JsonOptions);
@@ -446,19 +524,19 @@ public sealed class DarlingMcpPgIndexUsageTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice is { IsUnavailable: false, WindowTruncated: true }, notice.EffectiveStart,
-                    factual: $"No indexes were recorded for {displayName} in the last {hoursBack} hour(s) even though "
+                    factual: $"No indexes were recorded for {displayName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))} even though "
                         + "collection ran - at least two snapshots exist. Every index on every collected database is "
                         + "under the collector's 64 KB size floor, which is the state of a schema whose indexes are "
                         + "all trivially small",
                     coveredClaim: ". That is a genuine all-clear rather than missing data."),
-                hints), cancellationToken);
+                hints), cancellationToken, start);
         }
 
         if (probe.SnapshotsInWindow == 1)
         {
             return await DarlingServerOfflineNote.UnavailableAsync(
                 postgres, serverId, displayName,
-                $"Only ONE index snapshot exists for {displayName} in the last {hoursBack} hour(s), so this "
+                $"Only ONE index snapshot exists for {displayName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}, so this "
                 + "is NOT a report about index usage. A windowed scan count is a DIFFERENCE and needs two "
                 + "snapshots before it produces anything. This collector runs DAILY, so on a newly added "
                 + "server it clears itself within a day or two; widen hours_back in the meantime.",
@@ -468,7 +546,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         return await DarlingServerOfflineNote.UnavailableAsync(
             postgres, serverId, displayName,
             probe.RowsEver > 0
-                ? $"No index snapshots were collected for {displayName} in the last {hoursBack} hour(s), so "
+                ? $"No index snapshots were collected for {displayName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}, so "
                 + "the window says nothing either way. Collection HAS run for this server outside the "
                 + "window - this collector runs DAILY, so a window shorter than about 48 hours can "
                 + "legitimately contain fewer than two samples. Widen hours_back, or use "

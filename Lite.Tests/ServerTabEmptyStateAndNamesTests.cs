@@ -130,7 +130,7 @@ public class ServerTabEmptyStateAndNamesTests
     [Fact]
     public void EmptyState_TheGenericGridWording_MatchesTheThemesNoDataText()
     {
-        Assert.Equal("No data for the selected time range.", EmptyState.DefaultGridText);
+        Assert.Equal("No data in the selected time window.", EmptyState.DefaultGridText);
         foreach (var theme in new[] { "Lite/Themes/DarkTheme.xaml", "Lite/Themes/LightTheme.xaml", "Lite/Themes/CoolBreezeTheme.xaml",
             "Darling/PerformanceMonitor.Darling.Viewer/Themes/DarkTheme.xaml", "Darling/PerformanceMonitor.Darling.Viewer/Themes/LightTheme.xaml", "Darling/PerformanceMonitor.Darling.Viewer/Themes/CoolBreezeTheme.xaml" })
         {
@@ -225,7 +225,7 @@ public class ServerTabEmptyStateAndNamesTests
 
         Assert.Equal("example-sql-01", peerName);
         Assert.Equal(System.Windows.Automation.Peers.AutomationControlType.Group, controlType);
-        Assert.Contains("<controls:OverviewCardBorder", RepoFile("Lite/MainWindow.xaml"), StringComparison.Ordinal);
+        Assert.Contains("<controls:OverviewCardBorder", RepoFile("Lite/Controls/ServerOverviewCard.xaml"), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -267,7 +267,7 @@ public class ServerTabEmptyStateAndNamesTests
     [InlineData("Lite/Controls/FinOpsTab.xaml", "StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}\" Width=\"156\"")]
     [InlineData("Lite/Controls/FinOpsTab.xaml", "Binding=\"{Binding SkippedLowWaterMark, StringFormat='{}{0:N0}'}\" Width=\"171\"")]
     [InlineData("Lite/Controls/FinOpsTab.xaml", "Binding=\"{Binding DailyWriteOpsSaved}\" Width=\"166\"")]
-    [InlineData("Lite/Controls/FinOpsTab.xaml", "Header=\"Query Preview\" Width=\"350\"")]
+    [InlineData("Lite/Controls/FinOpsTab.xaml", "Header=\"Query Preview\" Width=\"*\" MinWidth=\"100\"")]
     [InlineData("Lite/Controls/FinOpsTab.xaml", "Binding=\"{Binding AvgLogicalReads, StringFormat='{}{0:N0}'}\" Width=\"161\"")]
     [InlineData("Lite/Controls/FinOpsTab.xaml", "Binding=\"{Binding CpuCount, StringFormat='{}{0:N0}'}\" Width=\"131\"")]
     [InlineData("Lite/Controls/JobHistoryTab.xaml", "Binding=\"{Binding RunStatusDesc}\" Width=\"100\"")]
@@ -326,20 +326,20 @@ public class ServerTabEmptyStateAndNamesTests
     }
 
     [Theory]
-    [InlineData("Lite/Themes/CoolBreezeTheme.xaml")]
-    [InlineData("Lite/Themes/DarkTheme.xaml")]
-    [InlineData("Lite/Themes/LightTheme.xaml")]
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/Themes/CoolBreezeTheme.xaml")]
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/Themes/DarkTheme.xaml")]
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/Themes/LightTheme.xaml")]
-    public void TheTabControlTemplate_UsesAWrapPanel_SoTheSelectedRowNeverMoves(string theme)
+    public void TheTabControlTemplate_UsesAOneRowStrip_SoTheSelectedRowNeverMoves(string theme)
     {
-        var xaml = RepoFile(theme);
+        var xaml = RepoFile(theme).Replace("\r\n", "\n", StringComparison.Ordinal);
         var start = xaml.IndexOf("<Style TargetType=\"TabControl\">", StringComparison.Ordinal);
         Assert.True(start >= 0, "the TabControl style moved");
-        var style = xaml.Substring(start, xaml.IndexOf("</Style>", start, StringComparison.Ordinal) - start);
+        /* The style's own close is the one at the style's indent; the overflow button's text style closes inside it. */
+        var style = xaml.Substring(start, xaml.IndexOf("\n    </Style>", start, StringComparison.Ordinal) - start);
 
-        Assert.Contains("<WrapPanel", style, StringComparison.Ordinal);
+        /* #8266: the tabs sit in one horizontal row that scrolls (the #8169 strip Lite's themes use), which cannot reorder its rows. */
+        Assert.Contains("<ScrollViewer x:Name=\"PART_TabStripScroll\"", style, StringComparison.Ordinal);
+        Assert.Contains("<StackPanel x:Name=\"HeaderPanel\" Orientation=\"Horizontal\"", style, StringComparison.Ordinal);
         Assert.Contains("KeyboardNavigation.TabNavigation=\"Once\"", style, StringComparison.Ordinal);
         Assert.Contains("KeyboardNavigation.DirectionalNavigation=\"Cycle\"", style, StringComparison.Ordinal);
         Assert.Contains("IsItemsHost=\"True\"", style, StringComparison.Ordinal);
@@ -355,8 +355,8 @@ public class ServerTabEmptyStateAndNamesTests
         var xaml = RepoFile(file);
 
         Assert.Contains("Text=\"I/O Latency ms\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("<Run Text=\"events\"/>", xaml, StringComparison.Ordinal);
-        Assert.DoesNotContain("<Run Text=\"events\" FontWeight", xaml, StringComparison.Ordinal);
+        /* #8162: each lane label is one caption (PanelSubtitleText) now, so the blocking lane's unit is part of its text, not a Run. */
+        Assert.Contains("Text=\"Blocking &amp; Deadlocking events\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"CPU %\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"Buffer Pool MB\"", xaml, StringComparison.Ordinal);
     }
@@ -373,7 +373,7 @@ public class ServerTabEmptyStateAndNamesTests
         }
 
         var charts = RepoFile("Lite/Controls/ServerTab.Charts.cs");
-        foreach (var chart in new[] { "MemoryGrantSizingChart", "MemoryGrantActivityChart", "BlockingTrendChart", "DeadlockTrendChart" })
+        foreach (var chart in new[] { "BlockingTrendChart", "DeadlockTrendChart" })
         {
             Assert.Contains("EmptyState.Show(" + chart + ", data.Count == 0", charts, StringComparison.Ordinal);
         }

@@ -860,8 +860,21 @@ public sealed class DarlingAgReaderTests
         Assert.Contains(result.AvailabilityGroups, g => g.AgName == "AG1");
         Assert.DoesNotContain(result.AvailabilityGroups, g => g.AgName == "AG2");
         Assert.True(result.GroupsTruncated);
-        Assert.Contains("No view of 1 availability group(s) fit: AG2", result.GroupsTruncatedNote);
+        Assert.Contains("No view of 1 availability group fit: AG2", result.GroupsTruncatedNote);
         Assert.DoesNotContain("at least one view of each availability group", result.GroupsTruncatedNote);
+    }
+
+    [Fact]
+    public void Build_LimitCutsManyGroups_TheNoteEndsItsNameListWithAndNMoreNotAnEllipsis()
+    {
+        /* #8738: a fleet of 8 groups at limit 1 leaves 7 unnamed-by-view; the note names five and counts the rest in words. */
+        var views = Enumerable.Range(1, 8).Select(i => AgView(i, $"AG{i}", $"g{i}", true, 1)).ToArray();
+
+        var result = BuildViews(1, views);
+
+        Assert.True(result.GroupsTruncated);
+        Assert.Contains(", and 2 more.", result.GroupsTruncatedNote, StringComparison.Ordinal);
+        Assert.DoesNotContain("…", result.GroupsTruncatedNote, StringComparison.Ordinal);
     }
 
     [Fact]

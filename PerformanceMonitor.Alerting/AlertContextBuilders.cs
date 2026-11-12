@@ -444,6 +444,9 @@ public static class AlertContextBuilders
 
         var context = new AlertContext();
         var shown = files.GetRange(0, Math.Min(5, files.Count));
+        /* #7068: the card lists five, but every breached file was announced by this fire. The standing-state seed after
+           a restart reads this list, so file six of eight is not announced again. */
+        context.FileGrowthFiles = files.ConvertAll(f => new AlertFileIdentity(f.DatabaseName, f.FileName));
         foreach (var f in shown)
         {
             var fields = new List<(string, string)>
@@ -475,7 +478,7 @@ public static class AlertContextBuilders
 
             context.Details.Add(new AlertDetailItem
             {
-                Heading = $"{f.DatabaseName}.{f.FileName} — {f.TotalSizeGb:F1} GB ({(f.VolumeTotalMb is double headTotal && headTotal > 0 ? $"{f.VolumePercent:F0}% of {(string.IsNullOrEmpty(f.VolumeMountPoint) ? "(unknown)" : f.VolumeMountPoint)}" : "volume unknown")})",
+                Heading = $"{f.DatabaseName}.{f.FileName}: {f.TotalSizeGb:F1} GB ({(f.VolumeTotalMb is double headTotal && headTotal > 0 ? $"{f.VolumePercent:F0}% of {(string.IsNullOrEmpty(f.VolumeMountPoint) ? "(unknown)" : f.VolumeMountPoint)}" : "volume unknown")})",
                 Fields = fields
             });
         }
@@ -784,6 +787,18 @@ public static class AlertContextBuilders
                 $"{finding.ExcludedSamples:N0} of {finding.SampledEvents:N0} sampled events came from {AttentionEvaluator.ExcludedToolNames(finding.ExcludedSsmsSamples > 0, finding.ExcludedVsCodeSamples > 0)} cancelling their own metadata queries; they are left out of the rate judged")));
         }
 
+        if (finding.ShortSamples > 0)
+        {
+            reading.Fields.Add(("Under 1 ms", string.Create(CultureInfo.InvariantCulture,
+                $"{finding.ShortSamples:N0} of {finding.SampledEvents:N0} sampled events lasted under 1 ms (a cancel on a command that had already finished); they are left out of the rate judged")));
+        }
+
+        if (finding.AzdataMetadataSamples > 0)
+        {
+            reading.Fields.Add(("Azure Data Studio", string.Create(CultureInfo.InvariantCulture,
+                $"{finding.AzdataMetadataSamples:N0} of {finding.SampledEvents:N0} sampled events were Azure Data Studio metadata queries; they are left out of the rate judged")));
+        }
+
         if (finding.Bars is not null)
         {
             reading.Fields.Add(("Bar", AttentionEvaluator.BarSentence(finding)));
@@ -959,7 +974,7 @@ public static class AlertContextBuilders
         {
             var item = new AlertDetailItem
             {
-                Heading = $"Session #{q.SessionId} — {q.ElapsedSeconds / 60}m {q.ElapsedSeconds % 60}s",
+                Heading = $"Session #{q.SessionId}: {q.ElapsedSeconds / 60}m {q.ElapsedSeconds % 60}s",
                 Fields = new()
             };
 
@@ -1249,7 +1264,7 @@ public static class AlertContextBuilders
         {
             context.Details.Add(new AlertDetailItem
             {
-                Heading = $"{v.MountPoint} — {v.FreePercent:F0}% Free",
+                Heading = $"{v.MountPoint}: {v.FreePercent:F0}% Free",
                 Fields = new()
                 {
                     ("Free Space", $"{v.FreeGb:F1} GB"),
@@ -1325,7 +1340,7 @@ public static class AlertContextBuilders
             }
             context.Details.Add(new AlertDetailItem
             {
-                Heading = $"{d.DatabaseName} — PVS {d.PvsPercent:F0}% of database",
+                Heading = $"{d.DatabaseName}: PVS {d.PvsPercent:F0}% of database",
                 Fields = fields
             });
         }
@@ -1339,7 +1354,7 @@ public static class AlertContextBuilders
         var context = new AlertContext();
         context.Details.Add(new AlertDetailItem
         {
-            Heading = $"tempdb — {tempDb.ReservedPercent:F0}% Reserved",
+            Heading = $"tempdb: {tempDb.ReservedPercent:F0}% Reserved",
             Fields = new()
             {
                 ("Total Reserved", $"{tempDb.TotalReservedMb:F0} MB"),
@@ -1393,7 +1408,7 @@ public static class AlertContextBuilders
 
         return new AlertDetailItem
         {
-            Heading = $"Blocking Wait Time — {current.TotalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked {(current.BlockedSessionCount == 1 ? "session" : "sessions")}",
+            Heading = $"Blocking Wait Time: {current.TotalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked {(current.BlockedSessionCount == 1 ? "session" : "sessions")}",
             Fields = new()
             {
                 (BlockingWaitFiredByLabel, firedBy),
@@ -1475,7 +1490,7 @@ public static class AlertContextBuilders
             item.Fields.Add(("Job", j.JobName));
             item.Fields.Add(("Failed At", j.RunDateTimeFormatted));
             if (j.StepId > 0 && !string.IsNullOrEmpty(j.StepName))
-                item.Fields.Add(("Step", $"{j.StepId} — {j.StepName}"));
+                item.Fields.Add(("Step", $"{j.StepId}: {j.StepName}"));
             if (!string.IsNullOrEmpty(j.Message))
                 item.Fields.Add(("Message", TruncateText(j.Message, 300)));
             context.Details.Add(item);

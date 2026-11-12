@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// the app themes it, laid out in a window, and the text its grid cells actually show is read back from the visual tree, so
 /// these fail on a grid whose rows exist but whose cells are blank, and on a grid that prints a raw double.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerPostgresQueryShapesGridRenderTests
 {
     private static string ViewerDir([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "") =>
@@ -56,7 +57,7 @@ public sealed class ViewerPostgresQueryShapesGridRenderTests
                     new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
                     new DarlingServer(1, "pg-shapes-test", "pg-shapes-test", true, null, engineKind: "postgres"));
                 var window = new Window { Content = tab, Width = 1800, Height = 1000 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     /* Switching tabs starts the tab's own database read on a thread-pool continuation; the viewer's own drill-down skips it the same way. */

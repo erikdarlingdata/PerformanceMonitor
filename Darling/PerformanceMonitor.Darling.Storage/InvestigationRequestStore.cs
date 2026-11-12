@@ -45,6 +45,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public sealed partial class InvestigationRequestStore : IInvestigationRequestStore, IInvestigationNoteStore
 {
+    /// <summary>Optional mandatory server IDs for request and report reads.</summary>
+    public IReadOnlyList<int>? ReadServerIds { get; init; }
+
     /// <summary>The first key of the route lock, <c>pg_advisory_xact_lock(5632, route_id)</c>.</summary>
     public const int RouteLockKey = 5632;
 
@@ -131,6 +134,7 @@ SET alert_count = alert_count + 1,
     max_severity = $5
 WHERE request_id = $1";
 
+    /* A chat request (#7659) is counted apart, by ChatCountsSql, so a busy thread cannot block the route's alerts. */
     internal const string CountRouteSql = @"
 SELECT count(*) FILTER (WHERE opened_at > $2 - interval '1 hour'),
        count(*)
@@ -138,13 +142,17 @@ FROM config.investigation_requests
 WHERE route_id = $1
   AND practice_of IS NULL
   AND force_check_of IS NULL
+  AND trigger_kind <> 'chat'
   AND opened_at > $2 - interval '1 day'";
 
+    /* #8578: server_name is the registry's display name for server_id when the server is registered, else the name the caller passed. An alert
+       carries the display name or the host name and an analysis finding the storage name (host[:database][:RO]), so one server opened its requests
+       under two names. server_id 0 (an external source) has no registry row and keeps the caller's label, which is also its join key (FindJoinSql). */
     internal static readonly string OpenSql = @"
 INSERT INTO config.investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, first_dedup_key, story_path_hash,
      first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes, autonomy_level, max_severity, trigger_kind)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + " + GroupingWindowSql + @", $10, $10 + make_interval(mins => $11), $12,
+VALUES ($1, $2, $3, COALESCE((SELECT COALESCE(sv.display_name, sv.server_name) FROM collect.servers AS sv WHERE sv.server_id = $3), $4), $5, $6, $7, $8, $9, $9, $9 + " + GroupingWindowSql + @", $10, $10 + make_interval(mins => $11), $12,
         " + StampLevelSql(6, 13) + ", $14, $15)";
 
     internal const string AlertRowsSql = @"
@@ -284,12 +292,18 @@ SELECT follow_up_condition FROM config.investigation_requests WHERE request_id =
     internal const string OpenFollowUpSql = @"
 INSERT INTO config.investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
-     window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, max_severity, follow_up_of)
+     window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, max_severity, follow_up_of, trigger_kind, chat_thread_of)
 SELECT $1, r.route_id, r.server_id, r.server_name, r.family, r.first_metric, r.story_path_hash, r.first_alert_at, r.last_alert_at,
-       r.window_until, $3, $3 + (r.expires_at - r.opened_at), r.lease_minutes, r.autonomy_level, r.alert_count, r.max_severity, r.request_id
+       r.window_until, $3, $3 + (r.expires_at - r.opened_at), r.lease_minutes, r.autonomy_level, r.alert_count, r.max_severity, r.request_id,
+       " + ChatKindCopySql + @"
 FROM config.investigation_requests AS r
 WHERE r.request_id = $2
 RETURNING route_id, server_id";
+
+    /* #7659: a follow-up and a force check copy trigger_kind and the thread link only from a chat request; any other source opens an alert
+       request, as before. The askers are copied after the insert (CopyAskersSql), and an alert request has none. */
+    internal const string ChatKindCopySql = @"CASE WHEN r.trigger_kind = 'chat' THEN 'chat' ELSE 'alert' END,
+       CASE WHEN r.trigger_kind = 'chat' THEN r.chat_thread_of END";
 
     /* #6008: the source's alert rows, without the dedup key, so the brief's alerts section reads what the source's read. $1 new, $2 source. */
     internal const string CopyFollowUpAlertsSql = @"
@@ -410,6 +424,7 @@ WITH m AS (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS
                                   FROM config.investigation_requests AS r
                                   WHERE r.state IN ('open', 'claimed', 'reported')
                                     AND r.practice_of IS NULL
+                                    AND r.trigger_kind <> 'chat'
                                     AND r.opened_at > $1 - interval '2 days')
            GROUP BY a.request_id, a.server_id, a.metric_name)
 SELECT m.request_id, m.metric_name, h.context_json
@@ -450,6 +465,7 @@ FROM (
     LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
     WHERE ($3::integer IS NULL OR r.server_id = $3)
       AND ($4::text IS NULL OR r.family = $4)
+      AND ($6::integer[] IS NULL OR r.server_id = ANY($6))
 ) AS s
 WHERE ($2::text IS NULL OR s.effective_state = $2)
 ORDER BY s.opened_at DESC, s.request_id
@@ -519,6 +535,7 @@ RETURNING source_request_id, server_id, decided_at";
 WHERE ($2::uuid IS NULL OR r.request_id = $2)
   AND ($3::integer IS NULL OR r.server_id = $3)
   AND ($2::uuid IS NOT NULL OR r.opened_at >= $4)
+  AND ($6::integer[] IS NULL OR r.server_id = ANY($6))
 ORDER BY r.opened_at DESC, r.request_id
 LIMIT $5";
 
@@ -628,7 +645,9 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     private readonly Func<DateTime> _utcNow;
 
     /// <summary>The data source <see cref="RunAgentActionAsync"/> runs on: the store owner's, when the caller gave one. The journal rows an agent
-    /// action writes (<see cref="AgentActionEvents"/>) are the owner's alone, so the whole change, its checks and its rows, runs on that login.</summary>
+    /// action writes (<see cref="AgentActionEvents"/>) are the owner's alone, so the whole change, its checks and its rows, runs on that login. The
+    /// gate's asker kind read (<see cref="AskersHoldKindSql"/>) and the agent's message (<see cref="PostAgentMessageAsync"/>) run on it too: the asker
+    /// table and the <see cref="AgentMessage"/> row are the owner's, which the mcp login neither reads nor writes.</summary>
     private NpgsqlDataSource AgentActionSource => _agentActionSource ?? _dataSource;
 
     /// <summary>
@@ -1149,7 +1168,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = Command(connection, null, ReportsRequestsSql,
             P(Now()), new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid },
-            new NpgsqlParameter<int?> { TypedValue = null, NpgsqlDbType = NpgsqlDbType.Integer }, P(DateTime.MinValue), P(1));
+            new NpgsqlParameter<int?> { TypedValue = null, NpgsqlDbType = NpgsqlDbType.Integer }, P(DateTime.MinValue), P(1), ReadServerScopeParameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -1188,7 +1207,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         string? brief = null;
         await using (var command = Command(connection, null, ReportsRequestsSql,
             P(Now()), new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid },
-            new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer }, P(sinceUtc), P(limit + 1)))
+            new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer }, P(sinceUtc), P(limit + 1), ReadServerScopeParameter()))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
@@ -1238,7 +1257,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
         /* #5913: the people's feedback on these reports, and (for a window, not one request) the false-positive counts per family
            over the same window and server. The V191 table is SELECT-able by every role that reads these tables. */
-        var feedbackStore = new InvestigationFeedbackStore(_dataSource, _commandTimeoutSeconds);
+        var feedbackStore = new InvestigationFeedbackStore(_dataSource, _commandTimeoutSeconds) { ReadServerIds = ReadServerIds };
         var feedback = await feedbackStore.ReadAsync(connection, ids, cancellationToken);
         var familyCounts = requestId is null ? await feedbackStore.FamilyCountsAsync(connection, sinceUtc, serverId, cancellationToken) : null;
         return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, journalTruncated, feedback, familyCounts, EvidenceByBasis: true);
@@ -1315,7 +1334,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = Command(connection, null, ListSql,
             P(Now()), PNullable(state), new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
-            PNullable(family), P(limit));
+            PNullable(family), P(limit), ReadServerScopeParameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var rows = new List<InvestigationRequestRow>();
         while (await reader.ReadAsync(cancellationToken))
@@ -1481,7 +1500,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     /// claims (its last claim's lease lapsed, or released), to <c>expired</c> and journals that once: <c>expired</c> past the
     /// expiry, <c>claims_exhausted</c> before it. It never reopens a lease. Then, in a transaction of its own, it journals
     /// each live request whose every metric has cleared (<see cref="ResolveCandidatesSql"/>), so a failure there cannot hold
-    /// back the expiry and its fallback (#6003 review).
+    /// back the expiry and its fallback (#6003 review). Last, the action proposals (#7109, <see cref="SweepProposalsAsync"/>).
     /// </summary>
     public async Task<InvestigationSweepResult> SweepAsync(CancellationToken cancellationToken = default)
     {
@@ -1502,7 +1521,12 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await using var forceCheckTransaction = await connection.BeginTransactionAsync(cancellationToken);
         var forceChecks = await SweepForceChecksAsync(connection, forceCheckTransaction, now, cancellationToken);
         await forceCheckTransaction.CommitAsync(cancellationToken);
-        return new InvestigationSweepResult(lapsed, expired) { Resolved = resolved, FollowUps = followUps + forceChecks };
+        /* #7109: the action proposals, after the resolved journal so an alert that resolved this pass voids its pending kill in the same
+           pass. A transaction of their own, so a failure there holds back nothing above. */
+        await using var proposalTransaction = await connection.BeginTransactionAsync(cancellationToken);
+        var proposals = await SweepProposalsAsync(connection, proposalTransaction, now, cancellationToken);
+        await proposalTransaction.CommitAsync(cancellationToken);
+        return new InvestigationSweepResult(lapsed, expired) { Resolved = resolved, FollowUps = followUps + forceChecks, Proposals = proposals };
     }
 
     /// <summary>
@@ -1593,6 +1617,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             }
 
             await ExecAsync(connection, transaction, CopyFollowUpAlertsSql, cancellationToken, P(followUpId), P(earlier));
+            await ExecAsync(connection, transaction, CopyAskersSql, cancellationToken, P(followUpId), P(earlier));
             if (deployed)
             {
                 await WriteDeployEvidenceAsync(connection, transaction, followUpId, earlier, changedTo!.Value, now, cancellationToken);
@@ -1794,6 +1819,9 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             new NpgsqlParameter<int?> { TypedValue = routeId, NpgsqlDbType = NpgsqlDbType.Integer },
             new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
             P(journalEvent), P(actor), PNullable(reason), PNullable(detailJson), PNullable(onceKey));
+
+    private NpgsqlParameter ReadServerScopeParameter() =>
+        new() { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = (object?)ReadServerIds?.ToArray() ?? DBNull.Value };
 
     private NpgsqlCommand Command(NpgsqlConnection connection, NpgsqlTransaction? transaction, string sql, params NpgsqlParameter[] parameters)
     {

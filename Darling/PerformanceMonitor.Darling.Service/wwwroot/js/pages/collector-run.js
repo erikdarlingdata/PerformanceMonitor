@@ -13,7 +13,7 @@
  * neither button: the server answers 403 to it anyway, so this is the affordance layer, never the enforcement.
  */
 
-import { el, mount, apiGet, apiGetFleet, apiWrite, readTool } from "../util.js";
+import { el, mount, apiGet, apiGetFleet, apiWrite, readTool, localTime } from "../util.js";
 import { getSession, peekSession } from "../views-api.js";
 import { plainTextCounts } from "../plain-text.js";
 
@@ -60,7 +60,8 @@ async function markOffline(server, button, note) {
   const res = await apiGetFleet();
   if (res.kind !== "data") return;
   const card = (res.data.cards || []).find((c) => c.server_name === server || c.display_name === server);
-  if (!card || card.band !== "Offline") {
+  /* #7590: a card that carries the stored failed connect is unreachable whatever its band says: no collector can run. */
+  if (!card || (card.band !== "Offline" && !card.connect_down_since)) {
     offline.delete(server);
     return;
   }
@@ -152,14 +153,16 @@ async function newestRows(server, names) {
 }
 
 function resultTable(rows) {
-  const head = el("tr", {}, ["Collector", "When", "Status", "Rows", "Error"].map((h) => el("th", {}, [h])));
+  const head = el("tr", {}, ["Collector", "When", "Status", "Rows", "Error", "Run note"].map((h) => el("th", {}, [h])));
   const body = rows.map((run) =>
     el("tr", {}, [
       el("td", {}, [String(run.collector)]),
-      el("td", {}, [run.collection_time ? new Date(run.collection_time).toLocaleString() : ""]),
+      /* #7930: collection_time is the store's naive UTC stamp (no zone); localTime reads it as UTC, as every other time cell does. */
+      el("td", {}, [run.collection_time ? localTime(run.collection_time) : ""]),
       el("td", {}, [String(run.status || "")]),
       el("td", {}, [run.rows_collected == null ? "" : String(run.rows_collected)]),
       el("td", {}, [run.error_message ? plainTextCounts(String(run.error_message)) : ""]),
+      el("td", {}, [run.run_note ? plainTextCounts(String(run.run_note)) : ""]),
     ])
   );
   return el("table", { class: "data-table" }, [el("thead", {}, [head]), el("tbody", {}, body)]);
@@ -211,7 +214,7 @@ export function collectorRunBar(server) {
       " Runs every enabled collector once. This puts extra load on the monitored server; pick one collector in the table below to run just that one.",
     ]);
     track(server, button);
-    mount(slot, [el("div", {}, [button, note]), status, output]);
+    mount(slot, [el("div", { class: "run-row" }, [button, note]), status, output]);
     markOffline(server, button, note);
     slot.dataset.status = "ready";
     slot.__status = status;

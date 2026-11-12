@@ -26,7 +26,7 @@ A collector, alert, or analysis change lands once in the shared libraries and bo
 | Best for | Quick triage, consultants, a handful of servers | Always-on team monitoring, larger estates, one shared store |
 | Configuration | Settings UI | `darling.json` seeds the first start. After that, the Viewer edits servers, alert settings and notification routes in the store. The web dashboard's Admin page edits a server in place and the agent channel of a notification route, for a sign-in that can make changes. Its Alert Settings tab is read-only. |
 
-Nothing is installed on the monitored SQL Servers by either edition beyond two lightweight Extended Events ring-buffer sessions and, when it is unset, a one-time `blocked process threshold` bootstrap (see [What the Service Does on Monitored Servers](../docs/darling/monitored-servers.md#what-the-service-does-on-monitored-servers)).
+Nothing is installed on the monitored SQL Servers by either edition beyond three lightweight Extended Events ring-buffer sessions and, when it is unset, a one-time `blocked process threshold` bootstrap (see [What the Service Does on Monitored Servers](../docs/darling/monitored-servers.md#what-the-service-does-on-monitored-servers)).
 
 ---
 
@@ -39,7 +39,7 @@ Nothing is installed on the monitored SQL Servers by either edition beyond two l
 The install reference that was here moved to these pages:
 
 - [Install Darling](../docs/darling/install.md#install-reference): prerequisites, `darling.json`, the pre-flight, the Windows service, the install location, the service account, building from source and the CET error.
-- [The Darling quick start](../docs/darling-quick-start.md#run-on-linux-docker-compose-or-systemd): Docker Compose and systemd on Linux.
+- [The Darling quick start](../docs/darling-quick-start.md#run-on-linux-docker-compose-or-systemd): Docker Compose and systemd on Linux. The container runs as user 1654; see [Container user](../docs/darling/security.md#container-user) before upgrading an install that ran as root.
 - [Running Darling day to day](../docs/darling/admin.md#upgrading-an-existing-install): upgrade and roll back.
 - [Darling and your monitored servers](../docs/darling/monitored-servers.md): what the service does on each server, its Extended Events sessions and the permissions it needs.
 
@@ -137,9 +137,9 @@ This section moved to [Configuration Reference](../docs/darling/configuration.md
 
 This section moved to [Configuration Reference](../docs/darling/configuration.md#postgres).
 
-### servers (array, at least one entry)
+### servers (array)
 
-This section moved to [Configuration Reference](../docs/darling/configuration.md#servers-array-at-least-one-entry).
+This section moved to [Configuration Reference](../docs/darling/configuration.md#servers-array).
 
 ### Testing an index on PostgreSQL
 

@@ -73,7 +73,10 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
             "SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_stats')", ct),
             "query_store_stats did not convert to a hypertable; the pin's chunk-floor diagnostic cannot be trusted");
 
-        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        /* Unpooled, for every reader below: QuiesceScanStatisticsAsync waits for every other client backend in the database to
+           exit, which is how a read's scan counters reach pg_stat_user_tables. A pooled reader would keep its backend idle. */
+        var unpooled = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Pooling = false }.ConnectionString;
+        await using var postgres = NpgsqlDataSource.Create(unpooled);
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
 
         await SeedStraddleAsync(runner, ct);
@@ -159,16 +162,20 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
            passes an endUtc past literalEndUtc for a custom range (see the doc comment on
            ViewerDataService.GetQueryStoreTopQueriesAsync) - for a custom range they are the same value - so this
            passes LiteralEnd for both, matching raw's own bound to the straddle point instead of past it. */
-        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+        await using var viewer = new ViewerDataService(unpooled);
         var gridRows = await viewer.GetQueryStoreTopQueriesAsync(ServerId, WindowStart, LiteralEnd, TestTop, null, literalEndUtc: LiteralEnd);
         var gridRow = gridRows.Single(r => r.DatabaseName == "qsStraddle" && r.QueryId == 7001);
-        Assert.Equal(192, gridRow.TotalExecutions);
+        /* #7776: the grid places its window by the interval's start (day0, inside the window), so the re-fetch collected after
+           LiteralEnd is the interval's newest state and the grid shows it: 385, the answer the table path gives. Before, the grid
+           windowed on collection_time and showed the 192 snapshot. */
+        Assert.Equal(385, gridRow.TotalExecutions);
 
         /* The MCP/web top read: endUtc doubles as both the window end and the gate's literal end (#3953's own
            doc comment on DarlingDataReader.GetQueryStoreTopAsync), so an explicit as_of/end IS this parameter. */
         var mcpRows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, ServerId, WindowStart, LiteralEnd, TestTop, null, ct);
         var mcpRow = mcpRows.Single(r => r.DatabaseName == "qsStraddle" && r.QueryId == 7001);
-        Assert.Equal(192, mcpRow.TotalExecutions);
+        /* #7814: the MCP read places the window by the interval's start too, so it shows the same newest state (385) as the grid above. */
+        Assert.Equal(385, mcpRow.TotalExecutions);
 
         var after = await WideTableScanCountsAsync();
         Assert.Equal(before, after);

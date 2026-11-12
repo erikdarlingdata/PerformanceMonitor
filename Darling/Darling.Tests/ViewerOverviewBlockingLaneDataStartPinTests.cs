@@ -37,7 +37,7 @@ public sealed class ViewerOverviewBlockingLaneDataStartPinTests
     [Fact]
     public void RefreshAsync_RunsTheNoteAfterTheLanesAreDrawn_AndKeepsTheProbesOutOfTheMainWhenAll()
     {
-        var refresh = Between(Code(), "public async Task RefreshAsync(", "private async Task ShowBlockingLaneDataStartAsync(");
+        var refresh = Between(Code(), "public async Task<string?> RefreshAsync(", "private async Task ShowBlockingLaneDataStartAsync(");
 
         var whenAll = Between(refresh, "await Task.WhenAll(", ");");
         Assert.DoesNotContain("DataStart", whenAll, StringComparison.Ordinal);
@@ -58,7 +58,7 @@ public sealed class ViewerOverviewBlockingLaneDataStartPinTests
         Assert.Contains("blockingTask.Result.Select(d => d.Time)", call, StringComparison.Ordinal);
         Assert.Contains("deadlockTask.Result.Select(d => d.Time)", call, StringComparison.Ordinal);
 
-        var step = Between(code, "private async Task ShowBlockingLaneDataStartAsync(", "private void UpdateBlockingLane(");
+        var step = Between(code, "private async Task ShowBlockingLaneDataStartAsync(", "void UpdateBlockingLane(");
         Assert.Contains("endUtc - startUtc > DurationTrendRouting.TruncationSlack", step, StringComparison.Ordinal);
         Assert.Contains("_dataService!.GetBlockingChartDataStartAsync(_serverId, startUtc, endUtc)", step, StringComparison.Ordinal);
         Assert.Contains("_dataService!.GetDeadlocksDataStartAsync(_serverId, startUtc, endUtc)", step, StringComparison.Ordinal);
@@ -73,7 +73,7 @@ public sealed class ViewerOverviewBlockingLaneDataStartPinTests
         Assert.Contains("<RowDefinition Height=\"Auto\"/>", chart, StringComparison.Ordinal);
         Assert.Matches(@"x:Name=""BlockingLaneDataStartBanner""\s+Visibility=""Collapsed""", chart);
         Assert.Contains("Background=\"#22FFAA00\"", chart, StringComparison.Ordinal);
-        Assert.Contains("<ScottPlot:WpfPlot Grid.Row=\"1\" Grid.Column=\"1\" x:Name=\"BlockingChart\"/>", chart, StringComparison.Ordinal);
+        Assert.Contains("<ScottPlot:WpfPlot Grid.Row=\"1\" x:Name=\"BlockingChart\"/>", chart, StringComparison.Ordinal);
     }
 
     [Fact]

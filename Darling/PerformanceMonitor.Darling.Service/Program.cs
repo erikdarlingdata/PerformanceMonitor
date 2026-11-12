@@ -53,7 +53,7 @@ if (args.Length > 0 && DarlingCliCommands.IsEncryptPasswordVerb(args[0]))
 {
     if (!OperatingSystem.IsWindows())
     {
-        Console.Error.WriteLine("--encrypt-password requires Windows (DPAPI).");
+        Console.Error.WriteLine("--encrypt-password requires Windows (DPAPI). On another OS, put the secret in darling.json as an env:NAME or file:/path reference instead.");
         return 1;
     }
 
@@ -245,6 +245,20 @@ if (args.Length > 0 && DarlingCliCommands.IsHardenFilesVerb(args[0]))
         : DarlingCliCommands.HardenFiles(configPath, Console.Out, Console.Error);
 }
 
+/* CLI verb: --grant-cert-key-access (#7718) - give the service account Read on the private key of a certificate in a
+   Windows certificate store, so the store form of web.network.tls / mcp.network.tls can open it. Elevated for
+   LocalMachine; adds one Read entry for one account and keeps the existing entries. Windows-only: keys and ACLs. */
+if (args.Length > 0 && DarlingCliCommands.IsGrantCertKeyAccessVerb(args[0]))
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("--grant-cert-key-access requires Windows (certificate private keys and their ACLs).");
+        return 1;
+    }
+
+    return DarlingCliCommands.GrantCertKeyAccess(args.Skip(1).ToArray(), Console.Out, Console.Error);
+}
+
 /* CLI verbs: enable/disable the embedded MCP + web-dashboard endpoints on a HEADLESS managed deployment. Each
    flips the live switch in config.config_service (mcp_enabled/web_enabled — the store is authoritative after the
    first run; darling.json's enabled is only the seed) via a targeted UPDATE whose self-bump trigger makes the
@@ -380,11 +394,20 @@ if (args.Length > 0 && (DarlingCliCommands.IsEnableCollectorVerb(args[0]) || Dar
 }
 
 /* CLI verb: --reset-password-key [--config <path>] (#5366) - mark the service's current password key replaced, so the next
-   start makes a new one, and print how many saved passwords must be entered again. Store only: it never touches a key
+   start makes a new one (without passwordKey; with it, the start waits for a new key in that source, #8006), and print how
+   many saved passwords must be entered again. Store only: it never touches a key
    file. Same platform posture as the verbs around it (Windows only for a MANAGED store credential, which the verb checks). */
 if (args.Length > 0 && DarlingCliCommands.IsResetPasswordKeyVerb(args[0]))
 {
     return await DarlingCliCommands.ResetPasswordKeyAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
+/* CLI verb: --new-password-key <path> (#8006) - write a new password key to a path that holds nothing, for an operator to put in
+   the secret store passwordKey reads, and print only its fingerprint, never the key. It reads no configuration and opens no
+   store, so it runs anywhere the exe does. */
+if (args.Length > 0 && DarlingCliCommands.IsNewPasswordKeyVerb(args[0]))
+{
+    return DarlingCliCommands.NewPasswordKey(args[1..], Console.Out, Console.Error);
 }
 
 /* CLI verb: --self-check-password-key <vector-path> (#5366) - hidden: not in the usage text. Runs the real password key file,
@@ -393,6 +416,14 @@ if (args.Length > 0 && DarlingCliCommands.IsResetPasswordKeyVerb(args[0]))
 if (args.Length > 0 && DarlingCliCommands.IsSelfCheckPasswordKeyVerb(args[0]))
 {
     return DarlingPasswordKeySelfCheck.Run(args[1..], Console.Out, Console.Error);
+}
+
+/* CLI verb: --self-check-launch-memory [<expected-limit-mib>] (#6995) - hidden: not in the usage text. Samples the Linux launch guard's
+   memory reader once and exits non-zero unless it reads resident memory against the cgroup limit. The container smoke runs it inside the
+   built image under `docker run --memory`. It reads no configuration and opens no store. */
+if (args.Length > 0 && DarlingCliCommands.IsSelfCheckLaunchMemoryVerb(args[0]))
+{
+    return DarlingLaunchMemorySelfCheck.Run(args[1..], Console.Out, Console.Error);
 }
 
 /* CLI verb: --set-collector-run-at <collector> <HH:MM|none|default> [--server <name>] [--config <path>] (#4938) — set,
@@ -573,7 +604,7 @@ if (OperatingSystem.IsWindows())
     if (!instanceGuard.Owns)
     {
         startupLogger.LogCritical(
-            "Another PerformanceMonitor Darling service instance already holds the single-instance lock ({Mutex}) — exiting without starting a second instance (a second instance would fight the first over the bundled PostgreSQL and the MCP/web ports).",
+            "Another PerformanceMonitor Darling service instance already holds the single-instance lock ({Mutex}). Exiting without starting a second instance, because a second instance would fight the first over the bundled PostgreSQL and the MCP and web ports. Stop the other instance (Services, or Task Manager) and start this one again.",
             SingleInstanceGuard.ServiceMutexName);
         instanceGuard.Dispose();
         /* Run() disposes the host on the normal path; we are skipping Run(), so dispose it ourselves. */

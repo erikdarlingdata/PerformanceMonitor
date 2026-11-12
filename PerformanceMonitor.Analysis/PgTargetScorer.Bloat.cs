@@ -327,7 +327,7 @@ public static partial class PgTargetScorer
     [
         new()
         {
-            Description = "PG_AUTOVACUUM_BACKLOG co-fired on a table this trend names — the dead tuples autovacuum is not clearing are where the growth is coming from",
+            Description = "PG_AUTOVACUUM_BACKLOG co-fired on a table this trend names: the dead tuples autovacuum is not clearing are where the growth is coming from",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.BloatTrend, out var bloat)
@@ -337,7 +337,7 @@ public static partial class PgTargetScorer
         },
         new()
         {
-            Description = "PG_XMIN_HOLD co-fired — a held xmin horizon makes dead tuples unremovable, so the space they hold cannot be reused and the heap grows around them",
+            Description = "PG_XMIN_HOLD co-fired: a held xmin horizon makes dead tuples unremovable, so the space they hold cannot be reused and the heap grows around them",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.XminHold, out var hold) && hold.BaseSeverity > 0,
@@ -348,7 +348,7 @@ public static partial class PgTargetScorer
     [
         new()
         {
-            Description = "PG_BLOAT_TREND co-fired on this index's table — the heap and its index are growing together, which is churn, not a one-off",
+            Description = "PG_BLOAT_TREND co-fired on this index's table: the heap and its index are growing together, which is churn, not a one-off",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.IndexBloatTrend, out var index)

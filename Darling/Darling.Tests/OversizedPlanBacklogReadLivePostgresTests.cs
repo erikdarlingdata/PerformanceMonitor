@@ -110,7 +110,8 @@ VALUES
         await using var postgres = NpgsqlDataSource.Create(ReadConnectionString(scratch));
 
         var census = await DarlingOversizedPlanBacklogReader.GetCollectorCensusAsync(postgres, null, ct);
-        var servers = await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(postgres, null, ct);
+        /* The fixture's stamps are fixed dates, so the day the three last-day counts cover is fixed too; nothing here reads them. */
+        var servers = await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(postgres, null, new DateTime(2026, 9, 13, 0, 0, 0, DateTimeKind.Unspecified), ct);
 
         Assert.Equal(
             new[] { OversizedPlanBacklog.ProcedureStatsCollectorName, OversizedPlanBacklog.QueryStatsCollectorName },
@@ -161,7 +162,7 @@ VALUES
         Assert.Equal<DateTime?>(new DateTime(2026, 9, 13, 11, 0, 0), registered.LastExpiredAt);
 
         /* A discrete median is one of the seeded sizes, never an interpolation between two of them. */
-        Assert.Contains(registered.MedianObservedBytes, new long[] { 600_000, 700_000, 800_000, 900_000, 1_000_000 });
+        Assert.Contains(registered.MedianObservedBytes!.Value, new long[] { 600_000, 700_000, 800_000, 900_000, 1_000_000 });
         Assert.Equal(600_000L, registered.MinObservedBytes);
         Assert.Equal(1_000_000L, registered.MaxObservedBytes);
 
@@ -205,7 +206,7 @@ VALUES
             claimed.OrderBy(h => h, StringComparer.Ordinal).ToArray());
 
         /* Server scoping narrows BOTH grains, rather than filtering only the listing. */
-        var scoped = await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(postgres, RegisteredServerId, ct);
+        var scoped = await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(postgres, RegisteredServerId, new DateTime(2026, 9, 13, 0, 0, 0, DateTimeKind.Unspecified), ct);
         Assert.Equal(RegisteredServerId, scoped.Single().ServerId);
         Assert.Equal(
             5L,
@@ -232,7 +233,7 @@ VALUES
 
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 

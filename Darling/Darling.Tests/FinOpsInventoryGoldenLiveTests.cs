@@ -160,14 +160,14 @@ public sealed class FinOpsInventoryGoldenLiveTests
             CollectionIdGenerator.Next(), now.AddDays(-3), IdA, NameA);
         /* The idle count (and the idle claim behind it) needs 7 days of query-stats history with a sample on each complete UTC day. */
         await FinOpsIdleCoverageSeed.SeedAsync(c, ct, IdA, NameA, now);
-        await InsertPropertiesAsync(c, IdA, NameA, anchor.AddDays(-1).AddHours(3), "Enterprise Edition", "16.0.4100.1", "RTM", "CU9", 3, 8, 65536L, 2, 4, true, false, anchor.AddDays(-3).AddHours(7), "Windows Server 2022", "PRIMARY", null, ct);
-        await InsertPropertiesAsync(c, IdA, NameA, anchor.AddDays(-9), "Developer Edition", "15.0.2000.5", "RTM", null, 3, 4, 8192L, 1, 4, false, false, null, "Windows Server 2019", null, null, ct);
+        await InsertPropertiesAsync(c, IdA, NameA, anchor.AddDays(-1).AddHours(3), "Enterprise Edition", "16.0.4100.1", "RTM", "CU9", 3, 8, 65536L, 2, 4, true, false, anchor.AddDays(-3).AddHours(7), "Windows Server 2022", "PRIMARY", null, -300, "Eastern Standard Time", ct);
+        await InsertPropertiesAsync(c, IdA, NameA, anchor.AddDays(-9), "Developer Edition", "15.0.2000.5", "RTM", null, 3, 4, 8192L, 1, 4, false, false, null, "Windows Server 2019", null, null, null, null, ct);
         await DarlingMcpTestData.ExecAsync(c, ct,
             "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status) VALUES ($1, $2, $3, 'wait_stats', $4, 'SUCCESS')",
             CollectionIdGenerator.Next(), IdA, NameA, anchor.AddHours(-5));
 
         /* B: disabled Azure SQL Database, vCore-named, no samples. */
-        await InsertPropertiesAsync(c, IdB, NameB, anchor.AddDays(-2), "SQL Azure", "12.0.2000.8", "RTM", null, 5, 2, 913000L, 0, 32, null, null, null, null, null, 4, ct);
+        await InsertPropertiesAsync(c, IdB, NameB, anchor.AddDays(-2), "SQL Azure", "12.0.2000.8", "RTM", null, 5, 2, 913000L, 0, 32, null, null, null, null, null, 4, null, null, ct);
 
         /* C: a monitored server with one CPU sample and a NULL current-workers count (so the verdict sees a missing
            count), and no hardware columns. */
@@ -177,7 +177,7 @@ public sealed class FinOpsInventoryGoldenLiveTests
         /* Eleven more readings of 7 make the 12 a verdict needs (#6139), with the same average and p95. */
         for (var i = 0; i < 11; i++)
             await InsertCpuAsync(c, IdC, NameC, now.AddMinutes(-5 * (i + 1)), 7, ct);
-        await InsertPropertiesAsync(c, IdC, NameC, anchor.AddDays(-4), "Standard Edition", "14.0.1000.169", "SP1", "", 2, null, null, null, null, null, null, null, null, null, null, ct);
+        await InsertPropertiesAsync(c, IdC, NameC, anchor.AddDays(-4), "Standard Edition", "14.0.1000.169", "SP1", "", 2, null, null, null, null, null, null, null, null, null, null, null, null, ct);
         await DarlingMcpTestData.ExecAsync(c, ct,
             "INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name, max_workers_count, current_workers_count) VALUES ($1, $2, $3, $4, 256, NULL)",
             CollectionIdGenerator.Next(), now.AddHours(-4), IdC, NameC);
@@ -199,7 +199,7 @@ public sealed class FinOpsInventoryGoldenLiveTests
             "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle, delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds) VALUES ($1, $2, $3, $4, 'UserDbOnly', '0xHASHGOLD2', '0xHANDLEGOLD2', 1000, 1000, 5, 300)",
             CollectionIdGenerator.Next(), now.AddHours(-6), IdD, NameD);
         await FinOpsIdleCoverageSeed.SeedAsync(c, ct, IdD, NameD, now);
-        await InsertPropertiesAsync(c, IdD, NameD, anchor.AddDays(-5), "Standard Edition", "15.0.4000.1", "RTM", null, 2, 4, 16384L, 1, 4, false, false, null, null, null, null, ct);
+        await InsertPropertiesAsync(c, IdD, NameD, anchor.AddDays(-5), "Standard Edition", "15.0.4000.1", "RTM", null, 2, 4, 16384L, 1, 4, false, false, null, null, null, null, null, null, ct);
     }
 
     private static Task InsertCpuAsync(NpgsqlConnection c, int id, string name, DateTime at, int pct, CancellationToken ct) =>
@@ -209,10 +209,10 @@ public sealed class FinOpsInventoryGoldenLiveTests
 
     private static Task InsertPropertiesAsync(NpgsqlConnection c, int id, string name, DateTime at, string edition, string version,
         string level, string? updateLevel, int engineEdition, int? cpuCount, long? memoryMb, int? sockets, int? coresPerSocket,
-        bool? hadr, bool? clustered, DateTime? start, string? os, string? role, int? vcores, CancellationToken ct) =>
+        bool? hadr, bool? clustered, DateTime? start, string? os, string? role, int? vcores, int? utcOffsetMinutes, string? timeZoneId, CancellationToken ct) =>
         DarlingMcpTestData.ExecAsync(c, ct,
-            "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, product_update_level, engine_edition, cpu_count, physical_memory_mb, socket_count, cores_per_socket, is_hadr_enabled, is_clustered, sqlserver_start_time, host_os_version, ag_replica_role, vcore_count) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
-            CollectionIdGenerator.Next(), at, id, name, edition, version, level, updateLevel, engineEdition, cpuCount, memoryMb, sockets, coresPerSocket, hadr, clustered, start, os, role, vcores);
+            "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, product_update_level, engine_edition, cpu_count, physical_memory_mb, socket_count, cores_per_socket, is_hadr_enabled, is_clustered, sqlserver_start_time, host_os_version, ag_replica_role, vcore_count, utc_offset_minutes, time_zone_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)",
+            CollectionIdGenerator.Next(), at, id, name, edition, version, level, updateLevel, engineEdition, cpuCount, memoryMb, sockets, coresPerSocket, hadr, clustered, start, os, role, vcores, utcOffsetMinutes, timeZoneId);
 
     private static Task CleanupAsync(NpgsqlConnection c, CancellationToken ct) =>
         DarlingMcpTestData.ExecAsync(c, ct,

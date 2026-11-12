@@ -30,18 +30,37 @@ public class MuteRuleService
     private readonly ILogger<MuteRuleService> _logger;
     private readonly object _lock = new object();
     private List<MuteRule> _rules = new();
+    private readonly Func<DateTime> _utcNow;
 
-    public MuteRuleService(IMuteRuleStore store, ILogger<MuteRuleService> logger)
+    /// <param name="utcNow">The clock the match, schedule and in-effect checks read; the system clock when null.</param>
+    public MuteRuleService(IMuteRuleStore store, ILogger<MuteRuleService> logger, Func<DateTime>? utcNow = null)
     {
         _store = store;
         _logger = logger;
+        _utcNow = utcNow ?? (() => DateTime.UtcNow);
     }
 
     public bool IsAlertMuted(AlertMuteContext context)
     {
+        var now = _utcNow();
         lock (_lock)
         {
-            return _rules.Any(r => r.Matches(context));
+            return _rules.Any(r => r.MatchesAt(context, now));
+        }
+    }
+
+    /// <summary>Whether a digest rule (#7083) is in force for <paramref name="context"/> now. Digest rules never mute:
+    /// <see cref="IsAlertMuted"/> ignores them, so a caller asks this second and only when the alert is not muted.</summary>
+    public bool IsInDigestWindow(AlertMuteContext context) => DigestWindowReason(context) is not null;
+
+    /// <summary>The reason line of the first digest rule in force for <paramref name="context"/> now (see <see cref="MuteRule.DigestHoldReason"/>),
+    /// or null when none is. The engines pass this as their digest-window delegate.</summary>
+    public string? DigestWindowReason(AlertMuteContext context)
+    {
+        var now = _utcNow();
+        lock (_lock)
+        {
+            return _rules.FirstOrDefault(r => r.MatchesDigestAt(context, now))?.DigestHoldReason();
         }
     }
 
@@ -55,9 +74,10 @@ public class MuteRuleService
 
     public List<MuteRule> GetActiveRules()
     {
+        var now = _utcNow();
         lock (_lock)
         {
-            return _rules.Where(r => r.Enabled && !r.IsExpired && !r.IsUpcomingAt(DateTime.UtcNow)).ToList();
+            return _rules.Where(r => r.IsInEffectAt(now)).ToList();
         }
     }
 

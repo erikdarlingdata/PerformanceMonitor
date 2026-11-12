@@ -10,10 +10,12 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Windows;
 
@@ -28,7 +30,13 @@ public partial class ManageMuteRulesWindow : Window
         _muteRuleService = muteRuleService;
         _rules = new ObservableCollection<MuteRule>(_muteRuleService.GetRules());
         RulesGrid.ItemsSource = _rules;
+        _rules.CollectionChanged += (_, _) => ShowEmptyState();
+        ShowEmptyState();
     }
+
+    /// <summary>An empty grid says so, in place of a bare header row.</summary>
+    private void ShowEmptyState() =>
+        NoRulesMessage.Visibility = _rules.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
     private async void AddRule_Click(object sender, RoutedEventArgs e)
     {
@@ -105,7 +113,7 @@ public partial class ManageMuteRulesWindow : Window
         if (removed > 0)
         {
             RefreshList();
-            MessageBox.Show($"Removed {removed} expired rule(s).", "Purge Complete",
+            MessageBox.Show($"Removed {CountText.Plural(removed, "expired rule")}.", "Purge Complete",
                 MessageBoxButton.OK, MessageBoxImage.Information);
         }
         else
@@ -138,7 +146,11 @@ public partial class ManageMuteRulesWindow : Window
 
     private void RulesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        EditRule_Click(sender, e);
+        // A double-click on a column header, the scrollbar or the empty area is not a row (#7210).
+        if (DataGridRowHit.IsOnRow(e.OriginalSource))
+        {
+            EditRule_Click(sender, e);
+        }
     }
 
     private void RefreshList()

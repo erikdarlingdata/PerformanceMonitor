@@ -135,9 +135,9 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
     /// That is a property of what a report IS rather than an accident of how it fires: an incident-carrying
     /// context would enter these documents into per-event splitting and the incident delivery filter, which
     /// are paging mechanisms a once-a-day report stays outside of (#3834 states this at each builder). The
-    /// belt-and-suspenders catch below also answers <c>null</c>: both <c>TrySendAsync</c> and
-    /// <c>RecordAlertAsync</c> are failure-isolated themselves, so a throw here is something outside the
-    /// channels and says nothing about whether they delivered.</para>
+    /// belt-and-suspenders catch below answers <see cref="AlertDelivery.DelivererFailed"/> (#8246): both
+    /// <c>TrySendAsync</c> and <c>RecordAlertAsync</c> are failure-isolated themselves, so a throw here is something
+    /// outside the channels, and nothing is known to have reached anyone, so the engine tries the alert again.</para>
     /// </summary>
     public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
     {
@@ -157,20 +157,23 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
             /* #1236/#1141: a per-server override wins over the global mode; Per-event splits an
                incident-carrying alert into one send+row per distinct incident (capped, "+N more"). */
             var mode = AlertDeliveryModeResolver.Resolve(_resolveServerOverride(outcome.ServerKey), _settings.DeliveryMode);
-            if (mode == AlertNotificationMode.PerEvent && outcome.Context?.Incidents is { Count: > 0 })
+            /* #7086: a held fire is one digest row, whatever the mode: the Per-event split is a paging mechanism. */
+            if (PerEventNotification.Splits(mode, outcome.Context) && !(outcome.Hold is not null && !outcome.Muted))
             {
                 var deliveries = new List<AlertDelivery?>();
                 foreach (var message in PerEventNotification.Split(outcome.Context, _settings.PerEventMax))
                 {
-                    /* Per-incident card: msg.CurrentValue is the incident's occurrence count, and
-                       msg.NumericValue carries it as a number for the history row (#1830 — the
-                       overflow message's "+N more" text is unparseable, so the store's text fallback
-                       silently recorded 0). Threshold is the outcome's, unchanged. Matches Lite's
-                       per-event sends; detail text rebuilt from the split context. */
+                    /* Per-incident card: message.CurrentValue is the incident's occurrence count. The row's numeric is the
+                       alert's measurement (#8246): the engine reads the newest open row's value back as the level it last
+                       announced (Volume Free Space's free percent, PVS's percent), and the history shows the value the
+                       threshold was judged against. message.NumericValue, the incident's count, is the row's numeric only
+                       for an alert with no measurement of its own (#1830: the overflow message's "+N more" text is
+                       unparseable, so the store's text fallback silently recorded 0). Threshold is the outcome's,
+                       unchanged. Matches Lite's per-event sends; detail text rebuilt from the split context. */
                     deliveries.Add(await SendAndRecordAsync(
                         outcome, message.CurrentValue, message.Context,
                         AlertContextBuilders.ContextToDetailText(message.Context),
-                        numericCurrentValue: message.NumericValue, numericThresholdValue: outcome.NumericThresholdValue,
+                        numericCurrentValue: outcome.NumericCurrentValue ?? message.NumericValue, numericThresholdValue: outcome.NumericThresholdValue,
                         deliveryMode: mode, cancellationToken: cancellationToken));
                 }
 
@@ -190,9 +193,9 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         }
         catch (Exception ex)
         {
-            _logger.LogError("Alert delivery failed for {Metric} on {Server}: {Message}",
+            _logger.LogError(ex, "Alert delivery failed for {Metric} on {Server}: {Message}",
                 outcome.MetricName, outcome.ServerName, ex.Message);
-            return null;
+            return AlertDelivery.DelivererFailed(ex.Message);
         }
     }
 
@@ -237,9 +240,41 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
             context.SeverityOverride ??= outcome.Severity;
         }
 
+        /* #8525: a recovery delivered as an alert of its own ("Server Restored", "AG Replica Reconnected") is routed at the tier
+           the firing it closes was delivered at, read from the episode's delivered fire: this process's record first, else the
+           firing's open history rows. Route-only: SeverityOverride stays null, so the recovery still renders RESOLVED. With no
+           record (nothing delivered, or a firing that carried no tier), the send falls back to the firing's own tierless rule. */
+        if (AlertFamily.RecoveryPairs.TryGetValue(outcome.MetricName, out var closedFiring)
+            && await FiredRouteTierAsync(outcome.ServerKey, closedFiring, outcome.MetricName, context?.AgReplicaIdentity ?? "", cancellationToken) is { } firedTier)
+        {
+            context ??= new AlertContext();
+            context.RouteSeverity = firedTier;
+        }
+
         /* #5642: the sample-age line rides the history row's detail_text and every channel's prose exactly
            once, whichever way the engine built the text; the context JSON below carries the typed field. */
         detailText = AlertDetailText.WithSampleAge(detailText, context);
+
+        /* #7086: the evaluator held this fire back from paging. Nothing is sent, no investigation request is opened,
+           and NoteDeliveredFire is not called: a held fire is not a delivered page, so its clear owes no close. The row
+           is the digest disposition with the reason on its routing record. A mute rule wins: a muted and held fire
+           falls through and records as muted. */
+        if (outcome.Hold is { } hold && !outcome.Muted)
+        {
+            context ??= new AlertContext();
+            context.Routing = hold.ToRouting();
+            var held = AlertDelivery.RoutedToDigest();
+            await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                outcome.ServerKey, outcome.ServerName, outcome.MetricName,
+                currentValue, outcome.ThresholdValue,
+                numericCurrentValue, numericThresholdValue,
+                held,
+                false, detailText, AlertContextSerializer.Serialize(context))
+            {
+                AlertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow),
+            });
+            return held;
+        }
 
         /* #5632 Phase A: the row's time is stamped once, here, so the investigation link names this exact row.
            #5821: the request is opened or joined BEFORE the channels post, so the generic webhook's {{investigation_json}}
@@ -309,6 +344,8 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
             outcome.Muted, detailText, contextJson)
         {
             AlertTimeUtc = alertTimeUtc,
+            /* #7076: a store-wide alert keyed by job or policy stores its exact key, so a restart finds its own open row. */
+            AlertKey = DarlingSelfAlertEvaluator.StoredAlertKey(outcome.ServerKey, outcome.MetricName),
         };
         await _historyStore.RecordAlertAsync(record);
 
@@ -329,6 +366,11 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         public DeliveredFire(DateTime firedAtUtc) => FiredAtUtc = firedAtUtc;
 
         public DateTime FiredAtUtc { get; }
+
+        /// <summary>#8525: the tier the newest delivered fire went out at, as its site graded it (null when the site passed none), per
+        /// replica identity (<see cref="AlertContext.AgReplicaIdentity"/>; the empty key for the server pair, whose incident is the
+        /// server). The AG pair is one incident per replica, so each reconnect reads and drops its own replica's tier.</summary>
+        public Dictionary<string, AlertSeverityLevel?> FiredTiers { get; } = new(StringComparer.Ordinal);
 
         public string LastValue { get; set; } = "";
 
@@ -424,6 +466,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
 
             fire.LastValue = currentValue;
             fire.DetailText = detailText;
+            fire.FiredTiers[context?.AgReplicaIdentity ?? ""] = context?.SeverityOverride;
             foreach (var (channel, where, routeId) in delivered)
             {
                 fire.AddDestination(channel, where, routeId);
@@ -471,7 +514,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         }
         catch (Exception ex)
         {
-            _logger.LogError("Alert resolution send failed for {Metric} on {Server}: {Message}",
+            _logger.LogError(ex, "Alert resolution send failed for {Metric} on {Server}: {Message}",
                 resolution.MetricName, resolution.ServerName, ex.Message);
         }
 
@@ -722,6 +765,59 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
             ResolutionChannels = channels,
             ResolutionOutcome = outcome.Count == 0 ? "sent" : string.Join("; ", outcome),
         };
+    }
+
+    /// <summary>
+    /// #8525: the tier the open firing <paramref name="firing"/> on <paramref name="serverKey"/> was delivered at, for the route of its
+    /// recovery <paramref name="recovery"/>. The AG pair is one incident per replica, so the record is read and dropped by
+    /// <paramref name="identity"/> (the replica's <see cref="AlertContext.AgReplicaIdentity"/>; empty for the server pair), and the
+    /// entry goes when no replica is left on it. After a restart the firing's open history rows answer, but a stored row does not say
+    /// which replica fired, so history gives a tier only when every open row agrees on one. Null when nothing is recorded, the rows
+    /// disagree, or the firing carried no tier; the recovery then routes as a tierless firing of its name does. Never throws except
+    /// for the caller's own cancellation.
+    /// </summary>
+    private async Task<AlertSeverityLevel?> FiredRouteTierAsync(
+        string serverKey, string firing, string recovery, string identity, CancellationToken cancellationToken)
+    {
+        lock (_deliveredFires)
+        {
+            var key = (serverKey, firing);
+            if (_deliveredFires.TryGetValue(key, out var fire) && fire.FiredTiers.Remove(identity, out var tier))
+            {
+                if (fire.FiredTiers.Count == 0)
+                {
+                    _deliveredFires.Remove(key);
+                }
+
+                return tier;
+            }
+        }
+
+        if (_historyStore is not IDeliveredFireReader reader)
+        {
+            return null;
+        }
+
+        try
+        {
+            var history = await reader.GetOpenDeliveredFiresAsync(serverKey, firing, recovery, cancellationToken);
+            if (history is null || history.Rows.Count == 0)
+            {
+                return null;
+            }
+
+            var tiers = history.Rows.Select(row => AlertContextSerializer.TryReadSeverity(row.ContextJson)).Distinct().ToList();
+            return tiers.Count == 1 ? tiers[0] : null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Could not read the delivered fire of {Metric} on {Server} for its recovery: {Message}", firing, serverKey, ex.Message);
+            return null;
+        }
     }
 
     /// <summary>

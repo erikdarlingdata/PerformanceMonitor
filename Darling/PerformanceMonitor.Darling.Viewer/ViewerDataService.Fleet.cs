@@ -71,7 +71,7 @@ public sealed partial class ViewerDataService
     /// alerts, the web card and <c>get_database_protection</c> use, over the newest capture inside <see cref="DatabaseProtectionBands.CaptureFreshness"/>.
     /// A store older than V223 has no table: that is no chip, not an error on the card.
     /// </summary>
-    internal async Task<(string? Value, string? Detail)> GetDatabaseProtectionChipAsync(
+    internal async Task<(string? Value, string? Detail, int Count)> GetDatabaseProtectionChipAsync(
         int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
     {
         try
@@ -80,17 +80,20 @@ public sealed partial class ViewerDataService
                 _dataSource, serverId, nowUtc - DatabaseProtectionBands.CaptureFreshness, nowUtc, cancellationToken: cancellationToken);
             if (read.NewestCapture is null)
             {
-                return (null, null);
+                return (null, null, 0);
             }
 
-            var overdue = DatabaseProtectionBands.OverdueFacts(read.Databases, DateTime.SpecifyKind(read.NewestCapture.Value, DateTimeKind.Utc));
+            /* #7611: each database against its own ages, as the alerts and the tool judge it. */
+            var resolver = await DatabaseProtectionThresholdSettings.ReadAsync(
+                _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            var overdue = DatabaseProtectionBands.OverdueFacts(read.Databases, DateTime.SpecifyKind(read.NewestCapture.Value, DateTimeKind.Utc), resolver.ForDatabase);
             return overdue.Count == 0
-                ? (null, null)
-                : (DatabaseProtectionBands.ChipValue(overdue), DatabaseProtectionBands.ChipDetail(overdue));
+                ? (null, null, 0)
+                : (DatabaseProtectionBands.ChipValue(overdue), DatabaseProtectionBands.ChipDetail(overdue), overdue.Count);
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
-            return (null, null);
+            return (null, null, 0);
         }
     }
 
@@ -166,6 +169,18 @@ SELECT
                 GROUP BY server_id
             ) AS dmv ON xe.server_id = dmv.server_id
         ) AS per_server
+    )
+    /* #7654: a PostgreSQL target adds the captures that saw blocking, the count its Fleet card shows (the service's fleet total adds
+       the same). A server with no capture in the window adds nothing. collection_log is windowed on collection_time alone, like the
+       pg_database_stats arm below. A SQL Server has no pg_blocking row, so it adds 0 here. */
+    +
+    (
+        SELECT COUNT(*)
+        FROM collection_log AS l
+        WHERE " + DarlingPgBlockingReader.PgBlockingCaptureFilter + @"
+        AND   l.rows_collected > 0
+        AND   l.collection_time >= $1
+        AND   l.collection_time <= $2
     ) AS total_blocking_events,
     (
         SELECT COUNT(*)
@@ -297,10 +312,17 @@ public sealed class FleetRankedServer
     /// <summary>A short "why it needs attention" line, e.g. "CPU 97%, Blocking 6" or "Offline — no recent collection".</summary>
     public string Reason { get; init; } = "";
 
-    public string BandLabel => ServerHealthClassifier.BandLabel(Band);
+    /// <summary>#7729: true for a server listed only for a tile no band reads (an Identity capacity warning, an Agent alerts gap, an overdue backup or
+    /// CHECKDB), whose band is Healthy. The row says "Attention" in the Warning colour and not "Healthy" in green. <see cref="Band"/> stays what the
+    /// metrics say, and the fleet's band counts do not read this.</summary>
+    public bool HasAdvisoryTile { get; init; }
+
+    private bool ShowsAttention => HasAdvisoryTile && Band == FleetHealthBand.Healthy;
+
+    public string BandLabel => ShowsAttention ? "Attention" : ServerHealthClassifier.BandLabel(Band);
 
     /// <summary>The band's dot / label brush — the card's severity palette (offline = the Unknown grey).</summary>
-    public SolidColorBrush BandBrush => Band switch
+    public SolidColorBrush BandBrush => ShowsAttention ? s_warningBrush : Band switch
     {
         FleetHealthBand.Critical => s_criticalBrush,
         FleetHealthBand.Warning => s_warningBrush,
@@ -327,7 +349,7 @@ public sealed class FleetRollup
 {
     /// <summary>The one sentence every viewer surface uses for an offline server: the Overview card, the server tab's
     /// header and the Recommendations tab (#6135).</summary>
-    public const string OfflineNote = "Offline — no recent collection";
+    public const string OfflineNote = "Offline: no recent collection";
 
     /// <summary>
     /// The default depth of the worst-first ranking (the "Needs attention" list caps at this).
@@ -352,7 +374,7 @@ public sealed class FleetRollup
     public int OfflineCount { get; init; }
 
     /// <summary>
-    /// Registered servers whose per-server summary read did NOT complete this cycle (#2753 review finding)
+    /// Enabled servers whose per-server summary read did NOT complete this cycle (#2753 review finding)
     /// — <c>TotalServers</c> minus however many summaries actually loaded. Deliberately tracked separately
     /// from <see cref="ServersWithCollectionFailures"/>, which only reflects a LOADED summary's own FAILING
     /// collectors: a server that failed to load this cycle has no summary to ask, so it cannot be banded
@@ -367,8 +389,27 @@ public sealed class FleetRollup
     /// <summary>Fleet-wide blocking events this window (from the cross-server SQL total).</summary>
     public long TotalBlockingEvents { get; init; }
 
+    /// <summary>#7616 / #3631: the unit(s) <see cref="TotalBlockingEvents"/> adds up, for the tile's tooltip. It sums SQL Server blocked waits and
+    /// PostgreSQL blocking captures, so a fleet with both engines names both. Null when no server has a card.</summary>
+    public string? TotalBlockingDetail { get; init; }
+
     /// <summary>Fleet-wide deadlocks this window (from the cross-server SQL total).</summary>
     public long TotalDeadlocks { get; init; }
+
+    /// <summary>True when this roll-up was built with no totals: the cross-server totals read failed this refresh and no
+    /// Overview search narrowed the panel to the cards' own sums. <see cref="TotalBlockingEvents"/> and
+    /// <see cref="TotalDeadlocks"/> are then 0 by default, not by measurement, and the tiles say so instead of showing them.</summary>
+    public bool TotalsUnavailable { get; init; }
+
+    /// <summary>The blocking tile's text: the count, or "unavailable" when the totals read failed.</summary>
+    public string TotalBlockingText => TotalsUnavailable
+        ? "Blocking events: unavailable"
+        : "Blocking events: " + TotalBlockingEvents.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>The deadlock tile's text: the count, or "unavailable" when the totals read failed.</summary>
+    public string TotalDeadlocksText => TotalsUnavailable
+        ? "Deadlocks: unavailable"
+        : "Deadlocks: " + TotalDeadlocks.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>
     /// How much of the fleet <see cref="TotalDeadlocks"/> actually read a deadlock source for, with the
@@ -376,8 +417,8 @@ public sealed class FleetRollup
     /// service's <c>get_fleet_overview</c> report the same denominator against the same total rather than
     /// two surfaces each having an opinion.
     ///
-    /// <para><see cref="FleetDeadlockCoverage.ServersTotal"/> is <see cref="TotalServers"/>, the REGISTERED
-    /// fleet — the same population the SQL total counts over, which is every server in the store and not
+    /// <para><see cref="FleetDeadlockCoverage.ServersTotal"/> is <see cref="TotalServers"/>, the ENABLED
+    /// fleet — the servers the Overview builds cards for, which is every enabled server in the store and not
     /// just the ones whose card loaded this cycle. So its four causes need not add up to it: the shortfall
     /// is <see cref="UnknownCount"/>, the servers this cycle has no summary to classify, and that gap has
     /// its own line already (<see cref="UnknownStatusText"/>) rather than being attributed to a cause it
@@ -410,9 +451,13 @@ public sealed class FleetRollup
     /// </summary>
     public bool IsAllClear => !HasProblems && UnknownCount == 0;
 
-    /// <summary>"+N more need attention" when the ranking overflows its cap, else empty.</summary>
-    public string AdditionalProblemText =>
-        AdditionalProblemCount > 0 ? $"+{AdditionalProblemCount} more need attention" : "";
+    /// <summary>#8115: how many of <see cref="AdditionalProblemCount"/> are Healthy-banded servers listed for a tile no band reads
+    /// (<see cref="FleetRankedServer.HasAdvisoryTile"/>). The band counts leave them under <see cref="HealthyCount"/>, so the overflow
+    /// line says how many of its servers are of that kind.</summary>
+    public int AdditionalAdvisoryCount { get; init; }
+
+    /// <summary>"+N more need attention (K healthy with advisories)" when the ranking overflows its cap, else empty.</summary>
+    public string AdditionalProblemText => FleetAttentionText.MoreText(AdditionalProblemCount, AdditionalAdvisoryCount);
 
     /// <summary>"N server(s) didn't report this cycle" when some registered server has no summary this
     /// cycle, else empty — the only place that gap is stated in words rather than silently absorbed into
@@ -427,22 +472,24 @@ public sealed class FleetRollup
     /// <summary>The all-clear affirmation shown when nothing needs attention. Content assumes the caller
     /// only renders this when <see cref="IsAllClear"/> is true — see that property's remarks.</summary>
     public string AllHealthyText => TotalServers == 1
-        ? "All 1 server healthy"
-        : $"All {TotalServers} servers healthy";
+        ? "All 1 enabled server healthy"
+        : $"All {TotalServers} enabled servers healthy";
 
-    /// <summary>The registered fleet size when this roll-up counts only the servers the Overview search leaves
-    /// (<see cref="OverviewCardView.BuildRollup"/>); null when it counts the whole fleet.</summary>
+    /// <summary>The enabled fleet size when this roll-up counts only the servers the Overview search leaves
+    /// (<see cref="OverviewCardView.BuildRollup"/>); null when it counts the whole enabled fleet.</summary>
     public int? FilteredOfTotal { get; internal set; }
 
-    /// <summary>"Monitoring N servers" subtitle for the fleet header; "Monitoring N of M servers" while the
-    /// Overview search narrows it to N of the M registered.</summary>
+    /// <summary>"Monitoring N enabled servers" subtitle for the fleet header; "Monitoring N of M enabled servers"
+    /// while the Overview search narrows it to N of the M enabled. The count is the enabled fleet, the servers the
+    /// Overview builds cards for, while the sidebar's "Servers: N" counts every registered server, so each line here
+    /// that states the count names the one it counts.</summary>
     public string MonitoringText => FilteredOfTotal.HasValue
         ? FilteredOfTotal.Value == 1
-            ? $"Monitoring {TotalServers} of 1 server"
-            : $"Monitoring {TotalServers} of {FilteredOfTotal.Value} servers"
+            ? $"Monitoring {TotalServers} of 1 enabled server"
+            : $"Monitoring {TotalServers} of {FilteredOfTotal.Value} enabled servers"
         : TotalServers == 1
-            ? "Monitoring 1 server"
-            : $"Monitoring {TotalServers} servers";
+            ? "Monitoring 1 enabled server"
+            : $"Monitoring {TotalServers} enabled servers";
 
     /// <summary>"N server(s)" for the collection-failures total line.</summary>
     public string CollectionFailuresText => ServersWithCollectionFailures == 1
@@ -517,12 +564,12 @@ public sealed class FleetRollup
     public bool HasDeadlockCoverage => DeadlockCoverage.ServersTotal > 0;
 
     /// <summary>
-    /// True when <see cref="TotalDeadlocks"/> did not read every registered server — the flag the coverage
+    /// True when <see cref="TotalDeadlocks"/> did not read every enabled server — the flag the coverage
     /// line's colour tracks. It tracks COVERAGE rather than the deadlock count's own severity: "read all 12
-    /// servers" beside a large count is good news about a bad number and must not be painted as part of the
-    /// alarm.
+    /// enabled servers" beside a large count is good news about a bad number and must not be painted as part
+    /// of the alarm.
     /// </summary>
-    public bool DeadlockCoverageIsPartial => DeadlockCoverage.ServersRead < DeadlockCoverage.ServersTotal;
+    public bool DeadlockCoverageIsPartial => TotalsUnavailable || DeadlockCoverage.ServersRead < DeadlockCoverage.ServersTotal;
 
     /// <summary>
     /// The coverage beside the deadlock total, in the "Label: value" shape the rest of that row already
@@ -543,7 +590,14 @@ public sealed class FleetRollup
         get
         {
             var total = DeadlockCoverage.ServersTotal;
-            var noun = total == 1 ? "server" : "servers";
+            var noun = total == 1 ? "enabled server" : "enabled servers";
+
+            /* The deadlock total beside this line is the fleet-totals read's answer. When that read failed there is no total for
+               the coverage to qualify, and "read all N servers" would vouch for a number nothing read. */
+            if (TotalsUnavailable)
+            {
+                return "Deadlock coverage: unavailable (the fleet totals read failed)";
+            }
 
             return DeadlockCoverage.ServersRead >= total
                 ? $"Deadlock coverage: read all {total} {noun}"
@@ -601,16 +655,16 @@ public sealed class FleetRollup
     /// card banding (no new bands); the blocking / deadlock totals come from the cross-server
     /// <paramref name="totals"/> SQL read. <paramref name="worstCount"/> caps the "Needs attention" list.
     ///
-    /// <para><paramref name="totalServerCount"/> is the REGISTERED fleet size — the same count the sidebar
-    /// shows — and is what <see cref="TotalServers"/> reports. It defaults to <paramref name="summaries"/>'
+    /// <para><paramref name="totalServerCount"/> is the ENABLED fleet size — the servers the Overview builds
+    /// cards for — and is what <see cref="TotalServers"/> reports. It defaults to <paramref name="summaries"/>'
     /// own count for callers (tests, mainly) that only ever pass a fully-loaded set, but the real caller
-    /// MUST pass the registered count explicitly: <paramref name="summaries"/> is only the servers whose
+    /// MUST pass the enabled count explicitly: <paramref name="summaries"/> is only the servers whose
     /// per-server summary read succeeded THIS cycle (#2753 — a transient per-server read failure silently
     /// drops that server from <paramref name="summaries"/>, so deriving the fleet total from its count made
     /// the Overview's "Total Servers" wobble cycle to cycle while the sidebar, sourced from the registry,
     /// never moved).</para>
     /// </summary>
-    public static FleetRollup Build(IReadOnlyList<ServerSummaryItem> summaries, FleetTotals totals, int worstCount = DefaultWorstCount, int? totalServerCount = null)
+    public static FleetRollup Build(IReadOnlyList<ServerSummaryItem> summaries, FleetTotals? totals, int worstCount = DefaultWorstCount, int? totalServerCount = null)
     {
         var registeredTotal = totalServerCount ?? summaries.Count;
         var unknown = Math.Max(0, registeredTotal - summaries.Count);
@@ -626,8 +680,10 @@ public sealed class FleetRollup
             {
                 TotalServers = registeredTotal,
                 UnknownCount = unknown,
-                TotalBlockingEvents = totals.TotalBlockingEvents,
-                TotalDeadlocks = totals.TotalDeadlocks,
+                TotalBlockingEvents = totals?.TotalBlockingEvents ?? 0,
+                TotalBlockingDetail = ServerHealthClassifier.BlockingTotalUnitsDetail(summaries.Any(s => !s.IsPostgres), summaries.Any(s => s.IsPostgres)),
+                TotalDeadlocks = totals?.TotalDeadlocks ?? 0,
+                TotalsUnavailable = totals is null,
                 DeadlockCoverage = deadlockCoverage,
             };
         }
@@ -660,7 +716,7 @@ public sealed class FleetRollup
            name as the stable tiebreak. The composite score keeps offline > critical > warning and, within
            a band, ranks by how many metrics are bad — see FleetHealthScore. */
         var problems = summaries
-            .Where(s => ClassifyBand(s) != FleetHealthBand.Healthy)
+            .Where(s => ClassifyBand(s) != FleetHealthBand.Healthy || s.HasAdvisoryTile)
             .OrderByDescending(FleetHealthScore)
             .ThenBy(s => s.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -672,6 +728,7 @@ public sealed class FleetRollup
                 ServerId = s.ServerId,
                 DisplayName = s.DisplayName,
                 Band = ClassifyBand(s),
+                HasAdvisoryTile = s.HasAdvisoryTile,
                 Score = FleetHealthScore(s),
                 Reason = BuildReason(s),
             })
@@ -686,11 +743,14 @@ public sealed class FleetRollup
             CriticalCount = critical,
             OfflineCount = offline,
             ServersWithCollectionFailures = failures,
-            TotalBlockingEvents = totals.TotalBlockingEvents,
-            TotalDeadlocks = totals.TotalDeadlocks,
+            TotalBlockingEvents = totals?.TotalBlockingEvents ?? 0,
+            TotalBlockingDetail = ServerHealthClassifier.BlockingTotalUnitsDetail(summaries.Any(s => !s.IsPostgres), summaries.Any(s => s.IsPostgres)),
+            TotalDeadlocks = totals?.TotalDeadlocks ?? 0,
+            TotalsUnavailable = totals is null,
             DeadlockCoverage = deadlockCoverage,
             WorstServers = worst,
             AdditionalProblemCount = Math.Max(0, problems.Count - worst.Count),
+            AdditionalAdvisoryCount = problems.Skip(worst.Count).Count(s => ClassifyBand(s) == FleetHealthBand.Healthy && s.HasAdvisoryTile),
         };
     }
 
@@ -700,9 +760,9 @@ public sealed class FleetRollup
     /// construction rather than by two reads agreeing (#3029).
     ///
     /// <para><paramref name="registeredTotal"/> is the denominator, not <paramref name="summaries"/>' own
-    /// count. The SQL total is a cross-server COUNT over the whole store, so the population it covers is the
-    /// registered fleet; a denominator that shrank to whatever loaded this cycle would report a smaller
-    /// fleet than exists, which is a new wrong number in place of the old one rather than a fix.</para>
+    /// count. The SQL total is a cross-server COUNT over the whole store, so the denominator is the whole
+    /// enabled fleet the Overview reads; a denominator that shrank to whatever loaded this cycle would report
+    /// a smaller fleet than exists, which is a new wrong number in place of the old one rather than a fix.</para>
     ///
     /// <para><b>Only the arms <see cref="FleetDeadlockCoverage.IsCovered"/> names count as read</b> — every
     /// other arm, INCLUDING an enum value a later build adds and this switch has never heard of, lands in
@@ -712,7 +772,7 @@ public sealed class FleetRollup
     /// instrument, the read count names the coverage.</para>
     ///
     /// <para>The three uncovered-or-read causes therefore need not sum to <paramref name="registeredTotal"/>:
-    /// a registered server with no summary this cycle is classified by none of them, and that shortfall is
+    /// an enabled server with no summary this cycle is classified by none of them, and that shortfall is
     /// <see cref="UnknownCount"/> — stated in its own words by <see cref="UnknownStatusText"/> and by
     /// <see cref="DeadlockUnreportedCause"/>, rather than attributed to a cause it was not measured to
     /// have.</para>
@@ -790,7 +850,10 @@ public sealed class FleetRollup
            its first collection — see ServerCollectionStatus. */
         if (s.CardStatus == ServerCollectionStatus.Offline)
         {
-            return OfflineNote;
+            /* #7590: the service's own connect failed, so the reason is that and its error, not an age. */
+            return s.ConnectDownSince.HasValue
+                ? ServerHealthClassifier.UnreachableReason(s.ConnectDownSince.Value, s.LastConnectError)
+                : OfflineNote;
         }
 
         if (s.CardStatus == ServerCollectionStatus.AwaitingFirstCollection)
@@ -811,7 +874,7 @@ public sealed class FleetRollup
                per-process split. */
             parts.Add(
                 FleetCpuProvenance.CapacityBandClause(s.AcuUtilizationPercent, s.CpuSource)
-                ?? $"CPU {s.CpuDisplay}");
+                ?? (s.CpuDisplay.StartsWith("SQL CPU", StringComparison.Ordinal) ? s.CpuDisplay : $"CPU {s.CpuDisplay}"));
         }
         if (s.ThreadsSeverity >= HealthSeverity.Warning)
         {
@@ -821,13 +884,12 @@ public sealed class FleetRollup
         {
             parts.Add($"Memory: {s.MemoryDetail}");
         }
-        if (s.BlockingSeverity >= HealthSeverity.Warning && s.BlockingCount > 0)
+        if (s.BlockingSeverity >= HealthSeverity.Warning && (s.IsPostgres ? s.PgBlockingCapturesWithBlocking : s.BlockingCount) > 0)
         {
-            /* #3539 A3: the RATE is what the count arm banded, so the reason names it — the deadlock line's
-               rule and the service's wording; an unrateable window prints the count alone. */
-            parts.Add(s.BlockingRatePerHour.HasValue
-                ? $"Blocking {s.BlockingCount} ({s.BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr)"
-                : $"Blocking {s.BlockingCount}");
+            /* #7444: the arm that fired the band (the longest block, the peak snapshot or the rate), through the
+               helper the service's fleet card uses, so the two surfaces read alike. #3539 A3: an unrateable window
+               with no wait fired prints the count alone. */
+            parts.Add(ServerHealthClassifier.BlockingReason(s.ToHealthMetrics()));
         }
         if (s.DeadlockSeverity >= HealthSeverity.Warning && s.DeadlockCount > 0)
         {
@@ -835,7 +897,7 @@ public sealed class FleetRollup
                fleet card uses, so the two surfaces read alike. An unrateable window prints the count
                alone, which is exactly what the band had to go on. */
             parts.Add(s.DeadlockRatePerHour.HasValue
-                ? $"Deadlocks {s.DeadlockCount} ({s.DeadlockRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr)"
+                ? $"Deadlocks {s.DeadlockCount} ({DailyHealthBandCalculator.RatePerHourText(s.DeadlockRatePerHour.Value)}/hr)"
                 : $"Deadlocks {s.DeadlockCount}");
         }
         if (s.CollectorSeverity >= HealthSeverity.Warning)
@@ -848,6 +910,28 @@ public sealed class FleetRollup
         if (s.CollectionStale)
         {
             parts.Add("collection stale");
+        }
+        if (s.IdentityCapacity is { ColumnsAtBar: > 0 } identity)
+        {
+            /* #7561: a critical identity tile bands the card and a warning one only lists it. Either way the reason names it, in the service's words
+               (ServerHealthClassifier.IdentityCapacityReason), so a Healthy server in Needs attention says why. */
+            parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns));
+        }
+
+        if (s.DatabaseStateReason is { Length: > 0 } databaseStateReason)
+        {
+            /* #7647: in the service's words (DarlingDatabaseStateDeviations.Reason). */
+            parts.Add(databaseStateReason);
+        }
+
+        if (s.AgentAlertGaps.Count > 0)
+        {
+            parts.Add($"Agent alerts {s.AgentAlertGaps.Count} gap{(s.AgentAlertGaps.Count == 1 ? "" : "s")}");
+        }
+
+        if (s.HasDatabaseProtectionOverdue)
+        {
+            parts.Add(ServerHealthClassifier.ProtectionReason(s.DatabaseProtectionOverdueCount));
         }
 
         if (s.MetricCount > 0 && s.MeasuredMetricCount == 0)
@@ -947,8 +1031,8 @@ public sealed class FleetRollup
             /* The all-clear's "every metric" claim is earned only at full coverage — at partial coverage
                the coverage IS the headline's second half, because the claim it replaces is false. */
             return coverage.Length == 0
-                ? "Healthy — every metric on this card is inside its threshold"
-                : "Healthy — " + coverage;
+                ? "Healthy: every metric on this card is inside its threshold"
+                : "Healthy: " + coverage;
         }
 
         /* The guarded reason-append stays WithReason's (one copy — its own doc says why); the qualifier
@@ -957,14 +1041,14 @@ public sealed class FleetRollup
            says "no metric measured yet" (#3539 A6), and "· 0 of 6 measured" after it would restate the
            same fact in different words, so the qualifier stands down there and only there. */
         var label = ServerHealthClassifier.BandLabel(band);
-        var headline = WithReason(label, " — ", s);
+        var headline = WithReason(label, ": ", s);
         if (coverage.Length == 0 || s.MeasuredMetricCount == 0)
         {
             return headline;
         }
 
         return headline.Equals(label, StringComparison.Ordinal)
-            ? label + " — " + coverage
+            ? label + ": " + coverage
             : headline + " · " + coverage;
     }
 
@@ -994,7 +1078,7 @@ public sealed class FleetRollup
     }
 
     /// <summary>The words behind StatusDisplay's "Unknown" — a card whose freshness was never classified.</summary>
-    private const string UnknownStatus = "Unknown — no collection status for this server";
+    private const string UnknownStatus = "Unknown: no collection status for this server";
 
     /// <summary>
     /// The problem servers among the Overview's cards — band != Healthy — kept in the order the caller handed
@@ -1006,7 +1090,8 @@ public sealed class FleetRollup
     {
         ArgumentNullException.ThrowIfNull(summaries);
 
-        return summaries.Where(s => ClassifyBand(s) != FleetHealthBand.Healthy).ToList();
+        /* #7561: the same predicate as the web page's Needs attention filter: a band away from Healthy, or a Healthy server with a tile no band reads. */
+        return summaries.Where(s => ClassifyBand(s) != FleetHealthBand.Healthy || s.HasAdvisoryTile).ToList();
     }
 
     /// <summary>
@@ -1014,11 +1099,13 @@ public sealed class FleetRollup
     /// one is a worse defect than the one the filter fixes, so the active state carries its own arithmetic —
     /// including the all-clear case, which is otherwise an empty grid with nothing saying why.
     /// </summary>
-    public static string AttentionFilterCountText(int shown, int total)
+    public static string AttentionFilterCountText(int shown, int total, int healthyWithAdvisories = 0)
     {
         if (shown > 0)
         {
-            return $"showing {shown} of {total}";
+            /* #8115: the Healthy tile keeps a server listed for an advisory tile, so the count says how many of its servers are that kind,
+               in the web fleet page's words. */
+            return $"showing {shown} of {total}" + FleetAttentionText.AdvisorySplit(healthyWithAdvisories);
         }
 
         /* Nothing left to show. On a populated fleet that is the honest all-clear; with no cards at all it

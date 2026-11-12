@@ -238,14 +238,30 @@ public sealed class QuietWindowBehaviourTests
     {
         var store = new FakeMuteRuleStore();
         var created = Parse(await DarlingMcpAlertTools.CreateMuteRuleOver(
-            store, "alpha", "High CPU", null, null, null, null, "r", Iso(Now.AddDays(2)), null, null, null, null, Iso(Now.AddDays(1))));
+            store, "alpha", "High CPU", null, null, null, null, "r", Iso(Now.AddDays(2)), null, null, null, null, Iso(Now.AddDays(1)), nowUtc: Now));
         Assert.Equal("created", created["status"]!.GetValue<string>());
         Assert.Equal(Iso(Now.AddDays(1)), created["mute_rule"]!["starts_at_utc"]!.GetValue<string>());
 
         var refused = Parse(await DarlingMcpAlertTools.CreateMuteRuleOver(
-            store, "alpha", "Deadlocks Detected", null, null, null, null, "r", Iso(Now.AddDays(1)), null, null, null, null, Iso(Now.AddDays(2))));
+            store, "alpha", "Deadlocks Detected", null, null, null, null, "r", Iso(Now.AddDays(1)), null, null, null, null, Iso(Now.AddDays(2)), nowUtc: Now));
         Assert.Equal("invalid", refused["status"]!.GetValue<string>());
         Assert.Equal(1, store.Count);
+    }
+
+    [Fact]
+    public async Task CreateMuteRule_AnEndAtOrBeforeTheStart_IsRefusedAndNothingIsWritten()
+    {
+        var store = new FakeMuteRuleStore();
+        var start = Now.AddDays(2);
+
+        var equal = Parse(await DarlingMcpAlertTools.CreateMuteRuleOver(
+            store, "alpha", "High CPU", null, null, null, null, "r", Iso(start), null, null, null, null, Iso(start), nowUtc: Now));
+        var before = Parse(await DarlingMcpAlertTools.CreateMuteRuleOver(
+            store, "alpha", "High CPU", null, null, null, null, "r", Iso(Now.AddDays(1)), null, null, null, null, Iso(start), nowUtc: Now));
+
+        Assert.Equal("invalid", equal["status"]!.GetValue<string>());
+        Assert.Equal("invalid", before["status"]!.GetValue<string>());
+        Assert.Equal(0, store.Count);
     }
 
     [Fact]

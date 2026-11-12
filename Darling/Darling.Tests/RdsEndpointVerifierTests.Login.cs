@@ -35,7 +35,7 @@ public partial class RdsEndpointVerifierTests
     }
 
     private static string ServiceFile(string name)
-        => File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", name)).Replace("\r\n", "\n");
+        => RepoFile.ReadRepoFile(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", name)).Replace("\r\n", "\n");
 
     /// <summary>
     /// The skip switch the older fixtures rely on stays out of product code: it may be named in the verifier's own file

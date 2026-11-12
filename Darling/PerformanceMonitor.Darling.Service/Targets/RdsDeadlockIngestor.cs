@@ -392,119 +392,24 @@ public sealed class RdsDeadlockIngestor
     }
 
     /// <summary>
-    /// The same binary COPY the collector runner uses, driven by the collector's own definition — so the
-    /// column order and COPY command come from one place and cannot drift from the table.
+    /// The same binary COPY the collector runner uses, driven by the collector's own definition, through the
+    /// write the RDS ingestors share (<see cref="RdsCopyWriter"/>).
     /// </summary>
-    private async Task<int> WriteAsync(
+    private Task<int> WriteAsync(
         int serverId,
         string storageName,
         IReadOnlyList<PgDeadlocksCollector.Row> rows,
         CancellationToken cancellationToken)
     {
-        var definition = PgDeadlocksCollector.Instance;
-
-        /* Naive UTC, the store's convention for every collector timestamp: the columns are `timestamp`
-           without a zone, and letting Kind=Utc through makes Npgsql infer timestamptz and shift the value
-           by the store session's offset. */
-        var collectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
-
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-
-        var writer = new PgCollectorRowWriter();
-        var written = 0;
-
-        /* The start phase's deadline. It is separate from the importer's because the importer does not
-           exist until Begin returns, and the await that returns it runs under the connection's
-           CommandTimeout, which Npgsql exposes read-only. StoreCopyStartDeadline carries the value, the
-           stop-versus-deadline discrimination and the fault shape — see it for why a breach is re-raised
-           as a TimeoutException rather than left as the cancellation Npgsql threw. */
-        using var startDeadline = StoreCopyStartDeadline.Start(cancellationToken);
-
-        /* Which COPY phase a fault came out of, on the same terms as
-           DarlingCollectorRunner.CopyBatchOnceAsync — see CollectorFaultCopyPhase, which is the authority
-           for what each value means and what it authorises.
-
-           Start until Begin returns, and the transition sits INSIDE the block for that reason: Start has to
-           mean strictly "the importer never came back". A fault anywhere past that line may have sent rows,
-           so it must read as Data even where it happens to have sent none. */
-        var copyPhase = StoreCopyPhase.Start;
-
-        try
-        {
-            using (var importer = await connection.BeginBinaryImportAsync(
-                PgCollectorRowWriter.CopyCommandFor(definition), startDeadline.Token))
-            {
-                copyPhase = StoreCopyPhase.Data;
-
-                /* #2874: the COPY's own deadline, on NpgsqlBinaryImporter.Timeout — a TimeSpan on a different type
-                   from the rest of the regime, invisible to a command-shaped regex, and inherited from the
-                   connection's CommandTimeout (30 s) when left unset. Same constant, same regime, and it reaches
-                   the row loop only — startDeadline above bounds the Begin that returns the importer, on the same
-                   terms as DarlingCollectorRunner.CopyBatchOnceAsync. */
-                importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
-
-                writer.Importer = importer;
-
-                foreach (var row in rows)
-                {
-                    await importer.StartRowAsync(cancellationToken);
-
-                    if (definition.IncludesCollectionId)
-                    {
-                        writer.Value(CollectionIdGenerator.Next());
-                    }
-
-                    writer.Value(collectionTime)
-                          .Value(serverId)
-                          .Value(storageName);
-
-                    writer.BeginPayload();
-                    definition.WritePayload(row, writer, NullContext(serverId, storageName, collectionTime));
-                    writer.EndPayload(definition.PayloadColumns.Count);
-                    written++;
-                }
-
-                await importer.CompleteAsync(cancellationToken);
-            }
-        }
-        /* The start phase's deadline, re-raised as the shape a client-side deadline has here, on the same
-           terms as DarlingCollectorRunner.CopyBatchOnceAsync. A throw from a catch arm leaves the whole
-           try, so this fault is stamped HERE rather than by the arm below; the phase term in the filter is
-           what keeps the arm unreachable once the row loop has begun, whatever Npgsql throws from inside
-           it, so a data-phase fault cannot be relabelled as the one a re-attempt trusts. */
-        catch (OperationCanceledException cancellation)
-            when (copyPhase == StoreCopyPhase.Start && startDeadline.Breached())
-        {
-            var breach = StoreCopyStartDeadline.Breach(cancellation);
-            CollectorFaultCopyPhase.Stamp(breach, copyPhase);
-            throw breach;
-        }
-        /* Stamped, then rethrown bare, for CopyBatchOnceAsync's reason: the fault keeps its own type,
-           message and inner chain, so every classification arm upstream sees exactly what it sees without
-           this. OperationCanceledException is excluded because a stopping token says the service is shutting
-           down, not which protocol exchange was in flight. */
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            CollectorFaultCopyPhase.Stamp(ex, copyPhase);
-            throw;
-        }
-
-        _logger?.LogInformation(
-            "Stored {Count} deadlock report(s) for {Server} from the RDS log API.", written, storageName);
-
-        return written;
+        return RdsCopyWriter.WriteAsync(
+            PgDeadlocksCollector.Instance,
+            _postgres,
+            _logger,
+            serverId,
+            storageName,
+            rows,
+            "deadlock report(s)",
+            "the RDS log API",
+            cancellationToken);
     }
-
-    /* WritePayload takes a context for the collectors that consult deltas or watermarks. This one reads
-       none of it - the rows are already fully formed by the parser - so the context exists to satisfy the
-       signature rather than to carry anything. */
-    private static CollectorContext NullContext(int serverId, string storageName, DateTime collectionTime)
-        => new()
-        {
-            ServerId = serverId,
-            ServerName = storageName,
-            CollectionTime = collectionTime,
-            Deltas = new CollectorDeltaCalculator(),
-            Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
-        };
 }

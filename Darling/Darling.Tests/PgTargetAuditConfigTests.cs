@@ -244,15 +244,20 @@ public sealed class PgTargetAuditConfigTests
             Assert.Equal("5 min", checkpointTimeout.GetProperty("current_value").GetString());
             Assert.Contains("Not applicable on Aurora PostgreSQL", checkpointTimeout.GetProperty("recommendation").GetString()!, StringComparison.Ordinal);
 
-            /* shared_buffers is Aurora's too, and it is graded there — the rider is about checkpointing, not
-               about switching the audit off. */
-            Assert.Equal("review", Row(PgTargetFactKeys.ConfigSharedBuffers).GetProperty("status").GetString());
+            /* shared_buffers is Aurora's too (#8322): the service sizes it from the instance's capacity, so the row reads
+               not_applicable, still reporting the parameter group's value, with a sentence that points at the capacity
+               figures and not at initdb. */
+            var sharedBuffers = Row(PgTargetFactKeys.ConfigSharedBuffers);
+            Assert.Equal("not_applicable", sharedBuffers.GetProperty("status").GetString());
+            Assert.Equal("128 MB", sharedBuffers.GetProperty("current_value").GetString());
+            Assert.Contains("capacity", sharedBuffers.GetProperty("recommendation").GetString()!, StringComparison.Ordinal);
+            Assert.DoesNotContain("initdb", sharedBuffers.GetProperty("recommendation").GetString()!, StringComparison.Ordinal);
 
-            /* Counted apart, and out of the checked count: two knobs nothing consults were not checked. */
+            /* Counted apart, and out of the checked count: three knobs the service owns were not checked. */
             var summary = root.GetProperty("summary");
-            Assert.Equal(2, summary.GetProperty("not_applicable").GetInt32());
-            Assert.Equal(rows.Count - 2, summary.GetProperty("settings_checked").GetInt32());
-            Assert.Equal(0, rows.Count(r => r.GetProperty("status").GetString() == "not_applicable") - 2);
+            Assert.Equal(3, summary.GetProperty("not_applicable").GetInt32());
+            Assert.Equal(rows.Count - 3, summary.GetProperty("settings_checked").GetInt32());
+            Assert.Equal(0, rows.Count(r => r.GetProperty("status").GetString() == "not_applicable") - 3);
 
             /* And neither is a finding: the Aurora rows are reported, never warned. */
             Assert.DoesNotContain(new[] { maxWal, checkpointTimeout }, r => r.GetProperty("status").GetString() == "warning");

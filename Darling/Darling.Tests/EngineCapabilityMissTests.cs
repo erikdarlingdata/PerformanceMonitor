@@ -755,7 +755,7 @@ public sealed class EngineCapabilityMissLivePostgresTests
             Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(boxWaits));
             Assert.Contains("system_health session is started", boxWaits, StringComparison.Ordinal);
 
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpConfigTools.GetTraceFlags(postgres, BoxServerName)));
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(await DarlingMcpConfigTools.GetTraceFlags(postgres, BoxServerName)));
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, BoxServerName)));
             Assert.Equal("no_config_data", DarlingMcpTestData.StatusOf(await DarlingMcpTools.AuditConfig(analysisService, postgres, BoxServerName)));
 
@@ -862,7 +862,7 @@ public sealed class EngineCapabilityMissLivePostgresTests
                   family that own miss is "unavailable" since #3541 A12 (a never-read session is not a clean
                   bill); the point here is that it is NOT "not_collected": unknown is not never. ── */
             Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetSystemHealth(postgres, UnprobedServerName)));
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpConfigTools.GetTraceFlags(postgres, UnprobedServerName)));
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(await DarlingMcpConfigTools.GetTraceFlags(postgres, UnprobedServerName)));
 
             var unprobedWaits = await DarlingMcpHealthParserTools.GetSignificantWaits(postgres, UnprobedServerName);
             Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(unprobedWaits));

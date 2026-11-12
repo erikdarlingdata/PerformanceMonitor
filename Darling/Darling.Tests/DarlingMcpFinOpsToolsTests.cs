@@ -231,7 +231,7 @@ public sealed class DarlingMcpFinOpsToolsTests
                 Assert.Equal(e.TotalDurationMs, r.GetProperty("total_duration_ms").GetDecimal());
                 Assert.Equal(e.TotalReads, r.GetProperty("total_reads").GetInt64());
                 Assert.Equal(e.TotalWrites, r.GetProperty("total_writes").GetInt64());
-                Assert.Equal(e.TotalMemoryMb, r.GetProperty("total_memory_mb").GetDecimal());
+                Assert.Equal(e.PeakMemoryMb, r.GetProperty("peak_memory_mb").GetDecimal());
                 Assert.Equal(e.CpuShare, r.GetProperty("cpu_share_pct").GetDecimal());
                 Assert.Equal(e.DurationShare, r.GetProperty("duration_share_pct").GetDecimal());
                 Assert.Equal(e.ReadsShare, r.GetProperty("reads_share_pct").GetDecimal());

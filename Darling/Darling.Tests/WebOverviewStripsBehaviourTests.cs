@@ -97,11 +97,29 @@ public sealed class WebOverviewStripsBehaviourTests
         var at12 = Samples(r.GetProperty("at12").GetProperty("blocking"));
         Assert.Equal((12.0, 3.0), at12[0]);
         Assert.Null(at12[1].V);
+        // #7219: the strip counts blocked-process report rows, so its readout names reports (not "Blocking 3 events").
+        Assert.Contains("Blocked-process reports 3 per min", r.GetProperty("at12Text").GetProperty("blocking").GetString(), StringComparison.Ordinal);
 
         Assert.Equal((30.0, 3.0), Samples(r.GetProperty("at30").GetProperty("io"))[0]);
         // A pointer move drives the same lookup, over one crosshair line.
         AssertReadout("07:30", "SQL 40 %  |  Total 45 %", r.GetProperty("pointerText").GetProperty("cpu").GetString());
         Assert.Equal(1, r.GetProperty("hoverLines").GetInt32());
+    }
+
+    /// <summary>
+    /// #7219: when the trend read answers from DMV snapshot rows (<c>source</c> = "DMV snapshot", no blocked-process reports in the window),
+    /// the strip names its series and its readout for snapshot rows, and the reports arm keeps "Blocked-process reports".
+    /// </summary>
+    [Fact]
+    public void TheBlockingStrip_NamesTheSourceTheReadCounted()
+    {
+        var r = Run("snapshot");
+
+        Assert.Equal(new[] { "Blocking snapshot rows", "Deadlocks" }, r.GetProperty("series").EnumerateArray().Select(e => e.GetString()).ToArray());
+        var readout = r.GetProperty("at12Text").GetProperty("blocking").GetString();
+        Assert.Contains("Blocking snapshot rows 3 per min", readout, StringComparison.Ordinal);
+        Assert.DoesNotContain("reports", readout, StringComparison.Ordinal);
+        Assert.Equal(new[] { "Blocked-process reports", "Deadlocks" }, r.GetProperty("reportsSeries").EnumerateArray().Select(e => e.GetString()).ToArray());
     }
 
     /// <summary>
@@ -142,6 +160,25 @@ public sealed class WebOverviewStripsBehaviourTests
         var labels = r.GetProperty("axisLabels").EnumerateArray().Select(e => e.GetString()).ToArray();
         Assert.StartsWith("07:20", labels.First());
         Assert.StartsWith("07:40", labels.Last());
+    }
+
+    /// <summary>
+    /// #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so other_process_cpu is null on every sample. The CPU strip draws the SQL
+    /// line alone and says so in its header; a Total line over a null Other would sit on the SQL line and claim the host was measured. A server
+    /// that does report host CPU keeps the Total line and has no note.
+    /// </summary>
+    [Fact]
+    public void TheCpuStrip_WithNoHostFigure_DrawsTheSqlLineAlone_AndSaysWhy()
+    {
+        var r = Run("linuxcpu");
+
+        Assert.Equal(new[] { "SQL" }, r.GetProperty("series").EnumerateArray().Select(s => s.GetString()).ToArray());
+        Assert.Equal(1, r.GetProperty("lines").GetInt32());
+        Assert.Equal(new[] { "This server cannot report host CPU" }, r.GetProperty("notes").EnumerateArray().Select(s => s.GetString()).ToArray());
+        /* The note is read at 1280 px: it must not start where the title does, or the two draw over each other. */
+        Assert.Equal(0, r.GetProperty("sharedTextStarts").GetInt32());
+        Assert.Equal(new[] { "SQL", "Total" }, r.GetProperty("measuredSeries").EnumerateArray().Select(s => s.GetString()).ToArray());
+        Assert.Equal(0, r.GetProperty("measuredNotes").GetInt32());
     }
 
     /// <summary>
@@ -226,7 +263,9 @@ public sealed class WebOverviewStripsBehaviourTests
         var drawn = r.GetProperty("drawn");
         Assert.Equal(1, drawn.GetProperty("cpu").GetProperty("band").GetInt32());
         Assert.Equal(1, drawn.GetProperty("cpu").GetProperty("mean").GetInt32());
-        Assert.Equal(26, drawn.GetProperty("cpu").GetProperty("dots").GetInt32());
+        /* #7678: the 26 marked points are two runs of neighbours (minutes 21..30 and 45..60): two segments, no circle per point. */
+        Assert.Equal(0, drawn.GetProperty("cpu").GetProperty("dots").GetInt32());
+        Assert.Equal(2, drawn.GetProperty("cpu").GetProperty("runs").GetInt32());
         Assert.Equal(0, drawn.GetProperty("waits").GetProperty("band").GetInt32());
         Assert.Equal(0, drawn.GetProperty("waits").GetProperty("dots").GetInt32());
         Assert.Equal(new[] { "No baseline yet: not enough history." },
@@ -241,6 +280,94 @@ public sealed class WebOverviewStripsBehaviourTests
     /// (#6360). They used to read UTC, so a reader in New York saw 20:28 on the axis under a chip that said 4:28:55 PM. The window here is
     /// 12:00-13:00 UTC, which is 07:00-08:00 in the zone the harness pins.
     /// </summary>
+    /// <summary>
+    /// #7644: the band is one step per hour the window crosses, and a point is judged against its own hour's step only. Hour A's band is
+    /// 8 to 12 and hour B's is 48 to 52; a third hour has no step. 49 in hour A is above its band and 11 in hour B is under its band, so
+    /// both are marked. 11 in hour A and 49 in hour B sit inside their own hour's band (a flat band over the window would mark them), and
+    /// 100 in the hour with no step is marked by nothing. An hour whose step has no samples draws no band and marks nothing.
+    /// </summary>
+    [Fact]
+    public void TheBand_StepsByHour_AndEachPointIsJudgedAgainstItsOwnHour()
+    {
+        var r = Run("steps");
+
+        var steps = r.GetProperty("steps").EnumerateArray().ToArray();
+        Assert.Equal(2, steps.Length);
+        Assert.Equal(-30, steps[0].GetProperty("from").GetDouble());
+        Assert.Equal(30, steps[0].GetProperty("to").GetDouble());
+        Assert.Equal(8, steps[0].GetProperty("lower").GetDouble());
+        Assert.Equal(12, steps[0].GetProperty("upper").GetDouble());
+        Assert.Equal(48, steps[1].GetProperty("lower").GetDouble());
+        Assert.Equal(52, steps[1].GetProperty("upper").GetDouble());
+        Assert.Equal(new[] { 10d, 40d }, r.GetProperty("markedTimes").EnumerateArray().Select(e => e.GetDouble()).ToArray());
+
+        Assert.Equal(1, r.GetProperty("droppedStepBands").GetInt32());
+        Assert.Equal(new[] { 10d }, r.GetProperty("droppedStepMarked").EnumerateArray().Select(e => e.GetDouble()).ToArray());
+    }
+
+    /// <summary>
+    /// #7663: a metric that sat at exactly 0 for the hour (the reply marks the step <c>zero_activity</c>) says so, and is never called "not enough
+    /// history". A lane with no steps, or a step with no samples, still says not enough history. A lane with a usable step beside the zero one
+    /// draws its band and no sentence.
+    /// </summary>
+    [Fact]
+    public void ALaneWithNoBand_SaysWhy_ZeroActivityIsNotNotEnoughHistory()
+    {
+        var r = Run("baselinereasons");
+        const string notEnough = "No baseline yet: not enough history.";
+        const string zero = "No band: this metric sat at 0 in this hour's history.";
+
+        foreach (var key in new[] { "zero", "mixed" })
+        {
+            Assert.Equal(zero, r.GetProperty(key).GetProperty("note").GetString());
+            Assert.Equal(0, r.GetProperty(key).GetProperty("band").GetInt32());
+            Assert.Equal(0, r.GetProperty(key).GetProperty("markers").GetInt32());
+        }
+        foreach (var key in new[] { "nullLane", "noSamples", "unmarkedZero" })
+            Assert.Equal(notEnough, r.GetProperty(key).GetProperty("note").GetString());
+
+        var both = r.GetProperty("zeroPlusBand");
+        Assert.Equal(JsonValueKind.Null, both.GetProperty("note").ValueKind);
+        Assert.Equal(1, both.GetProperty("band").GetInt32());
+
+        Assert.Equal(new[] { zero }, r.GetProperty("drawnNote").EnumerateArray().Select(e => e.GetString()!).ToArray());
+    }
+
+    /// <summary>
+    /// #7678: on a quiet server a third of the points are above the band. A run of neighbouring points above it is ONE mark (a segment over the
+    /// line), a lone point is one small dot, and no circle is drawn per point, at 1280 and at 2560 px. 600 points: three runs (60, 200 and 130
+    /// points) and two lone points.
+    /// </summary>
+    [Fact]
+    public void AboveBandRuns_AreOneMarkEach_NotACirclePerPoint()
+    {
+        var r = Run("markerruns");
+
+        foreach (var width in new[] { "w1280", "w2560" })
+        {
+            var w = r.GetProperty(width);
+            Assert.Equal(392, w.GetProperty("markedPoints").GetInt32());
+            Assert.Equal(3, w.GetProperty("runs").GetInt32());
+            Assert.Equal(new[] { 60, 200, 130 }, w.GetProperty("runPointCounts").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+            Assert.Equal(2, w.GetProperty("circles").GetInt32());
+            Assert.Equal(2, w.GetProperty("allCircles").GetInt32());
+        }
+    }
+
+    /// <summary>
+    /// #7678: a marked run is split where collection stopped, by the line's own gap rule, so a red polyline never crosses a stretch the service was
+    /// off. Ten marked points sit each side of a 100 minute hole: two runs of ten, not one run of twenty.
+    /// </summary>
+    [Fact]
+    public void AMarkedRun_IsSplitWhereCollectionStopped()
+    {
+        var r = Run("markerrungap");
+
+        Assert.Equal(20, r.GetProperty("markedPoints").GetInt32());
+        Assert.Equal(new[] { 10, 10 }, r.GetProperty("runPointCounts").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        Assert.Equal(0, r.GetProperty("circles").GetInt32());
+    }
+
     [Fact]
     public void TheAxisAndTheReadout_ReadInLocalTime_NotUtc()
     {
@@ -271,6 +398,27 @@ public sealed class WebOverviewStripsBehaviourTests
     }
 
     /// <summary>
+    /// #7644: the baseline read took up to 23 s on a busy server and the strips waited for it. They draw when their own reads return, with
+    /// no band, and the band appears when the baseline read does. A baseline read that fails leaves the lines and says so in a note.
+    /// </summary>
+    [Fact]
+    public void TheStrips_DrawWhileTheBaselineIsPending_AndTheBandArrivesWhenItResolves()
+    {
+        var r = Run("latebaseline");
+
+        var pending = r.GetProperty("whilePending");
+        Assert.True(pending.GetProperty("lines").GetInt32() > 0, "no strip line was drawn while the baseline read was still pending");
+        Assert.Equal(0, pending.GetProperty("bands").GetInt32());
+        var after = r.GetProperty("afterBaseline");
+        Assert.True(after.GetProperty("lines").GetInt32() > 0);
+        Assert.True(after.GetProperty("bands").GetInt32() > 0, "the band did not appear once the baseline resolved");
+        var failed = r.GetProperty("afterFailure");
+        Assert.True(failed.GetProperty("lines").GetInt32() > 0);
+        Assert.Equal(0, failed.GetProperty("bands").GetInt32());
+        Assert.True(failed.GetProperty("notes").GetInt32() > 0);
+    }
+
+    /// <summary>
     /// The Waits strip's axis starts at 0 like the other strips. It used to start at the series minimum, so a window whose waits ran
     /// from 292 to 500 ms/sec was drawn on a 292-500 axis and a small swing looked like a spike. The harness waits run 100 to 220.
     /// </summary>
@@ -284,5 +432,95 @@ public sealed class WebOverviewStripsBehaviourTests
         Assert.Equal("0", waits[1]);
         var memory = r.GetProperty("memory").EnumerateArray().Select(e => e.GetString()!).ToArray();
         Assert.Equal("0", memory[1]);
+    }
+
+    /// <summary>
+    /// #7572: the I/O latency strip, on a quiet file. Fifteen minute buckets with reads at minutes 0, 15 and 45 (minute 30 holds none). The line
+    /// stops at minute 15 instead of running to minute 45, and the lone reading at 45 is a dot. It is one read at 81 ms, under the 250 reads
+    /// Analysis needs before it calls read latency high, so it carries no red dot; with 300 reads behind it, it does.
+    /// </summary>
+    [Fact]
+    public void TheIoStrip_BreaksAtABucketWithNoReads_AndDotsOnlyABucketWithEnoughReads()
+    {
+        var r = Run("iogaps");
+
+        Assert.Equal(new[] { 400, 300, 1 }, r.GetProperty("points").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        var one = r.GetProperty("oneRead");
+        Assert.Equal(new[] { 2 }, one.GetProperty("lines").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        Assert.Equal(1, one.GetProperty("dots").GetInt32());
+        Assert.Equal(0, one.GetProperty("markers").GetInt32());
+        Assert.Equal(0, one.GetProperty("anomalyDots").GetInt32());
+        var many = r.GetProperty("manyReads");
+        Assert.Equal(1, many.GetProperty("markers").GetInt32());
+        Assert.Equal(1, many.GetProperty("anomalyDots").GetInt32());
+    }
+
+    /// <summary>
+    /// #7572: a bucket is the chart's width (1 minute for a day), not the collector's cadence. A file I/O collector scheduled every 5 minutes leaves a
+    /// row every fifth bucket, and the strip stays one line instead of six dots. The read floor is stated per 15 minutes of bucket (250, the bar the
+    /// PostgreSQL I/O baseline puts on a bucket) and scaled to the span a row counted: 17 reads in a 1 minute bucket, 500 in a 30 minute one, 84 in a row of a 5 minute collector.
+    /// </summary>
+    [Fact]
+    public void TheIoStrip_KeepsItsLineForACollectorSlowerThanTheBucket_AndScalesTheReadFloorToTheSpanARowCounted()
+    {
+        var r = Run("iogaps");
+
+        var slow = r.GetProperty("slowCollector");
+        Assert.Equal(new[] { 6 }, slow.GetProperty("lines").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        Assert.Equal(0, slow.GetProperty("dots").GetInt32());
+        // A row of a 5 minute collector holds 5 minutes of reads: the floor scales by that step (84), not by the 1 minute bucket (17).
+        Assert.Equal(0, r.GetProperty("floorSlowCollector").GetProperty("short").GetInt32());
+        Assert.Equal(1, r.GetProperty("floorSlowCollector").GetProperty("enough").GetInt32());
+        Assert.Equal(1, r.GetProperty("floorOneMinute").GetProperty("enough").GetInt32());
+        Assert.Equal(0, r.GetProperty("floorOneMinute").GetProperty("short").GetInt32());
+        Assert.Equal(0, r.GetProperty("floorThirtyMinute").GetProperty("short").GetInt32());
+        Assert.Equal(1, r.GetProperty("floorThirtyMinute").GetProperty("enough").GetInt32());
+    }
+
+    /// <summary>
+    /// #7921: the blocking strip has two reads. When one fails and the other answers points, the strip draws the points and names the failed
+    /// read in its header, so the missing series is not read as "no blocking". With both answering, the header carries no such note.
+    /// </summary>
+    [Fact]
+    public void TheBlockingStrip_NamesAFailedRead_InItsHeader_WhenTheOtherSeriesHasPoints()
+    {
+        var r = Run("failedread");
+
+        var blockingFailed = r.GetProperty("blockingFailed");
+        Assert.Equal(1, blockingFailed.GetProperty("bars").GetInt32());
+        Assert.Empty(blockingFailed.GetProperty("none").EnumerateArray());
+        Assert.Contains("The blocking trend read timed out.", blockingFailed.GetProperty("header").GetString());
+        var deadlocksFailed = r.GetProperty("deadlocksFailed");
+        Assert.Equal(2, deadlocksFailed.GetProperty("bars").GetInt32());
+        Assert.Contains("The deadlock trend read timed out.", deadlocksFailed.GetProperty("header").GetString());
+        var both = r.GetProperty("bothAnswered");
+        Assert.Equal(3, both.GetProperty("bars").GetInt32());
+        Assert.Equal("Blocking (per min)", both.GetProperty("header").GetString());
+        // The right-anchored baseline note shares the header's baseline: beside a named failure it is not drawn, so the two cannot overlap at narrow widths.
+        var failedNoted = r.GetProperty("failedWithBaselineNote");
+        Assert.Equal("No baseline yet: not enough history.", failedNoted.GetProperty("note").GetString());
+        Assert.Equal(0, failedNoted.GetProperty("noteTexts").GetInt32());
+        Assert.Equal(1, failedNoted.GetProperty("errorTspans").GetInt32());
+        Assert.Contains("The blocking trend read timed out.", failedNoted.GetProperty("header").GetString());
+        var answeredNoted = r.GetProperty("answeredWithBaselineNote");
+        Assert.Equal(1, answeredNoted.GetProperty("noteTexts").GetInt32());
+        Assert.Equal(0, answeredNoted.GetProperty("errorTspans").GetInt32());
+    }
+
+    /// <summary>
+    /// #7921: one of the six reads fails and the other five answer empty. The page names the failed read instead of saying only that there are
+    /// no samples, which is what a server with nothing collected says. Every read empty keeps that sentence alone, and every read failed keeps the first error alone.
+    /// </summary>
+    [Fact]
+    public void AnEmptyOverview_WithAFailedRead_NamesTheFailure_InsteadOfOnlyNoSamples()
+    {
+        var r = Run("mixedempty");
+
+        static (string kind, string text)[] Strips(JsonElement list) => list.EnumerateArray().Select(s => (s.GetProperty("kind").GetString()!, s.GetProperty("text").GetString()!)).ToArray();
+        var oneFailed = Strips(r.GetProperty("oneFailed"));
+        Assert.Contains(oneFailed, s => s.kind == "strip error" && s.text.Contains("The get_blocking_trend read timed out."));
+        Assert.DoesNotContain(oneFailed, s => s.text == "No overview samples in this window.");
+        Assert.Equal(new[] { ("strip empty", "No overview samples in this window.") }, Strips(r.GetProperty("allEmpty")));
+        Assert.Equal(new[] { ("strip error", "The get_cpu_utilization read timed out.") }, Strips(r.GetProperty("allFailed")));
     }
 }

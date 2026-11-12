@@ -135,6 +135,42 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
         Assert.Equal(4, messages.Distinct(StringComparer.Ordinal).Count());
     }
 
+    /// <summary>
+    /// #7592: the grade follows how much time was added, not the percent alone. Four rows, CPU and duration moving together:
+    /// 11: 4.73 ms to 12.67 ms over 162 runs (+168%): 1.3 s added in total and 7.9 ms a run. LOW, it used to read CRITICAL.
+    /// 12: 0.12 ms to 3,263 ms over 4 runs: 13 s added in total but 3.3 s a run. Stays CRITICAL on the per-run floor.
+    /// 13: 1.5 ms to 1.95 ms (+30%) over 2,900 runs: 1.3 s added, 0.45 ms a run. LOW, it used to read MEDIUM.
+    /// 14: 3 ms to 8 ms (+167%) over 13,000 runs: 65 s added. Stays CRITICAL on the total floor.
+    /// Every row stays listed.
+    /// </summary>
+    [Fact]
+    public async Task TheGrade_NeedsAMinuteInTotalOrASecondARun_ToReadAboveLow()
+    {
+        var service = new LocalDataService(_duckDb);
+        var baseNow = Truncate(DateTime.UtcNow);
+
+        async Task Pair(long queryId, long baseUs, long recentUs, long recentRuns)
+        {
+            await SeedAsync(baseNow.AddHours(-40), 100, baseUs, baseUs, intervalId: 3, queryId: queryId);
+            await SeedAsync(baseNow.AddMinutes(-30), recentRuns, recentUs, recentUs, intervalId: 4, queryId: queryId);
+        }
+
+        await Pair(11, 4_730, 12_670, 162);
+        await Pair(12, 120, 3_263_000, 4);
+        await Pair(13, 1_500, 1_950, 2_900);
+        await Pair(14, 3_000, 8_000, 13_000);
+
+        var hit = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, 24));
+        var rows = hit.GetProperty("regressions").EnumerateArray()
+            .ToDictionary(r => r.GetProperty("query_id").GetInt64(), r => r.GetProperty("severity").GetString());
+
+        Assert.Equal(4, rows.Count);
+        Assert.Equal("LOW", rows[11]);
+        Assert.Equal("CRITICAL", rows[12]);
+        Assert.Equal("LOW", rows[13]);
+        Assert.Equal("CRITICAL", rows[14]);
+    }
+
     [Fact]
     public async Task ARealRegression_IsRanked_AndSurvivesTheDedup()
     {
@@ -161,8 +197,9 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
         Assert.Equal(7, row.GetProperty("query_id").GetInt64());
         Assert.Equal(Db, row.GetProperty("database_name").GetString());
 
-        /* 1 ms -> 4 ms is +300%, the CRITICAL band (> 100%). */
-        Assert.Equal("CRITICAL", row.GetProperty("severity").GetString());
+        /* 1 ms -> 4 ms is +300%, the CRITICAL band (> 100%) by percent, but 500 runs add only 1.5 s and 3 ms a run, under the
+           #7592 grade floor (a minute in total and a second a run), so it reads LOW. The CRITICAL side is in TheGrade_NeedsAMinuteInTotalOrASecondARun_ToReadAboveLow. */
+        Assert.Equal("LOW", row.GetProperty("severity").GetString());
         Assert.Equal(1.0, row.GetProperty("baseline_duration_ms").GetDouble(), 6);
         Assert.Equal(4.0, row.GetProperty("recent_duration_ms").GetDouble(), 6);
         Assert.Equal(300.0, row.GetProperty("duration_regression_percent").GetDouble(), 6);

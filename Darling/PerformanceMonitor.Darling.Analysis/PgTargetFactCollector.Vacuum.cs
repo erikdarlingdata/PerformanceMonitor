@@ -368,7 +368,7 @@ LEFT JOIN modal_source AS ms ON true";
     /// What the extra two rows buy (#3691 lane 43, M3) is <see cref="Fact.Ranked"/>: the card can NAME the next
     /// two persistently-backlogged tables instead of only counting them, which is what an operator asked the
     /// <c>tables_in_backlog</c> number and then had to call a tool to answer. Three because the card is a
-    /// summary, not the list (<see cref="FactRanked.MaxObjects"/>) — <c>get_pg_autovacuum</c> is still the list,
+    /// summary, not the list (<see cref="FactRanked.MaxObjects"/>) — <c>get_pg_autovacuum_health</c> is still the list,
     /// and the sentence that points there keeps the full population count, which can exceed these three.
     /// </summary>
     private const int BacklogRowLimit = FactRanked.MaxObjects;

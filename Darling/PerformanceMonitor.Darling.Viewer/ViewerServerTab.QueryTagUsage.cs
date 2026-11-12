@@ -16,10 +16,9 @@ public partial class ViewerServerTab
     /// <summary>#5988 part B: opens "Resource use by tag" for this server, with an All servers choice for the fleet. Read-only.</summary>
     private void ResourceUseByTagButton_Click(object sender, RoutedEventArgs e)
     {
-        var here = (_server.ServerId, _server.DisplayName);
         new QueryTagUsageWindow(
-            _dataService, here,
-            async () => (await _dataService.GetServersAsync()).Where(s => s.IsEnabled).Select(s => (s.ServerId, s.DisplayName)).ToList())
+            _dataService, _server,
+            async () => (await _dataService.GetServersAsync()).Where(s => s.IsEnabled).ToList())
         { Owner = Window.GetWindow(this) }.Show();
     }
 }

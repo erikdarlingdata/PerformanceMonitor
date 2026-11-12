@@ -74,6 +74,39 @@ public sealed class PostgresAddServerDialogTests
         Assert.Contains("5432", error, StringComparison.Ordinal);
     }
 
+    /* ─────────────────────────────── ParseMonthlyCostText (pure, #7197) ─────────────────────────────── */
+
+    [Theory]
+    [InlineData(null, "0")]
+    [InlineData("", "0")]
+    [InlineData("   ", "0")]
+    [InlineData("0", "0")]
+    [InlineData("120", "120")]
+    [InlineData(" 120.50 ", "120.50")]
+    [InlineData("+7", "7")]
+    public void ParseMonthlyCostText_PlainNumbers_ParseAsTyped(string? text, string expected)
+    {
+        var (cost, error) = AddServerDialog.ParseMonthlyCostText(text);
+        Assert.Equal(decimal.Parse(expected, System.Globalization.CultureInfo.InvariantCulture), cost);
+        Assert.Null(error);
+    }
+
+    /// <summary>A bad value used to be stored as 0 with no message, wiping a stored cost on an edit, and "120,50"
+    /// read as 12050 because the thousands separator was accepted anywhere in the digits.</summary>
+    [Theory]
+    [InlineData("abc")]
+    [InlineData("-5")]
+    [InlineData("$120")]
+    [InlineData("120,50")]
+    [InlineData("1,234")]
+    [InlineData("1e3")]
+    public void ParseMonthlyCostText_BadValue_IsRefusedWithAMessage(string text)
+    {
+        var (cost, error) = AddServerDialog.ParseMonthlyCostText(text);
+        Assert.Equal(0m, cost);
+        Assert.False(string.IsNullOrWhiteSpace(error));
+    }
+
     /// <summary>Range-checked to match the MCP tool's validation (1–65535, 0 allowed as the default) rather
     /// than failing later inside Npgsql with a driver error nothing points back at the box.</summary>
     [Theory]

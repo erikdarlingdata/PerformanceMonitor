@@ -133,7 +133,7 @@ const report = (root, title) => {
     /* A chart is its legend's labels and the text of its value axis (a tick carries the unit: "10 ms"), which shows what was plotted. */
     charts: nodes.filter((n) => has(n, "chart-legend")).map((c) => ({
       labels: all(c).filter((n) => has(n, "item")).map((n) => n.textContent),
-      ticks: all(c.parent).filter((n) => n.tag === "text" && /\d (ms|MB|MB\/s)$/.test(n.textContent)).map((n) => n.textContent),
+      ticks: all(c.parent).filter((n) => n.tag === "text" && /\d (ms|s|min|MB|MB\/s)$/.test(n.textContent)).map((n) => n.textContent),
     })),
     strips: nodes.filter((n) => has(n, "strip")).map((n) => n.textContent),
     notes: nodes.filter((n) => has(n, "mp-metric-note")).map((n) => n.textContent),

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -17,8 +18,10 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -28,8 +31,56 @@ namespace Darling.Tests;
 /// show, so the assertions are on the values: the age text, the state words, the platform label, the order and the sentences of a read
 /// with no capture. The judgement under them is <see cref="DatabaseProtectionBands"/>.
 /// </summary>
-public sealed class ViewerDatabaseProtectionTextTests
+[Collection("viewer-time-statics")]
+public sealed class ViewerDatabaseProtectionTextTests : IDisposable
 {
+    /* #7343: the capture and scan times follow the display mode; these assertions are on the machine-local words, so the class runs in Local mode. */
+    private readonly TimeDisplayMode _savedMode = ViewerTimeHelper.CurrentDisplayMode;
+
+    public ViewerDatabaseProtectionTextTests() => ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+
+    public void Dispose() => ViewerTimeHelper.CurrentDisplayMode = _savedMode;
+
+    public static TheoryData<TimeDisplayMode> Modes => new() { TimeDisplayMode.ServerTime, TimeDisplayMode.UTC, TimeDisplayMode.LocalTime };
+
+    /// <summary>The time of <paramref name="utc"/> as each display mode words it on the page's clock (#8576), to the second with its zone: UTC in
+    /// Server and UTC modes, as the refresh stamp beside it reads, and this machine's time with this machine's zone name in Local mode.</summary>
+    private static string Worded(DateTime utc, TimeDisplayMode mode) => mode switch
+    {
+        TimeDisplayMode.ServerTime or TimeDisplayMode.UTC => utc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture) + " UTC",
+        _ => LocalWorded(utc),
+    };
+
+    private static string LocalWorded(DateTime utc) =>
+        TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.Local).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture)
+        + " " + (TimeZoneInfo.Local.IsDaylightSavingTime(utc) ? TimeZoneInfo.Local.DaylightName : TimeZoneInfo.Local.StandardName);
+
+    [Theory]
+    [MemberData(nameof(Modes))]
+    public void TheStatusLineCaptureTime_FollowsTheDisplayMode_OnTheRefreshStampsClock(TimeDisplayMode mode)
+    {
+        ViewerTimeHelper.CurrentDisplayMode = mode;
+        var read = Read(Fact("a", fullAgo: Day, logAgo: TimeSpan.FromMinutes(5), checkDbAgo: Day));
+
+        Assert.EndsWith("Captured: " + Worded(Captured, mode), ViewerDatabaseProtectionText.StatusLine(read), StringComparison.Ordinal);
+    }
+
+    /// <summary>The capture time is stamped to the second and names its zone, as every other grid's time does, so a reader never has to
+    /// guess which clock a culture short date was in.</summary>
+    [Fact]
+    public void TheStatusLineCaptureTime_IsStampedToTheSecond_AndNamesItsZone()
+    {
+        var read = Read(Fact("a", fullAgo: Day, logAgo: TimeSpan.FromMinutes(5), checkDbAgo: Day));
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+        Assert.EndsWith("Captured: 2026-10-28 12:00:00 UTC", ViewerDatabaseProtectionText.StatusLine(read), StringComparison.Ordinal);
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        /* #8576: Server Time has no server clock to apply to this page's stamps, so it reads UTC as the refresh stamp does. */
+        Assert.EndsWith("Captured: 2026-10-28 12:00:00 UTC", ViewerDatabaseProtectionText.StatusLine(read), StringComparison.Ordinal);
+    }
+
+
     private static readonly DateTime Captured = new(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc);
     private static readonly TimeSpan Day = TimeSpan.FromDays(1);
 
@@ -73,6 +124,16 @@ public sealed class ViewerDatabaseProtectionTextTests
         var row = ViewerDatabaseProtectionText.Rows(Read(Fact("lost", checkDbState: "never", fullState: "none_in_window", logState: "none_in_window")))[0];
 
         Assert.Equal(("none in window - overdue", "none in window - overdue", "never - overdue"), (row.FullBackup, row.LogBackup, row.CheckDb));
+    }
+
+    [Fact]
+    public void ThePlatformColumn_ShowsOnlyWhenSomeRowNamesAPlatform()
+    {
+        var boxed = ViewerDatabaseProtectionText.Rows(Read(Fact("a", fullAgo: Day), Fact("b", fullAgo: Day)));
+        Assert.False(ViewerDatabaseProtectionText.ShowsPlatformColumn(boxed));
+
+        var mixed = ViewerDatabaseProtectionText.Rows(Read(Fact("a", fullAgo: Day), Fact("b", platform: "platform_managed", fullAgo: Day)));
+        Assert.True(ViewerDatabaseProtectionText.ShowsPlatformColumn(mixed));
     }
 
     [Fact]
@@ -120,9 +181,9 @@ public sealed class ViewerDatabaseProtectionTextTests
     public void TheStatusLine_NamesTheOverdueDatabases_AndTheCaptureTime()
     {
         var read = Read(Fact("zeta", fullAgo: 9 * Day, logAgo: TimeSpan.FromMinutes(5), checkDbAgo: Day));
-        var local = Captured.ToLocalTime().ToString("g", System.Globalization.CultureInfo.CurrentCulture);
+        var local = LocalWorded(Captured);
 
-        Assert.Equal($"1 of 1 judged databases overdue. full backup: zeta.   Captured: {local}", ViewerDatabaseProtectionText.StatusLine(read));
+        Assert.Equal($"1 of 1 judged databases overdue. Full backup: zeta.   Captured: {local}", ViewerDatabaseProtectionText.StatusLine(read));
         Assert.StartsWith("No database is overdue (1 judged).", ViewerDatabaseProtectionText.StatusLine(Read(Fact("a", fullAgo: Day, logAgo: TimeSpan.FromMinutes(5), checkDbAgo: Day))), StringComparison.Ordinal);
     }
 

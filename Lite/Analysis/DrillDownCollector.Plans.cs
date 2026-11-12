@@ -34,7 +34,8 @@ public partial class DrillDownCollector
         var queryHash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
         if (string.IsNullOrEmpty(queryHash)) return;
 
-        // Look up plan_handle from DuckDB for this query_hash
+        // Look up plan_handle from DuckDB for this query_hash in the finding's database (#8317). Byte-identical
+        // to Darling's PlanHandleLookupSql.
         string? planHandle = null;
         try
         {
@@ -48,12 +49,14 @@ SELECT plan_handle
 FROM v_query_stats
 WHERE server_id = $1
 AND   query_hash = $2
+AND   ($3 = '' OR database_name = $3)
 AND   plan_handle IS NOT NULL AND plan_handle != ''
 ORDER BY collection_time DESC
 LIMIT 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = queryHash });
+            cmd.Parameters.Add(new DuckDBParameter { Value = finding.DatabaseName ?? "" });
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (await reader.ReadAsync(context.CancellationToken) && !reader.IsDBNull(0))
@@ -207,25 +210,19 @@ LIMIT 1";
         {
             var planXmls = new List<string>();
 
+            var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using (var readLock = _duckDb.AcquireReadLock(context.CancellationToken))
             using (var connection = _duckDb.CreateConnection())
             {
                 await connection.OpenAsync(context.CancellationToken);
 
                 using var cmd = connection.CreateCommand();
-                cmd.CommandText = @"
-SELECT query_plan_xml
-FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   query_plan_xml IS NOT NULL
-ORDER BY delta_worker_time DESC
-LIMIT 10";
+                cmd.CommandText = DuckDbFactCollector.PlanAdvisorySql;
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
+                cmd.CommandText = plan.Apply(cmd.CommandText);
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 while (await reader.ReadAsync(context.CancellationToken))
                 {

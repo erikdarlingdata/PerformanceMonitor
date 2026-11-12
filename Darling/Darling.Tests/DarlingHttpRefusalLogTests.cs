@@ -233,6 +233,48 @@ public class DarlingHttpRefusalLogTests
     }
 
     /// <summary>
+    /// #8611: one source's refusals through the token gate can be in different states: no header, then a wrong token a minute later while a
+    /// person sets a client up. Without a state in the key the first line held the second one back for the whole window, and the only line
+    /// in the log named the wrong problem. A new state logs at once, a repeat of a state already logged still holds, and the gate's
+    /// other sources are untouched.
+    /// </summary>
+    [Fact]
+    public void ANewRefusalState_FromTheSameSource_IsLoggedAtOnce_AndARepeatOfAStateStillHolds()
+    {
+        var log = new DarlingHttpRefusalLog(Window);
+
+        Assert.True(log.Observe(DarlingRefusalGate.Token, "10.0.0.1", T0, "no header").Log);
+        Assert.True(log.Observe(DarlingRefusalGate.Token, "10.0.0.1", T0.AddMinutes(1), "wrong token").Log);
+        Assert.False(log.Observe(DarlingRefusalGate.Token, "10.0.0.1", T0.AddMinutes(2), "no header").Log);
+        Assert.False(log.Observe(DarlingRefusalGate.Token, "10.0.0.1", T0.AddMinutes(3), "wrong token").Log);
+
+        /* A state-less caller (every other gate) keeps its one slot per source. */
+        Assert.True(log.Observe(DarlingRefusalGate.SourceCidr, "10.0.0.1", T0).Log);
+        Assert.False(log.Observe(DarlingRefusalGate.SourceCidr, "10.0.0.1", T0.AddMinutes(1)).Log);
+    }
+
+    /// <summary>
+    /// #8611: the held-back clause says the count was taken in the window after the previous line. Every held refusal falls in that window
+    /// (the first one after it is logged), so the clause is true however long the quiet gap before the next line is.
+    /// </summary>
+    [Fact]
+    public void TheHeldBackClause_NamesTheWindowAfterThePreviousLine()
+    {
+        var log = new DarlingHttpRefusalLog(Window);
+        log.Observe(DarlingRefusalGate.Token, "10.0.0.1", T0, "wrong token");
+        for (var i = 1; i <= 3; i++)
+        {
+            log.Observe(DarlingRefusalGate.Token, "10.0.0.1", T0.AddMinutes(i), "wrong token");
+        }
+
+        var next = log.Observe(DarlingRefusalGate.Token, "10.0.0.1", T0.AddMinutes(15), "wrong token");
+
+        Assert.True(next.Log);
+        Assert.Equal(" 3 further refusal(s) from this source were not logged in the 10 minute(s) after the previous line.",
+            DarlingHttpRefusalLog.DescribeSuppression(next, Window));
+    }
+
+    /// <summary>
     /// Eviction is keyed on LAST SEEN, not last logged. Keyed on last logged, a source still being refused
     /// every second would be dropped at the two-window horizon and re-log as a fresh first sighting —
     /// turning the rate limit into a rate multiplier, which is worse than no limit because it looks like

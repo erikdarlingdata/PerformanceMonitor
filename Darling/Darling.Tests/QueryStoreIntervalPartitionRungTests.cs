@@ -102,7 +102,7 @@ CREATE TRIGGER trg_plan_regression_daily_late
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -167,7 +167,7 @@ CREATE TRIGGER trg_plan_regression_daily_late
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -251,7 +251,7 @@ FROM generate_series(1, 50) AS g", ct);
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -296,7 +296,7 @@ FROM generate_series(1, 50) AS g", ct);
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -348,7 +348,7 @@ FROM generate_series(1, 50) AS g", ct);
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -393,7 +393,7 @@ FROM generate_series(1, 50) AS g", ct);
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -434,7 +434,7 @@ FROM generate_series(1, 50) AS g", ct);
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var role = "qsp_reader_" + Guid.NewGuid().ToString("N")[..12];
         var bodySucceeded = false;
         NpgsqlConnection? connection = null;
@@ -494,7 +494,7 @@ FROM generate_series(1, 50) AS g", ct);
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -570,7 +570,7 @@ FROM generate_series(1, 50) AS g", ct);
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -603,7 +603,7 @@ SELECT -5571901, 'trg', 900000, 1, NULL, 900000, {0}, {0}, 'ph', 'qh', 1, 1, 1, 
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -668,6 +668,9 @@ CROSS JOIN LATERAL (SELECT date_trunc('day', now() AT TIME ZONE 'UTC') - interva
         /* V174 (#5655): the service version table is above V170 too. */
         await ExecAsync(connection, "DROP TABLE IF EXISTS config.service_version", ct);
         /* V173 (#5582): the stamp-grain rollup and its triggers are above V170 too; RewindTableAsync dropped the triggers, the tables go here. */
+        /* V251 (#7762)'s rewind artifact puts V173's function and both triggers back (DropSentinelsAboveAsync above), on the plain wide table now, so
+           the triggers go before the function. */
+        await ExecAsync(connection, "DROP TRIGGER IF EXISTS " + QueryStoreComposeStamp.InsertTrigger + " ON collect.query_store_interval_wide; DROP TRIGGER IF EXISTS " + QueryStoreComposeStamp.UpdateTrigger + " ON collect.query_store_interval_wide", ct);
         await ExecAsync(connection, "DROP TABLE IF EXISTS collect.query_store_compose_stamp_hours, collect.query_store_compose_stamp_built, collect.query_store_compose_stamp; DROP FUNCTION IF EXISTS collect.query_store_compose_stamp_mark_late()", ct);
         await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= " + WideRungVersion.ToString(CultureInfo.InvariantCulture), ct);
     }

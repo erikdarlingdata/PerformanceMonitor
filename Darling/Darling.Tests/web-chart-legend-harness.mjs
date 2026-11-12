@@ -318,5 +318,77 @@ const shrunk = specFor();
 shrunk.series = shrunk.series.filter((x) => x.key !== "mid");
 out.shrunk = state(charts.zoomableLineChart(shrunk, "c7", scope));
 
+// 13. more series than the palette has colors (#7401): each series is colored as panels.js does, and no two legend entries may look alike
+const manySpec = (n) => ({
+  ...specFor(),
+  points: points.map((p, i) => ({ t: p.t, ...Object.fromEntries(Array.from({ length: n }, (_, k) => ["s" + k, 10 * (k + 1) + (i % 4)])) })),
+  series: Array.from({ length: n }, (_, k) => ({ key: "s" + k, label: "Series " + k, color: charts.SERIES_COLORS[k % charts.SERIES_COLORS.length] })),
+});
+const looks = (n) => {
+  const host = charts.zoomableLineChart(manySpec(n), "many" + n, scope);
+  return {
+    legend: legendItems(host).map((e) => e.children[0].attrs.style),
+    lines: find(host, (x) => x.tag === "polyline" && cls(x).includes("series-line")).map((x) => x.attrs.stroke + "|" + (x.attrs["stroke-dasharray"] || "")),
+  };
+};
+out.palette = { series: charts.SERIES_COLORS, categorical: charts.CATEGORICAL_COLORS };
+out.six = looks(6);
+out.twelve = looks(12);
+
+// 14. a swatch shows a dash only when the plot draws one (#7401): two series sharing a color on a stacked or stacked-bar chart are drawn solid,
+// and so is a repeated-color series that is only a lone dot. A repeated color on two real lines is still dashed on the line and its entry.
+const sameColor = charts.SERIES_COLORS[0];
+const twoSame = (mode, second) => ({
+  ...specFor(),
+  mode,
+  points: points.map((p, i) => ({ t: p.t, a: 10 + (i % 4), b: second(i) })),
+  series: [{ key: "a", label: "A", color: sameColor }, { key: "b", label: "B", color: sameColor }],
+});
+const sameLook = (mode, second) => {
+  const host = charts.zoomableLineChart(twoSame(mode, second), "same-" + mode + "-" + String(second(0)), scope);
+  return {
+    legend: legendItems(host).map((e) => e.children[0].attrs.style),
+    lines: find(host, (x) => x.tag === "polyline" && cls(x).includes("series-line")).map((x) => x.attrs["stroke-dasharray"] || ""),
+    marks: find(host, (x) => cls(x).includes("series-bar") || cls(x).includes("series-area") || cls(x).includes("series-dot")).length,
+  };
+};
+out.sameStackedBar = sameLook("stacked-bar", (i) => 20 + (i % 3));
+out.sameStacked = sameLook("stacked", (i) => 20 + (i % 3));
+out.sameLines = sameLook("line", (i) => 20 + (i % 3));
+out.sameLoneDot = sameLook("line", (i) => (i === 2 ? 20 : null));
+
+// 15. a panel with a second axis (#7668). Each line is named from its measure's catalog display name (the title belongs to neither), the second says it is
+// on the right axis, a one-line panel keeps its title, and the second line is drawn solid once its points sit closer together than one dash period.
+const overlayPanel = { source: "tempdb", viz: "line", title: "TempDB: reserved vs version store", measure: "tempdb_reserved_mb", unit: "mb", overlay: { measure: "tempdb_version_store_mb", unit: "mb" } };
+const overlayRows = (n) => Array.from({ length: n }, (_, i) => ({ bucket: new Date(T0 + i * MIN).toISOString().slice(0, 19), value: 1 + (i % 5), value2: 0.05 * (i % 3) }));
+const composedHost = (panel, rowCount, opts) => {
+  const holder = new FakeNode("div");
+  compose.renderComposedResult({ sql: "", rows: overlayRows(rowCount) }, panel, opts).filter(Boolean).forEach((n) => holder.appendChild(n));
+  return holder;
+};
+const entryLabels = (host) => find(host, (n) => n.tag === "span" && cls(n) === "item").map((n) => n.children[1].textContent);
+const overlayLine = (host) => find(host, (n) => n.tag === "polyline" && cls(n).includes("series-line-overlay"))[0];
+const names = new Map([["tempdb_reserved_mb", "TempDB Reserved MB"], ["tempdb_version_store_mb", "TempDB Version Store MB"]]);
+out.overlayLegend = {
+  catalog: entryLabels(composedHost(overlayPanel, 12, { measureNames: names })),
+  noCatalog: entryLabels(composedHost(overlayPanel, 12, {})),
+  oneLine: entryLabels(composedHost({ ...overlayPanel, overlay: undefined }, 12, { measureNames: names })),
+};
+const solidOf = (rowCount) => {
+  const line = overlayLine(composedHost(overlayPanel, rowCount, { measureNames: names }));
+  return { drawn: !!line, style: line ? line.attrs.style || "" : null };
+};
+out.overlayDense = solidOf(600);
+out.overlaySparse = solidOf(12);
+// ...and the reply that runs a panel carries the service's warnings, drawn as a note on the panel; a reply with none draws none
+const warningText = "this panel: the measure 'perfmon_value' on counter 'Transactions/sec' charts SQL Server's running total since startup, which only climbs, not a per-second rate.";
+const runWith = async (extra) => {
+  globalThis.fetch = async () => ({ status: 200, ok: true, text: async () => JSON.stringify({ sql: "select 1", rows: overlayRows(12), ...extra }) });
+  const body = new FakeNode("div");
+  await compose.renderComposedInto(body, { ...overlayPanel, overlay: undefined, title: "Transactions/sec" }, composedScope, {});
+  return find(body, (n) => cls(n).includes("strip") && cls(n).includes("notice")).map((n) => n.textContent);
+};
+out.runWarnings = { with: await runWith({ warnings: [warningText] }), without: await runWith({}), blank: await runWith({ warnings: ["", "  "] }) };
+
 fs.rmSync(scratch, { recursive: true, force: true });
 console.log(JSON.stringify(out));

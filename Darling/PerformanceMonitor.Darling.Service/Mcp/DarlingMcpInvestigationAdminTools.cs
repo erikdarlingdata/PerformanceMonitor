@@ -43,7 +43,7 @@ public sealed class DarlingMcpInvestigationAdminTools
 {
     internal const string PreconditionMessage =
         "The service's mcp store role may not write the investigation tables this tool changes. A bring-your-own store needs " +
-        "Darling/tools/provision-roles.sql re-run (it is idempotent) as a superuser. Managed and compose stores grant it themselves on start.";
+        DarlingManagedRoles.ProvisionRolesScriptPath + " re-run (it is idempotent) as a superuser. Managed and compose stores grant it themselves on start.";
 
     private const string NotPendingSentence = "That note is not pending: it was already decided, or it is gone.";
     private const string NotOpenSentence = "That request is not open: it is already closed or expired, or it is gone.";
@@ -54,7 +54,7 @@ public sealed class DarlingMcpInvestigationAdminTools
         "note_text is 1 to 2000 characters. server_name (optional) scopes the note to one server; leave it out for a fleet note. metric_name (optional, up to 128 characters) ties it to one metric. " +
         "days is how long it is kept: 1 to 365, default 90. An agent's own proposed note is not this: it waits for approve_investigation_note or reject_investigation_note. " +
         "Answer: {status:\"written\", note_id, author, server, metric_name, days, note: {before: null, after: {...}}, undo: null}. There is no undo: a written note cannot be deleted from the web or the Viewer; " +
-        "reject_investigation_note applies only to a pending note. Needs mcp.allowWrites; an agent investigation can never call it.")]
+        "reject_investigation_note applies only to a pending note. Needs mcp.allowWrites or a named operator token; an agent investigation can never call it.")]
     public static async Task<string> WriteInvestigationNote(
         NpgsqlDataSource postgres,
         [Description("The note, 1 to 2000 characters.")] string note_text,
@@ -123,7 +123,7 @@ public sealed class DarlingMcpInvestigationAdminTools
         "<<GUIDE>>" +
         "note_id is a pending note's id from the pending agent notes screen or the submit_investigation_report answer. Only a pending note can be approved: a note that is already approved or rejected, or not there, is refused and nothing is written. " +
         "Answer: {status:\"approved\", note: {before, after}, undo: null}; before and after are the note's state, decided_by and decided_at. There is no undo: a decided note cannot return to pending. " +
-        "Needs mcp.allowWrites; an agent investigation can never call it.")]
+        "Needs mcp.allowWrites or a named operator token; an agent investigation can never call it.")]
     public static Task<string> ApproveInvestigationNote(
         NpgsqlDataSource postgres,
         [Description("The note's id.")] long note_id,
@@ -136,7 +136,7 @@ public sealed class DarlingMcpInvestigationAdminTools
         "<<GUIDE>>" +
         "note_id is a pending note's id. Only a pending note can be rejected: a note that is already approved or rejected, or not there, is refused and nothing is written. " +
         "Answer: {status:\"rejected\", note: {before, after}, undo: null}; before and after are the note's state, decided_by and decided_at. There is no undo: a decided note cannot return to pending. " +
-        "Needs mcp.allowWrites; an agent investigation can never call it.")]
+        "Needs mcp.allowWrites or a named operator token; an agent investigation can never call it.")]
     public static Task<string> RejectInvestigationNote(
         NpgsqlDataSource postgres,
         [Description("The note's id.")] long note_id,
@@ -149,7 +149,7 @@ public sealed class DarlingMcpInvestigationAdminTools
         "<<GUIDE>>" +
         "request_id is the request's id from list_investigation_requests. reason is 1 to 500 characters. A request that is already closed or expired, or not there, is refused and nothing is written. " +
         "Answer: {status:\"closed\", request: {before, after}, undo: null}; before and after are the request's state, closed_by, closed_at and closed_reason. There is no undo: a closed request cannot be reopened. " +
-        "Needs mcp.allowWrites; an agent investigation can never call it.")]
+        "Needs mcp.allowWrites or a named operator token; an agent investigation can never call it.")]
     public static async Task<string> CloseInvestigationRequest(
         NpgsqlDataSource postgres,
         [Description("The request's id (a GUID), from list_investigation_requests.")] string request_id,
@@ -161,7 +161,7 @@ public sealed class DarlingMcpInvestigationAdminTools
         {
             if (!Guid.TryParse(request_id, out var request))
             {
-                return McpHelpers.Refusal("request_id", "The request id is not a request id. Nothing was changed.");
+                return McpHelpers.Refusal("request_id", DarlingWebEndpoints.RequestIdNotGuidText + " Nothing was changed.");
             }
 
             if (InvestigationPersonWrites.ValidateCloseReason(reason) is { } reasonRefusal)

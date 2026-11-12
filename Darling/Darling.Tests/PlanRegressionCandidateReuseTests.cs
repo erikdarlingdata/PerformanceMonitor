@@ -32,7 +32,7 @@ public sealed class PlanRegressionCandidateReuseRuleTests
     private static readonly TimeSpan Window = PgFactCollector.PlanRegressionCandidateCache.DefaultRefreshAfter;
 
     [Fact]
-    public void TheReuseWindow_IsOneAnalysisCadence_SetByTheWorker_AndTheScheduledPassAlwaysReads()
+    public void TheReuseWindow_DefaultsToOneAnalysisCadence_IsSetByTheWorker_AndTheScheduledPassAlwaysReads()
     {
         Assert.Equal(TimeSpan.FromMinutes(30), PgFactCollector.PlanRegressionCandidateCache.DefaultRefreshAfter);
         var cache = new PgFactCollector.PlanRegressionCandidateCache();
@@ -43,10 +43,10 @@ public sealed class PlanRegressionCandidateReuseRuleTests
         cache.Store("store", 1, "s", Now.AddMinutes(-15), Array.Empty<PgFactCollector.PlanRegressionCandidate>());
         Assert.Null(cache.TryGet("store", 1, "s", Now, Now));
 
-        /* The worker sets the shared window from the clamped cadence; the scheduled pass (the one caller that persists
+        /* The worker sets the shared window from the clamped cadence and the longest a pass is deferred; the scheduled pass (the one caller that persists
            caveats) refreshes and never reuses; an on-demand current call reuses. */
         var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
-        Assert.Contains("PlanRegressionCandidateCache.Shared.RefreshAfter = TimeSpan.FromMinutes(analysisIntervalMinutes);", worker, StringComparison.Ordinal);
+        Assert.Contains("PlanRegressionCandidateCache.Shared.RefreshAfter = TimeSpan.FromMinutes(analysisIntervalMinutes) + ScheduledAnalysisAdmission.OrdinaryDeferral(s_analysisTimeout);", worker, StringComparison.Ordinal);
         var service = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "DarlingAnalysisService.cs");
         Assert.Contains("ReusePlanRegressionCandidates = asOfUtc is null && !persistCollectionCaveats,", service, StringComparison.Ordinal);
         Assert.Contains("RefreshPlanRegressionCandidates = asOfUtc is null && persistCollectionCaveats,", service, StringComparison.Ordinal);
@@ -209,9 +209,10 @@ public sealed class PlanRegressionCandidateReuseLiveTests
            hit and miss counters (never the process-wide Shared one, which other classes and the worker touch) say which
            path ran.
            It once read pg_stat_statements' entries for the reads instead. Those are cluster-wide: this own-store class runs
-           in parallel with classes that fill the hash table until it evicts (the one full pg_stat_statements_reset() is in
-           ComposeStoreRolesLiveTests, whose collection runs alone), so the pass's entry could vanish with no read at all (CI run
-           38702741139: hits 1, misses 0, and no entry after the call). */
+           in parallel with classes that fill the hash table until it evicts (every pg_stat_statements_reset on the shared
+           cluster is scoped to the resetting test's own database; the two argument-less resets, ComposeStoreRolesLiveTests'
+           and StoreStatementStatsLiveTests', run on clusters those tests boot for themselves), so the pass's entry could
+           vanish with no read at all (CI run 38702741139: hits 1, misses 0, and no entry after the call). */
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 reuse test.");
         var ct = TestContext.Current.CancellationToken;

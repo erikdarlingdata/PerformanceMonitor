@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
@@ -27,6 +28,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed class ViewerProcedureStatsRow : QueryTagRowBase
 {
     public string DatabaseName { get; set; } = "";
+    /// <summary>#7725: true for a row from a database the server no longer lists. The ranking puts the databases the server still lists
+    /// first and fills what the limit leaves from the dropped ones, which carry this mark.</summary>
+    public bool IsDropped { get; set; }
+    /// <summary>#7725: what the grid's database cell shows: the name, with " (dropped)" after a database the server no longer lists.</summary>
+    public string DatabaseDisplay => DroppedDatabaseMark.Display(DatabaseName, IsDropped);
     public string SchemaName { get; set; } = "";
     public string ObjectName { get; set; } = "";
     public string ObjectType { get; set; } = "";
@@ -195,7 +201,7 @@ public sealed partial class ViewerDataService
         var now = DateTime.UtcNow;
         var databases = await CurrentDatabaseScope.NarrowAsync(
             _dataSource, serverId, DatabaseFilter.Of(databaseNames), nowUtc: now, asOfUtc: endUtc < now ? endUtc : null,
-            windowStartUtc: startUtc, logger: null, cancellationToken: cancellationToken);
+            windowStartUtc: startUtc, logger: ViewerStoreLogger.Instance, cancellationToken: cancellationToken);
         var leftOut = DatabasesLeftOut.Distinct(databases.ExcludedNames);
 
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
@@ -207,15 +213,46 @@ public sealed partial class ViewerDataService
             routedTier = RetentionTier.Hourly;
         }
 
+        ViewerRoutedRead<ViewerProcedureStatsRow> read;
         if (routedTier == RetentionTier.Hourly)
         {
             var hourly = await GetTopProceduresByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, databases, tags, cancellationToken);
-            return hourly with { LeftOutDatabases = leftOut };
+            read = hourly with { LeftOutDatabases = leftOut };
+        }
+        else
+        {
+            read = new ViewerRoutedRead<ViewerProcedureStatsRow>(
+                await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, databases, tags, cancellationToken), "raw", null,
+                LeftOutDatabases: leftOut);
         }
 
-        return new ViewerRoutedRead<ViewerProcedureStatsRow>(
-            await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, databases, tags, cancellationToken), "raw", null,
-            LeftOutDatabases: leftOut);
+        /* #7725: the databases the server still lists rank first, as above. What the limit leaves is filled from the left-out databases,
+           ranked the same way and marked IsDropped (the grid shows "(dropped)"), so a dropped database's rows never push out a listed row
+           and the grid is not empty while the work is on record. The banner then names only the databases with no row in the grid. */
+        if (leftOut is { Count: > 0 } && read.Rows.Count < top)
+        {
+            var fillTop = top - read.Rows.Count;
+            var leftOutNames = leftOut.ToList();
+            var fill = routedTier == RetentionTier.Hourly
+                ? (await GetTopProceduresByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, fillTop, leftOutNames, DatabaseFilter.All, tags, cancellationToken)).Rows
+                : await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, fillTop, leftOutNames, DatabaseFilter.All, tags, cancellationToken);
+            if (fill.Count > 0)
+            {
+                foreach (var row in fill)
+                {
+                    row.IsDropped = true;
+                }
+
+                var withRows = new HashSet<string>(fill.Select(row => row.DatabaseName), StringComparer.Ordinal);
+                read = read with
+                {
+                    Rows = [.. read.Rows, .. fill],
+                    LeftOutDatabases = DatabasesLeftOut.Distinct(leftOut.Where(name => !withRows.Contains(name))),
+                };
+            }
+        }
+
+        return read;
     }
 
     /// <summary>#4231 stage 3b: the hourly-rollup arm — builds its FROM clause ONLY through
@@ -302,7 +339,7 @@ public sealed partial class ViewerDataService
         /*TAG:object:database_name,schema_name,object_name*/
         GROUP BY database_name, schema_name, object_name
         HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
-        ORDER BY SUM(worker_time_sum) DESC
+        ORDER BY SUM(elapsed_time_sum) DESC
         LIMIT $4
         """;
 
@@ -592,14 +629,15 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// Hourly procedure-stats buckets for the Top-Procedures slicer — Lite's
-    /// <c>GetProcStatsSlicerDataAsync</c> ported (same bucket shape as the query-stats slicer, so it
-    /// shares <see cref="ReadQueryStatsSlicerAsync"/>). The distinct-count is over object_name.
+    /// Procedure-stats buckets for the Top-Procedures slicer — Lite's <c>GetProcStatsSlicerDataAsync</c> ported (same
+    /// bucket shape as the query-stats slicer, so it shares <see cref="ReadQueryStatsSlicerAsync"/>), at the width
+    /// <see cref="SlicerBuckets"/> picks for the window ($5 minutes, on the grid every width of it divides: a minute over a
+    /// short window, an hour over a day). The distinct-count is over object_name.
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
-    public const string ProcStatsSlicerSql = """
+    public const string ProcStatsSlicerSql = $"""
         SELECT
-            date_trunc('hour', collection_time) AS bucket,
+            date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}) AS bucket,
             /* #5449: a procedure that did no work in a cycle has no stored row now (old data still has its zero-delta row),
                so the count is of procedures WITH work: the same number on both. */
             COUNT(DISTINCT object_name) FILTER (WHERE COALESCE(delta_execution_count, 0) > 0 OR COALESCE(delta_worker_time, 0) > 0 OR COALESCE(delta_elapsed_time, 0) > 0) AS proc_count,
@@ -613,11 +651,11 @@ public sealed partial class ViewerDataService
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        GROUP BY date_trunc('hour', collection_time)
+        GROUP BY 1
         ORDER BY bucket
         """;
 
-    /// <summary>Hourly procedure-stats slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>].</summary>
+    /// <summary>Procedure-stats slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>], at the width <see cref="SlicerBuckets"/> picks for it.</summary>
     public async Task<List<TimeSliceBucket>> GetProcStatsSlicerDataAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
         => await ReadQueryStatsSlicerAsync(ProcStatsSlicerSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);

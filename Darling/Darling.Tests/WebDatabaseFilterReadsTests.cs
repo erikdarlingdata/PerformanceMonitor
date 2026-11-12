@@ -112,7 +112,10 @@ public sealed class WebDatabaseFilterReadsTests
                 continue;
             }
 
-            var text = ReadJs(module);
+            /* One file at a time (#7027): ReadJs would join pages/server-tabs.js with its tab files, whose imports are relative to
+               their own folder, so the walk below would resolve them against the wrong one. The closure reaches the tab files by import. */
+            var text = System.IO.File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", module))
+                .Replace("\r\n", "\n", StringComparison.Ordinal);
             seen[module] = text;
             var folder = module.Contains('/', StringComparison.Ordinal) ? module[..module.LastIndexOf('/')] : "";
             foreach (Match m in staticImport.Matches(text))

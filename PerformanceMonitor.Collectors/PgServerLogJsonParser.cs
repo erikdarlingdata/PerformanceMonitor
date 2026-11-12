@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -152,7 +151,7 @@ public static class PgServerLogJsonParser
             }
 
             if (!TryGetString(root, "timestamp", out var timestampText) ||
-                !TryParseTimestamp(timestampText!, out var occurredAtUtc, out var zoneText))
+                !PgLogEntry.TryParseStampAndZone(timestampText!, out var occurredAtUtc, out var zoneText))
             {
                 return false;
             }
@@ -224,35 +223,5 @@ public static class PgServerLogJsonParser
 
         value = element.GetString();
         return !string.IsNullOrEmpty(value);
-    }
-
-    /// <summary>
-    /// <c>timestamp</c> renders as <c>YYYY-MM-DD HH:MM:SS.mmm ZONE</c> — the same stamp-then-zone shape the
-    /// stderr assembler and csvlog's <c>log_time</c> read. This check decides only "is this a record" — a
-    /// stamp that parses — never whether the zone is UTC (#4053 review H1, mirrored here so the future
-    /// jsonlog wiring gets it right from the start): a non-zero-offset zone is still a record, and the zone
-    /// decision belongs to the caller's foreign-zone filter, which runs after every record has been
-    /// recovered.
-    /// </summary>
-    private static bool TryParseTimestamp(string timestampText, out DateTime occurredAtUtc, out string zoneText)
-    {
-        occurredAtUtc = default;
-        zoneText = string.Empty;
-
-        var spaceIndex = timestampText.LastIndexOf(' ');
-
-        if (spaceIndex < 0 || spaceIndex == timestampText.Length - 1)
-        {
-            return false;
-        }
-
-        var stamp = timestampText[..spaceIndex];
-        zoneText = timestampText[(spaceIndex + 1)..];
-
-        return DateTime.TryParse(
-            stamp,
-            CultureInfo.InvariantCulture,
-            DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
-            out occurredAtUtc);
     }
 }

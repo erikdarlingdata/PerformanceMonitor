@@ -152,22 +152,86 @@ public sealed class DarlingMcpPlanCacheSchedulerToolsSurfaceAndSqlTests
         Assert.Contains("v_cpu_scheduler_stats", PgSchemaGenerator.AllPassthroughViews);
     }
 
-    /* ─────────────── #1410 classification thresholds ─────────────── */
+    /* ─────────────── #1410 classification thresholds, #7445 floor and compiled-only ratio ─────────────── */
+
+    private static PlanCacheGroupRow Group(string cacheObjType, int plans, int sizeMb, int singleUsePlans, int singleUseSizeMb) =>
+        new(DateTime.UtcNow, cacheObjType, "Adhoc", plans, sizeMb, singleUsePlans, singleUseSizeMb, plans - singleUsePlans, sizeMb - singleUseSizeMb, 1m);
 
     [Theory]
-    [InlineData(100L, 60L, "CRITICAL")]   /* 60% > 50 */
-    [InlineData(100L, 40L, "HIGH")]       /* 40% > 30 */
-    [InlineData(100L, 25L, "MEDIUM")]     /* 25% > 20 */
-    [InlineData(100L, 10L, "NORMAL")]     /* 10% <= 20 */
-    [InlineData(0L, 0L, "NORMAL")]        /* empty cache */
-    public void ClassifyPlanCacheBloat_MatchesThresholds(long total, long singleUse, string expected)
+    [InlineData(100, 60, "CRITICAL")]   /* 60% > 50 */
+    [InlineData(100, 40, "HIGH")]       /* 40% > 30 */
+    [InlineData(100, 25, "MEDIUM")]     /* 25% > 20 */
+    [InlineData(100, 10, "NORMAL")]     /* 10% <= 20 */
+    public void ClassifyPlanCacheBloat_AboveTheFloor_MatchesThresholds(int plans, int singleUse, string expected)
     {
-        var (level, recommendation) = DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(total, singleUse);
+        var (level, recommendation) = DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(
+            [Group("Compiled Plan", plans, 900, singleUse, 300)]);
         Assert.Equal(expected, level);
         if (expected == "NORMAL")
             Assert.Equal("Plan cache composition is healthy", recommendation);
         else
-            Assert.Equal("Check for unparameterized queries / Consider Forced Parameterization", recommendation);
+            Assert.StartsWith("Optimize for ad hoc workloads", recommendation, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7445: an idle 49-entry, 11 MB cache that is 20.4% single use, 38 of the entries parse trees, read MEDIUM and
+    /// recommended Forced Parameterization. It is below the floor, so it is NORMAL and the text says how small it is.</summary>
+    [Fact]
+    public void ClassifyPlanCacheBloat_ASmallCache_IsNormal_WhateverTheRatio()
+    {
+        var (level, recommendation) = DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(
+        [
+            Group("Compiled Plan", 10, 9, 8, 6),
+            Group("Parse Tree", 38, 1, 2, 0),
+            Group("Extended Proc", 1, 1, 0, 0),
+        ]);
+        Assert.Equal("NORMAL", level);
+        Assert.Contains("too small to judge", recommendation, StringComparison.Ordinal);
+        Assert.Contains("49 plans using 11 MB", recommendation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Forced Parameterization", recommendation, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7445: 20,000 compiled plans in 3,000 MB with 50 MB single use is a well-parameterized server. It is below the
+    /// floor but the cache is not small, so the text must not say it is too small to judge.</summary>
+    [Fact]
+    public void ClassifyPlanCacheBloat_ALargeCacheUnderTheFloor_IsNotCalledTooSmallToJudge()
+    {
+        var (level, recommendation) = DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(
+            [Group("Compiled Plan", 20000, 3000, 1000, 50)]);
+        Assert.Equal("NORMAL", level);
+        Assert.DoesNotContain("too small", recommendation, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("50 MB", recommendation, StringComparison.Ordinal);
+        Assert.Contains("3,000 MB", recommendation, StringComparison.Ordinal);
+        Assert.Contains("no action is needed", recommendation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ClassifyPlanCacheBloat_TheFloor_IsOneHundredMegabytesOfSingleUse()
+    {
+        Assert.Equal("NORMAL", DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat([Group("Compiled Plan", 100, 900, 90, 99)]).Level);
+        Assert.Equal("CRITICAL", DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat([Group("Compiled Plan", 100, 900, 90, 100)]).Level);
+        Assert.Equal("NORMAL", DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat([]).Level);
+    }
+
+    /// <summary>#7445: parse trees and extended procedures are not plans a query compiled. A large cache whose compiled plans
+    /// are healthy stays NORMAL however many single-use parse trees it holds, and an unhealthy compiled mix still counts.</summary>
+    [Fact]
+    public void ClassifyPlanCacheBloat_RatioIsOverCompiledPlansOnly()
+    {
+        var healthy = DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(
+        [
+            Group("Compiled Plan", 1000, 800, 100, 150),
+            Group("Parse Tree", 4000, 40, 4000, 40),
+        ]);
+        Assert.Equal("NORMAL", healthy.Level);
+
+        var bloated = DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(
+        [
+            Group("Compiled Plan", 1000, 800, 600, 400),
+            Group("Parse Tree", 4000, 40, 0, 0),
+        ]);
+        Assert.Equal("CRITICAL", bloated.Level);
+        Assert.StartsWith("Optimize for ad hoc workloads", bloated.Recommendation, StringComparison.Ordinal);
+        Assert.Contains("Forced Parameterization", bloated.Recommendation, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -282,6 +346,76 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
 
             await DeleteRowsAsync(connection, ct, keepServer: true);
             Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(await DarlingMcpPlanCacheSchedulerTools.GetPlanCacheBloat(postgres, ServerName)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #7445: 1,000 compiled plans (100 single use, 150 MB) beside 4,000 single-use parse trees (40 MB). The tool
+    /// serves the compiled figures beside the all-types ones, and they are the figures that decided the level. The
+    /// analysis card reads the same population: it used to sum every cache type, 4,100 of 5,000 = 82% on 190 MB,
+    /// and scored a full PLAN_CACHE_BLOAT card while the badge read NORMAL.
+    /// </summary>
+    [Fact]
+    public async Task GetPlanCacheBloat_ParseTreesAreNotPlans_ToolAndAnalysisCardAgree()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live plan-cache/scheduler-tools test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var t = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+
+            foreach (var (cacheType, objType, total, totalMb, single, singleMb) in new[]
+            {
+                ("Compiled Plan", "Adhoc", 1_000, 500, 100, 150),
+                ("Parse Tree", "View", 4_000, 40, 4_000, 40)
+            })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO plan_cache_stats (collection_id, collection_time, server_id, server_name, cacheobjtype, objtype, total_plans, total_size_mb, single_use_plans, single_use_size_mb, multi_use_plans, multi_use_size_mb, avg_use_count, avg_size_kb, oldest_plan_create_time)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+                    CollectionIdGenerator.Next(), t, ServerId, ServerName, cacheType, objType, total, totalMb, single, singleMb, total - single, totalMb - singleMb, 3.5m, 64, t);
+            }
+
+            using var doc = System.Text.Json.JsonDocument.Parse(await DarlingMcpPlanCacheSchedulerTools.GetPlanCacheBloat(postgres, ServerName));
+            var summary = doc.RootElement.GetProperty("summary");
+            Assert.Equal(5_000, summary.GetProperty("total_plans").GetInt64());
+            Assert.Equal(4_100, summary.GetProperty("single_use_plans").GetInt64());
+            Assert.Equal(1_000, summary.GetProperty("compiled_plans").GetInt64());
+            Assert.Equal(100, summary.GetProperty("compiled_single_use_plans").GetInt64());
+            Assert.Equal(10.0, summary.GetProperty("compiled_single_use_percent").GetDouble());
+            Assert.Equal(150, summary.GetProperty("compiled_single_use_size_mb").GetInt64());
+            Assert.Equal("NORMAL", summary.GetProperty("bloat_level").GetString());
+
+            var context = new PerformanceMonitor.Analysis.AnalysisContext
+            {
+                ServerId = ServerId,
+                ServerName = ServerName,
+                TimeRangeStart = t.AddHours(-4),
+                TimeRangeEnd = t.AddMinutes(2),
+                ServerUtcOffset = TimeSpan.Zero,
+            };
+            var facts = (await new PerformanceMonitor.Darling.Analysis.PgFactCollector(postgres).CollectFactsAsync(context)).ToList();
+            new PerformanceMonitor.Analysis.FactScorer().ScoreAll(facts);
+            var card = facts.Single(f => f.Key == "PLAN_CACHE_BLOAT");
+            Assert.Equal(10.0, card.Value, precision: 6);
+            Assert.Equal(0.0, card.Severity, precision: 4);
 
             bodySucceeded = true;
         }

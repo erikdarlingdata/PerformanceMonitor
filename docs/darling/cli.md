@@ -38,13 +38,15 @@ Exit codes are numbers. The [exit code table](#exit-codes) below says what each 
 | `--configure-network` | Asks questions, then edits `darling.json` to expose the store, MCP or web endpoint on the network. Windows only. | no, but the service restart and firewall steps need it | either | `0`, `1` | [Guided setup](network-endpoints.md#guided-setup---configure-network) |
 | `--configure-firewall` | Creates or removes the scoped firewall rules so they match `darling.json`. Windows only. | yes | either | `0`, `1` | [Firewall rules](network-endpoints.md#firewall-rules---configure-firewall) |
 | `--harden-files` | Applies the locked-down permissions to `darling.json`, the store credentials, the log-hash key and the TLS key files. Windows only. | yes | either | `0`, `1` | [harden-files](#--harden-files) |
+| `--grant-cert-key-access` | Gives the service account Read on the private key of a certificate in the Windows certificate store, for the `store` form of `web.network.tls` and `mcp.network.tls`. Windows only. | yes, for `LocalMachine` | either | `0`, `1` | [Certificate from the Windows certificate store](network-endpoints.md#certificate-from-the-windows-certificate-store) |
 | `--enable-mcp`, `--disable-mcp` | Turns the MCP endpoint on or off in the store. Windows only. | no, but the firewall step needs it | either (1) | `0`, `1` | [Headless enable and disable](network-endpoints.md#headless-enabledisable--firewall---enable-mcp----enable-web) |
 | `--enable-web`, `--disable-web` | Turns the web dashboard on or off in the store. Windows only. | no, but the firewall step needs it | either (1) | `0`, `1` | [Headless enable and disable](network-endpoints.md#headless-enabledisable--firewall---enable-mcp----enable-web) |
 | `--enable-collector`, `--disable-collector` | Turns one collector on or off, for every server or one server. | no | either (1) | `0`, `1`, `2` | [Enable or disable a collector](collector-settings.md#enable-or-disable-a-collector-headlessly---enable-collector----disable-collector) |
 | `--set-collector-run-at` | Sets the time of day a daily collector starts. | no | either (1) | `0`, `1`, `2` | [Set the run time](collector-settings.md#set-the-time-of-day-a-daily-collector-runs---set-collector-run-at) |
 | `--set-collector-frequency` | Sets how often a collector runs, in minutes. | no | either (1) | `0`, `1`, `2` | [Collector settings](#collector-settings) |
 | `--set-collector-retention` | Sets how many days a collector keeps its data. | no | either (1) | `0`, `1`, `2` | [Collector settings](#collector-settings) |
-| `--reset-password-key` | Marks the current password key as replaced, so the next start makes a new one. | no | either (1) | `0`, `1`, `2` | [Make a new password key](collector-settings.md#make-a-new-password-key---reset-password-key) |
+| `--reset-password-key` | Marks the current password key as replaced, so the next start makes a new one. With `passwordKey` set, the service makes no key: the verb says to put a new key in the `passwordKey` source, then restart the service. | no | either (1) | `0`, `1`, `2` | [Make a new password key](collector-settings.md#make-a-new-password-key---reset-password-key) |
+| `--new-password-key` | Writes a new password key to a path where nothing exists, for a `passwordKey` secret. Prints the path and the key's fingerprint, never the key. The file is readable only by the account that runs it (on Windows also SYSTEM and Administrators), so run it as the service's account. On Windows, where nobody can run a command as the default service account, move the key into your secret store and delete the file, or keep it in a folder locked down as the security page shows and run `icacls <file> /reset`, so that it takes the folder's permissions. | no | no | `0`, `1` | [Keeping the key outside the service](security.md#security--least-privilege-roles) |
 | `--drop-xe-sessions` | Drops the Extended Events sessions that Darling created on a server. | no | either (1) | `0`, `1`, `2` | [Drop the sessions](collector-settings.md#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions) |
 | `--add-alert-source` | Creates a login for a system that sends alerts, and prints its connection string once. | no | either (1) | `0`, `1`, `2` | [Alert sources](agents-and-alert-sources.md#make-a-login-for-a-system-that-sends-alerts---add-alert-source-and-friends) |
 | `--rotate-alert-source` | Gives an alert source a new password and prints its connection string once. | no | either (1) | `0`, `1`, `2` | [Alert sources](agents-and-alert-sources.md#make-a-login-for-a-system-that-sends-alerts---add-alert-source-and-friends) |
@@ -70,7 +72,7 @@ Most verbs use two numbers:
 
 These verbs use only `0` and `1`:
 
-`--test-connection`, `--validate-config`, `--encrypt-password`, `--add-server`, `--grant-script`, `--print-viewer-connection`, `--export-viewer-config`, `--print-mcp-token`, `--print-web-token`, `--configure-network`, `--configure-firewall`, `--harden-files`, `--enable-mcp`, `--disable-mcp`, `--enable-web`, `--disable-web`, `--backfill-rollups`, `--collapse-legacy-slices` and `--recompress-plan-dim`.
+`--test-connection`, `--validate-config`, `--encrypt-password`, `--add-server`, `--grant-script`, `--print-viewer-connection`, `--export-viewer-config`, `--print-mcp-token`, `--print-web-token`, `--configure-network`, `--configure-firewall`, `--harden-files`, `--grant-cert-key-access`, `--new-password-key`, `--enable-mcp`, `--disable-mcp`, `--enable-web`, `--disable-web`, `--backfill-rollups`, `--collapse-legacy-slices` and `--recompress-plan-dim`.
 
 `--help` and `--version` always exit `0`.
 
@@ -139,6 +141,14 @@ PerformanceMonitor.Darling.Service.exe --harden-files [--config <path to darling
 ```
 
 The service knows the correct permissions for its secret files but cannot apply them. This verb applies them, then checks every file and reports it as secured or still readable. The config path can also be the one bare argument after the verb. Do not give both forms.
+
+### `--grant-cert-key-access`
+
+```
+PerformanceMonitor.Darling.Service.exe --grant-cert-key-access <thumbprint> [--account <name>] [--store-location LocalMachine|CurrentUser] [--store-name <name>]
+```
+
+Adds one Read entry for one account to the private key of the certificate the thumbprint names, and keeps every existing entry. The account is the one the service is registered under unless `--account` names another. The location and the store name default as they do in `darling.json`: `LocalMachine` and `My`. It grants to one account and refuses every group except the local Administrators group, whatever `--account` names: it asks Windows what the account is, and refuses a group, a computer or an account it cannot identify. It accepts a user (a domain user, a local user, a group managed service account) and these service identities: LocalSystem, LocalService, NetworkService, a per-service virtual account (`NT SERVICE\<name>`, only when a service with that name is registered on this machine), an IIS application pool identity and the local Administrators group. An empty `--account` or `--store-name`, and a `--store-name` with a backslash or a slash in it, are refused. It needs an elevated prompt for `LocalMachine`, and says so and changes nothing without one. An account that already has Read gets `Already granted`. Restart the service after it. The rules and the failures are in [Certificate from the Windows certificate store](network-endpoints.md#certificate-from-the-windows-certificate-store).
 
 ### Collector settings
 

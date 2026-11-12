@@ -46,6 +46,9 @@ public sealed class QueryStoreReadBudgetLiveTests
     private const string Alpha = "alpha";
     private const string Zeta = "zeta";
     private static readonly TimeSpan Budget = TimeSpan.FromSeconds(1);
+    /* #7130: the two-database test names the held database as the slowest item, which holds only while the sibling's
+       read and write cost less than the budget. 1 s was too tight for a busy runner, so that test alone runs at 5 s. */
+    private static readonly TimeSpan SiblingBudget = TimeSpan.FromSeconds(5);
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -84,6 +87,12 @@ public sealed class QueryStoreReadBudgetLiveTests
 
         /// <summary>#5813 plan fetch: how long each plan row then takes to arrive.</summary>
         public TimeSpan ShipPerPlan { get; set; }
+
+        /// <summary>#7187: a plan-fetch statement that asks for any of these ids throws, as a read timeout would.</summary>
+        public HashSet<long> FailPlanIds { get; } = [];
+
+        /// <summary>#7187: as <see cref="FailPlanIds"/>, for the statement-text fetch.</summary>
+        public HashSet<long> FailTextIds { get; } = [];
 
         /// <summary>Every plan id the plan fetch shipped, in order, across passes.</summary>
         public List<long> ShippedPlans { get; } = [];
@@ -189,7 +198,7 @@ public sealed class QueryStoreReadBudgetLiveTests
         public CapturingLogger Log = new();
         public DarlingCollectorRunner Runner = null!;
 
-        public static async Task<Rig> OpenAsync(CancellationToken ct)
+        public static async Task<Rig> OpenAsync(CancellationToken ct, TimeSpan? budget = null)
         {
             var rig = new Rig();
             rig.Scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
@@ -202,7 +211,7 @@ public sealed class QueryStoreReadBudgetLiveTests
             rig.Source = new NpgsqlDataSourceBuilder(rig.Scratch.ConnectionString).Build();
             rig.Runner = new DarlingCollectorRunner(rig.Source, new CollectorDeltaCalculator(), rig.Log)
             {
-                QueryStoreReadBudgetSpan = Budget,
+                QueryStoreReadBudgetSpan = budget ?? Budget,
             };
             return rig;
         }
@@ -285,7 +294,7 @@ public sealed class QueryStoreReadBudgetLiveTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #5813 read-budget pin.");
         var token = TestContext.Current.CancellationToken;
-        await using var rig = await Rig.OpenAsync(token);
+        await using var rig = await Rig.OpenAsync(token, SiblingBudget);
 
         /* Whole seconds, so the store's microseconds compare exactly. Both inside the 15-minute floor the #2111 shrink
            narrows to after two failures, so the resumed cutoff is the stored watermark itself, not a shrunk floor. */
@@ -321,16 +330,16 @@ public sealed class QueryStoreReadBudgetLiveTests
         /* slowest_item names the timed-out database with its marker, and slowest_item_ms is the budget. */
         Assert.NotNull(cut.Fanout);
         Assert.Equal(Alpha, cut.Fanout!.Value.SlowestItem);
-        Assert.Equal((int)Budget.TotalMilliseconds, cut.Fanout.Value.SlowestItemMs);
+        Assert.Equal((int)SiblingBudget.TotalMilliseconds, cut.Fanout.Value.SlowestItemMs);
         Assert.Equal(2, cut.Fanout.Value.ItemCount);
 
         /* #5813 review: the timed-out database's SQL slice is in the run's blended SQL time, as the enumerated driver's
            finally puts it there; before the fix the catch arm never added it and SqlMs held only zeta's instant read. The
            floor is half the budget, not the budget: the budget is a CancelAfter timer, which fires on the system timer's
            tick, so at Windows' default 15.6 ms tick a 1,000 ms budget can cut the read a few milliseconds short of 1,000
-           by the slice's stopwatch (Lite's twin read 999 on CI). Load only lengthens the slice, so half the budget
+           by the slice's stopwatch (Lite's twin read 999 on CI, at its 1 s budget). Load only lengthens the slice, so half the budget
            separates the two shapes with no clock in the test. */
-        Assert.True(cut.SqlMs >= (long)(Budget.TotalMilliseconds / 2), $"SqlMs {cut.SqlMs} holds the timed-out slice");
+        Assert.True(cut.SqlMs >= (long)(SiblingBudget.TotalMilliseconds / 2), $"SqlMs {cut.SqlMs} holds the timed-out slice");
         Assert.Contains("timed out", cut.HostNote ?? string.Empty, StringComparison.Ordinal);
         Assert.Equal(1, rig.Log.TimedOutWarnings(Alpha));
 
@@ -851,6 +860,242 @@ public sealed class QueryStoreReadBudgetLiveTests
         return result;
     }
 
+    /// <summary>
+    /// #7187: a plan fetch that throws in the pass that first found its plans missing keeps those ids for the next pass.
+    /// The three plans ran once, in a batch the watermark has passed, so no later pass references them again: the
+    /// carryover is the only way they are fetched. The next pass reads no new interval and stores all three.
+    /// </summary>
+    [Fact]
+    public async Task APlanFetchThatThrows_KeepsTheIdsItJustFoundMissing_ForTheNextPass()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #7187 plan-fetch carry pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var target = new Target();
+        target.Rows[Alpha] = Enumerable.Range(1, 3).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        target.FailPlanIds.UnionWith([1L, 2L, 3L]);
+
+        await PassAsync(rig, target, token, Alpha);
+
+        Assert.Equal(3, (await StoredAsync(rig, Alpha, token)).Count);
+        Assert.Empty(await StoredPlansAsync(rig, Alpha, token));
+        Assert.Equal([1L, 2L, 3L], rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+
+        target.FailPlanIds.Clear();
+        await PassAsync(rig, target, token, Alpha);
+
+        Assert.Equal([1L, 2L, 3L], await StoredPlansAsync(rig, Alpha, token));
+        Assert.Empty(rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+    }
+
+    /// <summary>
+    /// #7187: a plan id that makes every fetch throw is dropped after <see cref="DarlingCollectorRunner.MaxFetchThrowAttempts"/>
+    /// throws and does not hold up the ids behind it. Plan 1 sorts first, so a plain carry of the owed set would retry
+    /// it at the head of every pass and never reach the ids behind the first thirty-two.
+    /// </summary>
+    [Fact]
+    public async Task APlanIdThatKeepsThrowing_IsDroppedAfterTheCap_AndDoesNotBlockTheIdsBehindIt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #7187 plan-fetch carry pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var target = new Target();
+        target.Rows[Alpha] = Enumerable.Range(1, 100).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        target.FailPlanIds.Add(1);
+
+        await PassAsync(rig, target, token, Alpha);
+        Assert.Contains(1L, rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+
+        for (var pass = 0; pass < 20 && (await StoredPlansAsync(rig, Alpha, token)).Count < 100 - QueryStorePlanXmlState.MinCandidatePlans; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+        }
+
+        var stored = await StoredPlansAsync(rig, Alpha, token);
+        /* The #2776 backoff never narrows below QueryStorePlanXmlState.MinCandidatePlans (32), so the dropped id takes the
+        ids sorted within that floor with it. Everything behind them is stored. */
+        Assert.Equal(Enumerable.Range(1 + QueryStorePlanXmlState.MinCandidatePlans, 100 - QueryStorePlanXmlState.MinCandidatePlans).Select(static id => (long)id), stored);
+        Assert.Empty(rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+    }
+
+    /// <summary>#7187: the statement-text fetch's twin of the plan fetch's keep-on-throw.</summary>
+    [Fact]
+    public async Task ATextFetchThatThrows_KeepsTheIdsItJustFoundMissing_ForTheNextPass()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #7187 text-fetch carry pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var target = new Target();
+        target.Rows[Alpha] = Enumerable.Range(1, 3).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        target.FailTextIds.UnionWith([1L, 2L, 3L]);
+
+        await PassAsync(rig, target, token, Alpha);
+
+        Assert.Equal(3, (await StoredAsync(rig, Alpha, token)).Count);
+        Assert.Empty(await StoredTextsAsync(rig, Alpha, token));
+        Assert.Equal([1L, 2L, 3L], rig.Runner.TextFetchCarryoverForTests(LiveServerId, Alpha, collector));
+
+        target.FailTextIds.Clear();
+        await PassAsync(rig, target, token, Alpha);
+
+        Assert.Equal([1L, 2L, 3L], await StoredTextsAsync(rig, Alpha, token));
+        Assert.Empty(rig.Runner.TextFetchCarryoverForTests(LiveServerId, Alpha, collector));
+    }
+
+    /// <summary>#7187: the statement-text fetch's twin of the plan fetch's attempt cap.</summary>
+    [Fact]
+    public async Task AQueryIdThatKeepsThrowing_IsDroppedAfterTheCap_AndDoesNotBlockTheIdsBehindIt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #7187 text-fetch carry pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var target = new Target();
+        target.Rows[Alpha] = Enumerable.Range(1, 100).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        target.FailTextIds.Add(1);
+
+        await PassAsync(rig, target, token, Alpha);
+        Assert.Contains(1L, rig.Runner.TextFetchCarryoverForTests(LiveServerId, Alpha, collector));
+
+        for (var pass = 0; pass < 20 && (await StoredTextsAsync(rig, Alpha, token)).Count < 100 - QueryStorePlanXmlState.MinCandidatePlans; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+        }
+
+        var stored = await StoredTextsAsync(rig, Alpha, token);
+        /* The #2776 backoff never narrows below QueryStorePlanXmlState.MinCandidatePlans (32), so the dropped id takes the
+        ids sorted within that floor with it. Everything behind them is stored. */
+        Assert.Equal(Enumerable.Range(1 + QueryStorePlanXmlState.MinCandidatePlans, 100 - QueryStorePlanXmlState.MinCandidatePlans).Select(static id => (long)id), stored);
+        Assert.Empty(rig.Runner.TextFetchCarryoverForTests(LiveServerId, Alpha, collector));
+    }
+
+    /// <summary>
+    /// #7187 review: a store-write throw is not an attempt against any id. A trigger on the store table makes every insert
+    /// fail, as a store timeout would, while the target read succeeds. Six passes in a row (one past
+    /// <see cref="DarlingCollectorRunner.MaxFetchThrowAttempts"/>) carry all three ids and drop none, and the next pass
+    /// with a healthy store stores them.
+    /// </summary>
+    [Fact]
+    public async Task APlanStoreWriteThatThrowsEveryPass_CountsNoAttempt_AndDropsNoId()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #7187 plan-fetch carry pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var target = new Target();
+        target.Rows[Alpha] = Enumerable.Range(1, 3).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        await FailStoreInsertsAsync(rig, "collect.query_store_plan_map", on: true, token);
+
+        for (var pass = 0; pass <= DarlingCollectorRunner.MaxFetchThrowAttempts; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+            Assert.Equal([1L, 2L, 3L], rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+        }
+
+        await FailStoreInsertsAsync(rig, "collect.query_store_plan_map", on: false, token);
+        await PassAsync(rig, target, token, Alpha);
+
+        Assert.Equal([1L, 2L, 3L], await StoredPlansAsync(rig, Alpha, token));
+        Assert.Empty(rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+    }
+
+    /// <summary>#7187 review: the statement-text fetch's twin of the plan store-write case.</summary>
+    [Fact]
+    public async Task ATextStoreWriteThatThrowsEveryPass_CountsNoAttempt_AndDropsNoId()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #7187 text-fetch carry pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var target = new Target();
+        target.Rows[Alpha] = Enumerable.Range(1, 3).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        await FailStoreInsertsAsync(rig, "collect.query_store_text", on: true, token);
+
+        for (var pass = 0; pass <= DarlingCollectorRunner.MaxFetchThrowAttempts; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+            Assert.Equal([1L, 2L, 3L], rig.Runner.TextFetchCarryoverForTests(LiveServerId, Alpha, collector));
+        }
+
+        await FailStoreInsertsAsync(rig, "collect.query_store_text", on: false, token);
+        await PassAsync(rig, target, token, Alpha);
+
+        Assert.Equal([1L, 2L, 3L], await StoredTextsAsync(rig, Alpha, token));
+        Assert.Empty(rig.Runner.TextFetchCarryoverForTests(LiveServerId, Alpha, collector));
+    }
+
+    /// <summary>
+    /// #7187 review: the count is attempts "in a row". Plan 1 throws on four passes, then a pass the time budget cuts
+    /// issues it without throwing, which starts its count again. It then survives four more throws and is dropped on the
+    /// fifth. Without the reset the cut pass leaves the count at four and the first throw after it drops the plan.
+    /// </summary>
+    [Fact]
+    public async Task APlanThatThrew_ThenWasIssuedInAPassThatDidNotThrow_StartsItsCountAgain()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #7187 plan-fetch carry pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        rig.Runner.QueryStorePlanFetchBudgetSpan = TimeSpan.FromSeconds(2);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var target = new Target();
+        target.Rows[Alpha] = [Row(1, now.AddMinutes(-8))];
+        target.FailPlanIds.Add(1);
+
+        var cap = DarlingCollectorRunner.MaxFetchThrowAttempts;
+        for (var pass = 0; pass < cap - 1; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+            Assert.Equal([1L], rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+        }
+
+        /* Issued, cut by the time budget before it received anything, and not thrown. */
+        target.FailPlanIds.Clear();
+        target.HoldPlanUntilCut = true;
+        await PassAsync(rig, target, token, Alpha);
+        Assert.Equal([1L], rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+
+        target.HoldPlanUntilCut = false;
+        target.FailPlanIds.Add(1);
+        for (var pass = 0; pass < cap - 1; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+            Assert.Equal([1L], rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+        }
+
+        await PassAsync(rig, target, token, Alpha);
+        Assert.Empty(rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+    }
+
+    /// <summary>Makes every insert into <paramref name="table"/> fail (or stops doing so), standing in for a store write that times out.</summary>
+    private static async Task FailStoreInsertsAsync(Rig rig, string table, bool on, CancellationToken token)
+    {
+        await using var connection = new NpgsqlConnection(rig.Scratch.ConnectionString);
+        await connection.OpenAsync(token);
+        var sql = on
+            ? "CREATE OR REPLACE FUNCTION public.fail_store_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'simulated store write failure'; END $$; "
+              + $"CREATE TRIGGER fail_store_insert BEFORE INSERT ON {table} FOR EACH STATEMENT EXECUTE FUNCTION public.fail_store_insert()"
+            : $"DROP TRIGGER fail_store_insert ON {table}";
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(token);
+    }
+
     private static DateTime WholeSecondNow()
     {
         var now = DateTime.UtcNow;
@@ -939,7 +1184,7 @@ public sealed class QueryStoreReadBudgetLiveTests
         protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken)
         {
             var cutoff = query.Parameters?.FirstOrDefault(static p => p.Name == "@cutoff_time")?.Value as DateTime?;
-            if (cutoff is null && query.Text.Contains("FROM sys.query_store_plan AS qsp", StringComparison.Ordinal))
+            if (cutoff is null && query.Text.Contains("FROM sys.query_store_plan AS PerformanceMonitorLite", StringComparison.Ordinal))
             {
                 /* #5813: the plan-XML fetch by ids. Like the real statement it spends DecompressPerPlan on every
                    requested plan before the first row, then ships the plans in ascending plan_id order. */
@@ -951,6 +1196,11 @@ public sealed class QueryStoreReadBudgetLiveTests
                 lock (target.RequestedWidths)
                 {
                     target.RequestedWidths.Add((owner.DatabaseName, ids.Length));
+                }
+
+                if (target.FailPlanIds.Overlaps(ids))
+                {
+                    throw new InvalidOperationException("the plan fetch read failed");
                 }
 
                 if (target.HoldPlanUntilCut)
@@ -966,7 +1216,7 @@ public sealed class QueryStoreReadBudgetLiveTests
                 return new PlanReader(target, ids);
             }
 
-            if (cutoff is null && query.Text.Contains("FROM sys.query_store_query AS qsq", StringComparison.Ordinal))
+            if (cutoff is null && query.Text.Contains("FROM sys.query_store_query AS PerformanceMonitorLite", StringComparison.Ordinal))
             {
                 /* #6102: the statement-text fetch by ids. Like the real statement it spends MaterialisePerText on every
                    requested id before the first row, then ships the texts in ascending query_id order. */
@@ -978,6 +1228,11 @@ public sealed class QueryStoreReadBudgetLiveTests
                 lock (target.RequestedTextWidths)
                 {
                     target.RequestedTextWidths.Add((owner.DatabaseName, ids.Length));
+                }
+
+                if (target.FailTextIds.Overlaps(ids))
+                {
+                    throw new InvalidOperationException("the text fetch read failed");
                 }
 
                 if (target.HoldTextUntilCut)

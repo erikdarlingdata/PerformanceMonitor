@@ -133,6 +133,9 @@ public static class CollectorScheduleDefaults
         /* #6875 identity column capacity. A column fills over months, so a read every six hours is plenty and costs little: catalog views only,
            at most 21 rows per database. 90 days keeps enough samples for the time-to-exhaustion estimate. */
         ["identity_capacity"] = new(360, 90),
+        /* #7643 schema tracking: table and view definitions kept as versions. Off until switched on, because the change-tracking session needs
+           ALTER ANY EVENT SESSION. A pass reads the session and only the databases it names, so 15 minutes is cheap. Closed versions are kept 30 days. */
+        ["schema_objects"] = new(15, 30, DefaultEnabled: false),
         /* #1951 ADR persistent version store. Cadence and retention deliberately MATCH
            database_size_stats (60/90) rather than the per-minute health tier: PVS size is the same
            kind of slow-moving disk-pressure telemetry, it is read beside database sizes, and pairing
@@ -447,9 +450,9 @@ public static class CollectorScheduleDefaults
     /// collection-health surface, so none of them can pick a different row.
     /// </summary>
     /// <param name="collectorName">The collector.</param>
-    /// <param name="serverId">The server the cadence is wanted for.</param>
+    /// <param name="serverId">The server the cadence is wanted for, or null for no server: only the fleet-wide row applies.</param>
     /// <param name="overrides">The override rows to pick from, or null for none.</param>
-    public static (T? PerServer, T? Fleet) SelectScheduleOverrides<T>(string collectorName, int serverId, IEnumerable<T>? overrides)
+    public static (T? PerServer, T? Fleet) SelectScheduleOverrides<T>(string collectorName, int? serverId, IEnumerable<T>? overrides)
         where T : class, IScheduleFrequencyOverride
     {
         T? perServer = null;
@@ -463,13 +466,13 @@ public static class CollectorScheduleDefaults
                     continue;
                 }
 
-                if (o.ServerId == serverId)
-                {
-                    perServer = o;
-                }
-                else if (o.ServerId is null)
+                if (o.ServerId is null)
                 {
                     fleet = o;
+                }
+                else if (o.ServerId == serverId)
+                {
+                    perServer = o;
                 }
             }
         }
@@ -489,9 +492,9 @@ public static class CollectorScheduleDefaults
     /// picked rows (<see cref="SelectScheduleOverrides{T}"/>, <see cref="ResolveFrequencyMinutes"/>).</para>
     /// </summary>
     /// <param name="collectorName">The collector.</param>
-    /// <param name="serverId">The server the cadence is wanted for.</param>
+    /// <param name="serverId">The server the cadence is wanted for, or null for no server: only the fleet-wide row applies.</param>
     /// <param name="overrides">The override rows to resolve from, or null for none.</param>
-    public static int? ResolveEffectiveIntervalMinutes<T>(string collectorName, int serverId, IEnumerable<T>? overrides)
+    public static int? ResolveEffectiveIntervalMinutes<T>(string collectorName, int? serverId, IEnumerable<T>? overrides)
         where T : class, IScheduleFrequencyOverride
     {
         if (!All.ContainsKey(collectorName))
@@ -512,6 +515,14 @@ public static class CollectorScheduleDefaults
     /// every on-load collector on this cadence, in addition to on connect.
     /// </summary>
     public const int OnLoadRecaptureMinutes = 1440;
+
+    /// <summary>
+    /// How far back the newest CPU reading may be and still count as current (#7196, #3267), in minutes. One value for
+    /// both SKUs: Darling's fleet card, Overview card, <c>get_server_summary</c> and PostgreSQL CPU alert read, and
+    /// Lite's Overview card and <c>get_server_summary</c>. A SQL Server reading is current when newer than the larger of
+    /// this and twice its collector's own interval, so a collector scheduled slower than this is not read as stopped.
+    /// </summary>
+    public const int CpuReadingFreshnessFloorMinutes = 15;
 
     /// <summary>
     /// The one place "on-load" (frequency 0) becomes a concrete periodic interval (#3929/#3930):

@@ -39,7 +39,7 @@
                     <DataGridTextColumn Header="Last full backup" Binding="{Binding FullBackup}" Width="190"/>
                     <DataGridTextColumn Header="Last log backup" Binding="{Binding LogBackup}" Width="190"/>
                     <DataGridTextColumn Header="Last good CHECKDB" Binding="{Binding CheckDb}" Width="190"/>
-                    <DataGridTextColumn Header="Platform" Binding="{Binding Platform}" Width="110"/>
+                    <DataGridTextColumn x:Name="PlatformColumn" Header="Platform" Binding="{Binding Platform}" Width="110"/>
                     <DataGridTextColumn Header="Not judged because" Binding="{Binding NotJudgedBecause}" Width="*"/>
                 </DataGrid.Columns>
             </DataGrid>

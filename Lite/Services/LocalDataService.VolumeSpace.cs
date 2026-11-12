@@ -9,6 +9,7 @@
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -24,22 +25,27 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of database_size_stats.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var sizeRelation = await HotTableHasServerAsync(connection, "database_size_stats", serverId) ? "database_size_stats" : "v_database_size_stats";
+
+        command.CommandText = $@"
 SELECT
-    volume_mount_point,
+    {VolumeKey.Sql} AS volume_mount_point,
     MAX(volume_total_mb) AS volume_total_mb,
     MIN(volume_free_mb) AS volume_free_mb,
     MAX(collection_time) AS newest_sample
-FROM v_database_size_stats
+FROM {sizeRelation}
 WHERE server_id = $1
 AND   collection_time = (
     SELECT MAX(collection_time)
-    FROM v_database_size_stats
+    FROM {sizeRelation}
     WHERE server_id = $1
 )
-AND   volume_mount_point IS NOT NULL
+AND   {VolumeKey.Sql} IS NOT NULL
 AND   volume_total_mb > 0
-GROUP BY volume_mount_point
+GROUP BY {VolumeKey.Sql}
 ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

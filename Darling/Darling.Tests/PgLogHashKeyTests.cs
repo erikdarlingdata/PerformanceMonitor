@@ -63,7 +63,32 @@ internal sealed class StandInUnixModes : IUnixDirectoryModes
     /// (#5366). A path never reported has no owner to check, as on a platform whose stat layout is not known.</summary>
     public void ReportOwner(string path, uint userId, ulong links = 1) => _owners[Key(path)] = new UnixFileOwner(userId, links);
 
-    public UnixFileOwner? OwnerOf(string path) => _owners.TryGetValue(Key(path), out var owner) ? owner : null;
+    /// <summary>Exceptions <see cref="OwnerOf"/> throws for a path, keyed like the other maps (#8141).</summary>
+    public Dictionary<string, Exception> OwnerThrows { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public UnixFileOwner? OwnerOf(string path)
+        => OwnerThrows.TryGetValue(Key(path), out var thrown)
+            ? throw thrown
+            : _owners.TryGetValue(Key(path), out var owner) ? owner : null;
+
+    /// <summary>Directories the stand-in reports as unlistable by the service's user (#8141).</summary>
+    public HashSet<string> Unlistable { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Exceptions <see cref="CanList"/> throws for a directory, keyed like the other maps (#8141).</summary>
+    public Dictionary<string, Exception> ListThrows { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public bool CanList(string directory)
+        => ListThrows.TryGetValue(Key(directory), out var thrown)
+            ? throw thrown
+            : !Unlistable.Contains(Key(directory));
+
+    private readonly Dictionary<string, bool> _regularFiles = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Reports whether <paramref name="path"/> is a regular file (#8006). A path never reported cannot be told,
+    /// as on a platform whose stat layout is not known.</summary>
+    public void ReportRegularFile(string path, bool regular) => _regularFiles[Key(path)] = regular;
+
+    public bool? IsRegularFile(string path) => _regularFiles.TryGetValue(Key(path), out var regular) ? regular : null;
 
     /// <summary>A file someone else wrote that the file check trusts, which is the point: owner-only on Unix (a 0600
     /// file whose owner managed code cannot see), and the temp directory's inherited ACL on Windows.</summary>
@@ -528,7 +553,7 @@ public sealed class PgLogHashKeyTests
                 Assert.Equal("700", modes.Octal(directory));
                 Assert.False(File.Exists(path), "the planted key outlived the look that found its directory open");
                 Assert.Contains("was open to other users until now (its mode was 0777", log.Joined, StringComparison.Ordinal);
-                Assert.Contains($"{DarlingLogHashKeyFile.FileName} discarded (#4004)", log.Joined, StringComparison.Ordinal);
+                Assert.Contains($"{DarlingLogHashKeyFile.FileName} discarded.", log.Joined, StringComparison.Ordinal);
 
                 load = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
             }

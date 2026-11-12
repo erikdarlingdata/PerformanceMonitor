@@ -2,7 +2,7 @@
 
 Audience: operators.
 
-This guide gives the disk, RAM and vCPU counts for a Darling store host, by the number of monitored servers. The numbers come from three production stores that we measured on 2026-10-14. A load test on a restored copy of a store ([#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794)) went to 210 servers in one store. It ran three times and is done. The test hosts are torn down. This guide stays based on what was measured. The harness and its runbook are in [`Darling/loadtest/`](../Darling/loadtest/README.md).
+This guide gives the disk, RAM and vCPU counts for a Darling store host, by the number of monitored servers. The numbers come from three production stores that we measured on 2026-10-14. A load test on a restored copy of a store ([#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794)) went to 210 servers in one store. It ran four times and is done. The test hosts are torn down. This guide stays based on what was measured. The harness and its runbook are in [`Darling/loadtest/`](../Darling/loadtest/README.md).
 
 To back up, restore or move a store, and to see how much disk it uses, see [Back up, restore and move the store](darling-store-backup.md).
 
@@ -84,7 +84,7 @@ Only the store A row is measured. The other rows are estimates from these rules.
 | 46 to 90 | 16 | 256 GB | 1.4 TiB | Estimate: 90 x 2.1 GiB = 189 GiB (203 GB) uncompressed, 90 x 10 GiB x 1.5 = 1,350 GiB |
 | 91 to 150 | 32 | 384 GB | 2.2 TiB | Estimate: 150 / 5.4 = 27.8 vCPUs, rounded up to 32. 150 x 2.1 GiB = 315 GiB (338 GB) uncompressed, 150 x 10 GiB x 1.5 = 2,250 GiB |
 
-Of the stores we measured, the one with Query Store collected has 43 servers, so the rows above 45 servers are estimates. The load test below adds one measured point, at 210 servers. There, 256 GB was the smallest host on which one reader's reads met the 5 s budget. The RAM rule gives more than that for 150 servers, so the rule is cautious for one reader. The test ran once on each host, and no host that we tested served ten readers well.
+Of the stores we measured, the one with Query Store collected has 43 servers, so the rows above 45 servers are estimates. The load test below adds one measured point, at 210 servers. There, 256 GB was the smallest host on which one reader's reads met the 5 s budget. The RAM rule gives more than that for 150 servers, so the rule is cautious for one reader. Each phase ran once on each host, and no host that we tested served ten readers well.
 
 #### The load test at 210 servers
 
@@ -151,7 +151,22 @@ Our reading of run 3, which is an inference from these numbers:
 - No host that we tested serves ten readers at once at 210 servers. The limits are in the product: the limit on heavy reads at the same time (the busy replies), the 60 s statement timeout and the panel size limit. More hardware does not raise them.
 - If more than one person reads the store at the same time, use more than one store above about 150 servers. See [More than 150 servers](#more-than-150-servers).
 
-The project to speed up reads for many users ([#5506](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5506)) was closed as not planned on 2026-10-24. The last section of this page says to move some servers to a second store if the day-scan reads are the limit.
+##### Run 4: a newer build on 256 GB
+
+Run 4 used build `629a72767` at 210 servers, on an r7i.8xlarge host with 256 GB of RAM. The hardware and the planner settings match the best run 3 host (256 GB, with Darling's value for `effective_cache_size`). Only the build is newer. All numbers are measured.
+
+| Phase | Run 4 | Run 3 |
+|---|---|---|
+| One reader, warm | Every read p95 at or under 3.2 s, none refused as busy | The same pass |
+| One reader, cold after the resize | 7 reads with p95 over 5 s | 3 |
+| Ten readers | 15.0% refused as busy, 8 reads with p95 over 5 s, slowest 9.0 s | 48.8% refused as busy |
+
+- **A plan capture** (`auto_explain` at 2 s) on the warm host found only 5 statements over 2 s. The top CPU ranking pass was not one of them. Its cost is a cold-cache cost.
+- **Limits of the test:** each phase ran once. The cache was cold after each resize. About 10 million dead tuples were left by a cleanup during setup.
+
+Our reading of run 4 is an inference from these numbers. Run 4 met the one-reader budget warm on 256 GB, as run 3 did. Ten readers still saw 15.0% of calls refused as busy, so the ten-reader advice above does not change.
+
+The project to keep reads fast for many users ([#5506](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5506)) is open. It was closed on 2026-10-24 and reopened on 2026-10-25. The last section of this page says to move some servers to a second store if the day-scan reads are the limit.
 
 ### SQL Server without Query Store, and PostgreSQL
 

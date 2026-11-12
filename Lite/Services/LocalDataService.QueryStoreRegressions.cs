@@ -93,8 +93,9 @@ public sealed class QueryStoreRunGroup
  *
  * Differences from Darling's, none of them in which rows the read returns: the query-text sample comes only from the fact rows
  * (Darling resolves it from collect.query_store_text, #2150, a Darling-store table Lite has no equivalent of); Lite keeps no
- * per-day totals table, so the baseline always comes from the fact rows; and an interval belongs to the baseline or the recent
- * window by the collection_time of its latest snapshot, as this read always did.
+ * per-day totals table, so the baseline always comes from the fact rows. An interval belongs to the baseline or the recent
+ * window by the last_execution_time of its latest snapshot (#7875, the line Darling's read splits on), so one that has a snapshot
+ * on each side of the window start is counted on one side only.
  */
 public partial class LocalDataService
 {
@@ -132,6 +133,11 @@ public partial class LocalDataService
             ?? Mcp.McpQueryTools.EffectiveWindowStart(
                 await GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, serverId, baselineStartTime, endTime), baselineStartTime);
 
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", baselineStartTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStoreRegressionRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
@@ -146,39 +152,26 @@ public partial class LocalDataService
            and the store holds it from the later of the two. Both are numbers computed here, written as invariant literals. A side
            that holds no hour divides by NULL, so its per-hour rate is NULL as Darling's NULLIF gives (a zero literal would depend
            on the engine's division by zero). When the store holds the whole baseline the two equal the old whole windows.
-           Darling's gates count a baseline that holds no hours as empty, because there a baseline row can have runs while it holds
-           none (its rows are filtered on last_execution_time). Here they need no such arm: the baseline rows are filtered on
-           collection_time < $2, and the data start is at or before the first row's collection_time (GetQueryWindowFloorAsync), so
-           a baseline with any row holds a positive number of hours (#6750). */
+           #7875: a baseline that holds no hours counts as empty, as Darling's gates count it (base_hours = 0). The baseline rows are
+           filtered on the interval's last_execution_time now, so the baseline can have rows while it holds no hours: the data start
+           is at or after the window start and the first collection picked up an interval that ran before it. Its timeout and error
+           counts are then not compared (baseEmpty below), a query with enough recent runs is listed as against an empty baseline, and
+           its per-hour rates stay NULL. */
         static string Hours(TimeSpan held) => held > TimeSpan.Zero ? held.TotalHours.ToString("R", CultureInfo.InvariantCulture) : "CAST(NULL AS DOUBLE)";
         var baseHours = Hours(startTime - (dataStart > baselineStartTime ? dataStart : baselineStartTime));
         var recentHours = Hours(endTime - (dataStart > startTime ? dataStart : startTime));
+        var baseEmpty = (startTime - (dataStart > baselineStartTime ? dataStart : baselineStartTime)) > TimeSpan.Zero ? "FALSE" : "TRUE";
         var limit = "CAST($" + limitIndex + " AS INTEGER)";
 
         command.CommandText = @"
-WITH deduped_baseline AS (
+WITH latest AS (
     /* LOAD-BEARING (correctness, not just perf) - #1841. Keep the LATEST cumulative snapshot per
        interval before aggregating; see the file header for why this read is the most exposed to it. Every outcome is
-       kept (#6268): the Regular cost below and the Aborted and Exception counts are separate FILTERs over this set. */
-    SELECT
-        database_name,
-        query_id,
-        plan_id,
-        execution_type_desc,
-        execution_count,
-        avg_duration_us,
-        avg_cpu_time_us,
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-            ORDER BY collection_time DESC, execution_count DESC
-        ) AS rn
-    FROM v_query_store_stats
-    WHERE server_id = $1
-    AND   collection_time >= $" + baselineParamIndex + @"
-    AND   collection_time < $2" + dbClause + @"
-),
-deduped_recent AS (
+       kept (#6268): the Regular cost below and the Aborted and Exception counts are separate FILTERs over this set.
+       #7875: ONE dedupe over the whole span, baseline start to window end. Two arms, each deduping inside its own
+       collection_time range, kept an interval that has a snapshot on each side of the window start as the latest of the
+       baseline AND the latest of the recent window, counting its executions in both. The interval's latest snapshot is
+       now assigned to one side by its last_execution_time, the line Darling's read splits on (#6750). */
     SELECT
         collection_id,
         collection_time,
@@ -197,8 +190,40 @@ deduped_recent AS (
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time >= $" + baselineParamIndex + @"
     AND   collection_time <= $3" + dbClause + @"
+),
+deduped_baseline AS (
+    SELECT
+        database_name,
+        query_id,
+        plan_id,
+        execution_type_desc,
+        execution_count,
+        avg_duration_us,
+        avg_cpu_time_us,
+        rn
+    FROM latest
+    WHERE rn = 1
+    AND   last_execution_time >= $" + baselineParamIndex + @"
+    AND   last_execution_time < $2
+),
+deduped_recent AS (
+    SELECT
+        collection_id,
+        collection_time,
+        database_name,
+        query_id,
+        plan_id,
+        execution_type_desc,
+        execution_count,
+        avg_duration_us,
+        avg_cpu_time_us,
+        last_execution_time,
+        rn
+    FROM latest
+    WHERE rn = 1
+    AND   last_execution_time >= $2
 ),
 baseline_performance AS (
     SELECT
@@ -303,21 +328,24 @@ flagged AS (
         (j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) AS cpu_regression_percent,
         " + QueryStoreRegressionRules.CostTestSql("j") + @" AS is_cost,
         COALESCE(j.recent_aborted_execs >= " + QueryStoreRegressionRules.FailureMinRecentRuns + @"
-            AND (j.base_aborted_execs = 0
+            AND (j.base_aborted_execs = 0 OR " + baseEmpty + @"
                  OR (j.recent_aborted_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureRateMultiple + @" * (j.base_aborted_execs / " + baseHours + @")), false) AS is_timeouts,
         COALESCE(j.recent_exception_execs >= " + QueryStoreRegressionRules.FailureMinRecentRuns + @"
-            AND (j.base_exception_execs = 0
+            AND (j.base_exception_execs = 0 OR " + baseEmpty + @"
                  OR (j.recent_exception_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureRateMultiple + @" * (j.base_exception_execs / " + baseHours + @")), false) AS is_errors
     FROM joined AS j
 ),
 qualified AS (
     SELECT
         f.*,
-        /* A cost row keeps the duration bands (CRITICAL over 100%, HIGH over 50%, MEDIUM over 25%, else LOW). A failure row is
+        /* A cost row keeps the duration bands (CRITICAL over 100%, HIGH over 50%, MEDIUM over 25%, else LOW),
+           except that a cost row which added under a minute of duration over the window and under a second per run is LOW
+           whatever its percent (#7592). A failure row is
            HIGH when its rate is at least FailureHighMultiple times the baseline's or the baseline had none, else MEDIUM; a row with
            both takes the higher band. A failure never reads CRITICAL. */
         CASE
             WHEN NOT f.is_cost THEN 0
+            WHEN " + QueryStoreRegressionRules.GradeFloorSql("f") + @" THEN 1
             WHEN f.duration_regression_percent > 100 THEN 4
             WHEN f.duration_regression_percent > 50 THEN 3
             WHEN f.duration_regression_percent > 25 THEN 2
@@ -325,11 +353,11 @@ qualified AS (
         END AS cost_rank,
         GREATEST(
             CASE WHEN NOT f.is_timeouts THEN 0
-                 WHEN f.base_aborted_execs = 0
+                 WHEN f.base_aborted_execs = 0 OR " + baseEmpty + @"
                       OR (f.recent_aborted_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureHighMultiple + @" * (f.base_aborted_execs / " + baseHours + @") THEN 3
                  ELSE 2 END,
             CASE WHEN NOT f.is_errors THEN 0
-                 WHEN f.base_exception_execs = 0
+                 WHEN f.base_exception_execs = 0 OR " + baseEmpty + @"
                       OR (f.recent_exception_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureHighMultiple + @" * (f.base_exception_execs / " + baseHours + @") THEN 3
                  ELSE 2 END) AS failure_rank,
         (f.recent_dur_ms - f.base_dur_ms) * f.recent_execs AS additional_duration_ms
@@ -418,6 +446,7 @@ ORDER BY r.is_cost DESC,
          r.query_id
 LIMIT " + limit;
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -473,7 +502,7 @@ LIMIT " + limit;
         /* #5381: the text sample, read by key for the returned rows only. */
         var texts = await ReadQueryStoreTextByRowAsync(
             connection, serverId,
-            textKeys.Where(k => k.Id.HasValue && k.Time.HasValue).Select(k => (k.Id!.Value, k.Time!.Value)));
+            textKeys.Where(k => k.Id.HasValue && k.Time.HasValue).Select(k => (k.Id!.Value, k.Time!.Value)), relation);
         for (var i = 0; i < rows.Count; i++)
         {
             string? text = null;
@@ -488,6 +517,7 @@ LIMIT " + limit;
         }
 
         return rows;
+        }
     }
 
     private static QueryStoreRunGroup ReadRunGroup(System.Data.Common.DbDataReader reader, int first, int baselinePerHour, int recentPerHour) => new()
@@ -518,30 +548,44 @@ LIMIT " + limit;
     public async Task<(bool HasBaseline, bool HasRecent)> GetQueryStoreRegressionCoverageAsync(
         int serverId, int hoursBack = 24, DateTime? asOfUtc = null, IReadOnlyList<string>? databaseNames = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", baselineStartTime, ReadAsync, CancellationToken.None);
+
+        async Task<(bool HasBaseline, bool HasRecent)> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
-        var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
 
+        /* #7875: the sides are the read's own (GetQueryStoreRegressionsAsync): an interval's latest snapshot in [baseline start, window
+           end] is on the baseline side when its last_execution_time is before the window start, on the recent side when it is at or
+           after it. Probing collection_time instead said a side had rows when the read, which splits on the interval's last run,
+           put them on the other side. */
         command.CommandText = @"
+WITH latest AS (
+    SELECT
+        last_execution_time,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+            ORDER BY collection_time DESC, execution_count DESC
+        ) AS rn
+    FROM v_query_store_stats
+    WHERE server_id = $1
+    AND   collection_time >= $4
+    AND   collection_time <= $3" + dbClause + @"
+)
 SELECT
-    EXISTS (
-        SELECT 1
-        FROM v_query_store_stats
-        WHERE server_id = $1
-        AND   collection_time >= $4
-        AND   collection_time < $2" + dbClause + @"
-    ) AS has_baseline,
-    EXISTS (
-        SELECT 1
-        FROM v_query_store_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3" + dbClause + @"
-    ) AS has_recent";
+    COALESCE(BOOL_OR(last_execution_time >= $4 AND last_execution_time < $2), FALSE) AS has_baseline,
+    COALESCE(BOOL_OR(last_execution_time >= $2), FALSE) AS has_recent
+FROM latest
+WHERE rn = 1";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -556,6 +600,7 @@ SELECT
             return (false, false);
         return (reader.GetBoolean(0), reader.GetBoolean(1));
     }
+        }
 
     /// <summary>#6877: where the server's stored Query Store rows start, for a window that ends before them (the window-floor probe
     /// answers null when a window holds no row). Null when the server has none.</summary>
@@ -591,5 +636,26 @@ LIMIT 1";
         command.Parameters.Add(new DuckDBParameter { Value = collectorName });
         command.Parameters.Add(new DuckDBParameter { Value = cutoffUtc });
         return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
+
+    /// <summary>
+    /// #7005: the oldest row one window-floor relation holds for a server, on the time column its probe windows on
+    /// (<see cref="GetQueryWindowFloorAsync"/> answers null for a window that ends before the data starts, so the first row
+    /// is read here). The generic form of <see cref="GetOldestQueryStoreRowAsync"/>. The view and column come from the closed
+    /// <see cref="QueryWindowRelation"/> set, so nothing a caller typed reaches the SQL. A relation whose time column is the
+    /// server's wall clock answers null: its rows are not comparable to a UTC window end without the clock.
+    /// </summary>
+    public async Task<DateTime?> GetOldestWindowRowAsync(QueryWindowRelation relation, int serverId)
+    {
+        if (QueryWindowRelationTimeIsServerLocal(relation))
+        {
+            return null;
+        }
+
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT min({QueryWindowRelationTimeColumn(relation)}) FROM {QueryWindowRelationView(relation)} WHERE server_id = $1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is DateTime first ? first : null;
     }
 }

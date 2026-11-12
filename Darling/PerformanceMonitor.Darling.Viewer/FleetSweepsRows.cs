@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json.Nodes;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -177,7 +178,7 @@ internal static class FleetSweepsRows
         var departed = NameList(changes["departed_servers"]);
         if (Bool(report, "no_previous_sweep", false))
         {
-            return "First sweep — there is no previous sweep to diff against, so this document states absolutes.";
+            return "First sweep: there is no previous sweep to diff against, so this document states absolutes.";
         }
 
         if (transitions == 0 && newServers.Length == 0 && departed.Length == 0)
@@ -221,15 +222,15 @@ internal static class FleetSweepsRows
             "Verdict: " + (Bool(detail, "instruments_alive", true) ? "alive" : "DEAD"),
             "Service started: " + Local(Str(lv, "service_started_at")),
         };
-        if (Bool(lv, "baseline_reset", false)) lines.Add("Pass-counter baseline: reset by restart — advance not judgeable this sweep");
+        if (Bool(lv, "baseline_reset", false)) lines.Add("Pass-counter baseline: reset by restart, so the advance is not judgeable this sweep");
         var previous = lv["alert_passes_previous"] is JsonValue ? $" (previous {Num(Int(lv, "alert_passes_previous"))})" : " (no baseline)";
-        var advancing = lv["alert_passes_advancing"] is JsonValue av && av.TryGetValue<bool>(out var ab) ? (ab ? " — advancing" : " — frozen") : "";
+        var advancing = lv["alert_passes_advancing"] is JsonValue av && av.TryGetValue<bool>(out var ab) ? (ab ? ", advancing" : ", frozen") : "";
         lines.Add("Alert passes: " + Num(Int(lv, "alert_passes_total")) + previous + advancing);
         lines.Add("Alert read failures: " + Num(Int(lv, "alert_read_failures_total")));
         var faults = Objects(lv["server_read_faults"]).ToList();
         if (faults.Count > 0)
         {
-            lines.Add(faults.Count + " server read fault(s): " + string.Join("; ", faults.Select(f => $"{Str(f, "server")} ({Str(f, "error")})")));
+            lines.Add(CountText.Plural(faults.Count, "server read fault") + ": " + string.Join("; ", faults.Select(f => $"{Str(f, "server")} ({Str(f, "error")})")));
         }
 
         foreach (var note in lv["notes"] is JsonArray notes ? notes : new JsonArray())
@@ -254,7 +255,9 @@ internal static class FleetSweepsRows
                 var position = state == "pending" ? $"{hits} of {entryBar} hits to open"
                     : state == "closed" ? "closed"
                     : misses > 0 ? $"{misses} of {exitBar} quiet to close"
-                    : $"{hits} consecutive hit{(hits == 1 ? "" : "s")}";
+                    /* #8133: the hits count the current unbroken run, which starts over after a quiet sweep; the first-seen
+                       column is the item's first ever sighting, so the two can stand apart without contradiction. */
+                    : $"{hits} consecutive hit{(hits == 1 ? "" : "s")} in the current run";
                 /* The fleet-scope sentinel has no server name; "server 0" would be a fabrication. */
                 var server = Bool(w, "fleet_scope", false) ? "Fleet"
                     : Str(w, "server") is { Length: > 0 } n ? n : "server " + Int(w, "server_id");

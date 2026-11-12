@@ -67,8 +67,8 @@ public sealed class SkippedCycleSurfaceTests : IClassFixture<SharedDuckDbFixture
         Assert.Equal("newest late cycle", summary.LastMessage);
 
         var line = summary.SummaryLine();
-        Assert.Contains("3 late cycle(s)", line, StringComparison.Ordinal);
-        Assert.Contains("6 slot(s) skipped", line, StringComparison.Ordinal);
+        Assert.Contains("3 late cycles", line, StringComparison.Ordinal);
+        Assert.Contains("6 slots skipped", line, StringComparison.Ordinal);
         Assert.Contains("slowest step collectors, 412.3 s", line, StringComparison.Ordinal);
     }
 

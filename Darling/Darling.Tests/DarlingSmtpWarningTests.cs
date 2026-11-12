@@ -67,7 +67,7 @@ public sealed class DarlingSmtpWarningTests
     [Fact]
     public void TheServiceLogsItAtStartAndOnReload_OnTheSettingsInForce()
     {
-        var worker = File.ReadAllText(Path.GetFullPath(Path.Combine(
+        var worker = RepoFile.ReadRepoFile(Path.GetFullPath(Path.Combine(
             Path.GetDirectoryName(ThisFile())!, "..", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs")));
 
         // After each of the two places that put the store's settings into the held config.

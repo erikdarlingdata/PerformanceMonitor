@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -26,14 +27,21 @@ namespace Lite.Tests;
 /// </summary>
 public sealed class ServerTabIncidentTabsTests
 {
-    private static readonly Dictionary<string, List<string>> Tabs = ReadTabHeaders();
+    /* #7081: the Baml2006Reader below, and the first touch of ServerTab, load WPF and System.Xaml types and run their static constructors.
+       This class used to do that in its own static constructor, on an xunit worker thread, while the class that ran the process's first
+       WpfPlot did the same on the shared STA thread. In one CI leg both stopped for good within a second of the start (the STA body for
+       60 s, until the hang guard gave up on it, this one for 14 minutes, until the job timed out). Every WPF touch goes through the shared
+       thread and its gate (#5602), so two of them never load those types at once. */
+    private static readonly Lazy<Dictionary<string, List<string>>> s_tabs = new(() => StaTestThread.Run(ReadTabHeaders));
+
+    private static Dictionary<string, List<string>> Tabs => s_tabs.Value;
 
     [Theory]
     [InlineData(AlertChainView.Blocking, "Blocked Process Reports")]
     [InlineData(AlertChainView.Deadlocks, "Deadlocks")]
     public void IncidentTabs_LandOnTheGridTheAlertNames(AlertChainView view, string subTab)
     {
-        var (mainTab, blockingSubTab) = ServerTab.IncidentTabs(view);
+        var (mainTab, blockingSubTab) = StaTestThread.Run(() => ServerTab.IncidentTabs(view));
 
         Assert.Equal("Blocking", Tabs["MainTabControl"][mainTab]);
         Assert.Equal(subTab, Tabs["BlockingSubTabControl"][blockingSubTab]);
@@ -54,6 +62,7 @@ public sealed class ServerTabIncidentTabsTests
     /// <summary>The string headers of each named TabControl's own TabItems, in order, from the compiled server tab.</summary>
     private static Dictionary<string, List<string>> ReadTabHeaders()
     {
+        StaTestThread.Step("opening the Lite assembly's compiled markup resources (controls/servertab.baml)");
         var assembly = typeof(ServerTab).Assembly;
         using var resources = assembly.GetManifestResourceStream(assembly.GetName().Name + ".g.resources")!;
         using var reader = new ResourceReader(resources);
@@ -67,6 +76,7 @@ public sealed class ServerTabIncidentTabsTests
         }
 
         Assert.NotNull(baml);
+        StaTestThread.Step("new Baml2006Reader(servertab.baml): the XAML schema context, the first load of the WPF types it names");
         using var nodes = new Baml2006Reader(baml, new XamlReaderSettings { LocalAssembly = assembly });
 
         var result = new Dictionary<string, List<string>>();

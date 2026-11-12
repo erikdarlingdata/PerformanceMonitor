@@ -9,7 +9,6 @@
 using System;
 using System.Linq;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -336,21 +335,6 @@ public sealed class SkippedCycleSurfaceShapeTests
     }
 
     [Fact]
-    public void TheWebPanel_IsUsedAtBothSites_AndReadsOnlyKeysTheBlockHas()
-    {
-        var js = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
-        Assert.Equal(2, Regex.Matches(js, @"\{ title: ""Skipped Cycles"", subtitle: ""trailing 24 hours"", viz: ""stat"", stats: SKIPPED_CYCLES_STATS \},").Count);
-
-        var start = js.IndexOf("const SKIPPED_CYCLES_STATS = [", StringComparison.Ordinal);
-        Assert.True(start >= 0);
-        var end = js.IndexOf("];", start, StringComparison.Ordinal);
-        var stats = js[start..end];
-        var keys = Regex.Matches(stats, @"key: ""skipped_cycles\.(\w+)""").Select(m => m.Groups[1].Value).ToArray();
-        Assert.Equal(BlockFields, keys);
-        Assert.Contains("key: \"skipped_cycles.last_message\", label: \"Last message\", format: \"text\", small: true, hideWhenEmpty: true", stats, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void TheViewerLine_SaysAllClear_ThenCountsAndTheNewestCause()
     {
         Assert.Equal("No skipped collection slots in 24 h", SkippedCycleLine.Format(SkippedCycleSummary.None));
@@ -363,7 +347,7 @@ public sealed class SkippedCycleSurfaceShapeTests
             LastSlowestStep = "gate_wait",
             LastSlowestStepMs = 90_000,
         });
-        Assert.StartsWith("Skipped collection slots in 24 h: 8 slot(s) in 2 late stretch(es). Last ", line, StringComparison.Ordinal);
+        Assert.StartsWith("Skipped collection slots in 24 h: 8 slots in 2 late stretches. Last ", line, StringComparison.Ordinal);
         Assert.EndsWith(": cause gate_wait, 90 s.", line, StringComparison.Ordinal);
     }
 

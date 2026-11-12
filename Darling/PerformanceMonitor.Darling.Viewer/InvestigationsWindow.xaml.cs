@@ -33,7 +33,8 @@ public partial class InvestigationsWindow : Window
 {
     /// <summary>The status line a read-only seat shows in place of the write controls.</summary>
     internal const string ReadOnlyMessage =
-        "Read-only connection (postgres.connectAs = \"viewer\"): investigations can be viewed but not closed, and notes, profiles and report feedback cannot be changed here. Set connectAs to \"admin\" and restart the viewer to change them.";
+        "Read-only connection: investigations can be viewed but not closed, and notes, profiles and report feedback cannot be changed here. " +
+        ViewerReadOnlyException.HowToConnectAsAdmin;
 
     private readonly ViewerDataService _dataService;
     private readonly ObservableCollection<InvestigationRequestViewRow> _requests = new();
@@ -128,7 +129,7 @@ public partial class InvestigationsWindow : Window
         /// <summary>The instant the Reported column is formatted from, and sorts by (not its text).</summary>
         public DateTime ReportedAtUtc => Row.ReportedAtUtc;
 
-        public string ReportedDisplay => Row.ReportedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+        public string ReportedDisplay => ViewerTimeHelper.FormatFleetWide(Row.ReportedAtUtc, "yyyy-MM-dd HH:mm");
 
         public string FeedbackSummary => Row.Feedback.Count == 0 ? "none"
             : string.Create(CultureInfo.InvariantCulture, $"{Row.Feedback.Count}, newest: {Row.Feedback[0].Verdict}");
@@ -140,7 +141,7 @@ public partial class InvestigationsWindow : Window
         /// <summary>The instant the When column is formatted from, and sorts by (not its text).</summary>
         public DateTime CreatedAtUtc => Row.CreatedAtUtc;
 
-        public string WhenDisplay => Row.CreatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+        public string WhenDisplay => ViewerTimeHelper.FormatFleetWide(Row.CreatedAtUtc, "yyyy-MM-dd HH:mm");
 
         public string CorrectedDisplay => Row.CorrectedVerdict ?? "(report's)";
     }
@@ -306,7 +307,7 @@ public partial class InvestigationsWindow : Window
             : _profiles.FirstOrDefault(p => p.ScopeServerId == scope.ServerId && p.ScopeTagId == scope.TagId);
         ProfileTextBox.Text = profile?.ProfileText ?? "";
         ProfileModifiedText.Text = profile is null ? "No profile yet."
-            : "Saved " + profile.ModifiedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture)
+            : "Saved " + ViewerTimeHelper.FormatFleetWide(profile.ModifiedAtUtc, "yyyy-MM-dd HH:mm")
               + (profile.ModifiedBy is { } by ? " by " + by : "");
     }
 
@@ -347,15 +348,68 @@ public partial class InvestigationsWindow : Window
         text.Append("Verdict: ").Append(report.Verdict)
             .Append(report.RootCauseFound ? " (root cause found)" : " (root cause not found)")
             .Append(", by ").Append(report.AgentId).Append(" at ")
-            .AppendLine(report.SubmittedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture));
+            .AppendLine(ViewerTimeHelper.FormatFleetWide(report.SubmittedAtUtc, "yyyy-MM-dd HH:mm"));
         text.Append("Root cause: ").AppendLine(report.RootCause);
         if (!string.IsNullOrWhiteSpace(report.Summary))
         {
             text.Append("Summary: ").AppendLine(report.Summary);
         }
 
-        text.Append("Evidence: ").Append(report.EvidenceJson);
+        text.Append("Evidence: ").Append(EvidenceText(report.EvidenceJson));
         return text.ToString();
+    }
+
+    private static readonly System.Text.Json.JsonSerializerOptions EvidenceWriteOptions = new()
+    {
+        WriteIndented = true,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
+    /// <summary>
+    /// The evidence as the detail pane shows it (#8555). An agent sends <c>key_numbers</c> as a string, and the string is often JSON of its own, so
+    /// the stored text shows it with a second layer of escapes. A <c>key_numbers</c> string that parses to an object or an array is drawn as
+    /// that object; one that does not parse stays the text it was. Evidence that is not a JSON array is shown as stored.
+    /// </summary>
+    internal static string EvidenceText(string? evidenceJson)
+    {
+        if (string.IsNullOrWhiteSpace(evidenceJson))
+        {
+            return evidenceJson ?? "";
+        }
+
+        try
+        {
+            if (System.Text.Json.Nodes.JsonNode.Parse(evidenceJson) is not System.Text.Json.Nodes.JsonArray items)
+            {
+                return evidenceJson;
+            }
+
+            foreach (var item in items)
+            {
+                if (item is System.Text.Json.Nodes.JsonObject obj
+                    && obj["key_numbers"] is System.Text.Json.Nodes.JsonValue value
+                    && value.TryGetValue<string>(out var typed))
+                {
+                    try
+                    {
+                        if (System.Text.Json.Nodes.JsonNode.Parse(typed) is System.Text.Json.Nodes.JsonObject or System.Text.Json.Nodes.JsonArray)
+                        {
+                            obj["key_numbers"] = System.Text.Json.Nodes.JsonNode.Parse(typed);
+                        }
+                    }
+                    catch (System.Text.Json.JsonException)
+                    {
+                        /* Not JSON: the string stays as the agent typed it. */
+                    }
+                }
+            }
+
+            return items.ToJsonString(EvidenceWriteOptions);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return evidenceJson;
+        }
     }
 
     /// <summary>
@@ -428,7 +482,7 @@ public partial class InvestigationsWindow : Window
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ShowStatus("Could not close the request: " + ex.Message);
+            ShowStatus("Could not close the request: " + ViewerDataService.InputErrorText(ex));
         }
     }
 
@@ -467,7 +521,7 @@ public partial class InvestigationsWindow : Window
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ShowStatus("Could not record the feedback: " + ex.Message);
+            ShowStatus("Could not record the feedback: " + ViewerDataService.InputErrorText(ex));
         }
     }
 
@@ -489,7 +543,7 @@ public partial class InvestigationsWindow : Window
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ShowStatus("Could not decide the note: " + ex.Message);
+            ShowStatus("Could not decide the note: " + ViewerDataService.InputErrorText(ex));
         }
     }
 
@@ -512,7 +566,7 @@ public partial class InvestigationsWindow : Window
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ShowStatus("Could not write the note: " + ex.Message);
+            ShowStatus("Could not write the note: " + ViewerDataService.InputErrorText(ex));
         }
     }
 
@@ -543,7 +597,7 @@ public partial class InvestigationsWindow : Window
         catch (ArgumentException ex)
         {
             /* The store's refusal sentence (#6400: a tag that no longer exists), without the parameter name the exception adds. */
-            ShowStatus(ex.Message.Split('\n')[0].Replace(" (Parameter 'profileText')", "", StringComparison.Ordinal));
+            ShowStatus(ViewerDataService.InputErrorText(ex).Split('\n')[0]);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

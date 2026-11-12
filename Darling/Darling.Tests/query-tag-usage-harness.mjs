@@ -78,8 +78,11 @@ const HOURLY_NOTE = "the hourly rollup is materialized only to 2026-10-26T21:00:
 /* #6800: what the fleet Query Store section carries when the hourly table served it: the start moved up to the hour. */
 const QS_NOTE = "hourly buckets start on the hour: no bucket before 2026-10-26T23:00:00.0000000Z: the data from 2026-10-26T22:17:00.0000000Z to 2026-10-26T23:00:00.0000000Z is not included";
 const asks = [];
+/* #8083: when set, list_query_tags answers as the service does on a store with no tag (the empty envelope). */
+let noTags = false;
 const answerFor = (name, q) => {
   if (name === "list_servers") return { servers: [{ server_name: "a", display_name: "Server A", engine_kind: "sqlserver" }, { server_name: "b" }] };
+  if (name === "list_query_tags" && noTags) return { status: "empty", message: "No query tags exist. create_query_tag adds one.", tags: [] };
   if (name === "list_query_tags") return { status: "ok", tags: [{ tag_id: 3, name: "Prod", path: "Prod", colour: "#4E79A7" }, { tag_id: 7, name: "Web", path: "Prod / Web", colour: "#59A14F" }, { tag_id: 8, name: "Batch", path: "Batch", colour: null }] };
   if (name === "get_resource_use_by_tag") {
     const tagOnly = !!q.get("tag");
@@ -127,6 +130,15 @@ try {
 
 const all = (n, out = []) => { out.push(n); for (const c of n.children) all(c, out); return out; };
 const flush = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 0)); };
+/* #8417: the page's Retry-After wait (retryOnceWhenBusy, util.js) runs on util's busyRetryClock, which the harness drives: a timer is held
+   until advanceBusyRetry fires every timer due within the Retry-After, then the turns that follow it run. Nothing waits on wall-clock time. */
+const busyRetryTimers = [];
+modules.util.busyRetryClock.setTimeout = (fn, ms) => { const timer = { fn, ms, cleared: false }; busyRetryTimers.push(timer); return timer; };
+modules.util.busyRetryClock.clearTimeout = (timer) => { if (timer) timer.cleared = true; };
+const advanceBusyRetry = async (ms = 1000) => {
+  for (const timer of busyRetryTimers.splice(0)) if (!timer.cleared && timer.ms <= ms) timer.fn();
+  await flush();
+};
 const readsOf = (name) => asks.filter((a) => a.name === name).map((a) => a.q);
 const out = {};
 
@@ -184,6 +196,25 @@ const out = {};
   out.zeroBacklogNotes = mutedOf({ ...base, window_truncated: true, backlog_hours_waiting: 0, hours_left_out: 0 });
 }
 
+/* #7376: a server (or a whole section) the read answers not_collected shows its message only, with no table of zeros under it. */
+{
+  const qs = { name: "query_store", title: "Query Store" };
+  const okServer = { server: "ok-one", status: "ok", rows: [{ tag: "Prod", tag_id: 1, executions: 5 }], total: { executions: 5 } };
+  const notCollectedServer = (name, message) => ({ server: name, status: "not_collected", message, rows: [], total: { executions: 0 }, untagged: { executions: 0 } });
+  const tablesAndText = (card) => ({ tables: all(card).filter((n) => n.tag === "table").length, text: all(card).filter((n) => n.className === "muted").map((n) => n.textContent) });
+  out.notCollectedMixed = tablesAndText(modules.page.sectionCard(qs, {
+    section: "query_store", status: "ok", source: "collect.query_store_interval_wide",
+    servers: [okServer, notCollectedServer("sec-one", "Query Store is not collected for sec-one: it is a readable secondary.")], fleet_total: { executions: 5 },
+  }, () => {}));
+  out.notCollectedSingle = tablesAndText(modules.page.sectionCard(qs, {
+    section: "query_store", status: "not_collected", message: "Query Store is not collected for sec-one: it is a readable secondary.", source: "collect.query_store_interval_wide", rows: [], total: { executions: 0 },
+  }, () => {}));
+  out.notCollectedAll = tablesAndText(modules.page.sectionCard(qs, {
+    section: "query_store", status: "not_collected", message: "each server says why.", source: "collect.query_store_interval_wide",
+    servers: [notCollectedServer("sec-one", "reason one"), notCollectedServer("sec-two", "reason two")], fleet_total: { executions: 0 },
+  }, () => {}));
+}
+
 /* #6831: the other edge cases, said from the fields. */
 out.edgeCases = [
   { tier: "hourly", window_edges_note: "n", served_start: "2026-10-26T13:00:00Z", window_end: "2026-10-27T11:00:00Z", start_dropped_from: "2026-10-26T12:59:00Z", materialized_to: null, end_hour_counted_whole: true },
@@ -212,13 +243,72 @@ for (const [label, refusals] of [["busyOnce", 1], ["busyTwice", 2]]) {
   await flush();
   const strips = () => all(main).filter((n) => /\bstrip\b/.test(n.attrs.class || n.className || "")).map((n) => ({ cls: n.attrs.class || n.className, text: n.textContent }));
   const seen = { readsBefore: readsOf("get_resource_use_by_tag").length, stripsBefore: strips() };
-  await new Promise((r) => setTimeout(r, 1300));
-  await flush();
+  await advanceBusyRetry();
   seen.readsAfter = readsOf("get_resource_use_by_tag").length;
   seen.stripsAfter = strips();
   seen.planCardAfter = all(main).some((n) => n.attrs["data-section"] === "plan_cache");
   busyReads = 0;
   out[label] = seen;
+}
+
+/* #8417: the same refusal while the event loop stalls past the Retry-After, as a loaded test run stalls it. The second read must not
+   be sent before the harness has counted the first: the wait is the harness's to advance, not wall-clock time's. */
+{
+  const main = new FakeNode("main");
+  main.isRoot = true;
+  asks.length = 0;
+  busyReads = 1;
+  modules.page.renderQueryTagUsage(main);
+  await flush();
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1100);
+  await flush();
+  const seen = { readsBefore: readsOf("get_resource_use_by_tag").length };
+  await advanceBusyRetry();
+  seen.readsAfter = readsOf("get_resource_use_by_tag").length;
+  seen.planCardAfter = all(main).some((n) => n.attrs["data-section"] === "plan_cache");
+  busyReads = 0;
+  out.busyUnderLoad = seen;
+}
+
+/* #8083: a store with no query tag. The page asks list_query_tags, draws one line that links to Manage Query Tags, and never sends the by-tag read:
+   no section panel, no table, no per-server heading. */
+{
+  const main = new FakeNode("main");
+  main.isRoot = true;
+  asks.length = 0;
+  noTags = true;
+  modules.page.renderQueryTagUsage(main);
+  await flush();
+  noTags = false;
+  const nodes = all(main);
+  out.noTags = {
+    tagListReads: readsOf("list_query_tags").length,
+    byTagReads: readsOf("get_resource_use_by_tag").length,
+    strips: nodes.filter((n) => /\bstrip\b/.test(n.className || "")).map((n) => ({ cls: n.className, text: n.textContent })),
+    links: nodes.filter((n) => n.tag === "a").map((n) => ({ href: n.attrs.href, text: n.textContent })),
+    panels: nodes.filter((n) => n.attrs["data-section"]).length,
+    tables: nodes.filter((n) => n.tag === "table").length,
+    headings: nodes.filter((n) => n.tag === "h4").length,
+  };
+}
+
+/* #8083: with tags defined, a block whose read sent no tag row (only untagged and the total) is one line with the untagged figures, not a two-row
+   table that says them twice. A block with a tag row keeps its table, and so does an untagged-only block under a tag filter (no untagged row there). */
+{
+  const plan = { name: "plan_cache", title: "Plan cache" };
+  const shape = (card) => ({
+    tables: all(card).filter((n) => n.tag === "table").length,
+    lines: all(card).filter((n) => /\buntagged-only\b/.test(n.className || "")).map((n) => n.textContent),
+    headings: all(card).filter((n) => n.tag === "h4").map((n) => n.textContent),
+  });
+  const allUntagged = (server) => ({ server, section: "plan_cache", status: "ok", tag_rows: [], untagged: fig(4, 2), total: fig(4, 2) });
+  out.untaggedOnlyFleet = shape(modules.page.sectionCard(plan, {
+    section: "plan_cache", status: "ok", source: "collect.query_stats",
+    servers: [allUntagged("a"), planCache("b", false)], fleet_total: fig(13, 6),
+  }, () => {}, "the last 24 hours", [{ server_name: "a", display_name: "Server A" }, { server_name: "b" }]));
+  out.untaggedOnlyServer = shape(modules.page.sectionCard(plan, allUntagged(null), () => {}));
+  out.taggedServer = shape(modules.page.sectionCard(plan, planCache(null, false), () => {}));
+  out.untaggedOnlyUnderTag = shape(modules.page.sectionCard(plan, { section: "plan_cache", status: "ok", tag_rows: [], total_scope: "tag_subtree", total: fig(0, 0) }, () => {}));
 }
 
 /* #6157: the Availability Groups card names the reporting server by its display name, and falls back to the key. */
@@ -260,5 +350,11 @@ for (const [label, refusals] of [["busyOnce", 1], ["busyTwice", 2]]) {
   await flush();
   out.gridUntaggedAsk = readsOf("get_top_queries_by_cpu").at(-1);
   out.gridUntagged = gridRows();
+}
+/* #7945: a figure under 0.1 keeps two significant digits (0.04), one from 0.1 up keeps one decimal, and a whole number prints whole. */
+{
+  const figures = { executions: 0.04, cpu_ms: 1234.56, logical_reads: 7 };
+  const table = modules.page.sectionTable({ section: "plan_cache", total: figures, tag_rows: [{ tag_id: 1, tag: "T", path: "T", subtree: figures }] }, () => {});
+  out.smallFigureRows = all(table).filter((n) => n.tag === "tr").map((tr) => tr.children.map((td) => td.textContent));
 }
 console.log(JSON.stringify(out));

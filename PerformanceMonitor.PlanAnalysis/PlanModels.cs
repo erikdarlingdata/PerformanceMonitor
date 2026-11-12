@@ -20,6 +20,20 @@ public class ParsedPlan
     public string? ParseError { get; set; }
 
     /// <summary>
+    /// True when <see cref="ParseError"/> is the size refusal: the XML was not read because it is over the parser's
+    /// character limit, and <see cref="RawXml"/> holds it whole. A viewer can still save such a plan.
+    /// </summary>
+    public bool ExceedsParseLimit { get; set; }
+
+    /// <summary>
+    /// True when the text is a ShowPlan document: XML whose root element is <c>ShowPlanXML</c> in the showplan namespace.
+    /// Set before the tree walk, so a plan the walk refuses for its depth, or fails on, is still known to be a plan. False
+    /// for text that is not XML, for XML that is something else, and for text over the parser's character limit, which is
+    /// not read (<see cref="ExceedsParseLimit"/>).
+    /// </summary>
+    public bool IsShowPlanXml { get; set; }
+
+    /// <summary>
     /// #4514: descends into stored procedure and UDF bodies via the shared
     /// <see cref="PlanStatements.EnumerateAll(ParsedPlan)"/> walk, so an EXEC &lt;procedure&gt;
     /// plan whose only missing-index suggestions live in the body is no longer reported as
@@ -101,7 +115,7 @@ public class PlanStatement
     // Additional StmtSimple attributes
     public string? StatementOptmLevel { get; set; }
     public string? StatementOptmEarlyAbortReason { get; set; }
-    public int StatementParameterizationType { get; set; }
+    public int? StatementParameterizationType { get; set; }
     public string? StatementSqlHandle { get; set; }
     public long DatabaseContextSettingsId { get; set; }
     public int ParentObjectId { get; set; }
@@ -111,6 +125,10 @@ public class PlanStatement
     // QueryPlan sub-elements
     public OptimizerHardwareInfo? HardwareProperties { get; set; }
     public List<OptimizerStatsUsageItem> StatsUsage { get; set; } = new();
+    /// <summary>#8147: the statement carried a QueryPlan element. False for DECLARE/ASSIGN shells and MULTIPLE PLAN statements whose plan was never captured.</summary>
+    public bool HasQueryPlan { get; set; }
+    /// <summary>#8147: the QueryPlan carried an OptimizerStatsUsage element (even an empty one). False means the plan does not record which statistics it loaded, which is not the same as loading none.</summary>
+    public bool HasStatsUsage { get; set; }
     public ThreadStatInfo? ThreadStats { get; set; }
     public SetOptionsInfo? SetOptions { get; set; }
     public List<PlanParameter> Parameters { get; set; } = new();
@@ -210,6 +228,9 @@ public class PlanNode
     public long ActualRows { get; set; }
     public long ActualExecutions { get; set; }
     public long ActualRowsRead { get; set; }
+    // #8381: true when a run-time counter carried ActualRowsRead. The engine writes it only for a scan or
+    // seek with a predicate, and older builds not at all, so 0 alone does not say the operator read nothing.
+    public bool HasActualRowsRead { get; set; }
     public long ActualRebinds { get; set; }
     public long ActualRewinds { get; set; }
     public long ActualElapsedMs { get; set; }
@@ -271,6 +292,7 @@ public class PlanNode
     public string? PartitionColumns { get; set; }
     public string? DefinedValues { get; set; }
     public double TableCardinality { get; set; }
+    public bool HasTableCardinality { get; set; }
     public double EstimatedRowsRead { get; set; }
     public string? TopExpression { get; set; }
     public bool IsPercent { get; set; }

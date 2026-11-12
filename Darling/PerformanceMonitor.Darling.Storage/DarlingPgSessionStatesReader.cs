@@ -26,6 +26,64 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class DarlingPgSessionStatesReader
 {
+    /// <summary>
+    /// A session must have been seen holding the horizon in at least this share of the samples that saw it
+    /// before it is called a sustained holder rather than a passing one.
+    /// <para>Half. Every session with an open write transaction is momentarily the oldest holder at some
+    /// point, which is what a transaction IS, so a single sighting proves nothing beyond "this instance
+    /// does writes". Sustained holding is the finding, and the MCP tool reports the raw sample counts beside
+    /// the verdict so a caller can disagree with the threshold rather than having to trust it.</para>
+    /// </summary>
+    public const double SustainedHolderSampleShare = 0.5;
+
+    /// <summary>
+    /// The fewest holder samples a session needs before it can be called a sustained holder (#7381). The
+    /// share rule alone is met by 1 of 1, and one sighting is a passing statement on a quiet instance, not a
+    /// hold.
+    /// </summary>
+    public const int MinSustainedHolderSamples = 2;
+
+    /// <summary>
+    /// The smallest peak horizon age that makes a sustained holder (#8092): ten thousand transactions assigned
+    /// behind the session's snapshot or xid at the moment of a sample.
+    /// <para>The age, not the duration, is what supports the causal claim, and the count rule alone cannot
+    /// carry it: a maintenance login that runs a 30 ms write every few minutes is the oldest holder in every
+    /// sample that sees it, at an age of 1 or 2, the handful of transactions in flight at that instant. Nothing
+    /// waited behind it for longer than its own statement. A transaction VACUUM is actually stuck behind has
+    /// been open while the instance kept assigning xids, and its age climbs with them; by ten thousand it is
+    /// holding back that many transactions' row versions, which is where a red is worth painting. Hundreds of
+    /// thousands would be wraparound territory, judged against autovacuum_freeze_max_age elsewhere; this band
+    /// is about dead rows, and sits well under the ages the tests call real.</para>
+    /// </summary>
+    public const long MinSustainedHolderHorizonAge = 10_000;
+
+    /// <summary>
+    /// The sample half of the sustained-holder rule (#7381): at least <see cref="MinSustainedHolderSamples"/>
+    /// holder samples and at least <see cref="SustainedHolderSampleShare"/> of the samples that saw the session.
+    /// True for a short writer seen at every sample as well as for a real hold; <see cref="IsSustainedHolder"/>
+    /// adds the age that tells them apart, and the finding text names which of the two a row is.
+    /// </summary>
+    public static bool HoldsAcrossSamples(PgSessionStateRow r) =>
+        r.SampleCount > 0
+        && r.HorizonHolderSamples >= Math.Max(
+            MinSustainedHolderSamples, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
+
+    /// <summary>
+    /// The one rule behind the MCP Critical band, the "PINS THE XMIN HORIZON" text and the viewer's red row
+    /// (#7381, #8092): <see cref="HoldsAcrossSamples"/>, and a peak horizon age of at least
+    /// <see cref="MinSustainedHolderHorizonAge"/>. Age 0 means the session held the newest xid or snapshot, so
+    /// nothing waited behind it: being the oldest on a quiet instance is not the same as holding anything. A
+    /// small positive age is a short writer caught at each sample, not a hold. This also covers rows stored
+    /// before the collector stopped reporting the service's own connections.
+    /// </summary>
+    public static bool IsSustainedHolder(PgSessionStateRow r) =>
+        HoldsAcrossSamples(r)
+        && r.PeakHorizonAge >= MinSustainedHolderHorizonAge;
+
+    /// <param name="LastQueryText">#7428: the normalised statement text captured for <see cref="LastQueryId"/> in
+    /// <c>collect.pg_statement_text</c>, or null until the hourly capture reaches that id. Also null for id 0 and for a
+    /// null id, which name no statement. Never the raw <c>pg_stat_activity.query</c>, which this collector deliberately
+    /// does not store.</param>
     public sealed record PgSessionStateRow(
         long BackendId,
         int Pid,
@@ -56,7 +114,8 @@ public static class DarlingPgSessionStatesReader
         int ActiveSessions,
         int IdleInTransactionSessions,
         int ReportableSessions,
-        bool CaptureWasTruncated);
+        bool CaptureWasTruncated,
+        string? LastQueryText = null);
 
     /// <summary>
     /// One row per backend seen in the window, with its peaks and its identity from the most recent sample.
@@ -92,6 +151,12 @@ public static class DarlingPgSessionStatesReader
     ///
     /// <para><b>Joins use <c>IS NOT DISTINCT FROM</c> where a column is nullable</b>, because <c>=</c> is
     /// NULL for a NULL operand and would silently drop the row rather than match it.</para>
+    ///
+    /// <para><b>#7428: <c>last_query_text</c> is a scalar lookup in the select list</b>, not a join, so it stays out
+    /// of the rollup and the worst-first ORDER BY. PostgreSQL evaluates an expensive select-list expression after the
+    /// sort when a LIMIT bounds the result, so only the page's rows look anything up (measured with EXPLAIN ANALYZE
+    /// on a throwaway store). The text store has (server_id, queryid) as its PRIMARY KEY (#2219): at most one row per
+    /// id, so the lookup cannot multiply or raise. Query id 0 and NULL find nothing and read as null.</para>
     ///
     /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row limit.</para>
     /// </summary>
@@ -213,7 +278,11 @@ public static class DarlingPgSessionStatesReader
             coalesce(l.active_sessions, 0)                          AS active_sessions,
             coalesce(l.idle_in_transaction_sessions, 0)             AS idle_in_transaction_sessions,
             coalesce(l.reportable_sessions, 0)                      AS reportable_sessions,
-            coalesce(r.capture_was_truncated, false)                AS capture_was_truncated
+            coalesce(r.capture_was_truncated, false)                AS capture_was_truncated,
+            (SELECT t.query_text
+             FROM collect.pg_statement_text AS t
+             WHERE t.server_id = $1
+             AND   t.queryid   = l.query_id)                        AS last_query_text
         FROM rolled AS r
         JOIN latest AS l
           ON  l.backend_id IS NOT DISTINCT FROM r.backend_id
@@ -299,7 +368,8 @@ public static class DarlingPgSessionStatesReader
             reader.IsDBNull(26) ? 0 : reader.GetInt32(26),
             reader.IsDBNull(27) ? 0 : reader.GetInt32(27),
             reader.IsDBNull(28) ? 0 : reader.GetInt32(28),
-            !reader.IsDBNull(29) && reader.GetBoolean(29));
+            !reader.IsDBNull(29) && reader.GetBoolean(29),
+            reader.FieldCount > 30 && !reader.IsDBNull(30) ? reader.GetString(30) : null);
     }
 
     /// <summary>
@@ -340,7 +410,9 @@ public static class DarlingPgSessionStatesReader
         string? ApplicationName,
         string? CommandTag,
         long QueryDurationMs,
-        DateTime? NewestSampleUtc = null);
+        DateTime? NewestSampleUtc = null,
+        string? StatementText = null,
+        long? QueryId = null);
 
     /// <summary>
     /// The single most recent <c>pg_session_states</c> capture for this server, filtered to sessions whose
@@ -499,6 +571,7 @@ public static class DarlingPgSessionStatesReader
                 s.application_name,
                 s.command_tag,
                 s.query_duration_ms,
+                s.query_id,
                 r.latest_capture AS capture_time,
                 {1} AS excluded_by_program_prefix,
                 {2} AS excluded_by_login,
@@ -524,6 +597,7 @@ public static class DarlingPgSessionStatesReader
             CAST((SELECT count(*) FROM candidates AS x WHERE x.excluded_by_program_prefix) AS integer) AS excluded_by_program_prefix_count,
             CAST((SELECT count(*) FROM candidates AS x WHERE x.excluded_by_login AND NOT x.excluded_by_program_prefix) AS integer) AS excluded_by_login_count,
             CAST((SELECT count(*) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS integer) AS excluded_by_database_count,
+            s.query_id,
             s.capture_time AS newest_sample_utc
         FROM candidates AS s
         WHERE NOT (s.excluded_by_program_prefix OR s.excluded_by_login OR s.excluded_by_database)
@@ -678,8 +752,11 @@ public static class DarlingPgSessionStatesReader
                 reader.IsDBNull(4) ? null : reader.GetString(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
                 reader.IsDBNull(6) ? -1 : reader.GetInt64(6),
-                /* ordinal 10: the capture the rows were read from (#5642), stamped UTC (the store keeps naive UTC). */
-                reader.IsDBNull(10) ? null : DateTime.SpecifyKind(reader.GetDateTime(10), DateTimeKind.Utc)));
+                /* ordinal 11: the capture the rows were read from (#5642), stamped UTC (the store keeps naive UTC). */
+                reader.IsDBNull(11) ? null : DateTime.SpecifyKind(reader.GetDateTime(11), DateTimeKind.Utc),
+                StatementText: null,
+                /* ordinal 10 (#7086): the collector's query_id, the key the statement text is looked up by. */
+                QueryId: reader.IsDBNull(10) ? null : reader.GetInt64(10)));
             /* The same three scalars on every row — read once is enough; a read with no rows has nothing to
                fire and therefore nothing to render the counts beside (the SQL Server read's rule). */
             excludedByProgramPrefix = reader.IsDBNull(7) ? 0 : reader.GetInt32(7);
@@ -692,6 +769,23 @@ public static class DarlingPgSessionStatesReader
            evaluates. The C# FilterExcludedDatabases helper that used to run here (and could leave the page
            short or empty while matches existed) is gone, not disabled. */
         return new LongRunningSessionsReadResult(rows, excludedByProgramPrefix, excludedByLogin, excludedByDatabase);
+    }
+
+    /// <summary>
+    /// The stored statement text for one <c>query_id</c> (#7086), from the store's own <c>pg_statement_text</c> lookup,
+    /// or null when none has been captured. A separate read on purpose: the session table and the long-running read
+    /// above store and project no statement text, and that stays true.
+    /// </summary>
+    public static async Task<string?> GetStatementTextAsync(
+        NpgsqlDataSource postgres, int serverId, long queryId, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        await using var command = postgres.CreateCommand(
+            "SELECT query_text FROM pg_statement_text WHERE server_id = $1 AND queryid = $2");
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(queryId);
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
     }
 
     public static async Task<PgSessionStatesCaptureCounts> GetPgSessionStatesCaptureCountsAsync(

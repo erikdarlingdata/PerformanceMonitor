@@ -273,7 +273,7 @@ public sealed class DarlingUpgradeInstallTreeWaitTests
     /// a hardcoded backslash (<c>[IO.Path]::GetFullPath($root).TrimEnd('\') + '\'</c>) - correct for the
     /// Windows paths it only ever runs against in production, but it can never match a macOS process's
     /// forward-slash <c>.Path</c>, so it is not what is under test here. A portable stand-in with the same
-    /// shape (full-path prefix match, skip processes whose <c>.Path</c> throws or is empty) is substituted
+    /// shape (full-path prefix match, skip processes whose <c>.Path</c> throws or is empty, one record for each hit) is substituted
     /// for it - defined after the real extraction, so it is the one <c>Wait-DarlingInstallTreeClear</c>
     /// actually calls. That helper's own Windows behavior is exercised by
     /// <c>DarlingDeployRollbackRetentionTests</c> against real Windows PowerShell; what is exercised here is
@@ -289,7 +289,7 @@ public sealed class DarlingUpgradeInstallTreeWaitTests
         script.AppendLine("        $path = $null");
         script.AppendLine("        try { $path = $process.Path } catch { continue }");
         script.AppendLine("        if ([string]::IsNullOrEmpty($path)) { continue }");
-        script.AppendLine("        if ($path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { $hits += $process }");
+        script.AppendLine("        if ($path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { $hits += [pscustomobject]@{ Process = $process; ProcessName = $process.ProcessName; Id = $process.Id; Path = $path } }");
         script.AppendLine("    }");
         script.AppendLine("    return @($hits)");
         script.AppendLine("}");

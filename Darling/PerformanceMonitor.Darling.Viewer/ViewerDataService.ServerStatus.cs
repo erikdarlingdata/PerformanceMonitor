@@ -27,9 +27,12 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>
-    /// Newest collection time per server across all collectors, in one statement — the sidebar dots and the
+    /// Newest successful collection time per server across all collectors, in one statement — the sidebar dots and the
     /// status bar's collection field derive freshness from this (the same newest <c>collection_time</c> the
     /// Overview cards use per server, so a dot and its card agree). Timestamps are the store's naive UTC.
+    /// #8464: only a <c>SUCCESS</c> row counts (<see cref="CollectionRunSql.SuccessfulCollectorRun"/>), so a failed
+    /// attempt moves no dot. A connect failure is banded by <c>connect_down_since</c> beside this (#7590); a collector
+    /// that fails after a good connect is banded by the age of its last success.
     /// Excludes <c>server_id = 0</c>, the fleet-level retention run-record sentinel
     /// (<c>DarlingObservability.FleetServerId</c>) — it is not a real server, so it must not appear as a
     /// phantom key a future key-iterating consumer could render as "server 0".
@@ -46,18 +49,51 @@ public sealed partial class ViewerDataService
     public const string ServerFreshnessSql = $@"
 SELECT
     s.server_id,
-    latest.collection_time
+    latest.collection_time,
+    {CollectionAttemptSql.Attempted} AS attempted
 FROM servers AS s
-CROSS JOIN LATERAL
+LEFT JOIN LATERAL
 (
     SELECT collection_time
     FROM v_collection_log
     WHERE server_id = s.server_id
-    AND   {CollectionCycleRow.NotCycleRowSql}
+    AND   {CollectionRunSql.SuccessfulCollectorRun}
     ORDER BY collection_time DESC
     LIMIT 1
-) AS latest
+) AS latest ON TRUE
 WHERE s.server_id <> 0";
+
+    /// <summary>The servers whose last connect failed (#7590): <c>connect_down_since</c>, the last connect error and the next retry time, from the registry the
+    /// service writes on every connect attempt. Only servers with a failed connect are returned, and a flag a newer collector row has proved stale
+    /// (<see cref="ConnectDownSinceSql.Healed"/>, #8464) does not count as one. A store older than the rung that adds the
+    /// columns (the undefined column error) answers an empty map, so the dots band as they did before it.</summary>
+    public const string ServerConnectDownSql =
+        "SELECT x.server_id, x.connect_down_since, x.last_connect_error, x.next_connect_attempt FROM (SELECT s.server_id, "
+        + ConnectDownSinceSql.Healed + " AS connect_down_since, s.last_connect_error, s.next_connect_attempt FROM servers s"
+        + " WHERE s.connect_down_since IS NOT NULL AND s.server_id <> 0) AS x WHERE x.connect_down_since IS NOT NULL";
+
+    /// <summary>Reads <see cref="ServerConnectDownSql"/>, keyed by server_id.</summary>
+    public async Task<Dictionary<int, (DateTime SinceUtc, string? Error, DateTime? NextAttemptUtc)>> GetServerConnectDownAsync(CancellationToken cancellationToken = default)
+    {
+        var result = new Dictionary<int, (DateTime SinceUtc, string? Error, DateTime? NextAttemptUtc)>();
+        try
+        {
+            await using var command = _dataSource.CreateCommand(ServerConnectDownSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                result[reader.GetInt32(0)] = (DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc), reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc));
+            }
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedColumn)
+        {
+            result.Clear();
+        }
+
+        return result;
+    }
 
     /// <summary>The store's on-disk size in bytes, measured live. No parameters.
     ///
@@ -118,16 +154,31 @@ WHERE s.server_id <> 0";
     public async Task<Dictionary<int, DateTime>> GetServerFreshnessAsync(CancellationToken cancellationToken = default)
     {
         var result = new Dictionary<int, DateTime>();
+        foreach (var (serverId, state) in await GetServerCollectionStateAsync(cancellationToken))
+        {
+            if (state.LastCollectionUtc is { } last)
+            {
+                result[serverId] = last;
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>#8464: <see cref="GetServerFreshnessAsync"/>'s read with its second fact: every registered server's newest successful
+    /// collection (null when the retained log holds none) and whether any collector has run against it, a failed attempt included.
+    /// The sidebar dot and the server tab's header band from the pair, so a server tried and refused on every attempt reads Offline
+    /// and one no collector has reached reads as awaiting its first collection.</summary>
+    public async Task<Dictionary<int, (DateTime? LastCollectionUtc, bool Attempted)>> GetServerCollectionStateAsync(CancellationToken cancellationToken = default)
+    {
+        var result = new Dictionary<int, (DateTime? LastCollectionUtc, bool Attempted)>();
 
         await using var command = _dataSource.CreateCommand(ServerFreshnessSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            if (!reader.IsDBNull(1))
-            {
-                result[reader.GetInt32(0)] = reader.GetDateTime(1);
-            }
+            result[reader.GetInt32(0)] = (reader.IsDBNull(1) ? null : reader.GetDateTime(1), reader.GetBoolean(2));
         }
 
         return result;

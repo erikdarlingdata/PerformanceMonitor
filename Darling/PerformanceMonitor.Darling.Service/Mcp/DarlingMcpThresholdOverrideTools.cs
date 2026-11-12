@@ -64,7 +64,7 @@ public sealed class DarlingMcpThresholdOverrideTools
 
     internal const string PreconditionMessage =
         "The service's mcp store role has no grant on config.config_threshold_overrides. A bring-your-own store needs " +
-        "Darling/tools/provision-roles.sql re-run (it is idempotent; single-table grants only reach a store when the script " +
+        DarlingManagedRoles.ProvisionRolesScriptPath + " re-run (it is idempotent; single-table grants only reach a store when the script " +
         "runs again) as a superuser. Managed and compose stores grant it themselves on start. Call again after the script has run.";
 
     [McpServerTool(Name = "set_alert_threshold_override"), Description(
@@ -95,7 +95,7 @@ public sealed class DarlingMcpThresholdOverrideTools
         [Description("true removes the override.")] bool clear = false,
         [Description("Who made the change (writes arm). 1-64 of A-Za-z0-9._:-. Default mcp.")] string? set_by = null,
         [Description("Investigations arm only: the agent_action object (request_id, claim_id, agent_id, reason, evidence). Ignored under the writes arm.")] string? agent_action = null,
-        [Description("A server tag, by name or id, in place of server_name: the value applies to every server under the tag and the tags below it (#6926). Writes arm only; no database_name.")] string? tag = null,
+        [Description("A server tag, by name or id, in place of server_name: the value applies to every server under the tag and the tags below it. Writes arm only; no database_name.")] string? tag = null,
         StoreOwnerSource? ownerSource = null,
         CancellationToken cancellationToken = default) =>
         await SetAsync(postgres, served.Policy, new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: ownerSource?.Read()),
@@ -514,6 +514,9 @@ public sealed class DarlingMcpThresholdOverrideTools
         DarlingThresholdKeys.PgBlockingCount => s.PgBlockingCountThreshold,
         DarlingThresholdKeys.PgDeadlockCount => s.PgDeadlockCountThreshold,
         DarlingThresholdKeys.IdentityCapacityWarning => s.IdentityCapacityWarningPercent,
+        DarlingThresholdKeys.BackupOverdueHours => s.BackupOverdueThresholdHours,
+        DarlingThresholdKeys.LogBackupOverdueMinutes => s.LogBackupOverdueThresholdMinutes,
+        DarlingThresholdKeys.CheckDbOverdueHours => s.CheckDbOverdueThresholdHours,
         DarlingThresholdKeys.IdentityCapacityCritical => s.IdentityCapacityCriticalPercent,
         _ => throw new ArgumentOutOfRangeException(nameof(wire), wire, "Not a tunable threshold."),
     };

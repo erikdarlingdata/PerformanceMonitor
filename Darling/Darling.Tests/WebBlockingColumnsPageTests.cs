@@ -118,7 +118,7 @@ public sealed class WebBlockingColumnsPageTests
     public void TheDeadlockGraphDownloadsAsXdl_AndTheReportAsXml_ThroughTheSharedDownloadHelper()
     {
         var tab = Tab();
-        Assert.Contains("import { downloadText } from \"../grid-tools.js\";", tab);
+        Assert.Contains("import { downloadText } from \"../../grid-tools.js\";", tab);
         Assert.Contains("\".xdl\"", tab);
         Assert.Contains("\"blocked_process_\" + fileStamp(r.event_time) + \".xml\"", tab);
         Assert.Contains("\"deadlock_\" + fileStamp(r.deadlock_time) + \".xdl\"", tab);

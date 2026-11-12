@@ -126,14 +126,14 @@ public sealed class FinOpsIndexAnalysisViewTests
     }
 
     [Fact]
-    public void Gb_RoundsAwayFromZero_ToThreeDecimals()
+    public void Gb_RoundsAwayFromZero_ToSixDecimals()
     {
         var root = Build(new IndexCleanupAnalysisResult
         {
             DatabaseRollups = [Roll("d")],
-            Recommendations = [Rec("a", 0.0005m)],
+            Recommendations = [Rec("a", 0.0000005m)],
         });
-        Assert.Equal(0.001m, root.GetProperty("recommendations")[0].GetProperty("index_size_gb").GetDecimal());
+        Assert.Equal(0.000001m, root.GetProperty("recommendations")[0].GetProperty("index_size_gb").GetDecimal());
     }
 
     [Fact]
@@ -241,10 +241,13 @@ public sealed class FinOpsIndexAnalysisViewTests
         using var doc = JsonDocument.Parse(json);
         var message = doc.RootElement.GetProperty("message").GetString()!;
         Assert.DoesNotContain("collected for this server yet", message, StringComparison.Ordinal);
-        Assert.Contains("1 database(s) the server no longer lists", message, StringComparison.Ordinal);
+        Assert.Contains("a database this server still has", message, StringComparison.Ordinal);
+        /* #7538: the count is stated once, by the reply's databases_left_out_count and the page's strip, not again in the empty sentence. */
+        Assert.DoesNotContain("left out", message, StringComparison.Ordinal);
 
         using var named = JsonDocument.Parse(McpHelpers.WithDatabasesLeftOut(json, new[] { "GoneDb" })!);
         Assert.Equal("GoneDb", named.RootElement.GetProperty("databases_left_out")[0].GetString());
+        Assert.Equal(1, named.RootElement.GetProperty("databases_left_out_count").GetInt32());
         Assert.Contains("no longer lists them", named.RootElement.GetProperty("databases_left_out_note").GetString(), StringComparison.Ordinal);
     }
 

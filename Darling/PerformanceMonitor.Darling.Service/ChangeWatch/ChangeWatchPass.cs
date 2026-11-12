@@ -76,15 +76,38 @@ public sealed partial class ChangeWatchPass
     /// <summary>How far a watch window's own mark may lag the present: the marks move to this far behind the pass, so a row the store makes visible a little late is still read next tick (a change is recorded once under its key).</summary>
     public static readonly TimeSpan MarkSlack = TimeSpan.FromMinutes(5);
 
-    /* The baseline is the newest capture at or before the mark ($2): the first capture after the mark is diffed against it. */
-    private static readonly string ScopedConfigChangesSql = $@"
+    /* The baseline is the newest capture at or before the mark ($2): the first capture after the mark is diffed against it.
+       #6968: only the databases captured in the window ($2, $3] are read, and each one's baseline is found once, by a seek on the
+       index (newest capture of that database at or before the mark), not once per history row. The old form put a correlated
+       subquery in the WHERE of the history scan, so every row of the server's whole retained history (compressed chunks included)
+       was decompressed and paid its own baseline probe, to return no rows on the many runs where no capture falls in the window
+       (about 31,000 buffers a run on a field store). Now a run with no capture in the window reads one index range and stops. A
+       database with no capture at or before the mark has every row after it, so its baseline is the mark itself. The rows read
+       start at the oldest baseline and stop at the window's end (a later row cannot change an earlier row's LAG). */
+    private const string ScopedConfigChangesSql = @"
+WITH dbs AS (
+    SELECT DISTINCT d.database_name
+    FROM v_database_scoped_config AS d
+    WHERE d.server_id = $1 AND d.capture_time > $2 AND d.capture_time <= $3
+), base AS (
+    SELECT dbs.database_name, coalesce(bb.capture_time, $2) AS base_time
+    FROM dbs
+    LEFT JOIN LATERAL (
+        SELECT b.capture_time
+        FROM v_database_scoped_config AS b
+        WHERE b.server_id = $1 AND b.capture_time <= $2 AND b.database_name IS NOT DISTINCT FROM dbs.database_name
+        ORDER BY b.capture_time DESC
+        LIMIT 1
+    ) AS bb ON true
+)
 SELECT capture_time, database_name, configuration_name, value, prev_value, value_for_secondary, prev_secondary
 FROM (
-    SELECT capture_time, database_name, configuration_name, value, value_for_secondary,
-           LAG(value) OVER w AS prev_value, LAG(value_for_secondary) OVER w AS prev_secondary, row_number() OVER w AS rn
-    FROM v_database_scoped_config
-    WHERE server_id = $1 AND {PerformanceMonitor.Darling.Service.Mcp.DarlingConfigHistoryReader.BaselineBound("v_database_scoped_config", "$1", "$2", perColumn: "database_name")}
-    WINDOW w AS (PARTITION BY database_name, configuration_name ORDER BY capture_time)
+    SELECT c.capture_time, c.database_name, c.configuration_name, c.value, c.value_for_secondary,
+           LAG(c.value) OVER w AS prev_value, LAG(c.value_for_secondary) OVER w AS prev_secondary, row_number() OVER w AS rn
+    FROM v_database_scoped_config AS c
+    JOIN base ON c.database_name IS NOT DISTINCT FROM base.database_name AND c.capture_time >= base.base_time
+    WHERE c.server_id = $1 AND c.capture_time <= $3 AND c.capture_time >= (SELECT min(base_time) FROM base)
+    WINDOW w AS (PARTITION BY c.database_name, c.configuration_name ORDER BY c.capture_time)
 ) AS x
 WHERE rn > 1 AND capture_time > $2 AND capture_time <= $3
   AND (value IS DISTINCT FROM prev_value OR value_for_secondary IS DISTINCT FROM prev_secondary)";

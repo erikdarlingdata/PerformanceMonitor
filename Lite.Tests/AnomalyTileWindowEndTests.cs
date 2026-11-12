@@ -111,7 +111,7 @@ public class AnomalyTileWindowEndTests : IClassFixture<SharedDuckDbFixture>, IDi
     private async Task SeedSlowCollectionAsync(DateTime at)
     {
         for (var file = 0; file < 4; file++)
-            await SeedFileIoAsync(at, $"AppDb_data{file}", stallReadMs: 400, reads: 10);
+            await SeedFileIoAsync(at, $"AppDb_data{file}", stallReadMs: 4000, reads: 100); // #7417: 4 x 100 reads clears the 250-read volume floor
     }
 
     private async Task<List<Fact>> DetectAsync() =>

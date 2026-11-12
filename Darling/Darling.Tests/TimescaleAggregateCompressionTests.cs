@@ -58,9 +58,9 @@ public sealed class TimescaleAggregateCompressionTests
 
         /* The ruling's numbers, as the values the expressions evaluate to today. */
         Assert.Equal(TimeSpan.FromDays(2), TimescaleSupport.HourlyAggregateCompressAfterSpan);
-        Assert.Equal(TimeSpan.FromDays(4), TimescaleSupport.DailyAggregateCompressAfterSpan);
+        Assert.Equal(TimeSpan.FromDays(5), TimescaleSupport.DailyAggregateCompressAfterSpan);
         Assert.Equal("2 days", TimescaleSupport.HourlyAggregateCompressAfter);
-        Assert.Equal("4 days", TimescaleSupport.DailyAggregateCompressAfter);
+        Assert.Equal("5 days", TimescaleSupport.DailyAggregateCompressAfter);
 
         /* The condition itself, per tier, with the tier's own bucket width. */
         Assert.True(
@@ -228,7 +228,7 @@ public sealed class TimescaleAggregateCompressionTests
         Assert.Equal(
             TimescaleSupport.HeaviestRefreshStartMinute + TimescaleSupport.HeaviestRefreshWindowMinutes - 1,
             minute);
-        Assert.Equal(35, minute);
+        Assert.Equal(34, minute);
 
         /* No hourly refresh starts on it, no raw compression policy starts on it, and it is the minute
            immediately before the raw compression band opens — the tiling identity from the daily band's side. */
@@ -243,7 +243,7 @@ public sealed class TimescaleAggregateCompressionTests
            margin. */
         var secondsPastHeaviest = (minute - TimescaleSupport.HeaviestRefreshStartMinute) * 60;
         /* #5329: (35 - 17) * 60 = 1,080 s past the heaviest start (1,200 s at :15 before the two io hourlies),
-           184 s over the 896 s ceiling (was 304 s). */
+           184 s over the 896 s ceiling (was 304 s). #8053: (34 - 16) * 60, the same 1,080 s. */
         Assert.Equal(1080, secondsPastHeaviest);
         Assert.True(
             secondsPastHeaviest > TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds,
@@ -251,7 +251,8 @@ public sealed class TimescaleAggregateCompressionTests
             + $"{TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds}s recorded ceiling — a once-a-day rewrite would "
             + "start inside the heaviest refresh's tail");
 
-        /* And past every light refresh's ceiling, measured from each one's own start. */
+        /* And past every light refresh's ceiling, measured forward round the hour from each one's own start: the
+           corrected Query Store hourly is on the hour's tail (#8053), so its distance crosses the hour boundary. */
         foreach (var view in TimescaleSupport.HourlyRefreshPhaseOrder)
         {
             if (string.Equals(view, TimescaleSupport.HeaviestHourlyRefreshView, StringComparison.Ordinal))
@@ -259,15 +260,18 @@ public sealed class TimescaleAggregateCompressionTests
                 continue;
             }
 
-            var secondsPast = (minute - TimescaleSupport.RefreshPhaseMinutesFor(view)) * 60;
+            var secondsPast = ((minute - TimescaleSupport.RefreshPhaseMinutesFor(view) + TimescaleSupport.MinutesInHourlyCadence) % TimescaleSupport.MinutesInHourlyCadence) * 60;
             Assert.True(
                 secondsPast > TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds,
                 $"{view}'s refresh could still be running at :{minute:00} against its {TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds}s ceiling");
         }
 
         /* The run has the rest of the hour to the next refresh START — the relation-agnostic clearance the
-           raw band's watch is measured in, so the two bands are stated in one unit. */
-        Assert.Equal(TimescaleSupport.MinutesInHourlyCadence - minute, TimescaleSupport.CompressionMinuteClearanceMinutes(minute));
+           raw band's watch is measured in, so the two bands are stated in one unit. The next start is the hour's
+           tail, where the hourly built from another hourly runs (#8053), one minute before the hour. */
+        Assert.Equal(
+            TimescaleSupport.MinutesInHourlyCadence - HourlyRefreshLineage.HierarchicalPairs().Count - minute,
+            TimescaleSupport.CompressionMinuteClearanceMinutes(minute));
         Assert.Equal(25, TimescaleSupport.CompressionMinuteClearanceMinutes(minute));
 
         /* THE HOURS: one per aggregate in registry order from hour 1, distinct, never the midnight hour, all
@@ -321,7 +325,7 @@ public sealed class TimescaleAggregateCompressionTests
             var sql = TimescaleSupport.AddAggregateCompressionPolicySql(view, night);
 
             Assert.StartsWith($"SELECT add_compression_policy('collect.{view}', ", sql, StringComparison.Ordinal);
-            Assert.Contains($"compress_after => INTERVAL '{(hourly ? "2 days" : view == TimescaleSupport.QueryStoreStatsDayGrainDailyView ? "5 days" : "4 days")}'", sql, StringComparison.Ordinal);
+            Assert.Contains($"compress_after => INTERVAL '{(hourly ? "2 days" : view == TimescaleSupport.QueryStoreStatsDayGrainDailyView ? "6 days" : "5 days")}'", sql, StringComparison.Ordinal);
             Assert.Contains("schedule_interval => INTERVAL '1 day'", sql, StringComparison.Ordinal);
             Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
             Assert.Contains(
@@ -359,7 +363,7 @@ public sealed class TimescaleAggregateCompressionTests
         var state = TimescaleSupport.AggregateCompressionStateSql;
         Assert.Contains("j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name", state, StringComparison.Ordinal);
         Assert.Contains("j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name", state, StringComparison.Ordinal);
-        Assert.Contains("WHERE ca.view_schema = 'collect'", state, StringComparison.Ordinal);
+        Assert.Contains("WHERE c.view_schema = 'collect'", state, StringComparison.Ordinal);
         Assert.DoesNotContain("hypertable_size", state, StringComparison.Ordinal);
         Assert.DoesNotContain("timescaledb_information.chunks", state, StringComparison.Ordinal);
 
@@ -668,6 +672,42 @@ public sealed class TimescaleAggregateCompressionTests
             Assert.Contains("0 changed this start", widthLog.Joined, StringComparison.Ordinal);
             Assert.DoesNotContain("materialization now chunks at", widthLog.Joined, StringComparison.Ordinal);
             Assert.Equal(widths, await MaterializationChunkIntervalSecondsAsync(connection, ct));
+
+            /* The state read itself (#7016): one row per aggregate in collect, never a duplicate from the
+               two-identity job join, and every target's row carries its converged job. */
+            var stateRows = new List<(string View, bool Enabled, int? JobId, long? CompressAfter, long? Schedule, bool? Fixed, int? Hour, int? Minute)>();
+            await using (var stateCommand = new NpgsqlCommand(TimescaleSupport.AggregateCompressionStateSql, connection))
+            await using (var stateReader = await stateCommand.ExecuteReaderAsync(ct))
+            {
+                while (await stateReader.ReadAsync(ct))
+                {
+                    stateRows.Add((
+                        stateReader.GetString(0),
+                        stateReader.GetBoolean(1),
+                        stateReader.IsDBNull(2) ? null : stateReader.GetInt32(2),
+                        stateReader.IsDBNull(3) ? null : stateReader.GetInt64(3),
+                        stateReader.IsDBNull(4) ? null : stateReader.GetInt64(4),
+                        stateReader.IsDBNull(5) ? null : stateReader.GetBoolean(5),
+                        stateReader.IsDBNull(6) ? null : stateReader.GetInt32(6),
+                        stateReader.IsDBNull(7) ? null : stateReader.GetInt32(7)));
+                }
+            }
+
+            Assert.Equal(stateRows.Count, stateRows.Select(r => r.View).Distinct(StringComparer.Ordinal).Count());
+            Assert.Equal(
+                (await ExistingCaggsAsync(connection, ct)).Length,
+                stateRows.Count);
+            foreach (var (_, view, _) in TimescaleSupport.AggregateCompressionTargets)
+            {
+                var row = Assert.Single(stateRows, r => r.View == view);
+                Assert.True(row.Enabled);
+                Assert.NotNull(row.JobId);
+                Assert.Equal((long?)TimescaleSupport.AggregateCompressAfterSpanFor(view).TotalSeconds, row.CompressAfter);
+                Assert.Equal((long?)TimescaleSupport.AggregateCompressionScheduleSpan.TotalSeconds, row.Schedule);
+                Assert.True(row.Fixed);
+                Assert.NotNull(row.Hour);
+                Assert.NotNull(row.Minute);
+            }
 
             /* Every aggregate: compression enabled, exactly one compression job, at its tier's window, on the daily
                cadence, on a fixed schedule at its hour and the band's minute. Read back from the catalog, not from

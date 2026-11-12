@@ -42,7 +42,9 @@ namespace PerformanceMonitor.Analysis;
 ///
 /// <para>Serialized as the target's <c>forcing_state</c> so the raw facts behind every blocker are on the
 /// wire beside the blocker names — an agent that disputes a verdict can see what it was built from.
-/// snake_case by attribute for the same reason <see cref="StructuredRemediation"/> is.</para>
+/// snake_case by attribute for the same reason <see cref="StructuredRemediation"/> is. #7417: that covers the two derived
+/// members too (<c>is_empty</c>, <c>apc_is_on</c>). The MCP serializer has no naming policy, so a member without the
+/// attribute went out in C# casing (<c>IsEmpty</c>, <c>ApcIsOn</c>).</para>
 /// </summary>
 public sealed record ForcePlanTargetState(
     /* ---- query_store_stats: the TARGET plan's newest row inside the lookback ---- */
@@ -143,12 +145,14 @@ public sealed record ForcePlanTargetState(
 
     /// <summary>Nothing observed on any of the three halves — the state read ran and found no row for
     /// this target inside <see cref="Lookback"/>.</summary>
+    [JsonPropertyName("is_empty")]
     public bool IsEmpty =>
         PlanObservedAtUtc is null && OtherForcedPlanObservedAtUtc is null &&
         ApcObservedAtUtc is null && EnablementObservedAtUtc is null;
 
     /// <summary>FORCE_LAST_GOOD_PLAN is ON for this target's database (case-insensitive on the stored
     /// spelling; false when unknown — an unknown enablement never changes the verb).</summary>
+    [JsonPropertyName("apc_is_on")]
     public bool ApcIsOn =>
         string.Equals(ForceLastGoodPlanActualState, EnablementOn, StringComparison.OrdinalIgnoreCase);
 }

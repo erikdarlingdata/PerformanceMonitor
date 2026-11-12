@@ -37,7 +37,7 @@ public sealed class McpDefaultTraceTools
             requestedStart, windowEnd, "default_trace_events", emptyAnswer: emptyAnswer);
     }
 
-    [McpServerTool(Name = "get_default_trace_events"), Description("Gets significant server events from the built-in Default Trace: file auto-grow/shrink stalls over 1 second, ErrorLog writes at severity 16+ (a null severity also counts), schema DDL, security audits, and Server Memory Change, each tagged with category, over an event_time window ending at as_of, newest first. Config-change events are excluded: use get_server_config_changes / get_database_config_changes / get_trace_flag_changes instead. Empty: nothing significant in the window, or nothing collected in it; not_collected means this engine has no default trace (Azure SQL Database). <<GUIDE>> Gets significant server events captured by the built-in Default Trace (stored, read-only): data/log file auto-grow/shrink STALLS (over 1 second), severe ErrorLog writes (severity >= 16), schema DDL (object create/alter/delete), security audits (audit-change / DBCC / alter-trace), and Server Memory Change. Each event is tagged with a category. event_time is UTC, the same frame as as_of (the Default Trace stores its StartTime in the monitored server's local clock; this read de-skews it). NOTE: configuration-change events are excluded here — use get_server_config_changes / get_database_config_changes / get_trace_flag_changes for those. Not available on Azure SQL Database (no default trace there).")]
+    [McpServerTool(Name = "get_default_trace_events"), Description("Gets significant server events from the built-in Default Trace: file auto-grow/shrink stalls over 1 second, ErrorLog writes at severity 16+ (a null severity also counts), schema DDL, security audits, and Server Memory Change, each tagged with category, over an event_time window ending at as_of, newest first. Config-change events are excluded: use get_server_config_changes / get_database_config_changes / get_trace_flag_changes instead. Empty: nothing significant in the window, or nothing collected in it; not_collected means this engine has no default trace (Azure SQL Database). <<GUIDE>> Gets significant server events captured by the built-in Default Trace (stored, read-only): data/log file auto-grow/shrink STALLS (over 1 second), severe ErrorLog writes (severity >= 16), schema DDL (object create/alter/delete), security audits (audit-change / DBCC / alter-trace), and Server Memory Change. Each event is tagged with a category. event_time is UTC, the same frame as as_of (the Default Trace stores its StartTime in the monitored server's local clock; this read de-skews it). NOTE: configuration-change events are excluded here, use get_server_config_changes / get_database_config_changes / get_trace_flag_changes for those. Not available on Azure SQL Database (no default trace there).")]
     public static async Task<string> GetDefaultTraceEvents(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -67,10 +67,10 @@ public sealed class McpDefaultTraceTools
                 resolved.ServerId, hours_back, databaseNames: database is null ? null : new[] { database }, asOfUtc: windowEnd, serverClock: serverClock);
             if (rows.Count == 0)
                 return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "default_trace_events", awsRdsKind: AwsRdsKind.None), database)
-                    ?? McpHelpers.StatusForDatabase("empty",
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.StatusForDatabase("empty",
                         $"No significant default trace events found in the requested time range{McpDatabaseSelection.ForChosen(database is null ? null : new[] { database })}.",
                         database,
-                        (await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd, serverClock, emptyAnswer: true)).AsHints());
+                        (await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd, serverClock, emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd, serverClock);
 
@@ -85,6 +85,13 @@ public sealed class McpDefaultTraceTools
                 truncation_note = notice.TruncationNote,
                 database_name = database,
                 total_events = rows.Count,
+                /* #7729: how many of the window's events each name holds, from every row the reader returned (it filters in SQL, before the limit, so
+                   not the page), as Darling's twin does, so one noisy event cannot hide the others and a page that stops at the limit still says what it left out. */
+                by_event = rows
+                    .GroupBy(r => r.EventName)
+                    .Select(g => new { event_name = g.Key, count = g.Count() })
+                    .OrderByDescending(g => g.count).ThenBy(g => g.event_name, StringComparer.Ordinal)
+                    .ToList(),
                 shown = Math.Min(rows.Count, limit),
                 events = rows.Take(limit).Select(r => new
                 {

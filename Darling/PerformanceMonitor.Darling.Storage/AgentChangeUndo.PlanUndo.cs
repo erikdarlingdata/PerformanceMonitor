@@ -18,8 +18,8 @@ using PerformanceMonitor.Common;
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>What a plan force or unforce did, read from its journal rows (#5632, step 9): the query and plan, the state the agent read before
-/// it wrote (<see cref="BeforeForcedPlanId"/> is the plan that was forced then, how it was forced is <see cref="BeforeForcingType"/>),
-/// and how the call ended.</summary>
+/// it wrote (<see cref="BeforeForcedPlanId"/> is the plan that was forced then, how it was forced is <see cref="BeforeForcingType"/>, and
+/// <see cref="BeforeQueryHash"/> is the query's <c>query_hash</c> as <c>0x</c> text, null on an image journaled without one), and how the call ended.</summary>
 public sealed record PlanChangeFacts(
     long CalledId,
     Guid RequestId,
@@ -33,7 +33,8 @@ public sealed record PlanChangeFacts(
     string? BeforeForcingType,
     AgentChangeResult Result,
     JsonNode? Target,
-    JsonNode? Guide = null)
+    JsonNode? Guide = null,
+    string? BeforeQueryHash = null)
 {
     /// <summary>True for <c>plan_force</c>: the undo puts back what was forced before, or removes the force.</summary>
     public bool IsForce => Kind == AgentChangeKinds.PlanForce;
@@ -248,7 +249,7 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
             return (null, AgentUndoResult.Refused("not_undoable", "This change's query, plan or database was not recorded, so it cannot be undone from here."));
 
         return (new PlanChangeFacts(calledId, request, server, serverName ?? ("server " + server.ToString(CultureInfo.InvariantCulture)), kind, database, query, plan,
-            Number(forcedBefore?["plan_id"]), Text(forcedBefore?["forcing_type"]), result, target?.DeepClone()), null);
+            Number(forcedBefore?["plan_id"]), Text(forcedBefore?["forcing_type"]), result, target?.DeepClone(), BeforeQueryHash: Text(before?["query_hash"])), null);
     }
 
     /// <summary>One person's undo in progress: the advisory lock is held until <see cref="CommitAsync"/> or disposal.</summary>

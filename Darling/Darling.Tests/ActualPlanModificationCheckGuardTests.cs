@@ -59,7 +59,9 @@ public sealed class ActualPlanModificationCheckGuardTests
     /// </summary>
     private static readonly Dictionary<string, string[]> s_serviceHandlers = new(StringComparer.Ordinal)
     {
-        ["Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs"] = new[] { "RunExecuteActualPlanAsync", "ExecuteActualPlanAsync" },
+        /* #7024: the handler and the nested command host that calls it now sit in different DarlingWorker.<Area>.cs files. */
+        ["Darling/PerformanceMonitor.Darling.Service/DarlingWorker.Targets.cs"] = new[] { "RunExecuteActualPlanAsync" },
+        ["Darling/PerformanceMonitor.Darling.Service/DarlingWorker.Passes.cs"] = new[] { "ExecuteActualPlanAsync" },
         ["Darling/PerformanceMonitor.Darling.Service/DarlingCommandExecutor.cs"] = new[] { "RunAsync", "ResolvePlan" },
     };
 
@@ -110,7 +112,7 @@ public sealed class ActualPlanModificationCheckGuardTests
     [InlineData(ServerTabPlans, "GetActualPlan_Click")]
     public void EveryGate_ChecksThenPromptsFromTheCheckResult_ThenAsksBeforeItRuns(string relative, string method)
     {
-        var body = MethodBody(StripComments(File.ReadAllText(Path.Combine(RepoRoot(), relative))), method);
+        var body = MethodBody(StripComments(RepoFile.ReadRepoFile(Path.Combine(RepoRoot(), relative))), method);
 
         var detect = Regex.Match(body, @"var\s+(\w+)\s*=\s*QueryModificationDetector\.Detect\(", RegexOptions.CultureInvariant);
         Assert.True(detect.Success, $"{relative} {method} never calls QueryModificationDetector.Detect into a variable");
@@ -134,6 +136,13 @@ public sealed class ActualPlanModificationCheckGuardTests
         Assert.True(run.Success && run.Index > answer.Index, $"{relative} {method}: the query runs before the answer is tested");
     }
 
+    /// <summary>
+    /// <c>if (!Confirm(..., info[, more arguments]))</c>: the Detect result must be passed to Confirm and the answer tested.
+    /// Arguments after the result (the database count, #7695) are allowed. A call that never passes the result still fails.
+    /// </summary>
+    private static string ConfirmAnswerPattern(string info) =>
+        @"if\s*\(\s*!Confirm\([^;]*\b" + Regex.Escape(info) + @"(?:\s*,[^;]*)?\s*\)\s*\)";
+
     /// <summary>The viewer's gate: Detect, then its Confirm helper (given the check result), then the answer test, then the run.</summary>
     [Fact]
     public void TheViewerGate_ChecksThenConfirmsWithTheCheckResult_BeforeItQueuesTheRun()
@@ -145,7 +154,7 @@ public sealed class ActualPlanModificationCheckGuardTests
         Assert.True(detect.Success, "RequestActualPlanAsync never calls QueryModificationDetector.Detect into a variable");
         var info = detect.Groups[1].Value;
 
-        var confirm = Regex.Match(body, @"if\s*\(\s*!Confirm\([^;]*\b" + Regex.Escape(info) + @"\s*\)\s*\)", RegexOptions.CultureInvariant);
+        var confirm = Regex.Match(body, ConfirmAnswerPattern(info), RegexOptions.CultureInvariant);
         var run = body.IndexOf(".ExecuteActualPlanAsync(", StringComparison.Ordinal);
         Assert.True(confirm.Success && confirm.Index > detect.Index,
             $"RequestActualPlanAsync does not pass the Detect result '{info}' to Confirm before running");
@@ -328,7 +337,7 @@ public sealed class ActualPlanModificationCheckGuardTests
         }
         else if (confirms == 1 && boxes == 0)
         {
-            var answer = Regex.Match(member, @"if\s*\(\s*!Confirm\([^;]*\b" + Regex.Escape(info) + @"\s*\)\s*\)", RegexOptions.CultureInvariant);
+            var answer = Regex.Match(member, ConfirmAnswerPattern(info), RegexOptions.CultureInvariant);
             if (!answer.Success || answer.Index < detect.Index)
             {
                 problems.Add($"does not pass the Detect result '{info}' to its one Confirm call and test the answer");
@@ -545,7 +554,7 @@ public sealed class ActualPlanModificationCheckGuardTests
 
     /// <summary>(e) In the service's two handler files only the named handler methods may run the executor or name the command.</summary>
     [Theory]
-    [InlineData("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "RunExecuteActualPlanAsync")]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.Targets.cs", "RunExecuteActualPlanAsync")]
     [InlineData("Darling/PerformanceMonitor.Darling.Service/DarlingCommandExecutor.cs", "RunAsync")]
     public void TheCensus_AllowsOnlyTheNamedHandlerMethodsInTheServiceFiles(string relative, string handler)
     {

@@ -22,8 +22,6 @@ public partial class ViewerServerTab
     /// the session lives (<see cref="LongQueryCompletionsCollector.SessionScopeSentence"/>). On Azure SQL Database the
     /// session is per monitored database, so the banner must not say it is on the server.
     /// </summary>
-    internal const string LongQueriesSwitchLocation = "Settings → Collection Schedule → Edit Collector Schedules…";
-
     internal static string LongQueriesDisabledText(int engineEdition) =>
         "The long-query completion trace is OFF for this server. It is opt-in because a completion trace adds overhead "
         + "on busy servers. Turn it on in Settings → Collection Schedule → Edit Collector Schedules…, then tick "
@@ -56,9 +54,51 @@ public partial class ViewerServerTab
         if (await TraceEnabledOrNullAsync(check) is bool traceEnabled)
         {
             LongQueriesDisabledWarning.Visibility = traceEnabled ? Visibility.Collapsed : Visibility.Visible;
-            /* Release walk V12a: the empty grid says why it is empty (the trace is opt-in and off), not the generic "No data". */
-            PerformanceMonitor.Ui.EmptyState.SetText(LongQueryCompletionsGrid,
-                PerformanceMonitor.Ui.LongQueriesEmptyText.Text(traceEnabled, LongQueriesSwitchLocation));
+            /* The banner above the grid says the trace is off and where its switch is, so the grid's own empty text does not say it
+               again (#8307): with the trace on or off it reads as the grid of a trace with nothing in the window. */
+            PerformanceMonitor.Ui.EmptyState.SetText(LongQueryCompletionsGrid, PerformanceMonitor.Ui.LongQueriesEmptyText.Text(traceEnabled: true));
+        }
+    }
+
+    /// <summary>#7573: whether the Active Queries grid and strip include the monitor's own statements (off by default, the same switch as Long Query Completions).</summary>
+    private bool ActiveQueriesIncludeMonitor => ActiveQueriesIncludeMonitorCheckBox.IsChecked == true;
+
+    private async void ActiveQueriesIncludeMonitorCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        try
+        {
+            await RefreshActiveInnerTabAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LatestSnapshotIndicator.Text = "Could not read active queries: " + ex.Message;
+        }
+    }
+
+    /// <summary>
+    /// #7416 item 11: the grid leaves the monitor's own statements out until this box is ticked (on an idle server every
+    /// long completion is the monitor's). A change reads the grid again; before the tab has loaded there is nothing to redo.
+    /// </summary>
+    private async void LongQueriesIncludeMonitorCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        try
+        {
+            await LoadLongQueriesAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LongQueriesDisabledWarning.Text = "Could not read long queries: " + ex.Message;
+            LongQueriesDisabledWarning.Visibility = Visibility.Visible;
         }
     }
 
@@ -80,7 +120,7 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         var tagFilter = await CurrentQueryTagFilterAsync();
         var dataStartTask = Timed(timer, "data start", _dataService.GetLongQueriesDataStartAsync(_server.ServerId, startUtc, endUtc));
-        var dataReadTask = Timed(timer, "grid read", _dataService.GetRecentLongQueryCompletionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter));
+        var dataReadTask = Timed(timer, "grid read", _dataService.GetRecentLongQueryCompletionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter, includeMonitor: LongQueriesIncludeMonitorCheckBox.IsChecked == true));
         try
         {
             await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Long Queries");

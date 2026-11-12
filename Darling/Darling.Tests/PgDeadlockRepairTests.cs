@@ -404,6 +404,6 @@ public sealed class PgDeadlockRepairTests
         }
 
         Assert.NotNull(dir);
-        return System.IO.File.ReadAllText(System.IO.Path.Combine(dir!, relativePath));
+        return RepoFile.ReadRepoFile(System.IO.Path.Combine(dir!, relativePath));
     }
 }

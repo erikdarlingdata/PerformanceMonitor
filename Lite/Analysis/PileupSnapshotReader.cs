@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -15,6 +16,7 @@ using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Analysis;
 
@@ -46,18 +48,26 @@ public class PileupSnapshotReader
 
     private readonly DuckDbInitializer _duckDb;
     private readonly ILogger? _logger;
+    private readonly int _rowCap;
 
-    public PileupSnapshotReader(DuckDbInitializer duckDb, ILogger? logger = null)
+    public PileupSnapshotReader(DuckDbInitializer duckDb, ILogger? logger = null, int rowCap = SameStatementPileupDetector.WindowRowCap)
     {
         _duckDb = duckDb;
         _logger = logger;
+        _rowCap = rowCap;
     }
 
     /// <summary>
     /// The evaluation window's rows, newest first, or an empty list on a read fault — the pileup
     /// sweep is a per-collection best-effort evaluation; a failed read costs one log line and this
-    /// cycle, never the collection loop. The LIMIT is a tripwire against a misbehaving snapshot,
-    /// not a working cap (the window is ~50–150 rows at the one-minute default cadence).
+    /// cycle, never the collection loop. The row cap (<see cref="SameStatementPileupDetector.WindowRowCap"/>,
+    /// the one Darling's reader binds) is a tripwire against a runaway session count, not a working bound. The
+    /// read binds one row more than the cap, so more than cap rows means the cap cut the window, and exactly
+    /// cap rows is a whole window that stands. A cut short of the baseline floor the finding would state
+    /// returns the empty list too, with one log line, rather than hand the detector a baseline shorter than the
+    /// one its finding describes; a cut past the floor drops the extra row (#8157). The trip is read off the
+    /// rows the read returned, the same way Darling's reader reads it: the read delegate below can run twice
+    /// (#7256), so it keeps no state outside its return value.
     /// </summary>
     public async Task<List<SameStatementPileupDetector.SnapshotRow>> ReadWindowAsync(
         int serverId, DateTime windowFloorUtc, CancellationToken cancellationToken)
@@ -65,12 +75,41 @@ public class PileupSnapshotReader
         var rows = new List<SameStatementPileupDetector.SnapshotRow>();
         try
         {
+            /* #7256: this read runs on every collection with a window of minutes. It reads the hot table alone when the Parquet
+               archive of query_snapshots holds nothing that new, instead of opening every archive file. */
+            rows.AddRange(await new LocalDataService(_duckDb).ReadWindowSkippingEmptyArchiveAsync(
+                "query_snapshots", "collection_time", windowFloorUtc, ReadAsync, cancellationToken));
+
+            if (rows.Count > _rowCap)
+            {
+                /* #8157: the read binds one row more than the cap, so more than cap rows means the cap cut the window; exactly
+                   cap rows is a whole window and stands. */
+                if (!SameStatementPileupDetector.ReachesBaselineFloor(rows))
+                {
+                    /* The cut landed short of the baseline floor the finding would state. The detector would describe a
+                       baseline it never read, so this sweep evaluates nothing; the next sweep re-reads. */
+                    _logger?.LogWarning(
+                        "[PileupSnapshotReader] pileup window read for server {ServerId} filled its {RowCap}-row cap and reached back only to {OldestUtc:u}, short of the {Minutes}-minute baseline the finding would state: this sweep's evaluation is skipped",
+                        serverId, _rowCap, rows.Min(r => r.CollectionTime), SameStatementPileupDetector.BaselineLookbackMinutes);
+                    rows.Clear();
+                }
+                else
+                {
+                    /* The extra row, the oldest, sits past the floor, and every baseline instant sorts before it, so the first
+                       cap rows hold the whole baseline. The detector gets at most the cap. */
+                    rows.RemoveRange(_rowCap, rows.Count - _rowCap);
+                }
+            }
+
+            async Task<List<SameStatementPileupDetector.SnapshotRow>> ReadAsync(string relation)
+            {
+            var window = new List<SameStatementPileupDetector.SnapshotRow>();
             using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(cancellationToken);
 
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
+            cmd.CommandText = $@"
 SELECT collection_time,
        session_id,
        query_hash,
@@ -88,16 +127,19 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   session_id > 50
 AND   COALESCE(is_cdc_capture, FALSE) = FALSE
+AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
 ORDER BY collection_time DESC
-LIMIT 5000";
+LIMIT $3";
+            cmd.CommandText = cmd.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = windowFloorUtc });
+            cmd.Parameters.Add(new DuckDBParameter { Value = _rowCap + 1 });
 
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
                 var rawText = reader.IsDBNull(3) ? null : reader.GetString(3);
-                rows.Add(new SameStatementPileupDetector.SnapshotRow(
+                window.Add(new SameStatementPileupDetector.SnapshotRow(
                     CollectionTime: reader.GetDateTime(0),
                     SessionId: reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
                     QueryHash: reader.IsDBNull(2) ? null : reader.GetString(2),
@@ -114,6 +156,9 @@ LIMIT 5000";
                     PhysicalReads: reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
                     PreviewText: McpHelpers.StatementPreview(rawText, StatementTextCharacters)));
             }
+
+            return window;
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -123,7 +168,7 @@ LIMIT 5000";
         catch (Exception ex)
         {
             _logger?.LogWarning(
-                "[PileupSnapshotReader] pileup window read failed for server {ServerId} — this cycle's evaluation is skipped, the next cycle re-reads: {Message}",
+                "[PileupSnapshotReader] pileup window read failed for server {ServerId}, this cycle's evaluation is skipped, the next cycle re-reads: {Message}",
                 serverId, ex.Message);
             rows.Clear();
         }

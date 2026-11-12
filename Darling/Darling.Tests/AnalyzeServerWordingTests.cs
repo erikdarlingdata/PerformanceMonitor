@@ -95,4 +95,31 @@ public sealed class AnalyzeServerWordingTests
         Assert.Null(RecurrenceLabeler.TryReadLabel(setting.StoryText));
         Assert.Equal(3, RecurrenceLabeler.TryReadLabel(series.StoryText)!.RecurrenceWeeks);
     }
+
+    [Fact]
+    public void AFreeSpaceStoryAndASettingsChainAreNotRecurring_ButAWaitBurstThatFiredTheSameWeeksIs()
+    {
+        var slot = new DateTime(2026, 10, 19, 12, 0, 0);
+        PriorOccurrence Prior(string hash, int weeksAgo) => new(hash, "X", slot.AddDays(-7 * weeksAgo), null);
+
+        var disk = StoryFor("DISK_SPACE", "h-disk");
+        var chain = StoryFor("CONFIG_PG_SHARED_BUFFERS", "h-chain");
+        chain.Path = ["CONFIG_PG_SHARED_BUFFERS", "PG_WAIT_IO"];
+        var burst = StoryFor("PG_WAIT_IO", "h-burst");
+        var facts = new List<Fact>
+        {
+            new() { Source = "disk", Key = "DISK_SPACE", Value = 1 },
+            new() { Source = PgTargetSources.ConfigSource, Key = "CONFIG_PG_SHARED_BUFFERS", Value = 1 },
+            new() { Source = PgTargetSources.WaitsSource, Key = "PG_WAIT_IO", Value = 1 },
+        };
+        var prior = new PriorOccurrenceRead(
+            0, slot.AddMinutes(37),
+            [Prior("h-disk", 1), Prior("h-disk", 2), Prior("h-chain", 1), Prior("h-chain", 2), Prior("h-burst", 1), Prior("h-burst", 2)]);
+
+        RecurrenceLabeler.Label([disk, chain, burst], facts, prior);
+
+        Assert.Null(RecurrenceLabeler.TryReadLabel(disk.StoryText));
+        Assert.Null(RecurrenceLabeler.TryReadLabel(chain.StoryText));
+        Assert.Equal(3, RecurrenceLabeler.TryReadLabel(burst.StoryText)!.RecurrenceWeeks);
+    }
 }

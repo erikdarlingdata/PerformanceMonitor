@@ -40,7 +40,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpDefaultTraceTools
 {
-    [McpServerTool(Name = "get_default_trace_events"), Description("Gets significant server events from the built-in Default Trace: file auto-grow/shrink stalls over 1 second, ErrorLog writes at severity 16+ (a null severity also counts), schema DDL, security audits, and Server Memory Change, each tagged with category, over an event_time window ending at as_of, newest first. Config-change events are excluded: use get_server_config_changes / get_database_config_changes / get_trace_flag_changes instead. Empty: nothing significant in the window, or nothing collected in it; not_collected means this engine has no default trace (Azure SQL Database). <<GUIDE>> Gets significant server events captured by the built-in Default Trace (stored, read-only): data/log file auto-grow/shrink STALLS (over 1 second), severe ErrorLog writes (severity >= 16), schema DDL (object create/alter/delete), security audits (audit-change / DBCC / alter-trace), and Server Memory Change. Each event is tagged with a category. event_time is UTC here, the same frame as this tool's own as_of, so it lines up directly against get_collection_log's collection_time and list_servers' last_collection (the Default Trace stores its StartTime in the monitored server's local clock; this read de-skews it). NOTE: configuration-change events are intentionally excluded here to avoid double-counting — use get_server_config_changes / get_database_config_changes / get_trace_flag_changes for those. Not available on Azure SQL Database (no default trace there).")]
+    [McpServerTool(Name = "get_default_trace_events"), Description("Gets significant server events from the built-in Default Trace: file auto-grow/shrink stalls over 1 second, ErrorLog writes at severity 16+ (a null severity also counts), schema DDL, security audits, and Server Memory Change, each tagged with category, over an event_time window ending at as_of, newest first. Config-change events are excluded: use get_server_config_changes / get_database_config_changes / get_trace_flag_changes instead. Empty: nothing significant in the window, or nothing collected in it; not_collected means this engine has no default trace (Azure SQL Database). <<GUIDE>> Gets significant server events captured by the built-in Default Trace (stored, read-only): data/log file auto-grow/shrink STALLS (over 1 second), severe ErrorLog writes (severity >= 16), schema DDL (object create/alter/delete), security audits (audit-change / DBCC / alter-trace), and Server Memory Change. Each event is tagged with a category. event_time is UTC here, the same frame as this tool's own as_of, so it lines up directly against get_collection_log's collection_time and list_servers' last_collection (the Default Trace stores its StartTime in the monitored server's local clock; this read de-skews it). NOTE: configuration-change events are intentionally excluded here to avoid double-counting, use get_server_config_changes / get_database_config_changes / get_trace_flag_changes for those. Not available on Azure SQL Database (no default trace there).")]
     public static Task<string> GetDefaultTraceEvents(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -115,11 +115,12 @@ public sealed class DarlingMcpDefaultTraceTools
                 windowStart, now, "default_trace_events", emptyAnswer: significant.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (significant.Count == 0)
-                return McpHelpers.StatusForDatabase(
+                /* #7167: an offline server's empty window answers unavailable, as Lite's twin does. */
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.StatusForDatabase(
                     "empty",
                     $"No significant default trace events found in the requested time range{DarlingMcpBlockingTools.ForChosenDatabases(databases)}.",
                     databases.Describe(),
-                    notice.AsHints());
+                    notice.AsHints()), cancellationToken, windowStart);
 
             var events = significant.Take(limit).Select(r =>
             {
@@ -158,6 +159,13 @@ public sealed class DarlingMcpDefaultTraceTools
                 truncation_note = notice.TruncationNote,
                 database_name = databases.Describe(),
                 total_events = significant.Count,
+                /* #7729: how many of the window's events each name holds, from every significant row (not the page), so one noisy event
+                   (143 Server Memory Change rows) cannot hide the others, and a page that stops at the limit still says what it left out. */
+                by_event = significant
+                    .GroupBy(r => r.EventName)
+                    .Select(g => new { event_name = g.Key, count = g.Count() })
+                    .OrderByDescending(g => g.count).ThenBy(g => g.event_name, StringComparer.Ordinal)
+                    .ToList(),
                 shown = events.Count,
                 events
             }, McpHelpers.JsonOptions);

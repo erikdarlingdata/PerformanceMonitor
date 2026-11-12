@@ -89,6 +89,13 @@ public sealed class InvestigationsPageTests
         Assert.Contains("SUMMARY <img src=x onerror=alert(1)>", text);
         Assert.Contains("<script>x</script>", text);
         Assert.Equal(0, picked.GetProperty("createdImgOrScript").GetInt32());
+        // #8555: an evidence item's key_numbers string that holds JSON is drawn as the object, with no second layer of escapes.
+        Assert.Contains("\"sql_cpu\": \"17.9% average, 32% peak\"", text);
+        Assert.Contains("\"path\": \"a->b\"", text);
+        Assert.DoesNotContain("\\\"sql_cpu\\\"", text);
+        Assert.DoesNotContain("u003E", text);
+        // A key_numbers string that is not JSON is drawn as plain text on its own line.
+        Assert.Contains("key_numbers: head blocker 412 s", text);
         // The journal keeps the read's order (newest first). The claim time's mapping (the claimed event, not the row) is pinned zone-independently by claimedAt below; the rendered text depends on the runner's zone, so it is not asserted.
         var journal = picked.GetProperty("journalRows").EnumerateArray().Select(Strings).ToArray();
         Assert.Equal(new[] { "reported", "claimed", "opened" }, journal.Select(r => r[1]));
@@ -106,6 +113,36 @@ public sealed class InvestigationsPageTests
         Assert.Equal(0, picked.GetProperty("closeButtons").GetInt32());
     }
 
+    /// <summary>#7700: a signed-in admin on a store with web.allowAdminWrites off gets no Close form (the service refuses it), and the
+    /// section says why; with the switch on the form is back.</summary>
+    [Fact]
+    public void WithTheSwitchOff_TheCloseForm_IsNotDrawn_AndTheSectionNamesTheSwitch()
+    {
+        var run = Run();
+        var off = run.GetProperty("writesOff");
+        Assert.Equal(0, off.GetProperty("closeInputs").GetInt32());
+        Assert.Equal(0, off.GetProperty("closeButtons").GetInt32());
+        Assert.Equal(0, off.GetProperty("signInLines").GetInt32());
+        var line = Assert.Single(Strings(off.GetProperty("offLines")));
+        Assert.Contains("set web.allowAdminWrites to true in darling.json", line, StringComparison.Ordinal);
+        Assert.Equal(1, run.GetProperty("writesOn").GetProperty("closeInputs").GetInt32());
+    }
+
+    /// <summary>#7700: the single-request view (#/investigations?request=id) says the same, for a signed-in admin and for a seat that is
+    /// not signed in (the switch comes first: signing in would not help, so the sign-in sentence is not shown).</summary>
+    [Theory]
+    [InlineData("oneWritesOff")]
+    [InlineData("oneWritesOffSignedOut")]
+    public void TheSingleRequestView_WithTheSwitchOff_NamesTheSwitch_AndDrawsNoCloseForm_AndNoSignInSentence(string phase)
+    {
+        var off = Run().GetProperty(phase);
+        Assert.Equal(0, off.GetProperty("closeInputs").GetInt32());
+        Assert.Equal(0, off.GetProperty("closeButtons").GetInt32());
+        Assert.Equal(0, off.GetProperty("signInLines").GetInt32());
+        var line = Assert.Single(Strings(off.GetProperty("offLines")));
+        Assert.Contains("set web.allowAdminWrites to true in darling.json", line, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheRebuild_KeepsTheOpenRequest_AndCloseEmptiesThePane()
     {
@@ -114,6 +151,120 @@ public sealed class InvestigationsPageTests
         Assert.True(rebuilt.GetProperty("hasDetail").GetBoolean());
         Assert.Single(rebuilt.GetProperty("reportCalls").EnumerateArray());
         Assert.Equal("", run.GetProperty("closed").GetString());
+    }
+
+    /// <summary>#7956: the poll's rebuild of the page draws the Close form again with the reason as typed so far, in one box, and a
+    /// successful close sends that reason and clears it.</summary>
+    [Fact]
+    public void TheRebuild_KeepsTheCloseReasonBeingTyped_AndASuccessfulClose_SendsAndClearsIt()
+    {
+        var run = Run();
+        var draft = run.GetProperty("draft");
+        Assert.Equal("The blocker was a one-off import", draft.GetProperty("kept").GetString());
+        Assert.Equal(1, draft.GetProperty("boxes").GetInt32());
+        var closing = run.GetProperty("closing");
+        Assert.Equal("The blocker was a one-off import", closing.GetProperty("reasonSent").GetString());
+        Assert.Equal("", closing.GetProperty("draftAfterClose").GetString());
+    }
+
+    /// <summary>#7956: a close whose PUT is still out when the poll redraws the form: the new button is disabled, a press on it sends
+    /// nothing, one PUT reaches the service, and the button is enabled again once the service has answered.</summary>
+    [Fact]
+    public void ACloseInFlight_KeepsTheRebuiltButtonDisabled_AndOnePutIsSent()
+    {
+        var closing = Run().GetProperty("closing");
+        Assert.Equal("/api/investigation-requests/11111111-1111-1111-1111-111111111111/close", closing.GetProperty("url").GetString());
+        Assert.Equal(1, closing.GetProperty("putsBeforeReply").GetInt32());
+        Assert.True(closing.GetProperty("rebuiltDisabled").GetBoolean());
+        Assert.Equal(1, closing.GetProperty("putsAfterSecondPress").GetInt32());
+        Assert.Equal(1, closing.GetProperty("putsAfterReply").GetInt32());
+        Assert.True(closing.GetProperty("buttonEnabledAfter").GetBoolean());
+    }
+
+    /// <summary>#7957: a Close under a State filter. The closed request no longer matches the filter, so the re-read's list does not hold
+    /// it, and the pane that showed it is emptied: with another request still listed, with the read answering empty, and with the read
+    /// answering no rows. One PUT goes out and the list is read again with the filter.</summary>
+    [Theory]
+    [InlineData("closedUnderFilter", "srv-third", false)]
+    [InlineData("closedLastUnderFilter", "", true)]
+    [InlineData("closedNoRowsUnderFilter", "", false)]
+    public void ACloseUnderAStateFilter_EmptiesThePane_WhenTheClosedRequestLeftTheList(string phase, string rowsLeft, bool emptyLine)
+    {
+        var closed = Run().GetProperty(phase);
+        Assert.Contains("Request on srv-old", closed.GetProperty("paneBefore").GetString());
+        Assert.Equal(1, closed.GetProperty("puts").GetInt32());
+        Assert.Equal("/api/investigation-requests/22222222-2222-2222-2222-222222222222/close", closed.GetProperty("closedUrl").GetString());
+        var read = Assert.Single(closed.GetProperty("listCalls").EnumerateArray());
+        Assert.Equal("open", read.GetProperty("state").GetString());
+        Assert.Equal(rowsLeft, string.Join(",", Strings(closed.GetProperty("rows"))));
+        Assert.Equal(emptyLine, closed.GetProperty("emptyLine").GetBoolean());
+        Assert.Equal("", closed.GetProperty("pane").GetString());
+    }
+
+    /// <summary>#8007: request A's detail read is still out when A is dropped, by a State pick and by a list re-read that no longer holds
+    /// it. The read then answers: the pane stays empty, no Close form is drawn for A, and the read was aborted when A was dropped.</summary>
+    [Theory]
+    [InlineData("droppedByFilter")]
+    [InlineData("droppedByReRead")]
+    public void ADetailReadStillOutWhenItsRequestIsDropped_IsAborted_AndDoesNotRedrawThePane(string phase)
+    {
+        var dropped = Run().GetProperty(phase);
+        Assert.Contains("Loading this request", dropped.GetProperty("paneWhileOut").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, dropped.GetProperty("detailReads").GetInt32());
+        Assert.True(Assert.Single(dropped.GetProperty("abortedBeforeAnswer").EnumerateArray()).GetBoolean(), "the detail read still out was not aborted when its request was dropped");
+        Assert.Equal("", dropped.GetProperty("pane").GetString());
+        Assert.Equal(0, dropped.GetProperty("closeButtons").GetInt32());
+    }
+
+    /// <summary>#8007: request A's detail read has answered, but the session read the pane waits on with it is still out, when a State pick
+    /// drops A. The fetch is past aborting, so only the detail ticket stops the answer: once the session read answers, the pane is still empty.</summary>
+    [Fact]
+    public void ADetailReadThatAnsweredBeforeItsRequestWasDropped_WhileTheSessionReadIsStillOut_DoesNotRedrawThePane()
+    {
+        var dropped = Run().GetProperty("droppedWhileSessionOut");
+        Assert.Equal(1, dropped.GetProperty("detailReads").GetInt32());
+        Assert.Equal(1, dropped.GetProperty("answeredBeforeDrop").GetInt32());
+        Assert.Contains("Loading this request", dropped.GetProperty("paneWhileSessionOut").GetString(), StringComparison.Ordinal);
+        Assert.Equal("", dropped.GetProperty("paneAfterDrop").GetString());
+        Assert.Equal("", dropped.GetProperty("pane").GetString());
+    }
+
+    /// <summary>#7987: request A's close is out when request B is picked and its reason typed. A's answer re-reads the list, and B's form
+    /// comes back with the reason as typed: only the closed request's own draft is dropped.</summary>
+    [Fact]
+    public void AnotherRequestsCloseSucceeding_KeepsTheReasonBeingTyped()
+    {
+        var other = Run().GetProperty("otherClose");
+        Assert.Equal("/api/investigation-requests/11111111-1111-1111-1111-111111111111/close", other.GetProperty("closedUrl").GetString());
+        Assert.Equal(1, other.GetProperty("puts").GetInt32());
+        Assert.Equal("22222222-2222-2222-2222-222222222222", other.GetProperty("paneRequest").GetString());
+        Assert.Equal("The CPU spike was one report run by hand", other.GetProperty("reasonKept").GetString());
+    }
+
+    /// <summary>#7987: a close the service refuses (409 with its sentence) after the poll redrew the form: the rebuilt button is enabled
+    /// again with the sentence under it, the reason stays in the box, and the list is not re-read.</summary>
+    [Fact]
+    public void ACloseRefused_EnablesTheRebuiltButton_ShowsTheRefusal_AndKeepsTheReason()
+    {
+        var refused = Run().GetProperty("refused");
+        Assert.True(refused.GetProperty("rebuiltDisabled").GetBoolean());
+        Assert.Equal("The CPU spike was one report run by hand", refused.GetProperty("reasonSent").GetString());
+        Assert.Equal(1, refused.GetProperty("puts").GetInt32());
+        Assert.True(refused.GetProperty("buttonEnabledAfter").GetBoolean());
+        Assert.Contains("This request was closed by someone else a moment ago.", refused.GetProperty("status").GetString(), StringComparison.Ordinal);
+        Assert.Equal("The CPU spike was one report run by hand", refused.GetProperty("reasonKept").GetString());
+        Assert.Equal(1, refused.GetProperty("listReads").GetInt32());
+    }
+
+    /// <summary>#7987: leaving the page while the reason box has the focus, then opening it again, keeps the reason and does not move
+    /// the focus into the box. The poll's rebuild on the page still gives the box its focus back (#7956).</summary>
+    [Fact]
+    public void LeavingThePageWithTheReasonBoxFocused_DoesNotMoveTheFocusIntoTheBoxOnReturn()
+    {
+        var left = Run().GetProperty("leftFocused");
+        Assert.Equal(1, left.GetProperty("pollRefocused").GetInt32());
+        Assert.Equal(0, left.GetProperty("returnRefocused").GetInt32());
+        Assert.Equal("The CPU spike was one report run by hand", left.GetProperty("reasonKept").GetString());
     }
 
     [Fact]
@@ -142,5 +293,88 @@ public sealed class InvestigationsPageTests
         Assert.Equal("2026-10-14T10:05:00Z", run.GetProperty("claimedAt").GetString());
         Assert.Equal(JsonValueKind.Null, run.GetProperty("claimedAtNever").ValueKind);
         Assert.False(run.GetProperty("params").GetProperty("none").TryGetProperty("state", out _));
+    }
+
+    /// <summary>#6979: <c>#/investigations?request=&lt;id&gt;</c> opens one request on its own, with its report and its own agent changes only.</summary>
+    [Fact]
+    public void TheRequestRoute_OpensOneRequest_WithItsReportAndOnlyItsOwnAgentChanges()
+    {
+        var one = Run().GetProperty("one");
+        Assert.Empty(one.GetProperty("listCalls").EnumerateArray());
+        var read = Assert.Single(one.GetProperty("reportCalls").EnumerateArray());
+        Assert.Equal("11111111-1111-1111-1111-111111111111", read.GetProperty("request_id").GetString());
+        Assert.Equal(1, one.GetProperty("agentChangeReads").GetInt32());
+        /* The page asks the service for this request's changes by id: it does not filter the newest 200 in the browser (#6979). */
+        Assert.Equal("/api/agent-changes?request=11111111-1111-1111-1111-111111111111", Assert.Single(Strings(one.GetProperty("agentChangeUrls"))));
+        var text = one.GetProperty("text").GetString()!;
+        Assert.Contains("Request on srv-new", text);
+        Assert.Contains("Verdict: needs_person", text);
+        Assert.Contains("Agent changes (1)", text);
+        Assert.Contains("set_config", text);
+        Assert.DoesNotContain("other_tool", text);
+        Assert.Contains("#/admin/agent-changes", Strings(one.GetProperty("links")));
+        Assert.Equal(0, one.GetProperty("closeButtons").GetInt32());
+    }
+
+    [Fact]
+    public void TheRequestRoute_SaysPlainlyWhenTheIdIsNotARequest()
+    {
+        var text = Run().GetProperty("oneMissing").GetString()!;
+        Assert.Contains("No investigation request has id 99999999-9999-9999-9999-999999999999.", text);
+        Assert.DoesNotContain("Verdict", text);
+    }
+
+    [Fact]
+    public void TheRequestRoute_SaysSoWhenARequestHasNoAgentChange_AndStillLinksToTheTab()
+    {
+        var none = Run().GetProperty("oneNoChange");
+        Assert.Contains("Request on srv-old", none.GetProperty("text").GetString());
+        Assert.Contains("No agent change on this request", none.GetProperty("text").GetString());
+        Assert.Contains("#/admin/agent-changes", Strings(none.GetProperty("links")));
+    }
+
+    /// <summary>#8578: one server's two requests, one opened by an analysis finding (the host name) and one by an alert (the display name), draw
+    /// the same Server text, which is the registry's display name; the host name rides the cell's title and the pane.</summary>
+    [Fact]
+    public void TwoRequestsForOneServer_DrawTheSameServerText_WhateverNameTheyWereOpenedWith()
+    {
+        var same = Run().GetProperty("sameServer");
+        var texts = Strings(same.GetProperty("texts"));
+        Assert.Equal(new[] { "Prod OLTP", "Prod OLTP" }, texts);
+        var titles = Strings(same.GetProperty("titles"));
+        Assert.Contains("SQLPRODOLTP01.corp.example.com:SalesDatabaseWithALongName:RO", titles[0]);
+        Assert.Equal("Prod OLTP", titles[1]);
+        Assert.Contains("name-cell", same.GetProperty("cellClass").GetString());
+        var pane = Run().GetProperty("revealed").GetProperty("pane").GetString()!;
+        Assert.Contains("Request on Prod OLTP (blocking)", pane);
+        Assert.Contains("Opened as SQLPRODOLTP01.corp.example.com:SalesDatabaseWithALongName:RO", pane);
+    }
+
+    /// <summary>#8578: a pick draws a pane under a list that can fill the window, so the pane's heading is scrolled to and takes the focus;
+    /// the poll's rebuild of the open pane does not move the focus or the scroll. A fake DOM has no layout: the heading being inside a 1280x720
+    /// viewport is the scroll call's job, which the browser walk of the page checks.</summary>
+    [Fact]
+    public void PickingARequest_ScrollsItsHeadingIntoView_AndMovesTheFocusThere_ButAPollRebuildDoesNot()
+    {
+        var run = Run();
+        var revealed = run.GetProperty("revealed");
+        var focus = Assert.Single(revealed.GetProperty("focused").EnumerateArray());
+        Assert.Equal("jh-detail-title", focus.GetProperty("cls").GetString());
+        Assert.StartsWith("Request on Prod OLTP", focus.GetProperty("text").GetString());
+        Assert.Equal("-1", focus.GetProperty("tabindex").GetString());
+        var scroll = Assert.Single(revealed.GetProperty("scrolled").EnumerateArray());
+        Assert.Equal("jh-detail-title", scroll.GetProperty("cls").GetString());
+        Assert.Equal("start", scroll.GetProperty("options").GetProperty("block").GetString());
+        var poll = run.GetProperty("revealedByPoll");
+        Assert.True(poll.GetProperty("hasDetail").GetBoolean());
+        Assert.Equal(0, poll.GetProperty("focused").GetInt32());
+        Assert.Equal(0, poll.GetProperty("scrolled").GetInt32());
+    }
+
+    [Fact]
+    public void TheRequestId_IsReadFromTheHashQuery_AndBlankWhenThereIsNone()
+    {
+        var ids = Strings(Run().GetProperty("queryIds"));
+        Assert.Equal(new[] { "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", "", "", "" }, ids);
     }
 }

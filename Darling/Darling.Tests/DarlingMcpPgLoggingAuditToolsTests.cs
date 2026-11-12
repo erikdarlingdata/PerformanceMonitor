@@ -181,7 +181,7 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
 
         Assert.Equal(DarlingPgLoggingAudit.Instrumented, everything.Verdict);
         Assert.Contains("31 percent", everything.CostNote, StringComparison.Ordinal);
-        Assert.Contains("#2565", everything.CostNote, StringComparison.Ordinal);
+        Assert.Contains("Measured for auto_explain", everything.CostNote, StringComparison.Ordinal);
         Assert.StartsWith("ALTER SYSTEM SET log_min_duration_statement = 1000;", everything.Remedy, StringComparison.Ordinal);
     }
 
@@ -362,7 +362,7 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
         var audit = DarlingPgLoggingAudit.Audit(rows);
 
         Assert.True(audit.Managed);
-        Assert.Contains("2 rds.* parameter(s)", audit.HostingEvidence, StringComparison.Ordinal);
+        Assert.Contains("2 rds.* parameters", audit.HostingEvidence, StringComparison.Ordinal);
 
         foreach (var facet in audit.Facets)
         {
@@ -564,13 +564,11 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
         Assert.Contains("family temp_file", FacetOf(audit, "log_temp_files").Consumer, StringComparison.Ordinal);
         Assert.Contains("recent_runs", FacetOf(audit, "log_autovacuum_min_duration").Consumer, StringComparison.Ordinal);
 
-        /* And each names its issue and the read that exists today, so "planned" is a pointer and not a shrug. */
-        Assert.Contains("#3601", FacetOf(audit, "log_min_duration_statement").Consumer, StringComparison.Ordinal);
+        /* And each names the planned pipeline or the read that exists today (no tracker numbers in served text), so "planned" is a pointer and not a shrug. */
+        Assert.Contains("the planned log pipeline", FacetOf(audit, "log_min_duration_statement").Consumer, StringComparison.Ordinal);
         Assert.Contains("get_pg_top_queries", FacetOf(audit, "log_min_duration_statement").Consumer, StringComparison.Ordinal);
-        Assert.Contains("#3601", FacetOf(audit, "log_lock_waits").Consumer, StringComparison.Ordinal);
+        Assert.Contains("the log pipeline", FacetOf(audit, "log_lock_waits").Consumer, StringComparison.Ordinal);
         Assert.Contains("get_pg_blocking", FacetOf(audit, "log_lock_waits").Consumer, StringComparison.Ordinal);
-        Assert.Contains("#3602", FacetOf(audit, "log_temp_files").Consumer, StringComparison.Ordinal);
-        Assert.Contains("#3603", FacetOf(audit, "log_autovacuum_min_duration").Consumer, StringComparison.Ordinal);
         Assert.Contains("get_pg_autovacuum_health", FacetOf(audit, "log_autovacuum_min_duration").Consumer, StringComparison.Ordinal);
         Assert.Contains("get_pg_write_stats", FacetOf(audit, "log_checkpoints").Consumer, StringComparison.Ordinal);
     }

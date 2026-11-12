@@ -85,6 +85,56 @@ public sealed class ViewerAlertRulesTests
         Assert.Equal(9, (double)root["predicate"]!["warnThreshold"]!);
     }
 
+    private const string ScopeRuleHead =
+        "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"unit\":\"ms\",\"hours\":1},\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1000},\"scope\":";
+
+    [Fact]
+    public void AScopeWithAServersListAndNoMode_LoadsAsServers_AndBuildsBackWithThatMode()
+    {
+        // #8077: a saved rule whose scope names servers without a mode is one the validator refuses. Opening it in the form must
+        // not turn it into an every-server rule on Save: the list is the author's statement, so the form loads the servers mode
+        // and writes it back.
+        var json = ScopeRuleHead + "{\"servers\":[\"alpha\",\"beta\"]}}";
+        var form = AlertRuleEditorModel.Load(json);
+
+        Assert.NotNull(form);
+        Assert.Equal(AlertRuleScopeKind.Servers, form!.Scope);
+        Assert.Equal(new[] { "alpha", "beta" }, form.Servers);
+
+        Assert.Null(AlertRuleEditorModel.TryBuild(json, form, out var built));
+        var (definition, error) = CustomAlertRuleDefinition.TryParse(built);
+        Assert.Null(error);
+        Assert.Equal(CustomAlertScopeMode.Servers, definition!.ScopeMode);
+        Assert.Equal(new[] { "alpha", "beta" }, definition.ScopeServers);
+    }
+
+    [Fact]
+    public void AScopeWithATagIdAndNoMode_LoadsAsTag_AndBuildsBackWithThatMode()
+    {
+        var json = ScopeRuleHead + "{\"tagId\":7}}";
+        var form = AlertRuleEditorModel.Load(json);
+
+        Assert.NotNull(form);
+        Assert.Equal(AlertRuleScopeKind.Tag, form!.Scope);
+        Assert.Equal(7, form.TagId);
+
+        Assert.Null(AlertRuleEditorModel.TryBuild(json, form, out var built));
+        var (definition, error) = CustomAlertRuleDefinition.TryParse(built);
+        Assert.Null(error);
+        Assert.Equal(CustomAlertScopeMode.Tag, definition!.ScopeMode);
+        Assert.Equal(7, definition.ScopeTagId);
+    }
+
+    [Fact]
+    public void AScopeWithBothKeysAndNoMode_IsNotGuessed_TheFormStaysOnAll()
+    {
+        // The validator refuses the stored rule and says so; the form does not pick one of the two keys for the author.
+        var form = AlertRuleEditorModel.Load(ScopeRuleHead + "{\"servers\":[\"alpha\"],\"tagId\":7}}");
+
+        Assert.NotNull(form);
+        Assert.Equal(AlertRuleScopeKind.All, form!.Scope);
+    }
+
     [Fact]
     public void ABoxThatIsNotANumber_IsRefusedByName_AndTheValidatorsRefusalPassesThroughUnchanged()
     {

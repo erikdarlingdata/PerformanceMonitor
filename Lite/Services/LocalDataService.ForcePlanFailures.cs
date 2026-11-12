@@ -109,23 +109,43 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
     /// </summary>
     internal Action<string>? ArchiveReadStepForTests { get; set; }
 
+    /// <summary>The same text over the hot table alone, for a window the Parquet archive holds nothing from (#7256).</summary>
+    private static readonly string ForcePlanFailuresHotOnlySql = ForcePlanFailuresSql.Replace("v_query_store_stats", "query_store_stats", StringComparison.Ordinal);
+
     /// <summary>
     /// Runs <see cref="ForcePlanFailuresSql"/> for one server. The query reads <c>v_query_store_stats</c>, so it
     /// scans Parquet like the watermark reads' cache misses do, and it shares their limit (#5377): it takes a
     /// slot of the process-wide <see cref="ArchiveReadLimiter"/> FIRST and the database read lock after it
-    /// (<see cref="OpenConnectionAsync"/>), and gives the lock back first, so a pass that waits for a slot holds
+    /// (<see cref="OpenConnectionAsync(ReadPhaseTimer?, CancellationToken, string?, string?)"/>), and gives the lock back first, so a pass that waits for a slot holds
     /// no lock. A cancelled wait takes nothing and releases nothing.
+    ///
+    /// <para>The window is two hours and the archive's newest row is usually days old, so the read asks
+    /// <see cref="ReadWindowSkippingEmptyArchiveAsync{T}"/> first and, when the archive has nothing in the window,
+    /// reads the hot table alone: no slot, and no Parquet file opened (#7256). Each pass used to read every file's footer
+    /// whatever the window, holding the read lock for the whole read.</para>
     /// </summary>
     public async Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(int serverId, CancellationToken cancellationToken = default)
     {
-        using var slot = await _archiveReadLimiter.EnterAsync(cancellationToken);
-        ArchiveReadStepForTests?.Invoke("limiter");
-        using var connection = await OpenConnectionAsync();
-        ArchiveReadStepForTests?.Invoke("readlock");
+        using var _q = TimeQuery("GetForcePlanFailuresAsync", "v_query_store_stats forced plan failures");
+        var windowStart = DateTime.UtcNow - ForcePlanFailureWindow;
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", windowStart,
+            view => view == "query_store_stats"
+                ? ReadForcePlanFailuresAsync(ForcePlanFailuresHotOnlySql, serverId, windowStart, takeArchiveSlot: false, cancellationToken)
+                : ReadForcePlanFailuresAsync(ForcePlanFailuresSql, serverId, windowStart, takeArchiveSlot: true, cancellationToken),
+            cancellationToken);
+    }
+
+    private async Task<List<ForcePlanFailureInfo>> ReadForcePlanFailuresAsync(
+        string sql, int serverId, DateTime windowStart, bool takeArchiveSlot, CancellationToken cancellationToken)
+    {
+        using var slot = takeArchiveSlot ? await WaitForArchiveSlotAsync(Helpers.QueryExecutionContext.CurrentPhases, cancellationToken) : null;
+        if (takeArchiveSlot) ArchiveReadStepForTests?.Invoke("limiter");
+        using var connection = await OpenConnectionAsync(timer: null, cancellationToken, holderMember: nameof(GetForcePlanFailuresAsync));
+        if (takeArchiveSlot) ArchiveReadStepForTests?.Invoke("readlock");
         using var command = connection.CreateCommand();
-        command.CommandText = ForcePlanFailuresSql;
+        command.CommandText = sql;
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow - ForcePlanFailureWindow });
+        command.Parameters.Add(new DuckDBParameter { Value = windowStart });
 
         var items = new List<ForcePlanFailureInfo>();
         using var reader = await command.ExecuteReaderAsync(cancellationToken);

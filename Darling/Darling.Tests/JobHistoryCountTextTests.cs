@@ -36,16 +36,26 @@ public sealed class JobHistoryCountTextTests
     [Fact]
     public void ReadBelowTheCap_IsJustTheCount()
     {
-        Assert.Equal("12 run(s)", JobHistoryCap.CountText(12, 1500, Cap));
+        Assert.Equal("12 runs", JobHistoryCap.CountText(12, 1500, Cap));
+    }
+
+    [Fact]
+    public void ACountOfFourDigits_ReadsWithAThousandsSeparator_LikeTheCapLabel()
+    {
+        /* The cap label says "2,000", so the count beside it says "2,000" too, and so does every other count label. */
+        Assert.Equal("1,500 runs", JobHistoryCap.CountText(1500, 1500, Cap));
+        Assert.Equal("12,345 events", PerformanceMonitor.Common.CountText.Plural(12345, "event"));
+        Assert.Equal("1,000 queries", PerformanceMonitor.Common.CountText.Plural(1000, "query", "queries"));
+        Assert.Equal("999 alerts", PerformanceMonitor.Common.CountText.Plural(999, "alert"));
     }
 
     [Fact]
     public void ReadAtTheCap_KeepsTheLabel_WhateverTheFiltersLeaveShown()
     {
         /* The load's own count, and what a column filter leaves of the same read: the label is about the read. */
-        Assert.Equal("2000 run(s) (showing the newest 2,000)", JobHistoryCap.CountText(2000, 2000, Cap));
-        Assert.Equal("7 run(s) (showing the newest 2,000)", JobHistoryCap.CountText(7, 2000, Cap));
-        Assert.Equal("1 run(s) (showing the newest 2,000)", JobHistoryCap.CountText(1, 2000, Cap));
+        Assert.Equal("2,000 runs (showing the newest 2,000)", JobHistoryCap.CountText(2000, 2000, Cap));
+        Assert.Equal("7 runs (showing the newest 2,000)", JobHistoryCap.CountText(7, 2000, Cap));
+        Assert.Equal("1 run (showing the newest 2,000)", JobHistoryCap.CountText(1, 2000, Cap));
     }
 
     [Fact]
@@ -75,7 +85,7 @@ public sealed class JobHistoryCountTextTests
             handler);
 
         /* The load records the read's row count (all.Count, before the Status/Category/column filters) for the handler. */
-        var load = CSharpSourceWalker.BraceBalanced(stripped, stripped.IndexOf('{', stripped.IndexOf("private async Task LoadJobsAsync()", StringComparison.Ordinal)));
+        var load = CSharpSourceWalker.BraceBalanced(stripped, stripped.IndexOf('{', stripped.IndexOf("private async Task LoadJobsAsync(", StringComparison.Ordinal)));
         Assert.Matches(@"_lastReadRowCount\s*=\s*all\s*\.\s*Count\s*;", load);
     }
 

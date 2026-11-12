@@ -40,8 +40,22 @@ public sealed class DarlingConfig
         AllowTrailingCommas = true,
     };
 
+    /// <summary>#8184: the options <see cref="Parse"/> reads darling.json with (case-insensitive names, comments, trailing commas), for a
+    /// reader of one block that must accept the same file.</summary>
+    internal static JsonSerializerOptions JsonOptions => s_jsonOptions;
+
     [JsonPropertyName("postgres")]
     public PostgresConfig Postgres { get; set; } = new();
+
+    /// <summary>
+    /// #8006: where the service loads its password key from, instead of the key file it generates in the credentials
+    /// directory. Only a reference is accepted, <c>file:&lt;path&gt;</c> or <c>env:&lt;NAME&gt;</c>; a literal key is
+    /// refused by <see cref="Validate"/> (<see cref="DarlingPasswordKeySource.LiteralRefusal"/>). Unlike the other
+    /// reference slots it is never resolved at load: the reference stays as written here, so the key text never sits
+    /// in the config object. Null (the setting omitted) keeps the generated key file.
+    /// </summary>
+    [JsonPropertyName("passwordKey")]
+    public string? PasswordKey { get; set; }
 
     /// <summary>
     /// #4535: the plan analyzer's per-rule disable/severity-override config, read from an optional
@@ -204,6 +218,30 @@ public sealed class DarlingConfig
     public bool RawChunkIntervalReconcileEnabled { get; set; } = true;
 
     /// <summary>
+    /// Whether the daily-summary warmer runs at all (#8370). Default TRUE. The warmer builds each SQL Server target's
+    /// closed-day <c>get_daily_summary_range</c> block two minutes after the service starts and again just after each
+    /// UTC day boundary, one server at a time under the long-read limit, so a server's first Overview visitor finds it
+    /// built. Set false to stop the passes, for example while a store maintenance window overlaps the boundary pass; the
+    /// first visitor of each server then pays the cold read, as before the warmer existed. A file-only knob like
+    /// <see cref="RawChunkIntervalReconcileEnabled"/> (not seeded into the control-plane store, unlike
+    /// <see cref="QueryStoreBackfillEnabled"/>), so an edit takes effect on the next restart.
+    /// </summary>
+    [JsonPropertyName("dailySummaryWarmerEnabled")]
+    public bool DailySummaryWarmerEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Whether the service builds a <c>pg_trgm</c> GIN index on the plan-cache text (<c>collect.query_text_dim.query_text</c>, #7674).
+    /// Default FALSE: on a store the size of the largest field store the index is 3.1 GB (52% of the table), a build takes about 17
+    /// minutes and it adds about 0.5 ms to each written row. When true the service creates the <c>pg_trgm</c> extension if the store
+    /// login can, then builds the index with <c>CREATE INDEX CONCURRENTLY</c> in the background, never inside a migration rung and never
+    /// ahead of collection. When false the service drops the index if it exists. A failed build is dropped, reported by
+    /// <c>get_store_metrics</c> (<c>query_text_index</c>) and retried with a growing wait. A file-only knob (not seeded into the
+    /// control-plane store), so an edit takes effect on the next restart.
+    /// </summary>
+    [JsonPropertyName("queryTextTrigramIndexEnabled")]
+    public bool QueryTextTrigramIndexEnabled { get; set; }
+
+    /// <summary>
     /// #2862: how many collection cycles pass between plan-XML captures for <c>procedure_stats</c> — 1 is
     /// every cycle (the pre-#2862 collector, byte-identical), 4 is one cycle in four. Clamped to [1,60] on
     /// read. Only <c>procedure_stats</c> is gated; every other plan-capturing collector is untouched.
@@ -227,6 +265,22 @@ public sealed class DarlingConfig
     /// </summary>
     [JsonPropertyName("procedureStatsPlanCycleInterval")]
     public int ProcedureStatsPlanCycleInterval { get; set; } = 4;
+
+    /// <summary>
+    /// #8146: the <c>max_events_limit</c> every deadlock, blocked-process and long-query session is created with. The
+    /// engine's own default is 1000, and a session over it silently evicts its oldest events; a larger limit holds more
+    /// between collections, at the cost of a larger ring buffer in the server's memory (<c>max_memory</c> stays 4096 KB,
+    /// which may cap it first). Unset is 1000; the range is 1000 to 10000 and a value outside it is clamped at load, with a
+    /// log line. A session keeps the limit it was created with, so a changed value applies to sessions created afterwards,
+    /// and the loss note says when a live session's limit is below it.
+    ///
+    /// <para>A long, not an int, so any JSON whole number binds and one too large for an int still clamps to the nearest
+    /// bound, as Lite's <c>xe_ring_buffer_max_events</c> does (#8146).</para>
+    ///
+    /// <para>A file-only knob like <see cref="ProcedureStatsPlanCycleInterval"/>: an edit takes effect on the next restart.</para>
+    /// </summary>
+    [JsonPropertyName("xeRingBufferMaxEvents")]
+    public long? XeRingBufferMaxEvents { get; set; }
 
     /// <summary>
     /// #5158: whether <c>query_stats</c> fetches plan XML only for statement plans this host has not already
@@ -360,6 +414,21 @@ public sealed class DarlingConfig
     public WebConfig Web { get; set; } = new();
 
     /// <summary>
+    /// #8184: the opt-in health port for Kubernetes probes, <c>/livez</c> and <c>/readyz</c> and nothing else. FILE-ONLY:
+    /// the control plane never writes it, and a change needs a restart. Optional; omit the section entirely.
+    /// </summary>
+    [JsonPropertyName("health")]
+    public HealthConfig Health
+    {
+        get => _health;
+
+        /* "health": null means off, the same as an absent block (the #5460 heartbeat rule). */
+        set => _health = value ?? new();
+    }
+
+    private HealthConfig _health = new();
+
+    /// <summary>
     /// Declared PEER STORES (#2339): what this store covers, and which sibling Darling stores cover the
     /// rest of the fleet. Pure disclosure — see <see cref="PeersConfig"/>. Optional; omit it entirely on a
     /// single-store deployment and every surface behaves exactly as it did before.
@@ -446,8 +515,8 @@ public sealed class DarlingConfig
     internal List<string> SecretReferencesAsWritten { get; set; } = new();
 
     /// <summary>#5307: the paths (never the values) of keys under <c>web.network</c> and <c>mcp.network</c>, their
-    /// <c>tls</c> blocks and <c>web.network.oidc</c> that no config class declares, e.g. <c>mcp.network.ssl</c>,
-    /// found by <see cref="DarlingUnknownKeys"/> in <see cref="Parse"/>. Internal and <c>[JsonIgnore]</c>, so a
+    /// <c>tls</c> blocks, <c>web.network.oidc</c>, each <c>mcp.tokens</c> entry (#7023) and each <c>servers</c> entry (#8239) that no config class declares, e.g. <c>mcp.network.ssl</c>
+    /// or <c>servers[0].displayName</c>, found by <see cref="DarlingUnknownKeys"/> in <see cref="Parse"/>. Internal and <c>[JsonIgnore]</c>, so a
     /// serialized config (the diagnostics bundle) never carries it.</summary>
     [JsonIgnore]
     internal List<string> UnknownNetworkKeys { get; set; } = new();
@@ -481,7 +550,7 @@ public sealed class DarlingConfig
         var config = JsonSerializer.Deserialize<DarlingConfig>(json, s_jsonOptions);
         if (config is null)
         {
-            throw new InvalidDataException("Configuration file parsed to null.");
+            throw new InvalidDataException("darling.json is empty or contains only 'null'. Copy darling.sample.json to darling.json and edit it.");
         }
 
         /* #6468: a file with no "servers" key, or "servers": null, is the same as an empty list (a start with no servers yet). */
@@ -494,7 +563,7 @@ public sealed class DarlingConfig
 
         /* #5240: a reference in a server's own secret slot is one the file declares for that server, so the entry read from
            the file may resolve it even when it is owned. The flags are set here and nowhere from a stored value. */
-        foreach (var server in config.Servers ?? new List<MonitoredServer>())
+        foreach (var server in config.Servers)
         {
             if (server is null)
             {
@@ -580,6 +649,15 @@ public sealed class DarlingConfig
             problems.Add("postgres.connectionString is required (or set postgres.managed = true to run the bundled server).");
         }
 
+        /* #8006: a literal key in darling.json is the plaintext secret the setting exists to avoid, so it is fatal rather
+           than a warning. The sentence is a constant and never repeats the value. The prefix is tested on the value as
+           written, not trimmed: the owned set (DarlingOwnedSecrets.Visit) does the same, so a value with leading
+           whitespace that slipped past here would load a key that no owned-secret check covers. */
+        if (!string.IsNullOrWhiteSpace(PasswordKey) && !DarlingSecretSource.IsReference(PasswordKey))
+        {
+            problems.Add(DarlingPasswordKeySource.LiteralRefusal);
+        }
+
         /* Peer-disclosure problems are checked BEFORE the servers early-return so a broken peers block is
            reported even on a config that has no servers yet. */
         /* The AWS role allowlist (#5452): an entry is a role ARN or a 12-digit account id. Fatal like the server
@@ -597,6 +675,10 @@ public sealed class DarlingConfig
         problems.AddRange(FrontDoorConfig.Validate(FrontDoor));
         /* #5450: the heartbeat block, for the same reason (a broken one is reported even with no servers yet). */
         problems.AddRange(HeartbeatConfig.Validate(Heartbeat));
+
+        /* #8184: the health block is not checked here (D-validate). The health port is an optional, default-off endpoint, so a bad
+           value there must not stop collection: the health host refuses its own bad config with one Critical line and does not
+           listen. See HealthConfig.Problems. */
 
         /* #6468: no servers is a valid configuration. A first install starts with an empty list and the person adds the
            first server in the Viewer or the web dashboard, so an empty list is not a problem to report here. */
@@ -824,17 +906,20 @@ public sealed class AlertsConfig
     [JsonPropertyName("blockingEnabled")]
     public bool BlockingEnabled { get; set; } = true;
 
+    /// <summary>
+    /// #7083: blocked events in the window that page, but only when the worst wait among them is also at
+    /// least <see cref="BlockingPageRule.CountArmWorstWaitFloorMs"/> (15 seconds, fixed). Default 3.
+    /// </summary>
     [JsonPropertyName("blockingCountThreshold")]
-    public int BlockingCountThreshold { get; set; } = 1;
+    public int BlockingCountThreshold { get; set; } = BlockingPageRule.CountThresholdDefault;
 
     /// <summary>
     /// #1839: fire when the latest blocking snapshot's TOTAL blocked wait reaches this many seconds.
-    /// 0 = off, and off is the shipped default — a count threshold cannot tell one session blocked for
-    /// an hour from one blocked for a second, but enabling it for everyone would change what existing
-    /// deployments alert about.
+    /// #7083: ON by default at 60 seconds, and the same figure is the bar for one blocked event: a single
+    /// event whose own wait reaches it pages at once. 0 turns both off.
     /// </summary>
     [JsonPropertyName("blockingWaitSecondsThreshold")]
-    public int BlockingWaitSecondsThreshold { get; set; }
+    public int BlockingWaitSecondsThreshold { get; set; } = BlockingPageRule.WaitSecondsThresholdDefault;
 
     [JsonPropertyName("deadlockEnabled")]
     public bool DeadlockEnabled { get; set; } = true;
@@ -927,6 +1012,19 @@ public sealed class AlertsConfig
 
     [JsonPropertyName("checkDbOverdueEnabled")]
     public bool CheckDbOverdueEnabled { get; set; }
+
+    /// <summary>The three overdue ages (#7611): a full backup older than this many hours (default 168, 7 days), a log backup older than this many minutes
+    /// (default 60) and a good CHECKDB older than this many hours (default 336, 14 days) is overdue. Store columns <c>backup_overdue_threshold_hours</c>,
+    /// <c>log_backup_overdue_threshold_minutes</c> and <c>checkdb_overdue_threshold_hours</c> (V245). A per-server or per-database threshold override
+    /// (<c>backup_overdue.threshold_hours</c>, <c>log_backup_overdue.threshold_minutes</c>, <c>checkdb_overdue.threshold_hours</c>) replaces each.</summary>
+    [JsonPropertyName("backupOverdueThresholdHours")]
+    public int BackupOverdueThresholdHours { get; set; } = 168;
+
+    [JsonPropertyName("logBackupOverdueThresholdMinutes")]
+    public int LogBackupOverdueThresholdMinutes { get; set; } = 60;
+
+    [JsonPropertyName("checkDbOverdueThresholdHours")]
+    public int CheckDbOverdueThresholdHours { get; set; } = 336;
 
     [JsonPropertyName("longRunningQueryEnabled")]
     public bool LongRunningQueryEnabled { get; set; } = true;
@@ -1062,7 +1160,7 @@ public sealed class AlertsConfig
     public int PgDeadlockCountThreshold { get; set; } = PostgresAlertEvaluator.DeadlockCountThresholdDefault;
 
     /// <summary>#3444 (V122): how many distinct ROOT BLOCKERS inside the rolling window fire the PostgreSQL
-    /// Blocking alert, seeded from <see cref="PostgresAlertEvaluator.BlockingCountThresholdDefault"/> for
+    /// Blocking alert (default 3 since #7083, same 15-second worst-wait floor as the SQL Server count arm), seeded from <see cref="PostgresAlertEvaluator.BlockingCountThresholdDefault"/> for
     /// the reason its deadlock sibling above is.
     ///
     /// <para>Separate from <see cref="BlockingCountThreshold"/> because the two count different things: that
@@ -1105,13 +1203,13 @@ public sealed class AlertsConfig
     [JsonPropertyName("deadlockCriticalPerHour")]
     public double DeadlockCriticalPerHour { get; set; } = ServerHealthThresholds.DeadlockCriticalPerHourDefault;
 
-    /// <summary>#6927 (V228): the blocking health band's WARNING tier, blocked-process reports per hour over the window a card
+    /// <summary>#6927 (V228): the blocking health band's WARNING tier, blocked waits per hour (#7028, the unit blocking.count_threshold uses) over the window a card
     /// counted them in. Seeded from <see cref="ServerHealthThresholds.BlockingWarnPerHour"/>, named rather than restated, so a store
     /// that never sets it bands as every earlier build did. <c>BlockingBandThresholds</c> clamps it on read.</summary>
     [JsonPropertyName("blockingWarnPerHour")]
     public double BlockingWarnPerHour { get; set; } = ServerHealthThresholds.BlockingWarnPerHour;
 
-    /// <summary>#6927 (V228): the blocking health band's CRITICAL tier, reports per hour, seeded from
+    /// <summary>#6927 (V228): the blocking health band's CRITICAL tier, waits per hour, seeded from
     /// <see cref="ServerHealthThresholds.BlockingCriticalPerHour"/>.</summary>
     [JsonPropertyName("blockingCriticalPerHour")]
     public double BlockingCriticalPerHour { get; set; } = ServerHealthThresholds.BlockingCriticalPerHour;
@@ -1125,6 +1223,34 @@ public sealed class AlertsConfig
     /// <see cref="ServerHealthThresholds.BlockingCriticalWaitSeconds"/>.</summary>
     [JsonPropertyName("blockingCriticalWaitSeconds")]
     public double BlockingCriticalWaitSeconds { get; set; } = ServerHealthThresholds.BlockingCriticalWaitSeconds;
+
+    /// <summary>#7028 (V230): the blocking band's WARNING bar on the longest total blocked wait in one sampled snapshot, seconds. 0 means the
+    /// tier is off, as the Blocking Wait Time alert's own bar does at 0. Valid values are 0 and 1 to 86400. When both tiers are above 0, critical
+    /// is at least warn. <c>BlockingBandThresholds</c> clamps it on read.</summary>
+    [JsonPropertyName("blockingWarnSnapshotWaitSeconds")]
+    public double BlockingWarnSnapshotWaitSeconds { get; set; }
+
+    /// <summary>#7028 (V230): the blocking band's CRITICAL bar on the longest total blocked wait in one sampled snapshot, seconds. 0 means off.</summary>
+    [JsonPropertyName("blockingCriticalSnapshotWaitSeconds")]
+    public double BlockingCriticalSnapshotWaitSeconds { get; set; }
+
+    /// <summary>The scheduled Daily Health Report (#7041): one report a day through the alert pipeline, as the "Daily Health Report" metric. Ships OFF.
+    /// Store column <c>daily_report_enabled</c> (V232).</summary>
+    [JsonPropertyName("dailyReportEnabled")]
+    public bool DailyReportEnabled { get; set; }
+
+    /// <summary>The local time of day (<c>HH:mm</c>, in <see cref="DailyReportTimeZone"/>) the Daily Health Report goes out; it covers the 24 hours before.
+    /// Store column <c>daily_report_send_at</c> (V232).</summary>
+    [JsonPropertyName("dailyReportSendAt")]
+    public string DailyReportSendAt { get; set; } = Reports.DailyHealthReportSettings.DefaultSendAt;
+
+    /// <summary>The report's time zone id; NULL means the service host's local zone. Store column <c>daily_report_time_zone</c> (V232).</summary>
+    [JsonPropertyName("dailyReportTimeZone")]
+    public string? DailyReportTimeZone { get; set; }
+
+    /// <summary>The report's title; NULL means "Daily Health Report". Store column <c>daily_report_title</c> (V232).</summary>
+    [JsonPropertyName("dailyReportTitle")]
+    public string? DailyReportTitle { get; set; }
 
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;
@@ -1172,9 +1298,10 @@ public sealed class AlertsConfig
     public AlertNotificationMode DeliveryMode { get; set; } = AlertNotificationMode.Summary;
 
     /// <summary>Per-event mode's cap on incidents delivered individually per cycle before the trailing
-    /// "+N more" batch (#1141); clamped 1–100 when applied. Stored as <c>config_alert_settings.per_event_max</c>.</summary>
+    /// "+N more" batch (#1141); clamped 1–100 when applied. Defaults to <see cref="AlertDefaults.PerEventMax"/>, the figure Lite
+    /// ships too. Stored as <c>config_alert_settings.per_event_max</c>.</summary>
     [JsonPropertyName("perEventMax")]
-    public int PerEventMax { get; set; } = 5;
+    public int PerEventMax { get; set; } = AlertDefaults.PerEventMax;
 
     /* The long-running-query read shape (V20 control-plane knobs) — the row cap + the five noise-filter
        opt-outs the shared AlertEngine forwards to GetLongRunningQueriesAsync. Defaults match Lite's App.*
@@ -1520,11 +1647,24 @@ public sealed class McpConfig
     public bool AllowInvestigations { get; set; }
 
     /// <summary>
+    /// Default ON (#7414). Under <see cref="AllowInvestigations"/> an agent token may create, change, enable, disable and delete a mute or digest
+    /// rule with no investigation claim, for one server or all servers and a named metric, each rule expiring within 7 days of its creation, with a
+    /// reason, and journaled. Set false to refuse that path (the refusal names this setting) and write nothing. It does not touch the claim-based
+    /// Level 2 and 3 tools. Has no effect unless <see cref="AllowInvestigations"/> serves the agent. File-only and restart-only, like it.
+    /// </summary>
+    [JsonPropertyName("allowAgentMuteRules")]
+    public bool AllowAgentMuteRules { get; set; } = true;
+
+    /// <summary>
     /// Default OFF. A loopback-only MCP server needs a bearer token like an exposed one: with no
     /// <see cref="McpNetworkConfig.EncryptedToken"/> or <see cref="McpNetworkConfig.Token"/>, an enabled MCP server does not
     /// start, and the log names the settings to add. On, a loopback-only server with no token serves local clients
     /// without one, with the write and investigation tools off (they need the token), and every start logs one line
-    /// saying so. A configured token always gates, whatever this says. File-only and restart-only.
+    /// saying so. This applies only to a start with no token configured: a configured token is still resolved and gates
+    /// every request, and a token that clears the floor serves the write and investigation tools as their settings say,
+    /// whatever this says. Lite's <c>mcp_allow_tokenless_loopback</c> differs: on, Lite does not read its stored token at
+    /// all and serves reads only.
+    /// File-only and restart-only.
     /// </summary>
     [JsonPropertyName("allowTokenlessLoopback")]
     public bool AllowTokenlessLoopback { get; set; }
@@ -1569,7 +1709,8 @@ public sealed class McpConfig
     /// Null or empty keeps the legacy single token (<see cref="McpNetworkConfig.Token"/> or <see cref="McpNetworkConfig.EncryptedToken"/>)
     /// exactly as before. With entries, the token on each request picks the tool set: <c>operator</c> gets the reads and the write
     /// tools (never the claim or submit tools), <c>agent</c> gets the reads, the investigation tools and the Level 2 action tools
-    /// (never a tool in <c>DarlingMcpWritePolicy.NeverAgentTools</c>), and an agent's identity is the entry's name. A legacy token
+    /// (never a tool in <c>DarlingMcpWritePolicy.NeverAgentTools</c>), an agent's identity is the entry's name, and <c>reader</c> (#7023)
+    /// gets the reads only, whatever <see cref="AllowWrites"/>, <see cref="AllowServerAdmin"/> and <see cref="AllowInvestigations"/> say. A legacy token
     /// set beside them keeps its role from <see cref="AllowWrites"/> and <see cref="AllowInvestigations"/>. File-only and restart-only.
     /// </summary>
     [JsonPropertyName("tokens")]
@@ -1584,7 +1725,8 @@ public sealed class McpConfig
 /// <summary>
 /// One named MCP bearer token (#6542): a <see cref="Name"/> (1 to 64 of <c>A-Za-z0-9._:-</c>), the token itself
 /// (<see cref="EncryptedToken"/> or <see cref="Token"/>, the same rules as <c>mcp.network</c>'s), and a <see cref="Role"/>,
-/// <c>operator</c> or <c>agent</c>. The name is what logs and the journal record; the value is never logged.
+/// <c>operator</c>, <c>agent</c> or <c>reader</c> (#7023), and optionally a <see cref="DataDetail"/> that narrows <c>mcp.dataDetail</c> for
+/// this token. The name is what logs and the journal record; the value is never logged.
 /// </summary>
 public sealed class McpTokenEntry
 {
@@ -1593,6 +1735,10 @@ public sealed class McpTokenEntry
 
     /// <summary>The <c>agent</c> role.</summary>
     public const string AgentRole = "agent";
+
+    /// <summary>The <c>reader</c> role (#7023): the read tools only. It is not an agent: no identity in the journal, no claim, no submit,
+    /// no Level 2 action, and no setting widens it.</summary>
+    public const string ReaderRole = "reader";
 
     [JsonPropertyName("name")]
     public string? Name { get; set; }
@@ -1607,6 +1753,11 @@ public sealed class McpTokenEntry
 
     [JsonPropertyName("role")]
     public string? Role { get; set; }
+
+    /// <summary>Optional (#7023): <c>full</c>, <c>maskLiterals</c> or <c>metadataOnly</c>. It can only narrow <c>mcp.dataDetail</c>: the level this
+    /// token is served is the stricter of the two. Absent, the token is served <c>mcp.dataDetail</c>. An unrecognized value leaves the entry unserved.</summary>
+    [JsonPropertyName("dataDetail")]
+    public string? DataDetail { get; set; }
 
     /// <summary>The token, preferring <see cref="EncryptedToken"/> over <see cref="Token"/>; null when neither is set. Throws when an
     /// encrypted token cannot be read.</summary>
@@ -1983,10 +2134,14 @@ public sealed class WebConfig
     /// <summary>
     /// Default OFF; a darling.json without the key keeps it off, so an upgrade from 3.11 keeps that release's web scope until the
     /// operator turns it on. The files this product writes for a NEW install (the MSI's minimal darling.json and darling.sample.json) set
-    /// it to true explicitly (#6600). On the managed store the dashboard signs in as the read-only <c>viewer</c> role, so
-    /// its Admin writes were list-only. On, the dashboard opens a second, small connection pool that signs in as the managed <c>admin</c> role
-    /// (the Viewer's login) and uses it only for those writes and their access checks, and only for a person signed in as an admin; every read
-    /// stays on <c>viewer</c>. Off keeps the dashboard list-only on the managed store. A store you bring yourself is unchanged either way.
+    /// it to true explicitly (#6600). On the managed store the dashboard signs in as the least-privilege <c>web</c> role, which holds no grant
+    /// for the Admin writes: notification routes and environment profiles, threshold overrides, alert settings, people, report feedback, server
+    /// actions, note decisions, agent changes and the agent switch, and the rest of the list in docs/darling/configuration-web.md. On, the
+    /// dashboard opens a second, small connection pool that signs in as the managed <c>admin</c> role (the Viewer's login) and uses it only for
+    /// those writes and their access checks, and only for a person signed in as an admin; every other request stays on <c>web</c>. Off turns
+    /// those writes off on the managed store and nothing else: a sign-in that can edit still adds and edits monitored servers and writes mute
+    /// rules, dismissals and custom alert rules, through the <c>web</c> role's own grants. With OIDC and no <c>roleClaim</c> every signed-in
+    /// user can edit, so each one can add a server whatever this says. A store you bring yourself is unchanged either way.
     /// File-only and restart-only.
     /// </summary>
     [JsonPropertyName("allowAdminWrites")]
@@ -2015,6 +2170,76 @@ public sealed class WebConfig
     /// </summary>
     [JsonPropertyName("network")]
     public WebNetworkConfig? Network { get; set; }
+}
+
+/// <summary>
+/// #8184: the health port's config. Off by default. The port serves only <c>/livez</c> and <c>/readyz</c>, one word each,
+/// with no token, no <c>allowFrom</c> and no TLS, so it carries nothing worth protecting.
+/// </summary>
+public sealed class HealthConfig
+{
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
+
+    [JsonPropertyName("port")]
+    public int Port { get; set; } = 5154;
+
+    /// <summary>
+    /// The address to bind. Empty means <c>0.0.0.0</c> inside a container and <c>127.0.0.1</c> outside one.
+    /// </summary>
+    [JsonPropertyName("listen")]
+    public string Listen { get; set; } = "";
+
+    /// <summary>
+    /// The address <paramref name="listen"/> names, or null when it does not parse. Empty resolves by
+    /// <paramref name="inContainer"/>: a probe reaches a pod over the pod address, so a container binds every interface.
+    /// </summary>
+    internal static IPAddress? ResolveListenAddress(string listen, bool inContainer)
+    {
+        if (string.IsNullOrWhiteSpace(listen))
+        {
+            return inContainer ? IPAddress.Any : IPAddress.Loopback;
+        }
+
+        return IPAddress.TryParse(listen.Trim(), out var address) ? address : null;
+    }
+
+    /// <summary>
+    /// #8184: what makes the health host refuse to listen, empty when the block is usable or off. Not part of
+    /// <see cref="DarlingConfig.Validate"/> (D-validate): the port is an optional, default-off endpoint, so a bad value turns off only
+    /// the port, with one Critical line, and collection keeps running. The clash test compares against the <c>web.port</c> and
+    /// <c>mcp.port</c> the same file read gives (<paramref name="webPort"/> and <paramref name="mcpPort"/>, null when that block is
+    /// <c>null</c>), whether or not those surfaces are enabled: the control plane can turn either on later without a restart, and the
+    /// ports would then collide. A port the control plane later stores for web or MCP is not seen here.
+    /// </summary>
+    internal static IReadOnlyList<string> Problems(HealthConfig health, int? webPort, int? mcpPort)
+    {
+        var problems = new List<string>();
+        if (!health.Enabled)
+        {
+            return problems;
+        }
+
+        if (health.Port is < 1 or > 65535)
+        {
+            problems.Add($"health.port must be between 1 and 65535 (got {health.Port}).");
+        }
+        else if (health.Port == webPort)
+        {
+            problems.Add($"health.port ({health.Port}) is the same as web.port — give the health listener its own port.");
+        }
+        else if (health.Port == mcpPort)
+        {
+            problems.Add($"health.port ({health.Port}) is the same as mcp.port — give the health listener its own port.");
+        }
+
+        if (ResolveListenAddress(health.Listen, inContainer: false) is null)
+        {
+            problems.Add($"health.listen (\"{health.Listen}\") is not an IP address.");
+        }
+
+        return problems;
+    }
 }
 
 /// <summary>
@@ -2112,6 +2337,17 @@ public sealed class WebNetworkConfig
     public bool Hsts { get; set; }
 
     /// <summary>
+    /// Named access tokens, each with a role (#7735), shaped like <c>mcp.tokens</c>, served beside the shared token
+    /// (<see cref="EncryptedToken"/> or <see cref="Token"/>), which stays required and keeps its edit seat. A <c>reader</c> entry signs a
+    /// browser in to the read-only seat an OIDC viewer gets: every read, and every write refused by the dashboard's write gate. An
+    /// <c>operator</c> entry gets the edit seat, with its writes stamped with the entry's name. An entry that cannot be served (a bad name
+    /// or role, an unreadable or short value, a value or name another token already has, a value an MCP token has) is left out with one
+    /// Critical line naming it. Null or empty changes nothing. File-only and restart-only, like the rest of this block.
+    /// </summary>
+    [JsonPropertyName("tokens")]
+    public List<WebTokenEntry>? Tokens { get; set; }
+
+    /// <summary>
     /// True when any field is set — used only for the BYO "network.* is ignored" caller warning (D-BYO);
     /// NOT the same as "exposed".
     /// </summary>
@@ -2123,7 +2359,12 @@ public sealed class WebNetworkConfig
         || !string.IsNullOrWhiteSpace(Token)
         || (Tls?.IsConfigured ?? false)
         || (Oidc?.IsConfigured ?? false)
-        || (TrustedProxies?.Length ?? 0) > 0;
+        || (TrustedProxies?.Length ?? 0) > 0
+        || HasNamedTokens;
+
+    /// <summary>True when <see cref="Tokens"/> has an entry, served or not.</summary>
+    [JsonIgnore]
+    public bool HasNamedTokens => Tokens is { Count: > 0 } && Tokens.Any(t => t is not null);
 
     /// <summary>
     /// The access token, preferring <see cref="EncryptedToken"/> (DPAPI-decrypted; Windows-only) over the
@@ -2156,6 +2397,69 @@ public sealed class WebNetworkConfig
         }
 
         return null;
+    }
+}
+
+/// <summary>
+/// One named web dashboard access token (#7735), the twin of <see cref="McpTokenEntry"/>: a <see cref="Name"/> (1 to 64 of
+/// <c>A-Za-z0-9._:-</c>, and not a name a built-in writer stamps as itself: <c>Hosting.DarlingWebSeat.BuiltInStamps</c>), the token itself (<see cref="EncryptedToken"/> or <see cref="Token"/>, the same rules as <c>web.network</c>'s),
+/// and a <see cref="Role"/>: <c>reader</c> (the read-only seat) or <c>operator</c> (the edit seat), the <c>mcp.tokens</c> words and only
+/// those. There is no <c>agent</c> seat on the web. The name is what the log and the <c>updated_by</c> stamp record; the value is never logged.
+/// </summary>
+public sealed class WebTokenEntry
+{
+    /// <summary>Optional server tag ids for a scoped reader: the reader sees the servers under these tags and their descendants, and
+    /// nothing else. Null is an unscoped reader. Only a <c>web.network.tokens</c> entry with the reader role carries one.</summary>
+    [JsonPropertyName("allowedTagIds")]
+    public List<int>? AllowedTagIds { get; set; }
+
+    /// <summary>The <c>reader</c> role: the read-only seat, the one an OIDC viewer gets.</summary>
+    public const string ReaderRole = "reader";
+
+    /// <summary>The <c>operator</c> role: the edit seat, the one the shared token and an OIDC admin get.</summary>
+    public const string OperatorRole = "operator";
+
+    /// <summary>The role word as served, or null when <paramref name="role"/> names no web seat: <c>reader</c> is
+    /// <see cref="ReaderRole"/> and <c>operator</c> is <see cref="OperatorRole"/>, compared ignoring case and surrounding space. Any other
+    /// word, <c>agent</c> included, is no web seat.</summary>
+    public static string? NormalizeRole(string? role) => (role ?? "").Trim().ToLowerInvariant() switch
+    {
+        ReaderRole => ReaderRole,
+        OperatorRole => OperatorRole,
+        _ => null,
+    };
+
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    /// <summary>The DPAPI-encrypted token (Windows), as <c>--encrypt-password</c> writes it. Preferred over <see cref="Token"/>.</summary>
+    [JsonPropertyName("encryptedToken")]
+    public string? EncryptedToken { get; set; }
+
+    /// <summary>The plaintext token, or an <c>env:</c>/<c>file:</c> reference.</summary>
+    [JsonPropertyName("token")]
+    public string? Token { get; set; }
+
+    [JsonPropertyName("role")]
+    public string? Role { get; set; }
+
+    /// <summary>The token, preferring <see cref="EncryptedToken"/> over <see cref="Token"/>; null when neither is set. Throws when an
+    /// encrypted token cannot be read. The error names this entry's own setting, so an operator fixes the right line.</summary>
+    public string? ResolveToken()
+    {
+        var setting = $"web.network.tokens[{Name}]";
+        if (!string.IsNullOrWhiteSpace(EncryptedToken))
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                throw new PlatformNotSupportedException(
+                    setting + ".encryptedToken requires Windows (DPAPI); use the plaintext \"token\" on other platforms.");
+            }
+
+            return DarlingSecrets.Unprotect(EncryptedToken);
+        }
+
+        return string.IsNullOrWhiteSpace(Token) ? null : DarlingSecretSource.Resolve(Token, setting + ".token");
     }
 }
 
@@ -2285,6 +2589,34 @@ public sealed class WebOidcConfig
 }
 
 /// <summary>
+/// The <c>store</c> form of a <c>tls</c> block (#7718): which Windows certificate store to open, and which
+/// certificate in it to serve. Exactly one of <see cref="Thumbprint"/> and <see cref="Subject"/> picks it.
+/// Read-only: the service never writes to a store.
+/// </summary>
+public sealed class WebTlsStoreConfig
+{
+    /// <summary><c>LocalMachine</c> (the default) or <c>CurrentUser</c>. A service account with no loaded
+    /// profile has no useful <c>CurrentUser</c> store, so <c>LocalMachine</c> is what almost every install wants.</summary>
+    [JsonPropertyName("location")]
+    public string? Location { get; set; }
+
+    /// <summary>The store name, <c>My</c> (Personal) by default.</summary>
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    /// <summary>The exact certificate to serve, as the 40 hex digits of its SHA-1 thumbprint. Spaces and case do
+    /// not matter. A thumbprint changes at every renewal; use <see cref="Subject"/> to follow renewals.</summary>
+    [JsonPropertyName("thumbprint")]
+    public string? Thumbprint { get; set; }
+
+    /// <summary>A DNS name. The service serves the newest certificate (by <c>NotBefore</c>) that is valid now, has
+    /// the Server Authentication usage and a private key, and carries this name as a dNSName SAN, so a renewed
+    /// certificate is picked up at the next service start without editing the config.</summary>
+    [JsonPropertyName("subject")]
+    public string? Subject { get; set; }
+}
+
+/// <summary>
 /// Opt-in TLS for a network listener (#2562, #5288). This one type backs BOTH <c>web.network.tls</c> (the web
 /// dashboard) and <c>mcp.network.tls</c> (the MCP endpoint): two separate blocks, each its own fail-closed
 /// decision, with no shared block and no precedence rule. To serve one certificate on both, point both blocks at
@@ -2294,10 +2626,12 @@ public sealed class WebOidcConfig
 /// exchanged for; on MCP, every tool result) crosses the segment in the clear over HTTP, and the in-app CIDR
 /// check bounds who can ROUTE to the port, never what an on-path attacker can read off the wire.
 ///
-/// <para><b>Two forms, exactly one at a time.</b> A PKCS#12 bundle (<see cref="PfxPath"/>, with the password
-/// in whichever of the three slots suits the platform) or a PEM pair (<see cref="CertPath"/> +
-/// <see cref="KeyPath"/>, which is what a container mounts). Configuring both is refused rather than resolved
-/// by precedence — see <see cref="Hosting.DarlingWebTls.Describe"/>.</para>
+/// <para><b>Three forms, exactly one at a time.</b> A PKCS#12 bundle (<see cref="PfxPath"/>, with the password
+/// in whichever of the three slots suits the platform), a PEM pair (<see cref="CertPath"/> +
+/// <see cref="KeyPath"/>, which is what a container mounts), or a Windows certificate-store entry
+/// (<see cref="Store"/>, #7718: a certificate whose private key is not exportable cannot be made into a file).
+/// Configuring two forms is refused rather than resolved by precedence — see
+/// <see cref="Hosting.DarlingWebTls.Describe"/>.</para>
 ///
 /// <para><b>The product consumes a certificate; it does not manage a PKI.</b> No issuance, no ACME, no
 /// self-signed fallback: a certificate the product minted itself would buy encryption without authentication
@@ -2349,11 +2683,20 @@ public sealed class WebTlsConfig
     [JsonPropertyName("keyPath")]
     public string? KeyPath { get; set; }
 
+    /// <summary>
+    /// A certificate in a Windows certificate store (#7718), used instead of a file. Windows only; mutually
+    /// exclusive with <see cref="PfxPath"/> and <see cref="CertPath"/>/<see cref="KeyPath"/>. The service reads
+    /// it once, at start.
+    /// </summary>
+    [JsonPropertyName("store")]
+    public WebTlsStoreConfig? Store { get; set; }
+
     /// <summary>True when any field is set. Drives the "this block is configured" half of the decision — a
     /// block set but unusable must FAIL rather than read as "TLS was never asked for".</summary>
     [JsonIgnore]
     public bool IsConfigured =>
-        !string.IsNullOrWhiteSpace(PfxPath)
+        Store is not null
+        || !string.IsNullOrWhiteSpace(PfxPath)
         || !string.IsNullOrWhiteSpace(EncryptedPfxPassword)
         || !string.IsNullOrWhiteSpace(PfxPassword)
         || !string.IsNullOrWhiteSpace(CertPath)
@@ -2547,6 +2890,21 @@ public sealed class WebhooksConfig
     [JsonPropertyName("slackProxy")]
     public string SlackProxy { get; set; } = "";
 
+    /// <summary>
+    /// #7656: the Slack bot token (<c>xoxb-</c>, V252 <c>config_notification.slack_bot_token</c>) the bot posts investigation threads
+    /// with. Sealed as the store holds it, to its own slot on the settings row and to no proxy, and opened by
+    /// <see cref="DarlingWebhookSecrets.Open"/>; a value that is not sealed is read as stored and sealed at the next start.
+    /// </summary>
+    [JsonPropertyName("slackBotToken")]
+    public string SlackBotToken { get; set; } = "";
+
+    /// <summary>
+    /// #7656: the Slack app-level token (<c>xapp-</c>, V252 <c>config_notification.slack_app_token</c>) a Socket Mode listener connects
+    /// with. Sealed and opened as <see cref="SlackBotToken"/> is; stored now, read by nothing beyond the opener yet.
+    /// </summary>
+    [JsonPropertyName("slackAppToken")]
+    public string SlackAppToken { get; set; } = "";
+
     /* Generic webhook (#1506): POSTs an operator-authored JSON body to any endpoint, so an alert can drive
        automation we ship no adapter for (PagerDuty, Opsgenie, n8n, a GitHub repository_dispatch that re-runs
        a workflow). Enabled by a non-empty URL, like the sibling channels. */
@@ -2695,6 +3053,16 @@ public sealed class MonitoredServer
 
     [JsonPropertyName("excludedDatabases")]
     public List<string> ExcludedDatabases { get; set; } = new();
+
+    /// <summary>
+    /// #7639: on Azure SQL Database, the databases that get Extended Events sessions (deadlock, blocked process, client timeout, long
+    /// query completions), each a database-scoped session that Azure caps per pool. Empty, the default, means every database. When set,
+    /// only these get a session; <see cref="ExcludedDatabases"/> still applies and wins. A server-scoped session on a box SQL Server
+    /// covers every database and ignores this. A session this install made in a database left off the list is left in place, never dropped. The ownerless legacy long-query session is dropped in every database, as it does not belong to the list.
+    /// Stored in <c>config.config_monitored_servers.xe_session_databases</c> (V247).
+    /// </summary>
+    [JsonPropertyName("xeSessionDatabases")]
+    public List<string> XeSessionDatabases { get; set; } = new();
 
     /// <summary>
     /// The server's monthly cost/budget in USD — the twin of Lite's <c>ServerConnection.MonthlyCostUsd</c>.
@@ -3232,7 +3600,7 @@ public sealed class PeerStoreConfig
 /// </summary>
 public sealed class ReadsConfig
 {
-    /// <summary>How many long reads run at once (default 2). 0 turns the limit off.</summary>
+    /// <summary>How many long reads run at once (default 4, #7357). 0 turns the limit off.</summary>
     [JsonPropertyName("maxHeavyReads")]
     public int MaxHeavyReads { get; set; } = ReadAdmission.DefaultMaxHeavyReads;
 }

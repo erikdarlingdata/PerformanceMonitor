@@ -93,6 +93,12 @@ INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major
 VALUES (@server_id, '{ServerName}', '{ServerName}', TRUE, 16, now(), now())
 ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
 
+        /* #7167: a collecting server has a recent SUCCESS run, and a regression read that finds nothing for a server with none answers
+           unavailable ("offline") instead of the all-clear this class asserts. */
+        await QueryStoreIntervalWideBelowFloorLiveTests.ExecAsync(connection, $@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT COALESCE(MAX(log_id), 0) + 1, @server_id, '{ServerName}', 'query_store_intervals', now() - interval '2 minutes', 12, 'SUCCESS', 0 FROM collection_log;", null, ct);
+
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
         var context = new CollectorContext { ServerId = ServerId, ServerName = ServerName + "-host", CollectionTime = DateTime.SpecifyKind(now, DateTimeKind.Utc), Deltas = new CollectorDeltaCalculator() };
         var server = new ServerRuntime
@@ -207,8 +213,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         var note = hit.GetProperty("truncation_note").GetString()!;
         Assert.Contains(Z(costStart), note, StringComparison.Ordinal);
         Assert.Contains(Z(failureStart), note, StringComparison.Ordinal);
-        Assert.Contains("query_store_interval_latest", note, StringComparison.Ordinal);
-        Assert.Contains("query_store_interval_wide", note, StringComparison.Ordinal);
+        /* #7729: the page prints this note, so it names how far back each comparison reaches and no store table. */
+        Assert.DoesNotContain("query_store_interval", note, StringComparison.Ordinal);
 
         var regressions = hit.GetProperty("regressions").EnumerateArray().ToList();
         var cost = Assert.Single(regressions, r => r.GetProperty("query_id").GetInt64() == CostQuery);

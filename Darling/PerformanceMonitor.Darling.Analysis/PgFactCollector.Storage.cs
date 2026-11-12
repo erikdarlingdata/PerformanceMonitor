@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -48,6 +49,13 @@ WHERE rn = 1";
        that appears and vanishes strictly between those two snapshots and in neither of them; DatabaseSizeSql
        would carry it for up to 24 hours as a ghost, and #3896 exists to age ghosts out. Columns: total_size_mb
        (NULL with no qualifying row), dropped_out (true when DatabaseSizeSql must decide). */
+    /* #8570: EXCEPT, not NOT EXISTS over cur. The planner took the correlated form as a nested loop anti join of the
+       probed snapshots' files against the CTE's rows, one comparison per pair: 16 million of them, 2.1 seconds, on a
+       store holding 4,000 files for the server (a busy primary with 2,000 databases), growing with the square of
+       the file count. EXCEPT hashes the newest snapshot's keys once. The answer is the same for every file the
+       collector writes (both columns are always set). The one difference is a file with a NULL name: NOT EXISTS
+       never matched it, so it forced DatabaseSizeSql, while EXCEPT matches it with the newest snapshot's row of the
+       same NULL name and leaves the sum to this read. */
     public const string DatabaseSizeNewestSql = @"
 WITH newest AS (
     SELECT collection_time
@@ -93,17 +101,14 @@ edge AS (
 SELECT
     (SELECT SUM(size_mb) FROM cur) AS total_size_mb,
     EXISTS (
-        SELECT 1
+        SELECT f.database_name, f.file_name
         FROM file_io_stats AS f
         WHERE f.server_id = $1
         AND   f.collection_time IN (SELECT collection_time FROM edge)
         AND   f.size_mb > 0
-        AND   NOT EXISTS (
-            SELECT 1
-            FROM cur AS c
-            WHERE c.database_name = f.database_name
-            AND   c.file_name = f.file_name
-        )
+        EXCEPT
+        SELECT c.database_name, c.file_name
+        FROM cur AS c
     ) AS dropped_out";
 
     /// <summary>
@@ -170,8 +175,10 @@ SELECT
 SELECT
     SUM(delta_stall_read_ms) AS total_stall_read_ms,
     SUM(delta_reads) AS total_reads,
-    SUM(delta_stall_write_ms) AS total_stall_write_ms,
-    SUM(delta_writes) AS total_writes
+    SUM(delta_stall_write_ms) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS total_stall_write_ms,
+    SUM(delta_writes) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS total_writes,
+    SUM(delta_stall_write_ms) FILTER (WHERE NOT (file_type = 'LOG' OR lower(database_name) = 'tempdb')) AS data_file_stall_write_ms,
+    SUM(delta_writes) FILTER (WHERE NOT (file_type = 'LOG' OR lower(database_name) = 'tempdb')) AS data_file_writes
 FROM v_file_io_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -200,8 +207,12 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
             var totalReads = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
             var totalStallWriteMs = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
             var totalWrites = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
+            var dataFileStallWriteMs = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
+            var dataFileWrites = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
 
-            if (totalReads > 0)
+            /* #7417: a read average over a handful of I/Os is not a storage problem. The count is SUM(delta_reads) over
+               this query's own window, the rows the average was computed from (IoVolumeFloor). */
+            if (IoVolumeFloor.ReadsClearFloor(totalReads))
             {
                 var avgReadLatency = (double)totalStallReadMs / totalReads;
                 facts.Add(new Fact
@@ -219,21 +230,32 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
                 });
             }
 
-            if (totalWrites > 0)
+            /* #7417: totalWrites is the log and tempdb writes the scored latency covers, so user data file writes cannot lend volume. */
+            if (IoVolumeFloor.WritesClearFloor(totalWrites))
             {
+                /* #6959: the scored value is the log files and tempdb data files only (a session waits on a log flush
+                   and on a tempdb spill write). User data files are checkpoint and lazy-writer targets that no session
+                   waits on, so their write latency rides along as unscored metadata, and FactAdvice.ComposeIoLatency shows it as its
+                   own sentence on the card. */
                 var avgWriteLatency = (double)totalStallWriteMs / totalWrites;
+                var writeMetadata = new Dictionary<string, double>
+                {
+                    ["avg_write_latency_ms"] = avgWriteLatency,
+                    ["total_stall_write_ms"] = totalStallWriteMs,
+                    ["total_writes"] = totalWrites
+                };
+                if (dataFileWrites > 0)
+                {
+                    writeMetadata["data_file_write_latency_ms"] = (double)dataFileStallWriteMs / dataFileWrites;
+                    writeMetadata["data_file_writes"] = dataFileWrites;
+                }
                 facts.Add(new Fact
                 {
                     Source = "io",
                     Key = "IO_WRITE_LATENCY_MS",
                     Value = avgWriteLatency,
                     ServerId = context.ServerId,
-                    Metadata = new Dictionary<string, double>
-                    {
-                        ["avg_write_latency_ms"] = avgWriteLatency,
-                        ["total_stall_write_ms"] = totalStallWriteMs,
-                        ["total_writes"] = totalWrites
-                    }
+                    Metadata = writeMetadata
                 });
             }
         }
@@ -409,21 +431,44 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
     /* #3896: $2 is the lookback start (AnalysisContext.LatestValueStartFor). */
     public const string DiskSpaceSql = @"
 WITH latest AS (
-    SELECT volume_mount_point, volume_total_mb, volume_free_mb,
+    SELECT volume_mount_point, volume_total_mb, volume_free_mb, collection_time, named,
            ROW_NUMBER() OVER (PARTITION BY volume_mount_point ORDER BY collection_time DESC) AS rn
-    FROM database_size_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    AND   volume_total_mb > 0
+    FROM (
+        /* #7704: the volume key (VolumeKey) names a volume with no stored name by its files' directory. */
+        SELECT volume_mount_point IS NOT NULL AS named, " + VolumeKey.Sql + @" AS volume_mount_point, volume_total_mb, volume_free_mb, collection_time
+        FROM database_size_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   volume_total_mb > 0
+    ) AS keyed
+    WHERE volume_mount_point IS NOT NULL
+),
+tightest AS (
+    /* #7179: the free MB the card quotes is the scoring volume's (the lowest percent free), not the
+       volume with the fewest MB. Ties on percent break on the mount point. */
+    SELECT volume_mount_point, volume_free_mb
+    FROM latest WHERE rn = 1
+    ORDER BY volume_free_mb * 1.0 / volume_total_mb, volume_mount_point
+    LIMIT 1
+),
+disks AS (
+    /* #7704: a volume with a stored name counts as itself. The directory keys (a volume with no stored name) of one
+       collection that report the same total and free figures are one disk (data and log directories on one disk), so the
+       sum and the count take each such pair once. Two different disks with identical figures at one collection are counted
+       once too, which is accepted: the figures are the same either way and the card only quotes the sum. */
+    SELECT volume_mount_point, volume_total_mb, volume_free_mb, named,
+           ROW_NUMBER() OVER (PARTITION BY named, collection_time, volume_total_mb, volume_free_mb ORDER BY volume_mount_point) AS disk_rn
+    FROM latest WHERE rn = 1
 )
 SELECT
     MIN(volume_free_mb * 1.0 / volume_total_mb) AS min_free_pct,
-    MIN(volume_free_mb) AS min_free_mb,
+    (SELECT volume_free_mb FROM tightest) AS min_free_mb,
     COUNT(DISTINCT volume_mount_point) AS volume_count,
     SUM(volume_total_mb) AS total_volume_mb,
-    SUM(volume_free_mb) AS total_free_mb
-FROM latest WHERE rn = 1";
+    SUM(volume_free_mb) AS total_free_mb,
+    (SELECT volume_mount_point FROM tightest) AS tightest_mount_point
+FROM disks WHERE named OR disk_rn = 1";
 
     /// <summary>
     /// Collects disk space facts from database_size_stats: volume free space, file sizes. Each volume's
@@ -448,6 +493,7 @@ FROM latest WHERE rn = 1";
             var volumeCount = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
             var totalVolumeMb = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3));
             var totalFreeMb = reader.IsDBNull(4) ? 0.0 : Convert.ToDouble(reader.GetValue(4));
+            var tightestMount = reader.IsDBNull(5) ? null : reader.GetString(5);
 
             if (volumeCount == 0) return;
 
@@ -457,6 +503,7 @@ FROM latest WHERE rn = 1";
                 Key = "DISK_SPACE",
                 Value = minFreePct,
                 ServerId = context.ServerId,
+                ObjectName = string.IsNullOrWhiteSpace(tightestMount) ? null : tightestMount,
                 Metadata = new Dictionary<string, double>
                 {
                     ["min_free_pct"] = minFreePct,

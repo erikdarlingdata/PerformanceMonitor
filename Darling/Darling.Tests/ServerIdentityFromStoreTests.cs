@@ -142,7 +142,7 @@ public sealed class ServerIdentityFromStoreTests
            walk preserves every newline. */
         var offenders = CSharpSourceWalker
             .StripCommentsAndStrings(
-                File.ReadAllText(Path.Combine(root!, relativePath)).Replace("\r\n", "\n", StringComparison.Ordinal))
+                RepoFile.ReadRepoFile(Path.Combine(root!, relativePath)).Replace("\r\n", "\n", StringComparison.Ordinal))
             .Split('\n')
             .Select((line, index) => (Line: line, Number: index + 1))
             .Where(l => l.Line.Contains("GetDeterministicHashCode(", StringComparison.Ordinal))

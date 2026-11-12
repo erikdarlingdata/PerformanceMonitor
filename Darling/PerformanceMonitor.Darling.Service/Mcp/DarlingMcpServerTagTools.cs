@@ -494,7 +494,7 @@ public sealed class DarlingMcpServerTagTools
             ["refusal"] = RulesAffectedCode,
             ["message"] = message ?? string.Create(
                 CultureInfo.InvariantCulture,
-                $"Deleting tag {tagId} and its subtree would leave {count} custom alert rule(s) scoped to it matching no server: {names}. Nothing was deleted. Repeat with confirm=true to proceed."),
+                $"Deleting tag {tagId} and its subtree would leave {CountText.Plural(count, "custom alert rule")} scoped to it matching no server: {names}. Nothing was deleted. Repeat with confirm=true to proceed."),
             ["tag_id"] = tagId,
             ["affected_rules"] = RulesNode(ServerTagCoverage.SimulateDelete(before, tagId), before, before),
         });
@@ -526,7 +526,9 @@ public sealed class DarlingMcpServerTagTools
                 return Refusal(
                     "not_found",
                     UnknownServerCode,
-                    string.Create(CultureInfo.InvariantCulture, $"Server id(s) {string.Join(", ", unknown)} are not monitored servers. Nothing was written."),
+                    unknown.Count == 1
+                        ? string.Create(CultureInfo.InvariantCulture, $"Server id {unknown[0]} is not a monitored server. Nothing was written.")
+                        : string.Create(CultureInfo.InvariantCulture, $"Server ids {string.Join(", ", unknown)} are not monitored servers. Nothing was written."),
                     new JsonObject { ["unknown_server_ids"] = IntArray(unknown) });
             }
 
@@ -651,7 +653,9 @@ public sealed class DarlingMcpServerTagTools
 
     // ------------------------------------------------------------ arguments
 
-    /// <summary>De-duplicates and bounds a server id list; the error is non-null when the list cannot be used.</summary>
+    /// <summary>De-duplicates and bounds a server id list; the error is non-null when the list cannot be used. A server id is
+    /// a 32-bit hash of the server's name, negative for about half the servers, so only 0 (no server) is refused here; an id
+    /// that is not a monitored server is answered by the registered-server check.</summary>
     private static List<int> Normalize(IReadOnlyList<int>? serverIds, out string? error)
     {
         error = null;
@@ -664,9 +668,9 @@ public sealed class DarlingMcpServerTagTools
         {
             error = string.Create(CultureInfo.InvariantCulture, $"At most {MaxServerIds} server ids per call; got {ids.Count}.");
         }
-        else if (ids.Any(i => i <= 0))
+        else if (ids.Any(i => i == 0))
         {
-            error = "Server ids are positive whole numbers.";
+            error = "Server ids are whole numbers other than 0.";
         }
 
         return ids;

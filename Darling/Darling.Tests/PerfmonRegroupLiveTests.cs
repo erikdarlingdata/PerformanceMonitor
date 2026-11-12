@@ -41,7 +41,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -149,7 +149,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -187,7 +187,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -216,7 +216,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -249,7 +249,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -283,7 +283,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -317,7 +317,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -354,7 +354,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -394,7 +394,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -421,7 +421,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -470,7 +470,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -503,7 +503,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -553,7 +553,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -601,7 +601,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -631,7 +631,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -666,7 +666,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -691,7 +691,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -727,7 +727,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
@@ -768,7 +768,7 @@ public sealed class PerfmonRegroupLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);

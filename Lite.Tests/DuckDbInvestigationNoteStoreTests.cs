@@ -141,6 +141,57 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
         Assert.Equal("2", Scalar("SELECT count(*) FROM investigation_journal WHERE event IN ('note_approved', 'note_rejected')"));
     }
 
+    /* #7217: the pending read takes the store read lock with no token, and that wait has no limit while an archival, compaction
+       or archive reset holds the write lock. The Agent Notes window runs its read on the dispatcher, so the read must leave
+       the calling thread before it waits. Here a writer holds the write lock on its own thread and the window's read seam is
+       called from a pool thread of its own (it needs no dispatcher), the way Loaded and Refresh call it: the call must hand back a task at once (it must
+       not block the caller), the task must not finish while the lock is held, and it must list the note once the lock frees. */
+    [Fact]
+    public async Task TheWindowsRead_DoesNotBlockItsCaller_WhileTheWriteLockIsHeld_AndListsTheNoteOnceItIsFree()
+    {
+        await ProposeAsync("blocking", "a note to show", T0);
+
+        using var held = new ManualResetEventSlim(false);
+        using var release = new ManualResetEventSlim(false);
+        using var returned = new ManualResetEventSlim(false);
+        /* The write lock is process-wide, and the classes running alongside take it while they build their own databases. A budgeted
+           writer polls for it with no queue position for all but the last second of its budget (#7256), and the writers those classes
+           park on the lock win every handoff, so the writer here parks for its whole budget instead: it holds the lock as soon as the
+           current holder releases, and its budget is the only bound on the wait (#8142). */
+        _db.WriteLockParkTail = DuckDbInvestigationStoreTests.TestLockBudget;
+        var writer = Task.Factory.StartNew(() =>
+        {
+            using var writeLock = _db.AcquireWriteLock(DuckDbInvestigationStoreTests.TestLockBudget);
+            held.Set();
+            release.Wait(TimeSpan.FromMinutes(1));
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        Task<PendingNotesPage>? read = null;
+        var caller = Task.CompletedTask;
+        try
+        {
+            Assert.True(held.Wait(TimeSpan.FromSeconds(30), Ct));
+            caller = Task.Factory.StartNew(() =>
+            {
+                read = InvestigationNotesWindow.ReadPageOffDispatcherAsync(_store);
+                returned.Set();
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            Assert.True(returned.Wait(TimeSpan.FromSeconds(10), Ct), "the read blocked its calling thread on the write lock");
+            Assert.False(read!.IsCompleted);
+
+            release.Set();
+            await writer;
+            var page = await read.WaitAsync(TimeSpan.FromSeconds(30), Ct);
+            Assert.Equal("a note to show", Assert.Single(page.Notes).NoteText);
+        }
+        finally
+        {
+            release.Set();
+            await writer;
+            await caller.WaitAsync(TimeSpan.FromSeconds(30), CancellationToken.None);
+        }
+    }
+
     /* #5903 (round 2): the window reads one more than it lists, so a queue of exactly 200 is not called cut and 201 lists 200
        with the sentence the web Admin page shows. The window binds PendingNotesPage, the seam below the WPF surface. */
     [Fact]

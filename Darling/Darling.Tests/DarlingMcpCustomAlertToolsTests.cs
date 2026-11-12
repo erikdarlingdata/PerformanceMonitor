@@ -95,6 +95,26 @@ public sealed class DarlingMcpCustomAlertToolsSurfaceTests
         Assert.All(toolMethods, m => Assert.True(m.ReturnType == typeof(Task<string>), $"{m.Name} must return Task<string>"));
     }
 
+    /// <summary>
+    /// #7015: the backtest answers with ONE window notice, the least covered replayed server's. Among truncated servers a null
+    /// EffectiveStart (no coverage anywhere in the span) is the least covered, not the most: an ordinal descending sort reads null as ""
+    /// and put it last, so the answer named a start the other server had when this one had nothing.
+    /// </summary>
+    [Fact]
+    public void BacktestNotice_NamesTheServerWithNoCoverage_AboveOneWithALaterStart()
+    {
+        var withStart = new McpWindowNotice("2026-10-30T00:00:00.0000000Z", true, "starts late");
+        var withEarlierStart = new McpWindowNotice("2026-10-28T00:00:00.0000000Z", true, "starts early");
+        var noCoverage = new McpWindowNotice(null, true, "no collection");
+        var covered = new McpWindowNotice("2026-10-31T00:00:00.0000000Z", false, null);
+
+        Assert.Equal(noCoverage, DarlingMcpCustomAlertTools.LeastCovered(new[] { withStart, noCoverage, withEarlierStart }));
+        Assert.Equal(noCoverage, DarlingMcpCustomAlertTools.LeastCovered(new[] { noCoverage, withStart }));
+        Assert.Equal(withStart, DarlingMcpCustomAlertTools.LeastCovered(new[] { withEarlierStart, withStart, covered }));
+        Assert.Equal(withEarlierStart, DarlingMcpCustomAlertTools.LeastCovered(new[] { covered, withEarlierStart }));
+        Assert.Equal(covered, DarlingMcpCustomAlertTools.LeastCovered(new[] { covered }));
+    }
+
     private static System.Collections.Generic.Dictionary<string, ModelContextProtocol.Protocol.Tool> BuildToolSchemas()
     {
         var services = new ServiceCollection();
@@ -187,6 +207,36 @@ public sealed class DarlingMcpCustomAlertToolsSurfaceTests
         Assert.False(doc.RootElement.GetProperty("valid").GetBoolean(), result);
         Assert.Contains("tagId", doc.RootElement.GetProperty("error").GetString()!, StringComparison.OrdinalIgnoreCase);
     }
+    /// <summary>A servers list with no 'mode' (#8077): the shape the validator refuses rather than reads as 'all'.</summary>
+    private const string ServersWithoutModeRule =
+        "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"hours\":1}," +
+        "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1000},\"scope\":{\"servers\":[\"alpha\",\"beta\"]}}";
+
+    [Fact]
+    public async Task ValidateCustomAlertRule_ServersListWithoutMode_ReturnsValidFalse_NamingScopeMode()
+    {
+        /* The scope half is as strict as the metric half: a servers list without a mode is refused, never read
+           as 'all' with the list dropped. */
+        var result = await DarlingMcpCustomAlertTools.ValidateCustomAlertRule(ServersWithoutModeRule);
+        using var doc = JsonDocument.Parse(result);
+        Assert.False(doc.RootElement.GetProperty("valid").GetBoolean(), result);
+        Assert.Contains("'scope.mode'", doc.RootElement.GetProperty("error").GetString()!);
+    }
+
+    [Fact]
+    public async Task TestCustomAlertRule_ServersListWithoutMode_ReturnsInvalid_WithoutResolvingTheFleet()
+    {
+        /* test-now refuses the definition before it resolves any server, so the list is never widened to every
+           enabled server (the dead store would fail the call if the resolver were reached). */
+        await using var dead = NpgsqlDataSource.Create(DeadStore);
+        var result = await DarlingMcpCustomAlertTools.TestCustomAlertRule(dead, definition: ServersWithoutModeRule);
+        using var doc = JsonDocument.Parse(result);
+        Assert.True(
+            doc.RootElement.TryGetProperty("status", out var status) && status.GetString() == "invalid",
+            result);
+        Assert.Contains("'scope.mode'", doc.RootElement.GetProperty("message").GetString()!);
+    }
+
 
     [Fact]
     public async Task CreateCustomAlertRule_InvalidDefinition_ReturnsInvalid_WithoutTouchingTheStore()

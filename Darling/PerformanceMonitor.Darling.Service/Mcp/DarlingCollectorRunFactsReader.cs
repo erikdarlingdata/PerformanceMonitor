@@ -53,9 +53,10 @@ internal static class DarlingCollectorRunFactsReader
         LIMIT $3
         """;
 
-    /// <summary>Successful runs of one collector inside a window. $1 server_id, $2 collector_name, $3/$4 window (naive UTC).</summary>
+    /// <summary>Successful runs of one collector inside a window, and the earliest of them (#7442; NULL when there is none). $1 server_id,
+    /// $2 collector_name, $3/$4 window (naive UTC), the same bounds for both.</summary>
     public const string RunsInWindowSql = """
-        SELECT COUNT(*)
+        SELECT COUNT(*), MIN(collection_time)
         FROM v_collection_log
         WHERE server_id = $1
         AND   collector_name = $2
@@ -123,6 +124,7 @@ internal static class DarlingCollectorRunFactsReader
         }
 
         long? inWindow = null;
+        DateTime? firstInWindow = null;
         if (windowStartUtc is { } start && windowEndUtc is { } end)
         {
             await using var command = postgres.CreateCommand(RunsInWindowSql);
@@ -131,9 +133,14 @@ internal static class DarlingCollectorRunFactsReader
             DarlingMcpReadParameters.AddText(command, collectorName);
             DarlingMcpReadParameters.AddTimestamp(command, start);
             DarlingMcpReadParameters.AddTimestamp(command, end);
-            inWindow = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                inWindow = Convert.ToInt64(reader.GetValue(0));
+                firstInWindow = reader.IsDBNull(1) ? null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc);
+            }
         }
 
-        return new CollectorRunFacts(runs, inWindow, last, lastRows);
+        return new CollectorRunFacts(runs, inWindow, last, lastRows, firstInWindow);
     }
 }

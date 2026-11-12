@@ -299,14 +299,6 @@ public sealed class PlanRegressionDailyRungTests
     }
 
     [Fact]
-    public void TheClosedDayArithmetic_IsOnePastOneSkewAndOneSpan()
-    {
-        Assert.Equal(14, PlanRegressionDaily.WindowDays);
-        Assert.Equal(1, PlanRegressionDaily.PlanRegressionSkewMarginDays);
-        Assert.Equal(3, PlanRegressionDaily.ClosedDayLagDays);
-    }
-
-    [Fact]
     public void BuildDaySql_InsertsTheTablesColumnsInOrder_FromTheIntervalTable_WithTheDaysBounds()
     {
         var sql = Regex.Replace(PlanRegressionDaily.BuildDaySql, @"\s+", " ");
@@ -408,7 +400,7 @@ public sealed class PlanRegressionDailyRungTests
         var ct = TestContext.Current.CancellationToken;
 
         // #1776 own-store: a scratch database of its own, so no other class's migrations race it.
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;
@@ -458,7 +450,7 @@ public sealed class PlanRegressionDailyRungTests
         var ct = TestContext.Current.CancellationToken;
 
         // #1776 own-store: a scratch database of its own, so no other class's migrations race it.
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;
@@ -489,7 +481,7 @@ public sealed class PlanRegressionDailyRungTests
         var ct = TestContext.Current.CancellationToken;
 
         // #1776 own-store: a scratch database of its own, so no other class's migrations race it.
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;

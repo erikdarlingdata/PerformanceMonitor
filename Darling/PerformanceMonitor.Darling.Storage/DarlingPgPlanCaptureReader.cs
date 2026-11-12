@@ -40,6 +40,9 @@ public static class DarlingPgPlanCaptureReader
     /// <param name="PlanJson">The JSON of the group's latest collection cycle, redacted at collection (literals and query text
     /// never reach the store). Its estimates and counters are that capture's: the hash does not cover them, so
     /// the group's other captures may carry different ones.</param>
+    /// <param name="QueryText">#7428: the normalised statement text captured for <see cref="QueryId"/> in
+    /// <c>collect.pg_statement_text</c>, or null until the hourly capture reaches that id. Also null for id 0, which
+    /// names no statement. This is not the plan's own text: the plan is redacted at collection and carries none.</param>
     public sealed record PgPlanCaptureRow(
         long QueryId,
         string? PlanHash,
@@ -50,7 +53,8 @@ public static class DarlingPgPlanCaptureReader
         double MaxDurationMs,
         double AvgDurationMs,
         string? PlanJson,
-        DateTime LastSeen);
+        DateTime LastSeen,
+        string? QueryText = null);
 
     /* The hash is of the plan's SHAPE (#5114), so the JSON of one group is NOT identical across its captures: they
        differ in costs, row estimates and runtime counters. The group is ranked and cut first, without the JSON, and
@@ -59,7 +63,12 @@ public static class DarlingPgPlanCaptureReader
        Two captures of one plan can share a cycle's timestamp, so max() picks one of them deterministically; the
        lookup is an equality on that timestamp, bounded by the same (server_id, collection_time) index. The outer
        LIMIT repeats the inner one, because the paged-read contract wants every such read to end in its bound. top_node_type and
-       node_count are shape properties, so min() and max() over a group are exact. */
+       node_count are shape properties, so min() and max() over a group are exact.
+
+       #7428: the statement text is joined in the outer query, after the inner cap, so only the page's groups (limit,
+       limit + 1 from the tool) look anything up. The text store has (server_id, queryid) as its PRIMARY KEY (#2219),
+       so the join is an index lookup per group and cannot multiply one: two plan shapes of one statement carry the same
+       text. Query id 0 and NULL find nothing and read as null. */
     public const string PgPlanCaptureSql = """
         SELECT
             g.query_id,
@@ -71,7 +80,8 @@ public static class DarlingPgPlanCaptureReader
             g.max_duration_ms,
             g.avg_duration_ms,
             latest.plan_json,
-            g.last_seen
+            g.last_seen,
+            t.query_text
         FROM (
             SELECT
                 query_id,
@@ -104,6 +114,9 @@ public static class DarlingPgPlanCaptureReader
             AND   c.query_id IS NOT DISTINCT FROM g.query_id
             AND   c.plan_hash IS NOT DISTINCT FROM g.plan_hash
         ) AS latest ON true
+        LEFT JOIN collect.pg_statement_text AS t
+               ON  t.server_id = $1
+               AND t.queryid   = g.query_id
         ORDER BY g.total_duration_ms DESC
         LIMIT $5
         """;
@@ -152,7 +165,8 @@ public static class DarlingPgPlanCaptureReader
                 PlanJson: reader.IsDBNull(8) ? null : reader.GetString(8),
                 LastSeen: reader.IsDBNull(9)
                     ? default
-                    : DateTime.SpecifyKind(reader.GetDateTime(9), DateTimeKind.Utc)));
+                    : DateTime.SpecifyKind(reader.GetDateTime(9), DateTimeKind.Utc),
+                QueryText: reader.IsDBNull(10) ? null : reader.GetString(10)));
         }
 
         return rows;

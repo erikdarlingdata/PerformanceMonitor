@@ -58,7 +58,7 @@ internal static class McpEngineCapability
            The parameter is REQUIRED rather than defaulted so that decision is visible at the call site
            instead of being made by omission. awsRdsKind is required for the same reason (#6894). */
         var engineEnvelope = Envelope(serverName, engineEdition, collectorName, awsRdsKind);
-        if (engineEnvelope is not null || collectorName is not ("query_store" or "plan_correction"))
+        if (engineEnvelope is not null || collectorName is not ("query_store" or "plan_correction" or "query_store_health"))
         {
             return engineEnvelope;
         }
@@ -132,6 +132,47 @@ internal static class McpEngineCapability
     }
 
     /// <summary>
+    /// #7375: whether this server's newest <c>server_properties</c> row says Always On is off, the fact Darling's <c>get_collection_health</c>
+    /// reads the same way. No row, or a failed read, makes no claim (false): the log-driven rows stand. A NULL flag reads as off, as both
+    /// stores map it (#6838).
+    /// </summary>
+    public static async Task<bool> AlwaysOnOffAsync(LocalDataService dataService, int serverId)
+    {
+        try
+        {
+            var properties = await dataService.GetLatestServerPropertiesAsync(serverId);
+            return CollectorHealthClassifier.IsAlwaysOnOff(properties is not null, properties?.IsHadrEnabled ?? false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// #7375: on a server with Always On off, the two Always On collectors run, find nothing and log HEALTHY with zero rows, and the
+    /// zero-output sentence then called that something that "needs a look". Those rows leave the listed rows and come back as
+    /// <c>not_collected</c> rows with Darling's sentence (<see cref="CollectorHealthClassifier.AlwaysOnOffMessage"/>), by the rule
+    /// Darling uses (<see cref="CollectorHealthClassifier.IsNotCollectedWhenAlwaysOnOff"/>): a FAILING Always On collector keeps its row and
+    /// its Last Error. Only the listing and the detail counts change. The sweep arithmetic keeps every row, as Darling's does.
+    /// </summary>
+    internal static (List<CollectorHealthRow> Shown, List<object> NotCollected) SplitCollectionHealthByAlwaysOn(
+        bool alwaysOnOff, List<CollectorHealthRow> rows)
+    {
+        var shown = rows
+            .Where(r => !CollectorHealthClassifier.IsNotCollectedWhenAlwaysOnOff(r.CollectorName, r.HealthStatus, alwaysOnOff))
+            .ToList();
+        var notCollected = rows
+            .Where(r => CollectorHealthClassifier.IsNotCollectedWhenAlwaysOnOff(r.CollectorName, r.HealthStatus, alwaysOnOff))
+            .Select(r => r.CollectorName)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .Select(n => (object)new { collector = n, status = CollectorRuntimePrecondition.NotCollectedStatusWord, message = CollectorHealthClassifier.AlwaysOnOffMessage })
+            .ToList();
+        return (shown, notCollected);
+    }
+
+    /// <summary>
     /// #6894, #6893: what the connection check found this server to be: an Amazon RDS for SQL Server instance (the <c>rdsadmin</c> database),
     /// and on the Web or Express edition. Lite keeps the facts in memory on the server's connection status, and a tool holds only the storage
     /// id, so the server is found the way the collectors name it. <see cref="AwsRdsKind.None"/> for a server that is not registered, was never
@@ -150,6 +191,44 @@ internal static class McpEngineCapability
 
         return AwsRdsKind.None;
     }
+
+    /// <summary>
+    /// #7699 item 7: the empty sentence of get_pvs_stats, which says whether this server's version has no persistent version store
+    /// (SQL Server before 2019) or has just not completed a cycle. The version is read the way <see cref="AwsRdsKindOf"/> finds the
+    /// server; a server that is not found or was never checked has no version (0, assumed newest) and gets the second sentence.
+    /// </summary>
+    public static CollectorTargetInfo PvsTarget(ServerManager serverManager, int storageServerId)
+    {
+        var target = new CollectorTargetInfo();
+        foreach (var server in serverManager.GetEnabledServers())
+        {
+            if (RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server)) == storageServerId)
+            {
+                var status = serverManager.GetConnectionStatus(server.Id);
+                target = new CollectorTargetInfo
+                {
+                    IsAzureSqlDb = status.SqlEngineEdition == 5,
+                    IsAzureManagedInstance = status.SqlEngineEdition == 8,
+                    SqlMajorVersion = status.SqlMajorVersion,
+                };
+                break;
+            }
+        }
+
+        return target;
+    }
+
+    /// <summary>The empty sentence of get_pvs_stats for this server: no persistent version store before SQL Server 2019, or no collection cycle yet.</summary>
+    public static string PvsNoRowsMessage(ServerManager serverManager, int storageServerId) =>
+        PvsStatsCollector.NoRowsMessage(PvsTarget(serverManager, storageServerId));
+
+    /// <summary>#7822: whether this server's SQL Server version has a persistent version store (2019+, or an unknown version, which is assumed newest).</summary>
+    public static bool PvsVersionHasStore(ServerManager serverManager, int storageServerId) =>
+        PvsStatsCollector.Instance.AppliesTo(PvsTarget(serverManager, storageServerId));
+
+    /// <summary>#7813: the empty sentence of get_plan_corrections for this server: no automatic tuning before SQL Server 2017, or no stored cycle yet. The version comes from the same connection status <see cref="PvsTarget"/> reads.</summary>
+    public static string PlanCorrectionNoRowsMessage(ServerManager serverManager, int storageServerId) =>
+        PlanCorrectionCollector.NoRowsMessage(PvsTarget(serverManager, storageServerId));
 
     /// <summary>
     /// #6178: the <c>not_collected</c> envelope for a read that covers every registered server and found nothing, when

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,7 +21,7 @@ public readonly record struct ServerMetricsDto(
     decimal? AvgCpuPct, decimal? StorageTotalGb, int? IdleDbCount, string? ProvisioningStatus, int? HealthScore = null);
 
 /// <summary>One Server Inventory base row. Times are naive-UTC instants, except <c>SqlServerStartTime</c>, which is
-/// the server's own local clock, stored verbatim. No display or WPF state.</summary>
+/// the server's own local clock, stored verbatim; <c>UtcOffsetMinutes</c> and <c>TimeZoneId</c> are the collected zone that turn it into UTC (#7176). No display or WPF state.</summary>
 public sealed record ServerInventoryDto(
     int ServerId,
     string ServerName,
@@ -40,7 +41,9 @@ public sealed record ServerInventoryDto(
     string AgReplicaRole,
     bool IsEnabled,
     decimal MonthlyCost,
-    DateTime? LastCollectedUtc);
+    DateTime? LastCollectedUtc,
+    int? UtcOffsetMinutes = null,
+    string? TimeZoneId = null);
 
 /// <summary>
 /// The FinOps Server Inventory reads, shared by the viewer and the coming read tool. Lite queries each target LIVE; the
@@ -50,6 +53,11 @@ public sealed record ServerInventoryDto(
 /// </summary>
 public static class DarlingFinOpsInventoryReader
 {
+    /// <summary>The host OS version as stored, trimmed (#7467): the collected text can end in a line break, and every surface
+    /// (the MCP tool, the web page and both desktop grids) reads it through here, so none shows one. A SQL Server 2016
+    /// row stored with the <c>@@VERSION</c> tail is cut to the product name (#7699 item 3, <c>HostOsText</c>).</summary>
+    internal static string CleanHostOsVersion(string? raw) => PerformanceMonitor.Common.HostOsText.Clean(raw);
+
     /// <summary>
     /// Collected 24h-CPU / storage / idle-DB / provisioning metrics for EVERY server, in one round trip (#4227).
     /// $1 cpu cutoff (24h), $2 idle cutoff (7d), $3 the idle-coverage start (first of the last 7 UTC days), $4 the days that must be
@@ -69,15 +77,23 @@ public static class DarlingFinOpsInventoryReader
     /// finding: a 4-day raw retention silently narrowed a 7-day claim).</para>
     /// </summary>
     public const string ServerMetricsSql = @"
-WITH cpu_24h AS (
+/* #8570: the window's rows are read first, on their own, and aggregated after. Grouped straight off the table, the planner fed the ordered-set
+   PERCENTILE_CONT through the (server_id, collection_time) index to skip a sort, which walks the heap server by server: every server revisits the whole
+   chunk's pages in a scattered order, and the index's own pages come with it (1,073 pages for 60,000 rows on a 42 server store, against 625 read in
+   file order here). A cold first call pays a disk wait for each scattered page. The 60,000 rows sort in memory in a few milliseconds. */
+WITH cpu_rows AS MATERIALIZED (
+    SELECT server_id, sqlserver_cpu_utilization
+    FROM v_cpu_utilization_stats
+    WHERE collection_time >= $1
+),
+cpu_24h AS (
     SELECT
         server_id,
         AVG(CAST(sqlserver_cpu_utilization AS DECIMAL(5,2))) AS avg_cpu_pct,
         MAX(sqlserver_cpu_utilization) AS max_cpu_pct,
         PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu_pct,
         COUNT(*) AS cpu_samples
-    FROM v_cpu_utilization_stats
-    WHERE collection_time >= $1
+    FROM cpu_rows
     GROUP BY server_id
 ),
 /* The worker counts feed the verdict (memory_ratio used to feed this read's own CASE, and that CASE was the #2246 bug), and the
@@ -112,47 +128,48 @@ grants AS (
         MAX(100.0 * granted_memory_mb / NULLIF(target_memory_mb, 0)) AS grant_utilization_pct
     FROM v_memory_grant_stats
     WHERE collection_time >= $1
+    AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before id 1 was collected */
     GROUP BY server_id
 ),
-/* The latest size-snapshot TIME per server (LATERAL LIMIT 1, indexed descent), shared by storage_totals
-   (sums every database at that instant) and latest_dbs (the idle check's known-databases universe) so
-   neither re-derives it. */
-size_latest AS (
+/* #8570: the newest size snapshot of every server, read ONCE. Its rows are the totals (storage_totals) and the idle check's known-databases
+   universe (latest_dbs). The snapshot's time is not known when the statement is planned (it comes from each server's own newest row), so
+   no chunk can be dropped at plan time: every reference to the hypertable plans every chunk of the size history, and the ones above the
+   newest snapshot are only skipped while it runs. This read used to name the table three times (the newest time, then the totals and the
+   databases each joined back on that time), 133 chunks each on a store with 133 days of history. FETCH FIRST 1 ROW WITH TIES returns every row
+   that ties the newest collection_time of the server, which is exactly the rows an equality on that time returned, from one reference. The
+   per-server LATERAL keeps the descent through the (server_id, collection_time) index, newest chunk first, as the old probe did. */
+latest_size AS MATERIALIZED (
     SELECT
         s.server_id,
-        latest_time.collection_time
+        newest.database_name,
+        newest.total_size_mb,
+        newest.used_size_mb
     FROM servers s
     CROSS JOIN LATERAL (
-        SELECT collection_time
-        FROM v_database_size_stats
-        WHERE server_id = s.server_id
-        ORDER BY collection_time DESC
-        LIMIT 1
-    ) AS latest_time
+        SELECT d.database_name, d.total_size_mb, d.used_size_mb
+        FROM v_database_size_stats d
+        WHERE d.server_id = s.server_id
+        ORDER BY d.collection_time DESC
+        FETCH FIRST 1 ROW WITH TIES
+    ) AS newest
 ),
 storage_totals AS (
     SELECT
-        sl.server_id,
-        SUM(vd.total_size_mb) / 1024.0 AS total_storage_gb,
+        ls.server_id,
+        SUM(ls.total_size_mb) / 1024.0 AS total_storage_gb,
         /* The allocated and free totals the Utilization view scores storage from (FinOpsUtilizationFigures.LatestStorageTotalsSql) at the same
            newest snapshot: a row with no total adds nothing to either, a row with no used size has no free space. */
-        COALESCE(SUM(vd.total_size_mb), 0) AS alloc_mb,
-        COALESCE(SUM(CASE WHEN vd.total_size_mb IS NOT NULL AND vd.used_size_mb IS NOT NULL THEN vd.total_size_mb - vd.used_size_mb END), 0) AS free_mb
-    FROM size_latest sl
-    JOIN v_database_size_stats vd
-      ON vd.server_id = sl.server_id
-     AND vd.collection_time = sl.collection_time
-    GROUP BY sl.server_id
+        COALESCE(SUM(ls.total_size_mb), 0) AS alloc_mb,
+        COALESCE(SUM(CASE WHEN ls.total_size_mb IS NOT NULL AND ls.used_size_mb IS NOT NULL THEN ls.total_size_mb - ls.used_size_mb END), 0) AS free_mb
+    FROM latest_size ls
+    GROUP BY ls.server_id
 ),
 latest_dbs AS (
     SELECT DISTINCT
-        sl.server_id,
-        vd.database_name
-    FROM size_latest sl
-    JOIN v_database_size_stats vd
-      ON vd.server_id = sl.server_id
-     AND vd.collection_time = sl.collection_time
-    WHERE vd.database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
+        ls.server_id,
+        ls.database_name
+    FROM latest_size ls
+    WHERE ls.database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
 ),
 active_dbs AS (
     SELECT DISTINCT server_id, database_name
@@ -206,10 +223,10 @@ SELECT
     c.p95_cpu_pct,
     COALESCE(m.max_workers_count, 0),
     m.current_workers_count,
-    COALESCE(g.max_grant_waiters, 0),
-    COALESCE(g.grant_timeouts, 0),
-    COALESCE(g.forced_grants, 0),
-    COALESCE(g.grant_utilization_pct, 0),
+    g.max_grant_waiters,
+    g.grant_timeouts,
+    g.forced_grants,
+    g.grant_utilization_pct,
     props.engine_edition,
     props.edition,
     m.total_physical_memory_mb,
@@ -218,10 +235,11 @@ SELECT
     st.alloc_mb,
     st.free_mb,
     c.cpu_samples,
-    m.total_server_memory_mb
+    m.total_server_memory_mb,
+    props.ag_replica_role
 FROM servers s
 LEFT JOIN LATERAL (
-    SELECT engine_edition, edition
+    SELECT engine_edition, edition, ag_replica_role
     FROM server_properties
     WHERE server_id = s.server_id
     ORDER BY collection_time DESC
@@ -261,9 +279,11 @@ WHERE s.server_id <> 0";
     /// </summary>
     private static string IdleCoverageForCagg(string relationSql, DateTime watermarkUtc, DateTime idleCutoffUtc)
     {
-        var watermark = $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var watermark = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
         var floorHour = TimescaleSupport.AlignDown(idleCutoffUtc, TimescaleSupport.HourlyBucket);
-        var oldestBucketBefore = $"TIMESTAMP '{floorHour:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var oldestBucketBefore = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{floorHour:yyyy-MM-dd HH:mm:ss.ffffff}'");
 
         return $@"idle_coverage AS (
     SELECT d.server_id
@@ -310,8 +330,9 @@ WHERE s.server_id <> 0";
     /// </summary>
     private static string IdleActiveDbsForCagg(string relationSql, DateTime ceilingHourUtc, DateTime watermarkUtc)
     {
-        var ceiling = $"TIMESTAMP '{ceilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
-        var watermark = $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var ceiling = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{ceilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
+        var watermark = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
 
         return $@"active_dbs AS (
     SELECT DISTINCT server_id, database_name
@@ -456,7 +477,7 @@ WHERE s.server_id <> 0";
     /// Inventory grid already shows a null status as blank. A server WITH CPU samples gets the same verdict as
     /// before, except that a logical server's master gets the N/A verdict. Ordinals match the fleet SELECT: 1 avg CPU,
     /// 4 max CPU, 5 p95 CPU, 6 max workers, 7 current workers, 8 grant waiters, 9 grant timeouts, 10 forced grants,
-    /// 11 grant utilization, 12 engine edition, 13 edition, 15 buffer pool, 19 CPU sample count, 20 total server memory. With fewer than
+    /// 11 grant utilization, 12 engine edition, 13 edition, 15 buffer pool, 19 CPU sample count, 20 total server memory, 21 the AG replica role (a secondary gets NOT_JUDGED_SECONDARY, #7705). With fewer than
     /// <see cref="ProvisioningVerdict.MinSamples"/> samples the verdict is NOT_ENOUGH_DATA, and a high stolen-memory share is
     /// UNDER_PROVISIONED, so this grid shows the same verdict as the drill-down (#6139).</para>
     /// </summary>
@@ -479,7 +500,8 @@ WHERE s.server_id <> 0";
             cpuSamples: reader.IsDBNull(19) ? 0L : Convert.ToInt64(reader.GetValue(19)),
             stolenMemoryPercent: (decimal)FinOpsUtilizationFigures.StolenMemoryPct(
                 reader.IsDBNull(20) ? 0 : Convert.ToInt32(reader.GetValue(20)),
-                reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15))));
+                reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15))),
+            isAgSecondary: ProvisioningVerdict.IsSecondaryReplicaRole(reader.IsDBNull(21) ? null : reader.GetString(21)));
     }
 
     /// <summary>
@@ -532,13 +554,16 @@ SELECT
     /* #2359: real collection freshness, which is NOT what sp.collection_time means. server_properties
        has FrequencyMinutes 0 - collected once on server load - so its timestamp is the last service
        start, not a heartbeat. Appended LAST so no existing reader ordinal moves. */
-    (SELECT MAX(cl.collection_time) FROM v_collection_log cl WHERE cl.server_id = sp.server_id AND {CollectionCycleRow.NotCycleRowSql}) AS last_collection
+    (SELECT MAX(cl.collection_time) FROM v_collection_log cl WHERE cl.server_id = sp.server_id AND {CollectionRunSql.SuccessfulCollectorRun}) AS last_collection,
+    /* #7176: the zone id and offset that turn sqlserver_start_time (server-local) into UTC. Appended LAST so no existing reader ordinal moves. */
+    sp.utc_offset_minutes,
+    sp.time_zone_id
 FROM (
     SELECT DISTINCT ON (server_id)
         server_id, edition, product_version, product_level, product_update_level,
         engine_edition, cpu_count, physical_memory_mb, socket_count, cores_per_socket,
         is_hadr_enabled, is_clustered, collection_time,
-        sqlserver_start_time, host_os_version, ag_replica_role
+        sqlserver_start_time, host_os_version, ag_replica_role, utc_offset_minutes, time_zone_id
     FROM server_properties
     ORDER BY server_id, collection_time DESC
 ) sp
@@ -584,11 +609,13 @@ ORDER BY s.is_enabled DESC, server_name";
                 InventoryAsOfUtc: reader.IsDBNull(13) ? null : reader.GetDateTime(13),
                 /* sqlserver_start_time is the server's LOCAL clock — read verbatim. host OS + AG role are the collected guarded values. */
                 SqlServerStartTime: reader.IsDBNull(14) ? null : reader.GetDateTime(14),
-                HostOsVersion: reader.IsDBNull(15) ? "" : reader.GetString(15),
+                HostOsVersion: CleanHostOsVersion(reader.IsDBNull(15) ? null : reader.GetString(15)),
                 AgReplicaRole: reader.IsDBNull(16) ? "Standalone" : reader.GetString(16),
                 IsEnabled: reader.IsDBNull(17) || reader.GetBoolean(17),
                 MonthlyCost: reader.IsDBNull(18) ? 0m : Convert.ToDecimal(reader.GetValue(18)),
-                LastCollectedUtc: reader.IsDBNull(19) ? null : reader.GetDateTime(19)));
+                LastCollectedUtc: reader.IsDBNull(19) ? null : reader.GetDateTime(19),
+                UtcOffsetMinutes: reader.IsDBNull(20) ? null : reader.GetInt32(20),
+                TimeZoneId: reader.IsDBNull(21) ? null : reader.GetString(21)));
         }
         return items;
     }

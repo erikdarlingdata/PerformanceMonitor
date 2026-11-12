@@ -53,7 +53,7 @@ public sealed class PgSensitiveStatementFilterLiveTests
             "Set DARLING_TEST_PG to a connection string to judge the #4348 pattern in PostgreSQL's regex engine.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 
@@ -93,7 +93,7 @@ public sealed class PgSensitiveStatementFilterLiveTests
             "Set DARLING_TEST_PG to a connection string to judge the #4348 pattern in PostgreSQL's regex engine.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 

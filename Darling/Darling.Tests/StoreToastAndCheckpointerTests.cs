@@ -159,28 +159,6 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.DoesNotContain("pg_freespace", StoreSelfMetrics.DimensionInsertSql, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void TheSweepDoc_StatesThePerKindMeaningOfTheCheckpointerColumns()
-    {
-        /* Single-line anchors only (so the plain reader is enough), each the load-bearing clause of one
-           paragraph: the per-kind mapping, the raw-vs-delta decision, the reset idiom, the extension fence. */
-        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "StoreSelfMetrics.cs");
-        foreach (var phrase in new[]
-        {
-            "hold the server's CUMULATIVE counters as the",
-            "NOT the interval's delta",
-            "Why the row stores the raw counters and the READ computes the interval",
-            "BACKWARDS means <c>pg_stat_reset_shared('checkpointer')</c>",
-            "the #3705 discontinuity idiom",
-            "just found <c>pg_freespacemap</c> installed (#3783's code half)",
-            "reads 48.5 %",
-            "~20 million rows",
-        })
-        {
-            Assert.Contains(phrase, source, StringComparison.Ordinal);
-        }
-    }
-
     /* ---- the reader ------------------------------------------------------------------------------------ */
 
     [Fact]
@@ -294,7 +272,7 @@ public sealed class StoreToastAndCheckpointerTests
         /* Pre-V137 row: no file size recorded. */
         var predates = DarlingStoreMetricsReader.ToastFacts.For(Row(StoreSelfMetrics.DimensionObjectKind, PayloadDimensions.QueryPlanDimTable, toast: null, live: null))!;
         Assert.Null(predates.UtilisationPercent);
-        Assert.Contains("predates V137", predates.Note, StringComparison.Ordinal);
+        Assert.Contains("did not record it", predates.Note, StringComparison.Ordinal);
 
         /* The shipped store: file real, live NULL — the DORMANT arm, in words, naming the one option. */
         var unmeasured = DarlingStoreMetricsReader.ToastFacts.For(Row(StoreSelfMetrics.DimensionObjectKind, PayloadDimensions.QueryPlanDimTable, toast: 154L << 30, live: null))!;
@@ -565,7 +543,7 @@ public sealed class StoreToastAndCheckpointerTests
         var crash = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(
             new(t1, 3, 4, 1, after), new(t0, 115, 78, 2, before)));
         Assert.Contains("read LOWER than before", crash, StringComparison.Ordinal);
-        Assert.Contains("The store's postmaster did restart inside this interval (#3955)", crash, StringComparison.Ordinal);
+        Assert.Contains("The store's postmaster did restart inside this interval, which is the second of those causes", crash, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -623,7 +601,7 @@ public sealed class StoreToastAndCheckpointerTests
 
         /* Pre-rung pair: null timed on both sides -> unmeasured average arm, no pressure from the sum. */
         var preRung = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 85_000, 5), new(t0, 1_000, 1_000, 5)));
-        Assert.Contains("an unmeasured number of checkpoints (a row before V140 has no timed count)", preRung, StringComparison.Ordinal);
+        Assert.Contains("an unmeasured number of checkpoints (an older row has no timed count)", preRung, StringComparison.Ordinal);
         Assert.DoesNotContain("average of", preRung, StringComparison.Ordinal);
         Assert.DoesNotContain("CHECKPOINTER PRESSURE", preRung, StringComparison.Ordinal);
         Assert.False(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 85_000, 5), new(t0, 1_000, 1_000, 5)).IsPressure);
@@ -696,7 +674,7 @@ public sealed class StoreToastAndCheckpointerTests
                25.2s/14.0s checkpoint sync-phase incident - are D4 "story of why" removals too: each one's RULE
                (the VACUUM/free-space behavior; the sync_ms/requested self-alert gate) stays in the description,
                only the specific past incident's numbers are gone. See the #3898 PR body's D4 section. */
-            "TOAST UTILISATION (V137)",
+            "TOAST UTILISATION:",
             "they live in its TOAST file, and pg_total_relation_size says how big that file is and nothing about how FULL it is",
             "ordinary VACUUM returns to the table and never to the operating system",
             "toast_utilisation_pct is toast_live_bytes / toast_bytes (one decimal)",
@@ -706,7 +684,7 @@ public sealed class StoreToastAndCheckpointerTests
             "ACCESS EXCLUSIVE lock",
             "This tool never reclaims anything by itself.",
             "Hypertable, aggregate, table and catch-all objects carry the four TOAST fields as null",
-            "CHECKPOINTER (V137)",
+            "CHECKPOINTER:",
             "interval_seconds (MEASURED between the two sweeps that bound it, not the assumed cadence)",
             "Reset (a counter went backwards",
             "WAL sizing and refresh slicing",
@@ -902,6 +880,51 @@ public sealed class StoreToastAndCheckpointerTests
         h.Settings.AlertsEnabled = false;
         await h.Build().ApplyToastSlackAsync(new[] { Dim(PayloadDimensions.QueryPlanDimTable, 154L << 30, 39.6) }, Ct);
         Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task CheckpointerPressure_HoldsTheFirstTwoHourlyBreaches_WritesOneHeldRow_AndPagesOnTheThird()
+    {
+        /* #7086 part 4: the check runs once an hour, so the hold is 3 breaching evaluations in a row (the 30-minute bar does not
+           fit a check that runs less often than every 10 minutes). Two hours in: one held row and no page. The third pages. */
+        var h = new Harness();
+        h.HoldSelfHealth = true;
+        var e = h.Build();
+
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+        h.Clock = h.Clock.AddHours(1);
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+
+        var held = Assert.Single(h.Deliverer.Outcomes);
+        Assert.NotNull(held.Hold);
+        Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, held.MetricName);
+
+        h.Clock = h.Clock.AddHours(1);
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Null(h.Deliverer.Outcomes[1].Hold);
+        Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, h.Deliverer.Outcomes[1].MetricName);
+    }
+
+    [Fact]
+    public async Task CheckpointerPressure_ACleanIntervalEndsTheEpisode_SoTheNextBreachIsHeldAgain()
+    {
+        var h = new Harness();
+        h.HoldSelfHealth = true;
+        var e = h.Build();
+
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+        h.Clock = h.Clock.AddHours(1);
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 1_200, requested: 0), Ct);
+        h.Clock = h.Clock.AddHours(1);
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+        h.Clock = h.Clock.AddHours(1);
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+
+        // Two held episodes (a row each) and no page: neither episode reached 3 breaches in a row.
+        Assert.Equal(2, h.Deliverer.Outcomes.Count(o => o.MetricName == DarlingSelfAlertEvaluator.CheckpointerPressureMetric && o.Hold is not null));
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == DarlingSelfAlertEvaluator.CheckpointerPressureMetric && o.Hold is null);
     }
 
     [Fact]
@@ -1446,7 +1469,18 @@ public sealed class StoreToastAndCheckpointerTests
         public FakeHistoryStore History { get; } = new();
         public DateTime Clock { get; set; } = new(2026, 9, 20, 13, 0, 0, DateTimeKind.Utc);
 
-        public DarlingSelfAlertEvaluator Build() =>
+        public DarlingSelfAlertEvaluator Build()
+        {
+            var e = BuildCore();
+            e.HoldSelfHealth = HoldSelfHealth;
+            return e;
+        }
+
+        /// <summary>#7086: false (the default here) lets the self-health conditions page on a first breach, as the older tests
+        /// in this file assume. The hold tests set it true.</summary>
+        public bool HoldSelfHealth { get; set; }
+
+        private DarlingSelfAlertEvaluator BuildCore() =>
             new(Settings, Deliverer, History, _ => false, logger: null, utcNow: () => Clock);
     }
 

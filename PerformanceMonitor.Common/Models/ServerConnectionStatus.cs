@@ -56,6 +56,18 @@ public class ServerConnectionStatus
     public string? ErrorMessage { get; set; }
 
     /// <summary>
+    /// When the in-process connection check says the server is down, the sentence every surface shows for it (#7590):
+    /// <c>Server unreachable since 2026-11-04 11:56 UTC: &lt;last connect error&gt;</c>, the wording
+    /// <see cref="ServerHealthClassifier.UnreachableReason"/> gives Darling's stored state. The time is when the status last
+    /// changed to offline (the first failed check of this outage), or the last check when that was never stamped. Null when
+    /// the server is online or has not been checked, and when no time was ever recorded.
+    /// </summary>
+    public string? UnreachableReason =>
+        IsOnline == false && (StatusChangedAt ?? LastChecked) is { } since
+            ? ServerHealthClassifier.UnreachableReason(since.ToUniversalTime(), ErrorMessage)
+            : null;
+
+    /// <summary>
     /// The SQL Server start time, queried from sys.dm_os_sys_info.
     /// Only populated when server is online.
     /// </summary>

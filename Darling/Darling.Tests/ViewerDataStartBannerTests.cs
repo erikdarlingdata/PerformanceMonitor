@@ -93,7 +93,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
 
         Assert.Equal(1, Matches(tab, @"var dataStartTask = _dataService\.GetQuerySnapshotsDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
         Assert.Equal(1, Matches(tab,
-            @"UpdateTruncationBanner\(QuerySnapshotsTruncationBanner,\s*await DataStartOrNullAsync\(dataStartTask,\s*""Active Queries""\),\s*startUtc\);\s*await LoadActiveQueriesSlicerAsync\(startUtc,\s*endUtc\);"));
+            @"UpdateTruncationBanner\(QuerySnapshotsTruncationBanner,\s*await DataStartOrNullAsync\(dataStartTask,\s*""Active Queries""\),\s*startUtc\);\s*await LoadActiveQueriesSlicerAsync\(startUtc,\s*endUtc(?:,\s*timer)?\);"));
     }
 
     [Fact]
@@ -181,10 +181,11 @@ public sealed class ViewerDataStartBannerTests : IDisposable
        toolbar's range on a load (startUtc), the slicer's selection on a drag (e.StartUtc). Both await the probe through the
        same catch as the two surfaces above, so a probe that throws costs the grid its banner and not the slicer and the
        comparison loads that follow it. The tail is what the call passes after the start: the hourly-tier suffix on Top
-       Queries and Top Procedures, the interval-table plan on a Query Store load, nothing on a Query Store slicer drag. Top Procedures names the databases its read left out (#6651) between the banner
+       Queries and Top Procedures, the interval-table plans (the grid's and the slicer's) on a Query Store load, the grid's plan and the last load's slicer plan on a Query Store slicer drag. Top Procedures names the databases its read left out (#6651) between the banner
        and the next call. */
     private const string HourlyTail = @",\s*HourlyBannerSuffix\(read\.Tier, read\.IoRoute, read\.HourlyEdgesNote\),\s*HourlyServedOf\(read\.Tier, read\.HourlyFirstBucket\)";
-    private const string WidePlanTail = @",\s*widePlan: widePlan";
+    private const string WidePlanTail = @",\s*widePlan: widePlan,\s*slicerPlan: slicerPlan";
+    private const string SlicerDragPlanTail = @",\s*widePlan: widePlan,\s*slicerPlan: _queryStoreSlicerPlan";
 
     [Theory]
     [InlineData("GetQueryStatsWindowFloorAsync", "QueryStats", "Query Stats", HourlyTail)]
@@ -202,7 +203,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
     [Theory]
     [InlineData("GetQueryStatsWindowFloorAsync", "QueryStats", "Query Stats", HourlyTail)]
     [InlineData("GetProcedureStatsWindowFloorAsync", "ProcStats", "Procedure Stats", HourlyTail)]
-    [InlineData("GetQueryStoreWindowFloorAsync", "QueryStore", "Query Store", "")]
+    [InlineData("GetQueryStoreWindowFloorAsync", "QueryStore", "Query Store", SlicerDragPlanTail)]
     public void QueriesTab_SlicerDrag_AsksAboutTheSelection_AndComparesWithItsStart(string probe, string grid, string surface, string tail)
     {
         var tab = ViewerFile("ViewerServerTab.Queries.cs");

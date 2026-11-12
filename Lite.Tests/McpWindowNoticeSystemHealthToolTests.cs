@@ -126,10 +126,10 @@ public sealed class McpWindowNoticeSystemHealthToolTests : IDisposable
         Tool.SevereErrors => (SystemHealthParser.ErrorReportedEvent, "error_reported.xml", null),
         Tool.IoIssues => (SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_io_subsystem.xml", null),
         Tool.SchedulerIssues => (SystemHealthParser.SchedulerMonitorEvent, "scheduler_monitor_high_sql_cpu.xml", null),
-        /* The fixtures carry the HIGH notification, which the memory gates drop; LOW is the one they keep. */
+        /* The memory-conditions fixture carries HIGH and the broker fixture STABLE, which the gates drop; LOW and SHRINK (#7466) are the ones they keep. */
         Tool.MemoryConditions => (SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_resource.xml", "LOW"),
         Tool.CpuTasks => (SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_query_processing_warning.xml", null),
-        Tool.MemoryBroker => (SystemHealthParser.MemoryBrokerEvent, "memory_broker.xml", "LOW"),
+        Tool.MemoryBroker => (SystemHealthParser.MemoryBrokerEvent, "memory_broker.xml", "SHRINK"),
         Tool.MemoryNodeOom => (SystemHealthParser.MemoryNodeOomEvent, "memory_node_oom.xml", null),
         Tool.SignificantWaits => (SystemHealthParser.WaitInfoEvent, "wait_info.xml", null),
         _ => throw new ArgumentOutOfRangeException(nameof(tool))
@@ -157,7 +157,9 @@ public sealed class McpWindowNoticeSystemHealthToolTests : IDisposable
         var xml = LoadFixture(fixture);
         if (replace is not null)
         {
-            xml = xml.Replace("RESOURCE_MEMPHYSICAL_HIGH", "RESOURCE_MEMPHYSICAL_" + replace, StringComparison.Ordinal);
+            xml = tool == Tool.MemoryBroker
+                ? xml.Replace(">STABLE<", ">" + replace + "<", StringComparison.Ordinal)
+                : xml.Replace("RESOURCE_MEMPHYSICAL_HIGH", "RESOURCE_MEMPHYSICAL_" + replace, StringComparison.Ordinal);
         }
 
         return ExecuteAsync(@"
@@ -411,7 +413,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         /* #4966: the window is cut, so the healthy-answer claim gives way to the cut sentence; the event count and the reason
            nothing qualified (the first sentence) are kept. */
         var message = root.GetProperty("message").GetString()!;
-        Assert.StartsWith("1 " + eventType + " event(s) were captured for " + ServerName, message, StringComparison.Ordinal);
+        Assert.StartsWith("1 " + eventType + " event was captured for " + ServerName, message, StringComparison.Ordinal);
         Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
         Assert.DoesNotContain("healthy answer", message, StringComparison.Ordinal);
     }
@@ -441,7 +443,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         Assert.Equal("empty", root.GetProperty("status").GetString());
         AssertCovered(root.GetProperty("hints"), WindowStart);
         var message = root.GetProperty("message").GetString()!;
-        Assert.StartsWith("1 " + eventType + " event(s) were captured for " + ServerName, message, StringComparison.Ordinal);
+        Assert.StartsWith("1 " + eventType + " event was captured for " + ServerName, message, StringComparison.Ordinal);
         Assert.EndsWith(". Events ARE being captured, so this is the healthy answer for this read rather than missing data.", message, StringComparison.Ordinal);
     }
 
@@ -468,9 +470,9 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         AssertTruncatedAt(cut.GetProperty("hints"), Anchor.AddDays(-2));
         var cutMessage = cut.GetProperty("message").GetString()!;
         Assert.StartsWith("No " + eventType + " events were captured for " + ServerName, cutMessage, StringComparison.Ordinal);
-        Assert.Contains("This server HAS captured them before", cutMessage, StringComparison.Ordinal);
+        Assert.Contains("This server has captured them before", cutMessage, StringComparison.Ordinal);
         Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, cutMessage, StringComparison.Ordinal);
-        Assert.DoesNotContain("genuinely quiet", cutMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("nothing happened in this window", cutMessage, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -482,6 +484,8 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         var (eventType, _, _) = SourceOf(tool);
         await SeedEventAsync(tool, WindowStart.AddDays(-9));
         await SeedLogRunsAsync(WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
+        /* #7167: another collector ran a minute ago, so the server is being collected and the empty window stays empty. */
+        await SeedOtherCollectorRunAsync(DateTime.UtcNow.AddMinutes(-1));
 
         var root = Root(await CallAsync(tool));
 
@@ -503,7 +507,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         var root = Root(await CallAsync(tool));
 
         AssertCovered(root.GetProperty("hints"), WindowStart);
-        Assert.EndsWith(", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.EndsWith(", so nothing happened in this window: widen hours_back to reach the most recent events.", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
     /// <summary>The tool's type was captured before the window and not in it (the second rung): the keys say nothing in the window was read.</summary>
@@ -522,6 +526,9 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         await _duckDb.InitializeFromTemplateAsync();
         await SeedEventAsync(tool, WindowStart.AddDays(-9));
         await SeedLogRunsAsync(WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
+        /* #7167: the server is being collected now (another collector ran a minute ago), so the empty window is this collector's
+           alone and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedOtherCollectorRunAsync(DateTime.UtcNow.AddMinutes(-1));
 
         var root = Root(await CallAsync(tool));
 
@@ -654,9 +661,9 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, 'ring_buffer_t
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
-        Assert.Contains("773 event(s) are hidden", message, StringComparison.Ordinal);
+        Assert.Contains("773 events are hidden", message, StringComparison.Ordinal);
         Assert.Contains("5 h 23 min old", message, StringComparison.Ordinal);
-        Assert.DoesNotContain("quiet", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("nothing happened in this window", message, StringComparison.Ordinal);
     }
 
     private Task SeedTruncatedRunAsync(DateTime at, int hidden = 773, string? note = null) => ExecuteAsync(@"
@@ -707,7 +714,7 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, $5)",
         Assert.Contains("2 system_health collection runs that read events of this window", message, StringComparison.Ordinal);
         Assert.Contains("the first at " + Minute(pastEnd.AddHours(-5)), message, StringComparison.Ordinal);
         Assert.Contains("the last at " + Minute(pastEnd.AddHours(-2)), message, StringComparison.Ordinal);
-        Assert.Contains("240 event(s) are hidden", message, StringComparison.Ordinal);
+        Assert.Contains("240 events are hidden", message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -781,7 +788,7 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, $5)",
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
         Assert.Contains("the system_health collection run at " + Minute(after) + ", which read events of this window, reported that", message, StringComparison.Ordinal);
-        Assert.Contains("321 event(s) are hidden", message, StringComparison.Ordinal);
+        Assert.Contains("321 events are hidden", message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -816,7 +823,7 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, $5)",
         var root = Root(await CallAsync(tool, hoursBack: 24));
 
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
-        Assert.Contains("555 event(s) are hidden", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.Contains("555 events are hidden", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
     /* #6827: a note can match the SQL's pre-filter and still not be a truncated note by TryParse (a value of 1x). The newest
@@ -838,7 +845,7 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, $5)",
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("the system_health collection run at " + Minute(older) + ", which read events of this window, reported that", message, StringComparison.Ordinal);
-        Assert.Contains("240 event(s) are hidden", message, StringComparison.Ordinal);
+        Assert.Contains("240 events are hidden", message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -869,6 +876,8 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, $5)",
         await SeedEventAsync(tool, Anchor.AddDays(-20));
         await SeedLogRunsAsync(Anchor.AddDays(-9), Anchor.AddHours(-4), everyMinutes: 30);
         await SeedTruncatedRunAsync(Anchor.AddHours(-3));
+        /* #7167: another collector ran a minute ago, so the server is being collected and the empty window stays empty. */
+        await SeedOtherCollectorRunAsync(DateTime.UtcNow.AddMinutes(-1));
 
         var root = Root(await CallAsync(tool, hoursBack: 1));
 
@@ -902,10 +911,10 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, 'ring_buffer_t
 
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         var message = root.GetProperty("message").GetString()!;
-        Assert.StartsWith("1 " + eventType + " event(s) were read for " + ServerName, message, StringComparison.Ordinal);
+        Assert.StartsWith("1 " + eventType + " event was read for " + ServerName, message, StringComparison.Ordinal);
         Assert.DoesNotContain("events were found", message, StringComparison.Ordinal);
         Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
-        Assert.Contains("773 event(s) are hidden", message, StringComparison.Ordinal);
+        Assert.Contains("773 events are hidden", message, StringComparison.Ordinal);
     }
 
     /* #6441, #6827: the truncated run is at WindowStart minus 3 days, outside the read's window, so the window read never asks
@@ -925,7 +934,7 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, 'ring_buffer_t
         var root = Root(await CallAsync(Tool.SignificantWaits));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Contains("genuinely quiet", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.Contains("so nothing happened in this window", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
     /* #6453: nothing of any type ever stored. The newest run read the live session through its event_file target and found
@@ -959,6 +968,68 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, $5, 0, $6)",
         {
             Assert.Contains("NOT an all-clear", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>One successful run of a collector the system_health reads do not use (#7167: it keeps the server collected, so an empty window stays empty).</summary>
+    private async Task SeedOtherCollectorRunAsync(DateTime atUtc)
+    {
+        await ExecuteAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+VALUES ($1, $2, $3, 'wait_stats', $4, 12, 'SUCCESS', 0)",
+            _nextId, _serverId, ServerName, Naive(atUtc));
+        _nextId += 100_000;
+    }
+
+    /* #7466: the broker tool shows what the SHRINK gate filtered out. The counts come from the tool's own JSON, on its real
+       path, and events_in_window is the raw number of stored broker events (a row that fails to shred still counts), the
+       same on the data reply and the empty reply, so the two paths agree. */
+    private async Task SeedBrokerEventsAsync(params string[] notifications)
+    {
+        var (eventType, fixture, _) = SourceOf(Tool.MemoryBroker);
+        var minutes = 10;
+        foreach (var n in notifications)
+        {
+            var xml = n == "unparseable" ? "this is not xml" : LoadFixture(fixture).Replace(">STABLE<", ">" + n + "<", StringComparison.Ordinal);
+            await ExecuteAsync(@"
+INSERT INTO system_health_events (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
+VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                _nextId++, Naive(Anchor.AddMinutes(-minutes)), _serverId, ServerName, Naive(Anchor.AddMinutes(-minutes)), eventType, xml);
+            minutes += 10;
+        }
+    }
+
+    [Fact]
+    public async Task MemoryBroker_DataReply_CarriesNotificationCounts_AndTheRawEventCount_7466()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedLogRunsAsync(WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
+        await SeedBrokerEventsAsync("STABLE", "GROW", "GROW", "SHRINK", "unparseable");
+
+        var root = Root(await CallAsync(Tool.MemoryBroker));
+
+        Assert.Equal(1, root.GetProperty("event_count").GetInt32());
+        Assert.Equal(5, root.GetProperty("events_in_window").GetInt32());
+        var counts = root.GetProperty("notification_counts");
+        Assert.Equal(2, counts.GetProperty("GROW").GetInt32());
+        Assert.Equal(1, counts.GetProperty("SHRINK").GetInt32());
+        Assert.Equal(1, counts.GetProperty("STABLE").GetInt32());
+    }
+
+    [Fact]
+    public async Task MemoryBroker_EmptyReply_CarriesNotificationCounts_AndTheSameRawEventCount_7466()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedLogRunsAsync(WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
+        await SeedBrokerEventsAsync("STABLE", "GROW", "GROW", "unparseable");
+
+        var root = Root(await CallAsync(Tool.MemoryBroker));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        Assert.Equal(4, root.GetProperty("events_in_window").GetInt32());
+        var counts = root.GetProperty("notification_counts");
+        Assert.Equal(2, counts.GetProperty("GROW").GetInt32());
+        Assert.Equal(1, counts.GetProperty("STABLE").GetInt32());
+        Assert.False(counts.TryGetProperty("SHRINK", out _));
     }
 
     private async Task SeedLogRunsAsync(DateTime firstUtc, DateTime lastUtc, int everyMinutes)

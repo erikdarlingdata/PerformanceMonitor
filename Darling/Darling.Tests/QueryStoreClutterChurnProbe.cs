@@ -136,9 +136,9 @@ internal static partial class QueryStoreClutterChurnProbe
             await insert.ExecuteNonQueryAsync(ct);
         }
 
-        /* VACUUM sets the visibility map, which production's autovacuum keeps set and an index-only walk needs to skip the heap. */
-        await using var analyze = new NpgsqlCommand("VACUUM (ANALYZE) query_store_stats", connection);
-        await analyze.ExecuteNonQueryAsync(ct);
+        /* VACUUM sets the visibility map, which production's autovacuum keeps set and an index-only walk needs to skip the heap.
+           #8204: until every page is marked, since one pass cannot mark them while an older snapshot is open in the database. */
+        await LiveVisibilityMap.VacuumUntilAllVisibleAsync(connection, "query_store_stats", ct);
     }
 
     internal sealed record Run(List<DarlingQueryStoreClutterReader.PlanChurnRow> Rows, string PlanText);
@@ -172,6 +172,17 @@ internal static partial class QueryStoreClutterChurnProbe
             return command;
         }
 
+        /* #8570: the arm is two statements now (the plan facts and the distinct collection times), merged the way GetPlanChurnAsync merges them. */
+        var collections = new Dictionary<string, int>(StringComparer.Ordinal);
+        await using (var command = Build(DarlingQueryStoreClutterReader.PlanChurnCollectionsSql))
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                collections[reader.GetString(1)] = (int)reader.GetInt64(2);
+            }
+        }
+
         var rows = new List<DarlingQueryStoreClutterReader.PlanChurnRow>();
         await using (var command = Build(DarlingQueryStoreClutterReader.PlanChurnSql))
         await using (var reader = await command.ExecuteReaderAsync(ct))
@@ -179,15 +190,16 @@ internal static partial class QueryStoreClutterChurnProbe
             while (await reader.ReadAsync(ct))
             {
                 rows.Add(new DarlingQueryStoreClutterReader.PlanChurnRow(
-                    reader.GetInt32(0), reader.GetString(1), reader.GetDateTime(2), reader.GetDateTime(3), reader.GetInt32(4),
-                    reader.GetInt32(5), reader.GetInt32(6), reader.GetInt32(7), reader.GetInt32(8), reader.GetInt32(9), reader.GetInt32(10)));
+                    reader.GetInt32(0), reader.GetString(1), reader.GetDateTime(2), reader.GetDateTime(3), collections[reader.GetString(1)],
+                    reader.GetInt32(4), reader.GetInt32(5), reader.GetInt32(6), reader.GetInt32(7), reader.GetInt32(8), reader.GetInt32(9)));
             }
         }
 
         var plan = new StringBuilder();
-        await using (var explain = Build("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + DarlingQueryStoreClutterReader.PlanChurnSql))
-        await using (var reader = await explain.ExecuteReaderAsync(ct))
+        foreach (var statement in new[] { DarlingQueryStoreClutterReader.PlanChurnSql, DarlingQueryStoreClutterReader.PlanChurnCollectionsSql })
         {
+            await using var explain = Build("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + statement);
+            await using var reader = await explain.ExecuteReaderAsync(ct);
             while (await reader.ReadAsync(ct))
             {
                 plan.AppendLine(reader.GetString(0));
@@ -219,7 +231,7 @@ internal static partial class QueryStoreClutterChurnProbe
     /// <summary>
     /// True when EVERY scan of the stats table's chunks is an index-only scan of <see cref="CoveringIndex"/> (a chunk index is named
     /// <c>&lt;chunk&gt;_&lt;index&gt;</c> cut to 63 characters, so the match is on the first 40 characters of the index name). The
-    /// statement reads its <c>NOT MATERIALIZED</c> CTE twice, so at least two scans are expected, and no scan at all fails (#6816).
+    /// arm is two statements since #8570 (the plan facts, the collection times), each scanning the stats table, so at least two scans are expected, and no scan at all fails (#6816).
     /// </summary>
     internal static bool WalksCoveringIndexOnly(string planText)
     {

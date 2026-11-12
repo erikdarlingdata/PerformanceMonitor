@@ -28,6 +28,10 @@ globalThis.location = { hash: "#/server/SRV1/overview" };
 const jsDir = process.argv[2];
 const scenario = process.argv[3];
 const settle = () => new Promise((r) => setTimeout(r, 15));
+/* What get_daily_summary sends (#7193): a gap day (nothing collected) and a purged day (before the retention horizon) both answer
+   status "unavailable"; only the purged one carries hints.data_state "purged". */
+const GAP_SAID = "No data collected for SRV1 on 2026-10-10. Nothing was collected that day, so this is a gap in collection, not a quiet day: check get_collection_health.";
+const PURGED_SAID = "2026-10-12 is before SRV1's retention_horizon (2026-10-15): the per-signal tables the health band reads have been purged for that day, so no health verdict is possible.";
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "daily-calendar-"));
 try {
@@ -70,7 +74,12 @@ try {
       if (params.summary_date === "2026-10-03") {
         return { kind: "data", data: { ...row("2026-10-03", "Critical", { deadlock_count: 2 }), reasons: ["2 deadlocks", "1 alert"], drills: ["Deadlocks", "TopQueries"] } };
       }
-      return { kind: "empty", status: "empty", message: "No data collected for SRV1 on " + params.summary_date + "." };
+      if (params.summary_date === "2026-10-12") {
+        // A purged day: the service's own sentence, and hints.data_state "purged" (the only thing that tells it from a gap day).
+        return { kind: "empty", status: "unavailable", message: PURGED_SAID, hints: { summary_date: "2026-10-12", overall_health: "NoData", data_state: "purged", retention_horizon: "2026-10-15" } };
+      }
+      // A gap day (#7193): the service answers "unavailable" for it too, with hints that carry no data_state.
+      return { kind: "empty", status: "unavailable", message: GAP_SAID, hints: { summary_date: params.summary_date, overall_health: "NoData" } };
     };
     const initial = {
       to_date: "2026-10-21",
@@ -112,7 +121,12 @@ try {
     // A day with no row: "no data", never a band.
     click(root.every((n) => n.getAttribute("data-day") === "2026-10-10")[0]);
     await settle();
-    out.noDataDetail = { text: text().includes("No collection this day."), healthy: root.every((n) => n.className === "daycal-band band-Healthy").length };
+    out.noDataDetail = { text: text().includes("No collection this day."), serviceSentence: text().includes("Nothing was collected that day"), healthy: root.every((n) => n.className === "daycal-band band-Healthy").length };
+
+    // A purged day: the service's horizon sentence, not the page's gap words.
+    click(root.every((n) => n.getAttribute("data-day") === "2026-10-12")[0]);
+    await settle();
+    out.purgedDetail = { text: text().includes(PURGED_SAID), gapWords: text().includes("No collection this day.") };
 
     // Previous month: read with the month's own days_back and as_of, drawn from that read only.
     click(named("Previous month"));
@@ -139,7 +153,7 @@ try {
     /* #6353: a day after the calendar's today. The calendar's today is the read's to_date (the service's UTC day), so a browser clock
        that is already on the next UTC day (nowMs) must not make the 22nd a "today" or a past day. */
     const reads = [];
-    const read = async (tool, params) => { reads.push({ tool, params }); return { kind: "empty", status: "empty", message: "No data collected for SRV1 on " + params.summary_date + "." }; };
+    const read = async (tool, params) => { reads.push({ tool, params }); return { kind: "empty", status: "unavailable", message: GAP_SAID, hints: { summary_date: params.summary_date, overall_health: "NoData" } }; };
     const initial = { to_date: "2026-10-21", days: [], days_missing: [] };
     const root = cal.dailyHealthCalendar({ server: "SRV1", initial, read, nowMs: Date.parse("2026-10-22T00:30:00Z"), firstDow: 0, renderTable: () => new FakeNode("div"), openDay: async () => null });
     await settle();

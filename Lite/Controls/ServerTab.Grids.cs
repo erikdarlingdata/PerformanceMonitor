@@ -223,6 +223,7 @@ public partial class ServerTab : UserControl
 
     private void QueryStatsGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource)) return;
         if (QueryStatsGrid.SelectedItem is not QueryStatsRow item) return;
         if (string.IsNullOrEmpty(item.DatabaseName) || string.IsNullOrEmpty(item.QueryHash)) return;
 
@@ -234,6 +235,7 @@ public partial class ServerTab : UserControl
 
     private void ProcedureStatsGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource)) return;
         if (ProcedureStatsGrid.SelectedItem is not ProcedureStatsRow item) return;
         if (string.IsNullOrEmpty(item.DatabaseName) || string.IsNullOrEmpty(item.ObjectName)) return;
 
@@ -245,6 +247,7 @@ public partial class ServerTab : UserControl
 
     private void QueryStoreGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource)) return;
         if (QueryStoreGrid.SelectedItem is not QueryStoreRow item) return;
         if (string.IsNullOrEmpty(item.DatabaseName) || item.QueryId == 0) return;
 
@@ -257,6 +260,7 @@ public partial class ServerTab : UserControl
 
     private void CollectionHealthGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource)) return;
         if (CollectionHealthGrid.SelectedItem is not CollectorHealthRow item) return;
 
         var window = new Windows.CollectionLogWindow(_dataService, _serverId, item.CollectorName, _serverClock);
