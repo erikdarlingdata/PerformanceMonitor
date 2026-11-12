@@ -84,25 +84,47 @@ public sealed class PgOwnStatementUpgradeLiveTests
                     Assert.Skip("pg_stat_statements or role setup is not available on this server: " + ex.Message);
                 }
 
-                /* The old build: the service's statements, unmarked. These create the entries, and keep their text. */
-                await DarlingMcpTestData.ExecAsync(target, ct, columnStats);
-                await DarlingMcpTestData.ExecAsync(target, ct, tableBloat);
-                /* The application: the service's column-statistics text under another login (its own entry, same queryid),
-                   the same text with one table name changed, and a statement of another shape, under the service's login. */
-                await DarlingMcpTestData.ExecAsync(target, ct, "SET ROLE " + AppRole);
-                await DarlingMcpTestData.ExecAsync(target, ct, columnStats);
-                await DarlingMcpTestData.ExecAsync(target, ct, "RESET ROLE");
-                await DarlingMcpTestData.ExecAsync(target, ct, otherTable);
-                await DarlingMcpTestData.ExecAsync(target, ct, AppOnly);
-
-                /* The new build: the same statements, marked. They add calls to the old entries; the stored text stays unmarked. */
-                foreach (var sql in new[] { columnStats, tableBloat })
+                /* #8708: the setup needs the unmarked entries to still be there when the marked run adds its calls. A table at its
+                   limit evicts the least-used entries first, and a statement run once is the least used there is, so a pass between
+                   the two runs takes the new entry and the marked run creates it again with the marked text. PgStatementTable reads
+                   the module's eviction counter around the setup and runs it again when a pass landed inside it. A retry first
+                   clears this scratch database's entries: an entry the marked run created would keep its marked text through the
+                   unmarked run of the next attempt. */
+                entries = [];
+                var setup = await PgStatementTable.RunAsync(target, ct, async attempt =>
                 {
-                    await using var marked = PostgresTargetProvider.Instance.CreateCommand(new CollectorQuery(sql), target, 60);
-                    await marked.ExecuteNonQueryAsync(ct);
-                }
+                    if (attempt.Number > 1)
+                    {
+                        await DarlingMcpTestData.ExecAsync(target, ct,
+                            "SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)");
+                    }
 
-                entries = await ReadEntriesAsync(target, ct);
+                    /* The old build: the service's statements, unmarked. These create the entries, and keep their text. */
+                    await DarlingMcpTestData.ExecAsync(target, ct, columnStats);
+                    await DarlingMcpTestData.ExecAsync(target, ct, tableBloat);
+                    /* The application: the service's column-statistics text under another login (its own entry, same queryid),
+                       the same text with one table name changed, and a statement of another shape, under the service's login. */
+                    await DarlingMcpTestData.ExecAsync(target, ct, "SET ROLE " + AppRole);
+                    await DarlingMcpTestData.ExecAsync(target, ct, columnStats);
+                    await DarlingMcpTestData.ExecAsync(target, ct, "RESET ROLE");
+                    await DarlingMcpTestData.ExecAsync(target, ct, otherTable);
+                    await DarlingMcpTestData.ExecAsync(target, ct, AppOnly);
+
+                    /* The new build: the same statements, marked. They add calls to the old entries; the stored text stays unmarked. */
+                    foreach (var sql in new[] { columnStats, tableBloat })
+                    {
+                        await using var marked = PostgresTargetProvider.Instance.CreateCommand(new CollectorQuery(sql), target, 60);
+                        await marked.ExecuteNonQueryAsync(ct);
+                    }
+
+                    entries = await ReadEntriesAsync(target, ct);
+                });
+
+                /* Every run had a pass inside it: the shared table is evicting faster than the setup runs, an environment condition
+                   and not a product defect. A run with no pass inside that still leaves a marked text fails below. */
+                Assert.SkipWhen(setup.PassesInside != 0,
+                    $"pg_stat_statements ran {setup.PassesInside} eviction pass(es) inside the last of every setup attempt (dealloc {setup.DeallocAtStart} -> {setup.DeallocAtEnd}), so the setup could not keep an unmarked stored text (#8708).");
+
                 var serviceColumnStats = Assert.Single(entries, e => e.Name == "column_stats" && e.RoleName != AppRole);
                 var serviceBloat = Assert.Single(entries, e => e.Name == "bloat");
                 Assert.False(PgOwnStatement.IsOwn(serviceColumnStats.Text), "the setup must leave an unmarked stored text");
