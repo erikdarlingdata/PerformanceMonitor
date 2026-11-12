@@ -254,7 +254,7 @@ internal static class PgTargetToolRecommendations
         [PgTargetFactKeys.ConfigMemoryOvercommit] =
         [
             new("get_pg_server_config", "shared_buffers, max_connections, work_mem, maintenance_work_mem and autovacuum_max_workers as set"),
-            new("get_pg_cpu_utilization", "The host's memory_total_bytes the sum is measured against (the V136 memory columns ride the capacity row)"),
+            new("get_pg_cpu_utilization", "The host's memory_total_bytes the sum is measured against (the memory columns ride the capacity row)"),
             new("get_pg_session_states", "How many of max_connections are in use: the ceiling's distance from the load"),
         ],
         [PgTargetFactKeys.HostMemoryPressure] =

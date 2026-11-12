@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -122,6 +123,16 @@ public sealed class DarlingCollectionLogReadTests
             Assert.True(quietDoc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
             Assert.Equal(JsonValueKind.Null, quietDoc.RootElement.GetProperty("hints").GetProperty("effective_start").ValueKind);
             Assert.Equal($"No collector runs recorded for {ServerName} in the last 1 hour. {McpHelpers.CutWindowNothingReadMessage}", quietText);
+
+            /* #8572: a read anchored at as_of names the window it really looked at, not "the last hour" (which would be the
+               hour ending now). */
+            var anchor = DateTime.UtcNow.AddHours(-2);
+            var anchored = await DarlingMcpDataTools.GetCollectionLog(
+                dataSource, ServerName, 1, 200, as_of: anchor.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture));
+            var anchoredText = JsonDocument.Parse(anchored).RootElement.GetProperty("message").GetString()!;
+            Assert.StartsWith(
+                $"No collector runs recorded for {ServerName} in the 1 hour ending at {anchor:yyyy-MM-dd HH:mm} UTC", anchoredText, StringComparison.Ordinal);
+            Assert.DoesNotContain("in the last", anchoredText, StringComparison.Ordinal);
 
             /* ── 3. rows in the window: the data path, and the split that makes the log worth reading ── */
             await SeedAsync(connection, ct, "query_store", MinutesAgo(10));

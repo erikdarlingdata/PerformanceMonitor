@@ -415,7 +415,7 @@ public sealed class McpInvestigationTools
             {
                 return requestId is not null
                     ? InvestigationToolCore.Status("not_found", $"No investigation request has id {requestId}.")
-                    : InvestigationToolCore.Status("empty", $"No investigation request opened in the last {hours_back} hours.");
+                    : InvestigationToolCore.Status("empty", $"No investigation request opened {McpHelpers.InTheLast($"{hours_back} hours")}.");
             }
 
             return InvestigationToolCore.ReportsAnswer(read, requestId is null ? hours_back : null, mode, key);

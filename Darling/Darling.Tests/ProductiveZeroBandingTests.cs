@@ -232,7 +232,7 @@ public sealed class ProductiveZeroBandingTests
 
         Assert.Equal(
             "produced 25,230 rows until 2026-09-14 08:46:00Z and has recorded SUCCESS with zero rows on "
-            + "11,520 runs since — a collector that stops producing is a different fact from one that "
+            + "11,520 runs since. A collector that stops producing is a different fact from one that "
             + "never produced",
             CollectorHealthClassifier.FormatProducedThenStoppedFinding(RowsInPriorWindow, at, 11_520));
     }

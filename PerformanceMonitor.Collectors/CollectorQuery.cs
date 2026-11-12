@@ -13,7 +13,7 @@ namespace PerformanceMonitor.Collectors;
 
 /// <summary>Parameter types a collector query can bind — grown as the sweep demands.</summary>
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Naming", "CA1720:Identifier contains type name",
-    Justification = "SQL parameter-binding vocabulary by design — Int32 names the binding type the sweep requests, not the .NET type.")]
+    Justification = "SQL parameter-binding vocabulary by design. Int32 names the binding type the sweep requests, not the .NET type.")]
 public enum CollectorParameterType
 {
     DateTime2,

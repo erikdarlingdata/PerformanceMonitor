@@ -159,7 +159,7 @@ public static class PoisonWaitEvaluator
         /// </summary>
         public string ShortMessage => string.Create(CultureInfo.InvariantCulture,
             $"[{WaitType}] {AccumulatedSeconds:N0}s of wait accumulated in the last {WindowMinutes} minutes "
-            + $"across {AccumulatedWaits:N0} waits — on average {AvgWaiters:N1} {(AvgWaiters == 1 ? "task" : "tasks")} continuously stuck");
+            + $"across {AccumulatedWaits:N0} waits. On average {AvgWaiters:N1} {(AvgWaiters == 1 ? "task" : "tasks")} continuously stuck");
     }
 
     /// <summary>
@@ -232,15 +232,15 @@ public static class PoisonWaitEvaluator
     /// </summary>
     public static string SqlServerRemedyFor(string? waitType) => waitType?.ToUpperInvariant() switch
     {
-        "THREADPOOL" => "Tasks are queueing for a worker thread — the server has run out of workers, usually "
+        "THREADPOOL" => "Tasks are queueing for a worker thread. The server has run out of workers, usually "
             + "because blocking or parallelism is holding the ones it has. Look at the blocking and active-query "
             + "snapshots for this window before touching max worker threads; adding workers to a blocked pile "
             + "adds to the pile.",
-        "RESOURCE_SEMAPHORE" => "Queries are queueing for memory grants — the grants in flight have consumed the "
+        "RESOURCE_SEMAPHORE" => "Queries are queueing for memory grants. The grants in flight have consumed the "
             + "query memory budget and new queries wait for one to finish. Look at the memory-grant snapshots "
             + "for the largest requested grants and the plans that asked for them (sorts, hashes, "
             + "over-estimated row counts).",
-        "RESOURCE_SEMAPHORE_QUERY_COMPILE" => "Queries are queueing for compile memory — too many large plans are "
+        "RESOURCE_SEMAPHORE_QUERY_COMPILE" => "Queries are queueing for compile memory. Too many large plans are "
             + "compiling at once, typically a burst of non-parameterized or freshly-evicted statements. Look at "
             + "the compile and recompile rates and at the statement shapes that are compiling in this window.",
         _ => "Sample the active-query snapshots for the sessions in this wait type.",

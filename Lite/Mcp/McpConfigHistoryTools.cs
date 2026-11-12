@@ -61,7 +61,7 @@ public sealed class McpConfigHistoryTools
             if (rows.Count == 0)
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_config", awsRdsKind: AwsRdsKind.None)
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
-                        $"No server configuration changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.",
+                        $"No server configuration changes detected {McpHelpers.InTheLast($"{hours_back} hours")}. Config is captured on connect, so at least two snapshots are needed to detect a change.",
                         (await WindowNoticeAsync(dataService, QueryWindowRelation.ServerConfig, resolved.ServerId, hours_back, windowEnd, "server_config", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, QueryWindowRelation.ServerConfig, resolved.ServerId, hours_back, windowEnd, "server_config");
@@ -128,7 +128,7 @@ public sealed class McpConfigHistoryTools
             if (allRows.Count == 0)
                 return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_config", awsRdsKind: AwsRdsKind.None), database)
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.StatusForDatabase("empty",
-                        $"No database configuration changes detected in the last {hours_back}h{McpDatabaseSelection.ForChosen(database is null ? null : new[] { database })}. Config is captured on connect, so at least two snapshots are needed to detect a change.",
+                        $"No database configuration changes detected {McpHelpers.InTheLast($"{hours_back} hours")}{McpDatabaseSelection.ForChosen(database is null ? null : new[] { database })}. Config is captured on connect, so at least two snapshots are needed to detect a change.",
                         database,
                         (await WindowNoticeAsync(dataService, QueryWindowRelation.DatabaseConfig, resolved.ServerId, hours_back, windowEnd, "database_config", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back));
 
@@ -180,7 +180,7 @@ public sealed class McpConfigHistoryTools
     {
         var none = runFacts.NoTraceFlagsEnabled();
         return none is null
-            ? $"No trace flag changes detected in the last {hoursBack}h. Config is captured on connect, so at least two snapshots are needed to detect a change."
+            ? $"No trace flag changes detected {McpHelpers.InTheLast($"{hoursBack} hours")}. Config is captured on connect, so at least two snapshots are needed to detect a change."
             : none + " A successful run that finds no flag stores no rows and counts as an empty capture, so a flag turned off shows as a change at that run's time; none falls in this window.";
     }
 

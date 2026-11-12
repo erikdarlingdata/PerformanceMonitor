@@ -1329,7 +1329,7 @@ public sealed partial class DarlingWorker
         if (server.Runtime is null)
         {
             return new CommandOutcome(false, "server not connected",
-                JsonError($"server '{server.Config.DisplayName}' is not currently connected — snapshot skipped"));
+                JsonError($"server '{server.Config.DisplayName}' is not currently connected. Snapshot skipped"));
         }
 
         await server.CollectionGate.WaitAsync(cancellationToken);
@@ -1480,7 +1480,7 @@ public sealed partial class DarlingWorker
         if (!connected)
         {
             return new CommandOutcome(false, "server not connected",
-                JsonError($"server '{displayName}' is not currently connected — the live plan cache can only be read from a connected server"));
+                JsonError($"server '{displayName}' is not currently connected. The live plan cache can only be read from a connected server"));
         }
 
         /* #2443: both arms now take the SAME token. The by-sql_handle arm always had it; the
@@ -1565,7 +1565,7 @@ public sealed partial class DarlingWorker
         if (runtime is null)
         {
             return new CommandOutcome(false, "server not connected",
-                JsonError($"server '{displayName}' is not currently connected — a hypothetical index has to be tested against the server's own statistics, so there is nothing to answer from while it is unreachable"));
+                JsonError($"server '{displayName}' is not currently connected. A hypothetical index has to be tested against the server's own statistics, so there is nothing to answer from while it is unreachable"));
         }
 
         if (!ServerDefinitionEquals(config, runtime.Config))
@@ -1598,7 +1598,7 @@ public sealed partial class DarlingWorker
         if (string.IsNullOrWhiteSpace(statementText))
         {
             return new CommandOutcome(false, "statement text not captured",
-                JsonError($"no statement text is stored for queryid {queryId} on '{displayName}'. Text is refreshed on its own cadence and a major-version upgrade re-keys every queryid, so a statement first seen minutes ago genuinely has none yet — there is nothing to re-plan until it does."));
+                JsonError($"no statement text is stored for queryid {queryId} on '{displayName}'. Text is refreshed on its own cadence and a major-version upgrade re-keys every queryid, so a statement first seen minutes ago genuinely has none yet. There is nothing to re-plan until it does."));
         }
 
         /* #6170: the check runs under its own login, never the monitoring login. Planning can evaluate a function a database role created
@@ -1709,7 +1709,7 @@ public sealed partial class DarlingWorker
         if (runtime is null)
         {
             return new CommandOutcome(false, "server not connected",
-                JsonError($"server '{displayName}' is not currently connected — the live active queries can only be read from a connected server"));
+                JsonError($"server '{displayName}' is not currently connected. The live active queries can only be read from a connected server"));
         }
 
         try
@@ -1881,7 +1881,7 @@ LIMIT 1";
         if (string.IsNullOrEmpty(connectionString))
         {
             return new CommandOutcome(false, "server not connected",
-                JsonError($"server '{displayName}' is not currently connected — the actual plan can only be captured from a connected server"));
+                JsonError($"server '{displayName}' is not currently connected. The actual plan can only be captured from a connected server"));
         }
 
         if (_postgres is null)
@@ -1924,7 +1924,7 @@ LIMIT 1";
         if (string.IsNullOrWhiteSpace(queryText))
         {
             return new CommandOutcome(false, "no stored query",
-                JsonError($"no stored query text was found for this {DescribeActualPlanIdentifier(request)} on '{displayName}' — the actual plan is captured by re-executing the stored query text, which is not available"));
+                JsonError($"no stored query text was found for this {DescribeActualPlanIdentifier(request)} on '{displayName}'. The actual plan is captured by re-executing the stored query text, which is not available"));
         }
 
         /* #5639: the store picks the latest text for a hash + database, which can differ from the text the
@@ -2403,7 +2403,7 @@ LIMIT 1";
             : string.Empty;
 
         const string Planted = " A client can plant such a byte with nothing more than a failed login. The role or "
-            + "database name that the client sends lands unescaped in the FATAL message (#4046).";
+            + "database name that the client sends lands unescaped in the FATAL message.";
 
         if (pg.SqlState == "22P05" || PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding(runtime.StorageName))
         {
@@ -2473,7 +2473,7 @@ LIMIT 1";
                 + "EXECUTE grants live in each database's own catalog, so issue them "
                 + WhereToGrantIt(connectedDatabase)
                 + " While issuing that grant, also GRANT EXECUTE ON FUNCTION pg_read_binary_file(text, "
-                + "bigint, bigint) to the same role (#4046): a byte that is not valid UTF-8 makes "
+                + "bigint, bigint) to the same role: a byte that is not valid UTF-8 makes "
                 + "pg_read_file() fail the whole tail read, pg_read_binary_file() does not, and the "
                 + "collector switches to it on its own once it is granted."),
 

@@ -309,7 +309,7 @@ public sealed class DarlingMcpDataTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No wait types recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}",
+                            factual: $"No wait types recorded for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}",
                             coveredClaim: ". This server has collected wait stats before, so this window was quiet: widen hours_back to find the most recent samples."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
@@ -987,7 +987,7 @@ public sealed class DarlingMcpDataTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No query-stats group on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
+                        $"No query-stats group on {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))} carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
                 }
 
                 /* A filtered miss is not a collection miss: with the floor in the query, an empty page under
@@ -998,8 +998,8 @@ public sealed class DarlingMcpDataTools
                     return McpHelpers.Status(
                         "empty",
                         windowTruncated
-                            ? $"No query-stats group on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the part of the window raw query_stats still holds (from {McpHelpers.FormatEffectiveStart(effectiveStart)}; the older part was not read), so this is that part's answer rather than a page artefact: drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan."
-                            : $"No query-stats group on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact: drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
+                            ? $"No query-stats group on {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))} has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the part of the window raw query_stats still holds (from {McpHelpers.FormatEffectiveStart(effectiveStart)}; the older part was not read), so this is that part's answer rather than a page artefact: drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan."
+                            : $"No query-stats group on {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))} has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact: drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
                         new
                         {
                             filter_applied = filterApplied,
@@ -1368,7 +1368,7 @@ public sealed class DarlingMcpDataTools
             if (rows.Count == 0 && tagFilter.Active)
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.WithDatabasesLeftOut(McpHelpers.Status(
                     "empty",
-                    $"No procedure on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!, cancellationToken, requestedStart);
+                    $"No procedure on {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))} carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!, cancellationToken, requestedStart);
 
             if (rows.Count == 0)
             {
@@ -1720,7 +1720,7 @@ public sealed class DarlingMcpDataTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No Query Store query on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
+                        $"No Query Store query on {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))} carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
                 }
 
                 /* A filter that matched nothing is an answer, not a missing collection. Most queries never abort,
@@ -3194,13 +3194,13 @@ ORDER BY server_name";
         if (!string.IsNullOrWhiteSpace(collectorName) || minDurationMs is not null || !string.IsNullOrWhiteSpace(status))
         {
             return ("empty",
-                $"No fleet-maintenance run-records in the last {CountText.Plural(hoursBack, "hour")} matched "
+                $"No fleet-maintenance run-records {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))} matched "
                 + $"{McpHelpers.DescribeCollectionLogFilters(collectorName, minDurationMs, status)}. "
                 + cadence);
         }
 
         return ("empty",
-            $"No fleet-maintenance run-records at all in the last {CountText.Plural(hoursBack, "hour")}. " + cadence);
+            $"No fleet-maintenance run-records at all {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}. " + cadence);
     }
 
     /// <summary>
@@ -3417,14 +3417,14 @@ ORDER BY server_name";
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.", emptyNotice.AsHints());
+                        $"No collector runs on {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))} matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.", emptyNotice.AsHints());
                 }
 
                 return McpHelpers.Status(
                     "empty",
                     McpHelpers.QuietUnlessCut(
                         emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                        factual: $"No collector runs recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}",
+                        factual: $"No collector runs recorded for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}",
                         coveredClaim: ". This server HAS collected before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent runs."),
                     emptyNotice.AsHints());
             }
@@ -3743,12 +3743,12 @@ ORDER BY server_name";
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs fleet-wide in the last {CountText.Plural(hours_back, "hour")} matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds.");
+                        $"No collector runs fleet-wide {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))} matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds.");
                 }
 
                 return McpHelpers.Status(
                     "empty",
-                    $"No collector runs recorded fleet-wide in the last {CountText.Plural(hours_back, "hour")}. At least one enabled server has collected before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent runs.");
+                    $"No collector runs recorded fleet-wide {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}. At least one enabled server has collected before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent runs.");
             }
 
             var result = rows.Select(fr => new
@@ -3942,7 +3942,7 @@ ORDER BY server_name";
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"Nothing was waiting on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}",
+                            factual: $"Nothing was waiting on {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}",
                             coveredClaim: ". The collector has sampled this server, so this is a genuine all-clear for the window rather than missing data."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
@@ -4055,9 +4055,9 @@ ORDER BY server_name";
                             /* #5244: with a database filter only the blocking half was limited to it (deadlocks are not
                                split by database here), so the sentence says exactly that instead of "no blocking". */
                             factual: databases.IsAll
-                                ? $"No blocking or deadlocks recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}"
+                                ? $"No blocking or deadlocks recorded for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}"
                                 : $"No blocking{DarlingMcpBlockingTools.ForChosenDatabases(databases)} "
-                                  + $"(and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}",
+                                  + $"(and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}",
                             /* #8146: a lossy window keeps the runs but not the all-clear; the lost events were never read. */
                             coveredClaim: emptyLoss is null
                                 ? ". The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window."

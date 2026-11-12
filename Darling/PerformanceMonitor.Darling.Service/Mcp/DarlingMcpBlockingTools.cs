@@ -1117,7 +1117,7 @@ public sealed class DarlingMcpBlockingTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No lock waits recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}",
+                            factual: $"No lock waits recorded for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}",
                             coveredClaim: ". This server has collected wait stats before, so this window was quiet: widen hours_back to find the most recent samples."),
                         emptyHints)
                     : McpHelpers.Status(
@@ -1229,7 +1229,7 @@ public sealed class DarlingMcpBlockingTools
         {
             return McpHelpers.Status(
                 "empty",
-                $"No {subject} was recorded for {serverName}{ForChosenDatabases(databases)} in the last {CountText.Plural(hoursBack, "hour")}. {CountText.Plural(captureCount, "collector run")} did execute over this window, "
+                $"No {subject} was recorded for {serverName}{ForChosenDatabases(databases)} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}. {CountText.Plural(captureCount, "collector run")} did execute over this window, "
                     + (loss is null ? "so this is a genuine all-clear rather than missing data" : "but " + RingBufferLossAnswer.LostEventsClaim)
                     + ": see hints.captures for which collectors ran and when.",
                 hints);
@@ -1239,7 +1239,7 @@ public sealed class DarlingMcpBlockingTools
         return McpHelpers.Status(
             "unavailable",
             everCaptured
-                ? $"No {subject} collector runs are recorded for {serverName} in the last {CountText.Plural(hoursBack, "hour")}, so this is NOT an all-clear: nothing was captured and the window says nothing either way. Collection HAS run for this server outside the window, so this is a gap rather than a dead collector: widen hours_back, or use get_collection_health to find where it stopped."
+                ? $"No {subject} collector runs are recorded for {serverName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}, so this is NOT an all-clear: nothing was captured and the window says nothing either way. Collection HAS run for this server outside the window, so this is a gap rather than a dead collector: widen hours_back, or use get_collection_health to find where it stopped."
                 : $"No {subject} collector runs have EVER been recorded for {serverName}, so this is NOT an all-clear: there is nothing to read. Check that collection is running for this server before concluding it was quiet.",
             hints);
     }

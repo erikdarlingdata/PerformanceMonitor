@@ -145,7 +145,7 @@ public sealed class McpToolGuideHeadsAlertingTests
         Assert.Contains("health_bands.deadlock_warn_per_hour", settingsTail, StringComparison.Ordinal);
         Assert.Contains("fleet_sweep.enabled", settingsTail, StringComparison.Ordinal);
         Assert.Contains("poison_wait.threshold_ms is RETIRED", settingsTail, StringComparison.Ordinal);
-        Assert.Contains("analysis.uncorroborated_route is WRITABLE since V137", settingsTail, StringComparison.Ordinal);
+        Assert.Contains("analysis.uncorroborated_route is WRITABLE", settingsTail, StringComparison.Ordinal);
         Assert.Contains("DEFAULTS from a 7-day production read", settingsTail, StringComparison.Ordinal);
         Assert.Contains("Pass the FULL list each time", settingsTail, StringComparison.Ordinal);
 

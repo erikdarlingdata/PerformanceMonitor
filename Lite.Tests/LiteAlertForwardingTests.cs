@@ -883,8 +883,8 @@ public partial class LiteAlertForwardingTests : IDisposable
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Failed Agent Job", fired.MetricName);
-        Assert.Equal("1 job failure in last 60m — NightlyETL", fired.CurrentValue); /* :703 */
-        Assert.Equal("1 job failure — NightlyETL", fired.ShortMessage);             /* :690 toast body */
+        Assert.Equal("1 job failure in last 60m: NightlyETL", fired.CurrentValue); /* :703 */
+        Assert.Equal("1 job failure: NightlyETL", fired.ShortMessage);             /* :690 toast body */
         /* :684 — the server-local watermark persisted the moment the alert fired. */
         Assert.Equal(runTime, h.FailedJobWatermark());
 
@@ -1027,7 +1027,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         Assert.Equal("THREADPOOL (900s in 10m), RESOURCE_SEMAPHORE (600s in 10m)", fired.CurrentValue);
         Assert.Equal("600s accumulated over 10m (an average of 1 task continuously waiting)", fired.ThresholdValue);
         Assert.Equal(
-            "[THREADPOOL] 900s of wait accumulated in the last 10 minutes across 30,000 waits — on average 1.5 tasks continuously stuck",
+            "[THREADPOOL] 900s of wait accumulated in the last 10 minutes across 30,000 waits. On average 1.5 tasks continuously stuck",
             fired.ShortMessage);
         Assert.Equal(900_000d, fired.NumericCurrentValue);
         Assert.Equal(600_000d, fired.NumericThresholdValue);
@@ -1054,7 +1054,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         Assert.Equal("30m", fired.ThresholdValue);                            /* :388 */
         var expectedPreview = PerformanceMonitor.Alerting.AlertContextBuilders.TruncateText(longText, 80);
         Assert.EndsWith("...", expectedPreview);
-        Assert.Equal($"Session #55 running 45m — {expectedPreview}", fired.ShortMessage); /* :357-358, :374 */
+        Assert.Equal($"Session #55 running 45m: {expectedPreview}", fired.ShortMessage); /* :357-358, :374 */
     }
 
     [Fact]

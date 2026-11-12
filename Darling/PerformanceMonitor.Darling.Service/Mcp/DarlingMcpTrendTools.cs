@@ -157,7 +157,7 @@ public sealed class DarlingMcpTrendTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No memory samples recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}",
+                            factual: $"No memory samples recorded for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}",
                             coveredClaim: ". This server HAS collected memory stats before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent samples."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
@@ -255,7 +255,7 @@ public sealed class DarlingMcpTrendTools
                 if (collected.Count == 0)
                     return McpHelpers.Status(
                         "unavailable",
-                        $"No trend data for counter '{counter_name}'. No perfmon counters have been collected for this server in the last {hours_back}h yet " +
+                        $"No trend data for counter '{counter_name}'. No perfmon counters have been collected for this server {McpHelpers.InTheLast($"{hours_back} hours")} yet " +
                         "(the collector may not have run, or delta counters need a second collection cycle).",
                         emptyNotice.AsHints());
 
@@ -385,7 +385,7 @@ public sealed class DarlingMcpTrendTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No file I/O samples recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}",
+                            factual: $"No file I/O samples recorded for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}",
                             coveredClaim: ". This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken: widen hours_back, or read it as no measurable read or write activity on any file in this window."),
                         echo, emptyNotice.AsHints())
                     : McpHelpers.StatusForDatabase(
@@ -420,7 +420,7 @@ public sealed class DarlingMcpTrendTools
     /// set, not about any one name. The single-name sentence is <see cref="TrendPayloads.FileIoScopeEmptyMessage"/>.
     /// </summary>
     internal static string FileIoChosenDatabasesEmptyMessage(string serverName, int hoursBack) =>
-        $"No read or write activity was recorded for {DatabaseFilter.ManyDatabasesDescription} on {serverName} in the last {CountText.Plural(hoursBack, "hour")}. "
+        $"No read or write activity was recorded for {DatabaseFilter.ManyDatabasesDescription} on {serverName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}. "
         + "Each name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
 
     [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time. Points are time buckets (bucket, bucket_minutes, aggregate_note) sized to the window unless bucket_minutes names a width: each point sums the collections it holds across the query's plans and handles, collection_count says how many, and avg_cpu_ms and avg_elapsed_ms are weighted by executions. min_dop and max_dop are each plan's cached extremes across the plans that ran in the bucket (a bucket where nothing ran leaves both blank), plan_count says how many plans, and query_plan_hash is null when that is more than one or no hash was captured. Past the raw tier's four days the hourly rollup answers, in buckets of whole hours (bucket_minutes a multiple of 60): executions, CPU and elapsed are summed across handles, and the other fields are null, collection_count included." + McpHelpers.UtcStampsDescription + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
@@ -1313,7 +1313,7 @@ public sealed class DarlingMcpTrendTools
 
     /// <summary>The two-state sentence pair the trio shares with Lite's twins, word for word (#2484, #2485).</summary>
     private static string QuietWindowMessage(string serverName, int hours_back, string what) =>
-        $"No {what} samples were recorded for {serverName} in the last {CountText.Plural(hours_back, "hour")}. This server HAS been sampled before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent samples.";
+        $"No {what} samples were recorded for {serverName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}. This server HAS been sampled before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent samples.";
 
     private static string NeverSampledMessage(string serverName, string what, string checkThis) =>
         $"No {what} samples have EVER been recorded for {serverName}. This is not an empty window: nothing at all has been stored for this server, so it is NOT a quiet server. {checkThis}";

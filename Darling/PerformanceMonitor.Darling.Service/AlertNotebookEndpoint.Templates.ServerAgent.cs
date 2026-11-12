@@ -95,7 +95,7 @@ internal static partial class AlertNotebookEndpoint
     private static JsonObject AgentJobHistoryNoteCell() => new()
     {
         ["type"] = "markdown",
-        ["text"] = "Per-job run history isn't available in this notebook — `get_running_jobs` only shows jobs "
+        ["text"] = "Per-job run history isn't available in this notebook: `get_running_jobs` only shows jobs "
             + "running right now. Check SQL Server Agent's own job history (SSMS: Agent > Job Activity Monitor, "
             + "or a job's History) for what ran before this alert fired.",
     };

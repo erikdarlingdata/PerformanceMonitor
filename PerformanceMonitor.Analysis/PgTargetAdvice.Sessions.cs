@@ -284,7 +284,7 @@ public static partial class PgTargetAdvice
         if (factsByKey.TryGetValue(PgTargetFactKeys.ConfigWorkMem, out var workMem))
         {
             rem.Append(CultureInfo.InvariantCulture,
-                $": work_mem is {workMem.Value:0.#} MB here, so {usable:0} connections each running one such node could claim {workMem.Value * usable:N0} MB before shared_buffers is counted, ");
+                $": work_mem is {workMem.Value:#,##0.#} MB here, so {usable:0} connections each running one such node could claim {workMem.Value * usable:N0} MB before shared_buffers is counted, ");
         }
         else
         {
@@ -456,6 +456,6 @@ public static partial class PgTargetAdvice
     {
         < 60 => "under a minute",
         < 3_600 => string.Format(CultureInfo.InvariantCulture, "{0:0} min", seconds / 60),
-        _ => string.Format(CultureInfo.InvariantCulture, "{0:0.#} h", seconds / 3_600),
+        _ => string.Format(CultureInfo.InvariantCulture, "{0:#,##0.#} h", seconds / 3_600),
     };
 }

@@ -49,7 +49,7 @@ public sealed class PgNoCsvlogFileException : Exception
 
     private static string BuildMessage() =>
         "logging_collector is on and log_destination includes csvlog on this target, but no .csv file has "
-        + "appeared under log_directory yet — most likely csvlog was only just added to log_destination and "
+        + "appeared under log_directory yet. Most likely csvlog was only just added to log_destination and "
         + "the syslogger has not rolled a file since the reload. There is no server-managed csvlog file to "
         + "read, so nothing was read this cycle, and this is NOT 'the log held nothing'. Recorded as a named "
         + "non-fatal skip rather than an error so it does not fill the log every cycle; the collector retries "

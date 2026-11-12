@@ -51,7 +51,7 @@ public sealed class PgNoJsonlogFileException : Exception
 
     private static string BuildMessage() =>
         "logging_collector is on and log_destination includes jsonlog on this target, but no .json file has "
-        + "appeared under log_directory yet — most likely jsonlog was only just added to log_destination and "
+        + "appeared under log_directory yet. Most likely jsonlog was only just added to log_destination and "
         + "the syslogger has not rolled a file since the reload. There is no server-managed jsonlog file to "
         + "read, so nothing was read this cycle, and this is NOT 'the log held nothing'. Recorded as a named "
         + "non-fatal skip rather than an error so it does not fill the log every cycle; the collector retries "

@@ -395,7 +395,7 @@ public static class FactRemediation
         sb.AppendLine($"-- Database: {db}");
         sb.AppendLine($"ALTER DATABASE {quoted} SET READ_COMMITTED_SNAPSHOT ON;   -- was OFF");
         sb.AppendLine();
-        sb.AppendLine("-- To back out (itself a destructive change — blocking returns):");
+        sb.AppendLine("-- To back out (itself a destructive change. Blocking returns):");
         sb.AppendLine($"-- ALTER DATABASE {quoted} SET READ_COMMITTED_SNAPSHOT OFF;");
         sb.AppendLine();
         sb.Append("-- Test on a copy first if the application relies on default locking behavior or uses NOLOCK hints.");
@@ -616,9 +616,9 @@ public static class FactRemediation
                 ? $"-- query_id = {target.QueryId}, forcing plan_id = {target.PlanId}"
                 : $"-- query_id = {target.QueryId}, best plan_id = {target.PlanId} (not offered as a force)");
             if (!string.IsNullOrEmpty(target.LatestPlanHash))
-                sb.AppendLine($"--   latest plan hash: {OneLine(target.LatestPlanHash)} (cpu/exec {target.LatestCpuPerExecUs:F0} us)");
+                sb.AppendLine($"--   latest plan hash: {OneLine(target.LatestPlanHash)} (cpu/exec {target.LatestCpuPerExecUs.ToString("N0", CultureInfo.InvariantCulture)} us)");
             if (!string.IsNullOrEmpty(target.BestPlanHash))
-                sb.AppendLine($"--   best plan hash:   {OneLine(target.BestPlanHash)}   (cpu/exec {target.BestCpuPerExecUs:F0} us)");
+                sb.AppendLine($"--   best plan hash:   {OneLine(target.BestPlanHash)}   (cpu/exec {target.BestCpuPerExecUs.ToString("N0", CultureInfo.InvariantCulture)} us)");
             AppendBestPlanAge(sb, target);
             sb.AppendLine($"--   regression factor: {target.RegressionFactor:F1}x");
             if (!string.IsNullOrEmpty(target.ReplicaRole))
@@ -1546,7 +1546,7 @@ public static class FactRemediation
                 {
                     // Close out the previous database group with its RCSI note (if any).
                     if (rcsiOffDatabases.Contains(currentDb))
-                        sb.AppendLine($"-- NOTE: {QuoteName(currentDb)} also has RCSI OFF — intentionally NOT auto-fixed (test on a copy first).");
+                        sb.AppendLine($"-- NOTE: {QuoteName(currentDb)} also has RCSI OFF. Intentionally NOT auto-fixed (test on a copy first).");
                     sb.AppendLine();
                 }
                 currentDb = target.Database;
@@ -1557,7 +1557,7 @@ public static class FactRemediation
         }
 
         if (currentDb is not null && rcsiOffDatabases.Contains(currentDb))
-            sb.AppendLine($"-- NOTE: {QuoteName(currentDb)} also has RCSI OFF — intentionally NOT auto-fixed (test on a copy first).");
+            sb.AppendLine($"-- NOTE: {QuoteName(currentDb)} also has RCSI OFF. Intentionally NOT auto-fixed (test on a copy first).");
 
         return sb.ToString().TrimEnd();
     }

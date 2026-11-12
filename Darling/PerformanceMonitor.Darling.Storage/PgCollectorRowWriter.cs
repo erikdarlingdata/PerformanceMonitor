@@ -33,7 +33,7 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
     public NpgsqlBinaryImporter? Importer { get; set; }
 
     private NpgsqlBinaryImporter Target
-        => Importer ?? throw new InvalidOperationException("Importer not set — open a binary import first.");
+        => Importer ?? throw new InvalidOperationException("Importer not set: open a binary import first.");
 
     private IReadOnlyDictionary<int, PayloadDimensions.PayloadDimension> _diversionPlan =
         new Dictionary<int, PayloadDimensions.PayloadDimension>();
@@ -155,7 +155,7 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
         {
             throw new InvalidOperationException(
                 $"Collector wrote {_payloadIndex} payload values but declares {expectedPayloadColumns} payload " +
-                "columns — WritePayload and PayloadColumns must stay in lockstep; column ORDER is the COPY contract.");
+                "columns. WritePayload and PayloadColumns must stay in lockstep; column ORDER is the COPY contract.");
         }
     }
 
@@ -262,7 +262,7 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
             var digest = PayloadDimensions.Digest(payload);
 
             var dimensions = _dimensions ?? throw new InvalidOperationException(
-                "A diversion plan is set but no dimension batch — call UseDimensions with both.");
+                "A diversion plan is set but no dimension batch. Call UseDimensions with both.");
             dimensions.Add(dimension.DimTable, digest, payload);
 
             Target.Write(digest, NpgsqlDbType.Bytea);
@@ -293,11 +293,11 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
         if (!_diversionPlan.TryGetValue(_payloadIndex, out var dimension))
         {
             throw new InvalidOperationException(
-                "A known payload digest needs a diverted payload position — this position has none, so the row would be written with no plan.");
+                "A known payload digest needs a diverted payload position. This position has none, so the row would be written with no plan.");
         }
 
         var dimensions = _dimensions ?? throw new InvalidOperationException(
-            "A diversion plan is set but no dimension batch — call UseDimensions with both.");
+            "A diversion plan is set but no dimension batch. Call UseDimensions with both.");
         NextPayloadIndex();
         dimensions.AddTouch(dimension.DimTable, digest);
         Target.Write(digest, NpgsqlDbType.Bytea);

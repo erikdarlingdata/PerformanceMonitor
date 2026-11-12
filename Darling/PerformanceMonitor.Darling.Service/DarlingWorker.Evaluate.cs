@@ -2143,7 +2143,7 @@ public sealed partial class DarlingWorker
                         NumericThresholdValue: thresholdMinutes,
                         Muted: mute.Muted, Hold: mute.Hold,
                         Severity: PgLongRunningQueryFireSeverity,
-                        ShortMessage: $"pid {worst.Pid} running {elapsedMinutes}m — {worst.CommandTag ?? "(unknown)"}"
+                        ShortMessage: $"pid {worst.Pid} running {elapsedMinutes}m: {worst.CommandTag ?? "(unknown)"}"
                             + (worst.DatabaseName is null ? "" : $" on {worst.DatabaseName}")),
                     cancellationToken);
                 readClock.Restart();
