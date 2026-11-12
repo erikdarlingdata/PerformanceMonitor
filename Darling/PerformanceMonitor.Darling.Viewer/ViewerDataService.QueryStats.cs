@@ -247,7 +247,41 @@ public sealed partial class ViewerDataService
     /// leaves out none).
     /// </summary>
     public static readonly string TopQueriesSql = $"""
-        WITH ranked AS MATERIALIZED (
+        WITH winners AS MATERIALIZED (
+            /* #8549 pass 1 of 2: rank every group of the window on NARROW columns, as the MCP reader's TopQueriesSql does (#5226). The
+               wide row below (forty aggregates, a plan flag and the newest text pick) shares one GROUP BY with the ranking when it is
+               built in the same pass, so a busy server's hash aggregate over hundreds of thousands of groups carried that row for every
+               group and spilled to disk (95,272 temp blocks, about 745 MB, on a field store's day window: 8.3 s at the worst call).
+               Here the pass keeps only the grouping key and the ranking sum; pass 2 builds the wide row for the survivors. Everything
+               that decides which groups exist or survive is the shipped statement's, unchanged: the window, the database filters, the
+               tag join, the grouping key, the HAVING and the ordering with its tie-break, so the same groups win in the same order. */
+            SELECT
+                database_name AS win_database_name,
+                query_hash AS win_query_hash,
+                host_object_name AS win_host_object_name
+            FROM query_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+           {DatabaseFilter.ExcludeClause("database_name", 7)}
+            /*TAG:hash:query_hash*/
+            GROUP BY database_name, query_hash, host_object_name
+            HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
+            ORDER BY SUM(delta_elapsed_time) DESC, database_name, query_hash, host_object_name
+            /* #5313: $6 is the candidate limit, not a fixed over-fetch of five. The caller starts at top plus five and, when the
+               WAITFOR trim below leaves fewer than top rows while more candidates exist, asks again with a
+               larger $6 (TopFill, at most three rounds). The final LIMIT stays $4. */
+            LIMIT $6
+        ),
+        ranked AS MATERIALIZED (
+            /* #8549 pass 2 of 2: the wide row, built only for pass 1's winners over the same window. The rows come from the winners'
+               query hashes through idx_query_stats_server_hash_time (server_id, query_hash, collection_time) where a store has it, the
+               way the MCP reader's pass 2 reads them (#8570); the equality is plain, so a hash two winners share is read once, and it
+               cannot match a NULL hash, so the second arm reads the NULL-hash rows, and only when a winner has one. The join stays the
+               exact NULL-safe match, so every group and figure is what the single pass produced. The COALESCE equality is only the
+               hashable pre-filter: PostgreSQL cannot hash an IS NOT DISTINCT FROM, so alone it would nested-loop every row against every
+               winner. */
             SELECT
                 database_name,
                 query_hash,
@@ -315,20 +349,29 @@ public sealed partial class ViewerDataService
                     || CASE WHEN q.query_text IS NOT NULL THEN '\x00'::bytea || convert_to(q.query_text, 'UTF8') ELSE '\x01'::bytea || q.query_text_digest END)
                     FILTER (WHERE q.query_text IS NOT NULL OR q.query_text_digest IS NOT NULL) AS latest_text_key,
                 host_object_name
-            FROM query_stats AS q
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
-           {DatabaseFilter.ExcludeClause("database_name", 7)}
-            /*TAG:hash:query_hash*/
+            FROM
+            (
+                SELECT * FROM query_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                AND   query_hash IN (SELECT win_query_hash FROM winners)
+                UNION ALL
+                SELECT * FROM query_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                AND   query_hash IS NULL
+                AND   EXISTS (SELECT 1 FROM winners WHERE win_query_hash IS NULL)
+            ) AS q
+            JOIN winners AS w
+                ON  COALESCE(q.query_hash, '') = COALESCE(w.win_query_hash, '')
+                AND q.database_name IS NOT DISTINCT FROM w.win_database_name
+                AND q.query_hash IS NOT DISTINCT FROM w.win_query_hash
+                AND q.host_object_name IS NOT DISTINCT FROM w.win_host_object_name
             GROUP BY database_name, query_hash, host_object_name
-            HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-            ORDER BY SUM(delta_elapsed_time) DESC, database_name, query_hash, host_object_name
-            /* #5313: $6 is the candidate limit, not a fixed over-fetch of five. The caller starts at top plus five and, when the
-               WAITFOR trim below leaves fewer than top rows while more candidates exist, asks again with a
-               larger $6 (TopFill, at most three rounds). The final LIMIT stays $4. */
-            LIMIT $6
         ),
         latest_text AS MATERIALIZED (
             /* #5309, #8136: the representative text of EVERY ranked group, resolved for the capped rows only. ranked

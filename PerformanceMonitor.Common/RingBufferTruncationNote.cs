@@ -213,6 +213,6 @@ public static class RingBufferTruncationNote
             return string.Format(CultureInfo.InvariantCulture, "{0} h {1} min", hours, minutes % 60);
         }
 
-        return string.Format(CultureInfo.InvariantCulture, "{0} d {1} h", hours / 24, hours % 24);
+        return string.Format(CultureInfo.InvariantCulture, "{0:N0} d {1} h", hours / 24, hours % 24);
     }
 }

@@ -62,7 +62,7 @@ public sealed class DarlingMcpSlowReadTools
         + "statement's rows stays null (the driver reports no returned-row count). The read's own rows is recorded only by "
         + "reads that count them, as get_query_store_top does, and is null otherwise. in_flight is how many other reads were "
         + "already running on the service when this read started, and wait_ms is the part of total_ms it spent waiting for a store "
-        + "connection rather than running (a connection wait only: since #5506 a read's total_ms starts once it has its long-read slot, so "
+        + "connection rather than running (a connection wait only: a read's total_ms starts once it has its long-read slot, so "
         + "time spent queued for a slot is in neither figure and shows in get_read_latency's queued and queue_wait_ms instead; a read "
         + "refused busy is never offered here); both are null on rows stored before schema V182. caller is who made the read: an MCP "
         + "client's own name and version (ua: and its User-Agent product token when it sent none, unknown when neither), or web: "

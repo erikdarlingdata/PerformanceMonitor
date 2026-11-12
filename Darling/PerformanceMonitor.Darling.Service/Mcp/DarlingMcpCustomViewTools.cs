@@ -415,7 +415,7 @@ public sealed class DarlingMcpCustomViewTools
     [McpServerTool(Name = "describe_custom_view_catalog"), Description(
         "Returns the COMPOSE CATALOG: the exact vocabulary (measures, dimensions, aggregates, units, timeBuckets, viz) " +
         "a composed (v2) panel may use; the compiler emits ONLY these identifiers. CALL THIS FIRST before " +
-        "create/update/validate/run_custom_view_panel. Default is COMPACT (#4198, see guide); source/full_detail " +
+        "create/update/validate/run_custom_view_panel. Default is COMPACT (see guide); source/full_detail " +
         "get more. On query_stats, ad-hoc SQL carries the literal '(ad hoc)' " +
         "module; a neq filter on procedure name still INCLUDES those rows (the dimension value is never null). " +
         "Static reference data: no server, time window, or collected-data read. <<GUIDE>> " +
@@ -425,7 +425,7 @@ public sealed class DarlingMcpCustomViewTools
         "'aggregate', 'unit', 'groupBy'/'filters' dimensions, 'timeBucket', and 'viz' must all come from this " +
         "catalog (the compiler emits ONLY these identifiers), and the validation errors do not enumerate the legal " +
         "names, so guessing them is slow. " +
-        "DEFAULT CALL (#4198, the full catalog is 98 KB, three times this tool's budget): {sources: [{source, " +
+        "DEFAULT CALL (the full catalog is 98 KB, three times this tool's budget): {sources: [{source, " +
         "measures: [{key, displayName, kind, unitFamily, validAggregates}]}], annotationSources (key/displayName/" +
         "category only), universalDimensions, unitFamilies, aggregates, timeBuckets, filterOps, viz, compact: true, " +
         "note}. displayName is the measure's one-line purpose; kind is scalar|ratio (use the key as the panel's " +

@@ -285,6 +285,11 @@ public sealed class DarlingMcpTools
                         }
                     }, f.SideLeafKeys, McpHelpers.JsonOptions), McpHelpers.JsonOptions)!;
                 }).ToList();
+            /* #8572: a drill-down, a fact's ranked objects and the remediation evidence carry stored doubles; round the float noise out of each finding. */
+            foreach (var findingNode in findingNodes)
+            {
+                McpHelpers.RoundFloatNoise(findingNode);
+            }
             var findingLabels = findings.Select(AnalysisFindingsBudget.LabelFor).ToList();
 
             /* #8081, #8569: the findings ride severity-first, and the reply is packed to the shared response budget in that
@@ -456,7 +461,8 @@ public sealed class DarlingMcpTools
                 .ToList();
 
             var dataNotice = await NoticeAsync(emptyAnswer: false);
-            return DarlingMcpWindowNotice.Attach(JsonSerializer.Serialize(collection.Attach(new
+            /* #8572: the ranked objects carry stored doubles; the reply is rounded as a whole. */
+            return DarlingMcpWindowNotice.Attach(McpHelpers.RoundFloatNoise(JsonSerializer.Serialize(collection.Attach(new
             {
                 server = resolved.DisplayName,
                 total_facts = facts.Count,
@@ -474,7 +480,7 @@ public sealed class DarlingMcpTools
                     collectionCaveat),
                 coverage = coverage.ToPayload(),
                 facts = result
-            }, McpHelpers.JsonOptions), McpHelpers.JsonOptions), dataNotice);
+            }, McpHelpers.JsonOptions), McpHelpers.JsonOptions)), dataNotice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1261,7 +1267,7 @@ public sealed class DarlingMcpTools
             var (forcePlanStates, forcePlanStateNote) =
                 await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, groups.Select(g => g.Latest), McpCommandDeadlines.ReadSeconds, logger: logger, cancellationToken: cancellationToken);
 
-            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(McpHelpers.RoundFloatNoise(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 /* #7010: the window-floor keys. This payload's own truncation_note is the read-cap sentence below, so the floor's sentence is
@@ -1389,7 +1395,7 @@ public sealed class DarlingMcpTools
                         standing_state = FactKinds.IsStandingStateKey(f.RootFactKey)
                     };
                 })
-            }, McpHelpers.JsonOptions), notice);
+            }, McpHelpers.JsonOptions)), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

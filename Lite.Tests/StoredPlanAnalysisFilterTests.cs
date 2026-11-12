@@ -75,7 +75,7 @@ public sealed class StoredPlanAnalysisFilterTests
             : McpPlanTools.AnalyzeFilteredPlan(plan, "srv", source, "id", null, null, default);
 
         using var doc = JsonDocument.Parse(result);
-        Assert.Equal("This plan was withheld by the statement filter (#4348), so it was not analysed.",
+        Assert.Equal("This plan was withheld by the statement filter, so it was not analysed.",
             doc.RootElement.GetProperty("message").GetString());
         Assert.DoesNotContain("could not be read", result);
     }

@@ -104,7 +104,7 @@ public static class AlertThresholdKeys
     {
         /* Integer members. */
         [nameof(IAlertEngineSettings.CooldownMinutes)] = "A cooldown: it spaces repeat notifications and decides no fire.",
-        [nameof(IAlertEngineSettings.PoisonWaitThresholdMs)] = "Retired as a threshold by #3539: the engine no longer reads it.",
+        [nameof(IAlertEngineSettings.PoisonWaitThresholdMs)] = "Retired as a threshold: the engine no longer reads it.",
         [nameof(IAlertEngineSettings.LongRunningQueryMaxResults)] = "A read cap: it bounds how many sessions the card lists and decides no fire.",
         [nameof(IAlertEngineSettings.SelfDiskFreeWarnPercent)] = "Self-monitoring (self_alerts.*): the monitor's own store volume, not a monitored server.",
         [nameof(IAlertEngineSettings.SelfDiskFreeWarnGb)] = "Self-monitoring (self_alerts.*): the monitor's own store volume, not a monitored server.",

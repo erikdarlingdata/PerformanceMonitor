@@ -457,7 +457,7 @@ public sealed class DarlingMcpToolsTests
                 Assert.Equal(0.9, finding.GetProperty("confidence").GetDouble());
                 /* #3538 A6: 0.9 on a two-node path is not the legacy (n-1)/n = 0.5, so the basis reads as
                    corroboration-derived; the legacy label is pinned on Lite's twin with a real 1.0/1 row. */
-                Assert.StartsWith("corroboration (#3538)", finding.GetProperty("confidence_basis").GetString(), StringComparison.Ordinal);
+                Assert.StartsWith("corroboration:", finding.GetProperty("confidence_basis").GetString(), StringComparison.Ordinal);
                 Assert.Equal("cpu", finding.GetProperty("category").GetString());
                 Assert.Equal("an4-incident-1", finding.GetProperty("incident_id").GetString());
                 Assert.Equal("SOS_SCHEDULER_YIELD", finding.GetProperty("root_fact").GetProperty("key").GetString());

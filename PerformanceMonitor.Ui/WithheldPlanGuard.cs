@@ -34,7 +34,7 @@ public static class WithheldPlanGuard
     public static string WithheldSentenceFor(string subject) =>
         string.Equals(subject, "plan", StringComparison.Ordinal)
             ? SensitiveStatements.WithheldPlanSentence
-            : $"This {subject} was withheld by the statement filter (#4348).";
+            : $"This {subject} was withheld by the statement filter.";
 
     /// <summary>
     /// True when <paramref name="planXml"/> is the whole-plan marker; the sentence is then shown in a message box

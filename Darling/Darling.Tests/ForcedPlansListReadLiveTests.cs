@@ -127,6 +127,77 @@ LIMIT 2001";
             Assert.Equal("<null>", FirstSeen("1003"));
         });
 
+    /// <summary>
+    /// The first-row step counts a force's due markers from the database's marker rank at the force's first row, and keeps the plain count for a first row
+    /// with no marker at its time (an orphan row; the collector never writes one, but the statement must still agree with the old one). Plan 1099 has an orphan
+    /// row 3 minutes before its first captured row (30 seconds off every marker) and then a gap, so its first sighting depends on the markers after the orphan
+    /// time. A third database holds markers and no force: its markers must not change any reply.
+    /// </summary>
+    [Fact]
+    public Task AForceWhoseFirstRowHasNoMarker_AndADatabaseWithoutForces_ReplyAsTheOldStatementDid() =>
+        WithSeedAsync(async (connection, serverId, from, to, ct) =>
+        {
+            await ExecAsync(connection, ct,
+                @"INSERT INTO collect.query_store_forced_plans (collection_id, collection_time, server_id, server_name, database_name, plan_id, query_id, query_plan_hash, plan_forcing_type)
+                  SELECT $1 + 70000000 + m, $2 - m * interval '1 minute' - interval '30 seconds', $3, 'a8570', 'DbA', 1099, 5099, '0xPH1099', 'MANUAL'
+                  FROM generate_series(10, 12) m
+                  UNION ALL
+                  SELECT $1 + 71000000 + m, $2 - m * interval '1 minute', $3, 'a8570', 'DbA', 1099, 5099, '0xPH1099', 'MANUAL'
+                  FROM generate_series(0, 9) m WHERE m NOT IN (4, 5)",
+                CollectionIdGenerator.Next(), to.AddMinutes(-1), serverId);
+            await ExecAsync(connection, ct,
+                @"INSERT INTO collect.query_store_forced_plans (collection_id, collection_time, server_id, server_name, database_name)
+                  SELECT $1 + 72000000 + m, $2 - m * interval '1 minute', $3, 'a8570', 'DbC'
+                  FROM generate_series(0, $4 - 1) m",
+                CollectionIdGenerator.Next(), to.AddMinutes(-1), serverId, Captures);
+            await ExecAsync(connection, ct, "ANALYZE collect.query_store_forced_plans");
+
+            var expected = await RowsAsync(connection, OldSql, serverId, from, to, null, null, ct);
+            var actual = await RowsAsync(connection, DarlingForcedPlanStateReader.ForcesSql(DatabaseFilter.All, 2000), serverId, from, to, null, null, ct);
+
+            Assert.Equal(Forces + 1, expected.Count);
+            Assert.Equal(expected, actual);
+            Assert.Contains(actual, r => r.Split('|')[1] == "1099" && r.Split('|')[7] != "<null>");
+        });
+
+    /// <summary>
+    /// #8570, the field cause: the force list is planned with nested loops off, so stale statistics on the window (a window past the end of the
+    /// <c>collection_time</c> histogram is estimated at one row) cannot send it into nested loops over the window rows (33.5 s in the field, 45 ms with
+    /// nested loops off). The setting is <c>SET LOCAL</c> in a read-only transaction of the read's own, so the pooled connection must come back as it was.
+    /// The pool is held to ONE connection, so the check after the read runs on the very connection the read used.
+    /// </summary>
+    [Fact]
+    public Task TheForceListRuns_ReadOnlyWithNestedLoopsOff_AndLeavesThePooledConnectionAsItWas() =>
+        WithSeedAsync(async (connection, serverId, from, to, connectionString, ct) =>
+        {
+            var builder = new NpgsqlConnectionStringBuilder(connectionString) { MaxPoolSize = 1 };
+            await using var dataSource = NpgsqlDataSource.Create(builder.ConnectionString);
+
+            async Task<(string NestLoop, string ReadOnly)> SettingsAsync(NpgsqlConnection onConnection, NpgsqlTransaction? transaction)
+            {
+                await using var command = new NpgsqlCommand("SELECT current_setting('enable_nestloop'), current_setting('transaction_read_only')", onConnection, transaction);
+                await using var reader = await command.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                return (reader.GetString(0), reader.GetString(1));
+            }
+
+            await using (var inside = await dataSource.OpenConnectionAsync(ct))
+            {
+                await using (var transaction = await DarlingForcedPlanStateReader.BeginForcesTransactionAsync(inside, 30, ct))
+                {
+                    Assert.Equal(("off", "on"), await SettingsAsync(inside, transaction));
+                }
+
+                Assert.Equal(("on", "off"), await SettingsAsync(inside, null));
+            }
+
+            var read = await DarlingForcedPlanStateReader.ReadAsync(dataSource, serverId, DatabaseFilter.All, null, from, to, cancellationToken: ct);
+            Assert.Equal(Forces, read.Plans.Count);
+
+            await using var after = await dataSource.OpenConnectionAsync(ct);
+            Assert.Equal(("on", "off"), await SettingsAsync(after, null));
+        });
+
     private static async Task<List<string>> RowsAsync(NpgsqlConnection connection, string sql, int serverId, DateTime from, DateTime to, long? queryId, long? planId, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
@@ -185,7 +256,10 @@ LIMIT 2001";
     /// 0 present in every capture, 1 first captured 100 minutes ago, 2 missing from the captures 50 to 60 minutes ago, 3 removed 20 minutes ago (its newest
     /// row is the capture before). Every seventh force has a failure count and reason, which moves it up the order.
     /// </summary>
-    private static async Task WithSeedAsync(Func<NpgsqlConnection, int, DateTime, DateTime, CancellationToken, Task> body)
+    private static Task WithSeedAsync(Func<NpgsqlConnection, int, DateTime, DateTime, CancellationToken, Task> body) =>
+        WithSeedAsync((connection, serverId, from, to, _, ct) => body(connection, serverId, from, to, ct));
+
+    private static async Task WithSeedAsync(Func<NpgsqlConnection, int, DateTime, DateTime, string, CancellationToken, Task> body)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live plan tests (each mints its own scratch database).");
@@ -221,7 +295,7 @@ LIMIT 2001";
                 CollectionIdGenerator.Next(), to.AddMinutes(-1), serverId, Captures);
             await ExecAsync(connection, ct, "ANALYZE collect.query_store_forced_plans");
 
-            await body(connection, serverId, from, to, ct);
+            await body(connection, serverId, from, to, connectionString, ct);
             succeeded = true;
         }
         finally

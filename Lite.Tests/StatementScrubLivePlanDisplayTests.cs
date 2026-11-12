@@ -95,7 +95,7 @@ public sealed class StatementScrubLivePlanDisplayTests
 
                 var title = (TextBlock)control.FindName("EmptyStateTitle");
                 Assert.Equal(SensitiveStatements.WithheldPlanSentence, title.Text);
-                Assert.Equal("This plan was withheld by the statement filter (#4348).", title.Text);
+                Assert.Equal("This plan was withheld by the statement filter.", title.Text);
                 Assert.DoesNotContain("could not be read", title.Text, StringComparison.Ordinal);
                 Assert.Equal(Visibility.Visible, ((UIElement)control.FindName("EmptyState")).Visibility);
                 Assert.Equal(Visibility.Collapsed, ((UIElement)control.FindName("EmptyStateDetail")).Visibility);

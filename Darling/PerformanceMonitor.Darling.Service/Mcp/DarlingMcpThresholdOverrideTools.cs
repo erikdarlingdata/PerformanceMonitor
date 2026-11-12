@@ -95,7 +95,7 @@ public sealed class DarlingMcpThresholdOverrideTools
         [Description("true removes the override.")] bool clear = false,
         [Description("Who made the change (writes arm). 1-64 of A-Za-z0-9._:-. Default mcp.")] string? set_by = null,
         [Description("Investigations arm only: the agent_action object (request_id, claim_id, agent_id, reason, evidence). Ignored under the writes arm.")] string? agent_action = null,
-        [Description("A server tag, by name or id, in place of server_name: the value applies to every server under the tag and the tags below it (#6926). Writes arm only; no database_name.")] string? tag = null,
+        [Description("A server tag, by name or id, in place of server_name: the value applies to every server under the tag and the tags below it. Writes arm only; no database_name.")] string? tag = null,
         StoreOwnerSource? ownerSource = null,
         CancellationToken cancellationToken = default) =>
         await SetAsync(postgres, served.Policy, new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: ownerSource?.Read()),
