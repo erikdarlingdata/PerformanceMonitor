@@ -4,9 +4,9 @@
     "net10.0-windows7.0": {
       "Microsoft.AspNetCore.TestHost": {
         "type": "Direct",
-        "requested": "[10.0.14, )",
-        "resolved": "10.0.14",
-        "contentHash": "u4AX1M5Uzmw7V3NCdJJO4ITwH0DDDufyzmVlksE4QguVd23Co8adaREMp2VahlRB5f/rmtaFYVJIA1iIFnchmQ=="
+        "requested": "[10.0.15, )",
+        "resolved": "10.0.15",
+        "contentHash": "mQWzQqmw2DX3Ofm9S46WkFVRFmKyy6bMwsToAoDdQcK1paSQ6LT8BY3O4VXm1dRTSEIn/4x5A+Q4tzD9jgwJ9Q=="
       },
       "Microsoft.CodeAnalysis.BannedApiAnalyzers": {
         "type": "Direct",
@@ -747,20 +747,20 @@
       "performancemonitor.alerting": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.12.0, )",
-          "PerformanceMonitor.Notifications": "[3.12.0, )"
+          "PerformanceMonitor.Common": "[3.13.0, )",
+          "PerformanceMonitor.Notifications": "[3.13.0, )"
         }
       },
       "performancemonitor.analysis": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.12.0, )"
+          "PerformanceMonitor.Common": "[3.13.0, )"
         }
       },
       "performancemonitor.collectors": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.12.0, )"
+          "PerformanceMonitor.Common": "[3.13.0, )"
         }
       },
       "performancemonitor.common": {
@@ -775,21 +775,21 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.14, )",
-          "PerformanceMonitor.Analysis": "[3.12.0, )"
+          "PerformanceMonitor.Analysis": "[3.13.0, )"
         }
       },
       "performancemonitor.plananalysis": {
         "type": "Project",
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.1.1, )",
-          "PerformanceMonitor.Common": "[3.12.0, )"
+          "PerformanceMonitor.Common": "[3.13.0, )"
         }
       },
       "performancemonitor.ui": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.12.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.12.0, )",
+          "PerformanceMonitor.Common": "[3.13.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.13.0, )",
           "ScottPlot.WPF": "[5.1.59, )"
         }
       },
@@ -806,13 +806,13 @@
           "Microsoft.Extensions.Logging": "[10.0.14, )",
           "ModelContextProtocol": "[2.4.0, )",
           "ModelContextProtocol.AspNetCore": "[2.4.0, )",
-          "PerformanceMonitor.Alerting": "[3.12.0, )",
-          "PerformanceMonitor.Analysis": "[3.12.0, )",
-          "PerformanceMonitor.Collectors": "[3.12.0, )",
-          "PerformanceMonitor.Common": "[3.12.0, )",
-          "PerformanceMonitor.Notifications": "[3.12.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.12.0, )",
-          "PerformanceMonitor.Ui": "[3.12.0, )",
+          "PerformanceMonitor.Alerting": "[3.13.0, )",
+          "PerformanceMonitor.Analysis": "[3.13.0, )",
+          "PerformanceMonitor.Collectors": "[3.13.0, )",
+          "PerformanceMonitor.Common": "[3.13.0, )",
+          "PerformanceMonitor.Notifications": "[3.13.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.13.0, )",
+          "PerformanceMonitor.Ui": "[3.13.0, )",
           "ScottPlot.WPF": "[5.1.59, )",
           "Velopack": "[1.2.161, )"
         }

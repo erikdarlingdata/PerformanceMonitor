@@ -8,10 +8,10 @@
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
   <ItemGroup>
-    <PackageVersion Include="AWSSDK.PI" Version="4.0.101.8" />
-    <PackageVersion Include="AWSSDK.RDS" Version="4.0.108.2" />
-    <PackageVersion Include="AWSSDK.S3" Version="4.0.104.11" />
-    <PackageVersion Include="AWSSDK.SecurityToken" Version="4.0.101.10" />
+    <PackageVersion Include="AWSSDK.PI" Version="4.1.0" />
+    <PackageVersion Include="AWSSDK.RDS" Version="4.1.0" />
+    <PackageVersion Include="AWSSDK.S3" Version="4.1.0" />
+    <PackageVersion Include="AWSSDK.SecurityToken" Version="4.1.0" />
     <PackageVersion Include="BlackwellSystems.Gcf" Version="1.1.0" />
     <PackageVersion Include="Azure.Storage.Blobs" Version="12.30.1" />
     <PackageVersion Include="CredentialManagement" Version="1.0.2" />
@@ -19,16 +19,16 @@
     <PackageVersion Include="DuckDB.NET.Bindings.Full" Version="1.5.6.1" />
     <PackageVersion Include="DuckDB.NET.Data" Version="1.5.6.1" />
     <PackageVersion Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
-    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.12.0" />
     <PackageVersion Include="Microsoft.Data.SqlClient" Version="7.1.1" />
     <PackageVersion Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="7.1.1" />
     <PackageVersion Include="Microsoft.Extensions.Configuration" Version="10.0.14" />
     <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="10.0.14" />
-    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.14" />
-    <PackageVersion Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.14" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.15" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.15" />
     <PackageVersion Include="Microsoft.Extensions.Logging" Version="10.0.14" />
-    <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.14" />
-    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.14" />
+    <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.15" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.15" />
     <!-- #5943: test projects only (see BannedSymbols.txt beside each test csproj). -->
     <PackageVersion Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" Version="5.6.0" />
     <PackageVersion Include="ModelContextProtocol" Version="2.4.0" />
@@ -45,8 +45,8 @@
          direct references in PlanAnalysis, Darling.Analysis and Darling.Service do the lifting. The self-contained Lite and
          Viewer builds never use this package: they ship the Windows Desktop runtime's own Pkcs, whose version global.json's
          SDK decides (runtime 10.0.13 or later, that is SDK 10.0.402 or later, carries the fix). -->
-    <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="10.0.14" />
-    <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.14" />
+    <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="10.0.15" />
+    <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.15" />
     <PackageVersion Include="Velopack" Version="1.2.161" />
     <!-- #6480: the Darling MSI (Darling/msi). The WixToolset.Sdk version is in the wixproj's Sdk attribute and moves with this one. -->
     <PackageVersion Include="WixToolset.Util.wixext" Version="5.0.2" />
