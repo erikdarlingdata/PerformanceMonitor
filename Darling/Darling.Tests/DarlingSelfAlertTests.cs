@@ -4948,7 +4948,7 @@ public sealed class DarlingSelfAlertTests
             x => x.Level == Microsoft.Extensions.Logging.LogLevel.Information
                 && x.Message.StartsWith("Store job health:", StringComparison.Ordinal));
         Assert.Equal(
-            "Store job health: 5 jobs read (compression 2, refresh 1, retention 2), 0 dead, 0 stuck, 0 stale, 1 held, 0 re-armed, 0 alerted",
+            "Store job health: 5 jobs read (compression 2, refresh 1, retention 2), 0 dead, 0 stuck, 0 stale, 1 held, 0 re-armed, 0 alerted (#3816)",
             summary.Message);
     }
 
@@ -4971,7 +4971,7 @@ public sealed class DarlingSelfAlertTests
             h.Log.Entries,
             x => x.Message.StartsWith("Store job health:", StringComparison.Ordinal));
         Assert.Contains("1 dead", summary.Message, StringComparison.Ordinal);
-        Assert.Contains("Alerts are DISABLED", summary.Message, StringComparison.Ordinal);
+        Assert.Contains("alerts are DISABLED", summary.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
