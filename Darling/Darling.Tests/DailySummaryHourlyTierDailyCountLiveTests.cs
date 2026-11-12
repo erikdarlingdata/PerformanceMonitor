@@ -91,7 +91,12 @@ public sealed class DailySummaryHourlyTierDailyCountLiveTests
         var lacking = await ScalarAsync<long>(connection, $"SELECT count(*) FROM {await ResolveAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, ct)} WHERE server_id = {ServerId} AND bucket >= '{Ts(yesterday)}'", ct);
         var oldRead = await RowsReadAsync(connection, oldSql, start, end, hourlyChunks, ct);
         var newRead = await RowsReadAsync(connection, newSql, start, end, hourlyChunks, ct);
-        Assert.True(oldRead > lacking * 3, $"the old text reads the window's hourly rows, {oldRead}, against {lacking} for the days the daily lacks");
+        /* #8752: the old text reads every day of the window, so it reads the days the daily holds on top of the days it lacks. The bound counts
+           those closed days' hourly rows (the same view and server as the lacking days) instead of scaling the lacking rows, which grow through the
+           UTC day while the closed days do not. */
+        var closedDays = await ScalarAsync<long>(connection, $"SELECT count(*) FROM {await ResolveAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, ct)} WHERE server_id = {ServerId} AND bucket >= '{Ts(start)}' AND bucket < '{Ts(yesterday)}'", ct);
+        Assert.True(closedDays > 0, "the seed gives the window closed days that the daily holds");
+        Assert.True(oldRead >= lacking + closedDays, $"the old text reads the window's hourly rows, {oldRead}, fewer than the {closedDays} of the closed days plus the {lacking} of the days the daily lacks");
         Assert.True(newRead <= lacking + 60, $"the new text read {newRead} hourly rows, more than the {lacking} of the days the daily lacks");
 
         /* A closed day in the middle that the daily does not hold (a refresh that never reached it): that day reads the hourly, and the
@@ -152,7 +157,11 @@ public sealed class DailySummaryHourlyTierDailyCountLiveTests
         var lacking = await ScalarAsync<long>(connection, $"SELECT count(*) FROM {await ResolveAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, ct)} WHERE server_id = {ServerId} AND bucket >= '{Ts(yesterday)}'", ct);
         var oldRead = await RowsReadAsync(connection, oldSql, start, end, hourlyChunks, ct);
         var newRead = await RowsReadAsync(connection, newSql, start, end, hourlyChunks, ct);
-        Assert.True(oldRead > lacking * 2, $"the old text reads the successor's closed days from its hourly, {oldRead}, against {lacking} for the days its daily lacks");
+        /* #8752: count the successor's closed days (from the boundary up to yesterday) in the same view and server as the lacking days. The old
+           text reads them from the hourly on top of the lacking days; a multiple of the lacking rows lost its margin as they grew through the UTC day. */
+        var closedDays = await ScalarAsync<long>(connection, $"SELECT count(*) FROM {await ResolveAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, ct)} WHERE server_id = {ServerId} AND bucket >= '{Ts(boundary)}' AND bucket < '{Ts(yesterday)}'", ct);
+        Assert.True(closedDays > 0, "the seed gives the successor closed days that its daily holds");
+        Assert.True(oldRead >= lacking + closedDays, $"the old text reads the successor's closed days from its hourly, {oldRead}, fewer than the {closedDays} of those days plus the {lacking} of the days its daily lacks");
         Assert.True(newRead <= lacking + 60, $"the new text read {newRead} interval hourly rows, more than the {lacking} of the days the interval daily lacks");
     }
 
