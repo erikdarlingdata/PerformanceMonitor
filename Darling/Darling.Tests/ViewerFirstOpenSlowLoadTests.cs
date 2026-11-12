@@ -127,6 +127,125 @@ public sealed class ViewerFirstOpenSlowLoadTests
         Assert.DoesNotContain(lines, l => l.Contains("server tab first open", StringComparison.Ordinal));
     }
 
+    /* A later refresh (a sub-tab pick, a range change, the auto-refresh tick) runs the same reads before its sub-tab's load as the first open
+       does: freshness, permission count, collection interval. They are on that refresh's clock too, so its line names them and its total
+       counts them. The first open here writes nothing (its threshold is out of reach), so the one line is the later refresh's. */
+    [Fact]
+    public void ASlowReadBeforeTheSubTabsLoad_IsNamedInALaterRefreshsSlowLoadLine()
+    {
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            using var silent = new TcpListener(IPAddress.Loopback, 0);
+            silent.Start();
+            var port = ((IPEndPoint)silent.LocalEndpoint).Port;
+            var tab = new ViewerServerTab(
+                new ViewerDataService($"Host=127.0.0.1;Port={port};Database=darling;Username=darling;Timeout=1"),
+                new DarlingServer(10, "later-refresh-host.invalid", "later-refresh-alias", true, null))
+            {
+                FirstOpenSlowThresholdMs = 600_000,
+                SlowLoadSink = lines.Add,
+            };
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                tab.BeginFirstOpen();
+                await tab.RefreshActiveInnerTabAsync();
+                lines.Clear();
+                await tab.RefreshActiveInnerTabAsync();
+            }
+            finally
+            {
+                window.Close();
+                silent.Stop();
+            }
+        });
+
+        var line = Assert.Single(lines);
+        Assert.Contains("[later-refresh-alias]", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("server tab first open", line, StringComparison.Ordinal);
+        Assert.Contains("server freshness read ", line, StringComparison.Ordinal);
+        Assert.Contains("permission denied count read ", line, StringComparison.Ordinal);
+        Assert.Contains("collection interval read ", line, StringComparison.Ordinal);
+    }
+
+    /* A refresh asked for while a sub-tab's load runs is queued, and loads when that one ends. Its clock starts at the ask, so the wait
+       behind the load in flight is in its line by name. The store here tells the test each time a read reaches it, and the test asks for
+       a refresh at every one until the first load's line is written: an ask that lands before the load begins is served by that load,
+       and the first one after it is the queued refresh's start. Two lines follow, the first open's and the queued refresh's. */
+    [Fact]
+    public void ARefreshAskedForWhileALoadRuns_BooksItsWaitInItsOwnSlowLoadLine()
+    {
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            using var silent = new TcpListener(IPAddress.Loopback, 0);
+            silent.Start();
+            var port = ((IPEndPoint)silent.LocalEndpoint).Port;
+            var asking = true;
+            var tab = new ViewerServerTab(
+                new ViewerDataService($"Host=127.0.0.1;Port={port};Database=darling;Username=darling;Timeout=1"),
+                new DarlingServer(11, "queued-refresh-host.invalid", "queued-refresh-alias", true, null))
+            {
+                /* Zero makes the first open write its line, which is when the test stops asking. */
+                FirstOpenSlowThresholdMs = 0,
+                SlowLoadSink = line =>
+                {
+                    asking = false;
+                    lines.Add(line);
+                },
+            };
+            var held = new List<TcpClient>();
+
+            async Task AskAtEveryReadAsync()
+            {
+                while (true)
+                {
+                    try
+                    {
+                        held.Add(await silent.AcceptTcpClientAsync());
+                    }
+                    catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
+                    {
+                        return;
+                    }
+
+                    if (asking)
+                    {
+                        await tab.RefreshActiveInnerTabAsync();
+                    }
+                }
+            }
+
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                tab.BeginFirstOpen();
+                var first = tab.RefreshActiveInnerTabAsync();
+                var asks = AskAtEveryReadAsync();
+                await first;
+                silent.Stop();
+                await asks;
+            }
+            finally
+            {
+                window.Close();
+                silent.Stop();
+                foreach (var client in held)
+                {
+                    client.Dispose();
+                }
+            }
+        });
+
+        Assert.Contains(lines, l => l.Contains("server tab first open", StringComparison.Ordinal));
+        var queued = Assert.Single(lines, l => !l.Contains("server tab first open", StringComparison.Ordinal));
+        Assert.Contains("[queued-refresh-alias]", queued, StringComparison.Ordinal);
+        Assert.Contains("waited for the refresh in flight ", queued, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void AClockStartedAfterTheTabsConstruction_CountsTheConstructionInItsTotal()
     {
