@@ -207,7 +207,27 @@ public sealed class ViewerSlowLoadPhasesTests
     [Theory]
     [InlineData("Optimization", "idle databases panel,tempdb summary panel,wait categories panel,expensive queries panel,memory grants panel")]
     [InlineData("Server Inventory", "server inventory read")]
+    [InlineData("Utilization", "utilization read")]
+    [InlineData("Database Resources", "database resources read")]
+    [InlineData("Storage Growth", "storage growth read")]
+    [InlineData("Locking & Contention", "locking databases read,index locking read,optimized locking note read,separately monitored read")]
+    [InlineData("Database Sizes", "database sizes read,table sizes read")]
+    [InlineData("Version Store (PVS)", "version store read,version store trend read")]
+    [InlineData("High Impact", "high impact queries read")]
+    [InlineData("Application Connections", "application connections read")]
+    [InlineData("Index Analysis", "index analysis read")]
+    [InlineData("Cost Savings", "recommendations read")]
     public void FinOps_ALoadOfTheSubTab_BooksItsReadsByName_AndWritesASlowLoadLine(string header, string expectedPhases)
+        => FinOpsSubTabLoad(header, expectedPhases, drill: null);
+
+    /// <summary>The Storage Growth sub-tab's drill levels read other things than its parent grid, so a refresh while drilled in names those reads.</summary>
+    [Theory]
+    [InlineData(1, "display zone read")]
+    [InlineData(2, "index detail read")]
+    public void FinOps_StorageGrowthDrilledIn_BooksTheDrillLevelsReadsByName(int level, string expectedPhases)
+        => FinOpsSubTabLoad("Storage Growth", expectedPhases, drill: level);
+
+    private static void FinOpsSubTabLoad(string header, string expectedPhases, int? drill)
     {
         var expected = expectedPhases.Split(',');
         var port = FreePort();
@@ -227,6 +247,16 @@ public sealed class ViewerSlowLoadPhasesTests
                 var subTabs = (TabControl)tab.FindName("FinOpsSubTabControl");
                 subTabs.SelectedIndex = subTabs.Items.OfType<TabItem>().ToList().FindIndex(t => Equals(t.Header, header));
                 Assert.True(subTabs.SelectedIndex >= 0, header);
+                if (drill is int level)
+                {
+                    /* The drill state is private to the tab (a row double-click sets it). Set it the way that click does: level, then the database, schema and table. */
+                    const System.Reflection.BindingFlags instance = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                    var levelField = typeof(FinOpsTab).GetField("_finopsStorageLevel", instance)!;
+                    levelField.SetValue(tab, Enum.ToObject(levelField.FieldType, level));
+                    typeof(FinOpsTab).GetField("_finopsObjDrillDb", instance)!.SetValue(tab, "drilldb");
+                    typeof(FinOpsTab).GetField("_finopsObjDrillSchema", instance)!.SetValue(tab, "dbo");
+                    typeof(FinOpsTab).GetField("_finopsObjDrillTable", instance)!.SetValue(tab, "drilltable");
+                }
 
                 var timer = SlowClock();
                 await tab.LoadActiveSubTabGuardedAsync(timer, logSlowLoad: false);
@@ -246,6 +276,61 @@ public sealed class ViewerSlowLoadPhasesTests
         }
 
         Assert.Contains("slow load: FinOps > " + header, line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AlertHistory_AFirstOpen_CountsTheWaitAndTheLayout_AndWritesOneLine()
+    {
+        var port = FreePort();
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            var tab = new AlertsHistoryTab { FirstOpenSlowThresholdMs = 0, SlowLoadSink = lines.Add };
+            tab.Initialize(new ViewerDataService(ClosedStore(port)));
+            var window = new Window { Content = tab, Width = 1200, Height = 800 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                tab.BeginFirstOpen();
+                await Task.Delay(150);
+                tab.FirstOpenRefreshStarted();
+                await tab.RefreshAlertsAsync();
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        var line = Assert.Single(lines);
+        Assert.Contains("slow load: first open > Alert History", line, StringComparison.Ordinal);
+        Assert.Contains("waited for the shell to start this refresh", line, StringComparison.Ordinal);
+        /* The wait is booked before the read, and the closed store fails the read, so the line shows the wait and the clock that ran from the show. */
+        Assert.True(line.Contains("waited for the shell to start this refresh 1", StringComparison.Ordinal)
+            || line.Contains("waited for the shell to start this refresh 2", StringComparison.Ordinal), line);
+    }
+
+    [Fact]
+    public void ASlowClock_NamesTheLayoutPassItWaitedFor()
+    {
+        string? line = null;
+        RunThemed(async () =>
+        {
+            var window = new Window { Width = 100, Height = 100 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                var timer = SlowClock();
+                await timer.SettleLayoutAsync(window.Dispatcher);
+                line = timer.Finish("Anything");
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.Contains("layout and render", line, StringComparison.Ordinal);
     }
 
     private static int FreePort()

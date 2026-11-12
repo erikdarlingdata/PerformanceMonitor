@@ -218,6 +218,21 @@ public static class ViewerCommandDeadlines
     public static int CurrentInteractiveReadSeconds => FanOutReadSeconds(ViewerReadFanOut.CurrentWidth);
 
     /// <summary>
+    /// #8549: the deadline for the Query Store interval-table read of the grid and the slicer, the one read whose cold first run is long
+    /// and whose fallback is slower still. On the larger field store a first read of the 30-day window took 15.3 s (375,000 blocks read
+    /// from disk) and 1.8 s once warm. At <see cref="InteractiveReadSeconds"/> that first read missed by half a second, the Viewer then read
+    /// raw history (11 s more, 26.6 s in all), and the next open was fast. Twenty-five seconds lets a cold table read that finishes under
+    /// about 22 s answer from the table instead of paying the raw read as well. Only the two table statements take it: the gates around
+    /// them, the raw reads and every other read keep <see cref="CurrentInteractiveReadSeconds"/>. It stays under the managed store's
+    /// 60 s server ceiling and the fallback to raw history is unchanged for a read that runs past it.
+    /// </summary>
+    public const int QueryStoreTableReadSeconds = 25;
+
+    /// <summary><see cref="QueryStoreTableReadSeconds"/>, or the fan-out deadline <see cref="CurrentInteractiveReadSeconds"/> when a declared
+    /// fan-out grants more, so this read never gets less time than any other interactive read in the same scope.</summary>
+    public static int CurrentQueryStoreTableReadSeconds => Math.Max(QueryStoreTableReadSeconds, CurrentInteractiveReadSeconds);
+
+    /// <summary>
     /// The store&lt;-&gt;service command plane — the three commands in
     /// <c>ViewerDataService.Commands.cs</c> (enqueue, poll, delete).
     ///
