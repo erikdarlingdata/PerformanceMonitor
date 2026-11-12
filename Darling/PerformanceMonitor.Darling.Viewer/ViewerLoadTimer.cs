@@ -33,6 +33,13 @@ public sealed class ViewerLoadTimer
     private readonly Stopwatch _total = Stopwatch.StartNew();
     private readonly List<(string Phase, long StartedMs, long EndedMs)> _phases = new();
     private readonly List<(string Step, long Ms)> _clientSteps = new();
+    /* #8549: reads handed to Track that have not ended (the key is a running number), and reads that ended cancelled. A load that is
+       finished before such a read's watcher has run must still name it: with only the ended reads booked, the stretch the read ran
+       was left to "client work". */
+    private readonly Dictionary<int, (string Phase, long StartedMs)> _inFlight = new();
+    private readonly List<(string Phase, long StartedMs, long EndedMs)> _cancelled = new();
+    private int _nextReadId;
+    private bool _superseded;
     private readonly object _gate = new();
     private readonly int _slowThresholdMs;
     private readonly long _alreadyElapsedMs;
@@ -62,15 +69,37 @@ public sealed class ViewerLoadTimer
     /// caller awaits it exactly as before. A faulted or cancelled task is still recorded; its own awaiter sees the error.</summary>
     internal Task<T> Track<T>(string phase, Task<T> task)
     {
-        _ = Watch(phase, ElapsedMs, task);
+        _ = Watch(phase, StartRead(phase), task);
         return task;
     }
 
     /// <summary><see cref="Track{T}"/> for a task with no result.</summary>
     internal Task Track(string phase, Task task)
     {
-        _ = Watch(phase, ElapsedMs, task);
+        _ = Watch(phase, StartRead(phase), task);
         return task;
+    }
+
+    /// <summary>#8549: the load was stopped by a newer one (a tab that cancels its superseded load calls this from its cancel path). A read
+    /// still in flight, or cancelled by that newer load, then reads "stopped by a newer pick" in the slow-load line. Without this call a read
+    /// still out when the load finishes stays off the line, as before.</summary>
+    internal void MarkSuperseded()
+    {
+        lock (_gate)
+        {
+            _superseded = true;
+        }
+    }
+
+    private (int Id, long StartedMs) StartRead(string phase)
+    {
+        var started = ElapsedMs;
+        lock (_gate)
+        {
+            var id = ++_nextReadId;
+            _inFlight[id] = (phase, started);
+            return (id, started);
+        }
     }
 
     /// <summary>#8549: times a stretch of the client's own work (a grid build, a chart draw, a converter) as <paramref name="step"/> and
@@ -139,7 +168,7 @@ public sealed class ViewerLoadTimer
     /// <summary>Records <paramref name="phase"/> when <paramref name="task"/> ends, however it ends. Written as an await rather than a
     /// <c>ContinueWith</c>, which the Viewer's concurrency census keeps out of the project (a continuation is a fan-out the width
     /// pin does not model). A faulted task's error is its awaiter's to see, so it is swallowed here.</summary>
-    private async Task Watch(string phase, long startedMs, Task task)
+    private async Task Watch(string phase, (int Id, long StartedMs) read, Task task)
     {
         try
         {
@@ -150,7 +179,12 @@ public sealed class ViewerLoadTimer
             /* The awaiter of the task sees the failure; this watcher only needs to know when it ended. */
         }
 
-        Record(phase, startedMs);
+        var ended = ElapsedMs;
+        lock (_gate)
+        {
+            _inFlight.Remove(read.Id);
+            (task.IsCanceled ? _cancelled : _phases).Add((phase, read.StartedMs, ended));
+        }
     }
 
     private void Record(string phase, long startedMs)
@@ -164,18 +198,24 @@ public sealed class ViewerLoadTimer
 
     /// <summary>The log line for a load of <paramref name="totalMs"/>, or null when it was not slow. Pure, so a test reads the text.</summary>
     internal static string? Describe(string surface, long totalMs, IReadOnlyList<(string Phase, long StartedMs, long EndedMs)> phases,
-        IReadOnlyList<(string Step, long Ms)>? clientSteps = null, int slowThresholdMs = SlowLoadThresholdMs)
+        IReadOnlyList<(string Step, long Ms)>? clientSteps = null, int slowThresholdMs = SlowLoadThresholdMs,
+        IReadOnlyList<(string Phase, long StartedMs, long EndedMs, string Marker)>? stoppedReads = null)
     {
         if (totalMs < slowThresholdMs)
         {
             return null;
         }
 
-        var lastReadEnded = phases.Count == 0 ? 0 : phases.Max(p => p.EndedMs);
+        /* #8549: a read the load did not see through (still running when the load was finished, or cancelled) is listed with its time and
+           a marker, and counts as ended where it stopped: the client's share starts after the last read that ended or was stopped. */
+        var reads = phases.Select(p => (p.Phase, p.StartedMs, p.EndedMs, Marker: ""))
+            .Concat(stoppedReads ?? Array.Empty<(string Phase, long StartedMs, long EndedMs, string Marker)>())
+            .OrderBy(p => p.EndedMs).ToList();
+        var lastReadEnded = reads.Count == 0 ? 0 : reads.Max(p => p.EndedMs);
         var clientMs = Math.Max(0, totalMs - lastReadEnded);
-        var split = phases.Count == 0
+        var split = reads.Count == 0
             ? "no store phase timed"
-            : string.Join(", ", phases.OrderBy(p => p.EndedMs).Select(p => $"{p.Phase} {p.EndedMs - p.StartedMs} ms"));
+            : string.Join(", ", reads.Select(p => $"{p.Phase} {p.EndedMs - p.StartedMs} ms{(p.Marker.Length == 0 ? "" : $" ({p.Marker})")}"));
         var line = $"slow load: {surface} took {totalMs} ms: store reads [{split}], then {clientMs} ms of client work after the last read";
         if (clientSteps is { Count: > 0 })
         {
@@ -239,7 +279,25 @@ public sealed class ViewerLoadTimer
         _total.Stop();
         lock (_gate)
         {
-            return Describe(Lead + (string.IsNullOrEmpty(Surface) ? fallbackSurface : Surface), ElapsedMs, _phases.ToList(), _clientSteps.ToList(), _slowThresholdMs);
+            /* A load nothing stopped lists only the reads it saw end: a side read still out when the load finished is not part of its time.
+               A load a newer one stopped lists the reads that were in flight or cancelled too, marked, and counts them as ended where
+               they stopped, so their time is not booked as client work. */
+            var now = ElapsedMs;
+            var phases = _phases.ToList();
+            List<(string Phase, long StartedMs, long EndedMs, string Marker)>? stopped = null;
+            if (_superseded)
+            {
+                const string marker = "stopped by a newer pick";
+                stopped = _cancelled.Select(c => (c.Phase, c.StartedMs, c.EndedMs, Marker: marker))
+                    .Concat(_inFlight.Values.Select(f => (f.Phase, f.StartedMs, EndedMs: now, Marker: marker)))
+                    .ToList();
+            }
+            else
+            {
+                phases.AddRange(_cancelled);
+            }
+
+            return Describe(Lead + (string.IsNullOrEmpty(Surface) ? fallbackSurface : Surface), now, phases, _clientSteps.ToList(), _slowThresholdMs, stopped);
         }
     }
 }

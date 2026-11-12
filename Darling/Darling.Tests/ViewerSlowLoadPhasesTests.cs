@@ -41,6 +41,54 @@ public sealed class ViewerSlowLoadPhasesTests
         Assert.Contains("[client steps: CPU lane draw 3500 ms, lane axis sync 700 ms]", line, StringComparison.Ordinal);
     }
 
+    private static long ClientWorkMs(string line)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(line, @"then (\d+) ms of client work");
+        Assert.True(m.Success, line);
+        return long.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    [Fact]
+    public async Task Finish_NamesAReadStillInFlight_AsStoppedByANewerPick_AndKeepsItsTimeOutOfClientWork()
+    {
+        /* #8549: a newer pick superseded a load while its read was running, and the load wrote its line then. The read's watcher had not
+           booked it, so the line left it out and counted its whole run as client work. */
+        var timer = new ViewerLoadTimer(0);
+        var read = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        timer.Track("job history read", read.Task);
+        await Task.Delay(400, TestContext.Current.CancellationToken);
+
+        timer.MarkSuperseded();
+        var line = timer.Finish("Job History");
+
+        Assert.NotNull(line);
+        Assert.Contains("job history read ", line, StringComparison.Ordinal);
+        Assert.Contains("(stopped by a newer pick)", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("no store phase timed", line, StringComparison.Ordinal);
+        Assert.True(ClientWorkMs(line) < 300, line);
+        read.SetCanceled();
+    }
+
+    [Fact]
+    public async Task Finish_NamesAReadTheNewerPickCancelled_AsStopped_WhicheverSideOfTheWatcherItLandsOn()
+    {
+        var timer = new ViewerLoadTimer(0);
+        using var cts = new System.Threading.CancellationTokenSource();
+        var read = Task.Delay(System.Threading.Timeout.Infinite, cts.Token);
+        timer.Track("job history read", read);
+        await Task.Delay(400, TestContext.Current.CancellationToken);
+
+        cts.Cancel();
+        await Assert.ThrowsAsync<TaskCanceledException>(() => read);
+        timer.MarkSuperseded();
+        var line = timer.Finish("Job History");
+
+        Assert.NotNull(line);
+        Assert.Contains("job history read ", line, StringComparison.Ordinal);
+        Assert.Contains("(stopped by a newer pick)", line, StringComparison.Ordinal);
+        Assert.True(ClientWorkMs(line) < 300, line);
+    }
+
     [Fact]
     public void Step_RunsTheWork_AndBooksItByName()
     {

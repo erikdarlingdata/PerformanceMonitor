@@ -311,6 +311,12 @@ public partial class JobHistoryTab : UserControl
         }
         finally
         {
+            /* #8549: a load a newer one stopped says so, so its line names the read it was waiting on as stopped, not as client work. */
+            if (_loads.Superseded(nameof(LoadJobsAsync), gen))
+            {
+                timer.MarkSuperseded();
+            }
+
             /* #8549: a slow load names the read or step that was slow. A caller that passed its own clock reads it and logs nothing. */
             if (loadTimer is null)
             {
