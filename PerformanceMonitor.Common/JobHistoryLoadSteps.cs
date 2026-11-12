@@ -164,3 +164,126 @@ public sealed class JobHistoryChoicesFreshness
         _readAtUtc = nowUtc;
     }
 }
+
+/// <summary>
+/// The Job History tab's category list, remembered per window and server for the session, with one read in flight per key (#8549).
+/// <para><b>Why a cache of results, not only a "read again after" clock.</b> <see cref="JobHistoryChoicesFreshness"/> remembers one
+/// key and is told a read succeeded only by a load that is still current when the read arrives. The category read is the slowest
+/// statement on a large store (several seconds, more on a first read), so a load that was superseded while it ran (a Status pick, a
+/// Refresh click, a range change) threw the answer away and left the next load to start the same read again; so did going back to a
+/// window already read. A field store logged five runs of it in an hour of light use. This cache keeps the answer for every key it has
+/// seen and hands every caller of a key that is still running the same task, so the store runs the read once per key per
+/// <c>lifetime</c>, whoever asks and however many loads come and go.</para>
+/// <para><b>What a cached list can miss.</b> A category that appears after the read is added to the drop-down anyway: the drop-down
+/// merges the categories of the runs the grid just read (<see cref="JobHistoryFilterChoices.MergeCategories"/>), and a new run is among the newest.
+/// What a cached list can still hold is a category whose last run has since left the window, which costs an empty grid for that pick,
+/// as the hour of slack in the read already can.</para>
+/// <para>A read that failed is never kept: the next caller reads again.</para>
+/// </summary>
+public sealed class JobHistoryCategoryCache
+{
+    private sealed class Entry(Task<List<string>> task, DateTime startedUtc)
+    {
+        public Task<List<string>> Task { get; } = task;
+
+        public DateTime StartedUtc { get; } = startedUtc;
+    }
+
+    private readonly TimeSpan _lifetime;
+    private readonly int _capacity;
+    private readonly object _gate = new();
+    private readonly Dictionary<JobHistoryChoicesKey, Entry> _entries = [];
+
+    /// <param name="lifetime">How long a finished read answers for its key.</param>
+    /// <param name="capacity">How many keys are remembered; the oldest finished read goes first.</param>
+    public JobHistoryCategoryCache(TimeSpan lifetime, int capacity = 16)
+    {
+        _lifetime = lifetime;
+        _capacity = capacity < 1 ? 1 : capacity;
+    }
+
+    /// <summary>How many reads <see cref="GetAsync"/> has started (not counting the callers it answered from memory).</summary>
+    public int ReadsStarted { get; private set; }
+
+    /// <summary>
+    /// The categories for <paramref name="key"/>: the finished answer if it is younger than the lifetime, the read already running for
+    /// the key if there is one, else a new read through <paramref name="read"/>. The caller must not change the returned list.
+    /// A read that throws faults the returned task, for every caller that was waiting on it, and is forgotten.
+    /// </summary>
+    public Task<List<string>> GetAsync(JobHistoryChoicesKey key, DateTime nowUtc, Func<Task<List<string>>> read)
+    {
+        ArgumentNullException.ThrowIfNull(read);
+
+        Entry entry;
+        TaskCompletionSource<List<string>> source;
+        lock (_gate)
+        {
+            if (_entries.TryGetValue(key, out var existing))
+            {
+                if (!existing.Task.IsCompleted
+                    || (existing.Task.IsCompletedSuccessfully && nowUtc - existing.StartedUtc <= _lifetime))
+                {
+                    return existing.Task;
+                }
+
+                _entries.Remove(key);
+            }
+
+            source = new TaskCompletionSource<List<string>>(TaskCreationOptions.RunContinuationsAsynchronously);
+            entry = new Entry(source.Task, nowUtc);
+            _entries[key] = entry;
+            ReadsStarted++;
+            Trim(key);
+        }
+
+        _ = RunAsync(key, entry, source, read);
+        return source.Task;
+    }
+
+    private async Task RunAsync(JobHistoryChoicesKey key, Entry entry, TaskCompletionSource<List<string>> source, Func<Task<List<string>>> read)
+    {
+        try
+        {
+            source.SetResult(await read().ConfigureAwait(false));
+        }
+        catch (Exception ex)
+        {
+            lock (_gate)
+            {
+                if (_entries.TryGetValue(key, out var current) && ReferenceEquals(current, entry))
+                {
+                    _entries.Remove(key);
+                }
+            }
+
+            source.SetException(ex);
+        }
+    }
+
+    /// <summary>Drops the oldest finished reads past the capacity, never the one just started and never one still running.</summary>
+    private void Trim(JobHistoryChoicesKey keep)
+    {
+        while (_entries.Count > _capacity)
+        {
+            JobHistoryChoicesKey? oldest = null;
+            var oldestAt = DateTime.MaxValue;
+            foreach (var (key, entry) in _entries)
+            {
+                if (key.Equals(keep) || !entry.Task.IsCompleted || entry.StartedUtc >= oldestAt)
+                {
+                    continue;
+                }
+
+                oldest = key;
+                oldestAt = entry.StartedUtc;
+            }
+
+            if (oldest is null)
+            {
+                return;
+            }
+
+            _entries.Remove(oldest.Value);
+        }
+    }
+}
