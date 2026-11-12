@@ -139,4 +139,45 @@ public sealed class WebServerFirstReadsTests
         Assert.Equal(["sql-value"], Shown(after));
         Assert.Equal(1, after.GetProperty("bar").GetInt32());
     }
+
+    [Fact]
+    public void APartialServerName_OpensThePageByTheServersOwnName_AndFillsTheHeaderFromTheKeptCard()
+    {
+        if (!TryRun("partialName", out var r)) return;
+        var after = r.GetProperty("afterFleet");
+        Assert.Equal(["#/server/HOST1.corp.example"], after.GetProperty("replaced").EnumerateArray().Select(e => e.GetString()!).ToArray());
+        Assert.Equal(["hashchange"], after.GetProperty("events").EnumerateArray().Select(e => e.GetString()!).ToArray());
+        Assert.Equal(0, after.GetProperty("errors").GetArrayLength());
+
+        var redrawn = r.GetProperty("redrawn");
+        Assert.Equal("HOST1.corp.example", redrawn.GetProperty("title").GetString());
+        Assert.Equal("ok", redrawn.GetProperty("badge").GetString());
+        Assert.Equal(0, redrawn.GetProperty("fleet").GetInt32());
+        Assert.Equal(1, redrawn.GetProperty("bar").GetInt32());
+    }
+
+    [Theory]
+    [InlineData("ambiguousName", "matches 2 monitored servers")]
+    [InlineData("noMatch", "No monitored server is named")]
+    public void AServerNameNoSingleServerAnswersTo_ShowsTheNotFoundSentence_AndDrawsNoPanelsOrTabBar(string scenario, string sentence)
+    {
+        if (!TryRun(scenario, out var r)) return;
+        var after = r.GetProperty("afterFleet");
+        Assert.Contains(sentence, string.Join(" ", after.GetProperty("errors").EnumerateArray().Select(e => e.GetString()!)));
+        Assert.Empty(Shown(after));
+        Assert.Equal(0, after.GetProperty("bar").GetInt32());
+        Assert.Equal(after.GetProperty("sql").GetInt32(), r.GetProperty("beforeFleet").GetProperty("sql").GetInt32());
+        Assert.Equal(0, after.GetProperty("replaced").GetArrayLength());
+    }
+
+    [Fact]
+    public void AServerNameThatIsTheDisplayNameExactly_IsLeftAlone()
+    {
+        if (!TryRun("exactDisplayName", out var r)) return;
+        var after = r.GetProperty("afterFleet");
+        Assert.Equal(0, after.GetProperty("replaced").GetArrayLength());
+        Assert.Equal(0, after.GetProperty("errors").GetArrayLength());
+        Assert.Equal("Prod One", after.GetProperty("title").GetString());
+        Assert.Equal(["sql-value"], Shown(after));
+    }
 }

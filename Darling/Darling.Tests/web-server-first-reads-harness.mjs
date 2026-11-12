@@ -61,7 +61,8 @@ globalThis.document = {
 };
 globalThis.window = globalThis;
 globalThis.location = { hash: "#/server/SRV1/cpu", pathname: "/", search: "", href: "http://localhost/", origin: "http://localhost" };
-globalThis.history = { pushState() {}, replaceState() {}, back() {} };
+globalThis.history = { pushState() {}, replaceState(a, b, url) { replaced.push(String(url)); }, back() {} };
+globalThis.dispatchEvent = (e) => { events.push(e.type); return true; };
 globalThis.addEventListener = () => {};
 globalThis.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
 const mem = new Map();
@@ -73,10 +74,12 @@ globalThis.scrollTo = (x, y) => { scrolledTo = y; };
 const [jsDir, scenario] = process.argv.slice(-2);
 
 /* ── the scripted fetch: the fleet roll-up is held until the scenario releases it; every other read answers at once ── */
-const state = { fleetGate: null, fleetFail: false, postgres: false, online: true };
+const state = { fleetGate: null, fleetFail: false, postgres: false, online: true, names: [{ server_name: "SRV1", display_name: "SRV1" }] };
+const replaced = [];
+const events = [];
 const calls = [];
 const reply = (status, body) => ({ status, ok: status >= 200 && status < 300, text: async () => JSON.stringify(body) });
-const card = () => ({ server_id: 7, server_name: "SRV1", display_name: "SRV1", is_postgres: state.postgres, band: "Healthy", band_label: "Healthy", is_online: state.online, status: "ok", last_collection: null, tags: [], metrics: [] });
+const card = (n = { server_name: "SRV1", display_name: "SRV1" }, id = 7) => ({ server_id: id, server_name: n.server_name, display_name: n.display_name, is_postgres: state.postgres, band: "Healthy", band_label: "Healthy", is_online: state.online, status: "ok", last_collection: null, tags: [], metrics: [] });
 globalThis.fetch = async (url, init) => {
   const u = String(url);
   if (u === "/api/session") return reply(200, { can_edit: false });
@@ -84,7 +87,7 @@ globalThis.fetch = async (url, init) => {
     calls.push({ tool: "fleet" });
     if (state.fleetGate) await state.fleetGate;
     if (state.fleetFail) return reply(500, { error: "fleet down" });
-    return reply(200, { total_servers: 1, critical_count: 0, warning_count: 0, offline_count: 0, tags: [], cards: [card()], generated_at: "2026-01-01T00:00:00" });
+    return reply(200, { total_servers: 1, critical_count: 0, warning_count: 0, offline_count: 0, tags: [], cards: state.names.map((n, i) => card(n, 7 + i)), generated_at: "2026-01-01T00:00:00" });
   }
   const m = /^\/api\/read\/(get_(?:sql|pg)_stub)/.exec(u);
   if (m) {
@@ -117,7 +120,7 @@ try {
   const shown = (n) => n.byClass("stub-result").map((e) => e.textContent);
   const subtabBars = (n) => n.byClass("subtabs").length;
   const snapshot = (name, main) => {
-    out[name] = { sql: count("get_sql_stub"), pg: count("get_pg_stub"), fleet: count("fleet"), bar: subtabBars(main), shown: shown(main) };
+    out[name] = { sql: count("get_sql_stub"), pg: count("get_pg_stub"), fleet: count("fleet"), bar: subtabBars(main), shown: shown(main), title: main.every((n) => n.tag === "h2").map((n) => n.textContent)[0] || null, badge: main.byClass("server-band").map((n) => n.textContent)[0] || null, errors: main.byClass("error").map((n) => n.textContent), replaced: replaced.slice(), events: events.slice() };
   };
 
   /* A first visit: the page has never seen this server, so it has no card. Holds the roll-up, looks, releases it, looks again. */
@@ -173,6 +176,31 @@ try {
     async postgresOnlyTab() {
       state.postgres = true;
       await firstVisit("SRV1", "pgonly");
+    },
+    /* #8741: a route name that is only part of one server's name. The page replaces the link with the server's own name (no pushed entry) and
+       asks the router to draw again; that draw takes the card the first one kept, so the header fills with no second roll-up read. */
+    async partialName() {
+      state.names = [{ server_name: "HOST1.corp.example", display_name: "HOST1.corp.example" }, { server_name: "OTHER2", display_name: "OTHER2" }];
+      await firstVisit("host1");
+      const main = root();
+      calls.length = 0;
+      (await load("pages/server.js")).renderServer(main, "HOST1.corp.example");
+      await settle();
+      snapshot("redrawn", main);
+    },
+    /* #8741: a name two servers contain, and a name none does: the page says so, and its panels and tab bar are gone. */
+    async ambiguousName() {
+      state.names = [{ server_name: "HOST1.a.example", display_name: "HOST1.a.example" }, { server_name: "HOST1.b.example", display_name: "HOST1.b.example" }];
+      await firstVisit("host1");
+    },
+    async noMatch() {
+      state.names = [{ server_name: "HOST1", display_name: "HOST1" }];
+      await firstVisit("nothing-like-it");
+    },
+    /* A name that is exactly one server's display name is already that server's page: no link rewrite and no second draw. */
+    async exactDisplayName() {
+      state.names = [{ server_name: "host1.corp", display_name: "Prod One" }];
+      await firstVisit("Prod One");
     },
     /* A roll-up that fails: the early panels stay, and the tab bar is drawn around them with no second read. */
     async fleetFails() {
