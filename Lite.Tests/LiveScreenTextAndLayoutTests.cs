@@ -30,7 +30,8 @@ namespace PerformanceMonitorLite.Tests;
 /// Add SQL Server form keeps a form's width when the window is wide, and the plan's Server Context card gets the server's name
 /// from the store. Built from the real controls on the shared STA thread, in hosts that fit a 1024x768 screen.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class LiveScreenTextAndLayoutTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

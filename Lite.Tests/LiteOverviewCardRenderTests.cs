@@ -25,7 +25,8 @@ namespace PerformanceMonitorLite.Tests;
 /// <see cref="ServerSummaryItem"/>), shown in a window and read back from what it rendered: a 2 px border in the server's health band
 /// colour, a severity dot on each metric row that has a band, the CPU detail column, and the name and rows in the shared text styles.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class LiteOverviewCardRenderTests
 {
     private static readonly Uri LiteTheme = new("pack://application:,,,/PerformanceMonitorLite;component/Themes/DarkTheme.xaml");

@@ -28,7 +28,8 @@ namespace PerformanceMonitorLite.Tests;
 /// shared STA thread builds and renders: the tab headers and sub-tab content, the accessible names a screen reader or the UI walk
 /// reads, and the sidebar's search filter.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ServerTabRegroupAndSidebarTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

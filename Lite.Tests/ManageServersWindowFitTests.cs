@@ -23,7 +23,8 @@ namespace PerformanceMonitorLite.Tests;
 /// Manage Servers at its default size shows every column, Last Connected included, with no horizontal scroll bar: Display Name
 /// and Server take the room the fixed columns leave instead of fixed widths that push the last column past the edge.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ManageServersWindowFitTests
 {
     [Fact]

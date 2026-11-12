@@ -29,7 +29,8 @@ namespace Lite.Tests;
 /// clicked; tabs are flat, with no solid accent fill. The real ServerTab is built on the shared STA thread, themed, shown at the
 /// given width, and everything is read from the rendered controls.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ServerTabStripTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

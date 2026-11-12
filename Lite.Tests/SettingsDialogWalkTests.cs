@@ -27,7 +27,8 @@ namespace PerformanceMonitorLite.Tests;
 /// Database State Overrides reset button names the column it copies from; and, from the theme itself, a disabled PasswordBox
 /// keeps the fill a disabled TextBox has, while a chosen radio button marks itself with the accent the CheckBox mark uses.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class SettingsDialogWalkTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

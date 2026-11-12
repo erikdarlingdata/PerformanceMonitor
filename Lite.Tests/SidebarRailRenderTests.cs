@@ -29,7 +29,8 @@ namespace PerformanceMonitorLite.Tests;
 /// status dot inside the list, the footer's buttons show their icons whole, and the open sidebar's subtitle sits on one line.
 /// The window is the real one, laid out in a host window of the stated size under each theme.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class SidebarRailRenderTests
 {
     public static TheoryData<string> Themes => new() { "Dark", "Light", "CoolBreeze" };

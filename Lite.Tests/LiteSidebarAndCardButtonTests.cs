@@ -31,7 +31,8 @@ namespace PerformanceMonitorLite.Tests;
 /// the real template or tab on the shared STA thread with the theme and the shared styles merged, at both window sizes, and
 /// reads the realized result. With REFRESH_SHOTS_DIR set, each screen is saved as a PNG.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class LiteSidebarAndCardButtonTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

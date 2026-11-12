@@ -36,7 +36,8 @@ namespace PerformanceMonitorLite.Tests;
 /// the theme and the shared styles merged, shows it at the width a tab has beside the sidebar of a 1280x800 and a 900x600 window,
 /// and reads the realized result. With REFRESH_SHOTS_DIR set, each screen is saved as a PNG.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class LitePanelCardsTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

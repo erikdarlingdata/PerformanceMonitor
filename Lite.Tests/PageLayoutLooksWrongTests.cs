@@ -27,7 +27,8 @@ namespace PerformanceMonitorLite.Tests;
 /// and reads the realized layout: which scroll viewer has an extent, what a card's share of a page is, how many times a message is said,
 /// and how many rows a legend takes.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class PageLayoutLooksWrongTests
 {
     private static CredentialResolver Credentials() => new(new CredentialService(), null);

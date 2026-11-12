@@ -14,8 +14,8 @@ namespace PerformanceMonitorLite.Tests;
 /// <summary>
 /// #7000: every Overview read must cost what its WINDOW holds, not what the archive holds (#6096: Top Queries by CPU ranked every
 /// archived procedure_stats row, 432,000 rows from one day of history at 344 databases). Each read runs against two stores in the
-/// shape a real install reaches over days (<c>ArchiveOldDataAsync</c> moves each day past the hot window into a compacted Parquet
-/// month file, one pass per day) that differ only in how many days sit in the archive behind the same window. The test sums the
+/// shape a real install reaches over days (<c>ArchiveOldDataAsync</c> moves every day past the hot window into Parquet, in one
+/// pass) that differ only in how many days sit in the archive behind the same window. The test sums the
 /// rows DuckDB's own profiler says the <c>READ_PARQUET</c> nodes scanned: a read that follows its window prunes the archive away
 /// (no node, or the same rows in both stores), a read that does not scans the archive in proportion to its size. Rows, never time.
 /// </summary>
@@ -31,12 +31,6 @@ public sealed class OverviewReadScalingTests : IDisposable
     private const int HotDays = 8;
     /* A read that follows its window scans the same Parquet rows in both stores; the slack is a small constant, not a ratio. */
     private const long AllowedExtraParquetRows = 100;
-    /* Archived days in the larger store, against 1 in the smaller (#8754: the release run spent 115 s here, nearly all of it in one real
-       archive pass per day, and 8 days meant 9 passes). A read that scans the archive in proportion reads every archived row of its table,
-       so the stores differ by (LargeArchivedDays - 1) days of that table. The smallest table the reads touch, cpu_utilization_stats, holds
-       SnapshotsPerDay (48) rows a day: 3 extra days are 144 rows against the 100 allowed, which is why 4 is the least that still fails
-       on it (2 extra days would be 96 and pass). The bigger tables differ by thousands. */
-    private const int LargeArchivedDays = 4;
     /* A WINDOW operator (the ranking #6096 ran over the archive) may rank only a fraction of the window's rows of the busiest
        table. Growth between the two stores cannot see a ranking over the WINDOW's rows that should have been only the ranked
        handles' (#6362: 14,400 procedure_stats rows in the 24 h window against about 2,700 for the handles it ranks), so this
@@ -49,7 +43,7 @@ public sealed class OverviewReadScalingTests : IDisposable
        two growth checks. It still fails above a third of the procedure_stats rows both stores hold: #6362's handle filter ranks
        the handles of the page's groups (23,815 and 42,295 rows measured), a revert ranks every row (129,600 and 230,400). */
     private const string TopQueriesRead = "top queries by CPU";
-    private const long MaxTopQueriesWindowRows = Databases * SnapshotsPerDay * (HotDays + LargeArchivedDays) / 3;
+    private const long MaxTopQueriesWindowRows = Databases * SnapshotsPerDay * (HotDays + 8) / 3;
 
     private const string InventoryRead = "FinOps server inventory";
 
@@ -73,14 +67,6 @@ public sealed class OverviewReadScalingTests : IDisposable
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status)
 SELECT s * 20 + c, {1}, 'SRV', 'collector_' || c, t, 'SUCCESS' FROM slots, range(20) b(c) ORDER BY t;";
 
-    /* The one table the idle-coverage reads touch. Kept apart so that test can build a store holding only it (#8754). */
-    private const string QueryStatsSql = @"
-INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, last_execution_time,
-    delta_execution_count, delta_worker_time, delta_elapsed_time, query_text, sql_handle, sample_interval_seconds)
-SELECT s * {2} + d, t, {1}, 'SRV', 'Db' || d, '0xQ' || d, '0xP' || d, t, 5, 900000 + d, 900000, 'SELECT ' || d, '0xH' || d, 1800
-FROM slots, range({2}) b(d) ORDER BY t;
-";
-
     private const string MetricTablesSql = @"
 INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb,
     delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds)
@@ -103,6 +89,11 @@ SELECT s, t, {1}, 'SRV', 65536, 10000, 50000, 40000, 30000 FROM slots ORDER BY t
 INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition,
     utc_offset_minutes)
 SELECT s, t, {1}, 'SRV', 'Edition', '15.0.2000.5', 'RTM', 3, -240 FROM slots ORDER BY t;
+
+INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, last_execution_time,
+    delta_execution_count, delta_worker_time, delta_elapsed_time, query_text, sql_handle, sample_interval_seconds)
+SELECT s * {2} + d, t, {1}, 'SRV', 'Db' || d, '0xQ' || d, '0xP' || d, t, 5, 900000 + d, 900000, 'SELECT ' || d, '0xH' || d, 1800
+FROM slots, range({2}) b(d) ORDER BY t;
 
 INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, file_id, file_type_desc, file_name,
     physical_name, total_size_mb, used_size_mb)
@@ -149,12 +140,9 @@ FROM slots, range(10) b(c) ORDER BY t;
 
     /// <summary>
     /// A store as the app leaves it after days of running: <see cref="HotDays"/> days in DuckDB and <paramref name="archivedDays"/>
-    /// older days moved to Parquet by one real <c>ArchiveOldDataAsync</c> pass per day (each pass compacts, so the archive is a
-    /// merged month file). Rows are stamped from .NET UTC; DuckDB's <c>now()::TIMESTAMP</c> goes through the session time zone.
-    /// With <paramref name="queryStatsOnly"/> the store holds only <c>query_stats</c>, the one table the idle-coverage reads touch (#8754): each
-    /// archive pass then moves one table instead of twenty, and the rows those reads see are the same.
+    /// older days moved to Parquet by one real <c>ArchiveOldDataAsync</c> pass (the archive is one file per table). Rows are stamped from .NET UTC; DuckDB's <c>now()::TIMESTAMP</c> goes through the session time zone.
     /// </summary>
-    private async Task<LocalDataService> BuildStoreAsync(string name, int archivedDays, int hotDays = HotDays, bool queryStatsOnly = false)
+    private async Task<LocalDataService> BuildStoreAsync(string name, int archivedDays, int hotDays = HotDays)
     {
         var dir = Path.Combine(_tempDir, name);
         var archiveDir = Path.Combine(dir, "archive");
@@ -171,16 +159,20 @@ FROM slots, range(10) b(c) ORDER BY t;
             using var cmd = connection.CreateCommand();
             var now = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
             var slotsSql = $"CREATE TEMP TABLE slots AS SELECT s, TIMESTAMP '{now}' - (s * INTERVAL 30 MINUTE) AS t FROM range({totalDays * SnapshotsPerDay}) a(s);";
-            cmd.CommandText = slotsSql + (queryStatsOnly ? QueryStatsSql : MetricTablesSql + QueryStatsSql + CollectionLogSql).Replace("{1}", ServerId.ToString()).Replace("{2}", Databases.ToString());
+            cmd.CommandText = slotsSql + (MetricTablesSql + CollectionLogSql).Replace("{1}", ServerId.ToString()).Replace("{2}", Databases.ToString());
             await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
+        /* One real pass archives every day older than hotDays. #8754: a pass takes about four seconds whatever it moves, and
+           this used to run one pass per archived day (26 of them across the four stores, 85 of the class's 140 seconds).
+           Every read's Parquet rows scanned and rows out, and every WINDOW row count the tests below compare, came out the same
+           from one pass (the idle-coverage reads' rows out differ by about 0.1%, 87,484 against 87,420 at 12 days, well inside
+           the slack that test allows). */
         var archive = new ArchiveService(initializer, archiveDir);
-        for (var pass = 1; pass <= archivedDays; pass++)
+        if (archivedDays > 0)
         {
-            /* Pass n archives everything older than (totalDays - n) days: one more day per pass, the last leaves HotDays. */
-            archive.TimestampForTests = DateTime.UtcNow.AddMinutes(pass).ToString("yyyyMMdd_HHmm");
-            await archive.ArchiveOldDataAsync(hotDataHours: (totalDays - pass) * 24);
+            archive.TimestampForTests = DateTime.UtcNow.AddMinutes(1).ToString("yyyyMMdd_HHmm");
+            await archive.ArchiveOldDataAsync(hotDataHours: hotDays * 24);
         }
 
         return new LocalDataService(initializer);
@@ -301,7 +293,7 @@ FROM slots, range(10) b(c) ORDER BY t;
         ("SQL engine edition", d => d.GetSqlEngineEditionAsync(ServerId)),
     ];
 
-    private async Task<(List<string> Failures, List<string> Report)> CheckReadsAsync(LocalDataService oneDay, LocalDataService largerArchive)
+    private async Task<(List<string> Failures, List<string> Report)> CheckReadsAsync(LocalDataService oneDay, LocalDataService eightDays)
     {
         var failures = new List<string>();
         var report = new List<string>();
@@ -309,10 +301,10 @@ FROM slots, range(10) b(c) ORDER BY t;
         {
             var tag = new string(name.Where(char.IsLetterOrDigit).ToArray());
             var small = await ParquetScansAsync(oneDay, tag + "_s", read);
-            var large = await ParquetScansAsync(largerArchive, tag + "_l", read);
+            var large = await ParquetScansAsync(eightDays, tag + "_l", read);
             var smallRows = small.Scans.Sum(s => s.RowsScanned);
             var largeRows = large.Scans.Sum(s => s.RowsScanned);
-            var line = $"{name}: READ_PARQUET rows scanned {smallRows:N0} ({small.Scans.Count} nodes) with 1 archived day, {largeRows:N0} ({large.Scans.Count} nodes) with {LargeArchivedDays}; rows out {small.Scans.Sum(x => x.RowsOut):N0} / {large.Scans.Sum(x => x.RowsOut):N0}; WINDOW rows {small.WindowRows:N0} / {large.WindowRows:N0}; nodes [{string.Join(" | ", large.Scans.Select(x => x.Columns))}]";
+            var line = $"{name}: READ_PARQUET rows scanned {smallRows:N0} ({small.Scans.Count} nodes) with 1 archived day, {largeRows:N0} ({large.Scans.Count} nodes) with 8; rows out {small.Scans.Sum(x => x.RowsOut):N0} / {large.Scans.Sum(x => x.RowsOut):N0}; WINDOW rows {small.WindowRows:N0} / {large.WindowRows:N0}; nodes [{string.Join(" | ", large.Scans.Select(x => x.Columns))}]";
             report.Add(line);
             var window = Math.Max(small.WindowRows, large.WindowRows);
             var failed = name == TopQueriesRead
@@ -331,9 +323,9 @@ FROM slots, range(10) b(c) ORDER BY t;
     public async Task OverviewReadsScanTheirWindowNotTheArchive()
     {
         var oneDay = await BuildStoreAsync("a1", archivedDays: 1);
-        var largerArchive = await BuildStoreAsync("a4", archivedDays: LargeArchivedDays);
+        var eightDays = await BuildStoreAsync("a8", archivedDays: 8);
 
-        var (failures, report) = await CheckReadsAsync(oneDay, largerArchive);
+        var (failures, report) = await CheckReadsAsync(oneDay, eightDays);
 
         Assert.True(failures.Count == 0,
             "an Overview read scans the archive, not its window:" + Environment.NewLine + string.Join(Environment.NewLine, failures)
@@ -345,7 +337,7 @@ FROM slots, range(10) b(c) ORDER BY t;
     /// 3 days, so the hot table cannot decide it and the archive does (#7014). The answer is true in both stores (every older day is
     /// archived, the 7 complete days before today are all sampled), and the archive rows the fleet rule and the per-server check read
     /// must not grow with the archived days: the per-day count reads only its window, and the oldest-sample question stops at the first
-    /// matching row. Measured by rows OUT of the scans: with the archive compacted into one month file, DuckDB's rows-scanned count is the
+    /// matching row. Measured by rows OUT of the scans: with the archive held in one file per table, DuckDB's rows-scanned count is the
     /// file's row count whatever the filter (864,000 for a one-hour window and for the whole archive alike), while rows out are what the
     /// pushed-down filter and a LIMIT let through (600 for one hour).
     /// </summary>
@@ -353,8 +345,8 @@ FROM slots, range(10) b(c) ORDER BY t;
     public async Task IdleCoverageDecidedByTheArchive_ReadsABoundedPartOfItNotTheArchive()
     {
         const int hotDays = 3;
-        var small = await BuildStoreAsync("c5", archivedDays: 5, hotDays: hotDays, queryStatsOnly: true);
-        var large = await BuildStoreAsync("c12", archivedDays: 12, hotDays: hotDays, queryStatsOnly: true);
+        var small = await BuildStoreAsync("c5", archivedDays: 5, hotDays: hotDays);
+        var large = await BuildStoreAsync("c12", archivedDays: 12, hotDays: hotDays);
 
         var lines = new List<string>();
         long smallRows = 0, largeRows = 0;

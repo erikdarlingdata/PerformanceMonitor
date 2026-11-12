@@ -22,13 +22,12 @@ namespace PerformanceMonitorLite.Tests;
 /// <c>ServerManager.UpdateServer</c> with no username, which deletes an Entra MFA server's stored username (the UPN lives only
 /// there). All Credential Manager use is under a prefix of the test's own.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
 public sealed class ExcludedDatabasesDialogSaveTests : IDisposable
 {
     private const string Upn = "dba@contoso.example";
 
-    private static readonly string Tag = "Test_" + Guid.NewGuid().ToString("N") + "_";
-    private readonly string _prefix = CredentialService.CredentialPrefix + Tag;
+    private readonly InMemoryCredentialStore _store = new();
     private readonly string _folder = Path.Combine(Path.GetTempPath(), "lite-excl-dialog-" + Guid.NewGuid().ToString("N"));
     private readonly List<string> _ids = new();
 
@@ -45,7 +44,7 @@ public sealed class ExcludedDatabasesDialogSaveTests : IDisposable
         try { Directory.Delete(_folder, recursive: true); } catch { /* best effort */ }
     }
 
-    private CredentialService Credentials() => new(new CredentialStore(_prefix, "Performance Monitor Lite test"));
+    private CredentialService Credentials() => new(_store);
 
     private (ServerManager Manager, ServerConnection Server) EntraMfaServerWithStoredUpn()
     {

@@ -37,7 +37,8 @@ namespace PerformanceMonitorLite.Tests;
 /// from the store. Collection <c>credential-manager</c>: the live read resolves each connection string through the process-wide
 /// credential service, the collection runs alone, and the time display statics this class sets are put back in Dispose.</para>
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class FinOpsServerInventoryCellsTests : IDisposable
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

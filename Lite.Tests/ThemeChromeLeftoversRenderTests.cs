@@ -29,7 +29,8 @@ namespace PerformanceMonitorLite.Tests;
 /// that paints a stock white square or a tooltip in another theme's colours fails here. The sidebar rail and the footer are in
 /// <see cref="SidebarRailRenderTests"/>.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ThemeChromeLeftoversRenderTests
 {
     public static TheoryData<string> Themes => new() { "Dark", "Light", "CoolBreeze" };
