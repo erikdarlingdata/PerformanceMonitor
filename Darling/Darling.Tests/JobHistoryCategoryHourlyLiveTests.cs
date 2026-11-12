@@ -86,21 +86,22 @@ public sealed class JobHistoryCategoryHourlyLiveTests
     // ── The pass's arithmetic ───────────────────────────────────────────────────────────────
 
     [Fact]
-    public void ThePlan_JoinsTheOldCoverage_WalksBackADay_AndHoldsTheRetentionEdge()
+    public void ThePlan_JoinsTheOldCoverage_WalksBackCatchUpDays_AndHoldsTheRetentionEdge()
     {
         var hour = new DateTime(2026, 11, 12, 10, 0, 0);
+        var step = JobHistoryCategoryHourly.CatchUpDays;
 
-        /* First pass: the last two closed hours, then a day behind them. */
+        /* First pass: the last two closed hours, then the catch-up days behind them. */
         var first = JobHistoryCategoryHourly.Plan(null, null, 365, hour);
         Assert.Equal(hour.AddHours(-2), first.ForwardFrom);
-        Assert.Equal(hour.AddHours(-2).AddDays(-1), first.BackfillFrom);
+        Assert.Equal(hour.AddHours(-2).AddDays(-step), first.BackfillFrom);
         Assert.Equal(hour.AddHours(-2), first.BackfillTo);
-        Assert.Equal(hour.AddHours(-2).AddDays(-1), first.CoveredFrom);
+        Assert.Equal(hour.AddHours(-2).AddDays(-step), first.CoveredFrom);
 
         /* Later pass: the forward range starts two hours before the old end, the backfill continues from the old start. */
         var later = JobHistoryCategoryHourly.Plan(hour.AddDays(-3), hour.AddHours(-1), 365, hour);
         Assert.Equal(hour.AddHours(-3), later.ForwardFrom);
-        Assert.Equal(hour.AddDays(-4), later.BackfillFrom);
+        Assert.Equal(hour.AddDays(-3 - step), later.BackfillFrom);
         Assert.Equal(hour.AddDays(-3), later.BackfillTo);
 
         /* The coverage reaches the retention edge: no backfill, and the start rides the edge as it moves. */
@@ -126,6 +127,47 @@ public sealed class JobHistoryCategoryHourlyLiveTests
         Assert.False(JobHistoryCategoryHourly.Covers(coverage with { From = floor.AddMinutes(1) }, floor, since, null), "coverage starting after the floor is partial");
     }
 
+    /// <summary>
+    /// The backfill is one day per command inside the one transaction, and a pass stops folding days once its budget is spent (#8549): a store
+    /// too large to fold CatchUpDays days inside the command timeout still moves one day a pass instead of rolling back each hour.
+    /// </summary>
+    [Fact]
+    public async Task ThePass_FoldsOneBackfillDayWithNoBudget_AndCatchUpDaysWithAnAmpleOne_AndTheCoverageNamesExactlyThoseDays()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        var now = await SeedAsync(connection, ct);
+        var forwardFrom = Floor(now).AddHours(-JobHistoryCategoryHourly.RecomputeHours);
+
+        /* The summary holds only runs collected inside the coverage: the folded rows are the ones the coverage names. */
+        async Task<long> RowsOutsideAsync(DateTime coveredFrom) => await ScalarAsync<long>(connection, $@"
+SELECT count(*) FROM collect.job_history_category_hourly h
+WHERE NOT EXISTS (SELECT 1 FROM collect.job_history j
+                  WHERE j.collection_time >= '{coveredFrom:yyyy-MM-dd HH:mm:ss}'::timestamp
+                    AND date_trunc('hour', j.run_datetime) = h.run_hour
+                    AND j.server_id = h.server_id AND j.category_name = h.category_name)", ct);
+
+        await JobHistoryCategoryHourly.RollUpAsync(connection, now, null, TimeSpan.Zero, ct);
+        var one = await CoverageAsync(connection, ct);
+        var oneRows = await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_history_category_hourly", ct);
+        Assert.Equal(forwardFrom.AddDays(-1), one.From);
+        Assert.Equal(Floor(now), one.To);
+        Assert.Equal(0L, await RowsOutsideAsync(one.From));
+
+        await ExecuteAsync(connection, "DELETE FROM collect.job_history_category_hourly; DELETE FROM collect.job_history_category_coverage;", ct);
+        await JobHistoryCategoryHourly.RollUpAsync(connection, now, null, TimeSpan.FromHours(1), ct);
+        var ample = await CoverageAsync(connection, ct);
+        var ampleRows = await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_history_category_hourly", ct);
+        Assert.Equal(forwardFrom.AddDays(-JobHistoryCategoryHourly.CatchUpDays), ample.From);
+        Assert.Equal(Floor(now), ample.To);
+        Assert.True(oneRows > 0 && oneRows < ampleRows, $"one day folded {oneRows} summary rows, {JobHistoryCategoryHourly.CatchUpDays} days folded {ampleRows}");
+    }
+
     // ── The answers ─────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -147,14 +189,14 @@ public sealed class JobHistoryCategoryHourlyLiveTests
         /* No pass has run: no coverage row, so every window reads the old statement. */
         await AssertAllWindowsEqualAsync(dataSource, now, ct);
 
-        /* One pass covers the last two hours and a day behind them: the 3-day windows are still the old statement's. */
+        /* One pass covers the last two hours and the catch-up days behind them: a longer window is still the old statement's. */
         await JobHistoryCategoryHourly.RollUpAsync(connection, now, null, ct);
         var partial = await CoverageAsync(connection, ct);
         Assert.True(partial.To == Floor(now));
-        Assert.True(partial.From > Floor(now).AddDays(-2));
+        Assert.True(partial.From > Floor(now).AddDays(-JobHistoryCategoryHourly.CatchUpDays - 1));
         await AssertAllWindowsEqualAsync(dataSource, now, ct);
 
-        /* The backfill, a day a pass, until the coverage holds the 12 days seeded and the windows read the summary. */
+        /* The backfill, a few days a pass, until the coverage holds the 12 days seeded and the windows read the summary. */
         for (var pass = 0; pass < 14; pass++)
         {
             await JobHistoryCategoryHourly.RollUpAsync(connection, now, null, ct);

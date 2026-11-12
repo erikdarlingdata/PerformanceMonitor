@@ -304,6 +304,40 @@ public static class DarlingJobHistoryReader
     }
 
     /// <summary>
+    /// One server's latest collected UTC offset (#8549): the newest <c>server_properties</c> row with a non-NULL offset, at any age, or no
+    /// row when the server has none. Read as a descent of <c>idx_server_properties_time (server_id, collection_time)</c> that stops at the
+    /// first hit. The statement this replaced, <c>SELECT DISTINCT ON (server_id) ... ORDER BY server_id, collection_time DESC</c> over the
+    /// whole table, walked every chunk of the hypertable (a skip scan in each, hundreds of them on a large store) on every read, to answer for
+    /// servers the read may not even touch. Same answer: the latest non-NULL row per server, so a server whose offset changed takes the
+    /// newer one and a server whose newest rows are NULL falls back to its last known value.
+    /// </summary>
+    internal static string LatestOffsetSql(string serverIdExpression) => $@"SELECT sp.utc_offset_minutes
+    FROM server_properties AS sp
+    WHERE sp.server_id = {serverIdExpression}
+    AND   sp.utc_offset_minutes IS NOT NULL
+    ORDER BY sp.collection_time DESC
+    LIMIT 1";
+
+    /// <summary>
+    /// The servers <see cref="LatestOffsetsSql"/> descends for (#8549): every server that has an offset row, read from <c>server_properties</c>
+    /// itself (a segmentby column on its compressed chunks, so no payload is read). Exactly the servers that can take an offset, so a
+    /// server with runs in the read's window always gets its latest one, and one with none costs a single descent. Taking the list from
+    /// <c>job_history</c> instead (the servers with rows in the window) read that table a second time, the whole window of it, and on the
+    /// hourly path the summary as well. <paramref name="serverFilter"/> is an <c>AND server_id = $n</c> tail or empty.
+    /// </summary>
+    internal static string ServersWithOffsetSql(string serverFilter) =>
+        "SELECT DISTINCT server_id FROM server_properties WHERE utc_offset_minutes IS NOT NULL" + serverFilter;
+
+    /// <summary>
+    /// <see cref="LatestOffsetSql"/> for each server of <paramref name="serversSql"/> (a query that returns a <c>server_id</c> column), as
+    /// the <c>svr</c> CTE body of the Category reads: (server_id, utc_offset_minutes), one row per server that has an offset and none for a
+    /// server that has not, so its runs take offset 0, as they did. The servers are the ones <see cref="ServersWithOffsetSql"/> lists: a server with runs and no offset row is absent, as before.
+    /// </summary>
+    internal static string LatestOffsetsSql(string serversSql) =>
+        "    SELECT s.server_id, o.utc_offset_minutes\n    FROM (" + serversSql + ") AS s\n    CROSS JOIN LATERAL ("
+        + LatestOffsetSql("s.server_id") + ") AS o";
+
+    /// <summary>
     /// <see cref="GetCategoriesAsync"/>'s SQL text. $1 is the window start (naive UTC) and $2 the <see cref="EventWindowFloor"/> for it
     /// (<c>job_history</c> is partitioned on <c>collection_time</c>, so the floor lets the planner exclude chunks, as in
     /// <see cref="BuildJobHistorySql"/>); with <paramref name="bounded"/>, $3 is the window end. <c>run_datetime</c> is the server's
@@ -319,14 +353,11 @@ public static class DarlingJobHistoryReader
             ? "\nAND   jh.run_datetime <= $3 + make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) + interval '1 hour'"
             : string.Empty;
 
+        var serversSql = ServersWithOffsetSql(forServer ? $" AND server_id = ${(bounded ? 4 : 3)}" : string.Empty);
+
         return $@"
 WITH svr AS (
-    SELECT DISTINCT ON (server_id)
-        server_id,
-        utc_offset_minutes
-    FROM server_properties
-    WHERE utc_offset_minutes IS NOT NULL
-    ORDER BY server_id, collection_time DESC
+{LatestOffsetsSql(serversSql)}
 )
 SELECT DISTINCT jh.category_name
 FROM job_history AS jh
@@ -464,6 +495,7 @@ ORDER BY jh.category_name";
         var filterSql = filter?.Clauses(firstFilterParam) ?? string.Empty;
         var statsUntilSql = filter?.StatsClause(firstFilterParam) ?? string.Empty;
         var baseCutSql = filter is null ? new JobHistoryFilter().BaseCutSql(limitParam) : filter.BaseCutSql(limitParam);
+        var latestOffsetSql = LatestOffsetSql("a.server_id");
         var offsetKnownSql = narrowFirst ? ", svr.utc_offset_minutes IS NOT NULL AS offset_known" : string.Empty;
         var topByServerSql = narrowFirst ? BuildNarrowFirstTopByServerSql(floorParam, limitParam, filterSql) : $@"top_by_server AS (
     SELECT
@@ -511,15 +543,7 @@ ORDER BY jh.category_name";
 
 
         return $@"
-WITH svr AS (
-    SELECT DISTINCT ON (server_id)
-        server_id,
-        utc_offset_minutes
-    FROM server_properties
-    WHERE utc_offset_minutes IS NOT NULL
-    ORDER BY server_id, collection_time DESC
-),
-active_servers AS (
+WITH active_servers AS (
     SELECT DISTINCT jh.server_id
     FROM job_history AS jh
     WHERE jh.collection_time >= {floorParam}
@@ -532,7 +556,7 @@ server_offsets AS (
         reg.display_name,
         COALESCE(svr.utc_offset_minutes, 0) AS offset_minutes{offsetKnownSql}
     FROM active_servers AS a
-    LEFT JOIN svr ON svr.server_id = a.server_id
+    LEFT JOIN LATERAL ({latestOffsetSql}) AS svr ON true
     LEFT JOIN servers AS reg ON reg.server_id = a.server_id
 ),
 {topByServerSql}

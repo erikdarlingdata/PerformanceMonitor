@@ -549,6 +549,11 @@ public partial class ViewerServerTab
         {
             return (false, await probe);
         }
+        catch (OperationCanceledException)
+        {
+            /* A tab that cancelled its own superseded load (#8549) cancelled the probe too: no banner for it and no warning. */
+            return (false, null);
+        }
         catch (Exception ex)
         {
             (warn ?? ViewerLogger.Warn)(
