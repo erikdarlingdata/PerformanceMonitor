@@ -38,7 +38,7 @@
     <PackageVersion Include="System.IO.FileSystem.AccessControl" Version="5.0.0" />
     <!-- #8650: pinned to 10.0.15 (GHSA-vmv3-wvjp-wqpj) because AWSSDK.PI pulls AWSSDK.Extensions.CborProtocol, whose newest release (4.0.100.26) still depends on the affected 9.0.5.
          Transitive pinning is off, so the direct reference in Darling.Service does the lifting. Drop both once a CborProtocol release depends on a fixed version. -->
-    <PackageVersion Include="System.Formats.Cbor" Version="10.0.15" />
+    <PackageVersion Include="System.Formats.Cbor" Version="11.0.0" />
     <!-- #5802: pinned to a patched version (10.0.13 or later) until a Microsoft.Data.SqlClient release depends on a patched Pkcs (7.1.1 pulls in 9.0.18); drop the direct references then.
          Transitive pinning is off, so this line alone lifts nothing: a transitive package gets a CentralTransitive lock entry
          that still resolves the lower version (a transitive ProtectedData lock entry showed it). The
