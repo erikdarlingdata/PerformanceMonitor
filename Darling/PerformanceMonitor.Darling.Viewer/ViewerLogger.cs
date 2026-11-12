@@ -135,11 +135,14 @@ public static class ViewerLogger
         }
     }
 
+    /// <summary>Stops the flush timer, writes what is queued and stops logging until the next <see cref="Initialize"/>. The timer is
+    /// stopped, not disposed (#8549): a disposed timer made every <see cref="Initialize"/> after the first <see cref="Shutdown"/> in the
+    /// process fail silently and log nothing, so a second test class could not read the log.</summary>
     public static void Shutdown()
     {
         s_flushTimer.Change(Timeout.Infinite, Timeout.Infinite);
         Flush();
-        s_flushTimer.Dispose();
+        s_initialized = false;
     }
 
     /// <summary>The resolved log directory (empty until <see cref="Initialize"/> succeeds).</summary>
