@@ -376,25 +376,21 @@ public sealed partial class ViewerDataService
         {{QueryStoreTopRankedColumns}}
             FROM
             (
-                /* #8549: the kept keys' rows are fetched by key, not found by reading the window again. A semi-join on KeyMatch could
-                   only hash, so this pass read every row of the window a second time: on a seeded store of 1.73 million intervals it
-                   was 5.7 s of a 10.3 s read, and on a cold field store it doubled the wide heap pages the first read loads. The plain
-                   equalities let each key probe the (server_id, database_name, query_id, first_execution_time) index; KeyMatch stays the
-                   exact NULL-safe test. A key with a NULL database_name or query_id cannot match a plain equality, so the second branch
-                   reads the window for those keys only, and only when such a key was kept (the uncorrelated EXISTS runs once, before
-                   the scan). Each row matches at most one key, so no row is read twice. */
+                /* #8549: the kept keys' rows are fetched by key, not found by reading the window again. A semi-join on KeyMatch alone
+                   could only hash, so this pass read every row of the window a second time: on a seeded store of 1.73 million intervals it
+                   was 5.7 s of a 10.3 s read, and on a cold field store it doubled the wide heap pages the first read loads. The two plain
+                   equalities in front of KeyMatch give the planner a second way to run the same semi-join: de-duplicate the kept keys (250
+                   narrow rows) and probe the (server_id, database_name, query_id, first_execution_time) index once per key. KeyMatch stays
+                   the exact NULL-safe test. It is a semi-join and not a join on purpose: with no such index (it is built in the background)
+                   the planner keeps hashing the narrow keys against one scan of the window, as it did before. An inner join on the same
+                   equalities let it hash the WIDE rows instead on a store without the index, which wrote the temp files the narrow ranking
+                   exists to avoid (QueryStoreGridNarrowRankLiveTests). A key with a NULL database_name or query_id cannot match a plain
+                   equality, so the second branch reads the window for those keys only, and only when such a key was kept (the uncorrelated
+                   EXISTS runs once, before the scan). A row matches at most one branch, so none is read twice. */
                 SELECT
                     deduped.*
-                FROM keys AS k
-                CROSS JOIN LATERAL
-                (
-                    SELECT
-                        *
-                    FROM deduped
-                    WHERE deduped.database_name = k.database_name
-                    AND   deduped.query_id = k.query_id
-                ) AS deduped
-                WHERE {{KeyMatch}}
+                FROM deduped
+                WHERE EXISTS (SELECT 1 FROM keys AS k WHERE k.database_name = deduped.database_name AND k.query_id = deduped.query_id AND {{KeyMatch}})
                 UNION ALL
                 SELECT
                     deduped.*
