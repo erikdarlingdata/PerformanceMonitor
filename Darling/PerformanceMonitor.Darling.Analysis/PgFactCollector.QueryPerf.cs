@@ -1477,6 +1477,38 @@ AND   delta_execution_count > 0";
     }
 
     public const string PlanAdvisorySql = @"
+/* #8570: the presence guard is answered once per distinct digest, not once per snapshot row. query_stats holds one
+   row per query per snapshot, so a window of 85,000 rows carries a few hundred distinct digests, and a correlated
+   EXISTS in the rank's WHERE probed query_plan_dim's primary key once per row (85,451 index probes, 375,000 buffer
+   hits and 0.3 to 1.4 s on a 52-million-row dimension) before the rank kept ten. The digests of rows with no plan
+   of their own are probed here, one primary-key lookup each. The LIMIT 1 in the lateral lookup is what keeps it
+   a lookup: without it the planner may turn the EXISTS into a hash of the whole dimension or a join that reads
+   it. The rank below joins the answer back by digest. The guard's meaning is unchanged: a row has a plan when
+   its own column or its dimension row carries one (the dimension's text column or, since #2069, its gzip bytes),
+   and a digest whose dimension row is gone has none. The rank still picks each plan's costliest row among the
+   rows that have a plan. */
+WITH probed AS
+(
+    SELECT w.digest
+    FROM
+    (
+        SELECT DISTINCT f.query_plan_digest AS digest
+        FROM query_stats AS f
+        WHERE f.server_id = $1
+        AND   f.collection_time >= $2
+        AND   f.collection_time <= $3
+        AND   f.query_plan_xml IS NULL
+        AND   f.query_plan_digest IS NOT NULL
+    ) AS w,
+    LATERAL
+    (
+        SELECT 1
+        FROM query_plan_dim AS p
+        WHERE p.digest = w.digest
+        AND   (p.query_plan_xml IS NOT NULL OR p.query_plan_gz IS NOT NULL)
+        LIMIT 1
+    ) AS has_plan
+)
 SELECT COALESCE(r.query_plan_xml, d.query_plan_xml) AS query_plan_xml, d.query_plan_gz
 FROM
 (
@@ -1497,21 +1529,17 @@ FROM
                every statement in its batch, so database_name and query_hash stay in the key. */
             ROW_NUMBER() OVER (PARTITION BY f.database_name, f.query_hash, COALESCE(f.query_plan_hash, f.plan_handle) ORDER BY f.delta_worker_time DESC) AS plan_rank
         FROM query_stats AS f
-        WHERE f.server_id = $1
-        AND   f.collection_time >= $2
-        AND   f.collection_time <= $3
         /* #8570: the window ranks every in-window row, so it ranks the table's own thin columns and carries
            the plan's digest, not the plan. This read went through v_query_stats, which looked up query_plan_dim and
            put each row's plan content into the rank's sort: a plan under the 2 KB TOAST limit sits inline in the
            dimension row, so every snapshot row of every plan was sorted with its whole plan (on 67,200 rows of
            1.4 KB plans the sort wrote 26 MB and 21 MB to disk, against 4.5 MB). The ten winners' content is read
-           by their digest after the limit. The presence guard is the view's, kept as a test on the dimension
-           row: a row has a plan when its own column or its dimension row carries one (the dimension's text
-           column or, since #2069, its gzip bytes), and a digest whose dimension row is gone has none. */
-        AND   (f.query_plan_xml IS NOT NULL
-               OR EXISTS (SELECT 1 FROM query_plan_dim AS p
-                          WHERE p.digest = f.query_plan_digest
-                          AND   (p.query_plan_xml IS NOT NULL OR p.query_plan_gz IS NOT NULL)))
+           by their digest after the limit. */
+        LEFT JOIN probed AS pr ON pr.digest = f.query_plan_digest
+        WHERE f.server_id = $1
+        AND   f.collection_time >= $2
+        AND   f.collection_time <= $3
+        AND   (f.query_plan_xml IS NOT NULL OR pr.digest IS NOT NULL)
     ) AS ranked
     WHERE plan_rank = 1
     ORDER BY delta_worker_time DESC
