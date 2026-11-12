@@ -372,7 +372,7 @@ public sealed class FleetSweepEngineTests
             previousRun: PreviousRun(alertsEnabled: false),
             instruments: SteadyInstruments(passes: 500));
         Assert.True(muted.Run.InstrumentsAlive);
-        Assert.Contains("expected under the alert master switch", muted.Run.InstrumentLivenessJson, StringComparison.Ordinal);
+        Assert.Contains("Expected under the alert master switch", muted.Run.InstrumentLivenessJson, StringComparison.Ordinal);
 
         /* A restart since the previous sweep resets the in-memory counter: baseline declared reset,
            comparison declared unjudgeable, liveness not failed on it. */

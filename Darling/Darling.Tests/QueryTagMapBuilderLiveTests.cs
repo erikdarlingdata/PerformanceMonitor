@@ -145,7 +145,103 @@ public sealed class QueryTagMapBuilderLiveTests
             Assert.Equal("2", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings"));
             Assert.Equal("3", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
             Assert.Equal("first", await ScalarAsync(env, "SELECT text_sample FROM collect.query_tag_sightings WHERE key = '0xAA'"));
-            Assert.Equal("True", await ScalarAsync(env, "SELECT last_seen > first_seen FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            /* Within the hour the later batch adds to the count but leaves last_seen where it was (#8716). */
+            Assert.Equal("True", await ScalarAsync(env, "SELECT last_seen = first_seen FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+        });
+    }
+
+    [Fact]
+    public async Task AReSightingWithinTheHour_AddsToTheCount_AndLeavesLastSeenAlone()
+    {
+        await WithStoreAsync(async env =>
+        {
+            await SightAsync(env, HashSightings("0xAA", "App"));
+            await ExecAsync(env, "UPDATE collect.query_tag_sightings SET last_seen = now() - interval '10 minutes'");
+            var stored = await ScalarAsync(env, "SELECT last_seen::text FROM collect.query_tag_sightings WHERE key = '0xAA'");
+
+            await SightAsync(env, HashSightings("0xAA", "App"), HashSightings("0xAA", "App"));
+
+            Assert.Equal("3", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            Assert.Equal(stored, await ScalarAsync(env, "SELECT last_seen::text FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+        });
+    }
+
+    [Fact]
+    public async Task AReSightingOfARowOverAnHourOld_MovesLastSeenToNow()
+    {
+        await WithStoreAsync(async env =>
+        {
+            await SightAsync(env, HashSightings("0xAA", "App"));
+            await ExecAsync(env, "UPDATE collect.query_tag_sightings SET last_seen = now() - interval '2 hours'");
+
+            await SightAsync(env, HashSightings("0xAA", "App"));
+
+            Assert.Equal("2", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            Assert.Equal("True", await ScalarAsync(env, "SELECT last_seen > now() - interval '1 minute' FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+        });
+    }
+
+    [Fact]
+    public async Task AReSightingThatFillsAMissingTextSample_MovesLastSeen_SoTheNextExtendResolvesIt()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int orders = await NewTagAsync(env, "Orders");
+            await NewRuleAsync(env, orders, "text", "*orders*");
+            var builder = new QueryTagMapBuilder(env.Source);
+            await SightAsync(env, HashSightings("0xAA", "App", text: ""));
+            Assert.True(await PassAsync(env, builder));
+            Assert.Empty(await MapAsync(env));
+            await ExecAsync(env, "UPDATE collect.query_tag_sightings SET last_seen = now() - interval '10 minutes'");
+
+            await SightAsync(env, HashSightings("0xAA", "App", text: "SELECT * FROM Orders"));
+            Assert.True(await PassAsync(env, builder));
+
+            Assert.Equal(new[] { $"hash|0xAA|{orders}|rule" }, await MapAsync(env));
+        });
+    }
+
+    [Fact]
+    public async Task ANewCombinationRowForAnExistingKey_IsAnInsert_AndTheNextExtendPassResolvesIt()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int reports = await NewTagAsync(env, "Reports");
+            await NewRuleAsync(env, reports, "application", "ReportServer*");
+            var builder = new QueryTagMapBuilder(env.Source);
+            await SightAsync(env, HashSightings("0xAA", "Excel"));
+            Assert.True(await PassAsync(env, builder));
+            Assert.True(await PassAsync(env, builder));
+            Assert.Empty(await MapAsync(env));
+
+            /* The key is already stored and its row is recent. A new application is a new row, so it takes now(). */
+            await SightAsync(env, HashSightings("0xAA", "ReportServer 2"));
+            Assert.True(await PassAsync(env, builder));
+
+            Assert.Equal("2", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            Assert.Equal(new[] { $"hash|0xAA|{reports}|rule" }, await MapAsync(env));
+        });
+    }
+
+    [Fact]
+    public async Task AReSightingWithinTheHour_LeavesTheMapRowUnchangedAndCorrect()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int reports = await NewTagAsync(env, "Reports");
+            await NewRuleAsync(env, reports, "application", "ReportServer*");
+            var builder = new QueryTagMapBuilder(env.Source);
+            await SightAsync(env, HashSightings("0xAA", "ReportServer 2"));
+            Assert.True(await PassAsync(env, builder));
+            Assert.True(await PassAsync(env, builder));
+            var built = await ScalarAsync(env, "SELECT built_at::text FROM config.query_tag_map WHERE key = '0xAA'");
+
+            await SightAsync(env, HashSightings("0xAA", "ReportServer 2"));
+            Assert.True(await PassAsync(env, builder));
+
+            Assert.Equal(new[] { $"hash|0xAA|{reports}|rule" }, await MapAsync(env));
+            Assert.Equal(built, await ScalarAsync(env, "SELECT built_at::text FROM config.query_tag_map WHERE key = '0xAA'"));
+            Assert.Equal("2", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
         });
     }
 

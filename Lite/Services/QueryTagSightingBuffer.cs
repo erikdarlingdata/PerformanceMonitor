@@ -173,6 +173,8 @@ internal sealed class QueryTagSightingBuffer
         {
             /* One order for every flush (the seven-part identity), as Darling sorts its rows; Lite's single writer under the
                write lock cannot deadlock, the sort keeps the two stores alike. */
+            /* A re-sighting moves last_seen at most once an hour, as Darling's writer does (#8716): the count still adds up on
+               every conflict. */
             /* last_seen is stamped HERE, at the write, from the C# UTC clock: the map pass captures its cursor clock from the
                same clock (DateTime.UtcNow, plain TIMESTAMP), so a row kept by an earlier timed-out flush is never behind a cursor. */
             var flushedAt = DateTime.UtcNow;
@@ -194,7 +196,8 @@ FROM (SELECT UNNEST($1) AS sv, UNNEST($2) AS k, UNNEST($3) AS c_key, UNNEST($4) 
              UNNEST($7) AS l, UNNEST($8) AS h, UNNEST($9) AS t, UNNEST($10) AS f, UNNEST($11) AS ls, UNNEST($12) AS n)
 ON CONFLICT (server_id, key_kind, key, database_name, application_name, login_name, host_name) DO UPDATE SET
     seen_count = query_tag_sightings.seen_count + excluded.seen_count,
-    last_seen = GREATEST(query_tag_sightings.last_seen, excluded.last_seen)";
+    last_seen = CASE WHEN query_tag_sightings.last_seen < excluded.last_seen - INTERVAL 1 HOUR
+        THEN excluded.last_seen ELSE query_tag_sightings.last_seen END";
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => e.Key.ServerId).ToList() });
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => KindText(e.Key.Kind)).ToList() });
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => e.Key.Key).ToList() });

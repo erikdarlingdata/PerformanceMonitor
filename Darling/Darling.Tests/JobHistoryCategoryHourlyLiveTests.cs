@@ -35,11 +35,10 @@ public sealed class JobHistoryCategoryHourlyLiveTests
     // ── The rung ────────────────────────────────────────────────────────────────────────────
 
     [Fact]
-    public void TheRungIsNewestOnADenseLadder_AndTheProbeMapsItToTheNewestVersion()
+    public void TheRungIsV265OnADenseLadder_AndTheProbeMapsItToV265WhenNoNewerRungIsThere()
     {
-        var rung = PgMigrations.Scripts[^1];
+        var rung = PgMigrations.Scripts.Single(r => r.Version == 265);
         Assert.Equal("job-history-category-hourly", rung.Name);
-        Assert.Equal(StorageVersion.SchemaVersion, rung.Version);
         Assert.Contains("collect.job_history_category_hourly", rung.Sql, StringComparison.Ordinal);
         Assert.Contains("collect.job_history_category_coverage", rung.Sql, StringComparison.Ordinal);
         Assert.Contains("to_regclass('collect.job_history_category_hourly') IS NOT NULL", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
@@ -49,11 +48,18 @@ public sealed class JobHistoryCategoryHourlyLiveTests
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal("hasJobHistoryCategoryHourly", parameters[^1].Name);
+        var ordinal = Array.FindIndex(parameters, p => p.Name == "hasJobHistoryCategoryHourly");
+        Assert.True(ordinal >= 0);
+        /* Every sentinel but the newer rungs' answers V265; without the tables the store maps one rung lower. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
+        for (var i = ordinal + 1; i < parameters.Length; i++)
+        {
+            all[i] = false;
+        }
+
         Assert.Equal(rung.Version, (int)method.Invoke(null, all)!);
         var without = (object[])all.Clone();
-        without[^1] = false;
+        without[ordinal] = false;
         Assert.Equal(rung.Version - 1, (int)method.Invoke(null, without)!);
     }
 
@@ -70,8 +76,8 @@ public sealed class JobHistoryCategoryHourlyLiveTests
         await PgMigrations.MigrateAsync(connection, null, ct);
 
         await ExecuteAsync(connection, "DROP TABLE IF EXISTS collect.job_history_category_hourly; DROP TABLE IF EXISTS collect.job_history_category_coverage", ct);
-        await ExecuteAsync(connection, PgMigrations.Scripts[^1].Sql, ct);
-        await ExecuteAsync(connection, PgMigrations.Scripts[^1].Sql, ct);
+        await ExecuteAsync(connection, PgMigrations.Scripts.Single(r => r.Version == 265).Sql, ct);
+        await ExecuteAsync(connection, PgMigrations.Scripts.Single(r => r.Version == 265).Sql, ct);
         Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_history_category_hourly", ct));
         Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_history_category_coverage", ct));
         Assert.Equal(1L, await ScalarAsync<long>(connection, "SELECT count(*) FROM pg_constraint WHERE conname = 'pk_job_history_category_hourly'", ct));

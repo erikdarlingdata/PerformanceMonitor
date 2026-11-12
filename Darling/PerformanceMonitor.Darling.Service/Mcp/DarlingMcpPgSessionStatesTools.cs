@@ -550,7 +550,7 @@ public sealed class DarlingMcpPgSessionStatesTools
 
         return await DarlingServerOfflineNote.UnavailableAsync(
             postgres, serverId, displayName,
-            $"No captures at all for {displayName} in the last {CountText.Plural(hoursBack, "hour")}, so the window says "
+            $"No captures at all for {displayName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}, so the window says "
             + "nothing either way - this is NOT an all-clear. Check that collection is running and enabled "
             + "for this server with get_collection_health, or widen hours_back.",
             hints, cancellationToken);

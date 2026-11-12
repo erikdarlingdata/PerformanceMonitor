@@ -38,7 +38,7 @@ public sealed class PlanForceActionDetailScrubLiveTests
     /// (non-safe-shape) <c>state_unavailable</c> block with — the WHOLE block is replaced, so the
     /// rewritten text has no parenthetical at all, unlike <see cref="SafeDetail"/>'s.</summary>
     private const string RedactedLegacyDetail =
-        "state_unavailable: the forcing and automatic-plan-correction state read failed \u2014 an unattended force cannot proceed on an unknown engine state";
+        "state_unavailable: the forcing and automatic-plan-correction state read failed. An unattended force cannot proceed on an unknown engine state";
 
     /// <summary>
     /// Pins 1-3 together against one scratch store: a legacy row's raw credential/host text is rewritten
@@ -133,7 +133,7 @@ public sealed class PlanForceActionDetailScrubLiveTests
            badId, standing in for any real per-row write failure without touching the product's logic. */
         await ExecAsync(connection,
             $"ALTER TABLE collect.plan_force_actions ADD CONSTRAINT chk_4346_forced_failure " +
-            $"CHECK (action_id <> {badId} OR detail NOT LIKE 'state_unavailable: the forcing and automatic-plan-correction state read failed \u2014%')",
+            $"CHECK (action_id <> {badId} OR detail NOT LIKE 'state_unavailable: the forcing and automatic-plan-correction state read failed. An unattended%')",
             ct);
 
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);

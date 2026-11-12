@@ -524,7 +524,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice is { IsUnavailable: false, WindowTruncated: true }, notice.EffectiveStart,
-                    factual: $"No indexes were recorded for {displayName} in the last {CountText.Plural(hoursBack, "hour")} even though "
+                    factual: $"No indexes were recorded for {displayName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))} even though "
                         + "collection ran - at least two snapshots exist. Every index on every collected database is "
                         + "under the collector's 64 KB size floor, which is the state of a schema whose indexes are "
                         + "all trivially small",
@@ -536,7 +536,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         {
             return await DarlingServerOfflineNote.UnavailableAsync(
                 postgres, serverId, displayName,
-                $"Only ONE index snapshot exists for {displayName} in the last {CountText.Plural(hoursBack, "hour")}, so this "
+                $"Only ONE index snapshot exists for {displayName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}, so this "
                 + "is NOT a report about index usage. A windowed scan count is a DIFFERENCE and needs two "
                 + "snapshots before it produces anything. This collector runs DAILY, so on a newly added "
                 + "server it clears itself within a day or two; widen hours_back in the meantime.",
@@ -546,7 +546,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         return await DarlingServerOfflineNote.UnavailableAsync(
             postgres, serverId, displayName,
             probe.RowsEver > 0
-                ? $"No index snapshots were collected for {displayName} in the last {CountText.Plural(hoursBack, "hour")}, so "
+                ? $"No index snapshots were collected for {displayName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}, so "
                 + "the window says nothing either way. Collection HAS run for this server outside the "
                 + "window - this collector runs DAILY, so a window shorter than about 48 hours can "
                 + "legitimately contain fewer than two samples. Widen hours_back, or use "

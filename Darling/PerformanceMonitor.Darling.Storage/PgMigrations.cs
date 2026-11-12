@@ -3472,6 +3472,10 @@ $rung$;";
         /* V265 (#8549): the hourly summary of job_history's categories and its one-row coverage table. Two new tables, created empty: no existing row
            moves and nothing is backfilled here, so the upgrade stays fast and the service's hourly pass fills them. */
         new Migration(265, "job-history-category-hourly", JobHistoryCategoryHourly.CreateSql),
+        /* V266 (#8716): fillfactor 80 on the query-tag sightings table, so a re-sighting's new row version has room on its own page and the
+           update can be HOT. It applies to pages written from now on: an existing page keeps its fill until the table is rewritten, and this rung
+           rewrites nothing. A metadata-only change, so the upgrade stays fast. Re-running it is a no-op. */
+        new Migration(266, "query-tag-sightings-fillfactor", "ALTER TABLE collect.query_tag_sightings SET (fillfactor = 80);"),
     };
 
     /* V256 (#7643): schema tracking. Versioned table and view definitions, kept by the schema_objects collector (Darling only).

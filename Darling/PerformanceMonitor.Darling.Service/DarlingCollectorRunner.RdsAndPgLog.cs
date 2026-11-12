@@ -146,13 +146,13 @@ public sealed partial class DarlingCollectorRunner
     /// the self-hosted sentence names <c>log_directory</c> and a 4 MB read, neither of which exists there.</summary>
     internal const string RdsLogResumeLostNote =
         "The RDS log file this collector had read up to is no longer listed, so this read fell back to the newest "
-        + "file's last 10,000 lines and whatever the old file received after the previous read was not collected (#4708)";
+        + "file's last 10,000 lines and whatever the old file received after the previous read was not collected";
 
     /// <summary>The sentence beside <see cref="PgServerLogTail.FilesSkippedByRotationMeasurement"/> on the RDS route (#4708).</summary>
     internal const string RdsLogFilesSkippedNote =
         "More than one RDS log rotation happened between two reads: this read finished the file the previous read stopped "
         + "in and read the newest one, and log_files_skipped_by_rotation counts the files between them that no read "
-        + "opened (#4708)";
+        + "opened";
 
     /// <summary>
     /// <paramref name="result"/> with the resume notes of the stderr log tail merged into its host note for each

@@ -159,7 +159,7 @@ public sealed class McpMissMessageParityPinTests
            window) no other read has. */
         "so this is NOT a report of a quiet server: there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.",
         "{CountText.Plural(hours_back, \"hour\")}, so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
-        "{CountText.Plural(hours_back, \"hour\")}, but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid",
+        "{McpHelpers.InTheLast(CountText.Plural(hours_back, \"hour\"))}, but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid",
         " Delta-based collection also needs a SECOND cycle before the first non-zero row exists.",
 
         /* get_lock_wait_trend (#2484). The all-clear sentence is get_wait_types' own, reused deliberately:

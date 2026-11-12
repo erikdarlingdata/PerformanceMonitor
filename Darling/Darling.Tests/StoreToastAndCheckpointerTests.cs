@@ -272,7 +272,7 @@ public sealed class StoreToastAndCheckpointerTests
         /* Pre-V137 row: no file size recorded. */
         var predates = DarlingStoreMetricsReader.ToastFacts.For(Row(StoreSelfMetrics.DimensionObjectKind, PayloadDimensions.QueryPlanDimTable, toast: null, live: null))!;
         Assert.Null(predates.UtilisationPercent);
-        Assert.Contains("predates V137", predates.Note, StringComparison.Ordinal);
+        Assert.Contains("did not record it", predates.Note, StringComparison.Ordinal);
 
         /* The shipped store: file real, live NULL — the DORMANT arm, in words, naming the one option. */
         var unmeasured = DarlingStoreMetricsReader.ToastFacts.For(Row(StoreSelfMetrics.DimensionObjectKind, PayloadDimensions.QueryPlanDimTable, toast: 154L << 30, live: null))!;
@@ -601,7 +601,7 @@ public sealed class StoreToastAndCheckpointerTests
 
         /* Pre-rung pair: null timed on both sides -> unmeasured average arm, no pressure from the sum. */
         var preRung = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 85_000, 5), new(t0, 1_000, 1_000, 5)));
-        Assert.Contains("an unmeasured number of checkpoints (a row before V140 has no timed count)", preRung, StringComparison.Ordinal);
+        Assert.Contains("an unmeasured number of checkpoints (an older row has no timed count)", preRung, StringComparison.Ordinal);
         Assert.DoesNotContain("average of", preRung, StringComparison.Ordinal);
         Assert.DoesNotContain("CHECKPOINTER PRESSURE", preRung, StringComparison.Ordinal);
         Assert.False(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 85_000, 5), new(t0, 1_000, 1_000, 5)).IsPressure);
@@ -674,7 +674,7 @@ public sealed class StoreToastAndCheckpointerTests
                25.2s/14.0s checkpoint sync-phase incident - are D4 "story of why" removals too: each one's RULE
                (the VACUUM/free-space behavior; the sync_ms/requested self-alert gate) stays in the description,
                only the specific past incident's numbers are gone. See the #3898 PR body's D4 section. */
-            "TOAST UTILISATION (V137)",
+            "TOAST UTILISATION:",
             "they live in its TOAST file, and pg_total_relation_size says how big that file is and nothing about how FULL it is",
             "ordinary VACUUM returns to the table and never to the operating system",
             "toast_utilisation_pct is toast_live_bytes / toast_bytes (one decimal)",
@@ -684,7 +684,7 @@ public sealed class StoreToastAndCheckpointerTests
             "ACCESS EXCLUSIVE lock",
             "This tool never reclaims anything by itself.",
             "Hypertable, aggregate, table and catch-all objects carry the four TOAST fields as null",
-            "CHECKPOINTER (V137)",
+            "CHECKPOINTER:",
             "interval_seconds (MEASURED between the two sweeps that bound it, not the assumed cadence)",
             "Reset (a counter went backwards",
             "WAL sizing and refresh slicing",

@@ -373,7 +373,7 @@ public class FleetSweepRollupTests
         /* (1) the header, parsed from the shipped short message shape. */
         var header = Regex.Match(
             fired.ShortMessage ?? string.Empty,
-            @"Fleet sweep rollup: (\d+) sweeps - (\d+) band transitions, (\d+) watch items opened, "
+            @"Fleet sweep rollup: (\d+) sweeps, (\d+) band transitions, (\d+) watch items opened, "
             + @"(\d+) closed, (\d+) liveness incidents, (\d+) muted sweeps");
         Assert.True(header.Success, fired.ShortMessage);
         int H(int group) => int.Parse(header.Groups[group].Value, CultureInfo.InvariantCulture);
@@ -657,5 +657,32 @@ public class FleetSweepRollupTests
 
         /* A report is not an incident: no Incidents, so no per-event splitting and no delivery filter. */
         Assert.Null(context.Incidents);
+    }
+
+    /// <summary>
+    /// #8572: the rollup's text is plain. A day with a transition, an opened watch item, a liveness failure
+    /// and a muted sweep renders a short message and a detail with no U+2014 and no spaced hyphen standing in
+    /// for one.
+    /// </summary>
+    [Fact]
+    public async Task TheRollupText_CarriesNoDashAndNoSpacedHyphenStandIn()
+    {
+        var runs = new[]
+        {
+            Run(1, Day.AddHours(-4), report: Report(
+                transitions: new[] { Transition("pm-server-1", "Healthy", "Critical", "deadlocks in span") },
+                opened: new[] { WatchEvent(2, "blocking") },
+                bands: new Dictionary<string, int> { ["Critical"] = 1, ["Healthy"] = 2 })),
+            Run(2, Day.AddHours(-3), instrumentsAlive: false),
+            Run(3, Day.AddHours(-2), alertsEnabled: false),
+        };
+
+        var fired = await FireAsync(runs, Array.Empty<FleetSweepLedgerSpanEntry>());
+
+        foreach (var text in new[] { fired.ShortMessage, fired.DetailText ?? string.Empty })
+        {
+            Assert.DoesNotContain("—", text, StringComparison.Ordinal);
+            Assert.DoesNotContain(" - ", text, StringComparison.Ordinal);
+        }
     }
 }

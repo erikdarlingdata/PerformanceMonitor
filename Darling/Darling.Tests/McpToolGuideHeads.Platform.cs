@@ -96,9 +96,9 @@ public sealed class McpToolGuideHeadsPlatformTests
     {
         var served = McpToolGuideTests.Served("get_store_metrics");
         Assert.DoesNotContain("TOAST UTILISATION", served.Served, StringComparison.Ordinal);
-        Assert.DoesNotContain("CHECKPOINTER (V137)", served.Served, StringComparison.Ordinal);
-        Assert.Contains("TOAST UTILISATION (V137)", served.Tail!, StringComparison.Ordinal);
-        Assert.Contains("CHECKPOINTER (V137)", served.Tail!, StringComparison.Ordinal);
+        Assert.DoesNotContain("CHECKPOINTER:", served.Served, StringComparison.Ordinal);
+        Assert.Contains("TOAST UTILISATION:", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("CHECKPOINTER:", served.Tail!, StringComparison.Ordinal);
     }
 
     /// <summary>

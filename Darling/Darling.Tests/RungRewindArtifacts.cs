@@ -791,6 +791,8 @@ DROP TABLE IF EXISTS collect.schema_capture_passes;"),
         new(264, "hasOversizedPlanBacklogDropCounts", "DROP TABLE IF EXISTS collect.oversized_plan_backlog_drops;"),
         // V265 (#8549): the hourly summary of job_history's categories and its coverage table. Two new tables; the rewind drops both and a re-run of V265 makes them again.
         new(265, "hasJobHistoryCategoryHourly", "DROP TABLE IF EXISTS collect.job_history_category_hourly; DROP TABLE IF EXISTS collect.job_history_category_coverage;"),
+        // V266 (#8716): fillfactor 80 on collect.query_tag_sightings. The rewind resets it and a re-run of V266 sets it again.
+        new(266, "hasQueryTagSightingsFillfactor", "ALTER TABLE collect.query_tag_sightings RESET (fillfactor);"),
     ];
 
     /// <summary>
