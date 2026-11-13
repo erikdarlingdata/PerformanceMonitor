@@ -787,8 +787,13 @@
                             CornerRadius="3,3,0,0"
                             Padding="{TemplateBinding Padding}"
                             Margin="{TemplateBinding Margin}">
+                        <!-- #8766: RecognizesAccessKey, because a CUSTOM template does not inherit the stock TabItem access-key handling
+                             (same cause as #3835 for the Button templates). Without it the Investigations window tab headers
+                             showed their underscores literally. Every string TabItem header in the Viewer is a fixed caption; the data-named
+                             headers (server tabs, plan tabs) are TextBlocks inside a panel and are not affected. -->
                         <ContentPresenter x:Name="contentPresenter"
                                           ContentSource="Header"
+                                          RecognizesAccessKey="True"
                                           HorizontalAlignment="Center"
                                           VerticalAlignment="Center">
                             <!-- #3577: a string header becomes a TextBlock, and this dictionary's app-level
@@ -847,6 +852,7 @@
                             BorderThickness="0"
                             Padding="{TemplateBinding Padding}">
                         <ContentPresenter ContentSource="Header"
+                                          RecognizesAccessKey="True"
                                           HorizontalAlignment="Center"
                                           VerticalAlignment="Center"/>
                     </Border>
