@@ -1395,7 +1395,8 @@ public sealed class DarlingWebHostService : BackgroundService
         NpgsqlDataSource? composeReadPostgres = null,
         DarlingWebTokenSet? webTokens = null,
         Uri? publicOrigin = null,
-        DarlingWebGroupTokens? managedGroups = null)
+        DarlingWebGroupTokens? managedGroups = null,
+        TokenSignInMode tokenSignIn = TokenSignInMode.On)
     {
         /* A caller that does not say whether the token is under the length floor gets the same answer the start path
            computes: a short shared token serves reads only. Without this a forgotten argument meant writes. */
@@ -1690,7 +1691,7 @@ public sealed class DarlingWebHostService : BackgroundService
                            abort still propagates — that is not a failure to report. */
                         try
                         {
-                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpTokens, webTokens, managedGroups, frontDoor: frontDoorProxy is not null);
+                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpTokens, webTokens, managedGroups, frontDoor: frontDoorProxy is not null, tokenSignIn: tokenSignIn);
                         }
                         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
                         {
@@ -1770,7 +1771,7 @@ public sealed class DarlingWebHostService : BackgroundService
                             return;
                         }
 
-                        await WriteLoginPageAsync(context, oidcClient is not null);
+                        await WriteLoginPageAsync(context, oidcClient is not null, tokenField: oidcClient is null || DarlingTokenSignIn.IsAllowed(tokenSignIn, remote, connectionIp));
                         return;
                 }
             });
@@ -2239,14 +2240,15 @@ public sealed class DarlingWebHostService : BackgroundService
         Func<DateTime> clock,
         IReadOnlyList<string>? mcpTokens,
         DarlingWebTokenSet? webTokens, DarlingWebGroupTokens? managedGroups,
-        bool frontDoor = false)
+        bool frontDoor = false,
+        TokenSignInMode tokenSignIn = TokenSignInMode.On)
     {
         var path = context.Request.Path.Value ?? "/";
         var remote = context.Connection.RemoteIpAddress;
 
         if (string.Equals(path, LoginPath, StringComparison.OrdinalIgnoreCase))
         {
-            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null, publicHostName, clock, mcpTokens, webTokens, managedGroups, frontDoor: frontDoor);
+            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null, publicHostName, clock, mcpTokens, webTokens, managedGroups, frontDoor: frontDoor, tokenSignIn: tokenSignIn);
             return;
         }
 
@@ -2520,10 +2522,13 @@ public sealed class DarlingWebHostService : BackgroundService
         Func<DateTime> clock,
         IReadOnlyList<string>? mcpTokens,
         DarlingWebTokenSet? webTokens = null, DarlingWebGroupTokens? managedGroups = null,
-        bool frontDoor = false)
+        bool frontDoor = false,
+        TokenSignInMode tokenSignIn = TokenSignInMode.On)
     {
         var remote = context.Connection.RemoteIpAddress;
         var now = clock();
+        var connectionIp = context.Items.TryGetValue(ConnectionIpItemKey, out var stashedIp) ? stashedIp as IPAddress : null;
+        var tokenSignInAllowed = DarlingTokenSignIn.IsAllowed(tokenSignIn, remote, connectionIp);
 
         if (!HttpMethods.IsPost(context.Request.Method))
         {
@@ -2535,7 +2540,21 @@ public sealed class DarlingWebHostService : BackgroundService
                     now);
             }
 
-            await WriteLoginPageAsync(context, oidcEnabled);
+            /* Without an OIDC client there is no SSO-only page to fall back to; the POST refusal below still applies. */
+            await WriteLoginPageAsync(context, oidcEnabled, tokenField: !oidcEnabled || tokenSignInAllowed);
+            return;
+        }
+
+        /* #8735: web.network.oidc.tokenSignIn refuses token sign-in from this connection before anything else is read or
+           counted, so the answer cannot tell a valid token from a wrong one. The refusal is not a throttle miss, and it
+           neither sets nor deletes a cookie, so an OIDC session the caller holds is untouched. */
+        if (!tokenSignInAllowed)
+        {
+            refusals.Report(
+                _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status403Forbidden, remote,
+                "the web.network.oidc.tokenSignIn mode refuses token sign-in from this address; set web.network.oidc.tokenSignIn to change it",
+                now);
+            await WriteTokenSignInDisabledAsync(context);
             return;
         }
 
@@ -2644,7 +2663,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 now);
             /* The form is served again as the answer to this POST, so its address is /auth/login: the page names
                the target it was covering in the form itself, or the retry would post the form's own address. */
-            await WriteLoginPageAsync(context, oidcEnabled, returnPath);
+            await WriteLoginPageAsync(context, oidcEnabled, returnPath, tokenField: true);
             return;
         }
 
