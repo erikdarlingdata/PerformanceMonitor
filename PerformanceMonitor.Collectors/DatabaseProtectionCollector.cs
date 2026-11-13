@@ -89,7 +89,9 @@ public sealed class DatabaseProtectionCollector : CollectorDefinitionBase<Databa
 
     /* Result shape, both queries: name, state_desc, recovery_model_desc, create_date (UTC), replica_role, checkdb (raw datetime, local
        to the server), last_full (UTC), last_log (UTC), backups_readable (bit). */
-    private static readonly string OnPremQueryText = $@"
+    /* The server's Excluded Databases list is applied to the sys.databases read (#8775). The backups CTE joins to d.name, so a name left out of the
+       catalog read is left out of the batch whole. The names are bound as parameters, so the text is built per call. */
+    private static string OnPremQuery(string exclusionClause) => $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 5000;
 SET NOCOUNT ON;
@@ -160,6 +162,7 @@ LEFT JOIN sys.dm_hadr_database_replica_states AS rs
 WHERE d.database_id <> 2
 AND   d.source_database_id IS NULL
 " + DatabaseScopeFilter.VendorControlledDatabaseScreen + @"
+" + exclusionClause + @"
 ORDER BY
     d.name
 OPTION(RECOMPILE);";
@@ -231,7 +234,15 @@ OPTION(RECOMPILE);";
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return new CollectorQuery(context.Target.IsAzureSqlDb ? AzureSqlDbQueryText : OnPremQueryText);
+        /* Azure SQL Database reads one database, the target itself, so there is nothing to leave out: an excluded name there is a database the
+           user chose to connect to (#8775). */
+        if (context.Target.IsAzureSqlDb)
+        {
+            return new CollectorQuery(AzureSqlDbQueryText);
+        }
+
+        var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(context.ExcludedDatabases, "d.name");
+        return new CollectorQuery(OnPremQuery(exclusionClause), exclusionParameters);
     }
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
