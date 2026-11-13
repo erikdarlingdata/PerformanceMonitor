@@ -120,14 +120,16 @@ WHERE server_id = $1
   AND coalesce(sample_time_utc, collection_time) > $2 AND coalesce(sample_time_utc, collection_time) <= $3
   AND sqlserver_cpu_utilization IS NOT NULL";
 
-    /* $4 is the query-hash list (text[]) or NULL for the top-N read; $5 the databases (text[]) or NULL; $6 the row cap. */
+    /* $4 is the query-hash list (text[]) or NULL for the top-N read; $5 the databases (text[]) or NULL; $6 the row cap. One row per (database, query
+       hash) (#8772): a hash cached in several databases (code shared across tenant databases) runs at a different speed in each, so the databases are
+       never summed into one average and none is named by max(). A NULL database_name is its own group. */
     private const string QuerySql = @"
-SELECT query_hash::text, max(database_name), sum(delta_execution_count)::bigint, sum(delta_elapsed_time)::double precision
+SELECT query_hash::text, database_name, sum(delta_execution_count)::bigint, sum(delta_elapsed_time)::double precision
 FROM v_query_stats
 WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3
   AND ($4::text[] IS NULL OR query_hash::text = ANY($4))
   AND ($5::text[] IS NULL OR database_name = ANY($5))
-GROUP BY query_hash::text
+GROUP BY query_hash::text, database_name
 HAVING sum(delta_execution_count) > 0
 ORDER BY sum(delta_elapsed_time) DESC
 LIMIT $6";
@@ -198,13 +200,15 @@ HAVING sum(execution_count) > 0";
     private static readonly string QueryStorePlansByEndSql =
         QueryStorePlansSqlTemplate.Replace("{placement}", IntervalEndSql + " > $4 AND " + IntervalEndSql + " <= $5", StringComparison.Ordinal);
 
-    /* #6555: one query hash's plans in a window (the plan cache's query_plan_hash), the per-plan counterpart of QuerySql. $5 is the same database
-       list QuerySql takes (NULL for none), so the plans describe the population the measured averages do. */
+    /* #6555: one query hash's plans in a window (the plan cache's query_plan_hash), the per-plan counterpart of QuerySql. $5 is the database of the
+       (database, hash) pair being measured (NULL matches a NULL database_name, #8772), so the plans describe the population the averages do. $6 is the
+       same database list QuerySql takes (NULL for none). */
     private const string QueryPlansSql = @"
 SELECT coalesce(query_plan_hash, ''), sum(delta_execution_count)::bigint, coalesce(sum(delta_elapsed_time), 0)::double precision
 FROM v_query_stats
 WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 AND query_hash::text = $4
-  AND ($5::text[] IS NULL OR database_name = ANY($5))
+  AND database_name IS NOT DISTINCT FROM $5::text
+  AND ($6::text[] IS NULL OR database_name = ANY($6))
 GROUP BY coalesce(query_plan_hash, '')
 HAVING sum(delta_execution_count) > 0";
 
@@ -446,7 +450,17 @@ HAVING sum(delta_execution_count) > 0";
         return new ChangeWatchEvaluation(hadData, measures, DetailText(watch, measures), ResultJson(watch, measures, hadData, notes, notMeasured), notes, notMeasured);
     }
 
-    private async Task<Dictionary<string, (string? Database, long Executions, double ElapsedUs)>> ReadQueriesAsync(
+    /// <summary>#8772: one plan cache query as Change Watch measures it, a query hash in ONE database. A NULL database is its own key.</summary>
+    internal readonly record struct PlanCacheQueryKey(string? Database, string QueryHash)
+    {
+        /// <summary>The database as a measure name and label spell it.</summary>
+        public string DatabaseName => Database ?? "(unknown)";
+
+        /// <summary>The measure's name, the Query Store arm's <c>query_avg_duration_ms:{database}:{queryId}</c> with the query hash.</summary>
+        public string MeasureName => $"query_avg_duration_ms:{DatabaseName}:{QueryHash}";
+    }
+
+    private async Task<Dictionary<PlanCacheQueryKey, (long Executions, double ElapsedUs)>> ReadQueriesAsync(
         NpgsqlConnection connection, int serverId, DateTime start, DateTime end, string[]? hashes, string[]? databases, int limit,
         CancellationToken cancellationToken)
     {
@@ -454,11 +468,11 @@ HAVING sum(delta_execution_count) > 0";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = (object?)hashes ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = (object?)databases ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { Value = limit });
-        var rows = new Dictionary<string, (string?, long, double)>(StringComparer.Ordinal);
+        var rows = new Dictionary<PlanCacheQueryKey, (long, double)>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows[reader.GetString(0)] = (reader.IsDBNull(1) ? null : reader.GetString(1), reader.GetInt64(2), reader.GetDouble(3));
+            rows[new PlanCacheQueryKey(reader.IsDBNull(1) ? null : reader.GetString(1), reader.GetString(0))] = (reader.GetInt64(2), reader.GetDouble(3));
         }
 
         return rows;
@@ -574,21 +588,24 @@ HAVING sum(delta_execution_count) > 0";
 
         var afterQueries = needTopQueries
             ? await ReadQueriesAsync(connection, watch.ServerId, afterStart, afterEnd, null, scope, TopQueries, cancellationToken)
-            : new Dictionary<string, (string? Database, long Executions, double ElapsedUs)>(StringComparer.Ordinal);
+            : new Dictionary<PlanCacheQueryKey, (long Executions, double ElapsedUs)>();
         if (needTopQueries && afterQueries.Count == 0)
         {
             notMeasured.Add(new ChangeWatchNotMeasured("query_avg_duration_ms", "the query_stats collector stored no query with executions in the after window"));
         }
         else if (afterQueries.Count > 0)
         {
-            var hashes = afterQueries.Keys.ToArray();
-            var beforeQueries = await ReadQueriesAsync(connection, watch.ServerId, beforeStart, afterStart, hashes, scope, hashes.Length, cancellationToken);
-            var weekQueries = await ReadQueriesAsync(connection, watch.ServerId, weekStart, weekEnd, hashes, scope, hashes.Length, cancellationToken);
+            /* The hash list names every database a hash ran in, so the baseline reads can return more pairs than the after-window's top list (the
+               hash's other databases): no row cap there, the hashes bound the read and a pair outside the top list is never looked up. */
+            var hashes = afterQueries.Keys.Select(k => k.QueryHash).Distinct(StringComparer.Ordinal).ToArray();
+            var beforeQueries = await ReadQueriesAsync(connection, watch.ServerId, beforeStart, afterStart, hashes, scope, int.MaxValue, cancellationToken);
+            var weekQueries = await ReadQueriesAsync(connection, watch.ServerId, weekStart, weekEnd, hashes, scope, int.MaxValue, cancellationToken);
             var missingBefore = 0;
             var belowFloor = 0;
-            foreach (var (hash, after) in afterQueries)
+            foreach (var (key, after) in afterQueries)
             {
-                if (!beforeQueries.TryGetValue(hash, out var before))
+                var hash = key.QueryHash;
+                if (!beforeQueries.TryGetValue(key, out var before))
                 {
                     missingBefore++;
                     continue;
@@ -603,25 +620,25 @@ HAVING sum(delta_execution_count) > 0";
 
                 var beforeAvg = before.ElapsedUs / before.Executions;
                 var afterAvg = after.ElapsedUs / after.Executions;
-                double? weekAvg = weekQueries.TryGetValue(hash, out var week) && week.Executions >= MinExecutions ? week.ElapsedUs / week.Executions : null;
+                double? weekAvg = weekQueries.TryGetValue(key, out var week) && week.Executions >= MinExecutions ? week.ElapsedUs / week.Executions : null;
                 if (DurationMoved(beforeAvg, afterAvg) && (weekAvg is null || DurationMoved(weekAvg.Value, afterAvg)))
                 {
                     /* #6555: a query hash that ran several plans is compared per plan (at the before-window's mix), not by the average over all of them. */
-                    var beforePlans = await ReadQueryPlansAsync(connection, watch.ServerId, hash, beforeStart, afterStart, scope, cancellationToken);
-                    var afterPlans = await ReadQueryPlansAsync(connection, watch.ServerId, hash, afterStart, afterEnd, scope, cancellationToken);
+                    var beforePlans = await ReadQueryPlansAsync(connection, watch.ServerId, key, beforeStart, afterStart, scope, cancellationToken);
+                    var afterPlans = await ReadQueryPlansAsync(connection, watch.ServerId, key, afterStart, afterEnd, scope, cancellationToken);
                     var weekPlans = weekAvg is null
                         ? new Dictionary<string, PlanRuntime>(StringComparer.Ordinal)
-                        : await ReadQueryPlansAsync(connection, watch.ServerId, hash, weekStart, weekEnd, scope, cancellationToken);
+                        : await ReadQueryPlansAsync(connection, watch.ServerId, key, weekStart, weekEnd, scope, cancellationToken);
                     var moved = QueryDurationMoved(beforeAvg, afterAvg, weekAvg, beforePlans, afterPlans, weekPlans, out var mixNote);
-                    var where = $"read from the plan cache (query_stats), query_hash {hash} in database {after.Database ?? "(unknown)"}; {before.Executions} -> {after.Executions} executions";
+                    var where = $"read from the plan cache (query_stats), query_hash {hash} in database {key.DatabaseName}; {before.Executions} -> {after.Executions} executions";
                     if (moved)
                     {
-                        measures.Add(new ChangeWatchMeasure("query_avg_duration_ms:" + hash, "ms", beforeAvg / 1000, afterAvg / 1000,
+                        measures.Add(new ChangeWatchMeasure(key.MeasureName, "ms", beforeAvg / 1000, afterAvg / 1000,
                             weekAvg / 1000, true, mixNote is null ? where : where + "; " + mixNote));
                     }
                     else
                     {
-                        notes.Add($"query_avg_duration_ms:{hash}: the average duration moved from {Num(beforeAvg / 1000)} ms to {Num(afterAvg / 1000)} ms, but only with the plan mix, so it is not a regression ({where}{(mixNote is null ? "" : "; " + mixNote)})");
+                        notes.Add($"{key.MeasureName}: the average duration moved from {Num(beforeAvg / 1000)} ms to {Num(afterAvg / 1000)} ms, but only with the plan mix, so it is not a regression ({where}{(mixNote is null ? "" : "; " + mixNote)})");
                     }
                 }
             }
@@ -682,12 +699,13 @@ HAVING sum(delta_execution_count) > 0";
         return await ReadPlansAsync(command, cancellationToken);
     }
 
-    /// <summary>#6555: the plans (query_plan_hash) one query hash ran in the window, from the plan cache's statistics.</summary>
+    /// <summary>#6555: the plans (query_plan_hash) one query hash ran in one database in the window, from the plan cache's statistics (#8772: per database).</summary>
     private async Task<Dictionary<string, PlanRuntime>> ReadQueryPlansAsync(
-        NpgsqlConnection connection, int serverId, string queryHash, DateTime start, DateTime end, string[]? databases, CancellationToken cancellationToken)
+        NpgsqlConnection connection, int serverId, PlanCacheQueryKey query, DateTime start, DateTime end, string[]? databases, CancellationToken cancellationToken)
     {
         await using var command = Command(connection, QueryPlansSql, serverId, start, end);
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = queryHash });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = query.QueryHash });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)query.Database ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = (object?)databases ?? DBNull.Value });
         return await ReadPlansAsync(command, cancellationToken);
     }
