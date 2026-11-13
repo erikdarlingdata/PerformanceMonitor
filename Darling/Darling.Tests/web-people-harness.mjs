@@ -24,9 +24,11 @@ class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = 
 globalThis.Node = FakeNode;
 globalThis.document = { createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
 globalThis.location = { hash: "#/admin/people" };
-/* The page asks before a destructive write (#7954). These scenarios press through, so the browser's confirm answers yes. */
+/* The page asks before a destructive write (#7954). The browser's confirm keeps each question it is asked and answers yes, or no once a
+   scenario says so. */
 globalThis.window = globalThis;
-globalThis.confirm = () => true;
+const confirmation = { answer: true, asked: [] };
+globalThis.confirm = (m) => { confirmation.asked.push(String(m)); return confirmation.answer; };
 let copied = null;
 Object.defineProperty(globalThis, "navigator", { value: { clipboard: { writeText: async (t) => { copied = t; } } }, configurable: true, writable: true });
 
@@ -38,24 +40,30 @@ const KEY = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcde";
 /* The session the scripted GET answers as; each scenario sets it before the first draw. */
 const session = { can_decide: true, signed_in_admin: true, sign_in_key: KEY };
 const puts = [];
+/* The people the scripted GET lists. A scenario adds to it before the first draw, and a delete the script accepts takes the person off it. */
+const people = [{
+  person_id: 5, display_name: "Ann", enabled: true, updated_by: "person:alice", updated_at_utc: null,
+  identities: [{ identity_id: 9, kind: "slack", external_id: "T1:U1" }],
+  grants: [{ grant_id: 3, capability: "approve", kinds: ["kill_session"], scope: "server", scope_server_id: 1, scope_server_name: "SRV1" }],
+}];
+/* What PUT /api/people/delete_person answers with a 409 while a scenario sets it: the service's refusal. */
+const deletes = { refusal: null };
 globalThis.fetch = async (url, init) => {
   const u = String(url);
   const reply = (status, body) => ({ status, ok: status < 400, text: async () => JSON.stringify(body), headers: { get: () => "application/json" } });
   if (init && init.method === "PUT") {
-    puts.push({ path: u, body: JSON.parse(init.body) });
+    const sent = JSON.parse(init.body);
+    puts.push({ path: u, body: sent });
+    if (u === "/api/people/delete_person") {
+      if (deletes.refusal) return reply(409, deletes.refusal);
+      const [gone] = people.splice(people.findIndex((p) => p.person_id === sent.person_id), 1);
+      return reply(200, { status: "deleted", message: "Deleted " + gone.display_name + "." });
+    }
     return reply(200, { status: "added", message: "Added." });
   }
   /* As GET /api/people answers (#7107): the list only to an administrator, and any other session its own key alone. */
   if (session.signed_in_admin !== true) return reply(200, { ...session });
-  return reply(200, {
-    ...session,
-    people_returned: 1,
-    people: [{
-      person_id: 5, display_name: "Ann", enabled: true, updated_by: "person:alice", updated_at_utc: null,
-      identities: [{ identity_id: 9, kind: "slack", external_id: "T1:U1" }],
-      grants: [{ grant_id: 3, capability: "approve", kinds: ["kill_session"], scope: "server", scope_server_id: 1, scope_server_name: "SRV1" }],
-    }],
-  });
+  return reply(200, { ...session, people_returned: people.length, people });
 };
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "people-"));
@@ -152,6 +160,47 @@ try {
       await click(button("Add grant"));
       await click(button("Disable Ann"));
       out.puts = puts;
+    },
+    /* #8777: Delete is in the details only of a person with no sign-in, no grant and no history. A press asks first and sends nothing on a
+       no. A refusal stays on the open details in the service's words. A delete that took closes the details and the person leaves the list. */
+    async deleting() {
+      people.push(
+        { person_id: 6, display_name: "Bo", enabled: true, has_history: false, updated_by: "person:alice", updated_at_utc: null, identities: [], grants: [] },
+        { person_id: 7, display_name: "Cy", enabled: false, has_history: true, updated_by: "person:alice", updated_at_utc: null, identities: [], grants: [] },
+        { person_id: 8, display_name: "Di", enabled: true, updated_by: "person:alice", updated_at_utc: null, identities: [], grants: [] });
+      await draw();
+      const listed = () => body.every((n) => n.className === "stub-row").map((n) => n.children[0].textContent.split(" | ")[0]);
+      const details = () => body.every((n) => n.getAttribute("data-role") === "person-detail").map((n) => n.getAttribute("aria-label"));
+      const said = (kind) => body.every((n) => n.className === "strip " + kind).map((n) => n.textContent);
+      out.offered = [];
+      for (const name of listed()) {
+        await click(button("Open " + name));
+        if (button("Delete " + name)) out.offered.push(name);
+        await click(button("Close " + name));
+      }
+
+      await click(button("Open Bo"));
+      confirmation.answer = false;
+      await click(button("Delete Bo"));
+      out.askedOnNo = confirmation.asked.slice();
+      out.putsOnNo = puts.length;
+      out.detailsOnNo = details();
+
+      confirmation.answer = true;
+      deletes.refusal = { status: "refused", code: "person_has_history", message: "This person has history, so disable them instead." };
+      await click(button("Delete Bo"));
+      out.refusalSaid = said("error");
+      out.detailsOnRefusal = details();
+      out.listedOnRefusal = listed();
+
+      deletes.refusal = null;
+      await click(button("Delete Bo"));
+      out.asked = confirmation.asked.length;
+      out.puts = puts;
+      out.deletedSaid = said("notice");
+      out.errorsAfterDelete = said("error");
+      out.detailsAfterDelete = details();
+      out.listedAfterDelete = listed();
     },
   };
   await scenarios[scenario]();

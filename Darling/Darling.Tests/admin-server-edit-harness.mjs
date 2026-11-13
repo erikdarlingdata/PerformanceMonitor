@@ -1309,7 +1309,8 @@ try {
     },
     /* #7954: the Admin writes that ask before they go. The param is "<target>/<answer>": the target is override (Remove on a threshold
        override), switchOff or switchOn (the service-wide agent switch), undo (a non-plan agent change) or peopleIdentity, peopleGrant,
-       peopleDisable (the People tab with Ann's details open); the answer, no or yes, is what window.confirm answers, or for switchOn which
+       peopleDisable (the People tab with Ann's details open) or peopleDelete (the People tab with the details open of Bo, who has no
+       sign-in, grant or history); the answer, no or yes, is what window.confirm answers, or for switchOn which
        button of the Turn on panel is pressed. Returns the confirm sentences asked, every PUT sent (url, body), and whether the Turn on panel
        was on the page after the first press and after the answer. */
     confirmWrites: async (param) => {
@@ -1331,14 +1332,16 @@ try {
           return { status: 200, body: { can_decide: true, signed_in_admin: true, sign_in_key: "key-of-this-session", people: [{
             person_id: 1, display_name: "Ann", enabled: true, updated_by: "person:bob", updated_at_utc: "2026-10-01T00:00:00Z",
             identities: [{ identity_id: 11, kind: "web", external_id: "abcdefghijklmnop" }],
-            grants: [{ grant_id: 21, capability: "approve", kinds: ["kill_session"], scope: "all" }] }] } };
+            grants: [{ grant_id: 21, capability: "approve", kinds: ["kill_session"], scope: "all" }] }, {
+            person_id: 2, display_name: "Bo", enabled: true, has_history: false, updated_by: "person:bob", updated_at_utc: "2026-10-01T00:00:00Z",
+            identities: [], grants: [] }] } };
         }
         if (method === "PUT") return { status: 200, body: { status: "updated", message: "Done." } };
         return { status: 404, body: { error: "no such request " + url } };
       };
       const tab = target === "override" ? "overrides" : target.startsWith("people") ? "people" : "agent-changes";
       await mountPage(tab);
-      if (tab === "people") await clickText(main, "Open");
+      if (tab === "people") await fire(buttons(main, "Open")[target === "peopleDelete" ? 1 : 0], "click");
       const confirmsBefore = confirms.length;
       const puts = () => requests.filter((r) => r.method === "PUT").map((r) => ({ url: r.url, body: r.body }));
       const panels = () => byAttr(main, "role", "alertdialog").length;
@@ -1351,7 +1354,7 @@ try {
       const labels = {
         override: "Remove cpu_percent for alpha", switchOff: "Turn off agent changes", undo: "Undo agent change c-1",
         peopleIdentity: "Remove Web sign-in abcdefgh...", peopleGrant: "Remove grant Approve server actions (Kill sessions), All servers", peopleDisable: "Disable Ann",
-        switchOn: "Turn on agent changes",
+        peopleDelete: "Delete Bo", switchOn: "Turn on agent changes",
       };
       await press(labels[target]);
       const panelShown = panels();

@@ -16,7 +16,7 @@ namespace Darling.Tests;
 /// <summary>
 /// The Admin writes that ask before they go (#7954), run under Node through the admin harness (<c>admin-server-edit-harness.mjs</c>,
 /// scenario <c>confirmWrites</c>): Remove on a threshold override, the service-wide agent switch in both directions, Undo of a non-plan
-/// agent change, and the People tab's Remove sign-in, Remove grant and Disable. A click alone asks and writes nothing; a confirmed click
+/// agent change, and the People tab's Remove sign-in, Remove grant, Disable and Delete. A click alone asks and writes nothing; a confirmed click
 /// writes once. Turning the agent switch on asks through a warning panel, as the per-server action switches do, and writes only from it.
 /// </summary>
 [Trait("Cost", "Slow")]
@@ -33,6 +33,7 @@ public sealed class AdminConfirmedWritesBehaviourTests
         { "peopleIdentity", "/api/people/remove_person_identity", "Remove the sign-in Web sign-in abcdefgh... from Ann?" },
         { "peopleGrant", "/api/people/remove_person_grant", "Remove the grant \"Approve server actions (Kill sessions), All servers\" from Ann?" },
         { "peopleDisable", "/api/people/set_person_enabled", "Disable Ann?" },
+        { "peopleDelete", "/api/people/delete_person", "Delete Bo? This removes them from the list and cannot be undone." },
     };
 
     [Theory]
@@ -75,6 +76,9 @@ public sealed class AdminConfirmedWritesBehaviourTests
                 break;
             case "peopleDisable":
                 Assert.False(body.GetProperty("enabled").GetBoolean());
+                break;
+            case "peopleDelete":
+                Assert.Equal(2, body.GetProperty("person_id").GetInt32());
                 break;
         }
     }

@@ -40,8 +40,13 @@ public partial class PeopleWindow : Window
         _dataService = dataService ?? throw new ArgumentNullException(nameof(dataService));
         _readOnly = readOnly;
         _login = login;
+        ConfirmDelete = person => MessageBox.Show(this, PeopleText.DeleteConfirmation(person.DisplayName), "Delete person",
+            MessageBoxButton.OKCancel, MessageBoxImage.Warning) == MessageBoxResult.OK;
         SetButtons();
     }
+
+    /// <summary>Asks before a delete and answers whether to go on. A message box by default. The tests answer for the person a message box waits on.</summary>
+    internal Func<PersonViewRow, bool> ConfirmDelete { get; set; }
 
     private PersonViewRow? SelectedPerson => PeopleGrid.SelectedItem as PersonViewRow;
 
@@ -72,7 +77,8 @@ public partial class PeopleWindow : Window
 
             DetailPanel.Visibility = Visibility.Visible;
             var selectedId = SelectedPerson?.PersonId;
-            var rows = PersonViewRow.From(result.People);
+            /* Only a seat that can delete needs to know who has history, and only the admin role reads it. */
+            var rows = PersonViewRow.From(result.People, _readOnly ? null : await _dataService.ReadPeopleWithHistoryAsync());
             PeopleGrid.ItemsSource = rows;
             PeopleGrid.SelectedItem = rows.FirstOrDefault(r => r.PersonId == selectedId) ?? (rows.Count > 0 ? rows[0] : null);
             EmptyMessage.Text = PeopleText.EmptyNote(_readOnly);
@@ -95,6 +101,7 @@ public partial class PeopleWindow : Window
         IdentitiesHeader.Text = person is null ? "Identities" : "Identities of " + person.DisplayName;
         GrantsHeader.Text = person is null ? "Grants" : "Grants of " + person.DisplayName;
         ToggleButton.Content = person is { Enabled: false } ? "_Enable" : "_Disable";
+        DeleteButton.Visibility = person is { CanDelete: true } ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void PeopleGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) => ShowDetail();
@@ -147,6 +154,21 @@ public partial class PeopleWindow : Window
         }
 
         await RunAsync(() => _dataService.SetPersonEnabledAsync(person.PersonId, !person.Enabled, _login));
+    }
+
+    private async void DeletePerson_Click(object sender, RoutedEventArgs e) => await DeleteSelectedPersonAsync();
+
+    /// <summary>Deletes the selected person once the administrator confirms. A person the service refuses stays, and its sentence says why.</summary>
+    internal async Task DeleteSelectedPersonAsync()
+    {
+        if (SelectedPerson is not { } person)
+        {
+            StatusText.Text = "Select a person first.";
+            return;
+        }
+
+        if (ConfirmDelete(person))
+            await RunAsync(() => _dataService.DeletePersonAsync(person.PersonId, _login));
     }
 
     private async void AddIdentity_Click(object sender, RoutedEventArgs e)

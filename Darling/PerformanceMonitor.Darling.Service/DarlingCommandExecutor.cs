@@ -641,6 +641,7 @@ WHERE status = 'in_progress'
             case PersonDirectoryCommands.RemoveIdentity:
             case PersonDirectoryCommands.AddGrant:
             case PersonDirectoryCommands.RemoveGrant:
+            case PersonDirectoryCommands.DeletePerson:
                 /* #7107: an administrator's people directory write, run in the service as the store owner. The arguments' shape is checked
                    here and their values when it runs; requested_by is the administrator (a name PersonActor refuses is refused here). */
                 if (!PersonDirectoryCommands.TryParse(command.CommandType, command.ArgsJson, out _, out var personUsage))
@@ -1234,8 +1235,8 @@ public enum CommandKind
     /// because no other role can write <c>config.config_server_actions</c>; the person is <c>requested_by</c>.</summary>
     SetServerAction,
 
-    /// <summary>The people directory writes (#7107, <see cref="PersonDirectoryCommands.Types"/>): an administrator adds, renames, enables or disables a
-    /// person, or adds or removes an identity or a grant. Run in the service as the store owner, because no other role can write the people tables;
+    /// <summary>The people directory writes (#7107, <see cref="PersonDirectoryCommands.Types"/>): an administrator adds, renames, enables, disables or
+    /// deletes a person, or adds or removes an identity or a grant. Run in the service as the store owner, because no other role can write the people tables;
     /// the administrator is <c>requested_by</c>.</summary>
     PersonDirectoryWrite,
 
