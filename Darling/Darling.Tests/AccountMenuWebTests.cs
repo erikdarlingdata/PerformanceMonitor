@@ -1,0 +1,186 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Linq;
+using System.Text.Json;
+using Xunit;
+using static Darling.Tests.RepoFile;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// The account menu (#8737): the shipped <c>account-menu.js</c>, with the real <c>util.js</c>, run under Node
+/// (<c>account-menu-harness.mjs</c>) against a stand-in <c>/api/me</c>. Pins the line and the rows each sign-in method gets, that
+/// Sign out is offered only for a session that ends, and that the signed-in party's own text is drawn as text, never as markup.
+/// Skipped when Node is not installed.
+/// </summary>
+public sealed class AccountMenuWebTests
+{
+    private static JsonElement Run(string scenario, string json)
+    {
+        var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "account-menu-harness.mjs"));
+        psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
+        psi.ArgumentList.Add(scenario);
+        psi.ArgumentList.Add(json);
+
+        Process proc;
+        try
+        {
+            proc = Process.Start(psi)!;
+        }
+        catch (Win32Exception)
+        {
+            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
+            return default;
+        }
+
+        using (proc)
+        {
+            var error = proc.StandardError.ReadToEndAsync();
+            var output = proc.StandardOutput.ReadToEnd().Trim();
+            if (!proc.WaitForExit(30000))
+            {
+                proc.Kill(entireProcessTree: true);
+                Assert.Fail("the account menu harness did not finish in 30 s for scenario " + scenario);
+            }
+
+            Assert.True(proc.ExitCode == 0, "the account menu harness failed for scenario " + scenario + ": " + error.Result);
+            using var doc = JsonDocument.Parse(output);
+            return doc.RootElement.Clone();
+        }
+    }
+
+    [Theory]
+    [InlineData("""{"method":"oidc","seat":"admin","subject":"erik@example.com","display_name":"Erik","granted_by":"dba-admins","expires_at":"2026-11-13T20:00:00Z"}""", "erik@example.com · admin")]
+    [InlineData("""{"method":"shared_token","seat":"admin"}""", "shared token · admin")]
+    [InlineData("""{"method":"named_token","seat":"read_only","token_name":"grafana"}""", "token grafana · read-only")]
+    [InlineData("""{"method":"managed_group","seat":"admin","group_name":"dbas","expires_at":"2026-11-13T20:00:00Z"}""", "group dbas · admin")]
+    [InlineData("""{"method":"reads_only","seat":"read_only"}""", "read-only access")]
+    public void AccountLine_PerMethod(string me, string expected)
+    {
+        Assert.Equal(expected, Run("line", me).GetProperty("line").GetString());
+    }
+
+    private static string[][] Rows(JsonElement r) =>
+        r.GetProperty("details").EnumerateArray().Select(p => new[] { p[0].GetString()!, p[1].GetString()! }).ToArray();
+
+    [Fact]
+    public void Details_OidcWithoutMapping_SaysNoRoleMappingSet()
+    {
+        var r = Run("details", """{"method":"oidc","seat":"admin","subject":"erik@example.com","display_name":null,"granted_by":null,"expires_at":null}""");
+
+        var rows = Rows(r);
+        Assert.Equal(new[] { "Signed in as", "Seat", "Signed in with" }, rows.Select(x => x[0]).ToArray());
+        Assert.Equal("admin (no role mapping set)", rows.Single(x => x[0] == "Seat")[1]);
+        Assert.Equal("OpenID Connect", rows.Single(x => x[0] == "Signed in with")[1]);
+    }
+
+    [Fact]
+    public void Details_OidcWithMapping_NamesTheGroup_AndTheSessionEndInLocalTime()
+    {
+        var r = Run("details", """{"method":"oidc","seat":"read_only","subject":"a@b.c","display_name":"Ann","granted_by":"readers","expires_at":"2026-11-13T20:00:00Z"}""");
+
+        var rows = Rows(r);
+        Assert.Equal(new[] { "Name", "Signed in as", "Seat", "Signed in with", "Session ends" }, rows.Select(x => x[0]).ToArray());
+        Assert.Equal("read-only (group: readers)", rows.Single(x => x[0] == "Seat")[1]);
+        Assert.Equal(r.GetProperty("localExpiry").GetString(), rows.Single(x => x[0] == "Session ends")[1]);
+    }
+
+    [Theory]
+    [InlineData("""{"method":"shared_token","seat":"admin"}""", "shared token")]
+    [InlineData("""{"method":"named_token","seat":"read_only","token_name":"t"}""", "web token")]
+    [InlineData("""{"method":"managed_group","seat":"admin","group_name":"g"}""", "access group")]
+    public void Details_TokenAndGroupSessions_NameTheirMethod(string me, string word)
+    {
+        var rows = Rows(Run("details", me));
+
+        Assert.Equal(word, rows.Single(x => x[0] == "Signed in with")[1]);
+    }
+
+    [Fact]
+    public void Details_ReadsOnly_HasNoSignedInWithRow()
+    {
+        var rows = Rows(Run("details", """{"method":"reads_only","seat":"read_only"}"""));
+
+        Assert.DoesNotContain(rows, x => x[0] == "Signed in with");
+        Assert.Equal("read-only", rows.Single(x => x[0] == "Seat")[1]);
+    }
+
+    [Fact]
+    public void Details_NoExpiry_HasNoSessionEndsRow_AndNoSignOut()
+    {
+        var me = """{"method":"shared_token","seat":"admin","expires_at":null}""";
+
+        Assert.DoesNotContain(Rows(Run("details", me)), x => x[0] == "Session ends");
+        var drawn = Run("init", me);
+        Assert.Equal(0, drawn.GetProperty("menuItems").GetArrayLength());
+    }
+
+    [Fact]
+    public void WithAnExpiry_SignOutIsTheOnlyItem_APlainLinkToTheLogout()
+    {
+        var drawn = Run("init", """{"method":"oidc","seat":"admin","subject":"s","expires_at":"2026-11-13T20:00:00Z"}""");
+
+        var item = Assert.Single(drawn.GetProperty("menuItems").EnumerateArray());
+        Assert.Equal("a", item.GetProperty("tag").GetString());
+        Assert.Equal("/auth/logout", item.GetProperty("href").GetString());
+        Assert.Equal("Sign out", item.GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public void TheControl_IsShownInBothHosts_OpensAsAMenu_AndEscapeCloses()
+    {
+        var drawn = Run("init", """{"method":"shared_token","seat":"admin"}""");
+
+        Assert.False(drawn.GetProperty("brandHidden").GetBoolean());
+        Assert.False(drawn.GetProperty("topbarHidden").GetBoolean());
+        Assert.Equal(1, drawn.GetProperty("topbarHasControl").GetInt32());
+        Assert.Equal("shared token · admin", drawn.GetProperty("buttonText").GetString());
+        Assert.Equal("menu", drawn.GetProperty("buttonAttrs").GetProperty("aria-haspopup").GetString());
+        Assert.Equal("true", drawn.GetProperty("expandedAfterOpen").GetString());
+        Assert.Equal("false", drawn.GetProperty("expandedAfterEscape").GetString());
+        Assert.Equal(0, drawn.GetProperty("popupAfterEscape").GetInt32());
+        Assert.Equal(1, drawn.GetProperty("fetched").GetArrayLength());
+    }
+
+    [Theory]
+    [InlineData("401")]
+    [InlineData("503")]
+    public void WhenMeIsNotAnswered_BothHostsStayHidden(string status)
+    {
+        var drawn = Run("init", status);
+
+        Assert.True(drawn.GetProperty("brandHidden").GetBoolean());
+        Assert.True(drawn.GetProperty("topbarHidden").GetBoolean());
+    }
+
+    [Fact]
+    public void Markup_InTheDisplayName_IsDrawnAsText()
+    {
+        const string evil = "<img src=x onerror=alert(1)>";
+        var me = JsonSerializer.Serialize(new { method = "oidc", seat = "admin", subject = "s", display_name = evil, granted_by = "g", expires_at = (string?)null });
+
+        var drawn = Run("init", me);
+
+        Assert.Contains(drawn.GetProperty("texts").EnumerateArray().Select(t => t.GetString()), t => t == evil);
+        Assert.Equal(0, drawn.GetProperty("innerHtmlSets").GetArrayLength());
+        Assert.Contains(drawn.GetProperty("popupRows").EnumerateArray(), row => row[1].GetString() == evil);
+    }
+
+    [Fact]
+    public void TheModule_UsesNoInnerHtml()
+    {
+        var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "account-menu.js");
+
+        Assert.DoesNotContain("innerHTML", source);
+    }
+}

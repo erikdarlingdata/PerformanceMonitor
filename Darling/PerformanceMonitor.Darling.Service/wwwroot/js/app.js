@@ -40,6 +40,7 @@
 
 import { el, mount, apiGet, apiGetFleetShell, setPollRender, readTool, localTime, hasInFlightReads, beginPageScope, readErrorCount, isSessionExpired, onSessionExpired, frontDoor, currentStore, routeHash, splitStoreHash, storeHash, storeHeaders, loadingStrip } from "./util.js";
 import { startFrontDoor as startFrontDoorIn, refreshPicker, rememberStore, frontDoorStores, isKnownStore, locateServer, ambiguousStrip, locateFailureStrip } from "./store-picker.js";
+import { initAccountMenu } from "./account-menu.js";
 import { makeScrollReset } from "./scroll-reset.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
@@ -960,6 +961,7 @@ function start() {
   setInterval(schedulerTick, SCHEDULER_TICK_MS);
   onSessionExpired(showSignedOutState);
   initAutoRefreshToggle();
+  initAccountMenu(document.getElementById("account-menu"), document.getElementById("topbar-account"));
   initPageRefreshControl();
   initSidebarCollapse(document.getElementById("app"), document.getElementById("sidebar-collapse"));
   initNavCollapse(document.getElementById("nav-collapse"), document.getElementById("nav-links"));
