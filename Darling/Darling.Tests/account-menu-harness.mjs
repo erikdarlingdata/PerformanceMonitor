@@ -156,9 +156,16 @@ try {
     button.listeners.click[0]();
     await settle();
     focused = null;
-    find(brand, (n) => n.className === "account-pop")[0].listeners.keydown[0]({ key: "Tab" });
+    const next = new Node("a");
+    const focusout = (relatedTarget) => control.listeners.focusout[0]({ relatedTarget });
+    focusout(find(brand, (n) => n.className === "account-pop")[0].childNodes[0]);
+    out.panelsAfterFocusMovesInside = panels();
+    focusout(null);
+    out.panelsAfterFocusLost = panels();
+    focused = next;
+    focusout(next);
     out.panelsAfterTab = panels();
-    out.focusAfterTab = focused === button;
+    out.focusAfterTab = focused === next;
     out.topAndBrandIds = [find(top, (n) => n.tag === "button")[0].attrs["aria-controls"], button.attrs["aria-controls"]];
   } else {
     throw new Error("unknown scenario " + scenario);

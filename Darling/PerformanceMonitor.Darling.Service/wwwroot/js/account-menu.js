@@ -28,8 +28,8 @@ export function accountLine(me) {
   switch (me && me.method) {
     case "oidc": return (me.subject || "signed in") + " · " + seat;
     case "shared_token": return "shared token · admin";
-    case "named_token": return "token " + (me.token_name || "") + " · " + seat;
-    case "managed_group": return "group " + (me.group_name || "") + " · " + seat;
+    case "named_token": return (me.token_name ? "token " + me.token_name : "web token") + " · " + seat;
+    case "managed_group": return (me.group_name ? "group " + me.group_name : "access group") + " · " + seat;
     case "reads_only": return "read-only access";
     default: return seat || "signed in";
   }
@@ -79,9 +79,6 @@ function buildControl(me) {
       el("div", { class: "account-row" }, [el("span", { class: "account-label", text: label }), el("span", { class: "account-value", text: value })])
     );
     popup = el("div", { id: panelId, class: "account-pop" }, signOut ? [...rows, signOut] : rows);
-    popup.addEventListener("keydown", (e) => {
-      if (e.key === "Tab") closeToButton();
-    });
     root.appendChild(popup);
     button.setAttribute("aria-expanded", "true");
     outside = (e) => {
@@ -92,6 +89,10 @@ function buildControl(me) {
     setTimeout(() => outside && document.addEventListener("click", outside), 0);
   };
   button.addEventListener("click", () => (popup ? close() : open()));
+  /* Tab follows the browser's own order; the panel closes when focus leaves the whole control, and focus is left where it went. */
+  root.addEventListener("focusout", (e) => {
+    if (popup && e.relatedTarget && !root.contains(e.relatedTarget)) close();
+  });
   root.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && popup) {
       e.preventDefault();

@@ -148,7 +148,7 @@ public sealed class AccountMenuWebTests
     }
 
     [Fact]
-    public void Panel_EscapeAndTabReturnFocusToTheButton_AClickOutsideCloses_AClickInsideDoesNot()
+    public void Panel_EscapeReturnsFocusToTheButton_TabOutClosesAndLeavesFocus_AClickOutsideCloses_AClickInsideDoesNot()
     {
         var r = Run("interact", """{"method":"oidc","seat":"admin","subject":"s","expires_at":"2026-11-13T20:00:00Z"}""");
 
@@ -161,13 +161,17 @@ public sealed class AccountMenuWebTests
         Assert.True(r.GetProperty("focusAfterEscape").GetBoolean());
         Assert.Equal(0, r.GetProperty("panelsAfterTab").GetInt32());
         Assert.True(r.GetProperty("focusAfterTab").GetBoolean());
+        Assert.Equal(1, r.GetProperty("panelsAfterFocusMovesInside").GetInt32());
+        Assert.Equal(1, r.GetProperty("panelsAfterFocusLost").GetInt32());
         var ids = r.GetProperty("topAndBrandIds").EnumerateArray().Select(x => x.GetString()).ToArray();
         Assert.NotEqual(ids[0], ids[1]);
     }
 
     [Theory]
-    [InlineData("""{"method":"named_token","seat":"read_only"}""", "token  · read-only")]
-    [InlineData("""{"method":"managed_group","seat":"admin"}""", "group  · admin")]
+    [InlineData("""{"method":"named_token","seat":"read_only","token_name":""}""", "web token · read-only")]
+    [InlineData("""{"method":"named_token","seat":"read_only","token_name":"t1"}""", "token t1 · read-only")]
+    [InlineData("""{"method":"named_token","seat":"read_only"}""", "web token · read-only")]
+    [InlineData("""{"method":"managed_group","seat":"admin"}""", "access group · admin")]
     public void AccountLine_AMissingName_IsNeverUndefined(string me, string expected)
     {
         Assert.Equal(expected, Run("line", me).GetProperty("line").GetString());
