@@ -417,6 +417,50 @@ public sealed class DarlingWebOidcTests
     public void MapRole_Matrix(string[] claims, string[] admin, string[] viewer, string expected)
         => Assert.Equal(expected, DarlingWebOidc.MapRole(claims, admin, viewer).ToString());
 
+    [Fact]
+    public void MapRoleWithGrant_NamesTheFirstMatchingValue_InTheConfiguredOrder()
+    {
+        var (role, grantedBy) = DarlingWebOidc.MapRoleWithGrant(
+            new[] { "b-admins", "a-admins" }, new[] { "a-admins", "b-admins" }, null);
+        Assert.Equal("Admin", role.ToString());
+        Assert.Equal("a-admins", grantedBy);
+    }
+
+    [Fact]
+    public void MapRoleWithGrant_Viewer_NamesTheViewerValue()
+    {
+        var (role, grantedBy) = DarlingWebOidc.MapRoleWithGrant(
+            new[] { "readers" }, new[] { "dba" }, new[] { "readers" });
+        Assert.Equal("Viewer", role.ToString());
+        Assert.Equal("readers", grantedBy);
+    }
+
+    [Fact]
+    public void MapRoleWithGrant_NoMapping_IsAdminWithNoGrant()
+    {
+        var (role, grantedBy) = DarlingWebOidc.MapRoleWithGrant(new[] { "anything" }, null, null);
+        Assert.Equal("Admin", role.ToString());
+        Assert.Null(grantedBy);
+    }
+
+    [Fact]
+    public void MapRoleWithGrant_NoMatch_IsDeniedWithNoGrant()
+    {
+        var (role, grantedBy) = DarlingWebOidc.MapRoleWithGrant(
+            new[] { "other" }, new[] { "dba" }, new[] { "eng" });
+        Assert.Equal("Denied", role.ToString());
+        Assert.Null(grantedBy);
+    }
+
+    [Theory]
+    [InlineData("{\"name\":\"  Alice Smith \"}", "Alice Smith")]
+    [InlineData("{}", null)]
+    [InlineData("{\"name\":\"\"}", null)]
+    [InlineData("{\"name\":42}", null)]
+    [InlineData("{\"name\":\"a\\u0007b\"}", null)]
+    public void DisplayNameClaim_Theory(string payloadJson, string? expected)
+        => Assert.Equal(expected, DarlingWebOidc.DisplayNameClaim((JsonObject)JsonNode.Parse(payloadJson)!));
+
     /* ---- THE SEAT CODEC (the role's round-trip through the session cookie's subject slot) ---- */
 
     /* The role enum is internal, so the rows carry admin-ness as a bool (the same convention as the verdict
