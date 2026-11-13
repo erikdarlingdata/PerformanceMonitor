@@ -837,10 +837,16 @@
                             BorderBrush="{StaticResource AccentBrush}"
                             BorderThickness="0"
                             Padding="{TemplateBinding Padding}">
+                        <!-- #8769, #3577: the empty TextBlock style shadows the theme's app-level TextBlock style inside the
+                             header, so a string header's text takes this TabItem's Foreground (dim until selected). -->
                         <ContentPresenter ContentSource="Header"
                                           RecognizesAccessKey="True"
                                           HorizontalAlignment="Center"
-                                          VerticalAlignment="Center"/>
+                                          VerticalAlignment="Center">
+                            <ContentPresenter.Resources>
+                                <Style TargetType="TextBlock"/>
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsSelected" Value="True">
