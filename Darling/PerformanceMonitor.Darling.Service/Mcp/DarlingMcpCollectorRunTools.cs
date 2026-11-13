@@ -39,7 +39,7 @@ public sealed class DarlingMcpCollectorRunTools
     internal static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(1);
 
     [McpServerTool(Name = "run_collectors_now"), Description(
-        "Runs collectors ONCE, now, for one monitored server, instead of waiting for their schedule. No collector list = every ENABLED collector that applies to the server's engine. A list of collector names runs only those, each even if disabled (its enabled state and schedule do not change). A collector that does not apply to the server's engine is reported as skipped, never run. Guards: refused (not queued) while a run for that server is queued or going, and within 60 seconds of the last one (the refusal says when the next is allowed); runs share the fleet's sweep slots, so it can wait behind other collection. Runs even while the service is paused. Use it to check collection right after installing an extension or changing a setting; the daily collectors (index_object_stats) and pg_buffer_usage put real load on the server, so name collectors when one is enough. Returns status queued/succeeded/failed/running/refused with collectors_run, rows and skipped; on running (a long pass), read get_collection_health or get_collection_log later.")]
+        "Runs collectors ONCE, now, for one monitored server, instead of waiting for their schedule. No collector list = every ENABLED collector that applies to the server's engine. A list of collector names runs only those, each even if disabled (its enabled state and schedule do not change). A collector that does not apply to the server's engine is reported as skipped, never run. Guards: refused (not queued) while a run for that server is queued or going, and within 60 seconds of the last one (the refusal says when the next is allowed); runs share the fleet's sweep slots, so it can wait behind other collection. Runs even while the service is paused. Use it to check collection right after installing an extension or changing a setting; the daily collectors (index_object_stats) and pg_buffer_usage put real load on the server, so name collectors when one is enough. Returns status queued/succeeded/failed/running/refused (precondition when the store lacks the queue function; the message names the script) with collectors_run, rows and skipped; on running (a long pass), read get_collection_health or get_collection_log later.")]
     public static async Task<string> RunCollectorsNow(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string server_name,
@@ -74,7 +74,7 @@ public sealed class DarlingMcpCollectorRunTools
         {
             var refusal = new JsonObject
             {
-                ["status"] = "refused",
+                ["status"] = outcome.Code == SnapshotRequestOutcome.StoreRefusedCode ? "precondition" : "refused",
                 ["reason"] = outcome.Code,
                 ["message"] = outcome.Text,
                 ["server"] = serverName,
