@@ -1669,6 +1669,7 @@ public sealed class DarlingWebHostService : BackgroundService
                             (frontDoorProxy is not null ||
                              !(context.Request.Path.Equals("/api/fleet", StringComparison.OrdinalIgnoreCase) ||
                                context.Request.Path.Equals("/api/session", StringComparison.OrdinalIgnoreCase) ||
+                               context.Request.Path.Equals("/api/me", StringComparison.OrdinalIgnoreCase) ||
                                DarlingWebEndpoints.SupportsScopedRead(context.Request.Path))))
                         {
                             refusals.Report(

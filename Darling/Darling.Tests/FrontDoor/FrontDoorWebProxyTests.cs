@@ -341,6 +341,25 @@ public sealed class FrontDoorWebProxyTests
     }
 
     [Fact(Timeout = 60_000)]
+    public async Task ApiMe_IsAnsweredByTheFrontDoor_WithoutAskingAStore()
+    {
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
+        await using var _a = a;
+        await using var _b = b;
+        await using var _door = door;
+
+        var (response, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/me", store: "use1"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = System.Text.Json.Nodes.JsonNode.Parse(body)!.AsObject();
+        Assert.Equal("shared_token", (string?)json["method"]);
+        Assert.Equal("admin", (string?)json["seat"]);
+        Assert.Null(json["subject"]);
+        Assert.Empty(a.Api);
+        Assert.Empty(b.Api);
+    }
+
+    [Fact(Timeout = 60_000)]
     public async Task AnUnknownStoreName_Is400_AndNothingIsSent()
     {
         var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
@@ -363,6 +382,7 @@ public sealed class FrontDoorWebProxyTests
     [Theory(Timeout = 60_000)]
     [InlineData("/api/ping")]
     [InlineData("/api/session")]
+    [InlineData("/api/me")]
     [InlineData("/api/front-door")]
     [InlineData("/api/front-door/locate?server=sql-east-1")]
     [InlineData("/api/fleet")]

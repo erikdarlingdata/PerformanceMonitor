@@ -258,6 +258,12 @@ Two gates apply, and the order matters:
 
 **Proof:** the dashboard renders in the remote browser, and the address bar shows no `?token=`.
 
+#### Who you are signed in as
+
+`GET /api/me` describes the calling session and nobody else. It answers `method` (`oidc`, `named_token`, `managed_group`, `shared_token` or `reads_only`), `seat` (`admin` or `read_only`) and `expires_at` (the time the session cookie ends, in UTC, or null when the request has no cookie). It adds `subject`, `display_name` and `granted_by` for an `oidc` sign-in, `token_name` for a named web token and `group_name` for a managed group. Every other key is null. The page shows these for display only, and no route decides anything from them.
+
+`/api/session` is unchanged. It still carries no name and no owner key, and a scoped reader can read `/api/me` as well.
+
 The exposure is fail-closed. Any of these sends the endpoint back to loopback: an unparseable `listen`, an invalid `allowFrom`, a missing token, or bring-your-own PostgreSQL. The service logs a critical line that says which one. The endpoint never half-exposes. With no token at all, the loopback dashboard does not start either (see [Turn it on](#turn-it-on)).
 
 TLS is opt-in. Without it, the token and the cookie travel in clear on the segment. The CIDR bounds who can route to the port. It does not protect the wire. An exposed dashboard with no certificate says so at every start. Point `web.network.tls` at a PKCS#12 bundle or a PEM pair (`Darling/README.md` has the shape), or put a TLS-terminating reverse proxy in front of the port. The certificate applies to the LAN listener only, and loopback stays plain HTTP. A missing or expired certificate keeps the dashboard loopback-only and does not fall back to cleartext.

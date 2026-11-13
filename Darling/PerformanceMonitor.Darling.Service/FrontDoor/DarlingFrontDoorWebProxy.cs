@@ -130,6 +130,11 @@ internal sealed class DarlingFrontDoorWebProxy
             return LocalGetAsync(context, SessionAsync);
         }
 
+        if (path.Equals("/api/me", StringComparison.OrdinalIgnoreCase))
+        {
+            return LocalGetAsync(context, MeAsync);
+        }
+
         if (path.Equals("/api/front-door", StringComparison.OrdinalIgnoreCase))
         {
             return LocalGetAsync(context, StoresAsync);
@@ -215,6 +220,10 @@ internal sealed class DarlingFrontDoorWebProxy
             ["front_door"] = true,
         });
     }
+
+    /// <summary>#8737: the calling session's own identity, from the seat the front door's gate gave this request. No store is asked.</summary>
+    private static Task MeAsync(HttpContext context) =>
+        WriteJsonAsync(context, StatusCodes.Status200OK, DarlingWebMe.Describe(DarlingWebSeat.FromContext(context)));
 
     /// <summary>The store list with each store's health, and, where the store said so, its <c>admin_writes_off</c> and <c>managed_store</c>: the
     /// page takes both from the store in use, as it does from the store's own <c>/api/session</c> when it is not behind a front door, so a
