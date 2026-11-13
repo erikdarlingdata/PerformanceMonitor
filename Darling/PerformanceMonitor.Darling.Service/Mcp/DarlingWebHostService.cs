@@ -2993,13 +2993,16 @@ public sealed class DarlingWebHostService : BackgroundService
     /// page the form was covering, carried back in the form's hidden <c>return</c> field when this page answers a
     /// POST to <see cref="LoginPath"/> (a wrong token), where the address bar no longer names that page. A hidden
     /// field's value is not a script or style block, so the page's policy does not change with it.
+    /// <paramref name="tokenField"/> false (valid only with OIDC) serves the SSO-only page for a client the
+    /// token sign-in is refused to (#8735): no token input and no submit button, the hidden <c>return</c> field
+    /// kept because the SSO link's script reads it.
     /// </summary>
-    internal static Task WriteLoginPageAsync(HttpContext context, bool oidcEnabled, string? returnPath = null)
+    internal static Task WriteLoginPageAsync(HttpContext context, bool oidcEnabled, string? returnPath = null, bool tokenField = true)
     {
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentType = "text/html; charset=utf-8";
         context.Response.Headers.CacheControl = "no-store";
-        var html = BuildLoginPageHtml(oidcEnabled);
+        var html = BuildLoginPageHtml(oidcEnabled, tokenField);
         if (!string.IsNullOrEmpty(returnPath))
         {
             html = html.Replace(
@@ -3012,7 +3015,7 @@ public sealed class DarlingWebHostService : BackgroundService
            gated stylesheet and scripts are reachable); each is allowed by its hash. The page is constant text
            (the two renderings differ only by the SSO fragment), so each policy is computed once from the
            LF-normalized text and never from a rendering. */
-        context.Response.Headers[DarlingWebSecurityHeaders.ContentSecurityPolicyHeader] = LoginPagePolicy(oidcEnabled);
+        context.Response.Headers[DarlingWebSecurityHeaders.ContentSecurityPolicyHeader] = LoginPagePolicy(oidcEnabled, tokenField);
         return context.Response.WriteAsync(html);
     }
 
@@ -3020,20 +3023,62 @@ public sealed class DarlingWebHostService : BackgroundService
     private static readonly string s_loginPageHtmlSso = ComposeLoginPage(oidcEnabled: true);
     private static readonly string s_loginPolicyPlain = DarlingWebSecurityHeaders.PolicyForInlinePage(s_loginPageHtmlPlain);
     private static readonly string s_loginPolicySso = DarlingWebSecurityHeaders.PolicyForInlinePage(s_loginPageHtmlSso);
+    private static readonly string s_loginPageHtmlSsoOnly = ComposeLoginPage(oidcEnabled: true, tokenField: false);
+    private static readonly string s_loginPolicySsoOnly = DarlingWebSecurityHeaders.PolicyForInlinePage(s_loginPageHtmlSsoOnly);
 
-    /// <summary>The Content-Security-Policy of the login page, fixed per rendering (SSO link or not).</summary>
-    internal static string LoginPagePolicy(bool oidcEnabled) => oidcEnabled ? s_loginPolicySso : s_loginPolicyPlain;
+    /// <summary>The Content-Security-Policy of the login page, fixed per rendering (SSO link or not, token
+    /// form or not). The SSO-only page (<paramref name="tokenField"/> false) needs OIDC.</summary>
+    internal static string LoginPagePolicy(bool oidcEnabled, bool tokenField = true)
+    {
+        RequireOidcForSsoOnly(oidcEnabled, tokenField);
+        return !tokenField ? s_loginPolicySsoOnly : oidcEnabled ? s_loginPolicySso : s_loginPolicyPlain;
+    }
 
-    /* The source file is checked out with CRLF, and a browser hashes the LF text, so the page is served in LF. */
-    private static string ComposeLoginPage(bool oidcEnabled)
+    private static void RequireOidcForSsoOnly(bool oidcEnabled, bool tokenField)
+    {
+        if (!tokenField && !oidcEnabled)
+        {
+            throw new ArgumentException("A login page without the token form needs OIDC enabled; it would have no way to sign in.", nameof(tokenField));
+        }
+    }
+
+    /* The source file is checked out with CRLF, and a browser hashes the LF text, so the page is served in LF.
+       The token fragments are spliced over their placeholder lines (the line break included) so the page with
+       the token form is the same text as before the fragments were split out. */
+    private static string ComposeLoginPage(bool oidcEnabled, bool tokenField = true)
         => DarlingWebSecurityHeaders.NormalizeLineEndings(
-            LoginPageHtml.Replace("<!--SSO-->", oidcEnabled ? SsoFragmentHtml : string.Empty, StringComparison.Ordinal)
+            DarlingWebSecurityHeaders.NormalizeLineEndings(LoginPageHtml)
+                .Replace("<!--TOKENFIELD-->\n", tokenField ? DarlingWebSecurityHeaders.NormalizeLineEndings(TokenFieldHtml) : string.Empty, StringComparison.Ordinal)
+                .Replace("<!--TOKENBUTTON-->\n", tokenField ? DarlingWebSecurityHeaders.NormalizeLineEndings(TokenButtonHtml) : string.Empty, StringComparison.Ordinal)
+                .Replace("<!--SSO-->", oidcEnabled ? SsoFragmentHtml : string.Empty, StringComparison.Ordinal)
                 .Replace("<!--ICON-->", IconLinkHtml, StringComparison.Ordinal));
 
-    /// <summary>The login page, with the SSO affordance included exactly when OIDC is enabled — the token
-    /// form is never removed (#2550 keeps the shared token as the scripted-caller/break-glass path).</summary>
-    internal static string BuildLoginPageHtml(bool oidcEnabled)
-        => oidcEnabled ? s_loginPageHtmlSso : s_loginPageHtmlPlain;
+    /// <summary>The login page, with the SSO affordance included exactly when OIDC is enabled, and the token
+    /// form included unless <paramref name="tokenField"/> is false (#8735: the SSO-only page for a client the
+    /// token sign-in is refused to; #2550 otherwise keeps the shared token as the scripted-caller/break-glass path).</summary>
+    internal static string BuildLoginPageHtml(bool oidcEnabled, bool tokenField = true)
+    {
+        RequireOidcForSsoOnly(oidcEnabled, tokenField);
+        return !tokenField ? s_loginPageHtmlSsoOnly : oidcEnabled ? s_loginPageHtmlSso : s_loginPageHtmlPlain;
+    }
+
+    /// <summary>The 403 page a refused token sign-in gets (#8735): a fixed text, identical on every call, whose
+    /// head carries <see cref="DarlingTokenSignIn.RefusalMarkerHtml"/> - the element the front door matches, never
+    /// the prose. It links to the SSO sign-in and sets no cookie.</summary>
+    internal static Task WriteTokenSignInDisabledAsync(HttpContext context)
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        context.Response.ContentType = "text/html; charset=utf-8";
+        context.Response.Headers.CacheControl = "no-store";
+        return context.Response.WriteAsync(TokenSignInDisabledHtml);
+    }
+
+    private static readonly string TokenSignInDisabledHtml =
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>" + DarlingTokenSignIn.RefusalMarkerHtml + "<title>Darling Web</title>" + IconLinkHtml + "</head>"
+        + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
+        + "<p>Token sign-in is not available from this address.</p>"
+        + "<p><a style='color:#2eaef1' href='/auth/oidc/login'>Sign in with SSO</a></p>"
+        + "</body></html>";
 
     /* A minimal, fully self-contained login form (no external references) — a POST form to LoginPath whose
        fields are the access token and the page to return to, so the token travels in the request body and
@@ -3082,12 +3127,11 @@ public sealed class DarlingWebHostService : BackgroundService
     <h1>Darling Web</h1>
     <div class='sub'>SQL Server and PostgreSQL monitor</div>
   </div>
-  <label for='token'>Access token</label>
-  <input id='token' name='token' type='password' autocomplete='off' autofocus>
+<!--TOKENFIELD-->
   <!-- #4221: the page this form is covering (pathname+search+hash, the fragment included) rides the POST as
        a field, and the sign-in leg 302s back to it, so an alert link survives sign-in. -->
   <input type='hidden' name='return' id='return' value=''>
-  <button type='submit'>Enter</button>
+<!--TOKENBUTTON-->
 <!--SSO-->
   <div class='host' id='host'></div>
 </form>
@@ -3095,6 +3139,15 @@ public sealed class DarlingWebHostService : BackgroundService
 if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById('return').value = location.pathname + location.search + location.hash; }</script>
 </body>
 </html>";
+
+    /* The token label and input, and the submit button, spliced over their placeholder lines by ComposeLoginPage
+       unless the page is the SSO-only one (#8735). */
+    private const string TokenFieldHtml = @"  <label for='token'>Access token</label>
+  <input id='token' name='token' type='password' autocomplete='off' autofocus>
+";
+
+    private const string TokenButtonHtml = @"  <button type='submit'>Enter</button>
+";
 
     /* Spliced over the <!--SSO--> placeholder when OIDC is enabled (#2550). The link carries the page the
        user was actually trying to reach as ?return=, so sign-in lands them there rather than on the root;
