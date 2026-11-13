@@ -128,7 +128,7 @@ public sealed class PersonDirectoryWebRouteLiveTests
             Assert.False(list.Body.AsObject().ContainsKey("people"));
             Assert.False(list.Body.AsObject().ContainsKey("people_returned"));
 
-            foreach (var command in new[] { "add_person", "rename_person", "set_person_enabled", "add_person_identity", "remove_person_identity", "add_person_grant", "remove_person_grant" })
+            foreach (var command in new[] { "add_person", "rename_person", "set_person_enabled", "add_person_identity", "remove_person_identity", "add_person_grant", "remove_person_grant", "delete_person" })
             {
                 var refused = await Send("PUT", "/api/people/" + command, "application/json", """{"display_name":"Ann","person_id":1}""");
                 Assert.Equal(403, refused.Status);
@@ -169,7 +169,7 @@ public sealed class PersonDirectoryWebRouteLiveTests
     {
         await WithWebAsync("admin", async (owner, Send, ct) =>
         {
-            var unknownCommand = await Send("PUT", "/api/people/delete_person", "application/json", """{"person_id":1}""");
+            var unknownCommand = await Send("PUT", "/api/people/no_such_command", "application/json", """{"person_id":1}""");
             Assert.Equal(400, unknownCommand.Status);
             Assert.Equal("invalid_args", (string?)unknownCommand.Body!["code"]);
 
@@ -186,6 +186,58 @@ public sealed class PersonDirectoryWebRouteLiveTests
             Assert.Equal("identity_taken", (string?)taken.Body!["code"]);
 
             Assert.Equal("3", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
+        }, seat: new DarlingWebSeat("alice", true, AliceKey));
+    }
+
+    /// <summary>#8777: <c>delete_person</c> on the route, as the real admin role. The list says who has history, the two refusals answer 409
+    /// with their sentence, and a person with nothing attached goes, journaled under the signed-in admin.</summary>
+    [Fact]
+    public async Task ASignedInAdmin_DeletesAPersonWithNothingAttached_AndIsRefusedForSignInsGrantsAndHistory()
+    {
+        await WithWebAsync("admin", async (owner, Send, ct) =>
+        {
+            var unknown = await Send("PUT", "/api/people/delete_person", "application/json", """{"person_id":99}""");
+            Assert.Equal(404, unknown.Status);
+            Assert.Equal("unknown_person", (string?)unknown.Body!["code"]);
+            Assert.Equal(400, (await Send("PUT", "/api/people/delete_person", "application/json", """{"person_id":"1"}""")).Status);
+
+            var ann = (long)(await Send("PUT", "/api/people/add_person", "application/json", """{"display_name":"Ann"}""")).Body!["person_id"]!;
+            var bo = (long)(await Send("PUT", "/api/people/add_person", "application/json", """{"display_name":"Bo"}""")).Body!["person_id"]!;
+            var cy = (long)(await Send("PUT", "/api/people/add_person", "application/json", """{"display_name":"Cy"}""")).Body!["person_id"]!;
+            Assert.Equal(200, (await Send("PUT", "/api/people/add_person_identity", "application/json",
+                "{\"person_id\":" + ann + ",\"kind\":\"slack\",\"external_id\":\"T1:U1\"}")).Status);
+            await using (var connection = await owner.OpenConnectionAsync(ct))
+            {
+                await PersonDirectoryLiveTests.AddHistoryRequestAsync(connection, ct);
+                await PersonDirectoryLiveTests.AddAskerAsync(connection, bo, ct);
+            }
+
+            /* The list carries has_history for every person: the admin role reads the history tables. */
+            var people = (await Send("GET", "/api/people", null)).Body!["people"]!.AsArray();
+            Assert.Equal(["Ann:False", "Bo:True", "Cy:False"],
+                people.Select(p => (string?)p!["display_name"] + ":" + (bool)p["has_history"]!).OrderBy(text => text, StringComparer.Ordinal));
+
+            var inUse = await Send("PUT", "/api/people/delete_person", "application/json", "{\"person_id\":" + ann + "}");
+            Assert.Equal(409, inUse.Status);
+            Assert.Equal("person_in_use", (string?)inUse.Body!["code"]);
+            Assert.Equal("Remove their sign-ins and grants first.", (string?)inUse.Body["message"]);
+
+            var hasHistory = await Send("PUT", "/api/people/delete_person", "application/json", "{\"person_id\":" + bo + "}");
+            Assert.Equal(409, hasHistory.Status);
+            Assert.Equal("person_has_history", (string?)hasHistory.Body!["code"]);
+            Assert.Equal("This person has history, so disable them instead.", (string?)hasHistory.Body["message"]);
+
+            Assert.Equal("3", await ScalarAsync(owner, "SELECT count(*) FROM config.person", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'person_deleted'", ct));
+
+            var deleted = await Send("PUT", "/api/people/delete_person", "application/json", "{\"person_id\":" + cy + "}");
+            Assert.Equal(200, deleted.Status);
+            Assert.Equal("deleted", (string?)deleted.Body!["status"]);
+            Assert.Equal("Deleted Cy.", (string?)deleted.Body["message"]);
+            Assert.Equal("Ann,Bo", await ScalarAsync(owner, "SELECT string_agg(display_name, ',' ORDER BY display_name) FROM config.person", ct));
+            Assert.Equal($"person:alice|web|{cy}|Cy", await ScalarAsync(owner,
+                "SELECT concat_ws('|', actor, detail->>'surface', detail->>'person_id', detail->>'display_name') FROM config.investigation_journal WHERE event = 'person_deleted'", ct));
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_request_askers", ct));
         }, seat: new DarlingWebSeat("alice", true, AliceKey));
     }
 

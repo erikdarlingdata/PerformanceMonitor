@@ -116,6 +116,12 @@ Only an admin who is signed in to the dashboard sees the list, and that includes
 
 To add a person, type the name and click **Add person**. In a person's details you can rename them, disable or enable them, add or remove a sign-in, and add or remove a grant. A grant cannot be edited. Remove it and add it again instead.
 
+### Delete a person
+
+A person added by mistake can be deleted. **Delete** shows in a person's details on the web dashboard, and in the Viewer's People window, when the person has no sign-in, no grant and no history. Remove their sign-ins and grants first if they have any. Darling asks before it deletes, and the delete is recorded with your name.
+
+A person with history cannot be deleted. History is a request they asked the agent or a message they sent it. Disable that person instead, which keeps the record and stops everything they could do.
+
 ### Link a web sign-in to a person
 
 Darling keeps no list of who signs in. So a person gives their sign-in key to an administrator:

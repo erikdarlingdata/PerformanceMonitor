@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
@@ -38,6 +39,7 @@ public sealed class PersonDirectoryCommandTests
     [InlineData("add_person_grant", """{"person_id":3,"capability":"approve","kinds":["kill_session"],"scope_server_id":7}""")]
     [InlineData("add_person_grant", """{"person_id":3,"capability":"ask","scope_tag_id":null}""")]
     [InlineData("remove_person_grant", """{"grant_id":4}""")]
+    [InlineData("delete_person", """{"person_id":3}""")]
     public void EachWrite_IsACommandOfItsOwn_RunByTheService(string type, string args)
     {
         Assert.Equal(CommandKind.PersonDirectoryWrite, DarlingCommandExecutor.ResolvePlan(Command(type, args)).Kind);
@@ -53,6 +55,9 @@ public sealed class PersonDirectoryCommandTests
     [InlineData("add_person_grant", """{"person_id":3,"capability":"ask","scope_server_id":"7"}""")]
     [InlineData("remove_person_grant", "not json")]
     [InlineData("remove_person_grant", null)]
+    [InlineData("delete_person", """{}""")]
+    [InlineData("delete_person", """{"person_id":0}""")]
+    [InlineData("delete_person", """{"person_id":"3"}""")]
     public void BadArguments_FailBeforeAnythingRuns(string type, string? args)
     {
         Assert.Equal(CommandKind.Fail, DarlingCommandExecutor.ResolvePlan(Command(type, args)).Kind);
@@ -122,6 +127,48 @@ public sealed class PersonDirectoryCommandTests
     {
         Assert.Null(PersonDirectory.RefusalForForeignKey(ForeignKeyViolation("fk_something_else").ConstraintName));
         Assert.Null(PersonDirectory.RefusalForForeignKey(null));
+    }
+
+    /// <summary>#8777: a sign-in or grant foreign key that refuses a person's delete answers as the check does, never as a raw error.</summary>
+    [Theory]
+    [InlineData("fk_person_grant_person")]
+    [InlineData("fk_person_identity_person")]
+    public void AForeignKeyThatRefusesADelete_IsTheSignInsAndGrantsRefusal(string constraint)
+    {
+        var refusal = PersonDirectory.RefusalForDeleteForeignKey(ForeignKeyViolation(constraint).ConstraintName, 4);
+        Assert.NotNull(refusal);
+        Assert.False(refusal.Succeeded);
+        Assert.Equal("refused", refusal.Status);
+        Assert.Equal("person_in_use", refusal.Code);
+        Assert.Equal("Remove their sign-ins and grants first.", refusal.Message);
+        Assert.Equal(4L, refusal.PersonId);
+    }
+
+    [Fact]
+    public void AnUnrelatedForeignKeyOnADelete_IsNotRefused_SoItStillThrows()
+    {
+        Assert.Null(PersonDirectory.RefusalForDeleteForeignKey(ForeignKeyViolation("fk_person_grant_server").ConstraintName, 4));
+        Assert.Null(PersonDirectory.RefusalForDeleteForeignKey(null, 4));
+    }
+
+    /// <summary>#8777: the web list says who has history only when it was read. Unread, a person carries no <c>has_history</c> at all.</summary>
+    [Fact]
+    public void TheWebList_MarksWhoHasHistory_OnlyWhenTheHistoryWasRead()
+    {
+        var at = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        PersonRow[] people =
+        [
+            new(1, "Ann", true, at, "person:alice", at, "person:alice", [], []),
+            new(2, "Bob", true, at, "person:alice", at, "person:alice", [], []),
+        ];
+
+        var read = DarlingMcpPeopleTools.ToJson(people, includeExternalIds: true);
+        DarlingWebEndpoints.MarkHistory(read, new HashSet<long> { 2 });
+        Assert.Equal([false, true], read["people"]!.AsArray().Select(p => (bool)p!["has_history"]!));
+
+        var unread = DarlingMcpPeopleTools.ToJson(people, includeExternalIds: true);
+        DarlingWebEndpoints.MarkHistory(unread, null);
+        Assert.All(unread["people"]!.AsArray(), p => Assert.False(p!.AsObject().ContainsKey("has_history")));
     }
 
     [Fact]
@@ -224,8 +271,11 @@ public sealed class PersonDirectoryLiveTests
             Assert.Equal("removed", (await PersonDirectory.RemoveIdentityAsync(owner, slack.IdentityId!.Value, Admin, ServerActionSurfaces.Viewer, ct)).Status);
             Assert.Equal("removed", (await PersonDirectory.RemoveGrantAsync(owner, approve.GrantId!.Value, Admin, ServerActionSurfaces.Viewer, ct)).Status);
 
+            var spare = (await PersonDirectory.AddPersonAsync(owner, "Spare", Admin, ServerActionSurfaces.Viewer, ct)).PersonId!.Value;
+            Assert.Equal("deleted", (await PersonDirectory.DeletePersonAsync(owner, spare, Admin, ServerActionSurfaces.Viewer, ct)).Status);
+
             /* One journal row per change (the unchanged rename wrote none), every one by the administrator, and each event kind present. */
-            Assert.Equal("11", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event LIKE 'person%'", ct));
+            Assert.Equal("13", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event LIKE 'person%'", ct));
             Assert.Equal("0", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event LIKE 'person%' AND actor <> 'person:alice'", ct));
             foreach (var kind in PersonEvents.OwnerOnly)
             {
@@ -242,7 +292,7 @@ public sealed class PersonDirectoryLiveTests
             Assert.Equal("unknown_server", (await PersonDirectory.AddGrantAsync(owner, ann, 99, null, "undo", null, Admin, ServerActionSurfaces.Viewer, ct)).Code);
             Assert.Equal("invalid_scope", (await PersonDirectory.AddGrantAsync(owner, ann, 7, tagId, "undo", null, Admin, ServerActionSurfaces.Viewer, ct)).Code);
             Assert.Equal("unknown_person", (await PersonDirectory.RenamePersonAsync(owner, 999_999, "x", Admin, ServerActionSurfaces.Viewer, ct)).Code);
-            Assert.Equal("11", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event LIKE 'person%'", ct));
+            Assert.Equal("13", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event LIKE 'person%'", ct));
         });
     }
 
@@ -353,6 +403,195 @@ public sealed class PersonDirectoryLiveTests
             Assert.Equal(journalBefore, await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal", ct));
         });
     }
+
+    private static readonly Guid s_historyRequest = Guid.Parse("87770000-0000-4000-8000-000000000001");
+
+    /// <summary>The request the history rows of the delete tests (#8777) hang from.</summary>
+    internal static Task AddHistoryRequestAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        ActionProposalStoreLiveTests.AddRequestAsync(connection, s_historyRequest, "claimed", ct);
+
+    /// <summary>Makes the person an asker of the history request: history whose foreign key cascades with the person.</summary>
+    internal static async Task AddAskerAsync(NpgsqlConnection connection, long personId, CancellationToken ct, NpgsqlTransaction? transaction = null)
+    {
+        await using var command = new NpgsqlCommand(
+            "INSERT INTO config.investigation_request_askers (request_id, person_id, identity, request_level) "
+            + $"VALUES ('{s_historyRequest}', {personId}, 'slack:T01:U{personId}', 1)", connection, transaction);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Gives the person one message in the history request's thread: history whose foreign key sets the person to null.</summary>
+    internal static Task AddMessageAsync(NpgsqlConnection connection, long personId, CancellationToken ct) =>
+        ExecAsync(connection,
+            "INSERT INTO config.investigation_person_messages (channel_id, ts, thread_ts, thread_request_id, person_id, identity, message_text, state) "
+            + $"VALUES ('C8777', '1700000000.{personId:D6}', '1700000000.000100', '{s_historyRequest}', {personId}, 'slack:T01:U{personId}', 'is it still blocked?', 'waiting')", ct);
+
+    private static async Task<long> AddAsync(NpgsqlDataSource owner, string name, CancellationToken ct) =>
+        (await PersonDirectory.AddPersonAsync(owner, name, "person:alice", ServerActionSurfaces.Viewer, ct)).PersonId!.Value;
+
+    [Fact]
+    public async Task APersonWithNothingAttached_IsDeleted_AndJournaledUnderTheAdministrator_WithTheIdAndName()
+    {
+        await WithStoreAsync(async (connection, owner, ct) =>
+        {
+            const string Admin = "person:alice";
+            var ann = await AddAsync(owner, "Ann", ct);
+            await AddAsync(owner, "Bob", ct);
+
+            var deleted = await PersonDirectory.DeletePersonAsync(owner, ann, Admin, ServerActionSurfaces.Web, ct);
+            Assert.True(deleted.Succeeded, deleted.Message);
+            Assert.Equal("deleted", deleted.Status);
+            Assert.Null(deleted.Code);
+            Assert.Equal("Deleted Ann.", deleted.Message);
+            Assert.Equal(ann, deleted.PersonId);
+            Assert.Equal("Bob", await ScalarAsync(connection, "SELECT string_agg(display_name, ',') FROM config.person", ct));
+
+            Assert.Equal("1", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'person_deleted'", ct));
+            Assert.Equal($"{deleted.JournalId}|person:alice|web|{ann}|Ann", await ScalarAsync(connection,
+                "SELECT concat_ws('|', journal_id, actor, detail->>'surface', detail->>'person_id', detail->>'display_name') FROM config.investigation_journal WHERE event = 'person_deleted'", ct));
+
+            /* A person who is gone is the unknown person every other people write answers, and journals nothing. */
+            var journalBefore = await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal", ct);
+            var again = await PersonDirectory.DeletePersonAsync(owner, ann, Admin, ServerActionSurfaces.Web, ct);
+            Assert.False(again.Succeeded);
+            Assert.Equal("refused", again.Status);
+            Assert.Equal("unknown_person", again.Code);
+            Assert.Equal(journalBefore, await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal", ct));
+        });
+    }
+
+    [Fact]
+    public async Task APersonWithASignInOrAGrant_IsRefused_UntilBothAreRemoved()
+    {
+        await WithStoreAsync(async (connection, owner, ct) =>
+        {
+            const string Admin = "person:alice";
+            var ann = await AddAsync(owner, "Ann", ct);
+            var identity = await PersonDirectory.AddIdentityAsync(owner, ann, "slack", "T01:U02", Admin, ServerActionSurfaces.Viewer, ct);
+            Assert.True(identity.Succeeded, identity.Message);
+            var grant = await PersonDirectory.AddGrantAsync(owner, ann, null, null, "ask", null, Admin, ServerActionSurfaces.Viewer, ct);
+            Assert.True(grant.Succeeded, grant.Message);
+
+            async Task AssertInUseAsync(string identities, string grants)
+            {
+                var journalBefore = await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal", ct);
+                var refused = await PersonDirectory.DeletePersonAsync(owner, ann, Admin, ServerActionSurfaces.Web, ct);
+                Assert.False(refused.Succeeded);
+                Assert.Equal("refused", refused.Status);
+                Assert.Equal(PersonDirectory.PersonInUseCode, refused.Code);
+                Assert.Equal("Remove their sign-ins and grants first.", refused.Message);
+                Assert.Equal(ann, refused.PersonId);
+                Assert.Equal("1", await ScalarAsync(connection, "SELECT count(*) FROM config.person", ct));
+                Assert.Equal(identities, await ScalarAsync(connection, "SELECT count(*) FROM config.person_identity", ct));
+                Assert.Equal(grants, await ScalarAsync(connection, "SELECT count(*) FROM config.person_grant", ct));
+                Assert.Equal(journalBefore, await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal", ct));
+            }
+
+            /* Both, then the grant alone, then a sign-in alone: each one refuses the delete on its own. */
+            await AssertInUseAsync("1", "1");
+            Assert.Equal("removed", (await PersonDirectory.RemoveIdentityAsync(owner, identity.IdentityId!.Value, Admin, ServerActionSurfaces.Viewer, ct)).Status);
+            await AssertInUseAsync("0", "1");
+            Assert.Equal("removed", (await PersonDirectory.RemoveGrantAsync(owner, grant.GrantId!.Value, Admin, ServerActionSurfaces.Viewer, ct)).Status);
+            var second = await PersonDirectory.AddIdentityAsync(owner, ann, "slack", "T01:U03", Admin, ServerActionSurfaces.Viewer, ct);
+            Assert.True(second.Succeeded, second.Message);
+            await AssertInUseAsync("1", "0");
+            Assert.Equal("removed", (await PersonDirectory.RemoveIdentityAsync(owner, second.IdentityId!.Value, Admin, ServerActionSurfaces.Viewer, ct)).Status);
+
+            Assert.Equal("deleted", (await PersonDirectory.DeletePersonAsync(owner, ann, Admin, ServerActionSurfaces.Web, ct)).Status);
+            Assert.Equal("0", await ScalarAsync(connection, "SELECT count(*) FROM config.person", ct));
+        });
+    }
+
+    [Fact]
+    public async Task APersonWithHistory_IsRefused_AndTheHistoryIsLeftAsItWas()
+    {
+        await WithStoreAsync(async (connection, owner, ct) =>
+        {
+            const string Admin = "person:alice";
+            var ann = await AddAsync(owner, "Ann", ct);
+            var bob = await AddAsync(owner, "Bob", ct);
+            var cat = await AddAsync(owner, "Cat", ct);
+            var dee = await AddAsync(owner, "Dee", ct);
+            await AddHistoryRequestAsync(connection, ct);
+            await AddAskerAsync(connection, ann, ct);
+            await AddMessageAsync(connection, bob, ct);
+            /* Cat has history and a grant: the history refusal is the one she gets, because removing the grant would not make her deletable. */
+            await AddAskerAsync(connection, cat, ct);
+            Assert.True((await PersonDirectory.AddGrantAsync(owner, cat, null, null, "ask", null, Admin, ServerActionSurfaces.Viewer, ct)).Succeeded);
+            var journalBefore = await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal", ct);
+
+            Assert.Equal([ann, bob, cat], (await PersonDirectory.PeopleWithHistoryAsync(owner, ct))!.OrderBy(id => id));
+
+            foreach (var person in new[] { ann, bob, cat })
+            {
+                var refused = await PersonDirectory.DeletePersonAsync(owner, person, Admin, ServerActionSurfaces.Viewer, ct);
+                Assert.False(refused.Succeeded);
+                Assert.Equal("refused", refused.Status);
+                Assert.Equal(PersonDirectory.PersonHasHistoryCode, refused.Code);
+                Assert.Equal("This person has history, so disable them instead.", refused.Message);
+                Assert.Equal(person, refused.PersonId);
+            }
+
+            Assert.Equal("4", await ScalarAsync(connection, "SELECT count(*) FROM config.person", ct));
+            Assert.Equal("2", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_request_askers", ct));
+            Assert.Equal(bob.ToString(CultureInfo.InvariantCulture), await ScalarAsync(connection, "SELECT person_id FROM config.investigation_person_messages", ct));
+            Assert.Equal(journalBefore, await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal", ct));
+
+            /* Disabling is what the refusal points at, and it is open to a person with history. */
+            Assert.Equal("disabled", (await PersonDirectory.SetPersonEnabledAsync(owner, ann, false, Admin, ServerActionSurfaces.Viewer, ct)).Status);
+
+            /* A person with no history deletes, and the others' history stays. */
+            Assert.Equal("deleted", (await PersonDirectory.DeletePersonAsync(owner, dee, Admin, ServerActionSurfaces.Viewer, ct)).Status);
+            Assert.Equal([ann, bob, cat], (await PersonDirectory.PeopleWithHistoryAsync(owner, ct))!.OrderBy(id => id));
+        });
+    }
+
+    [Fact]
+    public async Task ASignInOrHistoryAddedAtTheSameMoment_MakesTheDeleteWait_ThenRefuseIt_AndNothingIsOrphaned()
+    {
+        await WithStoreAsync(async (connection, owner, ct) =>
+        {
+            const string Admin = "person:alice";
+            var ann = await AddAsync(owner, "Ann", ct);
+            var bob = await AddAsync(owner, "Bob", ct);
+            await AddHistoryRequestAsync(connection, ct);
+            var journalBefore = await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal", ct);
+
+            async Task<PersonWriteResult> DeleteWhileAsync(long person, Func<NpgsqlConnection, NpgsqlTransaction, Task> insert)
+            {
+                /* Another transaction has inserted a row that references the person and not committed: the delete's checks cannot see it, so the
+                   delete waits on the person's row, and when the other transaction commits the checks read the row. */
+                await using var other = await owner.OpenConnectionAsync(ct);
+                await using var otherTransaction = await other.BeginTransactionAsync(ct);
+                await insert(other, otherTransaction);
+
+                var racing = PersonDirectory.DeletePersonAsync(owner, person, Admin, ServerActionSurfaces.Web, ct);
+                for (var i = 0; i < 100 && await ScalarAsync(connection, "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()", ct) == "0"; i++)
+                    await Task.Delay(100, ct);
+                Assert.False(racing.IsCompleted);
+                await otherTransaction.CommitAsync(ct);
+                return await racing;
+            }
+
+            var signIn = await DeleteWhileAsync(ann, async (other, transaction) =>
+            {
+                await using var insert = new NpgsqlCommand(
+                    "INSERT INTO config.person_identity (person_id, kind, external_id, created_by) VALUES (@p, 'slack', 'T01:U02', 'person:bob')", other, transaction);
+                insert.Parameters.AddWithValue("p", ann);
+                await insert.ExecuteNonQueryAsync(ct);
+            });
+            Assert.False(signIn.Succeeded);
+            Assert.Equal(PersonDirectory.PersonInUseCode, signIn.Code);
+
+            var history = await DeleteWhileAsync(bob, (other, transaction) => AddAskerAsync(other, bob, ct, transaction));
+            Assert.False(history.Succeeded);
+            Assert.Equal(PersonDirectory.PersonHasHistoryCode, history.Code);
+
+            Assert.Equal("2", await ScalarAsync(connection, "SELECT count(*) FROM config.person", ct));
+            Assert.Equal(ann.ToString(CultureInfo.InvariantCulture), await ScalarAsync(connection, "SELECT person_id FROM config.person_identity", ct));
+            Assert.Equal(bob.ToString(CultureInfo.InvariantCulture), await ScalarAsync(connection, "SELECT person_id FROM config.investigation_request_askers", ct));
+            Assert.Equal(journalBefore, await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal", ct));
+        });
+    }
 }
 
 /// <summary>
@@ -452,6 +691,14 @@ public sealed class PersonDirectoryGrantLiveTests
             await using var source = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = role, Password = password, Pooling = false }.ConnectionString);
             var refused = await Assert.ThrowsAsync<PostgresException>(() => PersonDirectory.AddPersonAsync(source, "Eve", "person:eve", ServerActionSurfaces.Viewer, ct));
             Assert.Equal("42501", refused.SqlState);
+
+            /* #8777: who has history is read by the admin login, which holds SELECT on the two history tables. The mcp login holds none, and
+               the read answers that it does not know. */
+            var history = await PersonDirectory.PeopleWithHistoryAsync(source, ct);
+            if (role == "admin")
+                Assert.Empty(Assert.IsAssignableFrom<IReadOnlySet<long>>(history));
+            else
+                Assert.Null(history);
         }
 
         Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.person", ct));

@@ -35,10 +35,11 @@ public static class PersonEvents
     public const string IdentityRemoved = "person_identity_removed";
     public const string GrantAdded = "person_grant_added";
     public const string GrantRemoved = "person_grant_removed";
+    public const string PersonDeleted = "person_deleted";
 
     /// <summary>Every event above, for the journal trigger's owner-only list.</summary>
     public static IReadOnlyList<string> OwnerOnly { get; } =
-        [PersonAdded, PersonRenamed, PersonEnabled, PersonDisabled, IdentityAdded, IdentityRemoved, GrantAdded, GrantRemoved];
+        [PersonAdded, PersonRenamed, PersonEnabled, PersonDisabled, IdentityAdded, IdentityRemoved, GrantAdded, GrantRemoved, PersonDeleted];
 }
 
 /// <summary>The identity kinds of a person (#7107).</summary>
@@ -201,6 +202,56 @@ RETURNING journal_id";
                 new JsonObject { ["surface"] = surface, ["person_id"] = personId, ["display_name"] = person.Name }, cancellationToken);
             return new PersonWriteResult(true, enabled ? "enabled" : "disabled", null, $"{person.Name} is now {(enabled ? "enabled" : "disabled")}.", personId,
                 JournalId: journalId);
+        }, cancellationToken);
+
+    /// <summary>The code of the refusal to delete a person who still has a sign-in or a grant (#8777).</summary>
+    public const string PersonInUseCode = "person_in_use";
+
+    /// <summary>The code of the refusal to delete a person who has history (#8777).</summary>
+    public const string PersonHasHistoryCode = "person_has_history";
+
+    internal const string PersonHasHistorySql = @"
+SELECT EXISTS (SELECT 1 FROM config.investigation_request_askers WHERE person_id = $1)
+    OR EXISTS (SELECT 1 FROM config.investigation_person_messages WHERE person_id = $1)";
+
+    internal const string PersonHasAccessSql = @"
+SELECT EXISTS (SELECT 1 FROM config.person_identity WHERE person_id = $1)
+    OR EXISTS (SELECT 1 FROM config.person_grant WHERE person_id = $1)";
+
+    /// <summary>
+    /// Deletes a person with nothing attached (#8777). A person with history, a row in <c>config.investigation_request_askers</c> or
+    /// <c>config.investigation_person_messages</c>, is refused with <see cref="PersonHasHistoryCode"/>: the first table's foreign key cascades
+    /// and the second's sets null, so a delete would take or orphan that history. History is checked first, because removing sign-ins and grants
+    /// does not make such a person deletable. A person with a sign-in or a grant is refused with <see cref="PersonInUseCode"/>.
+    /// <para>The row lock comes before the checks. Every insert that references the person takes a key-share lock on the person's row, which
+    /// the row lock conflicts with: a sign-in, grant, asker or message row added at the same moment either commits first, and the checks read
+    /// it, or waits for the delete and then fails on its own foreign key. Nothing is left pointing at a deleted person.</para>
+    /// </summary>
+    public static Task<PersonWriteResult> DeletePersonAsync(NpgsqlDataSource owner, long personId, string actor, string surface,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(owner, actor, async (connection, transaction) =>
+        {
+            if (await LockPersonAsync(connection, transaction, personId, cancellationToken) is not { } person)
+                return UnknownPerson(personId);
+            if (await ExistsAsync(connection, transaction, PersonHasHistorySql, personId, cancellationToken))
+                return PersonHasHistory(personId);
+            if (await ExistsAsync(connection, transaction, PersonHasAccessSql, personId, cancellationToken))
+                return PersonInUse(personId);
+
+            try
+            {
+                await using var command = Command(connection, transaction, "DELETE FROM config.person WHERE person_id = $1", Long(personId));
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation && RefusalForDeleteForeignKey(ex.ConstraintName, personId) is { } refusal)
+            {
+                /* A sign-in or grant the check did not read still references the person: the foreign key refuses the delete. Same answer as the check gives. */
+                return refusal;
+            }
+
+            var journalId = await JournalAsync(connection, transaction, null, PersonEvents.PersonDeleted, actor,
+                new JsonObject { ["surface"] = surface, ["person_id"] = personId, ["display_name"] = person.Name }, cancellationToken);
+            return new PersonWriteResult(true, "deleted", null, $"Deleted {person.Name}.", personId, JournalId: journalId);
         }, cancellationToken);
 
     /// <summary>
@@ -433,6 +484,36 @@ ORDER BY g.person_id, g.capability, g.grant_id";
             identities.TryGetValue(p.Id, out var i) ? i : [], grants.TryGetValue(p.Id, out var g) ? g : [])).ToList();
     }
 
+    internal const string PeopleWithHistorySql = @"
+SELECT person_id FROM config.investigation_request_askers
+UNION
+SELECT person_id FROM config.investigation_person_messages WHERE person_id IS NOT NULL";
+
+    /// <summary>
+    /// The ids of the people with history, the people <see cref="DeletePersonAsync"/> refuses with <see cref="PersonHasHistoryCode"/>. Reads
+    /// <c>config.investigation_request_askers</c> and <c>config.investigation_person_messages</c>, which the store owner and the admin role
+    /// read and the viewer, web and mcp roles do not. Answers null when the login may not read them or the store has no such tables: the
+    /// caller then does not know who has history, and the delete itself still refuses.
+    /// </summary>
+    public static async Task<IReadOnlySet<long>?> PeopleWithHistoryAsync(NpgsqlDataSource source, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        try
+        {
+            await using var connection = await source.OpenConnectionAsync(cancellationToken);
+            await using var command = new NpgsqlCommand(PeopleWithHistorySql, connection) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds };
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            var ids = new HashSet<long>();
+            while (await reader.ReadAsync(cancellationToken))
+                ids.Add(reader.GetInt64(0));
+            return ids;
+        }
+        catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.InsufficientPrivilege or PostgresErrorCodes.UndefinedTable)
+        {
+            return null;
+        }
+    }
+
     private static async Task<PersonWriteResult> RunAsync(NpgsqlDataSource owner, string actor,
         Func<NpgsqlConnection, NpgsqlTransaction, Task<PersonWriteResult>> body, CancellationToken cancellationToken)
     {
@@ -469,6 +550,13 @@ ORDER BY g.person_id, g.capability, g.grant_id";
         return await reader.ReadAsync(cancellationToken) ? (reader.GetString(0), reader.GetBoolean(1)) : null;
     }
 
+    private static async Task<bool> ExistsAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, long personId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = Command(connection, transaction, sql, Long(personId));
+        return await command.ExecuteScalarAsync(cancellationToken) is true;
+    }
+
     private static async Task<long> JournalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int? serverId, string journalEvent, string actor,
         JsonObject detail, CancellationToken cancellationToken)
     {
@@ -501,7 +589,23 @@ ORDER BY g.person_id, g.capability, g.grant_id";
     private static PersonWriteResult UnknownPerson(long personId) =>
         new(false, "refused", "unknown_person", "That person does not exist.", personId);
 
+    private static PersonWriteResult PersonInUse(long personId) =>
+        new(false, "refused", PersonInUseCode, "Remove their sign-ins and grants first.", personId);
+
+    private static PersonWriteResult PersonHasHistory(long personId) =>
+        new(false, "refused", PersonHasHistoryCode, "This person has history, so disable them instead.", personId);
+
     private static PersonWriteResult Refused(string code, string message) => new(false, "refused", code, message);
+
+    /// <summary>
+    /// The refusal for a foreign key violation raised by deleting a person, by constraint name, or null for any other foreign key (the caller
+    /// rethrows it). A sign-in or a grant is the only row whose foreign key refuses the delete.
+    /// </summary>
+    public static PersonWriteResult? RefusalForDeleteForeignKey(string? constraintName, long personId) => constraintName switch
+    {
+        "fk_person_grant_person" or "fk_person_identity_person" => PersonInUse(personId),
+        _ => null,
+    };
 
     /// <summary>
     /// The refusal for a foreign key violation raised by a people table insert, by constraint name, or null for any other foreign key (the caller

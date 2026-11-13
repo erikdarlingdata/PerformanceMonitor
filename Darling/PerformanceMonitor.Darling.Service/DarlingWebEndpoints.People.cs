@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Builder;
@@ -25,6 +27,21 @@ public static partial class DarlingWebEndpoints
     /// <summary>The route the Admin People tab reads (#7107).</summary>
     internal const string PeopleRoute = "/api/people";
 
+    /// <summary>Sets <c>has_history</c> on each listed person from the ids of the people with history. A null set, the answer of a login that
+    /// cannot read the history, changes nothing.</summary>
+    internal static void MarkHistory(JsonObject body, IReadOnlySet<long>? withHistory)
+    {
+        if (withHistory is null || body["people"] is not JsonArray people)
+        {
+            return;
+        }
+
+        foreach (var person in people.OfType<JsonObject>())
+        {
+            person["has_history"] = person["person_id"] is JsonValue value && value.TryGetValue(out long id) && withHistory.Contains(id);
+        }
+    }
+
     /// <summary>The 403 a refused people write answers when the web's store login cannot decide (#7107).</summary>
     internal static string PeopleRefusedMessage(bool managedStore, bool adminWritesOff = false) =>
         DarlingWebStoreWrites.Refused("change people, sign-ins or grants", managedStore, adminWritesOff: adminWritesOff);
@@ -33,10 +50,11 @@ public static partial class DarlingWebEndpoints
     /// The people directory routes (#7107). <c>GET /api/people</c> answers <c>{can_decide, signed_in_admin, sign_in_key}</c> to every session,
     /// and adds <c>people_returned</c> and <c>people: [...]</c>, the people with each identity's external id (a web sign-in key or Slack ids),
     /// only to an administrator: a signed-in admin or the shared web token (<see cref="DarlingWebSeat.IsSignedInAdmin"/>). Any other session
-    /// never reads the store here and sees no list. <c>sign_in_key</c> is the requesting session's own owner key
+    /// never reads the store here and sees no list. When that administrator's store login can decide, each person also carries
+    /// <c>has_history</c>, which the page reads to offer Delete (#8777); a login that cannot read the history leaves it out. <c>sign_in_key</c> is the requesting session's own owner key
     /// (<see cref="PersonDirectoryCommands.WebIdentityOf"/>), or null for the shared web token, a reads-only session or an older cookie. It is
     /// only ever the caller's own: it comes from the request's seat, never from the store.
-    /// <c>PUT /api/people/{command}</c>, with the command's args as the JSON body, runs one of the seven people writes through
+    /// <c>PUT /api/people/{command}</c>, with the command's args as the JSON body, runs one of the eight people writes through
     /// <see cref="PersonDirectoryCommands.RunForWebSeatAsync"/>. It runs the checks of <c>PUT /api/servers/{id}/actions/{action}</c> in the same
     /// order before the store is touched: 415 without <c>application/json</c>, 400 for a body that is not a JSON object, 403 unless the request is a
     /// signed-in session that may edit (the shared web token is one, as on the switch route), 400 for a signed-in name that cannot be recorded,
@@ -63,7 +81,15 @@ public static partial class DarlingWebEndpoints
                 var body = signedInAdmin
                     ? DarlingMcpPeopleTools.ToJson(await PersonDirectory.ListAsync(postgres, context.RequestAborted), includeExternalIds: true)
                     : new JsonObject();
-                body["can_decide"] = signedInAdmin && await DecideProbe(context).CanDecideAsync(context.RequestAborted);
+                var canDecide = signedInAdmin && await DecideProbe(context).CanDecideAsync(context.RequestAborted);
+                /* Who has history is read only for a session that can delete, as the login the change is allowed under: the admin role reads
+                   the history tables and the web role does not. */
+                if (canDecide)
+                {
+                    MarkHistory(body, await PersonDirectory.PeopleWithHistoryAsync(WebAdminArm.SourceFor(adminArm, context, postgres), context.RequestAborted));
+                }
+
+                body["can_decide"] = canDecide;
                 body["signed_in_admin"] = signedInAdmin;
                 body["sign_in_key"] = PersonDirectoryCommands.WebIdentityOf(DarlingWebSeat.FromContext(context));
                 return DarlingWebStatementSweep.JsonText(body, PeopleRoute, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
@@ -131,13 +157,13 @@ public static partial class DarlingWebEndpoints
         });
     }
 
-    /// <summary>The HTTP status of a people write's answer (#7107): 200 for a change or no change, 404 for a missing row, 409 for a duplicate or a
-    /// lost race, 403 for a request that is not a signed-in admin, and 400 for every other refusal.</summary>
+    /// <summary>The HTTP status of a people write's answer (#7107): 200 for a change or no change, 404 for a missing row, 409 for a duplicate, a
+    /// lost race or a person who cannot be deleted, 403 for a request that is not a signed-in admin, and 400 for every other refusal.</summary>
     internal static int PersonWriteStatus(PersonWriteResult result) => result.Succeeded ? StatusCodes.Status200OK : result.Code switch
     {
         "sign_in_required" => StatusCodes.Status403Forbidden,
         "unknown_person" or "unknown_identity" or "unknown_grant" or "unknown_server" or "unknown_tag" => StatusCodes.Status404NotFound,
-        "identity_taken" or "grant_exists" or "conflict" => StatusCodes.Status409Conflict,
+        "identity_taken" or "grant_exists" or "conflict" or PersonDirectory.PersonInUseCode or PersonDirectory.PersonHasHistoryCode => StatusCodes.Status409Conflict,
         _ => StatusCodes.Status400BadRequest,
     };
 }
