@@ -379,6 +379,49 @@ INSERT #backupset VALUES
     }
 
     /// <summary>
+    /// #8775: a database on the server's Excluded Databases list is left out of the rows, with its backup history, and the other databases
+    /// stay. Both names are real on every instance, so the batch has rows for them to leave out. The backup of the excluded one proves the
+    /// exclusion works on the catalog read the backups join to, not on the backups.
+    /// </summary>
+    [Fact]
+    public async Task ADatabaseOnTheExcludedList_IsLeftOutOfTheRows_AndTheOthersStay()
+    {
+        var cs = ConnectionString();
+        Assert.SkipWhen(cs is null, "Set DARLING_TEST_SQL to a SQL Server host to run the database protection live SQL test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var connection = new SqlConnection(cs);
+        await connection.OpenAsync(ct);
+
+        await using (var setup = new SqlCommand(@"
+CREATE TABLE #backupset (database_name nvarchar(128), type char(1), backup_finish_date datetime, is_copy_only bit, time_zone smallint);
+INSERT #backupset VALUES
+    (N'master', 'D', DATEADD(DAY, -1, GETDATE()), 0, NULL),
+    (N'model',  'D', DATEADD(DAY, -1, GETDATE()), 0, NULL);", connection))
+        {
+            await setup.ExecuteNonQueryAsync(ct);
+        }
+
+        var excluded = new CollectorContext
+        {
+            CollectionTime = DateTime.UtcNow, ServerId = 1, ServerName = "live-sql", Deltas = new CollectorDeltaCalculator(),
+            ExcludedDatabases = new[] { "model" },
+        };
+        var query = DatabaseProtectionCollector.Instance.BuildQuery(excluded);
+        await using var command = new SqlCommand(query.Text.Replace("msdb.dbo.backupset", "#backupset", StringComparison.Ordinal), connection);
+        foreach (var parameter in query.Parameters)
+        {
+            command.Parameters.Add(parameter.Name, System.Data.SqlDbType.NVarChar, 128).Value = parameter.Value;
+        }
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var rows = await DatabaseProtectionCollector.Instance.ReadAsync(reader, excluded, ct);
+
+        Assert.DoesNotContain(rows, r => r.DatabaseName == "model");
+        Assert.Contains(rows, r => r.DatabaseName == "master");
+    }
+
+    /// <summary>
     /// A backup converts with the offset recorded on its own row (<c>time_zone</c>, 15-minute steps), not the offset in force now,
     /// and the newest is chosen after the conversion. Two log backups on a database are given zones that put the raw-newest one
     /// EARLIER in UTC than the other, so taking the MAX before converting reads the wrong one. A full backup with time_zone 127
