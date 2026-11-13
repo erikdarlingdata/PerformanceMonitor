@@ -442,8 +442,8 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
-    /// The <c>ranked</c> CTE of the interval-table read, with no trailing comma. <c>/*KEYSET*/</c> in its first branch is a comment in the
-    /// one-statement read (<see cref="QueryStoreTopTableSql"/>) and the key-set bound in the two-statement read (<see cref="QueryStoreTopTableByKeysSql"/>).
+    /// The <c>ranked</c> CTE of the interval-table read, with no trailing comma. Both the one-statement read (<see cref="QueryStoreTopTableSql"/>)
+    /// and the two-statement read (<see cref="QueryStoreTopTableByKeysSql"/>) use it as it is.
     /// </summary>
     private const string QueryStoreTopTableRankedCte = $$"""
         ranked AS (
@@ -461,12 +461,11 @@ public sealed partial class ViewerDataService
                    equalities let it hash the WIDE rows instead on a store without the index, which wrote the temp files the narrow ranking
                    exists to avoid (QueryStoreGridNarrowRankLiveTests). A key with a NULL database_name or query_id cannot match a plain
                    equality, so the second branch reads the window for those keys only, and only when such a key was kept (the uncorrelated
-                   EXISTS runs once, before the scan). A row matches at most one branch, so none is read twice. The grid binds the kept keys
-                   as arrays (QueryStoreTopTableByKeysSql), and there /*KEYSET*/ also bounds this first branch on the key set. */
+                   EXISTS runs once, before the scan). A row matches at most one branch, so none is read twice. */
                 SELECT
                     deduped.*
                 FROM deduped
-                WHERE /*KEYSET*/ EXISTS (SELECT 1 FROM keys AS k WHERE k.database_name = deduped.database_name AND k.query_id = deduped.query_id AND {{KeyMatch}})
+                WHERE EXISTS (SELECT 1 FROM keys AS k WHERE k.database_name = deduped.database_name AND k.query_id = deduped.query_id AND {{KeyMatch}})
                 UNION ALL
                 SELECT
                     deduped.*
@@ -631,18 +630,13 @@ public sealed partial class ViewerDataService
         + "SELECT database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role FROM keys";
 
     /// <summary>
-    /// #8549: the grid's table read with the kept keys bound as arrays, run in the same transaction as <see cref="QueryStoreTopTableKeysSql"/>
-    /// so both see one snapshot. The one-statement read joined <c>ranked</c> to <c>keys</c> as a CTE the planner could not size, and it
-    /// probed the (server_id, database_name, query_id, first_execution_time) index once per key and daily leaf: on a field store, 250
-    /// loops over every leaf, each an index probe and then one random heap page per row (about 24,000 reads at 0.67 ms, 16 s of a 23 s
-    /// cold read). With the keys bound as arrays the planner sees their number, and the first branch is bounded on the key set
-    /// (<c>database_name = ANY</c> and <c>query_id = ANY</c> on the same index), so it reads each leaf once: a Bitmap Heap Scan that
-    /// visits every heap page once, in physical order, and prefetches (effective_io_concurrency). The key-set bound is implied by the
-    /// branch's own key match (a matching row has a non-NULL database_name and query_id that a key holds), so it drops no row; the
-    /// exact NULL-safe six-column test stays.
+    /// #8549: the grid's table read with the kept keys bound as arrays (<c>unnest</c>), run in the same transaction as
+    /// <see cref="QueryStoreTopTableKeysSql"/> so both see one snapshot. The per-key join is the one-statement read's (the <c>EXISTS</c> on
+    /// <c>keys</c> with <see cref="KeyMatch"/>), because bounding the first branch with <c>ANY</c> arrays sent the planner to the unique
+    /// identity index with a 1 to 3 row estimate per leaf (about 3,500 to 4,000 rows actual): on a field store 61,611 reads, 18.2 s. The
+    /// caller runs this statement with index scans off, so each leaf is a Bitmap Heap Scan over the db_query_first_exec index per key.
     /// $1 server_id, $2 the read start, $3 window end, $4 top, $5 database filter, $6 to $11 the keys' six columns as parallel arrays
-    /// (database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role), $12 the distinct non-NULL database names
-    /// among them, $13 the distinct non-NULL query ids.
+    /// (database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role).
     /// </summary>
     public static readonly string QueryStoreTopTableByKeysSql = QueryStoreTopTablePrefix
         + "keys AS (\n"
@@ -650,7 +644,7 @@ public sealed partial class ViewerDataService
         + "    FROM unnest($6::text[], $7::bigint[], $8::bigint[], $9::text[], $10::text[], $11::text[])\n"
         + "         AS k(database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role)\n"
         + "),\n"
-        + QueryStoreTopTableRankedCte.Replace("/*KEYSET*/", "deduped.database_name = ANY($12) AND deduped.query_id = ANY($13) AND", StringComparison.Ordinal)
+        + QueryStoreTopTableRankedCte
         + ",\n" + QueryStoreTopTail;
 
     /// <summary>
@@ -789,7 +783,7 @@ public sealed partial class ViewerDataService
             _replicaRoles.Add(reader.IsDBNull(5) ? null : reader.GetString(5));
         }
 
-        /// <summary>Adds $6 to $13 of <see cref="QueryStoreTopTableByKeysSql"/>.</summary>
+        /// <summary>Adds $6 to $11 of <see cref="QueryStoreTopTableByKeysSql"/>.</summary>
         internal void AddParameters(Npgsql.NpgsqlCommand command)
         {
             static Npgsql.NpgsqlParameter Array(NpgsqlTypes.NpgsqlDbType type, object values) =>
@@ -801,8 +795,6 @@ public sealed partial class ViewerDataService
             command.Parameters.Add(Array(NpgsqlTypes.NpgsqlDbType.Text, _queryHashes.ToArray()));
             command.Parameters.Add(Array(NpgsqlTypes.NpgsqlDbType.Text, _executionTypes.ToArray()));
             command.Parameters.Add(Array(NpgsqlTypes.NpgsqlDbType.Text, _replicaRoles.ToArray()));
-            command.Parameters.Add(Array(NpgsqlTypes.NpgsqlDbType.Text, _databaseNames.Where(n => n is not null).Distinct(StringComparer.Ordinal).ToArray()));
-            command.Parameters.Add(Array(NpgsqlTypes.NpgsqlDbType.Bigint, _queryIds.Where(i => i.HasValue).Select(i => i!.Value).Distinct().ToArray()));
         }
     }
 
@@ -872,7 +864,7 @@ public sealed partial class ViewerDataService
             /* #8549: the keys statement reads and aggregates millions of interval rows, and the planner's default parallel costs keep it
                serial. On a 30-day field read, zero setup and tuple costs gave a Gather with 2 workers and took the cold read from 22.8 s
                to 19.5 s. Both go back to their defaults below, so the per-key statement keeps the plan it has always had (a role or database setting still holds). */
-            await SetKeysParallelCostsAsync(connection, transaction, parallel: true, cancellationToken);
+            await SetKeysParallelCostsAsync(connection, transaction, cancellationToken);
             await using (var keysCommand = new Npgsql.NpgsqlCommand(keysSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds })
             {
                 AddTableReadParameters(keysCommand, serverId, plan.ReadStart, literalEndUtc, top, databaseNames);
@@ -884,7 +876,13 @@ public sealed partial class ViewerDataService
                 }
             }
 
-            await SetKeysParallelCostsAsync(connection, transaction, parallel: false, cancellationToken);
+            /* #8549: statement 2 reads each kept key's rows by key. With index scans off, each leaf runs a Bitmap Index Scan on
+               db_query_first_exec per key and a Bitmap Heap Scan (heap pages in physical order, prefetched); with them on, the planner
+               picks the unique identity index and reads 2.5 times the pages. Field read of 30 days, cold: 61,611 reads and 18.2 s of
+               per-key I/O with plain index scans, 23,951 reads and 8.0 s with them off. enable_indexscan = off also turns off
+               index-only scans, which is why the keys statement ran first. This is the transaction's last statement, so SET LOCAL
+               ends with it. */
+            await SetPerKeyFetchPlanAsync(connection, transaction, cancellationToken);
 
             await using (var command = new Npgsql.NpgsqlCommand(topSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds })
             {
@@ -906,13 +904,21 @@ public sealed partial class ViewerDataService
         }
     }
 
-    /// <summary>#8549: sets the two parallel-plan costs for the rest of the transaction, to zero for the keys statement and back to the
-    /// session defaults (not to a literal) for the per-key statement.</summary>
-    private static async Task SetKeysParallelCostsAsync(Npgsql.NpgsqlConnection connection, Npgsql.NpgsqlTransaction transaction, bool parallel, CancellationToken cancellationToken)
+    /// <summary>#8549: the parallel costs back to the session defaults and plain index scans off, for the per-key statement alone.</summary>
+    private static async Task SetPerKeyFetchPlanAsync(Npgsql.NpgsqlConnection connection, Npgsql.NpgsqlTransaction transaction, CancellationToken cancellationToken)
     {
-        var value = parallel ? "0" : "DEFAULT";
         await using var set = new Npgsql.NpgsqlCommand(
-            $"SET LOCAL parallel_setup_cost TO {value}; SET LOCAL parallel_tuple_cost TO {value}", connection, transaction)
+            "SET LOCAL parallel_setup_cost TO DEFAULT; SET LOCAL parallel_tuple_cost TO DEFAULT; SET LOCAL enable_indexscan TO off", connection, transaction)
+        { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+        await set.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>#8549: sets the two parallel-plan costs to zero for the rest of the transaction, for the keys statement alone.
+    /// <see cref="SetPerKeyFetchPlanAsync"/> puts them back to the session defaults.</summary>
+    private static async Task SetKeysParallelCostsAsync(Npgsql.NpgsqlConnection connection, Npgsql.NpgsqlTransaction transaction, CancellationToken cancellationToken)
+    {
+        await using var set = new Npgsql.NpgsqlCommand(
+            "SET LOCAL parallel_setup_cost TO 0; SET LOCAL parallel_tuple_cost TO 0", connection, transaction)
         { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
         await set.ExecuteNonQueryAsync(cancellationToken);
     }

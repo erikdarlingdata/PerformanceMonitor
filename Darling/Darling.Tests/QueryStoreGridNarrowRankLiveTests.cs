@@ -221,6 +221,8 @@ ANALYZE collect.query_store_interval_wide;", ct);
             }
         }
 
+        /* The read runs the per-key statement with plain index scans off (ViewerDataService.SetPerKeyFetchPlanAsync). */
+        await ExecuteAsync(connection, "SET enable_indexscan = off", ct);
         await using var twoStatement = new NpgsqlCommand(ViewerDataService.QueryStoreTopTableByKeysSql, connection) { CommandTimeout = 300 };
         AddShared(twoStatement);
         keys.AddParameters(twoStatement);
