@@ -121,6 +121,7 @@
                                 Padding="14,6"
                                 Margin="0,0,2,0">
                             <ContentPresenter ContentSource="Header"
+                                              RecognizesAccessKey="True"
                                               HorizontalAlignment="Center"
                                               VerticalAlignment="Center"/>
                         </Border>

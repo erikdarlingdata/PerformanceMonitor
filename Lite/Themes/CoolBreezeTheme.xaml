@@ -817,6 +817,7 @@
                             Margin="{TemplateBinding Margin}">
                         <ContentPresenter x:Name="contentPresenter"
                                           ContentSource="Header"
+                                          RecognizesAccessKey="True"
                                           HorizontalAlignment="Center"
                                           VerticalAlignment="Center">
                             <ContentPresenter.Resources>
@@ -858,6 +859,7 @@
                             BorderThickness="0"
                             Padding="{TemplateBinding Padding}">
                         <ContentPresenter ContentSource="Header"
+                                          RecognizesAccessKey="True"
                                           HorizontalAlignment="Center"
                                           VerticalAlignment="Center"/>
                     </Border>
@@ -894,6 +896,7 @@
                             BorderThickness="0"
                             Padding="{TemplateBinding Padding}">
                         <ContentPresenter ContentSource="Header"
+                                          RecognizesAccessKey="True"
                                           HorizontalAlignment="Center"
                                           VerticalAlignment="Center"/>
                     </Border>
