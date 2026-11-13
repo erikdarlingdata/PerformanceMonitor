@@ -357,6 +357,16 @@ public sealed class FrontDoorWebProxyTests
         Assert.Null(json["subject"]);
         Assert.Empty(a.Api);
         Assert.Empty(b.Api);
+
+        var (viewerResponse, viewerBody) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/me", FrontDoorSeat.Viewer, store: "use1"));
+
+        Assert.Equal(HttpStatusCode.OK, viewerResponse.StatusCode);
+        var viewerJson = System.Text.Json.Nodes.JsonNode.Parse(viewerBody)!.AsObject();
+        Assert.Equal("read_only", (string?)viewerJson["seat"]);
+        Assert.Equal("oidc", (string?)viewerJson["method"]);
+        Assert.Equal("viewer@example.test", (string?)viewerJson["subject"]);
+        Assert.Empty(a.Api);
+        Assert.Empty(b.Api);
     }
 
     [Fact(Timeout = 60_000)]
