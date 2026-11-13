@@ -41,7 +41,7 @@ public sealed class ProvisionRolesOwnerRunLiveTests
     {
         await RunInOwnStoreAsync(createRole: true, async (runtimeRoot, directory, superuser, ownerLogin, ct) =>
         {
-            var run = await ComposeStoreRolesLiveTests.RunFilledScriptAsync(runtimeRoot, directory, ownerLogin, null, Passwords, ct, OnErrorStop);
+            var run = await RunOwnerScriptAsync(runtimeRoot, directory, ownerLogin, ct);
 
             Assert.True(run.ExitCode == 0, $"psql exited {run.ExitCode}, not 0.{Environment.NewLine}{run.Error}");
             Assert.Single(SettingsWarnings(run.Error));
@@ -57,7 +57,7 @@ public sealed class ProvisionRolesOwnerRunLiveTests
     {
         await RunInOwnStoreAsync(createRole: true, async (runtimeRoot, directory, superuser, ownerLogin, ct) =>
         {
-            var first = await ComposeStoreRolesLiveTests.RunFilledScriptAsync(runtimeRoot, directory, ownerLogin, null, Passwords, ct, OnErrorStop);
+            var first = await RunOwnerScriptAsync(runtimeRoot, directory, ownerLogin, ct);
             Assert.True(first.ExitCode == 0, $"the first run exited {first.ExitCode}, not 0.{Environment.NewLine}{first.Error}");
             Assert.Single(SettingsWarnings(first.Error));
 
@@ -69,7 +69,7 @@ public sealed class ProvisionRolesOwnerRunLiveTests
             });
             await ComposeStoreRolesLiveTests.ExecAsync(superuser, string.Join("; ", statements), ct);
 
-            var second = await ComposeStoreRolesLiveTests.RunFilledScriptAsync(runtimeRoot, directory, ownerLogin, null, Passwords, ct, OnErrorStop);
+            var second = await RunOwnerScriptAsync(runtimeRoot, directory, ownerLogin, ct);
             Assert.True(second.ExitCode == 0, $"the second run exited {second.ExitCode}, not 0.{Environment.NewLine}{second.Error}");
             Assert.Empty(SettingsWarnings(second.Error));
             Assert.DoesNotContain("superuser-only settings", second.Error, StringComparison.Ordinal);
@@ -81,11 +81,16 @@ public sealed class ProvisionRolesOwnerRunLiveTests
     {
         await RunInOwnStoreAsync(createRole: false, async (runtimeRoot, directory, superuser, ownerLogin, ct) =>
         {
-            var run = await ComposeStoreRolesLiveTests.RunFilledScriptAsync(runtimeRoot, directory, ownerLogin, null, Passwords, ct, OnErrorStop);
+            /* The guard names the owner's missing CREATEROLE only for roles that already exist; with none, CREATE ROLE itself is refused. */
+            foreach (var role in new[] { "admin", "viewer", "web", "mcp" })
+            {
+                await ComposeStoreRolesLiveTests.ExecAsync(superuser, $"CREATE ROLE {role} LOGIN NOSUPERUSER; COMMENT ON ROLE {role} IS 'darling-managed'", ct);
+            }
+
+            var run = await RunOwnerScriptAsync(runtimeRoot, directory, ownerLogin, ct);
 
             Assert.True(run.ExitCode == 3, $"psql exited {run.ExitCode}, not 3.{Environment.NewLine}{run.Error}");
-            Assert.Contains("does not have CREATEROLE", run.Error, StringComparison.Ordinal);
-            Assert.False(await ComposeStoreRolesLiveTests.RoleExistsAsync(superuser, "admin", ct), "the guard's stop still created a role.");
+            Assert.True(run.Error.Contains("does not have CREATEROLE", StringComparison.Ordinal), run.Error);
         });
     }
 
@@ -99,12 +104,29 @@ public sealed class ProvisionRolesOwnerRunLiveTests
                 "pg_stat_statements is not in shared_preload_libraries on this runtime, so there is no utility tracking to guard against.");
             await ComposeStoreRolesLiveTests.ExecAsync(superuser, "ALTER ROLE prov_owner SET pg_stat_statements.track_utility = on", ct);
 
-            var run = await ComposeStoreRolesLiveTests.RunFilledScriptAsync(runtimeRoot, directory, ownerLogin, null, Passwords, ct, OnErrorStop);
+            var run = await RunOwnerScriptAsync(runtimeRoot, directory, ownerLogin, ct);
 
             Assert.True(run.ExitCode == 3, $"psql exited {run.ExitCode}, not 3.{Environment.NewLine}{run.Error}");
             Assert.Contains("pg_stat_statements.track_utility is on", run.Error, StringComparison.Ordinal);
             Assert.False(await ComposeStoreRolesLiveTests.RoleExistsAsync(superuser, "admin", ct), "the guard's stop still created a role.");
         });
+    }
+
+    /// <summary>The shipped script with the BEFORE RUNNING substitutions a deployment makes: the four passwords, the owner role in the
+    /// <c>ALTER DEFAULT PRIVILEGES FOR ROLE darling</c> lines and the database in the four <c>ON DATABASE darling</c> lines. It runs
+    /// under <c>-v ON_ERROR_STOP=1</c>, so an unsubstituted owner name would stop the run at step 4.</summary>
+    private static Task<(int ExitCode, string Output, string Error)> RunOwnerScriptAsync(string runtimeRoot, string directory, string ownerLogin, CancellationToken ct)
+    {
+        var script = File.ReadAllText(ComposeStoreRolesLiveTests.ShippedScriptPath())
+            .Replace("CHANGE_ME_ADMIN_PASSWORD", Passwords[0], StringComparison.Ordinal)
+            .Replace("CHANGE_ME_VIEWER_PASSWORD", Passwords[1], StringComparison.Ordinal)
+            .Replace("CHANGE_ME_MCP_PASSWORD", Passwords[2], StringComparison.Ordinal)
+            .Replace("CHANGE_ME_WEB_PASSWORD", "WebPw8779R1", StringComparison.Ordinal)
+            .Replace("ALTER DEFAULT PRIVILEGES FOR ROLE darling IN SCHEMA ", "ALTER DEFAULT PRIVILEGES FOR ROLE prov_owner IN SCHEMA ", StringComparison.Ordinal)
+            .Replace("ON DATABASE darling ", "ON DATABASE prov_store ", StringComparison.Ordinal);
+        var path = Path.Combine(directory, $"provision-{Guid.NewGuid():N}.sql");
+        File.WriteAllText(path, script);
+        return ComposeStoreRolesLiveTests.RunPsqlScriptAsync(runtimeRoot, ownerLogin, null, path, ct, OnErrorStop);
     }
 
     private static string[] SettingsWarnings(string error) =>
@@ -151,6 +173,14 @@ BEGIN
             CASE r.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'S' THEN 'SEQUENCE' ELSE 'TABLE' END, r.nspname, r.relname);
       EXCEPTION WHEN others THEN
          RAISE NOTICE 'could not hand % to prov_owner: %', r.relname, SQLERRM;
+      END;
+   END LOOP;
+   FOR r IN SELECT n.nspname, p.proname, p.oid::regprocedure::text AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname IN ('collect', 'config') AND p.prokind IN ('f', 'p') LOOP
+      BEGIN
+         EXECUTE format('ALTER ROUTINE %s OWNER TO prov_owner', r.signature);
+      EXCEPTION WHEN others THEN
+         RAISE NOTICE 'could not hand % to prov_owner: %', r.signature, SQLERRM;
       END;
    END LOOP;
 END $$;", ct);
