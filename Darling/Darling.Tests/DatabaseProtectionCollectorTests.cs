@@ -304,7 +304,7 @@ public sealed class DatabaseProtectionStoreLiveTests
 /// <summary>
 /// #6873: the collector's real SQL Server batch against a live instance, gated on <c>DARLING_TEST_SQL</c> (optional
 /// <c>DARLING_TEST_SQL_USER</c> and <c>DARLING_TEST_SQL_PASSWORD</c>). It writes nothing to msdb: the batch's <c>msdb.dbo.backupset</c> is
-/// pointed at a session temp table, so a copy_only backup and a backup older than the 60-day window can be put in front of the real
+/// pointed at a session temp table, so a copy_only backup (which counts, #8771) and a backup older than the 60-day window can be put in front of the real
 /// query, which the fake-reader tests cannot reach.
 /// </summary>
 public sealed class DatabaseProtectionLiveSqlTests
@@ -335,7 +335,7 @@ public sealed class DatabaseProtectionLiveSqlTests
     }
 
     [Fact]
-    public async Task TheRealBatch_LeavesOutCopyOnlyAndOldBackups_TakesTheNewestOfEachType_AndConvertsToUtc()
+    public async Task TheRealBatch_CountsCopyOnlyBackups_LeavesOutOldOnes_TakesTheNewestOfEachType_AndConvertsToUtc()
     {
         var cs = ConnectionString();
         Assert.SkipWhen(cs is null, "Set DARLING_TEST_SQL to a SQL Server host to run the database protection live SQL test.");
@@ -350,9 +350,10 @@ public sealed class DatabaseProtectionLiveSqlTests
 CREATE TABLE #backupset (database_name nvarchar(128), type char(1), backup_finish_date datetime, is_copy_only bit, time_zone smallint);
 INSERT #backupset VALUES
     (N'master', 'D', DATEADD(DAY, -2, GETDATE()), 0, NULL),
-    (N'master', 'D', DATEADD(DAY, -1, GETDATE()), 1, NULL),   /* newer, but copy_only: must not win */
+    (N'master', 'D', DATEADD(DAY, -1, GETDATE()), 1, NULL),   /* newer and copy_only: counts, so it wins (#8771) */
     (N'master', 'L', DATEADD(DAY, -70, GETDATE()), 0, NULL),  /* older than the 60-day window: reads as none */
-    (N'model',  'D', DATEADD(DAY, -3, GETDATE()), 0, NULL);", connection))
+    (N'model',  'D', DATEADD(DAY, -3, GETDATE()), 0, NULL),
+    (N'model',  'L', DATEADD(HOUR, -1, GETDATE()), 1, NULL);   /* a copy-only log backup counts too (#8771) */", connection))
         {
             await setup.ExecuteNonQueryAsync(ct);
         }
@@ -364,8 +365,11 @@ INSERT #backupset VALUES
 
         var master = rows.Single(r => r.DatabaseName == "master");
         Assert.NotNull(master.LastFullBackupTime);
-        /* the two-day-old non-copy_only backup, in UTC, not yesterday's copy_only one */
-        Assert.InRange((DateTime.UtcNow - master.LastFullBackupTime!.Value).TotalHours, 47.0, 49.0);
+        /* yesterday's copy_only full, in UTC, not the older ordinary one */
+        Assert.InRange((DateTime.UtcNow - master.LastFullBackupTime!.Value).TotalHours, 23.0, 25.0);
+        var model = rows.Single(r => r.DatabaseName == "model");
+        Assert.NotNull(model.LastLogBackupTime);
+        Assert.InRange((DateTime.UtcNow - model.LastLogBackupTime!.Value).TotalMinutes, 55.0, 65.0);
         Assert.Null(master.LastLogBackupTime);
         /* master is SIMPLE on a stock instance, where no log backup is expected, otherwise the 70-day-old one reads as none in the window */
         Assert.Equal(

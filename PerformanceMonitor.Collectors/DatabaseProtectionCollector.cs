@@ -19,7 +19,7 @@ namespace PerformanceMonitor.Collectors;
 /// #6873 (part of #6872): per database, the last good CHECKDB, the last full backup and the last log backup, as raw facts plus a
 /// platform label. One pass over <c>sys.databases</c> with <c>DATABASEPROPERTYEX(name, 'LastGoodCheckDbTime')</c>, and ONE grouped
 /// read of <c>msdb.dbo.backupset</c> over the last <see cref="BackupWindowDays"/> days (MAX(backup_finish_date) per database and type,
-/// copy_only backups left out). Whether a figure is OVERDUE is not decided here: the store keeps what the server said and the
+/// copy_only backups included: a copy-only full restores like any full and a copy-only log restores on top of the chain, #8771). Whether a figure is OVERDUE is not decided here: the store keeps what the server said and the
 /// reader judges it against the thresholds.
 ///
 /// <para><b>States, so a reader never has to guess.</b> <c>checkdb_state</c>: <c>checked</c> (a real time), <c>never</c>
@@ -125,8 +125,8 @@ WITH
                     bs.backup_finish_date
                 )
     ) AS u
+    /* Copy-only backups count: a backup tool that writes every backup as copy-only would otherwise leave every database unprotected (#8771). */
     WHERE bs.backup_finish_date >= DATEADD(DAY, -{BackupWindowDays}, GETDATE())
-    AND   bs.is_copy_only = 0
     AND   bs.type IN ('D', 'L')
     GROUP BY
         bs.database_name
