@@ -137,7 +137,7 @@ public sealed class ProvisionRolesOwnerRunLiveTests
     /// runtime root, a scratch directory, the superuser and the owner's connection strings (both on
     /// <c>prov_store</c>). When pg_stat_statements is loaded the owner's utility tracking is set off at the role level
     /// (the owner may not switch it off itself), so the run reaches the settings; the guard test sets it back on.</summary>
-    private static async Task RunInOwnStoreAsync(
+    internal static async Task RunInOwnStoreAsync(
         bool createRole,
         Func<string, string, string, string, CancellationToken, Task> body)
     {
