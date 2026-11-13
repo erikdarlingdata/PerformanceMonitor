@@ -429,7 +429,10 @@ VALUES ({collectionId}, TIMESTAMP '{t}', {ServerId}, 'srv', 'db_odd', {queryId},
     private const int WideTextRepeat = 3000;
     private const int WideQueries = 300;
     private const string TightMemoryLimit = "200MB";
-    private const string TopQueriesMemoryLimit = "400MB";
+    /* The limit the old statement fits at. On DuckDB.NET 1.5 it fit at 400MB; on 2.0 it needs between 600MB and 800MB. */
+    private const string TopQueriesMemoryLimit = "1GB";
+    /* The limit the new read is held to afterwards: what it needed on 1.5 (about 300MB) with room. On 2.0 it fits at 200MB. */
+    private const string TopQueriesNewReadMemoryLimit = "400MB";
 
     /// <summary>What <c>ArchiveService</c> does (lower the instance's memory_limit), plus one thread so the peak is repeatable.</summary>
     private async Task PinMemoryAsync(string limit)
@@ -457,6 +460,7 @@ VALUES ({collectionId}, TIMESTAMP '{t}', {ServerId}, 'srv', 'db_odd', {queryId},
             QueryStoreOldReadSql.TopQueries.Replace("@@CANDIDATES@@", "10"), ServerId, _anchor.AddHours(-120), _anchor, 5));
         Assert.True(old is null, "the old SQL is expected to fit at this limit, so the new read is held to it: " + old);
 
+        await PinMemoryAsync(TopQueriesNewReadMemoryLimit);
         var rows = await new LocalDataService(duckDb).GetQueryStoreTopQueriesAsync(ServerId, 120, 5, asOfUtc: _anchor);
         Assert.Equal(5, rows.Count);
         Assert.All(rows, r => Assert.True(r.QueryId == 13 || r.QueryText.Length > 90_000));
@@ -500,8 +504,11 @@ VALUES ({collectionId}, TIMESTAMP '{t}', {ServerId}, 'srv', 'db_odd', {queryId},
     public async Task TheTextLookups_CarryTheTimeFilterIntoTheScan()
     {
         var duckDb = await BuildStoreAsync(textRepeat: 3);
-        var from = _anchor.AddDays(-2);
-        var to = _anchor.AddDays(-1);
+        /* The window sits inside the oldest archived day, whose file holds collection_time values on both sides of it. DuckDB 2.0 reads
+           the parquet statistics when it plans, and drops a bound that every row in the file already meets (it printed the plan without
+           the upper bound when the window lay past the whole file), so a window outside the data would show a plan with no bound to find. */
+        var from = _anchor.Date.AddDays(-ArchivedDays).AddHours(3);
+        var to = _anchor.Date.AddDays(-ArchivedDays).AddHours(7);
 
         var byRow = await OracleAsync("EXPLAIN " + LocalDataService.TextByRowSql([1_000_000L + 10, 1_000_000L + 11]), ServerId, from, to);
         var window = await OracleAsync("EXPLAIN " + LocalDataService.WindowTextSql, ServerId, "db_odd", 7L, from, to);
@@ -514,7 +521,7 @@ VALUES ({collectionId}, TIMESTAMP '{t}', {ServerId}, 'srv', 'db_odd', {queryId},
             Assert.Matches(@"(?s)(READ_PARQUET|PARQUET_SCAN|TABLE_SCAN).*Filters:.*collection_time", text);
             /* Both bounds must be literal comparisons on the column, which is what DuckDB turns into a row-group skip: a bound
                wrapped in a function (epoch_ms(collection_time) >= ...) still prints under Filters: but skips nothing. */
-            var bare = Regex.Replace(text, @"[\s│┌┐└┘├┤┬┴┼─]+", "");
+            var bare = Regex.Replace(text, @"[\s│┌┐└┘├┤┬┴┼─╭╮╰╯]+", "");
             Assert.Contains("collection_time>=", bare, StringComparison.Ordinal);
             Assert.Contains("collection_time<=", bare, StringComparison.Ordinal);
         }

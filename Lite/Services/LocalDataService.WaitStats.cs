@@ -951,7 +951,7 @@ LIMIT 2000";
                         r.session_id,
                         r.database_name,
                         r.query_text,
-                        r.total_elapsed_time_ms / 1000 AS elapsed_seconds,
+                        r.total_elapsed_time_ms // 1000 AS elapsed_seconds,
                         r.cpu_time_ms,
                         r.reads,
                         r.writes,
