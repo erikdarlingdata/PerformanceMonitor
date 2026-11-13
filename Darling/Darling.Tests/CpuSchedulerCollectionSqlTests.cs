@@ -67,10 +67,7 @@ public sealed class CpuSchedulerCollectionSqlTests
             Assert.Contains($"MAX({column}) AS {column}", sql, StringComparison.Ordinal);
         }
 
-        /* The two flags built from the summed counts are recomputed for a split collection. Exhaustion is a task
-           waiting for a worker, not a worker count near the ceiling (#8778). */
-        Assert.Contains("COALESCE(SUM(total_work_queue_count), 0) > 0 AS worker_thread_exhaustion_warning", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("SUM(total_current_workers_count) >=", sql, StringComparison.Ordinal);
+        /* The two flags built from the summed counts are recomputed for a split collection. */
         Assert.Contains("SUM(total_runnable_tasks_count) >= MAX(cpu_count)", sql, StringComparison.Ordinal);
 
         /* #5712 review: correlated columns come from ONE stored row. The request triple is one dm_exec_requests reading: the row

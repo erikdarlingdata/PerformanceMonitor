@@ -181,6 +181,11 @@ public sealed class WebTileTruthsTests
     public void TheThreadsChip_OnAServerPastTheWorkerCeilingWithNothingWaiting_ReadsOkWithTheWorkerCount() =>
         Assert.Equal("ThreadsOK1,782 workers / 1,472 max", Run().GetProperty("workersPastCeiling").GetString());
 
+    // #8778: a Warning band from 20 or more runnable tasks names them, as the Viewer's Threads value does, not OK on a yellow chip.
+    [Fact]
+    public void TheThreadsChip_OnAWarningFromRunnableTasks_ReadsTheRunnableCount() =>
+        Assert.Equal("ThreadsWARN25 runnable100 workers / 512 max", Run().GetProperty("runnableWarning").GetString());
+
     // #7560: PostgreSQL has no memory-grant reading and no blocking count behind the fleet card, so those two tiles
     // say n/a (as CPU and Threads do) instead of an OK and a 0 that read as measured. A SQL Server card keeps both.
     [Fact]

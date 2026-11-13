@@ -882,6 +882,8 @@ export function metricBands(c, store) {
       ? "n/a"
       : c.requests_waiting_for_threads > 0
       ? fmtInt(c.requests_waiting_for_threads) + " starved"
+      : c.threads_waiting_for_cpu >= 20
+      ? fmtInt(c.threads_waiting_for_cpu) + " runnable"
       : "OK";
   /* #8778: the line under the value is the worker count over the ceiling, not threads in use: idle pooled workers and
      the workers of system tasks are counted, so it can pass the ceiling on a server where nothing waits. */
