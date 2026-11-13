@@ -98,7 +98,7 @@ public sealed class McpPlanCacheSchedulerTools
     /// equal instead. Change one, change both.
     /// </summary>
     internal const string CpuSchedulerPressureDescription =
-        "Gets CPU scheduler pressure from the latest snapshot: runnable task queue depth, worker thread utilization, queued/blocked requests, the collector's pressure warning flags, and the banded pressure_level verdict with its recommendation. Shows whether the server has enough worker threads and if tasks are queuing for CPU time. LATEST IS A TIME: this is the newest scheduler snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end; the verdict is that instant's, so read age_seconds before reading pressure_level as current. Every stamp here is UTC, not the monitored server's clock (get_server_properties has its utc_offset_minutes).";
+        "Gets CPU scheduler pressure from the latest snapshot: runnable task queue depth, worker thread utilization, queued/blocked requests, the collector's pressure warning flags, and the banded pressure_level verdict with its recommendation. Shows whether the server has enough worker threads and if tasks are queuing for CPU time. Worker thread exhaustion is a task waiting for a worker: tasks_waiting_for_worker above 0. workers counts idle pooled workers and the workers of system tasks too, so workers can pass max_workers and worker_utilization_percent can pass 100 on an idle server. LATEST IS A TIME: this is the newest scheduler snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end; the verdict is that instant's, so read age_seconds before reading pressure_level as current. Every stamp here is UTC, not the monitored server's clock (get_server_properties has its utc_offset_minutes).";
 
     [ReadsLatestSnapshot(LatestSnapshotShape.SearchBound)]
     [McpServerTool(Name = "get_cpu_scheduler_pressure"), Description(CpuSchedulerPressureDescription)]
@@ -146,6 +146,7 @@ public sealed class McpPlanCacheSchedulerTools
                 workers = item.TotalCurrentWorkersCount,
                 max_workers = item.MaxWorkersCount,
                 worker_utilization_percent = workerUtilizationPercent,
+                tasks_waiting_for_worker = item.TotalWorkQueueCount,
                 runnable_percent = item.RunnablePercent.HasValue ? Math.Round(item.RunnablePercent.Value, 2) : (double?)null,
                 active_requests = item.TotalActiveRequestCount,
                 queued_requests = item.TotalQueuedRequestCount,

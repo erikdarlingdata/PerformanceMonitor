@@ -45,7 +45,8 @@ internal static class DarlingPlanCacheSchedulerReader
         DateTime CollectionTime, int SchedulerCount, int TotalRunnableTasksCount, decimal AvgRunnableTasksCount,
         int TotalCurrentWorkersCount, int MaxWorkersCount, decimal? RunnablePercent, int TotalQueuedRequestCount,
         int TotalActiveRequestCount, bool WorkerThreadExhaustionWarning, bool RunnableTasksWarning,
-        bool BlockedTasksWarning, bool QueuedRequestsWarning, bool PhysicalMemoryPressureWarning);
+        bool BlockedTasksWarning, bool QueuedRequestsWarning, bool PhysicalMemoryPressureWarning,
+        long TotalWorkQueueCount = 0);
 
     /* ─────────────────────────── plan cache (latest snapshot, all groups) ─────────────────────────── */
 
@@ -129,7 +130,8 @@ internal static class DarlingPlanCacheSchedulerReader
             runnable_tasks_warning,
             blocked_tasks_warning,
             queued_requests_warning,
-            physical_memory_pressure_warning
+            physical_memory_pressure_warning,
+            total_work_queue_count
         FROM newest
         """;
 
@@ -159,26 +161,27 @@ internal static class DarlingPlanCacheSchedulerReader
             !reader.IsDBNull(10) && reader.GetBoolean(10),
             !reader.IsDBNull(11) && reader.GetBoolean(11),
             !reader.IsDBNull(12) && reader.GetBoolean(12),
-            !reader.IsDBNull(13) && reader.GetBoolean(13));
+            !reader.IsDBNull(13) && reader.GetBoolean(13),
+            reader.IsDBNull(14) ? 0L : reader.GetInt64(14));
     }
 
     /// <summary>
     /// The CPU-scheduler pressure classification — <c>report.cpu_scheduler_pressure</c>'s
     /// <c>pressure_level</c> + <c>recommendation</c> CASE (#1410), reproduced verbatim. Runnable-task queue
-    /// bands (&gt; 50 CRITICAL / &gt; 20 HIGH / &gt; 10 MEDIUM) come first, then a worker-utilization &gt; 90%
-    /// escalation, then the collector's warning flags as a fallback.
+    /// bands (&gt; 50 CRITICAL / &gt; 20 HIGH / &gt; 10 MEDIUM) come first, then the collector's warning flags. The
+    /// worker-exhaustion flag means a task is waiting for a worker. The proc's HIGH arm for current workers above 90% of
+    /// max worker threads is not here (#8778): the pool keeps idle workers after a burst and the workers of system tasks
+    /// fall outside max worker threads, so an idle server can sit above 100%. Same banding as
+    /// <c>CpuSchedulerMetrics.ClassifyCpuPressure</c>, which Lite and the Viewer use.
     /// </summary>
     public static (string Level, string Recommendation) ClassifyCpuSchedulerPressure(
-        int totalRunnableTasks, int totalCurrentWorkers, int maxWorkers, int totalQueuedRequests,
+        int totalRunnableTasks, int totalQueuedRequests,
         bool workerThreadExhaustionWarning, bool runnableTasksWarning, bool queuedRequestsWarning)
     {
-        double workerUtilization = maxWorkers > 0 ? totalCurrentWorkers * 100.0 / maxWorkers : 0.0;
-
         var level =
             totalRunnableTasks > 50 ? "CRITICAL - High runnable task queue" :
             totalRunnableTasks > 20 ? "HIGH - Moderate runnable task queue" :
             totalRunnableTasks > 10 ? "MEDIUM - Some runnable tasks queued" :
-            workerUtilization > 90 ? "HIGH - Worker thread exhaustion" :
             workerThreadExhaustionWarning ? "CRITICAL - Worker thread exhaustion warning" :
             runnableTasksWarning ? "HIGH - Runnable tasks warning" :
             queuedRequestsWarning ? "MEDIUM - Queued requests warning" :

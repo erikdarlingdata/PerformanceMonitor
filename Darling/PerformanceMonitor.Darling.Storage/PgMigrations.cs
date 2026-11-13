@@ -3956,7 +3956,7 @@ ALTER TABLE config.config_alert_log
     /// store whose provisioning has not run again since the upgrade does not leave <c>admin</c> the default privileges' INSERT, UPDATE and
     /// DELETE: every write privilege on the three tables, and every privilege on their identity sequences (a table's <c>REVOKE</c> does not
     /// reach them, and their names are PostgreSQL's own for an identity column of a table made here), from <c>PUBLIC</c> and each of the four roles that exists. SELECT stays as the default privileges gave it. The journal
-    /// trigger's owner-only list is not in any rung (provisioning writes it), so the eight people events reach it when provisioning next
+    /// trigger's owner-only list is not in any rung (provisioning writes it), so the people events reach it when provisioning next
     /// runs. Every statement is idempotent. <b>No Lite twin</b>: Lite has
     /// no people.</para>
     /// </summary>
