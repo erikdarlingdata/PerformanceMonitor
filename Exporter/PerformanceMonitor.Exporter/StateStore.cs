@@ -44,6 +44,14 @@ public sealed class StateStore : IDisposable
     private readonly DuckDBConnection _connection;
     private int _tempTableSeq;
 
+    /// <summary>
+    /// The oldest DuckDB release whose files the exporter's own state files must stay readable by (#6523). DuckDB 2.0 writes a new file
+    /// with storage version 999 unless told otherwise, and DuckDB 1.5.6.1 refuses that, so an older exporter could not read its state.
+    /// DuckDB 1.5 accepts the setting too. Drop it a release or two after the first release on DuckDB 2.0 ships. Shared with
+    /// <see cref="ChangeStateStore"/>.
+    /// </summary>
+    internal const string StorageCompatibilityVersion = "v1.5.0";
+
     private StateStore(DuckDBConnection connection)
     {
         _connection = connection;
@@ -54,7 +62,7 @@ public sealed class StateStore : IDisposable
     {
         Directory.CreateDirectory(stateDir);
         var path = Path.Combine(stateDir, "exported_keys.duckdb");
-        var connection = new DuckDBConnection($"Data Source={path}");
+        var connection = new DuckDBConnection($"Data Source={path};storage_compatibility_version={StorageCompatibilityVersion}");
         connection.Open();
 
         using var createPlanKeys = connection.CreateCommand();

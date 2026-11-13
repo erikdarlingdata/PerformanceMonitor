@@ -1142,6 +1142,14 @@ public partial class DuckDbInitializer : IDisposable
     private static readonly HashSet<string> ArchiveViewDedupKeepsEarliest = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// The oldest DuckDB release whose files the main store must stay readable by (#6523). Without it, DuckDB 2.0 writes a new store
+    /// with storage version 999, which DuckDB 1.5.6.1 refuses to open ("we can only read versions between 64 and 68"). With it, 2.0
+    /// writes storage version 68, and 1.5.6.1 opens the file read-write and read-only, so rolling back to an earlier Lite keeps the
+    /// history. DuckDB 1.5 accepts the setting too. Drop it a release or two after the first release on DuckDB 2.0 ships.
+    /// </summary>
+    internal const string StorageCompatibilityVersion = "v1.5.0";
+
+    /// <summary>
     /// Gets the connection string for the DuckDB database.
     /// - checkpoint_threshold=1GB: disables automatic WAL checkpoints to prevent
     ///   2-3s stop-the-world stalls during collector writes. Manual CHECKPOINT
@@ -1161,9 +1169,11 @@ public partial class DuckDbInitializer : IDisposable
     ///   with every 8192-row group of every file. Once it is over the trim cycle's 64 MB target, the trim's
     ///   `SET memory_limit` fails with "could not free up enough memory" and the trim stops working. The file
     ///   count is the real cost of a bind, and compaction (this issue) is what keeps that count down.
+    /// - storage_compatibility_version=<see cref="StorageCompatibilityVersion"/>: a store that DuckDB 2.0 creates stays readable by DuckDB 1.5, so a user who rolls
+    ///   back to an earlier Lite keeps their history (#6523).
     /// </summary>
     public string ConnectionString =>
-        $"Data Source={_databasePath};memory_limit={MainConnectionMemoryLimit};threads={MainConnectionThreads};checkpoint_threshold=1GB";
+        $"Data Source={_databasePath};memory_limit={MainConnectionMemoryLimit};threads={MainConnectionThreads};checkpoint_threshold=1GB;storage_compatibility_version={StorageCompatibilityVersion}";
 
     /// <summary>
     /// The main connection's resting <c>memory_limit</c> (#5381, owner ruling 2026-10-06). It was 1 GB, which
