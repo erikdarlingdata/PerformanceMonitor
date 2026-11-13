@@ -478,7 +478,7 @@ public sealed class DarlingWebOidcTests
 
     private const string SampleKey = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_";
 
-    /// <summary>The o2 shape carries the owner key in the signed slot and round-trips it with the subject and the role (#6214).</summary>
+    /// <summary>The o3 shape carries the owner key in the signed slot and round-trips it with the subject and the role (#6214).</summary>
     [Theory]
     [InlineData("erik@example.com", true)]
     [InlineData("reader@example.com", false)]
@@ -487,7 +487,7 @@ public sealed class DarlingWebOidcTests
     {
         Assert.Equal(DarlingWebSeat.OwnerKeyLength, SampleKey.Length);
         var encoded = DarlingWebSeat.EncodeCookieSubject(subject, admin ? WebOidcRole.Admin : WebOidcRole.Viewer, SampleKey);
-        Assert.StartsWith(admin ? "o2:a:" : "o2:v:", encoded, StringComparison.Ordinal);
+        Assert.StartsWith(admin ? "o3:a:" : "o3:v:", encoded, StringComparison.Ordinal);
         Assert.True(DarlingWebSeat.TryResolveSeat(encoded, out var seat));
         Assert.Equal(subject, seat.Subject);
         Assert.Equal(SampleKey, seat.OwnerKey);
@@ -507,12 +507,114 @@ public sealed class DarlingWebOidcTests
         Assert.Equal(cookieSubject, DarlingWebSeat.EncodeCookieSubject(subject, admin ? WebOidcRole.Admin : WebOidcRole.Viewer));
     }
 
-    /// <summary>The longest subject sign-in accepts still fits the session cookie's own limit once the o2 prefix and key ride with it.</summary>
+    /// <summary>The longest subject sign-in accepts still fits the session cookie's own limit once the o3 prefix, key, name and grant ride with it.</summary>
     [Fact]
     public void SeatCodec_TheLongestAllowedSubject_FitsTheCookieSlot()
     {
-        var encoded = DarlingWebSeat.EncodeCookieSubject(new string('s', DarlingWebSeat.MaxSubjectLength), WebOidcRole.Admin, SampleKey);
+        var max = new string('x', DarlingWebSeat.DisplayFieldMaxBytes);
+        var encoded = DarlingWebSeat.EncodeCookieSubject(new string('s', DarlingWebSeat.MaxSubjectLength), WebOidcRole.Admin, SampleKey, max, max);
         Assert.Equal(PerformanceMonitor.Darling.Service.Mcp.DarlingWebHostService.MaxSessionSubjectLength, encoded.Length);
+    }
+
+    [Fact]
+    public void O3_RoundTrips_NameAndGrant()
+    {
+        var encoded = DarlingWebSeat.EncodeCookieSubject("alice@corp", WebOidcRole.Viewer, SampleKey, "Alice Smith", "readers");
+        Assert.True(DarlingWebSeat.TryResolveSeat(encoded, out var seat));
+        Assert.Equal("alice@corp", seat.Subject);
+        Assert.False(seat.CanEdit);
+        Assert.Equal(SampleKey, seat.OwnerKey);
+        Assert.Equal("Alice Smith", seat.DisplayName);
+        Assert.Equal("readers", seat.GrantedBy);
+    }
+
+    [Fact]
+    public void O3_NullFields_RoundTripAsNull()
+    {
+        var encoded = DarlingWebSeat.EncodeCookieSubject("alice@corp", WebOidcRole.Admin, SampleKey);
+        Assert.True(DarlingWebSeat.TryResolveSeat(encoded, out var seat));
+        Assert.True(seat.CanEdit);
+        Assert.Null(seat.DisplayName);
+        Assert.Null(seat.GrantedBy);
+    }
+
+    [Fact]
+    public void O3_SubjectWithColons_RoundTrips()
+    {
+        var encoded = DarlingWebSeat.EncodeCookieSubject("a:b:c", WebOidcRole.Viewer, SampleKey, "N", "G");
+        Assert.True(DarlingWebSeat.TryResolveSeat(encoded, out var seat));
+        Assert.Equal("a:b:c", seat.Subject);
+        Assert.Equal("N", seat.DisplayName);
+        Assert.Equal("G", seat.GrantedBy);
+    }
+
+    [Fact]
+    public void O2_StillResolves_WithNullNameAndGrant()
+    {
+        Assert.True(DarlingWebSeat.TryResolveSeat("o2:a:" + SampleKey + ":erik@example.com", out var seat));
+        Assert.Equal("erik@example.com", seat.Subject);
+        Assert.True(seat.CanEdit);
+        Assert.Equal(SampleKey, seat.OwnerKey);
+        Assert.Null(seat.DisplayName);
+        Assert.Null(seat.GrantedBy);
+    }
+
+    [Theory]
+    [InlineData("o3:a:short::: s")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_:QQ:QQ")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_:!!:QQ:s")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_:QQ:!!:s")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_:QQ")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_::")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_:::")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_X:QQ:QQ:s")]
+    public void O3_Malformed_IsRefused(string cookieSubject)
+        => Assert.False(DarlingWebSeat.TryResolveSeat(cookieSubject, out _));
+
+    [Fact]
+    public void CapDisplayField_CutsAtACharacterBoundary()
+    {
+        Assert.Null(DarlingWebSeat.CapDisplayField(null));
+        Assert.Equal("short", DarlingWebSeat.CapDisplayField("short"));
+
+        var accents = DarlingWebSeat.CapDisplayField(new string('é', 200))!;
+        Assert.Equal(64, accents.Length);
+
+        var emoji = DarlingWebSeat.CapDisplayField(string.Concat(Enumerable.Repeat("😀", 40)))!;
+        Assert.Equal(64, emoji.Length);
+        Assert.Equal(32, emoji.EnumerateRunes().Count());
+        Assert.All(emoji, c => Assert.False(char.IsLowSurrogate(c) && !char.IsSurrogate(c)));
+        Assert.True(Encoding.UTF8.GetByteCount(emoji) <= DarlingWebSeat.DisplayFieldMaxBytes);
+
+        /* 127 ASCII bytes then a 2-byte character: the character does not fit, so it is dropped whole. */
+        var odd = DarlingWebSeat.CapDisplayField(new string('a', 127) + "é")!;
+        Assert.Equal(new string('a', 127), odd);
+    }
+
+    [Fact]
+    public void Cookie_AtEveryMaximum_FitsABrowserCookie()
+    {
+        var name = new string('n', DarlingWebSeat.DisplayFieldMaxBytes);
+        var grant = new string('g', DarlingWebSeat.DisplayFieldMaxBytes);
+        var slot = DarlingWebSeat.EncodeCookieSubject(new string('s', 207), WebOidcRole.Admin, SampleKey, name, grant);
+        var value = DarlingWebHostService.BuildSessionCookieValue(new byte[32], DateTimeOffset.UtcNow.AddHours(12), slot);
+        Assert.True(Encoding.UTF8.GetByteCount(DarlingWebHostService.SessionCookieName + "=" + value) < 4096);
+        Assert.True(DarlingWebSeat.TryResolveSeat(slot, out var seat));
+        Assert.Equal(name, seat.DisplayName);
+        Assert.Equal(grant, seat.GrantedBy);
+    }
+
+    [Fact]
+    public void MaxSubjectLength_IsUnchanged() => Assert.Equal(207, DarlingWebSeat.MaxSubjectLength);
+
+    [Fact]
+    public void Markup_InTheName_RoundTripsVerbatim()
+    {
+        const string markup = "<img src=x onerror=alert(1)>";
+        var encoded = DarlingWebSeat.EncodeCookieSubject("alice", WebOidcRole.Viewer, SampleKey, markup, markup);
+        Assert.True(DarlingWebSeat.TryResolveSeat(encoded, out var seat));
+        Assert.Equal(markup, seat.DisplayName);
+        Assert.Equal(markup, seat.GrantedBy);
     }
 
     /// <summary>The owner key is base64url(SHA-256(issuer + newline + sub)): stable, 43 characters with no ':', different for a

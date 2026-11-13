@@ -2006,14 +2006,16 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <summary>
     /// The longest <paramref name="subject"/> <see cref="BuildSessionCookieValue"/> will mint into a cookie.
     ///
-    /// <para>Generous for an OIDC <c>sub</c> — the identifiers real providers issue are GUIDs, opaque
+    /// <para>600 = the <c>o3</c> seat's longest slot: 5 (prefix) + 43 (owner key) + 1 + 171 + 1 + 171 (the base64url of a 128-byte display name
+    /// and of a 128-byte granting role value, each followed by a separator) + 1 + 207 (<see cref="DarlingWebSeat.MaxSubjectLength"/>).
+    /// A shared-token or token-name subject is far shorter. Generous for an OIDC <c>sub</c> — the identifiers real providers issue are GUIDs, opaque
     /// 40-character strings, or an email — and a hard REFUSAL rather than a truncation, deliberately.
     /// Truncating an identity is the one failure mode that would be worse than not having one: two subjects
     /// sharing a prefix would collapse to the same seat, so the surface would report the wrong person as the
     /// author of a change and every downstream authorization decision would be made about somebody else.
     /// Failing the sign-in loudly is recoverable; silently merging two identities is not.</para>
     /// </summary>
-    internal const int MaxSessionSubjectLength = 256;
+    internal const int MaxSessionSubjectLength = 600;
 
     /// <summary>
     /// Builds a session cookie value. PURE.
@@ -2459,7 +2461,7 @@ public sealed class DarlingWebHostService : BackgroundService
             return;
         }
 
-        var role = DarlingWebOidc.MapRole(
+        var (role, grantedBy) = DarlingWebOidc.MapRoleWithGrant(
             oidcClient.Options.RoleClaim is null
                 ? Array.Empty<string>()
                 : DarlingWebOidc.ExtractClaimValues(payload!, oidcClient.Options.RoleClaim),
@@ -2479,7 +2481,9 @@ public sealed class DarlingWebHostService : BackgroundService
 
         /* #6214: the owner key (issuer + sub, hashed) rides in the signed cookie, so a personal view follows the person's provider
            identity and not the display name, which can change and can be reissued. */
-        AppendSessionCookie(context, signingKey, DarlingWebSeat.EncodeCookieSubject(subject, role, DarlingWebOidc.ResolveOwnerKey(payload!)));
+        AppendSessionCookie(context, signingKey, DarlingWebSeat.EncodeCookieSubject(
+            subject, role, DarlingWebOidc.ResolveOwnerKey(payload!),
+            DarlingWebSeat.CapDisplayField(DarlingWebOidc.DisplayNameClaim(payload!)), DarlingWebSeat.CapDisplayField(grantedBy)));
 
         /* Per-user identity in the service log — the #2550 counterpart of the updated_by stamp. */
         _logger.LogInformation(
