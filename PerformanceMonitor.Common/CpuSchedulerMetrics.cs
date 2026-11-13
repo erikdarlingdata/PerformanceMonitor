@@ -52,11 +52,11 @@ public static class CpuSchedulerMetrics
             new("NUMA Nodes (online / total)", $"{s.NodesOnlineCount} / {s.TotalNodeCount}", false),
             new("Offline CPUs", FormatInt(s.OfflineCpuCount), s.OfflineCpuWarning),
             new("Max Worker Threads", FormatInt(s.MaxWorkersCount), false),
-            new("Current Workers", FormatInt(s.TotalCurrentWorkersCount), s.WorkerThreadExhaustionWarning),
-            new("Worker Utilization %", workerUtil.ToString("F1"), s.WorkerThreadExhaustionWarning),
+            new("Current Workers", FormatInt(s.TotalCurrentWorkersCount), false, CurrentWorkersHint),
+            new("Worker Utilization %", workerUtil.ToString("F1"), false, CurrentWorkersHint),
             new("Runnable Tasks", FormatInt(s.TotalRunnableTasksCount), s.RunnableTasksWarning),
             new("Avg Runnable / Scheduler", s.AvgRunnableTasksCount.ToString("F2"), s.RunnableTasksWarning),
-            new("Work Queue Length", FormatLong(s.TotalWorkQueueCount), false),
+            new("Work Queue Length", FormatLong(s.TotalWorkQueueCount), s.WorkerThreadExhaustionWarning, WorkQueueHint),
             new("Active Requests", FormatInt(s.TotalActiveRequestCount), false),
             new("Queued Requests", FormatInt(s.TotalQueuedRequestCount), s.QueuedRequestsWarning),
             new("Blocked Tasks", FormatInt(s.TotalBlockedTaskCount), s.BlockedTasksWarning),
@@ -76,24 +76,19 @@ public static class CpuSchedulerMetrics
     /// <summary>
     /// The rolled-up CPU-scheduler pressure classification, a pure client-side derivation of install/47's
     /// <c>report.cpu_scheduler_pressure</c> (pressure_level + recommendation). The banding is the proc's CASE with one
-    /// deliberate difference in order: runnable task queue &gt; 50 CRITICAL / &gt; 20 HIGH / &gt; 10 MEDIUM, then the
-    /// collector's worker-exhaustion flag CRITICAL, then worker-utilization &gt; 90% HIGH, then the runnable-tasks and
-    /// queued-requests warning flags. The proc tests the 90% arm before the flag; because the collector raises the flag
-    /// at 90% of max worker threads, that order makes the proc's CRITICAL reachable only at exactly 90%, and a server
-    /// at 95% reads HIGH there. Here the flag comes first, so above 90% the level is CRITICAL.
+    /// deliberate difference: runnable task queue &gt; 50 CRITICAL / &gt; 20 HIGH / &gt; 10 MEDIUM, then the collector's
+    /// worker-exhaustion flag CRITICAL, then the runnable-tasks and queued-requests warning flags. The flag means a task
+    /// is waiting for a worker (the scheduler work queue is not empty). The proc also raises HIGH when current workers
+    /// pass 90% of max worker threads; that arm is not here (#8778), because the worker pool keeps idle workers after a
+    /// burst and the workers of system tasks fall outside max worker threads, so an idle server can sit above 100%.
     /// </summary>
     public static CpuPressure ClassifyCpuPressure(ICpuSchedulerSnapshot s)
     {
-        double workerUtil = s.MaxWorkersCount > 0
-            ? (double)s.TotalCurrentWorkersCount / s.MaxWorkersCount * 100.0
-            : 0;
-
         var level =
             s.TotalRunnableTasksCount > 50 ? "CRITICAL - High runnable task queue" :
             s.TotalRunnableTasksCount > 20 ? "HIGH - Moderate runnable task queue" :
             s.TotalRunnableTasksCount > 10 ? "MEDIUM - Some runnable tasks queued" :
             s.WorkerThreadExhaustionWarning ? "CRITICAL - Worker thread exhaustion warning" :
-            workerUtil > 90 ? "HIGH - Worker thread exhaustion" :
             s.RunnableTasksWarning ? "HIGH - Runnable tasks warning" :
             s.QueuedRequestsWarning ? "MEDIUM - Queued requests warning" :
             "NORMAL";
@@ -110,6 +105,16 @@ public static class CpuSchedulerMetrics
     private static string FormatInt(int value) => value.ToString("N0");
 
     private static string FormatLong(long value) => value.ToString("N0");
+
+    /// <summary>
+    /// #8778: why Current Workers and Worker Utilization % are never highlighted. The count includes idle pooled workers.
+    /// </summary>
+    public const string CurrentWorkersHint = "Workers that exist, idle ones included. The pool keeps idle workers after a burst and system tasks have workers of their own, so this can pass Max Worker Threads on a server where nothing waits.";
+
+    /// <summary>
+    /// #8778: the Work Queue Length row carries the exhaustion highlight, because a task waiting for a worker is what exhaustion is.
+    /// </summary>
+    public const string WorkQueueHint = "Tasks waiting for a worker. Anything above 0 means the server ran out of worker threads.";
 
     /// <summary>
     /// #7578: the collector stores no Runnable % when no other request was running, so a missing share is 0.00 and not "N/A".

@@ -71,7 +71,7 @@ public sealed class WebClickthroughStaleStateTests
         var offline = r.GetProperty("offline");
         var texts = Texts(offline);
 
-        /* CPU, Threads, Memory, Blocking and Deadlocks: n/a with the age, never 0% / 77 free / ok. */
+        /* CPU, Threads, Memory, Blocking and Deadlocks: n/a with the age, never 0% / OK / workers / ok. */
         for (var i = 0; i < 5; i++)
         {
             Assert.Contains("n/a", texts[i], StringComparison.Ordinal);
@@ -79,7 +79,7 @@ public sealed class WebClickthroughStaleStateTests
             Assert.Contains("sev-Unknown", offline[i].GetProperty("cls").GetString(), StringComparison.Ordinal);
         }
 
-        Assert.DoesNotContain(texts, t => t.Contains("0%", StringComparison.Ordinal) || t.Contains("free", StringComparison.Ordinal) || t.Contains("ok", StringComparison.Ordinal));
+        Assert.DoesNotContain(texts, t => t.Contains("0%", StringComparison.Ordinal) || t.Contains("OK", StringComparison.Ordinal) || t.Contains("workers", StringComparison.Ordinal) || t.Contains("ok", StringComparison.Ordinal));
         Assert.StartsWith("CollectorsStale", texts[5], StringComparison.Ordinal);
     }
 
@@ -213,7 +213,7 @@ public sealed class WebClickthroughStaleStateTests
     {
         var online = Texts(Run("cards").GetProperty("online"));
         Assert.Equal("Total CPU0%SQL 0%", online[0]);
-        Assert.StartsWith("Threads77 free", online[1], StringComparison.Ordinal);
+        Assert.Equal("ThreadsOK23 workers / 100 max", online[1]);
         Assert.StartsWith("MemoryOK", online[2], StringComparison.Ordinal);
     }
 

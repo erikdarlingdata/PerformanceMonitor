@@ -56,7 +56,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
     private async Task InsertPieceAsync(
         long collectionId, DateTime collectionTime, int runnable, decimal avg, int currentWorkers,
         int activeRequests, decimal runnablePercent, long availableMemoryKb,
-        int schedulerCount = 4, int offlineCpus = 0, bool memoryWarning = false,
+        int schedulerCount = 4, int offlineCpus = 0, bool memoryWarning = false, long workQueue = 0L,
         int runnableRequests = 1, int? totalRequests = null, long totalMemoryKb = 65536000L,
         string memoryState = "Available physical memory is high")
     {
@@ -67,7 +67,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         object?[] values =
         {
             collectionId, collectionTime, ServerId, ServerName, 100, schedulerCount, 4,
-            runnable, 0L, currentWorkers, avg,
+            runnable, workQueue, currentWorkers, avg,
             activeRequests, 0, 0,
             3L, runnableRequests, totalRequests ?? activeRequests, runnablePercent,
             false, false, false, false,
@@ -105,8 +105,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
            inserted FIRST, and each piece alone looks like a smaller, different server (27.67 and 18.00 per
            scheduler). The pieces' request and memory columns differ, as the old collector's re-read per scheduler
            row made them; the read takes the request triple of the piece with the most requests and the memory group of the piece with the least available memory. The stored flags on every piece are FALSE (test data), so a TRUE flag
-           proves the read recomputed it from the sums: 101 runnable >= 4 CPUs and 95 workers >= 90% of 100. */
-        await InsertPieceAsync(9102L, time, runnable: 18, avg: 18.00m, currentWorkers: 45, activeRequests: 9, runnablePercent: 20.0m, availableMemoryKb: 30000000L);
+           proves the read recomputed it from the sums: 101 runnable >= 4 CPUs and a work queue of 2 (0 + 2). */
+        await InsertPieceAsync(9102L, time, runnable: 18, avg: 18.00m, currentWorkers: 45, activeRequests: 9, runnablePercent: 20.0m, availableMemoryKb: 30000000L, workQueue: 2L);
         await InsertPieceAsync(9101L, time, runnable: 83, avg: 27.67m, currentWorkers: 50, activeRequests: 8, runnablePercent: 10.0m, availableMemoryKb: 31000000L);
 
         var snapshot = await new LocalDataService(_duckDb).GetCpuSchedulerSnapshotAsync(ServerId, hoursBack: 24);
@@ -122,6 +122,27 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         Assert.Equal(30000000L, snapshot.AvailablePhysicalMemoryKb);
         Assert.True(snapshot.RunnableTasksWarning);
         Assert.True(snapshot.WorkerThreadExhaustionWarning);
+    }
+
+    /// <summary>
+    /// #8778: current workers count idle pooled workers and the workers of system tasks, so a server can hold more
+    /// workers than its ceiling with nothing waiting. 60 + 50 = 110 workers over a 100 ceiling, an empty work queue:
+    /// the exhaustion flag stays FALSE.
+    /// </summary>
+    [Fact]
+    public async Task Snapshot_WorkersPastTheCeilingWithAnEmptyWorkQueue_IsNotExhaustion()
+    {
+        var time = DateTime.UtcNow.AddMinutes(-2);
+        await InsertPieceAsync(9402L, time, runnable: 0, avg: 0m, currentWorkers: 60, activeRequests: 2, runnablePercent: 0m, availableMemoryKb: 30000000L);
+        await InsertPieceAsync(9401L, time, runnable: 0, avg: 0m, currentWorkers: 50, activeRequests: 2, runnablePercent: 0m, availableMemoryKb: 30000000L);
+
+        var snapshot = await new LocalDataService(_duckDb).GetCpuSchedulerSnapshotAsync(ServerId, hoursBack: 24);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(110, snapshot!.TotalCurrentWorkersCount);
+        Assert.Equal(100, snapshot.MaxWorkersCount);
+        Assert.False(snapshot.WorkerThreadExhaustionWarning);
+        Assert.Equal("NORMAL", PerformanceMonitor.Common.CpuSchedulerMetrics.ClassifyCpuPressure(snapshot).Level);
     }
 
     /// <summary>

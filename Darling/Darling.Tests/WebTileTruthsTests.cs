@@ -175,6 +175,12 @@ public sealed class WebTileTruthsTests
         Assert.Equal("Sev 20, Sev 19", ViewerAgentAlertsText.GapWhich(new AgentAlertGap("alert_disabled", "An alert is disabled, so it cannot fire.", ["Sev 20", "Sev 19"], [])));
     }
 
+    // #8778: a server holding more workers than max worker threads with nothing waiting for one reads OK, with the worker
+    // count over the ceiling under it, not a negative free count.
+    [Fact]
+    public void TheThreadsChip_OnAServerPastTheWorkerCeilingWithNothingWaiting_ReadsOkWithTheWorkerCount() =>
+        Assert.Equal("ThreadsOK1,782 workers / 1,472 max", Run().GetProperty("workersPastCeiling").GetString());
+
     // #7560: PostgreSQL has no memory-grant reading and no blocking count behind the fleet card, so those two tiles
     // say n/a (as CPU and Threads do) instead of an OK and a 0 that read as measured. A SQL Server card keeps both.
     [Fact]

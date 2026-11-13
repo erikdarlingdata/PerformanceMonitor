@@ -1275,8 +1275,10 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         var cpuSource = FleetCpuProvenance.ClassifyCpuSource(cpuPercent, instanceCpuPercent, isPostgres, isAurora);
         var cpuForAlert = totalCpu ?? cpuPercent;
 
+        /* Never below 0: current workers include idle pooled workers and the workers of system tasks, which the
+           ceiling leaves out, so the count can pass it on a server where nothing waits (#8778). */
         var availableThreads = threads.TotalThreads.HasValue
-            ? threads.TotalThreads.Value - (threads.CurrentWorkers ?? 0)
+            ? Math.Max(0, threads.TotalThreads.Value - (threads.CurrentWorkers ?? 0))
             : (int?)null;
 
         var hasMemoryPressure = pressure.WaiterCount > 0 || pressure.TimeoutCount > 0 || pressure.ForcedCount > 0;
@@ -1468,7 +1470,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                The whole threads block is null there, as the tool description says. */
             ThreadsWaitingForCpu = threads.TotalThreads.HasValue ? threads.RunnableTasks : null,
             RequestsWaitingForThreads = threads.TotalThreads.HasValue ? threads.WorkQueue : null,
-            ThreadsSeverity = ServerHealthClassifier.ThreadsSeverity(threads.TotalThreads, availableThreads, threads.RunnableTasks, threads.WorkQueue),
+            ThreadsSeverity = ServerHealthClassifier.ThreadsSeverity(threads.TotalThreads, threads.RunnableTasks, threads.WorkQueue),
             /* #6874: set only when the Agent alert setup has a gap. The Band below is not read from it. */
             AgentAlertGaps = agentAlertGaps is { Count: > 0 } ? agentAlertGaps : null,
             /* #6873: set only when something is overdue. The Band below is not read from it. */

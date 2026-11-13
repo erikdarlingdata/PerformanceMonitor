@@ -882,21 +882,13 @@ export function metricBands(c, store) {
       ? "n/a"
       : c.requests_waiting_for_threads > 0
       ? fmtInt(c.requests_waiting_for_threads) + " starved"
-      : c.available_threads != null
-      ? fmtInt(c.available_threads) + " free"
       : "OK";
-  /* W19 (#5644): the tile value reads "N free", so the line under it must not repeat N over the total (that read as
-     N in use). It says how many are in use, of the total. */
-  const threadsInUse =
-    c.total_threads != null
-      ? c.available_threads != null
-        ? c.total_threads - c.available_threads
-        : c.current_workers ?? 0
-      : null;
+  /* #8778: the line under the value is the worker count over the ceiling, not threads in use: idle pooled workers and
+     the workers of system tasks are counted, so it can pass the ceiling on a server where nothing waits. */
   /* #6178: an Azure SQL Database (engine_edition 5) has no scheduler data, so its Threads chip is "n/a" for good. Say why under the "n/a". */
   const threadsDetail =
     c.total_threads != null
-      ? fmtInt(threadsInUse) + " in use / " + fmtInt(c.total_threads) + " threads"
+      ? fmtInt(c.current_workers ?? 0) + " workers / " + fmtInt(c.total_threads) + " max"
       : threadsValue === "n/a" && c.engine_edition === 5
       ? "Azure SQL Database has no thread data"
       : null;
