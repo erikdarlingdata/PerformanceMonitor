@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Text;
 using Microsoft.AspNetCore.Http;
 
 namespace PerformanceMonitor.Darling.Service.Hosting;
@@ -120,8 +122,9 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     /// See <see cref="CapDisplayField"/>.</summary>
     internal const int DisplayFieldMaxBytes = 128;
 
-    /// <summary>Cuts a display-only field to at most <see cref="DisplayFieldMaxBytes"/> UTF-8 bytes at a character (rune) boundary, never
-    /// leaving half a surrogate pair. Null stays null. Only for display fields: a subject is refused, never cut.</summary>
+    /// <summary>Cuts a display-only field to at most <see cref="DisplayFieldMaxBytes"/> UTF-8 bytes at a text-element boundary
+    /// (<see cref="StringInfo"/>), so a flag, a ZWJ emoji sequence or a letter with its combining mark is never split. Null stays null.
+    /// Only for display fields: a subject is refused, never cut.</summary>
     internal static string? CapDisplayField(string? value)
     {
         if (value is null)
@@ -131,15 +134,16 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
 
         var bytes = 0;
         var end = 0;
-        foreach (var rune in value.EnumerateRunes())
+        while (end < value.Length)
         {
-            bytes += rune.Utf8SequenceLength;
+            var length = StringInfo.GetNextTextElementLength(value, end);
+            bytes += Encoding.UTF8.GetByteCount(value.AsSpan(end, length));
             if (bytes > DisplayFieldMaxBytes)
             {
                 break;
             }
 
-            end += rune.Utf16SequenceLength;
+            end += length;
         }
 
         return end == value.Length ? value : value.Substring(0, end);
