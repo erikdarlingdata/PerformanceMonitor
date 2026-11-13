@@ -136,6 +136,10 @@ public sealed class DarlingWebHostService : BackgroundService
     /// way on every retry until the config changes, which needs a restart, so the line is logged once.</summary>
     private bool _missingTokenReported;
 
+    /// <summary>Whether this process has logged the <see cref="TokenSignInStartProblem"/> line (#8735): the config is held for
+    /// the process lifetime, so the supervisor's 30s retries would only repeat it.</summary>
+    private bool _tokenSignInProblemReported;
+
     /// <summary>How often the supervisor re-reads the live control-plane state (#1562, mirrors the MCP host).</summary>
     internal static readonly TimeSpan SupervisorPollInterval = TimeSpan.FromSeconds(5);
 
@@ -490,15 +494,80 @@ public sealed class DarlingWebHostService : BackgroundService
     internal static DarlingHostBinding.BindDecision ResolveWebBind(WebConfig web, bool managed, bool? inContainer = null)
     {
         var network = web.Network;
+
+        /* #8735: tokenSignIn "off" with OIDC configured makes the shared token unnecessary, because OIDC is then the
+           only way in. An unknown value does not widen it: the start refuses it (TokenSignInStartProblem). */
+        var oidcOnlySignIn = network?.Oidc is { IsConfigured: true } oidc
+            && DarlingTokenSignIn.TryParse(oidc.TokenSignIn, out var signInMode)
+            && signInMode == TokenSignInMode.Off;
         return DarlingHostBinding.ResolveBind(
             network?.Listen,
             network?.AllowFrom,
             tokenPresent: network is not null
-                && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token)),
+                && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token) || oidcOnlySignIn),
             networkConfigured: network is { IsConfigured: true },
             managed: managed,
             /* #1804: tests pass this explicitly; the running host takes the ambient container marker. */
             inContainer: inContainer ?? DarlingHostBinding.IsRunningInContainer);
+    }
+
+    /// <summary>
+    /// The Critical line a start logs when <c>web.network.oidc.tokenSignIn</c> (#8735) stops it, or null when the start may go on.
+    /// An unknown value is refused (it would otherwise fail closed as <c>off</c> and lock operators out); <c>off</c> needs
+    /// OIDC to be the way in, so it needs the dashboard exposed and an OIDC client that was accepted. PURE; run once, after
+    /// the TLS and trustedProxies degrades have settled <paramref name="networkMode"/>. Never holds a token.
+    /// </summary>
+    internal static string? TokenSignInStartProblem(string? rawMode, bool oidcConfigured, bool networkMode, bool oidcClientPresent)
+    {
+        if (!DarlingTokenSignIn.TryParse(rawMode, out var mode))
+        {
+            return $"web.network.oidc.tokenSignIn is '{rawMode?.Trim()}', which is not a known value. Use 'on', 'loopback' or 'off'. "
+                + "The web dashboard is not started.";
+        }
+
+        if (mode != TokenSignInMode.Off || (networkMode && oidcClientPresent))
+        {
+            return null;
+        }
+
+        var missing = !oidcConfigured
+            ? "OIDC is not configured (web.network.oidc)"
+            : !oidcClientPresent
+                ? "OIDC was refused at start (see the OIDC line above)"
+                : "the dashboard is not exposed to the network (web.network.listen, allowFrom, TLS or trustedProxies was refused or is missing)";
+        return $"web.network.oidc.tokenSignIn is 'off', which leaves OIDC as the only way to sign in, but {missing}, so no one could sign in. "
+            + "Fix that, or set web.network.oidc.tokenSignIn to 'loopback' or 'on'. The web dashboard is not started.";
+    }
+
+    /// <summary>
+    /// The lines a start logs for <c>web.network.oidc.tokenSignIn</c> (#8735): nothing under <c>on</c>; under <c>loopback</c> an
+    /// Information line, plus a Warning when no <c>web.network.trustedProxies</c> is set, because an Envoy or Linkerd sidecar
+    /// connects from loopback and would make every client look local; under <c>off</c> an Information line. PURE.
+    /// </summary>
+    internal static IReadOnlyList<(LogLevel Level, string Message)> TokenSignInStartLines(TokenSignInMode mode, bool hasTrustedProxies)
+    {
+        var lines = new List<(LogLevel Level, string Message)>();
+        if (mode == TokenSignInMode.Loopback)
+        {
+            lines.Add((LogLevel.Information,
+                "web.network.oidc.tokenSignIn is 'loopback': the shared token, the web.network.tokens entries and the managed group tokens "
+                + "sign in only from this machine; other clients sign in with OIDC."));
+            if (!hasTrustedProxies)
+            {
+                lines.Add((LogLevel.Warning,
+                    "web.network.oidc.tokenSignIn is 'loopback' and web.network.trustedProxies is empty: a sidecar proxy such as Envoy or Linkerd "
+                    + "on this machine connects from loopback, so every client behind it would count as local. List the proxy in "
+                    + "web.network.trustedProxies, or use 'off'."));
+            }
+        }
+        else if (mode == TokenSignInMode.Off)
+        {
+            lines.Add((LogLevel.Information,
+                "web.network.oidc.tokenSignIn is 'off': the shared token, the web.network.tokens entries and the managed group tokens "
+                + "cannot sign in from any client; OIDC is the only way in. MCP tokens are not affected."));
+        }
+
+        return lines;
     }
 
     /// <summary>The answer of <see cref="ResolveLoopbackOnlyToken"/>: the token the loopback-only dashboard's
@@ -647,6 +716,13 @@ public sealed class DarlingWebHostService : BackgroundService
             /* Why the resolved token is under the length floor, or null. A token under it still gates sign-in, but the
                shared-token seat then serves reads only (ConfigurePipeline's sharedTokenReadsOnlyProblem). */
             string? writeTokenProblem = null;
+
+            /* #8735: parsed once. An unknown value parses as Off, so the token paths below stay quiet for it and the check
+               before ConfigurePipeline stops the start with the line that names the real problem. */
+            var rawTokenSignIn = network?.Oidc?.TokenSignIn;
+            DarlingTokenSignIn.TryParse(rawTokenSignIn, out var tokenSignIn);
+            var tokenConfigured = network is not null
+                && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token));
             if (networkMode)
             {
                 networkListenIp = IPAddress.Parse(network!.Listen!.Trim());
@@ -655,7 +731,14 @@ public sealed class DarlingWebHostService : BackgroundService
                 try
                 {
                     var token = network.ResolveToken(out var usedPlaintext);
-                    if (string.IsNullOrWhiteSpace(token))
+
+                    /* #8735: under tokenSignIn off no token is needed (OIDC is the only way in), so none configured is not an
+                       error and accessToken stays "". A token that is configured resolves as usual. */
+                    if (tokenSignIn == TokenSignInMode.Off && !tokenConfigured)
+                    {
+                        token = "";
+                    }
+                    else if (string.IsNullOrWhiteSpace(token))
                     {
                         _logger.LogCritical(
                             "Web dashboard token (web.network.encryptedToken) decrypted to an empty value. Re-create it with PerformanceMonitor.Darling.Service.exe --encrypt-password. The web dashboard is not started.");
@@ -669,7 +752,7 @@ public sealed class DarlingWebHostService : BackgroundService
                        still resolved so it keeps gating the loopback listener, the way a refused TLS
                        certificate degrades. */
                     var floor = DarlingHostBinding.ApplyTokenFloor(token, networkMode);
-                    if (floor.Problem is not null)
+                    if (tokenSignIn != TokenSignInMode.Off && floor.Problem is not null)
                     {
                         _logger.LogCritical(
                             "Web dashboard token {Problem}: refusing to expose; binding loopback-only.",
@@ -709,17 +792,26 @@ public sealed class DarlingWebHostService : BackgroundService
                    config is held for the process lifetime, so the 30s retries would only repeat it. A configured token
                    that cannot be used stops this start, because serving the dashboard open would drop the credential
                    the operator asked every client to present. */
-                var loopbackToken = ResolveLoopbackOnlyToken(
-                    network, web.AllowTokenlessLoopback, _logger, reportMissingToken: !_missingTokenReported);
-                if (loopbackToken.Refuse)
+                if (tokenSignIn == TokenSignInMode.Off && !tokenConfigured)
                 {
-                    _missingTokenReported |= loopbackToken.MissingToken;
-                    await DisposeFailedStartAsync();
-                    return false;
+                    /* #8735: tokenSignIn off with no token and no network listener cannot start, because no one could sign in.
+                       ResolveLoopbackOnlyToken would stop it with the "no token" line, which names the wrong cause, so it is
+                       skipped and the check before ConfigurePipeline stops the start with the tokenSignIn line. */
                 }
+                else
+                {
+                    var loopbackToken = ResolveLoopbackOnlyToken(
+                        network, web.AllowTokenlessLoopback, _logger, reportMissingToken: !_missingTokenReported);
+                    if (loopbackToken.Refuse)
+                    {
+                        _missingTokenReported |= loopbackToken.MissingToken;
+                        await DisposeFailedStartAsync();
+                        return false;
+                    }
 
-                accessToken = loopbackToken.Token;
-                writeTokenProblem = loopbackToken.TokenProblem;
+                    accessToken = loopbackToken.Token;
+                    writeTokenProblem = loopbackToken.TokenProblem;
+                }
             }
 
             /* OIDC sign-in (#2550) — resolved once per start, like the token and the certificate. A
@@ -1106,7 +1198,7 @@ public sealed class DarlingWebHostService : BackgroundService
             /* #6265: a web token with the MCP token's value is refused for web sign-in (the pipeline checks each posted token). The
                service still starts, so an upgrade of such a setup keeps running; this says why the token form answers 403. */
             var mcpTokens = DarlingAgentDispatchChecks.ResolveAllTokens(config.Mcp);
-            if (DarlingAgentDispatchChecks.WebTokenIsMcpToken(accessToken, mcpTokens))
+            if (tokenSignIn != TokenSignInMode.Off && DarlingAgentDispatchChecks.WebTokenIsMcpToken(accessToken, mcpTokens))
             {
                 _logger.LogWarning("{Message}", DarlingAgentDispatchChecks.WebTokenSameAsMcpMessage);
             }
@@ -1127,11 +1219,33 @@ public sealed class DarlingWebHostService : BackgroundService
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
                ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
                loopback-only admits loopback names only, whatever it parsed. */
+            /* #8735: stop before the pipeline when tokenSignIn cannot be honored. Placed here, after the TLS and trustedProxies
+               degrades, because those clear networkMode after OIDC resolved. This also keeps ConfigurePipeline's own guard
+               (off, not exposed, no token to require) from ever throwing in production. The line is logged once per process. */
+            var tokenSignInProblem = TokenSignInStartProblem(
+                rawTokenSignIn, network?.Oidc is { IsConfigured: true }, networkMode, oidcClient is not null);
+            if (tokenSignInProblem is not null)
+            {
+                if (!_tokenSignInProblemReported)
+                {
+                    _logger.LogCritical("{Message}", tokenSignInProblem);
+                    _tokenSignInProblemReported = true;
+                }
+
+                await DisposeFailedStartAsync();
+                return false;
+            }
+
+            foreach (var (level, message) in TokenSignInStartLines(tokenSignIn, trustedProxies is { Count: > 0 }))
+            {
+                _logger.Log(level, "{Message}", message);
+            }
+
             _managedGroups = frontDoorProxy is null && _ownerSource is not null && postgres is not null
                 ? new DarlingWebGroupTokens(() => _ownerSource.Read(), postgres, () => DarlingPasswordKey.Current,
                     accessToken, webTokens, mcpTokens, _logger)
                 : null;
-            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource, webTokens: webTokens, publicOrigin: publicOrigin, managedGroups: _managedGroups);
+            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource, webTokens: webTokens, publicOrigin: publicOrigin, managedGroups: _managedGroups, tokenSignIn: tokenSignIn);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
