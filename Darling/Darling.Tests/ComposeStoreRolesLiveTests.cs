@@ -1358,7 +1358,7 @@ public sealed class ComposeStoreRolesLiveTests
 
     /// <summary>Writes the shipped script with its three password placeholders replaced (in a file under
     /// <paramref name="directory"/>) and runs it with the runtime's own psql.</summary>
-    private static async Task<(int ExitCode, string Output, string Error)> RunFilledScriptAsync(
+    internal static async Task<(int ExitCode, string Output, string Error)> RunFilledScriptAsync(
         string runtimeRoot, string directory, string login, string? database, string[] passwords, CancellationToken ct, params string[] extraArguments)
     {
         var script = File.ReadAllText(ShippedScriptPath())
@@ -1488,12 +1488,12 @@ ALTER ROLE byo SET pg_stat_statements.track_utility = on;", ct);
     }
 
     /// <summary>The script as the build copies it next to the tests.</summary>
-    private static string ShippedScriptPath() => Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql");
+    internal static string ShippedScriptPath() => Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql");
 
     /// <summary>Runs the runtime's own <c>psql</c> (<c>-X</c>: no psqlrc) on a script file against the cluster the
     /// owner connection string names, and returns its exit code and output. <paramref name="database"/> overrides the
     /// owner's database. The child is ours: it is killed if the run is cancelled.</summary>
-    private static async Task<(int ExitCode, string Output, string Error)> RunPsqlScriptAsync(
+    internal static async Task<(int ExitCode, string Output, string Error)> RunPsqlScriptAsync(
         string runtimeRoot, string owner, string? database, string script, CancellationToken ct, params string[] extraArguments)
     {
         var psql = Path.Combine(runtimeRoot, "pgsql", "bin", "psql.exe");
@@ -1712,7 +1712,7 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), 60, 
         }
     }
 
-    private static string RequireRuntime()
+    internal static string RequireRuntime()
     {
         var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
         Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
@@ -1727,7 +1727,7 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), 60, 
     /// and migrates it, since provisioning names migrated tables. A boot failure carries the cluster's own
     /// server log tail (#4352): the CI failure artifact does not collect it, and a bare exception message
     /// ("connection open timed out", "CREATE DATABASE timed out") does not say what the server was doing.</summary>
-    private static async Task<string> BootMigratedAsync(DarlingManagedPostgres cluster, CancellationToken ct)
+    internal static async Task<string> BootMigratedAsync(DarlingManagedPostgres cluster, CancellationToken ct)
     {
         string connectionString;
         try
@@ -1915,7 +1915,7 @@ WHERE r.rolname IN ('admin', 'viewer', 'web', 'mcp')";
         return snapshot;
     }
 
-    private static string Login(string owner, string role, string password) =>
+    internal static string Login(string owner, string role, string password) =>
         new NpgsqlConnectionStringBuilder(owner) { Username = role, Password = password, Pooling = false }.ConnectionString;
 
     private static async Task<string> CurrentUserAsync(string login, CancellationToken ct)
@@ -1924,13 +1924,13 @@ WHERE r.rolname IN ('admin', 'viewer', 'web', 'mcp')";
         return await ScalarAsync<string>(connection, "SELECT current_user::text", ct);
     }
 
-    private static async Task<T> OwnerScalarAsync<T>(string owner, string sql, CancellationToken ct)
+    internal static async Task<T> OwnerScalarAsync<T>(string owner, string sql, CancellationToken ct)
     {
         await using var connection = await OpenAsync(owner, ct);
         return await ScalarAsync<T>(connection, sql, ct);
     }
 
-    private static async Task<bool> RoleExistsAsync(string owner, string role, CancellationToken ct)
+    internal static async Task<bool> RoleExistsAsync(string owner, string role, CancellationToken ct)
     {
         await using var connection = await OpenAsync(owner, ct);
         await using var command = new NpgsqlCommand("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $1)", connection);
@@ -1938,7 +1938,7 @@ WHERE r.rolname IN ('admin', 'viewer', 'web', 'mcp')";
         return (bool)(await command.ExecuteScalarAsync(ct))!;
     }
 
-    private static async Task<string?> RoleMarkerAsync(string owner, string role, CancellationToken ct)
+    internal static async Task<string?> RoleMarkerAsync(string owner, string role, CancellationToken ct)
     {
         await using var connection = await OpenAsync(owner, ct);
         await using var command = new NpgsqlCommand(
@@ -1953,14 +1953,14 @@ WHERE r.rolname IN ('admin', 'viewer', 'web', 'mcp')";
     internal static string WithoutPsqlMetaCommands(string script) =>
         string.Join("\n", script.Split('\n').Where(line => !line.StartsWith('\\')));
 
-    private static async Task ExecAsync(string connectionString, string sql, CancellationToken ct)
+    internal static async Task ExecAsync(string connectionString, string sql, CancellationToken ct)
     {
         await using var connection = await OpenAsync(connectionString, ct);
         await using var command = new NpgsqlCommand(sql, connection);
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task<NpgsqlConnection> OpenAsync(string connectionString, CancellationToken ct)
+    internal static async Task<NpgsqlConnection> OpenAsync(string connectionString, CancellationToken ct)
     {
         var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);

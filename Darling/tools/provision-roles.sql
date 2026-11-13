@@ -114,6 +114,8 @@
 -- created the role cannot revoke the option itself) or drop the role. A plain membership (GRANT viewer TO
 -- some_analyst) is not refused.
 --
+-- On Kubernetes, the chart's `store.provisionRoles` runs this script for you.
+--
 -- AN OWNER WHO IS NOT A SUPERUSER can run this script, with these limits:
 --   * It needs CREATEROLE. From PostgreSQL 16 it also needs ADMIN OPTION on each of the four roles to set a
 --     password or take back an attribute, and it holds that option only on a role it created itself. A role a
@@ -129,12 +131,16 @@
 --     holds that option on itself. The stop names each membership. A password line that still fails (a
 --     password-check module can reject a password) is written to the server log with its password, unless step 0
 --     could turn off log_min_error_statement for the session.
---   * pg_stat_statements: while the module is loaded with utility tracking on, step 0 fails for this owner, and
---     the guard in step 1 then stops the run before any password is sent. Either GRANT SET ON PARAMETER
+--   * pg_stat_statements: while the module is loaded with utility tracking on, step 0 cannot switch it off for this
+--     owner (the refusal is caught and noted), and the guard in step 1 then stops the run before any password is sent.
+--     Either GRANT SET ON PARAMETER
 --     pg_stat_statements.track_utility TO <owner> (PostgreSQL 15 and later), so step 0 can turn it off for this
 --     session, or turn it off for the cluster (step 1b).
---   * The superuser-only lines (temp_file_limit, log_min_duration_statement, log_parameter_max_length) fail, and
---     psql carries on. SUPERUSER is not switched off, nor is REPLICATION, BYPASSRLS or CREATEDB unless the owner
+--   * The superuser-only settings (temp_file_limit, log_min_duration_statement, log_parameter_max_length) are applied
+--     where the owner may set them, and an owner that may not does not stop the run: each statement catches
+--     insufficient_privilege and nothing else, so the run goes on under psql -v ON_ERROR_STOP=1 and exits 0. One
+--     WARNING after step 1b then names each role that still lacks a setting and the exact ALTER ROLE ... SET
+--     statements a superuser runs once. A setting a superuser already applied is not reported. SUPERUSER is not switched off, nor is REPLICATION, BYPASSRLS or CREATEDB unless the owner
 --     holds that attribute itself (PostgreSQL 16 and later; before 16 only a superuser can change REPLICATION or
 --     BYPASSRLS), and a role membership the owner is not allowed to revoke stays. Step 1 prints a WARNING for
 --     each of those, so read psql's output.
@@ -151,14 +157,24 @@
 --    module's default), it records that statement VERBATIM, password included, where any superuser or
 --    pg_read_all_stats member (a monitoring agent's pg_monitor login, say) can read it. This covers this
 --    session only; step 1b says how to turn it off for good. Harmless when the module is not loaded. When it is
---    loaded, this SET needs a superuser, or an owner that was granted SET on the parameter (PostgreSQL 15 and
---    later): for any other owner it fails, and the first statement of the guard in step 1 then stops the run
---    before a password is sent.
-SET pg_stat_statements.track_utility = off;
+--    loaded, this switch needs a superuser, or an owner that was granted SET on the parameter (PostgreSQL 15 and
+--    later): for any other owner the refusal (insufficient_privilege, and nothing else) is caught and noted, and the
+--    first statement of the guard in step 1 then stops the run before a password is sent.
+DO $$
+BEGIN
+   PERFORM set_config('pg_stat_statements.track_utility', 'off', false);
+EXCEPTION WHEN insufficient_privilege THEN
+   RAISE NOTICE 'pg_stat_statements.track_utility could not be switched off for this session (it needs a superuser, or SET on the parameter). The guard in step 1 stops the run if it is on.';
+END $$;
 
 --    pg_stat_monitor tracks utility statements through pg_stat_monitor.pgsm_track_utility (on by default), so it gets
 --    the same switch and the same stop in the guard. The setting can be changed by any role.
-SET pg_stat_monitor.pgsm_track_utility = off;
+DO $$
+BEGIN
+   PERFORM set_config('pg_stat_monitor.pgsm_track_utility', 'off', false);
+EXCEPTION WHEN insufficient_privilege THEN
+   RAISE NOTICE 'pg_stat_monitor.pgsm_track_utility could not be switched off for this session. The guard in step 1 stops the run if it is on.';
+END $$;
 
 --    The same for the server log. log_statement set to ddl, mod or all writes each ALTER ROLE ... PASSWORD line to
 --    the log as sent, and log_min_duration_statement (or log_min_duration_sample) at 0 or more writes it with its
@@ -522,13 +538,10 @@ ALTER ROLE mcp    SET statement_timeout = '60s';
 --     store itself (SQLSTATE 53400) rather than writing gigabytes to the store's own volume and starving the
 --     collector's writes. Keep this value in step with ComposeLimits.TempFileLimit in the service.
 --     Superuser-only (PGC_SUSET), like log_min_duration_statement below -- if the OWNER role running this
---     script is not a superuser and has not been GRANTed SET on this parameter, these two statements fail and
---     psql carries on with the rest of the script (only the role-collision guard in step 1 stops the run), so viewer
---     and mcp are left without this limit; grant the owner SET on it and run the script again (it is idempotent),
---     or run these two lines as a superuser.
-ALTER ROLE viewer SET temp_file_limit = '1GB';
-ALTER ROLE web    SET temp_file_limit = '1GB';
-ALTER ROLE mcp    SET temp_file_limit = '1GB';
+--     script is not a superuser and has not been GRANTed SET on this parameter, the statement is refused. The three
+--     temp_file_limit statements run with the log settings in the block after step 1b, where each one catches that
+--     refusal (insufficient_privilege only) and the one WARNING at the end of the block names the roles left without
+--     the limit and the statements a superuser runs once. Only the role-collision guard in step 1 stops the run.
 
 -- 1b. Slow-statement logging on viewer and mcp (#3899): a statement from either that runs past a third of its
 --     statement_timeout, capped at 5s so raising the ceiling never widens the unlogged band (#4442), is written
@@ -560,12 +573,84 @@ ALTER ROLE mcp    SET temp_file_limit = '1GB';
 --          cluster, and a web dashboard or MCP server left on the owner login (no webConnectionString /
 --          mcpConnectionString) connects as it. On a cluster shared with other applications, leave it out.
 --     The service builds its reader functions at its next start, and then within the hour.
-ALTER ROLE viewer SET log_min_duration_statement = '5000ms';
-ALTER ROLE web    SET log_min_duration_statement = '5000ms';
-ALTER ROLE mcp    SET log_min_duration_statement = '5000ms';
-ALTER ROLE viewer SET log_parameter_max_length = 0;
-ALTER ROLE web    SET log_parameter_max_length = 0;
-ALTER ROLE mcp    SET log_parameter_max_length = 0;
+--     The nine superuser-only statements (temp_file_limit from 1a, then the two log settings) run here, each in its own
+--     block that catches insufficient_privilege and nothing else, so a superuser, or an owner granted SET on the
+--     parameter, applies each exactly as before and any other error still ends the run. A refused statement is
+--     recorded, and ONE warning after the last one lists, for each role still missing a setting, the exact
+--     ALTER ROLE ... SET statements to run once as a superuser. A setting already stored for the role (in this database
+--     or in all of them, pg_db_role_setting) is not reported, so a store a superuser has finished runs quietly.
+DO $$
+DECLARE
+   misses text[] := ARRAY[]::text[];
+   miss text;
+   remaining text[] := ARRAY[]::text[];
+   missing_roles text;
+   statements text;
+BEGIN
+   BEGIN
+      ALTER ROLE viewer SET temp_file_limit = '1GB';
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'viewer|temp_file_limit|''1GB'''::text;
+   END;
+   BEGIN
+      ALTER ROLE web    SET temp_file_limit = '1GB';
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'web|temp_file_limit|''1GB'''::text;
+   END;
+   BEGIN
+      ALTER ROLE mcp    SET temp_file_limit = '1GB';
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'mcp|temp_file_limit|''1GB'''::text;
+   END;
+   BEGIN
+      ALTER ROLE viewer SET log_min_duration_statement = '5000ms';
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'viewer|log_min_duration_statement|''5000ms'''::text;
+   END;
+   BEGIN
+      ALTER ROLE web    SET log_min_duration_statement = '5000ms';
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'web|log_min_duration_statement|''5000ms'''::text;
+   END;
+   BEGIN
+      ALTER ROLE mcp    SET log_min_duration_statement = '5000ms';
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'mcp|log_min_duration_statement|''5000ms'''::text;
+   END;
+   BEGIN
+      ALTER ROLE viewer SET log_parameter_max_length = 0;
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'viewer|log_parameter_max_length|0'::text;
+   END;
+   BEGIN
+      ALTER ROLE web    SET log_parameter_max_length = 0;
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'web|log_parameter_max_length|0'::text;
+   END;
+   BEGIN
+      ALTER ROLE mcp    SET log_parameter_max_length = 0;
+   EXCEPTION WHEN insufficient_privilege THEN
+      misses := misses || 'mcp|log_parameter_max_length|0'::text;
+   END;
+   FOREACH miss IN ARRAY misses LOOP
+      IF NOT EXISTS (SELECT 1
+                     FROM pg_db_role_setting AS stored
+                     JOIN pg_roles AS target ON target.oid = stored.setrole
+                     WHERE target.rolname = split_part(miss, '|', 1)
+                       AND stored.setdatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
+                       AND EXISTS (SELECT 1 FROM unnest(stored.setconfig) AS entry WHERE entry LIKE split_part(miss, '|', 2) || '=%')) THEN
+         remaining := remaining || miss;
+      END IF;
+   END LOOP;
+   IF cardinality(remaining) > 0 THEN
+      SELECT string_agg(DISTINCT split_part(entry, '|', 1), ', ' ORDER BY split_part(entry, '|', 1)),
+             string_agg(format('ALTER ROLE %I SET %s = %s;', split_part(entry, '|', 1), split_part(entry, '|', 2), split_part(entry, '|', 3)),
+                        E'\n' ORDER BY split_part(entry, '|', 1), split_part(entry, '|', 2))
+      INTO missing_roles, statements
+      FROM unnest(remaining) AS entry;
+      RAISE WARNING E'The superuser-only settings below were not applied: the role running this script may not set them. Roles still missing a setting: %. A superuser runs these statements once (this script, run again by the owner, then stays quiet):\n%', missing_roles, statements;
+   END IF;
+END $$;
 
 -- 2. Schema usage + SELECT on everything that exists now (ALL TABLES covers tables AND views). collect
 --    holds no secrets, so admin+viewer read all of it. config: admin (the writer, and the Settings

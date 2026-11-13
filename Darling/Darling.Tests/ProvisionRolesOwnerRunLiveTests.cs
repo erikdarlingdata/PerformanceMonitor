@@ -1,0 +1,173 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #8779: the shipped <c>Darling/tools/provision-roles.sql</c>, run with the runtime's own psql under
+/// <c>-v ON_ERROR_STOP=1</c> by an owner that is not a superuser (<c>LOGIN NOSUPERUSER CREATEROLE</c>, owning the
+/// store database). The nine superuser-only settings used to fail and psql carried on; now each catches
+/// <c>insufficient_privilege</c>, the run exits 0 and one WARNING names what a superuser still has to apply. The
+/// step 1 guard still stops its own cases. Gated on <c>DARLING_TEST_PGRUNTIME</c> like
+/// <see cref="ComposeStoreRolesLiveTests"/>, whose helpers these tests reuse; the cluster's PostgreSQL major version
+/// is whatever that runtime ships.
+/// </summary>
+[Collection("darling-config-env")]
+public sealed class ProvisionRolesOwnerRunLiveTests
+{
+    private const string OwnerPassword = "ProvOwner8779R1";
+    private static readonly string[] OnErrorStop = { "-v", "ON_ERROR_STOP=1" };
+    private static readonly string[] Passwords = { "AdminPw8779R1", "ViewerPw8779R1", "McpPw8779R1" };
+
+    [Fact]
+    public async Task WholeScript_OnErrorStop_AsCreateRoleOwner_ExitsZeroWithOneWarning()
+    {
+        await RunInOwnStoreAsync(createRole: true, async (runtimeRoot, directory, superuser, ownerLogin, ct) =>
+        {
+            var run = await ComposeStoreRolesLiveTests.RunFilledScriptAsync(runtimeRoot, directory, ownerLogin, null, Passwords, ct, OnErrorStop);
+
+            Assert.True(run.ExitCode == 0, $"psql exited {run.ExitCode}, not 0.{Environment.NewLine}{run.Error}");
+            Assert.Single(SettingsWarnings(run.Error));
+            foreach (var role in new[] { "admin", "viewer", "web", "mcp" })
+            {
+                Assert.Equal("darling-managed", await ComposeStoreRolesLiveTests.RoleMarkerAsync(superuser, role, ct));
+            }
+        });
+    }
+
+    [Fact]
+    public async Task WholeScript_SecondRunAfterSuperuserAppliedSettings_HasNoSettingsWarning()
+    {
+        await RunInOwnStoreAsync(createRole: true, async (runtimeRoot, directory, superuser, ownerLogin, ct) =>
+        {
+            var first = await ComposeStoreRolesLiveTests.RunFilledScriptAsync(runtimeRoot, directory, ownerLogin, null, Passwords, ct, OnErrorStop);
+            Assert.True(first.ExitCode == 0, $"the first run exited {first.ExitCode}, not 0.{Environment.NewLine}{first.Error}");
+            Assert.Single(SettingsWarnings(first.Error));
+
+            var statements = new[] { "viewer", "web", "mcp" }.SelectMany(role => new[]
+            {
+                $"ALTER ROLE {role} SET temp_file_limit = '1GB'",
+                $"ALTER ROLE {role} SET log_min_duration_statement = '5000ms'",
+                $"ALTER ROLE {role} SET log_parameter_max_length = 0",
+            });
+            await ComposeStoreRolesLiveTests.ExecAsync(superuser, string.Join("; ", statements), ct);
+
+            var second = await ComposeStoreRolesLiveTests.RunFilledScriptAsync(runtimeRoot, directory, ownerLogin, null, Passwords, ct, OnErrorStop);
+            Assert.True(second.ExitCode == 0, $"the second run exited {second.ExitCode}, not 0.{Environment.NewLine}{second.Error}");
+            Assert.Empty(SettingsWarnings(second.Error));
+            Assert.DoesNotContain("superuser-only settings", second.Error, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task Guard_StillStops_OwnerWithoutCreateRole()
+    {
+        await RunInOwnStoreAsync(createRole: false, async (runtimeRoot, directory, superuser, ownerLogin, ct) =>
+        {
+            var run = await ComposeStoreRolesLiveTests.RunFilledScriptAsync(runtimeRoot, directory, ownerLogin, null, Passwords, ct, OnErrorStop);
+
+            Assert.True(run.ExitCode == 3, $"psql exited {run.ExitCode}, not 3.{Environment.NewLine}{run.Error}");
+            Assert.Contains("does not have CREATEROLE", run.Error, StringComparison.Ordinal);
+            Assert.False(await ComposeStoreRolesLiveTests.RoleExistsAsync(superuser, "admin", ct), "the guard's stop still created a role.");
+        });
+    }
+
+    [Fact]
+    public async Task Guard_StillStops_TrackUtilityOnWithoutSetGrant()
+    {
+        await RunInOwnStoreAsync(createRole: true, async (runtimeRoot, directory, superuser, ownerLogin, ct) =>
+        {
+            Assert.SkipUnless(
+                await ComposeStoreRolesLiveTests.OwnerScalarAsync<long>(superuser, "SELECT count(*) FROM pg_catalog.pg_settings WHERE name = 'pg_stat_statements.track_utility'", ct) == 1,
+                "pg_stat_statements is not in shared_preload_libraries on this runtime, so there is no utility tracking to guard against.");
+            await ComposeStoreRolesLiveTests.ExecAsync(superuser, "ALTER ROLE prov_owner SET pg_stat_statements.track_utility = on", ct);
+
+            var run = await ComposeStoreRolesLiveTests.RunFilledScriptAsync(runtimeRoot, directory, ownerLogin, null, Passwords, ct, OnErrorStop);
+
+            Assert.True(run.ExitCode == 3, $"psql exited {run.ExitCode}, not 3.{Environment.NewLine}{run.Error}");
+            Assert.Contains("pg_stat_statements.track_utility is on", run.Error, StringComparison.Ordinal);
+            Assert.False(await ComposeStoreRolesLiveTests.RoleExistsAsync(superuser, "admin", ct), "the guard's stop still created a role.");
+        });
+    }
+
+    private static string[] SettingsWarnings(string error) =>
+        Regex.Matches(error, @"(?m)^.*WARNING:.*superuser-only settings.*$").Select(match => match.Value).ToArray();
+
+    /// <summary>Boots a cluster, creates owner <c>prov_owner</c> and database <c>prov_store</c> owned by it, migrates
+    /// the store, hands the owner the schemas and every relation in them, and calls <paramref name="body"/> with the
+    /// runtime root, a scratch directory, the superuser and the owner's connection strings (both on
+    /// <c>prov_store</c>). When pg_stat_statements is loaded the owner's utility tracking is set off at the role level
+    /// (the owner may not switch it off itself), so the run reaches the settings; the guard test sets it back on.</summary>
+    private static async Task RunInOwnStoreAsync(
+        bool createRole,
+        Func<string, string, string, string, CancellationToken, Task> body)
+    {
+        var runtimeRoot = ComposeStoreRolesLiveTests.RequireRuntime();
+        var root = Directory.CreateTempSubdirectory("darling-8779-owner-");
+        var cluster = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = Path.Combine(root.FullName, "pg") },
+            NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var ct = timeout.Token;
+            var bootstrap = await ComposeStoreRolesLiveTests.BootMigratedAsync(cluster, ct);
+
+            await ComposeStoreRolesLiveTests.ExecAsync(
+                bootstrap, $"CREATE ROLE prov_owner LOGIN NOSUPERUSER {(createRole ? "CREATEROLE" : "NOCREATEROLE")} PASSWORD '{OwnerPassword}'", ct);
+            await ComposeStoreRolesLiveTests.ExecAsync(bootstrap, "CREATE DATABASE prov_store OWNER prov_owner", ct);
+            var superuser = new NpgsqlConnectionStringBuilder(bootstrap) { Database = "prov_store", Pooling = false }.ConnectionString;
+            await using (var connection = await ComposeStoreRolesLiveTests.OpenAsync(superuser, ct))
+            {
+                await PgMigrations.MigrateAsync(connection, ct);
+            }
+
+            await ComposeStoreRolesLiveTests.ExecAsync(superuser,
+                "ALTER SCHEMA collect OWNER TO prov_owner; ALTER SCHEMA config OWNER TO prov_owner;"
+                + @" DO $$
+DECLARE r record;
+BEGIN
+   FOR r IN SELECT n.nspname, c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname IN ('collect', 'config') AND c.relkind IN ('v', 'm', 'S', 'r', 'p') ORDER BY (c.relkind = 'S'), c.relname LOOP
+      BEGIN
+         EXECUTE format('ALTER %s %I.%I OWNER TO prov_owner',
+            CASE r.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'S' THEN 'SEQUENCE' ELSE 'TABLE' END, r.nspname, r.relname);
+      EXCEPTION WHEN others THEN
+         RAISE NOTICE 'could not hand % to prov_owner: %', r.relname, SQLERRM;
+      END;
+   END LOOP;
+END $$;", ct);
+            if (await ComposeStoreRolesLiveTests.OwnerScalarAsync<long>(
+                    superuser, "SELECT count(*) FROM pg_catalog.pg_settings WHERE name = 'pg_stat_statements.track_utility'", ct) == 1)
+            {
+                await ComposeStoreRolesLiveTests.ExecAsync(superuser, "ALTER ROLE prov_owner SET pg_stat_statements.track_utility = off", ct);
+            }
+
+            var ownerLogin = ComposeStoreRolesLiveTests.Login(superuser, "prov_owner", OwnerPassword);
+            await body(runtimeRoot, root.FullName, superuser, ownerLogin, ct);
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            await cluster.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+}

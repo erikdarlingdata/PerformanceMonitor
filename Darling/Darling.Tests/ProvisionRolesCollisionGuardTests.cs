@@ -60,11 +60,11 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.True(on.Index < firstPasswordReset.Index && off.Index < firstPasswordReset.Index,
             "the stop must be on and put back before the first ALTER ROLE ... PASSWORD, or the guard no longer stops that reset.");
 
-        /* Only the guard stops the run: step 0's SET (superuser-only once pg_stat_statements is loaded) sits before
-           the stop, and the temp_file_limit line (superuser-only) after it, so an owner who is not a superuser
-           still gets every grant it can make. */
-        var stepZero = sql.IndexOf("SET pg_stat_statements.track_utility = off;", StringComparison.Ordinal);
-        Assert.True(stepZero >= 0 && stepZero < on.Index, "step 0's SET must stay outside the stop.");
+        /* Only the guard stops the run: step 0's switch (superuser-only once pg_stat_statements is loaded) sits before
+           the stop, and the temp_file_limit line (superuser-only) after it. Each catches insufficient_privilege itself
+           (#8779), so an owner who is not a superuser still gets every grant it can make. */
+        var stepZero = sql.IndexOf("set_config('pg_stat_statements.track_utility', 'off', false)", StringComparison.Ordinal);
+        Assert.True(stepZero >= 0 && stepZero < on.Index, "step 0's switch must stay outside the stop.");
         var tempFileLimit = sql.IndexOf("ALTER ROLE viewer SET temp_file_limit", StringComparison.Ordinal);
         Assert.True(tempFileLimit > off.Index, "the temp_file_limit lines must stay outside the stop.");
     }
@@ -105,14 +105,16 @@ public sealed class ProvisionRolesCollisionGuardTests
     }
 
     /// <summary>The comment above the <c>temp_file_limit</c> lines used to say a failure there stops the script. It
-    /// does not: psql carries on, so the roles, the grants and the secret-column carve still land.</summary>
+    /// does not: each superuser-only statement catches insufficient_privilege (#8779), so the roles, the grants and the
+    /// secret-column carve still land, and only the role-collision guard stops the run.</summary>
     [Fact]
     public void TheTempFileLimitComment_DoesNotClaimAFailureStopsTheScript()
     {
         var sql = Script();
 
         Assert.DoesNotContain("rest of the script does not run", sql, StringComparison.Ordinal);
-        Assert.Contains("psql carries on", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("psql carries on", sql, StringComparison.Ordinal);
+        Assert.Contains("Only the role-collision guard in step 1 stops the run.", sql, StringComparison.Ordinal);
     }
 
     /// <summary>The live script test feeds the file to Npgsql, which cannot run psql's meta-commands, so it drops the
@@ -532,9 +534,9 @@ public sealed class ProvisionRolesCollisionGuardTests
     {
         var sql = Script();
 
-        var utilityOff = sql.IndexOf("\nSET pg_stat_statements.track_utility = off;", StringComparison.Ordinal);
-        Assert.True(utilityOff >= 0);
-        var block = sql[sql.IndexOf("DO $$", utilityOff, StringComparison.Ordinal)..];
+        var monitorOff = sql.IndexOf("set_config('pg_stat_monitor.pgsm_track_utility', 'off', false)", StringComparison.Ordinal);
+        Assert.True(monitorOff >= 0);
+        var block = sql[sql.IndexOf("DO $$", monitorOff, StringComparison.Ordinal)..];
         block = block[..(block.IndexOf("END $$;", StringComparison.Ordinal) + "END $$;".Length)];
 
         foreach (var (name, value) in new[]
@@ -589,8 +591,8 @@ public sealed class ProvisionRolesCollisionGuardTests
         var sql = Script();
         var guard = GuardBlock(sql);
 
-        var setOff = sql.IndexOf("\nSET pg_stat_monitor.pgsm_track_utility = off;", StringComparison.Ordinal);
-        Assert.True(setOff > sql.IndexOf("\nSET pg_stat_statements.track_utility = off;", StringComparison.Ordinal), "step 0 must switch pg_stat_monitor's tracking off after pg_stat_statements'.");
+        var setOff = sql.IndexOf("set_config('pg_stat_monitor.pgsm_track_utility', 'off', false)", StringComparison.Ordinal);
+        Assert.True(setOff > sql.IndexOf("set_config('pg_stat_statements.track_utility', 'off', false)", StringComparison.Ordinal), "step 0 must switch pg_stat_monitor's tracking off after pg_stat_statements'.");
         Assert.True(setOff < sql.IndexOf(guard, StringComparison.Ordinal), "step 0's SET must come before the guard.");
 
         var check = guard.IndexOf("current_setting('pg_stat_monitor.pgsm_track_utility', true)", StringComparison.Ordinal);
