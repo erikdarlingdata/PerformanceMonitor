@@ -190,6 +190,7 @@ WHERE {presence}";
         DateTime d => d.Ticks.ToString(CultureInfo.InvariantCulture),
         bool b => b ? "1" : "",
         System.Numerics.BigInteger big => big.IsZero ? "" : big.ToString(CultureInfo.InvariantCulture),
+        Int128 wide => wide == 0 ? "" : wide.ToString(CultureInfo.InvariantCulture),
         IConvertible c => Math.Abs(c.ToDouble(CultureInfo.InvariantCulture)) < double.Epsilon ? "" : c.ToDouble(CultureInfo.InvariantCulture).ToString("R", CultureInfo.InvariantCulture),
         _ => value.ToString() ?? "",
     };

@@ -154,10 +154,12 @@ FROM range({SnapshotsEach}) b(s);";
     {
         if (node.ValueKind == JsonValueKind.Object)
         {
-            if (node.TryGetProperty("operator_type", out var type)
+            /* DuckDB 2.0 renamed the profile keys (operator_type -> type, operator_cardinality -> intermediate_rows). */
+            if ((node.TryGetProperty("operator_type", out var type) || node.TryGetProperty("type", out type))
+                && type.ValueKind == JsonValueKind.String
                 && type.GetString() is { } name
                 && name.Contains("WINDOW", StringComparison.OrdinalIgnoreCase)
-                && node.TryGetProperty("operator_cardinality", out var cardinality))
+                && (node.TryGetProperty("operator_cardinality", out var cardinality) || node.TryGetProperty("intermediate_rows", out cardinality)))
             {
                 into.Add(cardinality.GetInt64());
             }

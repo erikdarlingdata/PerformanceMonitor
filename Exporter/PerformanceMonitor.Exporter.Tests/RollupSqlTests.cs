@@ -45,6 +45,7 @@ public class RollupSqlTests
     {
         null => 0,
         System.Numerics.BigInteger b => (long)b,
+        Int128 w => (long)w,
         _ => Convert.ToInt64(value),
     };
 
