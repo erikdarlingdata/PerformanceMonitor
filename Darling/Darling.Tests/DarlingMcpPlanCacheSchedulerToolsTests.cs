@@ -237,37 +237,34 @@ public sealed class DarlingMcpPlanCacheSchedulerToolsSurfaceAndSqlTests
     [Fact]
     public void ClassifyCpuSchedulerPressure_RunnableTaskBands()
     {
-        Assert.Equal("CRITICAL - High runnable task queue", Level(60, 0, 100, 0, false, false, false));
-        Assert.Equal("HIGH - Moderate runnable task queue", Level(30, 0, 100, 0, false, false, false));
-        Assert.Equal("MEDIUM - Some runnable tasks queued", Level(15, 0, 100, 0, false, false, false));
-        Assert.Equal("NORMAL", Level(0, 0, 100, 0, false, false, false));
+        Assert.Equal("CRITICAL - High runnable task queue", Level(60, 0, false, false, false));
+        Assert.Equal("HIGH - Moderate runnable task queue", Level(30, 0, false, false, false));
+        Assert.Equal("MEDIUM - Some runnable tasks queued", Level(15, 0, false, false, false));
+        Assert.Equal("NORMAL", Level(0, 0, false, false, false));
 
-        static string Level(int runnable, int workers, int maxWorkers, int queued, bool ex, bool rt, bool qr) =>
-            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(runnable, workers, maxWorkers, queued, ex, rt, qr).Level;
+        static string Level(int runnable, int queued, bool ex, bool rt, bool qr) =>
+            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(runnable, queued, ex, rt, qr).Level;
     }
 
     [Fact]
-    public void ClassifyCpuSchedulerPressure_WorkerUtilizationAndWarningFallbacks()
+    public void ClassifyCpuSchedulerPressure_WarningFallbacks()
     {
-        /* worker utilization > 90% (95/100) with low runnable tasks escalates to HIGH */
-        Assert.Equal("HIGH - Worker thread exhaustion",
-            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(5, 95, 100, 0, false, false, false).Level);
-
-        /* warning-flag fallbacks (below the worker-util threshold) */
         Assert.Equal("CRITICAL - Worker thread exhaustion warning",
-            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(5, 10, 100, 0, true, false, false).Level);
+            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(5, 0, true, false, false).Level);
         Assert.Equal("HIGH - Runnable tasks warning",
-            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(5, 10, 100, 0, false, true, false).Level);
+            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(5, 0, false, true, false).Level);
         Assert.Equal("MEDIUM - Queued requests warning",
-            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(5, 10, 100, 0, false, false, true).Level);
+            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(5, 0, false, false, true).Level);
 
         /* recommendation branches */
         Assert.Equal("CPU pressure detected - check for CPU-intensive queries, consider adding CPU cores",
-            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(30, 10, 100, 0, false, false, false).Recommendation);
+            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(30, 0, false, false, false).Recommendation);
+        Assert.Equal("Worker thread exhaustion - check max worker threads setting",
+            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(5, 0, true, false, false).Recommendation);
         Assert.Equal("Requests queued for execution - CPU or worker thread pressure",
-            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(5, 10, 100, 3, false, false, false).Recommendation);
+            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(5, 3, false, false, false).Recommendation);
         Assert.Equal("No CPU scheduler pressure detected",
-            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(0, 10, 100, 0, false, false, false).Recommendation);
+            DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(0, 0, false, false, false).Recommendation);
     }
 
     private static List<ModelContextProtocol.Protocol.Tool> BuildToolSchemas()
@@ -465,11 +462,11 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
             await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
                 9100L, exactTime, ServerId, ServerName, 100, 4, 4, 21, 2L, 60, 5.25m, 7, 1, 0, 3L, 12.5m, false, true, false, false, 65536000L, 32768000L, false, 1, 1, 0, false);
 
-            /* A split of 4 schedulers: 3 + 2 runnable tasks, 50 + 45 workers. Each row's own flags are FALSE (3 < 4
-               CPUs, 50 < 90 workers); the whole server's are TRUE (5 >= 4, 95 >= 90). The request columns differ
-               between the two pieces, as the old collector's re-read per scheduler row made them. */
+            /* A split of 4 schedulers: 3 + 2 runnable tasks, 0 + 1 tasks waiting for a worker, 50 + 45 workers. Each
+               row's stored flags are FALSE; the whole server's are TRUE (5 runnable >= 4 CPUs, a work queue of 1). The
+               request columns differ between the two pieces, as the old collector's re-read per scheduler row made them. */
             await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
-                9202L, splitTime, ServerId, ServerName, 100, 4, 4, 2, 0L, 45, 2.00m, 9, 1, 0, 3L, 20.0m, false, false, false, false, 65536000L, 30000000L, false, 1, 1, 0, false);
+                9202L, splitTime, ServerId, ServerName, 100, 4, 4, 2, 1L, 45, 2.00m, 9, 1, 0, 3L, 20.0m, false, false, false, false, 65536000L, 30000000L, false, 1, 1, 0, false);
             await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
                 9201L, splitTime, ServerId, ServerName, 100, 4, 4, 3, 0L, 50, 3.00m, 8, 1, 0, 3L, 10.0m, false, false, false, false, 65536000L, 31000000L, false, 1, 1, 0, false);
 
@@ -486,6 +483,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
             Assert.Equal(21, exact!.TotalRunnableTasksCount);
             Assert.Equal(5.25m, exact.AvgRunnableTasksCount);
             Assert.True(exact.RunnableTasksWarning);
+            /* #8778: the exhaustion flag is recomputed from the work queue (2 tasks waiting for a worker), not read from
+               the stored FALSE. */
+            Assert.True(exact.WorkerThreadExhaustionWarning);
 
             var split = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(
                 postgres, ServerId, splitTime.AddMinutes(-1), splitTime.AddMinutes(1), ct);
@@ -508,15 +508,16 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
             Assert.Equal(0.00m, zero.AvgRunnableTasksCount);
             Assert.Equal(40, zero.TotalCurrentWorkersCount);
             Assert.False(zero.RunnableTasksWarning);
+            Assert.False(zero.WorkerThreadExhaustionWarning);
 
             /* The tool's own verdict over the combined row (#5712 round 1): the read above is the reader, this is the
                tool the MCP client calls, so the pressure_level text it builds over a combined row is checked live too.
-               The split collection is the newest one inside a window that ends a minute after it. Neither piece alone
-               reaches the bar (50 and 45 workers of 100); the combined 95 does: the worker-utilization band, not NORMAL. */
+               The split collection is the newest one inside a window that ends a minute after it. The combined row has a
+               task waiting for a worker, so the verdict is the exhaustion warning, not NORMAL. */
             var asOf = splitTime.AddMinutes(1).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture);
             var toolSplit = await DarlingMcpPlanCacheSchedulerTools.GetCpuSchedulerPressure(postgres, ServerName, hours_back: 1, as_of: asOf, cancellationToken: ct);
             DarlingMcpTestData.AssertEnvelope(toolSplit, ServerName, "pressure_level");
-            Assert.Contains("HIGH - Worker thread exhaustion", toolSplit, StringComparison.Ordinal);
+            Assert.Contains("CRITICAL - Worker thread exhaustion warning", toolSplit, StringComparison.Ordinal);
             Assert.Contains("Worker thread exhaustion - check max worker threads setting", toolSplit, StringComparison.Ordinal);
 
             /* #5712 review: the memory group comes from ONE row, the one with the LEAST available memory. One piece stored TRUE at

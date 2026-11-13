@@ -703,7 +703,8 @@ namespace PerformanceMonitor.Common
         /// <summary>Worker-thread ceiling (max_workers_count), or null with no scheduler snapshot (e.g. Azure SQL DB).</summary>
         public int? TotalThreads { get; init; }
 
-        /// <summary>Available worker threads = ceiling - in-use, or null with no scheduler snapshot.</summary>
+        /// <summary>Worker threads the ceiling leaves after the current workers, never below 0, or null with no scheduler
+        /// snapshot. Shown, not banded: current workers include idle pooled workers (#8778).</summary>
         public int? AvailableThreads { get; init; }
 
         /// <summary>Runnable tasks waiting for a CPU (total_runnable_tasks_count).</summary>
@@ -1455,10 +1456,12 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
-        /// Threads band: work-queue starvation Critical; >= 20 runnable-waiting or under 10% workers available
-        /// Warning. Unknown when there is no scheduler snapshot.
+        /// Threads band: a task waiting for a worker (work-queue starvation) Critical; >= 20 runnable tasks waiting for a CPU
+        /// Warning. Unknown when there is no scheduler snapshot. How many workers exist is not a band input (#8778): the pool
+        /// keeps idle workers after a burst and the workers of system tasks fall outside <c>max_workers_count</c>, so the
+        /// worker count can pass the ceiling on a server where nothing waits.
         /// </summary>
-        public static HealthSeverity ThreadsSeverity(int? totalThreads, int? availableThreads, int threadsWaitingForCpu, long requestsWaitingForThreads)
+        public static HealthSeverity ThreadsSeverity(int? totalThreads, int threadsWaitingForCpu, long requestsWaitingForThreads)
         {
             if (!totalThreads.HasValue)
             {
@@ -1471,11 +1474,6 @@ namespace PerformanceMonitor.Common
             }
 
             if (threadsWaitingForCpu >= 20)
-            {
-                return HealthSeverity.Warning;
-            }
-
-            if (totalThreads.Value > 0 && availableThreads < totalThreads.Value * 0.10)
             {
                 return HealthSeverity.Warning;
             }
@@ -1563,7 +1561,7 @@ namespace PerformanceMonitor.Common
         public static IEnumerable<HealthSeverity> MetricSeverities(ServerHealthMetrics m)
         {
             yield return CpuSeverity(m.CpuPercentForAlert, m.CapacityUtilizationPercent, m.CpuSource);
-            yield return ThreadsSeverity(m.TotalThreads, m.AvailableThreads, m.ThreadsWaitingForCpu, m.RequestsWaitingForThreads);
+            yield return ThreadsSeverity(m.TotalThreads, m.ThreadsWaitingForCpu, m.RequestsWaitingForThreads);
             yield return MemorySeverity(m.HasMemoryPressure);
             yield return m.BlockingCapturesTaken.HasValue
                 ? PostgresBlockingSeverity(m.BlockingCount, m.BlockingCapturesTaken.Value, m.BlockingBandThresholds)

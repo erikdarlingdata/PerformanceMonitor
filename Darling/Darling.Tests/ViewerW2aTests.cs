@@ -488,24 +488,26 @@ public sealed class ViewerServerSummaryDisplayTests
         Assert.Equal("20 runnable", item.ThreadsDisplay);
     }
 
+    /// <summary>#8778: the reporter's idle replica, 1,782 workers against a ceiling of 1,472 and nothing waiting. It reads
+    /// OK with the worker count over the ceiling, not a negative free count and a warning.</summary>
     [Fact]
-    public void ThreadsSeverity_LessThanTenPercentAvailable_IsWarning()
+    public void ThreadsSeverity_WorkersPastTheCeilingWithNothingWaiting_IsHealthy()
     {
-        // available = 512 - 470 = 42 < 51.2 (10% of 512) → Warning, "Low"
-        var item = new ServerSummaryItem { TotalThreads = 512, CurrentWorkers = 470 };
-        Assert.Equal(HealthSeverity.Warning, item.ThreadsSeverity);
-        Assert.Equal("Low", item.ThreadsDisplay);
-        Assert.Equal(42, item.AvailableThreads);
+        var item = new ServerSummaryItem { TotalThreads = 1472, CurrentWorkers = 1782 };
+        Assert.Equal(HealthSeverity.Healthy, item.ThreadsSeverity);
+        Assert.Equal("OK", item.ThreadsDisplay);
+        Assert.Equal(0, item.AvailableThreads);
+        Assert.Equal("1,782 workers / 1,472 max", item.ThreadsDetail);
     }
 
     [Fact]
-    public void ThreadsSeverity_HealthyShowsAvailableDetail()
+    public void ThreadsSeverity_HealthyShowsWorkerDetail()
     {
         var item = new ServerSummaryItem { TotalThreads = 512, CurrentWorkers = 100 };
         Assert.Equal(HealthSeverity.Healthy, item.ThreadsSeverity);
         Assert.Equal("OK", item.ThreadsDisplay);
         Assert.Equal(412, item.AvailableThreads);
-        Assert.Equal("Available: 412/512", item.ThreadsDetail);
+        Assert.Equal("100 workers / 512 max", item.ThreadsDetail);
     }
 
     [Fact]
@@ -1072,7 +1074,7 @@ public sealed class ViewerW2aLivePostgresTests
             Assert.Equal(5, summary.ThreadsWaitingForCpu);
             Assert.Equal(0, summary.RequestsWaitingForThreads);
             Assert.Equal(HealthSeverity.Healthy, summary.ThreadsSeverity);
-            Assert.Equal("Available: 384/512", summary.ThreadsDetail);
+            Assert.Equal("128 workers / 512 max", summary.ThreadsDetail);
 
             /* Memory — total + buffer pool + resource-semaphore pressure summed at the LATEST collection only. */
             Assert.Equal(8192.0, summary.MemoryMb!.Value, precision: 1);

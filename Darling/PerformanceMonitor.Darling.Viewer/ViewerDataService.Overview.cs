@@ -1030,9 +1030,11 @@ public sealed class ServerSummaryItem
     /// <summary>Requests starved of a worker thread (total_work_queue_count) — thread-pool starvation.</summary>
     public long RequestsWaitingForThreads { get; set; }
 
-    /// <summary>Available worker threads = ceiling − in-use, or NULL when there is no scheduler snapshot.</summary>
+    /// <summary>Worker threads the ceiling leaves after the current workers, never below 0, or NULL when there is no
+    /// scheduler snapshot. Current workers include idle pooled workers and the workers of system tasks, which the
+    /// ceiling leaves out, so the count can pass it on a server where nothing waits (#8778).</summary>
     public int? AvailableThreads =>
-        TotalThreads.HasValue ? TotalThreads.Value - (CurrentWorkers ?? 0) : null;
+        TotalThreads.HasValue ? Math.Max(0, TotalThreads.Value - (CurrentWorkers ?? 0)) : null;
 
     /// <summary>Collectors whose 7-day band is HEALTHY (mirrors report.collection_health).</summary>
     public int HealthyCollectorCount { get; set; }
@@ -1281,14 +1283,14 @@ public sealed class ServerSummaryItem
             if (!TotalThreads.HasValue || IsOffline) return "--";
             if (RequestsWaitingForThreads > 0) return $"{RequestsWaitingForThreads} starved";
             if (ThreadsWaitingForCpu >= 20) return $"{ThreadsWaitingForCpu} runnable";
-            if (TotalThreads.Value > 0 && AvailableThreads < TotalThreads.Value * 0.10) return "Low";
             return "OK";
         }
     }
 
-    /// <summary>Threads detail — "Available: in/ceiling" (Dashboard's ThreadsDetailText); blank with no snapshot.</summary>
+    /// <summary>Threads detail: "N workers / M max", blank with no snapshot. It names the worker count, not threads in
+    /// use, because idle pooled workers are counted (#8778).</summary>
     public string ThreadsDetail =>
-        IsOffline ? "" : TotalThreads is > 0 ? $"Available: {AvailableThreads}/{TotalThreads}" : "";
+        IsOffline ? "" : TotalThreads is > 0 ? $"{CurrentWorkers ?? 0:N0} workers / {TotalThreads:N0} max" : "";
 
     /// <summary>
     /// Collectors value — "Stale" when the server is offline, else "N failed" / "OK" (Dashboard's
@@ -1545,9 +1547,9 @@ public sealed class ServerSummaryItem
         DeadlockWindow,
         DeadlockRateThresholds ?? PerformanceMonitor.Common.DeadlockRateThresholds.Default);
 
-    /// <summary>Threads band — work-queue starvation Critical; >= 20 runnable-waiting or under 10% available Warning; no snapshot Unknown.</summary>
+    /// <summary>Threads band: a task waiting for a worker Critical; >= 20 runnable-waiting Warning; no snapshot Unknown.</summary>
     public HealthSeverity ThreadsSeverity =>
-        ServerHealthClassifier.ThreadsSeverity(TotalThreads, AvailableThreads, ThreadsWaitingForCpu, RequestsWaitingForThreads);
+        ServerHealthClassifier.ThreadsSeverity(TotalThreads, ThreadsWaitingForCpu, RequestsWaitingForThreads);
 
     /// <summary>
     /// Collectors band — neutral Unknown when the server is offline (its collectors are unmeasured, not

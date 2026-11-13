@@ -198,6 +198,25 @@ public sealed class ViewerCpuSchedulerProjectionTests
         Assert.Equal("25.0", rows.Single(r => r.Metric == "Worker Utilization %").Value);
     }
 
+    /// <summary>
+    /// #8778: the reporter's idle replica, 1,782 workers over a 1,472 ceiling with nothing waiting. The worker rows show
+    /// the figures and do not highlight; only the work queue row carries the exhaustion flag.
+    /// </summary>
+    [Fact]
+    public void BuildMetrics_WorkersPastTheCeiling_HighlightNothing_TheExhaustionFlagHighlightsTheWorkQueue()
+    {
+        var idle = CpuSchedulerMetrics.BuildMetrics(Snapshot(maxWorkers: 1472, currentWorkers: 1782));
+        Assert.Equal("121.1", idle.Single(r => r.Metric == "Worker Utilization %").Value);
+        Assert.False(idle.Single(r => r.Metric == "Current Workers").IsWarning);
+        Assert.False(idle.Single(r => r.Metric == "Worker Utilization %").IsWarning);
+        Assert.False(idle.Single(r => r.Metric == "Work Queue Length").IsWarning);
+
+        var starved = CpuSchedulerMetrics.BuildMetrics(Snapshot(workerExhaustion: true, maxWorkers: 1472, currentWorkers: 1782));
+        Assert.True(starved.Single(r => r.Metric == "Work Queue Length").IsWarning);
+        Assert.False(starved.Single(r => r.Metric == "Current Workers").IsWarning);
+        Assert.False(starved.Single(r => r.Metric == "Worker Utilization %").IsWarning);
+    }
+
     [Fact]
     public void BuildMetrics_WorkerUtilization_ZeroMaxWorkers_DoesNotDivideByZero()
     {
@@ -282,12 +301,15 @@ public sealed class ViewerCpuPressureTests
     public void ClassifyCpuPressure_BandsOnRunnableTaskQueue(int runnable, string expectedLevel)
         => Assert.Equal(expectedLevel, CpuSchedulerMetrics.ClassifyCpuPressure(Snapshot(runnableTasks: runnable)).Level);
 
+    /// <summary>
+    /// #8778: current workers count idle pooled workers, so 1,782 of a 1,472 ceiling with nothing waiting is NORMAL.
+    /// </summary>
     [Fact]
-    public void ClassifyCpuPressure_WorkerUtilizationOver90_IsHigh_WhenRunnableIsLow()
+    public void ClassifyCpuPressure_WorkersPastTheCeilingWithNothingWaiting_IsNormal()
     {
-        /* 95 / 100 = 95% > 90, runnable low → the worker-utilization branch. */
-        var pressure = CpuSchedulerMetrics.ClassifyCpuPressure(Snapshot(maxWorkers: 100, currentWorkers: 95));
-        Assert.Equal("HIGH - Worker thread exhaustion", pressure.Level);
+        var pressure = CpuSchedulerMetrics.ClassifyCpuPressure(Snapshot(maxWorkers: 1472, currentWorkers: 1782));
+        Assert.Equal("NORMAL", pressure.Level);
+        Assert.Equal("No CPU scheduler pressure detected", pressure.Recommendation);
     }
 
     [Fact]
@@ -347,8 +369,8 @@ public sealed class ViewerCpuSchedulerLivePostgresTests
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
             var t2 = t1.AddMinutes(5);
 
-            await InsertAsync(connection, 1, t1, runnable: 2, blocked: 0, queued: 0, workerWarn: false);
-            await InsertAsync(connection, 2, t2, runnable: 9, blocked: 4, queued: 1, workerWarn: true);
+            await InsertAsync(connection, 1, t1, runnable: 2, blocked: 0, queued: 0, workQueue: 0);
+            await InsertAsync(connection, 2, t2, runnable: 9, blocked: 4, queued: 1, workQueue: 3);
 
             var trend = await viewer.GetCpuSchedulerTrendAsync(ServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
             Assert.Equal(2, trend.Count);
@@ -356,7 +378,8 @@ public sealed class ViewerCpuSchedulerLivePostgresTests
             Assert.Equal(new[] { 2, 9 }, trend.Select(p => p.RunnableTasks));
             Assert.Equal(new[] { 0, 4 }, trend.Select(p => p.BlockedTasks));
 
-            /* Snapshot = the newest row (t2), warning flag round-trips. */
+            /* Snapshot = the newest row (t2). The exhaustion flag is recomputed from its work queue (#8778): the
+               stored flag is FALSE on both rows. */
             var snapshot = await viewer.GetCpuSchedulerSnapshotAsync(ServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
             Assert.NotNull(snapshot);
             Assert.Equal(t2.Ticks, snapshot!.CollectionTime.Ticks);
@@ -399,9 +422,9 @@ public sealed class ViewerCpuSchedulerLivePostgresTests
             var t2 = t1.AddMinutes(5);
 
             /* t1: one exact row. t2: split in two, the higher collection_id inserted first. */
-            await InsertAsync(connection, 10, t1, runnable: 2, blocked: 0, queued: 0, workerWarn: false);
-            await InsertAsync(connection, 22, t2, runnable: 2, blocked: 4, queued: 1, workerWarn: false);
-            await InsertAsync(connection, 21, t2, runnable: 3, blocked: 4, queued: 1, workerWarn: false);
+            await InsertAsync(connection, 10, t1, runnable: 2, blocked: 0, queued: 0, workQueue: 0);
+            await InsertAsync(connection, 22, t2, runnable: 2, blocked: 4, queued: 1, workQueue: 0);
+            await InsertAsync(connection, 21, t2, runnable: 3, blocked: 4, queued: 1, workQueue: 0);
 
             var trend = await viewer.GetCpuSchedulerTrendAsync(ServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
             Assert.Equal(2, trend.Count);
@@ -433,7 +456,7 @@ public sealed class ViewerCpuSchedulerLivePostgresTests
 
     private static async Task InsertAsync(
         NpgsqlConnection connection, long collectionId, DateTime collectionTimeUtc,
-        int runnable, int blocked, int queued, bool workerWarn)
+        int runnable, int blocked, int queued, long workQueue)
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO cpu_scheduler_stats
@@ -447,8 +470,8 @@ INSERT INTO cpu_scheduler_stats
      queued_requests_warning, total_physical_memory_kb, available_physical_memory_kb,
      system_memory_state_desc, physical_memory_pressure_warning,
      total_node_count, nodes_online_count, offline_cpu_count, offline_cpu_warning)
-VALUES ($1, $2, $3, $4, 512, 8, 8, $5, 0, 128, 0.5, 2, $6, $7, 0, 3, 20, 12.5,
-        $8, false, false, false, 67108864, 8388608, 'ok', false, 2, 2, 0, false)", connection);
+VALUES ($1, $2, $3, $4, 512, 8, 8, $5, $8, 128, 0.5, 2, $6, $7, 0, 3, 20, 12.5,
+        false, false, false, false, 67108864, 8388608, 'ok', false, 2, 2, 0, false)", connection);
         command.Parameters.AddWithValue(collectionId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(ServerId);
@@ -456,7 +479,7 @@ VALUES ($1, $2, $3, $4, 512, 8, 8, $5, 0, 128, 0.5, 2, $6, $7, 0, 3, 20, 12.5,
         command.Parameters.AddWithValue(runnable);
         command.Parameters.AddWithValue(queued);
         command.Parameters.AddWithValue(blocked);
-        command.Parameters.AddWithValue(workerWarn);
+        command.Parameters.AddWithValue(workQueue);
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 

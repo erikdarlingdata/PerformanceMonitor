@@ -181,6 +181,11 @@ try {
     ok: tiles(panels.VIZ.stat({ instance_status: "ok", gaps: [] }, agentSpec))["Alert setup"],
   };
   const quietCard = fleet.metricBands({ server_name: "srv-q", display_name: "srv-q", is_online: true, has_memory_pressure: false, available_threads: null }, null);
+  /* #8778: an idle replica holding more workers than the ceiling (pooled workers, system tasks) with nothing waiting for one. */
+  const threadsChip = (card) => findAll(fleet.metricBands(card, null), (n) => hasClass(n, "metric-chip")).map((x) => x.textContent).find((t) => t.startsWith("Threads")) ?? "no chip";
+  const workersPastCeiling = threadsChip({ server_name: "ag", display_name: "ag", is_online: true, has_memory_pressure: false, total_threads: 1472, current_workers: 1782, available_threads: 0, threads_waiting_for_cpu: 0, requests_waiting_for_threads: 0, threads_severity: "Healthy" });
+  /* #8778: a Warning band from runnable tasks names them, the same as the Viewer's Threads value. */
+  const runnableWarning = threadsChip({ server_name: "rq", display_name: "rq", is_online: true, has_memory_pressure: false, total_threads: 512, current_workers: 100, threads_waiting_for_cpu: 25, requests_waiting_for_threads: 0, threads_severity: "Warning" });
   /* #7560: a PostgreSQL card (has_memory_pressure null, blocking_count a structural 0, Unknown severities) prints n/a on Memory and
      Blocking, and a SQL Server card with the same zero keeps printing it. */
   const unmeasuredChips = (card) => Object.fromEntries(
@@ -331,7 +336,7 @@ try {
   };
 
   console.log(JSON.stringify({
-    alertSetup, quietChips, engineChips, blockingTile, windowChips, sweepTiles, skippedCycles, recommendations, pools, semaphoreWords, windowCellClasses, windowHeaderClasses, windowHeaderClassesAfterSort, sortedState, fileIoHeaders, runnable, platform, unrateable,
+    alertSetup, quietChips, workersPastCeiling, runnableWarning, engineChips, blockingTile, windowChips, sweepTiles, skippedCycles, recommendations, pools, semaphoreWords, windowCellClasses, windowHeaderClasses, windowHeaderClassesAfterSort, sortedState, fileIoHeaders, runnable, platform, unrateable,
     deadlockRates,
     protectionChip: chipText("Protection"),
     identityChip: chipText("Identity capacity"),
