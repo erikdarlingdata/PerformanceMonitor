@@ -137,6 +137,105 @@ LIMIT 250", connection) { CommandTimeout = 300 })
         Assert.Contains(read, r => r.QueryId == 1000 && r.Replica == "Secondary");
     }
 
+    /// <summary>
+    /// #8549: the grid's two-statement read (the kept keys first, then the rows of those keys bound as arrays, one Bitmap Heap Scan per daily
+    /// leaf) returns exactly the rows of the one-statement read, on keys that stress the key match: a key with rows in several leaves, a
+    /// key whose query_id also has a sibling plan that is not kept, a key with NULL database_name and query_id, two keys that differ only in
+    /// replica_role (NULL and a value), and a row of a kept key from before the read start.
+    /// </summary>
+    [Fact]
+    public async Task TheGridTwoStatementRead_ReturnsTheOneStatementReadsRows_OnKeysThatStressTheMatch()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #8549 live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var metricList = string.Join(", ", Metrics);
+        var metricValues = string.Join(", ", Metrics.Select((m, i) => m.StartsWith("avg_duration", StringComparison.Ordinal)
+            ? "CASE WHEN r.hot THEN 5000000 + r.n ELSE 100 + r.n END"
+            : m.StartsWith("avg", StringComparison.Ordinal) ? $"((r.g * 7919 + r.n * 31 + {i}) % 9000 + 1)::bigint"
+            : m.StartsWith("min", StringComparison.Ordinal) ? $"((r.g + {i}) % 50)::bigint" : $"((r.g + {i}) % 5000 + 100)::bigint"));
+
+        /* Group g 1..40 are the hot keys (rows on four days, g 1 and 2 are replica twins of one plan: NULL and 'Secondary'), g 41..400 are
+           cold. Group 0 has NULL database_name and query_id. Group 1000 is a sibling plan of query 1 that is too cold to be kept, and one
+           row of group 1 is 60 days old, before the read start. */
+        await ExecuteAsync(connection, $@"
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time, query_hash,
+ execution_count, {metricList}, plan_type, is_forced_plan, query_plan_hash, replica_role, runtime_stats_interval_id, interval_start_time_utc)
+SELECT t + interval '30 minutes', 1,
+       CASE WHEN r.g = 0 THEN NULL ELSE 'db' || (r.g % 2) END,
+       CASE WHEN r.g = 0 THEN NULL WHEN r.g = 1000 THEN 1 WHEN r.g = 2 THEN 1 ELSE r.g END,
+       CASE WHEN r.g = 0 THEN 7 ELSE r.g END, 'Regular', t, t, '0x' || md5(r.g::text),
+       1 + (r.g * 13 + r.n) % 400, {metricValues}, 'Query', false, '0x' || md5((r.g + 1)::text),
+       CASE WHEN r.g = 2 THEN 'Secondary' END, r.g * 1000 + r.n, date_trunc('hour', t)
+FROM (SELECT g, n, g BETWEEN 0 AND 40 AS hot,
+             CASE WHEN g = 1 AND n = 9 THEN now() AT TIME ZONE 'utc' - interval '60 days'
+                  ELSE now() AT TIME ZONE 'utc' - ((n % 4) * interval '1 day') - (n * interval '5 minutes') - interval '2 hours' END AS t
+      FROM (SELECT g FROM generate_series(0, 400) AS g UNION ALL SELECT 1000) AS gs
+      CROSS JOIN generate_series(1, 9) AS n) AS r;
+ANALYZE collect.query_store_interval_wide;", ct);
+
+        var readStart = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-30), DateTimeKind.Unspecified);
+        const int top = 100;
+        const int candidates = 45;
+
+        void AddShared(NpgsqlCommand command)
+        {
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 1 });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = readStart });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
+            command.Parameters.Add(ViewerDataService.DatabaseFilterParameter(null));
+        }
+
+        async Task<List<string>> ReadAllAsync(NpgsqlCommand command)
+        {
+            var rows = new List<string>();
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                rows.Add(string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(i => reader.IsDBNull(i) ? "~" : Convert.ToString(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture))));
+            }
+
+            return rows;
+        }
+
+        await using var oneStatement = new NpgsqlCommand(ViewerDataService.QueryStoreTopTableSql, connection) { CommandTimeout = 300 };
+        AddShared(oneStatement);
+        oneStatement.Parameters.Add(new NpgsqlParameter<int> { TypedValue = candidates });
+        var expected = await ReadAllAsync(oneStatement);
+
+        var keys = new ViewerDataService.TableReadKeys();
+        await using (var keysCommand = new NpgsqlCommand(ViewerDataService.QueryStoreTopTableKeysSql, connection) { CommandTimeout = 300 })
+        {
+            AddShared(keysCommand);
+            keysCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = candidates });
+            await using var keyReader = await keysCommand.ExecuteReaderAsync(ct);
+            while (await keyReader.ReadAsync(ct))
+            {
+                keys.Add(keyReader);
+            }
+        }
+
+        /* The read runs the per-key statement with plain index scans off (ViewerDataService.SetPerKeyFetchPlanAsync). */
+        await ExecuteAsync(connection, "SET enable_indexscan = off", ct);
+        await using var twoStatement = new NpgsqlCommand(ViewerDataService.QueryStoreTopTableByKeysSql, connection) { CommandTimeout = 300 };
+        AddShared(twoStatement);
+        keys.AddParameters(twoStatement);
+        var actual = await ReadAllAsync(twoStatement);
+
+        Assert.True(expected.Count > 40, $"the page holds the kept keys: {expected.Count}");
+        Assert.Equal(expected, actual);
+
+        /* The seed does stress the match: the NULL-key group and both replica twins are in the page, and the sibling plan is not. */
+        Assert.Contains(actual, r => r.StartsWith("~|~|7|", StringComparison.Ordinal));
+        Assert.DoesNotContain(actual, r => r.StartsWith("db0|1|1000|", StringComparison.Ordinal));
+    }
+
     private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 300 };
