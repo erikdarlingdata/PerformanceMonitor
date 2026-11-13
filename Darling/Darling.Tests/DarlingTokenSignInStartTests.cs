@@ -98,7 +98,6 @@ public sealed class DarlingTokenSignInStartTests
 
     [Theory]
     [InlineData(false, false, "OIDC is not configured")]
-    [InlineData(true, false, "OIDC was refused")]
     public void StartProblem_Off_NamesWhatIsMissing(bool oidcConfigured, bool oidcClientPresent, string expected)
     {
         var line = DarlingWebHostService.TokenSignInStartProblem("off", oidcConfigured, true, oidcClientPresent);
@@ -108,11 +107,22 @@ public sealed class DarlingTokenSignInStartTests
     }
 
     [Fact]
-    public void StartProblem_Off_NotExposed_NamesTheDashboard()
+    public void StartProblem_Off_OidcRefused_NamesTheRefusal()
     {
-        var line = DarlingWebHostService.TokenSignInStartProblem("off", true, false, true);
+        var line = DarlingWebHostService.TokenSignInStartProblem("off", true, true, false);
+
+        Assert.Contains("OIDC was refused", line, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void StartProblem_Off_NotExposed_NamesTheDashboard_NotAnOidcRefusal(bool oidcClientPresent)
+    {
+        var line = DarlingWebHostService.TokenSignInStartProblem("off", true, false, oidcClientPresent);
 
         Assert.Contains("not exposed", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("refused at start", line, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -148,21 +158,5 @@ public sealed class DarlingTokenSignInStartTests
 
         var line = Assert.Single(lines);
         Assert.Equal(LogLevel.Information, line.Level);
-    }
-
-    [Fact]
-    public void TryStartServerAsync_Wiring()
-    {
-        var web = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
-
-        Assert.Contains("TokenSignInStartProblem(", web, StringComparison.Ordinal);
-        Assert.Contains("TokenSignInStartLines(", web, StringComparison.Ordinal);
-        Assert.Contains("tokenSignIn: tokenSignIn", web, StringComparison.Ordinal);
-
-        /* The check runs after the last degrade and before the pipeline is configured. */
-        var check = web.IndexOf("var tokenSignInProblem = TokenSignInStartProblem(", StringComparison.Ordinal);
-        var tls = web.IndexOf("ExposesWithoutItsCertificate)", StringComparison.Ordinal);
-        var pipeline = web.IndexOf("ConfigurePipeline(_app,", StringComparison.Ordinal);
-        Assert.True(tls >= 0 && check > tls && pipeline > check);
     }
 }

@@ -532,9 +532,9 @@ public sealed class DarlingWebHostService : BackgroundService
 
         var missing = !oidcConfigured
             ? "OIDC is not configured (web.network.oidc)"
-            : !oidcClientPresent
-                ? "OIDC was refused at start (see the OIDC line above)"
-                : "the dashboard is not exposed to the network (web.network.listen, allowFrom, TLS or trustedProxies was refused or is missing)";
+            : !networkMode
+                ? "the dashboard is not exposed to the network (web.network.listen, allowFrom, TLS or trustedProxies was refused or is missing)"
+                : "OIDC was refused at start (see the OIDC line above)";
         return $"web.network.oidc.tokenSignIn is 'off', which leaves OIDC as the only way to sign in, but {missing}, so no one could sign in. "
             + "Fix that, or set web.network.oidc.tokenSignIn to 'loopback' or 'on'. The web dashboard is not started.";
     }
@@ -942,6 +942,23 @@ public sealed class DarlingWebHostService : BackgroundService
                 }
             }
 
+            /* #8735: stop before the port probe, the credential wait and the build when tokenSignIn cannot be honored. Placed after the TLS and trustedProxies
+               degrades, because those clear networkMode after OIDC resolved. This also keeps ConfigurePipeline's own guard
+               (off, not exposed, no token to require) from ever throwing in production. The line is logged once per process. */
+            var tokenSignInProblem = TokenSignInStartProblem(
+                rawTokenSignIn, network?.Oidc is { IsConfigured: true }, networkMode, oidcClient is not null);
+            if (tokenSignInProblem is not null)
+            {
+                if (!_tokenSignInProblemReported)
+                {
+                    _logger.LogCritical("{Message}", tokenSignInProblem);
+                    _tokenSignInProblemReported = true;
+                }
+
+                await DisposeFailedStartAsync();
+                return false;
+            }
+
             /* The REAL primary bind address (network IP when exposed, else loopback): both the port precheck and
                the Kestrel bind use it, so the precheck probes the actual address, not always loopback. */
             var primaryBind = networkMode ? networkListenIp! : IPAddress.Loopback;
@@ -1219,23 +1236,6 @@ public sealed class DarlingWebHostService : BackgroundService
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
                ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
                loopback-only admits loopback names only, whatever it parsed. */
-            /* #8735: stop before the pipeline when tokenSignIn cannot be honored. Placed here, after the TLS and trustedProxies
-               degrades, because those clear networkMode after OIDC resolved. This also keeps ConfigurePipeline's own guard
-               (off, not exposed, no token to require) from ever throwing in production. The line is logged once per process. */
-            var tokenSignInProblem = TokenSignInStartProblem(
-                rawTokenSignIn, network?.Oidc is { IsConfigured: true }, networkMode, oidcClient is not null);
-            if (tokenSignInProblem is not null)
-            {
-                if (!_tokenSignInProblemReported)
-                {
-                    _logger.LogCritical("{Message}", tokenSignInProblem);
-                    _tokenSignInProblemReported = true;
-                }
-
-                await DisposeFailedStartAsync();
-                return false;
-            }
-
             foreach (var (level, message) in TokenSignInStartLines(tokenSignIn, trustedProxies is { Count: > 0 }))
             {
                 _logger.Log(level, "{Message}", message);
