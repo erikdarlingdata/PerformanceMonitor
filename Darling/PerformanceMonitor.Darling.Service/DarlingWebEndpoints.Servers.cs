@@ -43,7 +43,8 @@ public static partial class DarlingWebEndpoints
     /// one server: an empty body runs every enabled collector, <c>{"collectors":["name", ...]}</c> runs only those, each
     /// even when disabled. It needs the edit seat (a read-only seat gets 403) and goes through <see cref="SnapshotNowRequests"/>,
     /// the same guard the MCP tool uses: 202 queued, 409 when a run for the server is queued or going, 429 (with Retry-After)
-    /// within 60 seconds of the last one, 400 for an unknown collector name, 404 for an unknown server. The page then polls
+    /// within 60 seconds of the last one, 400 for an unknown collector name, 404 for an unknown server, 403 when the store has no
+    /// <c>config.request_snapshot_now</c> or the login may not execute it. The page then polls
     /// <c>GET /api/collectors/run/{commandId}</c> for the result the service wrote: the collectors run,
     /// the rows, and the ones it skipped with the reason.
     /// </summary>
@@ -142,6 +143,7 @@ public static partial class DarlingWebEndpoints
                 SnapshotRequestOutcome.InFlightCode => StatusCodes.Status409Conflict,
                 SnapshotRequestOutcome.RateLimitedCode => StatusCodes.Status429TooManyRequests,
                 SnapshotRequestOutcome.UnknownServerCode => StatusCodes.Status404NotFound,
+                SnapshotRequestOutcome.StoreRefusedCode => StatusCodes.Status403Forbidden,
                 _ => StatusCodes.Status400BadRequest,
             };
             return JsonNodeResult(refusal, status);
