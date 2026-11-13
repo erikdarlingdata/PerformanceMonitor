@@ -325,8 +325,12 @@ WHERE s.server_id <> 0";
     /// legacy/successor, already split at the successor's own floor) from <paramref name="ceilingHourUtc"/>,
     /// UNION the raw leading edge <c>[$2, ceilingHour)</c> the bucket grain can't slice, UNION the raw trailing
     /// edge <c>[watermark, now)</c> the aggregate has not materialized yet (<see cref="RollupMaterializationWatermark"/>).
-    /// Three <c>UNION</c>s rather than one combined predicate because each arm reads a different relation; a
-    /// database counts active if ANY of the three shows an execution (#4227's boolean rule).
+    /// A database counts active if ANY of the three shows an execution (#4227's boolean rule). The first two are
+    /// cheap and are read first (<c>window_active_dbs</c>). The trailing edge is the expensive one, up to the whole
+    /// current raw chunk, and it is read only for a server that still has a known database with no execution so far
+    /// (<c>edge_servers</c>), one server at a time through the <c>(server_id, collection_time)</c> index (#8570). A
+    /// server whose known databases are all active is not read, and a database the edge shows active but the window
+    /// already showed active adds nothing, so the pairs <c>idle_dbs</c> joins to are the same as before.
     /// </summary>
     private static string IdleActiveDbsForCagg(string relationSql, DateTime ceilingHourUtc, DateTime watermarkUtc)
     {
@@ -334,7 +338,12 @@ WHERE s.server_id <> 0";
         var ceiling = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{ceilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
         var watermark = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
 
-        return $@"active_dbs AS (
+        return $@"/* #8570: the trailing raw edge is probed only for what the rest of the window has not already shown active. Read whole, it was the third arm of
+   a UNION over every raw row since the watermark: 1.7 million rows (the whole current chunk, 371,600 pages on a 42 server store) to find a few hundred
+   (server, database) pairs. The rollup and the leading edge answer first. The edge is then read, one server at a time through the
+   (server_id, collection_time) index, only for a server that still has a known database with no execution so far, and a server whose known
+   databases are all active is not read at all. The result is the same set of pairs for every known database, which is the only thing idle_dbs asks of it. */
+window_active_dbs AS (
     SELECT DISTINCT server_id, database_name
     FROM {relationSql}
     WHERE bucket >= {ceiling}
@@ -347,13 +356,30 @@ WHERE s.server_id <> 0";
     WHERE collection_time >= $2
     AND   collection_time < {ceiling}
     AND   delta_execution_count > 0
+),
+edge_servers AS (
+    SELECT DISTINCT ld.server_id
+    FROM latest_dbs ld
+    WHERE NOT EXISTS (SELECT 1
+                      FROM window_active_dbs wa
+                      WHERE wa.server_id = ld.server_id
+                      AND   wa.database_name = ld.database_name)
+),
+active_dbs AS (
+    SELECT server_id, database_name
+    FROM window_active_dbs
 
     UNION
 
-    SELECT DISTINCT server_id, database_name
-    FROM v_query_stats
-    WHERE collection_time >= {watermark}
-    AND   delta_execution_count > 0
+    SELECT es.server_id, edge.database_name
+    FROM edge_servers es
+    CROSS JOIN LATERAL (
+        SELECT DISTINCT q.database_name
+        FROM v_query_stats q
+        WHERE q.server_id = es.server_id
+        AND   q.collection_time >= {watermark}
+        AND   q.delta_execution_count > 0
+    ) AS edge
 ),";
     }
 
