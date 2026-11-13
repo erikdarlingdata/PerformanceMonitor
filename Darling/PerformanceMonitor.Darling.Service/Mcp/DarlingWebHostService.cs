@@ -1545,7 +1545,7 @@ public sealed class DarlingWebHostService : BackgroundService
                    the network auth decision (session cookie / in-CIDR / the sign-in flow). */
                 var remote = context.Connection.RemoteIpAddress;
                 var hasValidCookie = TryValidateSessionCookie(
-                    context.Request.Cookies[SessionCookieName], signingKey, DateTimeOffset.UtcNow, out var cookieSubject);
+                    context.Request.Cookies[SessionCookieName], signingKey, DateTimeOffset.UtcNow, out var cookieSubject, out var cookieExpiresAt);
 
                 /* Resolve WHO holds the cookie (#2550). A cryptographically valid cookie whose subject
                    slot encodes a seat we do not recognize is treated as NO cookie: refusing is
@@ -1620,6 +1620,13 @@ public sealed class DarlingWebHostService : BackgroundService
                         /* #6840: a front door forwarding for a viewer lowers its shared-token session to the reads-only seat for
                            this one request, so every handler below answers the viewer as it answers any reads-only caller. */
                         seat = DarlingWebSeat.ApplyFrontDoorRole(context, seat);
+
+                        /* The seat is final here, so the cookie's signed expiry is set once, on it: a request admitted with no
+                           cookie (the in-CIDR allow path) keeps none. */
+                        if (hasValidCookie)
+                        {
+                            seat = seat with { SessionExpiresAt = cookieExpiresAt };
+                        }
 
                         /* The seat rides HttpContext.Items so EVERY downstream consumer — /api/session,
                            the updated_by stamps, endpoints added on any parallel branch — resolves the
@@ -2073,7 +2080,11 @@ public sealed class DarlingWebHostService : BackgroundService
     /// The signature compare is constant-time.
     /// </summary>
     internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now)
-        => TryValidateSessionCookie(cookieValue, signingKey, now, out _);
+        => TryValidateSessionCookie(cookieValue, signingKey, now, out _, out _);
+
+    /// <summary>PURE verify, additionally reporting WHO holds the cookie (#2550); see the overload that also reports the expiry.</summary>
+    internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now, out string? subject)
+        => TryValidateSessionCookie(cookieValue, signingKey, now, out subject, out _);
 
     /// <summary>
     /// PURE verify, additionally reporting WHO the cookie says is holding it (#2550).
@@ -2086,9 +2097,10 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <para>The subject is decoded only AFTER the HMAC verifies, so nothing derived from an unauthenticated
     /// cookie ever reaches a caller.</para>
     /// </summary>
-    internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now, out string? subject)
+    internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now, out string? subject, out DateTimeOffset expiresAt)
     {
         subject = null;
+        expiresAt = default;
 
         if (string.IsNullOrEmpty(cookieValue))
         {
@@ -2159,6 +2171,7 @@ public sealed class DarlingWebHostService : BackgroundService
             }
         }
 
+        expiresAt = DateTimeOffset.FromUnixTimeSeconds(expiryUnix);
         return true;
     }
 

@@ -46,7 +46,9 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// </summary>
 /// <param name="AllowedTagIds">The scoped reader's server tag ids, or null for every other seat. The tag tree and the tag map are read
 /// on each request, so a tag change applies to the next request without a new sign-in.</param>
-internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? OwnerKey = null, string? TokenName = null, IReadOnlyList<int>? AllowedTagIds = null, Guid? GroupId = null, Guid? GroupGeneration = null, string? DisplayName = null, string? GrantedBy = null)
+/// <param name="SessionExpiresAt">When the session cookie that carried this request ends (its signed expiry, whole seconds), or null for a request
+/// admitted with no cookie.</param>
+internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? OwnerKey = null, string? TokenName = null, IReadOnlyList<int>? AllowedTagIds = null, Guid? GroupId = null, Guid? GroupGeneration = null, string? DisplayName = null, string? GrantedBy = null, DateTimeOffset? SessionExpiresAt = null)
 {
     /// <summary>The shared-token seat: full edit reach, exactly what the token granted before per-user identity
     /// existed.</summary>
