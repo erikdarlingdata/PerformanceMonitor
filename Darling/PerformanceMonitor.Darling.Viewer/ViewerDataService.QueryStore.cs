@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
@@ -421,7 +422,7 @@ public sealed partial class ViewerDataService
     /// availability group. <c>deduped</c> is <c>NOT MATERIALIZED</c> in <see cref="QueryStoreTopTablePrefix"/>: this reads it
     /// twice, and a materialized copy of every wide row is the temp file this exists to avoid.
     /// </summary>
-    private const string QueryStoreTopTableRankedHead = $$"""
+    private const string QueryStoreTopTableKeysCte = $$"""
         keys AS (
             SELECT
                 database_name,
@@ -437,7 +438,14 @@ public sealed partial class ViewerDataService
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY {{QueryStoreWeightedAverage.RankByDuration}} DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $6
-        ),
+        )
+        """;
+
+    /// <summary>
+    /// The <c>ranked</c> CTE of the interval-table read, with no trailing comma. <c>/*KEYSET*/</c> in its first branch is a comment in the
+    /// one-statement read (<see cref="QueryStoreTopTableSql"/>) and the key-set bound in the two-statement read (<see cref="QueryStoreTopTableByKeysSql"/>).
+    /// </summary>
+    private const string QueryStoreTopTableRankedCte = $$"""
         ranked AS (
             SELECT
         {{QueryStoreTopRankedColumns}}
@@ -453,11 +461,12 @@ public sealed partial class ViewerDataService
                    equalities let it hash the WIDE rows instead on a store without the index, which wrote the temp files the narrow ranking
                    exists to avoid (QueryStoreGridNarrowRankLiveTests). A key with a NULL database_name or query_id cannot match a plain
                    equality, so the second branch reads the window for those keys only, and only when such a key was kept (the uncorrelated
-                   EXISTS runs once, before the scan). A row matches at most one branch, so none is read twice. */
+                   EXISTS runs once, before the scan). A row matches at most one branch, so none is read twice. The grid binds the kept keys
+                   as arrays (QueryStoreTopTableByKeysSql), and there /*KEYSET*/ also bounds this first branch on the key set. */
                 SELECT
                     deduped.*
                 FROM deduped
-                WHERE EXISTS (SELECT 1 FROM keys AS k WHERE k.database_name = deduped.database_name AND k.query_id = deduped.query_id AND {{KeyMatch}})
+                WHERE /*KEYSET*/ EXISTS (SELECT 1 FROM keys AS k WHERE k.database_name = deduped.database_name AND k.query_id = deduped.query_id AND {{KeyMatch}})
                 UNION ALL
                 SELECT
                     deduped.*
@@ -467,8 +476,11 @@ public sealed partial class ViewerDataService
             ) AS deduped
             WHERE rn = 1
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
-        ),
+        )
         """;
+
+    /// <summary>The one-statement <c>keys</c> and <c>ranked</c>, the pair <see cref="QueryStoreTopTableSql"/> reads.</summary>
+    private const string QueryStoreTopTableRankedHead = QueryStoreTopTableKeysCte + ",\n" + QueryStoreTopTableRankedCte + ",\n";
 
     /// <summary>The page and its candidate count, from <c>page AS (</c> down, shared by the raw and the interval-table reads.</summary>
     private const string QueryStoreTopTail = $$"""
@@ -611,6 +623,37 @@ public sealed partial class ViewerDataService
     public static readonly string QueryStoreTopTableSql = QueryStoreTopTablePrefix + QueryStoreTopTableRankedHead + "\n" + QueryStoreTopTail;
 
     /// <summary>
+    /// #8549: the first statement of the grid's table read: the kept keys, one row per key, ranked and limited exactly as the one-statement
+    /// read's <c>keys</c> is (<see cref="QueryStoreTopTableKeysCte"/>, with the self-statement slot and the tag filter before the limit).
+    /// $1 server_id, $2 the read start, $3 window end (NULL for an open end), $4 unused, $5 database filter, $6 the candidate limit.
+    /// </summary>
+    public static readonly string QueryStoreTopTableKeysSql = QueryStoreTopTablePrefix + QueryStoreTopTableKeysCte + "\n"
+        + "SELECT database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role FROM keys";
+
+    /// <summary>
+    /// #8549: the grid's table read with the kept keys bound as arrays, run in the same transaction as <see cref="QueryStoreTopTableKeysSql"/>
+    /// so both see one snapshot. The one-statement read joined <c>ranked</c> to <c>keys</c> as a CTE the planner could not size, and it
+    /// probed the (server_id, database_name, query_id, first_execution_time) index once per key and daily leaf: on a field store, 250
+    /// loops over every leaf, each an index probe and then one random heap page per row (about 24,000 reads at 0.67 ms, 16 s of a 23 s
+    /// cold read). With the keys bound as arrays the planner sees their number, and the first branch is bounded on the key set
+    /// (<c>database_name = ANY</c> and <c>query_id = ANY</c> on the same index), so it reads each leaf once: a Bitmap Heap Scan that
+    /// visits every heap page once, in physical order, and prefetches (effective_io_concurrency). The key-set bound is implied by the
+    /// branch's own key match (a matching row has a non-NULL database_name and query_id that a key holds), so it drops no row; the
+    /// exact NULL-safe six-column test stays.
+    /// $1 server_id, $2 the read start, $3 window end, $4 top, $5 database filter, $6 to $11 the keys' six columns as parallel arrays
+    /// (database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role), $12 the distinct non-NULL database names
+    /// among them, $13 the distinct non-NULL query ids.
+    /// </summary>
+    public static readonly string QueryStoreTopTableByKeysSql = QueryStoreTopTablePrefix
+        + "keys AS (\n"
+        + "    SELECT *\n"
+        + "    FROM unnest($6::text[], $7::bigint[], $8::bigint[], $9::text[], $10::text[], $11::text[])\n"
+        + "         AS k(database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role)\n"
+        + "),\n"
+        + QueryStoreTopTableRankedCte.Replace("/*KEYSET*/", "deduped.database_name = ANY($12) AND deduped.query_id = ANY($13) AND", StringComparison.Ordinal)
+        + ",\n" + QueryStoreTopTail;
+
+    /// <summary>
     /// The store schema version <see cref="GetQueryStoreTopQueriesAsync"/> (the grid) requires before it will
     /// even attempt <c>query_store_interval_wide</c> (#3953 B4): must equal the version of the
     /// <c>PgMigrations</c> migration that creates the table. The slicer (#8549) reads the same constant before it routes to the
@@ -711,6 +754,58 @@ public sealed partial class ViewerDataService
             ? QueryStoreSelfStatement.WithRankedKeyTest(sql)
             : sql;
 
+    /// <summary>The first five parameters both statements of the grid's table read share ($1 to $5).</summary>
+    private static void AddTableReadParameters(
+        Npgsql.NpgsqlCommand command, int serverId, DateTime readStart, DateTime? literalEndUtc, int top, IReadOnlyList<string>? databaseNames)
+    {
+        command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(readStart, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new Npgsql.NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
+            Value = literalEndUtc.HasValue ? DateTime.SpecifyKind(literalEndUtc.Value, DateTimeKind.Unspecified) : DBNull.Value,
+        });
+        command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+    }
+
+    /// <summary>The kept keys of <see cref="QueryStoreTopTableKeysSql"/>, held to bind as the arrays of <see cref="QueryStoreTopTableByKeysSql"/>.</summary>
+    internal sealed class TableReadKeys
+    {
+        private readonly List<string?> _databaseNames = new();
+        private readonly List<long?> _queryIds = new();
+        private readonly List<long?> _planIds = new();
+        private readonly List<string?> _queryHashes = new();
+        private readonly List<string?> _executionTypes = new();
+        private readonly List<string?> _replicaRoles = new();
+
+        internal void Add(System.Data.Common.DbDataReader reader)
+        {
+            _databaseNames.Add(reader.IsDBNull(0) ? null : reader.GetString(0));
+            _queryIds.Add(reader.IsDBNull(1) ? null : reader.GetInt64(1));
+            _planIds.Add(reader.IsDBNull(2) ? null : reader.GetInt64(2));
+            _queryHashes.Add(reader.IsDBNull(3) ? null : reader.GetString(3));
+            _executionTypes.Add(reader.IsDBNull(4) ? null : reader.GetString(4));
+            _replicaRoles.Add(reader.IsDBNull(5) ? null : reader.GetString(5));
+        }
+
+        /// <summary>Adds $6 to $13 of <see cref="QueryStoreTopTableByKeysSql"/>.</summary>
+        internal void AddParameters(Npgsql.NpgsqlCommand command)
+        {
+            static Npgsql.NpgsqlParameter Array(NpgsqlTypes.NpgsqlDbType type, object values) =>
+                new() { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | type, Value = values };
+
+            command.Parameters.Add(Array(NpgsqlTypes.NpgsqlDbType.Text, _databaseNames.ToArray()));
+            command.Parameters.Add(Array(NpgsqlTypes.NpgsqlDbType.Bigint, _queryIds.ToArray()));
+            command.Parameters.Add(Array(NpgsqlTypes.NpgsqlDbType.Bigint, _planIds.ToArray()));
+            command.Parameters.Add(Array(NpgsqlTypes.NpgsqlDbType.Text, _queryHashes.ToArray()));
+            command.Parameters.Add(Array(NpgsqlTypes.NpgsqlDbType.Text, _executionTypes.ToArray()));
+            command.Parameters.Add(Array(NpgsqlTypes.NpgsqlDbType.Text, _replicaRoles.ToArray()));
+            command.Parameters.Add(Array(NpgsqlTypes.NpgsqlDbType.Text, _databaseNames.Where(n => n is not null).Distinct(StringComparer.Ordinal).ToArray()));
+            command.Parameters.Add(Array(NpgsqlTypes.NpgsqlDbType.Bigint, _queryIds.Where(i => i.HasValue).Select(i => i!.Value).Distinct().ToArray()));
+        }
+    }
+
     /// <summary>
     /// #3953's gate and table read, on ONE connection in ONE read-only REPEATABLE READ transaction (M1, ruling
     /// issuecomment-5836972848), so <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>'s decision and the read
@@ -756,31 +851,39 @@ public sealed partial class ViewerDataService
 
             /* #5882: the same shorter first_execution_time floor as the MCP read (DarlingDataReader.TryGetQueryStoreTopFromTableAsync
                explains it), one extra round trip per table-served read. An open end reads to now. */
-            var topSql = QueryStoreTopTableSql;
+            var keysSql = QueryStoreTopTableKeysSql;
+            var topSql = QueryStoreTopTableByKeysSql;
             var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
                 connection, serverId, plan.ReadStart, literalEndUtc ?? DateTime.UtcNow, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
             if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
             {
-                topSql = QueryStoreIntervalWide.WithEdgeMargin(topSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
+                var marginSql = QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin);
+                keysSql = QueryStoreIntervalWide.WithEdgeMargin(keysSql, marginSql);
+                topSql = QueryStoreIntervalWide.WithEdgeMargin(topSql, marginSql);
             }
 
-            topSql = QueryTagReadJoin.Apply(topSql, serverId, tags);
+            /* The tag filter and the self-statement slot belong to the keys statement alone: they decide which keys are kept. */
+            keysSql = QueryTagReadJoin.Apply(keysSql, serverId, tags);
 
             /* #7736: the monitor's own statements leave ranked before its candidate limit, once the key backfill has run. */
-            topSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, topSql, cancellationToken);
+            keysSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, keysSql, cancellationToken);
             /* #8549: the table read alone gets the longer deadline (ViewerCommandDeadlines.QueryStoreTableReadSeconds): a cold first read can run past 15 s and still beat the raw read it would otherwise fall back to. */
+            var keys = new TableReadKeys();
+            await using (var keysCommand = new Npgsql.NpgsqlCommand(keysSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds })
+            {
+                AddTableReadParameters(keysCommand, serverId, plan.ReadStart, literalEndUtc, top, databaseNames);
+                keysCommand.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = TopFill.FinalCandidates(top) });
+                await using var keyReader = await keysCommand.ExecuteReaderAsync(cancellationToken);
+                while (await keyReader.ReadAsync(cancellationToken))
+                {
+                    keys.Add(keyReader);
+                }
+            }
+
             await using (var command = new Npgsql.NpgsqlCommand(topSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds })
             {
-                command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
-                command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
-                command.Parameters.Add(new Npgsql.NpgsqlParameter
-                {
-                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
-                    Value = literalEndUtc.HasValue ? DateTime.SpecifyKind(literalEndUtc.Value, DateTimeKind.Unspecified) : DBNull.Value,
-                });
-                command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
-                command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-                command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = TopFill.FinalCandidates(top) });
+                AddTableReadParameters(command, serverId, plan.ReadStart, literalEndUtc, top, databaseNames);
+                keys.AddParameters(command);
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 (rows, _) = await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
             }
