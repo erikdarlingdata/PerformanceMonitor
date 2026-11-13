@@ -230,30 +230,44 @@ public sealed class DarlingWebAuthTests
         Assert.Equal(default, expiresAt);
     }
 
-    /// <summary>The seat a request runs as carries the cookie's signed expiry, for the shared-token cookie and a named (o3) one.</summary>
+    /// <summary>The seat a request runs as carries the cookie's signed expiry, whichever seat the cookie names (shared token, named o3, named
+    /// web token t1), and a request admitted with no cookie (the tokenless loopback path) carries none.</summary>
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task TheSeat_CarriesTheCookiesSignedExpiry(bool named)
+    [InlineData("shared")]
+    [InlineData("o3")]
+    [InlineData("t1")]
+    [InlineData("none")]
+    public async Task TheSeat_CarriesTheCookiesSignedExpiry(string kind)
     {
         const string probeRoute = "/__test/seat-expiry";
+        const string tokenName = "readers";
+        var tokenless = kind == "none";
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
-        var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        await using var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
         builder.Services.AddSingleton(postgres);
         DarlingWebHostService.ConfigureResponseCompression(builder.Services);
-        var app = builder.Build();
+        await using var app = builder.Build();
         var host = new DarlingWebHostService(
             NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
+        var webTokens = kind == "t1"
+            ? DarlingWebNamedTokenTests.SetFor(DarlingWebNamedTokenTests.Entry(tokenName, DarlingWebNamedTokenTests.ReaderToken, "reader"))
+            : null;
         host.ConfigurePipeline(app, postgres, networkMode: false, networkListenIp: null, allowedCidr: IPNetwork.Parse("127.0.0.1/32"),
-            accessToken: new string('t', 40), oidcClient: null, requireTokenWhenLoopbackOnly: true, sessionSigningKeyForTests: Key);
+            accessToken: tokenless ? string.Empty : new string('t', 40), oidcClient: null, requireTokenWhenLoopbackOnly: !tokenless,
+            sessionSigningKeyForTests: Key, webTokens: webTokens);
         app.MapGet(probeRoute, (HttpContext ctx) => DarlingWebSeat.FromContext(ctx).SessionExpiresAt?.ToUnixTimeSeconds().ToString() ?? "none");
         await app.StartAsync(TestContext.Current.CancellationToken);
         using var server = app.GetTestServer();
 
         var expiry = DateTimeOffset.UtcNow.AddHours(3).AddMilliseconds(777);
-        var subject = named ? DarlingWebSeat.EncodeCookieSubject("viewer@example.test", WebOidcRole.Viewer) : null;
+        var subject = kind switch
+        {
+            "o3" => DarlingWebSeat.EncodeCookieSubject("viewer@example.test", WebOidcRole.Viewer),
+            "t1" => DarlingWebSeat.EncodeTokenCookieSubject(tokenName),
+            _ => null,
+        };
         var cookie = DarlingWebHostService.BuildSessionCookieValue(Key, expiry, subject);
 
         var ctx = await server.SendAsync(c =>
@@ -262,12 +276,15 @@ public sealed class DarlingWebAuthTests
             c.Request.Path = probeRoute;
             c.Request.Headers.Host = "localhost";
             c.Connection.RemoteIpAddress = IPAddress.Loopback;
-            c.Request.Headers["Cookie"] = DarlingWebHostService.SessionCookieName + "=" + cookie;
+            if (!tokenless)
+            {
+                c.Request.Headers["Cookie"] = DarlingWebHostService.SessionCookieName + "=" + cookie;
+            }
         }, TestContext.Current.CancellationToken);
         var body = await new System.IO.StreamReader(ctx.Response.Body).ReadToEndAsync(TestContext.Current.CancellationToken);
 
         Assert.Equal(200, ctx.Response.StatusCode);
-        Assert.Equal(expiry.ToUnixTimeSeconds().ToString(), body);
+        Assert.Equal(tokenless ? "none" : expiry.ToUnixTimeSeconds().ToString(), body);
     }
 
     [Fact]

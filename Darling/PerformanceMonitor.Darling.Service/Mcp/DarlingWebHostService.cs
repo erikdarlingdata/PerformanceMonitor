@@ -2096,6 +2096,8 @@ public sealed class DarlingWebHostService : BackgroundService
     ///
     /// <para>The subject is decoded only AFTER the HMAC verifies, so nothing derived from an unauthenticated
     /// cookie ever reaches a caller.</para>
+    ///
+    /// <para><paramref name="expiresAt"/> is the signed expiry at whole-second precision, and <c>default</c> when the method returns false.</para>
     /// </summary>
     internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now, out string? subject, out DateTimeOffset expiresAt)
     {
