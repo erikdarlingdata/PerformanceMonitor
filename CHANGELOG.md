@@ -21,6 +21,10 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
+### Added
+
+- **The web dashboard can limit token sign-in to loopback, or turn it off** ([#8735]) - A new `web.network.oidc.tokenSignIn` setting takes `on` (the default; nothing changes), `loopback` or `off`. It covers every token the dashboard's sign-in form accepts: the shared token, the `web.network.tokens` entries and the Viewer's web access group tokens. MCP tokens and OIDC sign-in are not affected. Under `loopback` a token signs in only from a loopback connection, a browser on the host or `kubectl port-forward` to the pod (the break-glass path when the identity provider is down), and network clients see only the identity-provider sign-in. Under `off` no token signs in anywhere, and the shared token is not required. The rule also applies to existing token sessions on every request. A change applies at the restart, and the restart also ends every earlier token session. A refused sign-in answers 403 before the form is read and is not counted by the sign-in throttle. A reverse proxy on the same host, or a service-mesh sidecar such as Envoy or Linkerd, makes every client look like loopback: set `web.network.trustedProxies` to that proxy; each start under `loopback` without it logs a warning. `off` needs OIDC that works on an exposed dashboard; when OIDC is not configured or is refused at start, or the dashboard is not exposed, the web dashboard does not start and one Critical line says why. An unknown value does not start either. A `curl` POST of the token to `/auth/login` works only where the mode allows. A store behind a front door must keep `on`, because the front door signs in to the store with its shared token over the network; under `loopback` or `off` the front door reports that the store has `tokenSignIn` set to `loopback` or `off`. `--validate-config` reports the mode, fails on an unknown value or on `off` without OIDC or an exposed dashboard, and notes `loopback` with an exposed listen and no `trustedProxies`.
+
 ## [3.13.0] - 2026-11-12
 
 Full entries: [docs/changelog/3.13.md](docs/changelog/3.13.md)
@@ -7693,6 +7697,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#8719]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8719
 [#8722]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8722
 [#8728]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8728
+[#8735]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8735
 [#8738]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8738
 [#8741]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8741
 [#8743]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8743

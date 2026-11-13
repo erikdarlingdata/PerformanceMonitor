@@ -22,4 +22,6 @@ The chart README is the reference. It covers:
 
 Out of the box only `kubectl port-forward` reaches the dashboard. An Ingress needs `allowFrom` per surface (the dashboard judges the client address the controller forwards, the MCP endpoint the controller's own connection) and, for the dashboard, `trustedProxies`; see [reaching it from outside the cluster](../../Darling/helm/performancemonitor-darling/README.md#reaching-it-from-outside-the-cluster) and [Opt-in Network Endpoints](network-endpoints.md).
 
+With `web.network.oidc.tokenSignIn` set to `loopback`, a `kubectl port-forward` to the pod is the break-glass path when the identity provider is down: the connection to the pod comes from loopback, so the token form works there and nowhere else. A service-mesh sidecar (Envoy, Linkerd) also connects from loopback and would make every client look local, so list it in `web.network.trustedProxies`; see [Token sign-in mode](configuration-web.md#token-sign-in-mode).
+
 If you write the manifests yourself instead, the pod needs the `securityContext` and the volume ownership steps in [Container user](security.md#container-user).

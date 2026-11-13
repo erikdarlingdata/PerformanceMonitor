@@ -78,6 +78,37 @@ Administrators configure scoped tokens in the service configuration.
 }
 ```
 
+### Token sign-in mode
+
+`web.network.oidc.tokenSignIn` ([#8735](https://github.com/erikdarlingdata/PerformanceMonitor/issues/8735)) decides where a token can sign in to the dashboard. It sits in the `web.network.oidc` block, is a string, and is file-only: change it in `darling.json` and restart. The value is compared without regard to case or surrounding spaces. A missing, null or blank value means `on`.
+
+| Value | Effect |
+|---|---|
+| `on` (the default) | Nothing changes. Every token the sign-in form accepts signs in from any client the dashboard admits. |
+| `loopback` | A token signs in only from a loopback connection: a browser on the host, or `kubectl port-forward` to the pod. A network client sees only the identity-provider sign-in. |
+| `off` | No token signs in from anywhere. The identity provider is the only way in, and the shared token is not required. |
+
+The setting covers every token the sign-in form accepts: the shared token (`web.network.encryptedToken` or `token`), the `web.network.tokens` entries, and the Viewer's web access group tokens. MCP tokens are not affected, and neither is OIDC sign-in.
+
+The rule applies to every request, not only to the sign-in. A token session that is not allowed under the current mode is refused on its next request: an `/api/` call gets the 401 that makes the page ask for a new sign-in, and a page gets the login page. A change takes effect at the restart, and the restart also ends every earlier token session, because the cookie key is new on each start.
+
+A refused sign-in POST to `/auth/login` answers 403 before the form is read, with a fixed page that links to the SSO sign-in. It sets no cookie, it is the same whatever token was posted, and the sign-in throttle does not count it. A wrong token posted from a connection the mode allows still shows the login form again, as under `on`.
+
+**Break-glass under `loopback`.** When the identity provider is down, sign in with the token from a browser on the host, or run `kubectl port-forward` to the pod and open `http://127.0.0.1:<port>/` on your own machine. The connection to the pod then comes from loopback, so the token form works.
+
+**A proxy or sidecar on the same host.** A reverse proxy on the same host, or a service-mesh sidecar such as Envoy or Linkerd, connects to the dashboard from loopback, so every client behind it looks local. Under `loopback` that lets every client sign in with a token. Set `web.network.trustedProxies` to that proxy: the dashboard then judges the client the proxy forwards, and a forwarded `127.0.0.1` is never loopback. Each start under `loopback` with no `trustedProxies` logs a warning that says so.
+
+**When the web dashboard does not start.**
+
+- An unknown value does not start. One Critical line names `web.network.oidc.tokenSignIn` and the three values.
+- `off` needs OIDC that works on an exposed dashboard. If `web.network.oidc` is not configured, if OIDC is refused at start (a bad setting, or a client secret that cannot be read), or if the dashboard is not exposed (no network `listen`, or a TLS or `trustedProxies` refusal), the web dashboard does not start and one Critical line says which. Set `tokenSignIn` to `loopback` or `on` instead, or fix the cause.
+
+**Scripts.** A `curl` POST of the token to `/auth/login` works only where the mode allows it. Under `loopback` it works from the host and fails from the network with 403; under `off` it fails everywhere. A script that reads the dashboard from the network under `loopback` or `off` needs another route, such as running on the host or reading through MCP.
+
+**A store behind a front door keeps `on`.** The front door signs in to the store with its shared token, over the network. Under `loopback` or `off` the front door reports that the store has `tokenSignIn` set to `loopback` or `off`. See [The front door](front-door.md#the-web-dashboard).
+
+`--validate-config` prints the mode, fails on an unknown value and on `off` without working OIDC or without an exposed dashboard, and notes `loopback` with an exposed `listen` and no `trustedProxies`.
+
 ### Viewer-managed team access groups
 
 Advanced web access starts off. A Viewer administrator can select **Enable advanced web access** in the sidebar to show **Web Access Groups** and allow group-token sign-in alongside existing dashboard sign-in methods. Clearing the checkbox hides group management, blocks group-token sign-in and invalidates group sessions. Re-enabling access lets users sign in again with their existing enabled group tokens. Every flip of the switch writes a row to the group journal, `config.web_access_group_events`, with the database role that made it and when.
