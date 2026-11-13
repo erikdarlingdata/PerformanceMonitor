@@ -28,8 +28,8 @@ export function accountLine(me) {
   switch (me && me.method) {
     case "oidc": return (me.subject || "signed in") + " · " + seat;
     case "shared_token": return "shared token · admin";
-    case "named_token": return "token " + me.token_name + " · " + seat;
-    case "managed_group": return "group " + me.group_name + " · " + seat;
+    case "named_token": return "token " + (me.token_name || "") + " · " + seat;
+    case "managed_group": return "group " + (me.group_name || "") + " · " + seat;
     case "reads_only": return "read-only access";
     default: return seat || "signed in";
   }
@@ -49,12 +49,15 @@ export function accountDetails(me) {
   return rows;
 }
 
-/** One control: the button with the line, and (when open) the popover. Each mount gets its own, with its own open state. */
+let panelCount = 0;
+
+/** One control: the button with the line, and (when open) the panel it discloses. Each mount gets its own, with its own open state
+ *  and panel id. A disclosure, not a menu: the panel is information rows and at most one plain link. */
 function buildControl(me) {
-  const button = el("button", { class: "account-btn", type: "button", "aria-haspopup": "menu", "aria-expanded": "false", text: accountLine(me) });
+  const panelId = "account-panel-" + ++panelCount;
+  const button = el("button", { class: "account-btn", type: "button", "aria-expanded": "false", "aria-controls": panelId, text: accountLine(me) });
   const root = el("div", { class: "account-control" }, [button]);
-  const signOut = me.expires_at ? el("a", { class: "account-item", role: "menuitem", href: "/auth/logout", text: "Sign out" }) : null;
-  const items = signOut ? [signOut] : [];
+  const signOut = me.expires_at ? el("a", { class: "account-item", href: "/auth/logout", text: "Sign out" }) : null;
   let popup = null;
   let outside = null;
 
@@ -73,24 +76,14 @@ function buildControl(me) {
   };
   const open = () => {
     const rows = accountDetails(me).map(([label, value]) =>
-      el("div", { class: "account-row", role: "none" }, [el("span", { class: "account-label", text: label }), el("span", { class: "account-value", text: value })])
+      el("div", { class: "account-row" }, [el("span", { class: "account-label", text: label }), el("span", { class: "account-value", text: value })])
     );
-    popup = el("div", { class: "account-pop", role: "menu", tabindex: "-1" }, [...rows, ...items]);
+    popup = el("div", { id: panelId, class: "account-pop" }, signOut ? [...rows, signOut] : rows);
     popup.addEventListener("keydown", (e) => {
-      const at = items.indexOf(document.activeElement);
-      if (e.key === "Tab") {
-        closeToButton();
-      } else if (e.key === "ArrowDown" && items.length) {
-        e.preventDefault();
-        items[(at + 1) % items.length].focus();
-      } else if (e.key === "ArrowUp" && items.length) {
-        e.preventDefault();
-        items[(at - 1 + items.length) % items.length].focus();
-      }
+      if (e.key === "Tab") closeToButton();
     });
     root.appendChild(popup);
     button.setAttribute("aria-expanded", "true");
-    (items[0] || popup).focus();
     outside = (e) => {
       if (e && e.target && root.contains(e.target)) return;
       close();

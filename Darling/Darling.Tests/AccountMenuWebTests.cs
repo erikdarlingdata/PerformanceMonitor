@@ -126,7 +126,7 @@ public sealed class AccountMenuWebTests
     }
 
     [Fact]
-    public void WithAnExpiry_SignOutIsTheOnlyItem_APlainLinkToTheLogout()
+    public void WithAnExpiry_SignOutIsAPlainLinkToTheLogout()
     {
         var drawn = Run("init", """{"method":"oidc","seat":"admin","subject":"s","expires_at":"2026-11-13T20:00:00Z"}""");
 
@@ -137,7 +137,44 @@ public sealed class AccountMenuWebTests
     }
 
     [Fact]
-    public void TheControl_IsShownInBothHosts_OpensAsAMenu_AndEscapeCloses()
+    public void ThePanel_IsADisclosure_NotAMenu()
+    {
+        var drawn = Run("init", """{"method":"oidc","seat":"admin","subject":"s","expires_at":"2026-11-13T20:00:00Z"}""");
+
+        Assert.Equal(0, drawn.GetProperty("rolesUsed").GetInt32());
+        Assert.False(drawn.GetProperty("hasPopupAttr").GetBoolean());
+        Assert.False(string.IsNullOrEmpty(drawn.GetProperty("panelId").GetString()));
+        Assert.Equal(drawn.GetProperty("panelId").GetString(), drawn.GetProperty("controls").GetString());
+    }
+
+    [Fact]
+    public void Panel_EscapeAndTabReturnFocusToTheButton_AClickOutsideCloses_AClickInsideDoesNot()
+    {
+        var r = Run("interact", """{"method":"oidc","seat":"admin","subject":"s","expires_at":"2026-11-13T20:00:00Z"}""");
+
+        Assert.Equal(1, r.GetProperty("openedPanels").GetInt32());
+        Assert.Equal(1, r.GetProperty("panelsAfterClickInside").GetInt32());
+        Assert.Equal(0, r.GetProperty("panelsAfterClickOutside").GetInt32());
+        Assert.Equal("false", r.GetProperty("expandedAfterClickOutside").GetString());
+        Assert.Equal(0, r.GetProperty("outsideListenersLeft").GetInt32());
+        Assert.Equal(0, r.GetProperty("panelsAfterEscape").GetInt32());
+        Assert.True(r.GetProperty("focusAfterEscape").GetBoolean());
+        Assert.Equal(0, r.GetProperty("panelsAfterTab").GetInt32());
+        Assert.True(r.GetProperty("focusAfterTab").GetBoolean());
+        var ids = r.GetProperty("topAndBrandIds").EnumerateArray().Select(x => x.GetString()).ToArray();
+        Assert.NotEqual(ids[0], ids[1]);
+    }
+
+    [Theory]
+    [InlineData("""{"method":"named_token","seat":"read_only"}""", "token  · read-only")]
+    [InlineData("""{"method":"managed_group","seat":"admin"}""", "group  · admin")]
+    public void AccountLine_AMissingName_IsNeverUndefined(string me, string expected)
+    {
+        Assert.Equal(expected, Run("line", me).GetProperty("line").GetString());
+    }
+
+    [Fact]
+    public void TheControl_IsShownInBothHosts_OpensAsADisclosure_AndEscapeCloses()
     {
         var drawn = Run("init", """{"method":"shared_token","seat":"admin"}""");
 
@@ -145,7 +182,7 @@ public sealed class AccountMenuWebTests
         Assert.False(drawn.GetProperty("topbarHidden").GetBoolean());
         Assert.Equal(1, drawn.GetProperty("topbarHasControl").GetInt32());
         Assert.Equal("shared token · admin", drawn.GetProperty("buttonText").GetString());
-        Assert.Equal("menu", drawn.GetProperty("buttonAttrs").GetProperty("aria-haspopup").GetString());
+        Assert.Equal("false", drawn.GetProperty("buttonAttrs").GetProperty("aria-expanded").GetString());
         Assert.Equal("true", drawn.GetProperty("expandedAfterOpen").GetString());
         Assert.Equal("false", drawn.GetProperty("expandedAfterEscape").GetString());
         Assert.Equal(0, drawn.GetProperty("popupAfterEscape").GetInt32());

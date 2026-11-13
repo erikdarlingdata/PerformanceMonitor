@@ -961,7 +961,7 @@ function start() {
   setInterval(schedulerTick, SCHEDULER_TICK_MS);
   onSessionExpired(showSignedOutState);
   initAutoRefreshToggle();
-  initAccountMenu(document.getElementById("account-menu"), document.getElementById("topbar-account"));
+  initAccountMenu(document.getElementById("account-menu"), document.getElementById("topbar-account")).catch(() => {});
   initPageRefreshControl();
   initSidebarCollapse(document.getElementById("app"), document.getElementById("sidebar-collapse"));
   initNavCollapse(document.getElementById("nav-collapse"), document.getElementById("nav-links"));

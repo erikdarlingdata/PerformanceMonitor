@@ -20,6 +20,8 @@ const [jsDir, scenario, rawJson] = process.argv.slice(-3);
 const input = JSON.parse(rawJson);
 
 const noop = () => {};
+let focused = null;
+const docListeners = {};
 const texts = [];
 const innerHtmlSets = [];
 globalThis.Node = class Node {
@@ -41,14 +43,14 @@ globalThis.Node = class Node {
   set textContent(v) { texts.push(String(v)); this._text = String(v); }
   get textContent() { return this._text; }
   set innerHTML(v) { innerHtmlSets.push(String(v)); }
-  appendChild(c) { this.childNodes.push(c); this.firstChild = this.childNodes[0]; return c; }
-  removeChild(c) { this.childNodes.splice(this.childNodes.indexOf(c), 1); this.firstChild = this.childNodes[0] || null; return c; }
+  appendChild(c) { c.parent = this; this.childNodes.push(c); this.firstChild = this.childNodes[0]; return c; }
+  removeChild(c) { c.parent = null; this.childNodes.splice(this.childNodes.indexOf(c), 1); this.firstChild = this.childNodes[0] || null; return c; }
   setAttribute(k, v) { this.attrs[k] = String(v); }
   removeAttribute(k) { delete this.attrs[k]; }
   addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); }
   removeEventListener() {}
-  contains() { return false; }
-  focus() {}
+  contains(n) { for (let x = n; x; x = x.parent) if (x === this) return true; return false; }
+  focus() { focused = this; }
   querySelector() { return null; }
   querySelectorAll() { return []; }
 };
@@ -56,7 +58,10 @@ globalThis.document = {
   createElement: (tag) => new Node(tag),
   createTextNode: (t) => { texts.push(String(t)); return new Node("#text", String(t)); },
   getElementById: () => null, querySelector: () => null, querySelectorAll: () => [],
-  addEventListener: noop, removeEventListener: noop, body: new Node("body"), documentElement: new Node("html"), cookie: "", hidden: false,
+  addEventListener: (t, f) => { (docListeners[t] = docListeners[t] || []).push(f); },
+  removeEventListener: (t, f) => { docListeners[t] = (docListeners[t] || []).filter((x) => x !== f); },
+  get activeElement() { return focused; },
+  body: new Node("body"), documentElement: new Node("html"), cookie: "", hidden: false,
 };
 globalThis.window = globalThis;
 globalThis.location = { hash: "", pathname: "/", search: "", href: "http://localhost/", origin: "http://localhost" };
@@ -110,16 +115,51 @@ try {
       out.buttonAttrs = button.attrs;
       /* Open the popover as a click would, then read what it holds. */
       button.listeners.click[0]();
-      const pop = find(brand, (n) => n.attrs.role === "menu")[0];
+      const pop = find(brand, (n) => n.className === "account-pop")[0];
       out.popupRows = find(pop, (n) => n.className === "account-row").map((r) => r.childNodes.map(flat));
-      out.menuItems = find(pop, (n) => n.attrs.role === "menuitem").map((n) => ({ tag: n.tag, href: n.attrs.href, text: flat(n) }));
+      out.panelId = pop.attrs.id;
+      out.controls = button.attrs["aria-controls"];
+      out.rolesUsed = find(brand, (n) => "role" in n.attrs).length;
+      out.hasPopupAttr = "aria-haspopup" in button.attrs;
+      out.menuItems = find(pop, (n) => n.tag === "a").map((n) => ({ tag: n.tag, href: n.attrs.href, text: flat(n) }));
       out.expandedAfterOpen = button.attrs["aria-expanded"];
       /* Escape closes it again. */
       find(brand, (n) => n.className === "account-control")[0].listeners.keydown[0]({ key: "Escape", preventDefault: noop });
       out.expandedAfterEscape = button.attrs["aria-expanded"];
-      out.popupAfterEscape = find(brand, (n) => n.attrs.role === "menu").length;
+      out.popupAfterEscape = find(brand, (n) => n.className === "account-pop").length;
       out.topbarHasControl = find(top, (n) => n.tag === "button").length;
     }
+  } else if (scenario === "interact") {
+    const brand = new Node("div");
+    const top = new Node("span");
+    await menu.initAccountMenu(brand, top);
+    const button = find(brand, (n) => n.tag === "button")[0];
+    const control = find(brand, (n) => n.className === "account-control")[0];
+    const panels = () => find(brand, (n) => n.className === "account-pop").length;
+    const clickDoc = (target) => (docListeners.click || []).slice().forEach((f) => f({ target }));
+    const settle = () => new Promise((r) => setTimeout(r, 20));
+    button.listeners.click[0]();
+    await settle();
+    out.openedPanels = panels();
+    clickDoc(find(brand, (n) => n.className === "account-pop")[0].childNodes[0]);
+    out.panelsAfterClickInside = panels();
+    clickDoc(new Node("div"));
+    out.panelsAfterClickOutside = panels();
+    out.expandedAfterClickOutside = button.attrs["aria-expanded"];
+    out.outsideListenersLeft = (docListeners.click || []).length;
+    button.listeners.click[0]();
+    await settle();
+    focused = null;
+    control.listeners.keydown[0]({ key: "Escape", preventDefault: noop });
+    out.panelsAfterEscape = panels();
+    out.focusAfterEscape = focused === button;
+    button.listeners.click[0]();
+    await settle();
+    focused = null;
+    find(brand, (n) => n.className === "account-pop")[0].listeners.keydown[0]({ key: "Tab" });
+    out.panelsAfterTab = panels();
+    out.focusAfterTab = focused === button;
+    out.topAndBrandIds = [find(top, (n) => n.tag === "button")[0].attrs["aria-controls"], button.attrs["aria-controls"]];
   } else {
     throw new Error("unknown scenario " + scenario);
   }
