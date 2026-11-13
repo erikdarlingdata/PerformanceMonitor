@@ -876,10 +876,10 @@ public sealed partial class ViewerDataService
                 }
             }
 
-            /* #8549: statement 2 reads each kept key's rows by key. With index scans off, each leaf runs a Bitmap Index Scan on
-               db_query_first_exec per key and a Bitmap Heap Scan (heap pages in physical order, prefetched); with them on, the planner
-               picks the unique identity index and reads 2.5 times the pages. Field read of 30 days, cold: 61,611 reads and 18.2 s of
-               per-key I/O with plain index scans, 23,951 reads and 8.0 s with them off. enable_indexscan = off also turns off
+            /* #8549: statement 2 reads each kept key's rows by key. With index scans on, each leaf runs an Index Scan per key on
+               db_query_first_exec, which visits heap pages in index order, one random read at a time. With them off it is a Bitmap Heap
+               Scan per leaf (pages in physical order, prefetched). Cold 30-day field reads on two servers of the same store with matched
+               heap blocks per key: 0.66 against 0.33 ms per block, about half the per-key read time. enable_indexscan = off also turns off
                index-only scans, which is why the keys statement ran first. This is the transaction's last statement, so SET LOCAL
                ends with it. */
             await SetPerKeyFetchPlanAsync(connection, transaction, cancellationToken);
