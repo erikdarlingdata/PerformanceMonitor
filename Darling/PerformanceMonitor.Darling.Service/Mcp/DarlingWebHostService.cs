@@ -1621,8 +1621,8 @@ public sealed class DarlingWebHostService : BackgroundService
                            this one request, so every handler below answers the viewer as it answers any reads-only caller. */
                         seat = DarlingWebSeat.ApplyFrontDoorRole(context, seat);
 
-                        /* The seat is final here, so the cookie's signed expiry is set once, on it: a request admitted with no
-                           cookie (the in-CIDR allow path) keeps none. */
+                        /* The seat is final here, so the cookie's signed expiry is set once, on it. The guard is defensive:
+                           only a request with a valid cookie is admitted here. */
                         if (hasValidCookie)
                         {
                             seat = seat with { SessionExpiresAt = cookieExpiresAt };
@@ -1859,7 +1859,7 @@ public sealed class DarlingWebHostService : BackgroundService
 
         if (frontDoorProxy is not null)
         {
-            /* #6840: a front door answers the four local routes and forwards the rest of /api/* to a store. It sits exactly where MapAll
+            /* #6840: a front door answers the five local routes and forwards the rest of /api/* to a store. It sits exactly where MapAll
                does, behind the gates above, so a request reaches it only after sign-in, the CIDR test and the role gate. */
             frontDoorProxy.AddRoutes(app);
         }

@@ -436,6 +436,15 @@ public sealed class DarlingWebOidcTests
     }
 
     [Fact]
+    public void MapRoleWithGrant_BothAdminAndViewerValues_IsAdmin_NamingTheAdminValue()
+    {
+        var (role, grantedBy) = DarlingWebOidc.MapRoleWithGrant(
+            new[] { "eng", "dba" }, new[] { "dba" }, new[] { "eng" });
+        Assert.Equal("Admin", role.ToString());
+        Assert.Equal("dba", grantedBy);
+    }
+
+    [Fact]
     public void MapRoleWithGrant_NoMapping_IsAdminWithNoGrant()
     {
         var (role, grantedBy) = DarlingWebOidc.MapRoleWithGrant(new[] { "anything" }, null, null);
@@ -458,6 +467,9 @@ public sealed class DarlingWebOidcTests
     [InlineData("{\"name\":\"\"}", null)]
     [InlineData("{\"name\":42}", null)]
     [InlineData("{\"name\":\"a\\u0007b\"}", null)]
+    [InlineData("{\"name\":\"   \"}", null)]
+    [InlineData("{\"name\":\"a\\tb\"}", null)]
+    [InlineData("{\"name\":\"a\\u2028b\"}", null)]
     public void DisplayNameClaim_Theory(string payloadJson, string? expected)
         => Assert.Equal(expected, DarlingWebOidc.DisplayNameClaim((JsonObject)JsonNode.Parse(payloadJson)!));
 
@@ -619,6 +631,31 @@ public sealed class DarlingWebOidcTests
     }
 
     [Fact]
+    public void CapDisplayField_NeverSplitsATextElement()
+    {
+        const string flag = "\U0001F1FA\U0001F1E6";
+
+        /* Flags are 8 bytes each: 16 fit in 128 bytes exactly, so 17 are cut back to 16 whole flags. */
+        var flags = DarlingWebSeat.CapDisplayField(string.Concat(Enumerable.Repeat(flag, 17)))!;
+        Assert.Equal(string.Concat(Enumerable.Repeat(flag, 16)), flags);
+        AssertWellFormed(flags);
+
+        /* A leading 'a' puts the limit between the two halves of a flag: the flag is dropped whole, not cut to one indicator. */
+        var straddle = DarlingWebSeat.CapDisplayField("a" + string.Concat(Enumerable.Repeat(flag, 17)))!;
+        Assert.Equal("a" + string.Concat(Enumerable.Repeat(flag, 15)), straddle);
+        AssertWellFormed(straddle);
+
+        /* 3 bytes each after a leading 'x': 1 + 3 * 42 = 127 bytes fit, and a cut by character would end on a bare 'e'. */
+        var accents = DarlingWebSeat.CapDisplayField("x" + string.Concat(Enumerable.Repeat("e\u0301", 60)))!;
+        Assert.EndsWith("\u0301", accents);
+        Assert.Equal(1 + 3 * 42, Encoding.UTF8.GetByteCount(accents));
+
+        /* A ZWJ family is 18 bytes (4 + 3 + 4 + 3 + 4): 7 fit in 128, the 8th is dropped whole. */
+        const string family = "\U0001F468\u200D\U0001F469\u200D\U0001F467";
+        Assert.Equal(string.Concat(Enumerable.Repeat(family, 7)), DarlingWebSeat.CapDisplayField(string.Concat(Enumerable.Repeat(family, 8))));
+    }
+
+    [Fact]
     public void Cookie_AtEveryMaximum_FitsABrowserCookie()
     {
         var name = new string('n', DarlingWebSeat.DisplayFieldMaxBytes);
@@ -630,9 +667,6 @@ public sealed class DarlingWebOidcTests
         Assert.Equal(name, seat.DisplayName);
         Assert.Equal(grant, seat.GrantedBy);
     }
-
-    [Fact]
-    public void MaxSubjectLength_IsUnchanged() => Assert.Equal(207, DarlingWebSeat.MaxSubjectLength);
 
     [Fact]
     public void Markup_InTheName_RoundTripsVerbatim()

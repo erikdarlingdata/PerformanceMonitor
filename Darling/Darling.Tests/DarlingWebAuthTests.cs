@@ -373,7 +373,7 @@ public sealed class DarlingWebAuthTests
     }
 
     /// <summary>
-    /// Refuses rather than truncates. Truncation is the worse failure: two subjects sharing a 256-character
+    /// Refuses rather than truncates. Truncation is the worse failure: two subjects sharing a <see cref="DarlingWebHostService.MaxSessionSubjectLength"/>-character
     /// prefix would collapse into one seat, silently attributing one person's writes to another.
     /// </summary>
     [Fact]

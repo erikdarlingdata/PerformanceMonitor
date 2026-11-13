@@ -34,7 +34,7 @@ namespace PerformanceMonitor.Darling.Service.FrontDoor;
 /// the Host guard and the session cookie are the web host's own and run before any route here: a request reaches this class only
 /// after it has passed them, and a read-only role never gets a change through.
 ///
-/// <para><b>Routes.</b> <c>/api/ping</c>, <c>/api/session</c>, <c>GET /api/front-door</c> and <c>GET /api/front-door/locate</c> are
+/// <para><b>Routes.</b> <c>/api/ping</c>, <c>/api/session</c>, <c>/api/me</c>, <c>GET /api/front-door</c> and <c>GET /api/front-door/locate</c> are
 /// answered here. Every other <c>/api/*</c> call is forwarded to one store. <c>/auth/*</c> and the static pages are never forwarded.</para>
 ///
 /// <para><b>Which store.</b> The <c>X-Darling-Store</c> header (a configured name, else 400), then <c>?server=</c> through the
