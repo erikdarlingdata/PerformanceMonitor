@@ -869,6 +869,10 @@ public sealed partial class ViewerDataService
             keysSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, keysSql, cancellationToken);
             /* #8549: the table read alone gets the longer deadline (ViewerCommandDeadlines.QueryStoreTableReadSeconds): a cold first read can run past 15 s and still beat the raw read it would otherwise fall back to. */
             var keys = new TableReadKeys();
+            /* #8549: the keys statement reads and aggregates millions of interval rows, and the planner's default parallel costs keep it
+               serial. On a 30-day field read, zero setup and tuple costs gave a Gather with 2 workers and took the cold read from 22.8 s
+               to 19.5 s. Both go back to their defaults below, so the per-key statement keeps the plan it has always had (a role or database setting still holds). */
+            await SetKeysParallelCostsAsync(connection, transaction, parallel: true, cancellationToken);
             await using (var keysCommand = new Npgsql.NpgsqlCommand(keysSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds })
             {
                 AddTableReadParameters(keysCommand, serverId, plan.ReadStart, literalEndUtc, top, databaseNames);
@@ -879,6 +883,8 @@ public sealed partial class ViewerDataService
                     keys.Add(keyReader);
                 }
             }
+
+            await SetKeysParallelCostsAsync(connection, transaction, parallel: false, cancellationToken);
 
             await using (var command = new Npgsql.NpgsqlCommand(topSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds })
             {
@@ -898,6 +904,17 @@ public sealed partial class ViewerDataService
             LogTableReadFallback("Query Store grid", elapsed, "the interval-table read failed", ex);
             return null;
         }
+    }
+
+    /// <summary>#8549: sets the two parallel-plan costs for the rest of the transaction, to zero for the keys statement and back to the
+    /// session defaults (not to a literal) for the per-key statement.</summary>
+    private static async Task SetKeysParallelCostsAsync(Npgsql.NpgsqlConnection connection, Npgsql.NpgsqlTransaction transaction, bool parallel, CancellationToken cancellationToken)
+    {
+        var value = parallel ? "0" : "DEFAULT";
+        await using var set = new Npgsql.NpgsqlCommand(
+            $"SET LOCAL parallel_setup_cost TO {value}; SET LOCAL parallel_tuple_cost TO {value}", connection, transaction)
+        { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+        await set.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <summary>
