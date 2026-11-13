@@ -42,7 +42,7 @@ export function accountDetails(me) {
   if (oidc && me.display_name) rows.push(["Name", me.display_name]);
   if (oidc) rows.push(["Signed in as", me.subject || ""]);
   const seat = seatWord(me);
-  if (oidc) rows.push(["Seat", seat + (me.granted_by ? " (group: " + me.granted_by + ")" : " (no role mapping set)")]);
+  if (oidc) rows.push(["Seat", seat + (me.granted_by ? " (granted by " + me.granted_by + ")" : " (no role mapping set)")]);
   else rows.push(["Seat", seat]);
   if (METHOD_WORDS[me.method]) rows.push(["Signed in with", METHOD_WORDS[me.method]]);
   if (me.expires_at) rows.push(["Session ends", localTime(me.expires_at)]);
@@ -55,11 +55,15 @@ let panelCount = 0;
  *  and panel id. A disclosure, not a menu: the panel is information rows and at most one plain link. */
 function buildControl(me) {
   const panelId = "account-panel-" + ++panelCount;
-  const button = el("button", { class: "account-btn", type: "button", "aria-expanded": "false", "aria-controls": panelId, text: accountLine(me) });
+  const button = el("button", { class: "account-btn", type: "button", "aria-expanded": "false", "aria-controls": panelId }, [
+    el("span", { text: accountLine(me) }),
+    el("span", { class: "account-caret", "aria-hidden": "true", text: " ▾" }),
+  ]);
   const root = el("div", { class: "account-control" }, [button]);
   const signOut = me.expires_at ? el("a", { class: "account-item", href: "/auth/logout", text: "Sign out" }) : null;
   let popup = null;
   let outside = null;
+  let escape = null;
 
   const close = () => {
     if (popup) {
@@ -69,6 +73,8 @@ function buildControl(me) {
     button.setAttribute("aria-expanded", "false");
     if (outside) document.removeEventListener("click", outside);
     outside = null;
+    if (escape) document.removeEventListener("keydown", escape);
+    escape = null;
   };
   const closeToButton = () => {
     close();
@@ -87,17 +93,19 @@ function buildControl(me) {
     };
     /* After this click finishes, so the click that opened the popover does not close it. */
     setTimeout(() => outside && document.addEventListener("click", outside), 0);
+    /* On the document, so Escape works when the button never took focus (Safari does not focus a clicked button). */
+    escape = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeToButton();
+      }
+    };
+    document.addEventListener("keydown", escape);
   };
   button.addEventListener("click", () => (popup ? close() : open()));
   /* Tab follows the browser's own order; the panel closes when focus leaves the whole control, and focus is left where it went. */
   root.addEventListener("focusout", (e) => {
     if (popup && e.relatedTarget && !root.contains(e.relatedTarget)) close();
-  });
-  root.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && popup) {
-      e.preventDefault();
-      closeToButton();
-    }
   });
   return root;
 }

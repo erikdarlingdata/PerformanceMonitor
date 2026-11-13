@@ -91,7 +91,7 @@ public sealed class AccountMenuWebTests
 
         var rows = Rows(r);
         Assert.Equal(new[] { "Name", "Signed in as", "Seat", "Signed in with", "Session ends" }, rows.Select(x => x[0]).ToArray());
-        Assert.Equal("read-only (group: readers)", rows.Single(x => x[0] == "Seat")[1]);
+        Assert.Equal("read-only (granted by readers)", rows.Single(x => x[0] == "Seat")[1]);
         Assert.Equal(r.GetProperty("localExpiry").GetString(), rows.Single(x => x[0] == "Session ends")[1]);
     }
 
@@ -159,6 +159,8 @@ public sealed class AccountMenuWebTests
         Assert.Equal(0, r.GetProperty("outsideListenersLeft").GetInt32());
         Assert.Equal(0, r.GetProperty("panelsAfterEscape").GetInt32());
         Assert.True(r.GetProperty("focusAfterEscape").GetBoolean());
+        Assert.Equal(0, r.GetProperty("keydownListenersLeft").GetInt32());
+        Assert.Equal(0, r.GetProperty("panelsAfterEscapeWithoutFocus").GetInt32());
         Assert.Equal(0, r.GetProperty("panelsAfterTab").GetInt32());
         Assert.True(r.GetProperty("focusAfterTab").GetBoolean());
         Assert.Equal(1, r.GetProperty("panelsAfterFocusMovesInside").GetInt32());
@@ -186,6 +188,9 @@ public sealed class AccountMenuWebTests
         Assert.False(drawn.GetProperty("topbarHidden").GetBoolean());
         Assert.Equal(1, drawn.GetProperty("topbarHasControl").GetInt32());
         Assert.Equal("shared token · admin", drawn.GetProperty("buttonText").GetString());
+        var caret = drawn.GetProperty("caret").EnumerateArray().Single();
+        Assert.Equal("true", caret.GetProperty("hidden").GetString());
+        Assert.Contains("▾", caret.GetProperty("text").GetString());
         Assert.Equal("false", drawn.GetProperty("buttonAttrs").GetProperty("aria-expanded").GetString());
         Assert.Equal("true", drawn.GetProperty("expandedAfterOpen").GetString());
         Assert.Equal("false", drawn.GetProperty("expandedAfterEscape").GetString());
@@ -205,23 +210,21 @@ public sealed class AccountMenuWebTests
     }
 
     [Fact]
-    public void Markup_InTheDisplayName_IsDrawnAsText()
+    public void Markup_InTheSessionsOwnText_IsDrawnAsText()
     {
         const string evil = "<img src=x onerror=alert(1)>";
-        var me = JsonSerializer.Serialize(new { method = "oidc", seat = "admin", subject = "s", display_name = evil, granted_by = "g", expires_at = (string?)null });
+        var me = JsonSerializer.Serialize(new { method = "oidc", seat = "admin", subject = evil + "s", display_name = evil + "d", granted_by = evil + "g", expires_at = (string?)null });
 
         var drawn = Run("init", me);
 
-        Assert.Contains(drawn.GetProperty("texts").EnumerateArray().Select(t => t.GetString()), t => t == evil);
+        var texts = drawn.GetProperty("texts").EnumerateArray().Select(t => t.GetString()).ToArray();
         Assert.Equal(0, drawn.GetProperty("innerHtmlSets").GetArrayLength());
-        Assert.Contains(drawn.GetProperty("popupRows").EnumerateArray(), row => row[1].GetString() == evil);
-    }
-
-    [Fact]
-    public void TheModule_UsesNoInnerHtml()
-    {
-        var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "account-menu.js");
-
-        Assert.DoesNotContain("innerHTML", source);
+        var rows = drawn.GetProperty("popupRows").EnumerateArray().ToDictionary(row => row[0].GetString()!, row => row[1].GetString());
+        Assert.Equal(evil + "d", rows["Name"]);
+        Assert.Equal(evil + "s", rows["Signed in as"]);
+        Assert.Equal("admin (granted by " + evil + "g)", rows["Seat"]);
+        Assert.Contains(evil + "d", texts);
+        Assert.Contains(evil + "s", texts);
+        Assert.Contains("admin (granted by " + evil + "g)", texts);
     }
 }

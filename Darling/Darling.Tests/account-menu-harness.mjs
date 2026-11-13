@@ -111,7 +111,8 @@ try {
     out.innerHtmlSets = innerHtmlSets;
     if (!brand.hidden) {
       const button = find(brand, (n) => n.tag === "button")[0];
-      out.buttonText = flat(button);
+      out.buttonText = flat(button.childNodes[0]);
+      out.caret = find(button, (n) => n.className === "account-caret").map((n) => ({ hidden: n.attrs["aria-hidden"], text: flat(n) }));
       out.buttonAttrs = button.attrs;
       /* Open the popover as a click would, then read what it holds. */
       button.listeners.click[0]();
@@ -124,7 +125,7 @@ try {
       out.menuItems = find(pop, (n) => n.tag === "a").map((n) => ({ tag: n.tag, href: n.attrs.href, text: flat(n) }));
       out.expandedAfterOpen = button.attrs["aria-expanded"];
       /* Escape closes it again. */
-      find(brand, (n) => n.className === "account-control")[0].listeners.keydown[0]({ key: "Escape", preventDefault: noop });
+      (docListeners.keydown || []).slice().forEach((f) => f({ key: "Escape", preventDefault: noop }));
       out.expandedAfterEscape = button.attrs["aria-expanded"];
       out.popupAfterEscape = find(brand, (n) => n.className === "account-pop").length;
       out.topbarHasControl = find(top, (n) => n.tag === "button").length;
@@ -150,9 +151,17 @@ try {
     button.listeners.click[0]();
     await settle();
     focused = null;
-    control.listeners.keydown[0]({ key: "Escape", preventDefault: noop });
+    const pressEscape = () => (docListeners.keydown || []).slice().forEach((f) => f({ key: "Escape", preventDefault: noop }));
+    pressEscape();
     out.panelsAfterEscape = panels();
     out.focusAfterEscape = focused === button;
+    out.keydownListenersLeft = (docListeners.keydown || []).length;
+    /* Opened by a click that never focused the button: Escape on the document still closes it. */
+    button.listeners.click[0]();
+    await settle();
+    focused = null;
+    pressEscape();
+    out.panelsAfterEscapeWithoutFocus = panels();
     button.listeners.click[0]();
     await settle();
     focused = null;

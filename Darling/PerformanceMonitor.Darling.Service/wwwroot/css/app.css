@@ -1811,7 +1811,9 @@ table.data tr[aria-pressed]:focus-visible { outline: 2px solid var(--accent); ou
 .account-menu { margin-top: 0.5rem; min-width: 0; }
 .account-menu[hidden] { display: none; }
 .account-control { position: relative; }
-.account-btn { display: block; width: 100%; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; background: transparent; border: 1px solid var(--border); color: var(--dim); border-radius: var(--radius-sm); padding: 0.2rem 0.5rem; font-size: 0.78rem; cursor: pointer; }
+.account-btn { display: flex; width: 100%; max-width: 100%; overflow: hidden; white-space: nowrap; text-align: left; background: transparent; border: 1px solid var(--border); color: var(--dim); border-radius: var(--radius-sm); padding: 0.2rem 0.5rem; font-size: 0.78rem; cursor: pointer; }
+.account-btn > span:first-child { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.account-caret { flex: none; }
 .account-btn:hover, .account-btn:focus-visible, .account-btn[aria-expanded="true"] { border-color: var(--accent); color: var(--fg); }
 .account-pop { display: flex; flex-direction: column; margin-top: 0.25rem; background: var(--bg-dark); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.3rem 0; font-size: 0.78rem; }
 .account-row { display: flex; flex-direction: column; padding: 0.2rem 0.7rem; overflow-wrap: anywhere; }
