@@ -1402,6 +1402,14 @@ public sealed class DarlingWebHostService : BackgroundService
            computes: a short shared token serves reads only. Without this a forgotten argument meant writes. */
         sharedTokenReadsOnlyProblem ??= accessToken.Length > 0 ? DarlingHostBinding.DescribeTokenProblem(accessToken) : null;
 
+        /* #8735: tokenSignIn off removes every token sign-in, so a loopback-only start with no token requirement would be
+           left serving the tokenless reads-only dashboard to anyone on the box. That is a different exposure the operator
+           did not ask for, so the pipeline refuses to build rather than serve it. */
+        if (tokenSignIn == TokenSignInMode.Off && !networkMode && !requireTokenWhenLoopbackOnly)
+        {
+            throw new InvalidOperationException("tokenSignIn off never serves the tokenless loopback dashboard");
+        }
+
         Func<DateTime> clock = utcNow ?? (() => DateTime.UtcNow);
 
         /* #2479 item 5: the gates below used to refuse silently. Rate-limited per (gate, source),
@@ -1574,6 +1582,22 @@ public sealed class DarlingWebHostService : BackgroundService
                     }
                 }
 
+                var connectionIp = context.Items.TryGetValue(ConnectionIpItemKey, out var stashedIp) ? stashedIp as IPAddress : null;
+
+                /* #8735: tokenSignIn holds an existing token session to the same rule as the sign-in. A shared, named or group
+                   cookie from a connection the mode refuses is treated as NO cookie, so the holder sees the sign-in page (or the
+                   JSON 401 on /api/*). It sits before the group lookup, so a refused group cookie costs no store trip. An OIDC
+                   seat is not a token seat and is never touched. */
+                if (hasValidCookie && DarlingTokenSignIn.IsTokenSeat(seat) && !DarlingTokenSignIn.IsAllowed(tokenSignIn, remote, connectionIp))
+                {
+                    hasValidCookie = false;
+                    seat = DarlingWebSeat.SharedToken;
+                    refusals.Report(
+                        _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized, remote,
+                        "a token session was ended because web.network.oidc.tokenSignIn does not allow token sign-in from this connection",
+                        DateTime.UtcNow);
+                }
+
                 /* The token is accepted from the sign-in form's POST body only (HandleTokenSignInAsync, on
                    LoginPath). One riding the URL is never compared, whatever its value: a token in the URL lands in
                    browser history, bookmarks, proxy logs and the Referer of every asset the page loads, so
@@ -1582,7 +1606,6 @@ public sealed class DarlingWebHostService : BackgroundService
                 var tokenInUrl = context.Request.Query.ContainsKey("token");
                 var isAuthFlowRoute = IsAuthFlowPath(context.Request.Path.Value ?? "/", oidcClient is not null);
 
-                var connectionIp = context.Items.TryGetValue(ConnectionIpItemKey, out var stashedIp) ? stashedIp as IPAddress : null;
                 // Only a cryptographically valid managed cookie, already inside the network gate, may read current group metadata.
                 // Every request it rides is checked, the page itself included, so a holder the group no longer admits is shown the
                 // sign-in form; only the page's own scripts and stylesheets, which carry no data, cost no store trip. A database

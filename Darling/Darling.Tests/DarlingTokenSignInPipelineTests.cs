@@ -45,7 +45,8 @@ public sealed class DarlingTokenSignInPipelineTests
     private static readonly byte[] SigningKey = Enumerable.Range(1, 32).Select(i => (byte)i).ToArray();
 
     private static async Task<TestServer> Build(
-        string mode, IReadOnlyList<IPNetwork>? trustedProxies = null, bool oidc = false, string allowFrom = AllowedCidr)
+        string mode, IReadOnlyList<IPNetwork>? trustedProxies = null, bool oidc = false, string allowFrom = AllowedCidr,
+        IReadOnlyList<string>? mcpTokens = null)
     {
         Assert.True(DarlingTokenSignIn.TryParse(mode, out var parsed));
 
@@ -81,6 +82,7 @@ public sealed class DarlingTokenSignInPipelineTests
             trustedProxies: trustedProxies,
             utcNow: () => now,
             webTokens: DarlingWebNamedTokenTests.SetFor(DarlingWebNamedTokenTests.Entry("operator", NamedToken, "operator")),
+            mcpTokens: mcpTokens,
             tokenSignIn: parsed);
 
         await app.StartAsync();
@@ -306,6 +308,129 @@ public sealed class DarlingTokenSignInPipelineTests
 
         Assert.Equal(StatusCodes.Status302Found, answer.Ctx.Response.StatusCode);
         Assert.True(answer.Ctx.Response.Headers.SetCookie.Count > 0);
+    }
+
+    private static string SharedCookie()
+        => DarlingWebHostService.SessionCookieName + "=" + DarlingWebHostService.BuildSessionCookieValue(
+            SigningKey, DateTimeOffset.UtcNow.AddHours(1));
+
+    private static string NamedCookie(string name)
+        => DarlingWebHostService.SessionCookieName + "=" + DarlingWebHostService.BuildSessionCookieValue(
+            SigningKey, DateTimeOffset.UtcNow.AddHours(1), DarlingWebSeat.EncodeTokenCookieSubject(name));
+
+    private static string OidcCookie()
+        => DarlingWebHostService.SessionCookieName + "=" + DarlingWebHostService.BuildSessionCookieValue(
+            SigningKey, DateTimeOffset.UtcNow.AddHours(1),
+            DarlingWebSeat.EncodeCookieSubject("alice@example.com", WebOidcRole.Admin, new string('k', DarlingWebSeat.OwnerKeyLength)));
+
+    /// <summary>A path nothing maps answers 404 once the gate lets the session through; the sign-in page is 200.</summary>
+    private const string UnmappedPath = "/some/unmapped/path";
+
+    private static void AssertSignedOut((HttpContext Ctx, string Body) answer)
+    {
+        Assert.Equal(StatusCodes.Status200OK, answer.Ctx.Response.StatusCode);
+        Assert.DoesNotContain("name='token'", answer.Body, StringComparison.Ordinal);
+        Assert.Contains("id='return'", answer.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Loopback_SharedCookieFromLan_IsSignedOut()
+    {
+        using var server = await Build("loopback", oidc: true);
+        AssertSignedOut(await Get(server, Lan, UnmappedPath, SharedCookie()));
+    }
+
+    [Fact]
+    public async Task Loopback_NamedCookieFromLan_IsSignedOut()
+    {
+        using var server = await Build("loopback", oidc: true);
+        var cookie = NamedCookie("operator");
+
+        Assert.Equal(StatusCodes.Status404NotFound, (await Get(server, IPAddress.Loopback, UnmappedPath, cookie)).Ctx.Response.StatusCode);
+        AssertSignedOut(await Get(server, Lan, UnmappedPath, cookie));
+    }
+
+    [Fact]
+    public async Task Loopback_SharedCookieFromLan_OnApi_Gets401Json()
+    {
+        using var server = await Build("loopback", oidc: true);
+        var answer = await Get(server, Lan, "/api/session", SharedCookie());
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, answer.Ctx.Response.StatusCode);
+        Assert.StartsWith("application/json", answer.Ctx.Response.ContentType, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Loopback_SharedCookieFromLoopback_IsServed()
+    {
+        using var server = await Build("loopback", oidc: true);
+        var answer = await Get(server, IPAddress.Loopback, UnmappedPath, SharedCookie());
+
+        Assert.Equal(StatusCodes.Status404NotFound, answer.Ctx.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Loopback_OidcCookieFromLan_IsServed()
+    {
+        using var server = await Build("loopback", oidc: true);
+        var answer = await Get(server, Lan, UnmappedPath, OidcCookie());
+
+        Assert.Equal(StatusCodes.Status404NotFound, answer.Ctx.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Off_SharedCookieFromLoopback_IsSignedOut()
+    {
+        using var server = await Build("off", oidc: true);
+        AssertSignedOut(await Get(server, IPAddress.Loopback, UnmappedPath, SharedCookie()));
+    }
+
+    [Fact]
+    public void Off_InLoopbackOnlyModeWithoutToken_PipelineRefusesToBuild()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        builder.Services.AddSingleton(postgres);
+        DarlingWebHostService.ConfigureResponseCompression(builder.Services);
+        var app = builder.Build();
+        var host = new DarlingWebHostService(
+            NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), new CollectorRuntimeState(),
+            new WebTlsCertificateState(), new BaselineCache());
+
+        Assert.Throws<InvalidOperationException>(() => host.ConfigurePipeline(
+            app, postgres,
+            networkMode: false,
+            networkListenIp: null,
+            allowedCidr: IPNetwork.Parse(AllowedCidr),
+            accessToken: string.Empty,
+            oidcClient: null,
+            requireTokenWhenLoopbackOnly: false,
+            tokenSignIn: TokenSignInMode.Off));
+    }
+
+    [Fact]
+    public async Task Loopback_RefusedPost_ModeCheckRunsBeforeSameSiteAndMcpSameValueChecks()
+    {
+        using var server = await Build("loopback", mcpTokens: new[] { Token });
+        var answer = await Post(server, Lan, Token, configure: c =>
+        {
+            c.Request.Headers.Origin = "http://evil.example.com";
+            c.Request.Headers["Sec-Fetch-Site"] = "cross-site";
+        });
+
+        AssertRefused(answer);
+    }
+
+    [Fact]
+    public async Task Loopback_LanGetOfGate_WithOidc_ServesNoTokenField()
+    {
+        using var server = await Build("loopback", oidc: true);
+        var answer = await Get(server, Lan, "/");
+
+        Assert.Equal(StatusCodes.Status200OK, answer.Ctx.Response.StatusCode);
+        Assert.DoesNotContain("name='token'", answer.Body, StringComparison.Ordinal);
     }
 
     /// <summary>Answers the discovery document the OIDC login leg fetches, with nothing else.</summary>
