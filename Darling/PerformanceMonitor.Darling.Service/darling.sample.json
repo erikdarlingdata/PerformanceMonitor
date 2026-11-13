@@ -614,7 +614,7 @@
     //
     //   // OPTIONAL per-user OIDC sign-in (#2550) -- omit the whole block to keep the shared token as the only
     //   // credential. When set, the login page adds an SSO button (authorization code + PKCE) and the shared
-    //   // token KEEPS working beside it (scripted callers / break-glass). Register this redirect URI at the
+    //   // token KEEPS working beside it (scripted callers / break-glass) unless "tokenSignIn" below is loopback or off. Register this redirect URI at the
     //   // IdP: {scheme}://{host}:{port}/auth/oidc/callback for every host browsers will use -- the "listen"
     //   // IP, localhost, and (#4220) web.publicBaseUrl's host above, because the anti-DNS-rebind Host
     //   // allowlist admits exactly those and no others.
@@ -627,6 +627,7 @@
     //     "encryptedClientSecret": "<output of --encrypt-password>", // or "clientSecret" (env:/file: reference, or plaintext for dev; omit BOTH for a public client on PKCE alone)
     //     "scopes": "openid profile email",                  // optional; openid is always forced in
     //     "subjectClaim": "preferred_username",              // optional; default chain preferred_username -> email (only when email_verified) -> sub. When SET it is required -- no fallback.
+    //     "tokenSignIn": "on",                               // optional: on | loopback | off -- where web tokens (shared, named, group) may sign in once OIDC is set; loopback = only from this machine, off = OIDC only (docs/darling/configuration-web.md)
     //
     //     // Role mapping: omit all three for parity with the shared token (every signed-in user may edit).
     //     // With them, a claim value in adminRoles => edit; else viewerRoles => read-only (the server refuses

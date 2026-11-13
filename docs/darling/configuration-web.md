@@ -107,7 +107,7 @@ A refused sign-in POST to `/auth/login` answers 403 before the form is read, wit
 
 **A store behind a front door keeps `on`.** The front door signs in to the store with its shared token, over the network. Under `loopback` or `off` the front door reports that the store has `tokenSignIn` set to `loopback` or `off`. See [The front door](front-door.md#the-web-dashboard).
 
-`--validate-config` prints the mode, fails on an unknown value and on `off` without working OIDC or without an exposed dashboard, and notes `loopback` with an exposed `listen` and no `trustedProxies`.
+`--validate-config` prints the mode when it is not `on`, fails on an unknown value and on `off` without OIDC configured or without an exposed dashboard, and notes `loopback` with an exposed `listen` and no `trustedProxies`.
 
 ### Viewer-managed team access groups
 
