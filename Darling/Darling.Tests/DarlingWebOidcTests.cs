@@ -568,8 +568,29 @@ public sealed class DarlingWebOidcTests
     [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_::")]
     [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_:::")]
     [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_X:QQ:QQ:s")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_:gA:QQ:s")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_:QQQQQ:QQ:s")]
     public void O3_Malformed_IsRefused(string cookieSubject)
         => Assert.False(DarlingWebSeat.TryResolveSeat(cookieSubject, out _));
+
+    private static void AssertWellFormed(string text)
+    {
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (char.IsHighSurrogate(text[i]))
+            {
+                Assert.True(i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]), "unpaired high surrogate at " + i);
+                i++;
+            }
+            else
+            {
+                Assert.False(char.IsLowSurrogate(text[i]), "unpaired low surrogate at " + i);
+            }
+        }
+
+        var strict = new UTF8Encoding(false, throwOnInvalidBytes: true);
+        Assert.Equal(text, strict.GetString(strict.GetBytes(text)));
+    }
 
     [Fact]
     public void CapDisplayField_CutsAtACharacterBoundary()
@@ -583,8 +604,14 @@ public sealed class DarlingWebOidcTests
         var emoji = DarlingWebSeat.CapDisplayField(string.Concat(Enumerable.Repeat("😀", 40)))!;
         Assert.Equal(64, emoji.Length);
         Assert.Equal(32, emoji.EnumerateRunes().Count());
-        Assert.All(emoji, c => Assert.False(char.IsLowSurrogate(c) && !char.IsSurrogate(c)));
+        AssertWellFormed(emoji);
         Assert.True(Encoding.UTF8.GetByteCount(emoji) <= DarlingWebSeat.DisplayFieldMaxBytes);
+
+        /* The limit falls INSIDE a 4-byte emoji: 1 + 31 * 4 = 125 bytes fit, the 32nd emoji would reach 129. */
+        var inside = DarlingWebSeat.CapDisplayField("a" + string.Concat(Enumerable.Repeat("😀", 40)))!;
+        Assert.Equal("a" + string.Concat(Enumerable.Repeat("😀", 31)), inside);
+        Assert.Equal(125, Encoding.UTF8.GetByteCount(inside));
+        AssertWellFormed(inside);
 
         /* 127 ASCII bytes then a 2-byte character: the character does not fit, so it is dropped whole. */
         var odd = DarlingWebSeat.CapDisplayField(new string('a', 127) + "é")!;
