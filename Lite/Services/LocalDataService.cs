@@ -287,6 +287,9 @@ public partial class LocalDataService
     {
         if (value is BigInteger bi)
             return (double)bi;
+        /* DuckDB.NET 2.0 returns HUGEINT as System.Int128, which is not IConvertible. */
+        if (value is Int128 wide)
+            return (double)wide;
         return Convert.ToDouble(value);
     }
 
@@ -297,6 +300,8 @@ public partial class LocalDataService
     {
         if (value is BigInteger bi)
             return (long)bi;
+        if (value is Int128 wide)
+            return (long)wide;
         return Convert.ToInt64(value);
     }
 

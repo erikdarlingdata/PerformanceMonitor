@@ -33,18 +33,18 @@
       },
       "DuckDB.NET.Bindings.Full": {
         "type": "Direct",
-        "requested": "[1.5.6.1, )",
-        "resolved": "1.5.6.1",
-        "contentHash": "Lk/w0DHTr2MjhTFnSkO0+al6FpdZBfxXESDzULKuNVrIOI6r+nUaFE4rlOo0L+ZgBSTVd6qqHriGL7gu4OSJDA=="
+        "requested": "[2.0.0-preview.1, )",
+        "resolved": "2.0.0-preview.1",
+        "contentHash": "ABVtE0Avcq9vyw3cpJXR5nRQtREzPjyqt1ULj0hhjPmKOkww7wiQat8IRZpRS3aFr36wkSW6XE3gmdkVDim/YA=="
       },
       "DuckDB.NET.Data": {
         "type": "Direct",
-        "requested": "[1.5.6.1, )",
-        "resolved": "1.5.6.1",
-        "contentHash": "fz5jYe/NGufgjdYL5Trr+LtZB5PXj2kjcygpeu4fULaimX8T6o1zzRoLXdGXD8GuF103jwLD5xmWcgfX1XRrPg==",
+        "requested": "[2.0.0-preview.1, )",
+        "resolved": "2.0.0-preview.1",
+        "contentHash": "F95V/GGLUGRF3L/loMuk63cSeF0Q29r1yp1f9C4J0niEI6FiafYaHKys0d58Rk2G26/uaz1Ivwhx1uEGsygIUA==",
         "dependencies": {
           "Apache.Arrow": "23.0.0",
-          "DuckDB.NET.Bindings": "1.5.6.1"
+          "DuckDB.NET.Bindings": "2.0.0-preview.1"
         }
       },
       "Npgsql": {
@@ -114,8 +114,8 @@
       },
       "DuckDB.NET.Bindings": {
         "type": "Transitive",
-        "resolved": "1.5.6.1",
-        "contentHash": "aaDbLAfmnClaZ+VDoUYMVxNO5OuTdNn4byrKrxIl1vavZJknyTgL9XqJVTeJtGoV/wny9OhEQnemfwHbcHTx3w=="
+        "resolved": "2.0.0-preview.1",
+        "contentHash": "iBnljevARRg0CLZyTEjC5qiFHspdpA6u88cwvPfUJ7fj5lAE4l/SJK0E+oJ8dzvg91Qxp9IxEGhWBMdX3189LA=="
       },
       "Microsoft.Bcl.AsyncInterfaces": {
         "type": "Transitive",
@@ -425,9 +425,9 @@
     "net10.0/linux-x64": {
       "DuckDB.NET.Bindings.Full": {
         "type": "Direct",
-        "requested": "[1.5.6.1, )",
-        "resolved": "1.5.6.1",
-        "contentHash": "Lk/w0DHTr2MjhTFnSkO0+al6FpdZBfxXESDzULKuNVrIOI6r+nUaFE4rlOo0L+ZgBSTVd6qqHriGL7gu4OSJDA=="
+        "requested": "[2.0.0-preview.1, )",
+        "resolved": "2.0.0-preview.1",
+        "contentHash": "ABVtE0Avcq9vyw3cpJXR5nRQtREzPjyqt1ULj0hhjPmKOkww7wiQat8IRZpRS3aFr36wkSW6XE3gmdkVDim/YA=="
       },
       "Microsoft.Data.SqlClient.SNI.runtime": {
         "type": "Transitive",
@@ -468,9 +468,9 @@
     "net10.0/win-x64": {
       "DuckDB.NET.Bindings.Full": {
         "type": "Direct",
-        "requested": "[1.5.6.1, )",
-        "resolved": "1.5.6.1",
-        "contentHash": "Lk/w0DHTr2MjhTFnSkO0+al6FpdZBfxXESDzULKuNVrIOI6r+nUaFE4rlOo0L+ZgBSTVd6qqHriGL7gu4OSJDA=="
+        "requested": "[2.0.0-preview.1, )",
+        "resolved": "2.0.0-preview.1",
+        "contentHash": "ABVtE0Avcq9vyw3cpJXR5nRQtREzPjyqt1ULj0hhjPmKOkww7wiQat8IRZpRS3aFr36wkSW6XE3gmdkVDim/YA=="
       },
       "Microsoft.Data.SqlClient.SNI.runtime": {
         "type": "Transitive",

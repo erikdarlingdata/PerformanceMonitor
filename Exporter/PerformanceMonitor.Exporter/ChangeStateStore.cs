@@ -52,7 +52,7 @@ public sealed class ChangeStateStore : IDisposable
         {
             try
             {
-                var probe = new DuckDBConnection($"Data Source={path}");
+                var probe = new DuckDBConnection($"Data Source={path};storage_compatibility_version={StateStore.StorageCompatibilityVersion}");
                 probe.Open();
                 EnsureSchema(probe);
                 return (probe, wasRecreated);
@@ -72,7 +72,7 @@ public sealed class ChangeStateStore : IDisposable
             }
         }
 
-        var connection = new DuckDBConnection($"Data Source={path}");
+        var connection = new DuckDBConnection($"Data Source={path};storage_compatibility_version={StateStore.StorageCompatibilityVersion}");
         connection.Open();
         EnsureSchema(connection);
         return (connection, wasRecreated);

@@ -495,7 +495,7 @@ COPY (
            100::BIGINT AS delta_execution_count,
            (1000 + i)::BIGINT AS delta_worker_time,
            (i + s)::BIGINT AS delta_elapsed_time,
-           list_aggregate(list_transform(range(0, {TextChars / 32}), j -> md5(i::VARCHAR || ':' || s::VARCHAR || ':{dayText}:' || j::VARCHAR)), 'string_agg', '') AS query_text
+           list_aggregate(list_transform(range(0, {TextChars / 32}), lambda j: md5(i::VARCHAR || ':' || s::VARCHAR || ':{dayText}:' || j::VARCHAR)), 'string_agg', '') AS query_text
     FROM range(0, {KeysPerFile}) t(i), range(0, {SnapshotsPerKey}) g(s)
 ) TO '{path}' (FORMAT PARQUET, COMPRESSION ZSTD)");
         }
@@ -624,7 +624,9 @@ COPY (
     {
         await SeedWideArchiveAsync();
         var from = LastArchiveDayStart;
-        var to = LastArchiveDayStart.AddDays(1);
+        /* The window ends inside the newest archived day, which holds rows after it. DuckDB 2.0 plans from the parquet statistics and drops
+           a bound that every row already meets, so an end past the newest row would print a scan with no upper bound to find. */
+        var to = LastArchiveDayStart.AddHours(12);
 
         AssertEveryParquetScanIsWindowed(await ParquetScanFiltersAsync(LocalDataService.TopQueriesByCpuSql(string.Empty, 100), ServerId, from, to, 50, 0, 0));
 

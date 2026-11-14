@@ -95,6 +95,9 @@ AND blocking_spid <> 0";
     {
         if (value is BigInteger bi)
             return (long)bi;
+        /* DuckDB.NET 2.0 hands HUGEINT back as System.Int128 instead of BigInteger; Int128 is not IConvertible either. */
+        if (value is Int128 wide)
+            return (long)wide;
         return Convert.ToInt64(value);
     }
 

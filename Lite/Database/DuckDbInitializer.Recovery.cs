@@ -139,17 +139,25 @@ public partial class DuckDbInitializer
         }
     }
 
+    /// <summary>The text DuckDB puts in every error after a fatal one has invalidated the database.</summary>
+    private const string InvalidatedDatabaseMessage = "database has been invalidated";
+
     /// <summary>
     /// True when the exception, or one it wraps, is DuckDB's FATAL error. A fatal error invalidates the whole
     /// database instance: every later statement on every connection to the file fails with "database has been
-    /// invalidated" until all of them are closed and the file is opened again. DuckDB.NET reports it as
-    /// <see cref="DuckDBErrorType.Fatal"/>, so the type is checked and the message is not.
+    /// invalidated" until all of them are closed and the file is opened again. DuckDB.NET 1.x reports every one of
+    /// those errors as <see cref="DuckDBErrorType.Fatal"/>. DuckDB.NET 2.0 reports the error that invalidated the
+    /// database as Fatal, but the statements that fail afterwards as <see cref="DuckDBErrorType.Invalid"/> with the
+    /// message "FATAL Error: Failed: database has been invalidated because of a previous fatal error". A caller whose
+    /// statement ran after the first failure sees only that second form, so the type is checked and so is that message.
     /// </summary>
     internal static bool IsDatabaseInvalidated(Exception? exception)
     {
         for (var current = exception; current is not null; current = current.InnerException)
         {
-            if (current is DuckDBException { ErrorType: DuckDBErrorType.Fatal })
+            if (current is DuckDBException duckDbException
+                && (duckDbException.ErrorType == DuckDBErrorType.Fatal
+                    || duckDbException.Message.Contains(InvalidatedDatabaseMessage, StringComparison.OrdinalIgnoreCase)))
             {
                 return true;
             }
