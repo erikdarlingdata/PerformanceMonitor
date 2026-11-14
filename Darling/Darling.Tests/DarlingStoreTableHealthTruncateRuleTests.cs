@@ -105,6 +105,8 @@ public sealed class DarlingStoreTableHealthTruncateRuleTests
 }
 
 /// <summary>The crash backoff <c>next_start</c> (#8787) against a real store, as a superuser who can rewrite a job's stat row.</summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test reaches DARLING_TEST_PG only to
+   CREATE and DROP its own database through ScratchPostgres and works entirely inside it. */
 public sealed class DarlingStoreJobCrashLiveTests
 {
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -157,6 +159,8 @@ public sealed class DarlingStoreJobCrashLiveTests
 }
 
 /// <summary>Measure reads <c>vacuum_truncate</c> in every spelling and judges by the shared rule (#8787).</summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test reaches DARLING_TEST_PG only to
+   CREATE and DROP its own database through ScratchPostgres and works entirely inside it. */
 public sealed class DarlingStoreTableMeasureTruncateLiveTests
 {
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
