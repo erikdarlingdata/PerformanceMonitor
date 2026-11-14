@@ -43,8 +43,9 @@ public sealed class QueryFleetSummaryQueryStoreDailyMidLiveTests
 
     private sealed record Store(ScratchPostgres Scratch, NpgsqlConnection Connection);
 
-    /// <summary>The window ends eight days back, so every whole day in it is older than the daily policy's four-day re-read span and the mid route
-    /// may read it from the daily. <c>End</c> and the start are both off midnight, so both edge days hold hours.</summary>
+    /// <summary>The window ends at noon eight days back, so every whole day in it is older than the daily policy's four-day re-read span and the mid
+    /// route may read it from the daily. <c>End</c> (12:00) and the start (13:00 seven days earlier) are both off midnight, so both edge days hold
+    /// hours, and the days fall the same way at every hour the test runs: six whole days from <c>DStart</c> to <c>DEnd</c>.</summary>
     private sealed record Timeline(DateTime End, int HoursBack)
     {
         public DateTime Start => End.AddHours(-HoursBack);
@@ -54,20 +55,8 @@ public sealed class QueryFleetSummaryQueryStoreDailyMidLiveTests
 
     private static Timeline NewTimeline()
     {
-        var back = LiveClock.Now().AddDays(-8);
-        var end = new DateTime(back.Year, back.Month, back.Day, back.Hour, 0, 0, DateTimeKind.Unspecified);
-        if (end.Hour == 0)
-        {
-            end = end.AddHours(-1);
-        }
-
-        var hoursBack = 167;
-        while (end.AddHours(-hoursBack).Hour == 0)
-        {
-            hoursBack--;
-        }
-
-        return new Timeline(end, hoursBack);
+        var end = DateTime.SpecifyKind(LiveClock.Now().Date.AddDays(-8).AddHours(12), DateTimeKind.Unspecified);
+        return new Timeline(end, 167);
     }
 
     private static async Task<Store> CreateStoreAsync(CancellationToken ct)
