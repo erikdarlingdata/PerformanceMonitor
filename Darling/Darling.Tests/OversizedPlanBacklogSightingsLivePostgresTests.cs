@@ -125,12 +125,15 @@ AND   relname = 'oversized_plan_backlog';";
             postgres, BatchedServer, OversizedPlanBacklog.QueryStatsCollectorName, sightings, seenAt, Cap, Limit, null, ct);
 
         /* Of the 200 new rows, 155 rank past the cap. The ten that share a hash with an older row are the lowest by bytes and
-           are the only rows that make the older ones superseded, so they stay for the trim; the other 145 are not inserted. */
-        var (afterSightingsDropped, _) = await DropTotalsAsync(postgres, BatchedServer, ct);
-        Assert.Equal(145L, afterSightingsDropped);
+           are the only rows that make the older ones superseded, so they stay for the trim; the other 145 are not inserted.
+           The sightings record that number and count nothing: the pass's trim counts it. */
+        Assert.Equal(145L, await LeftOutAsync(postgres, BatchedServer, ct));
+        Assert.Equal((0L, 0L), await DropTotalsAsync(postgres, BatchedServer, ct));
 
         await TrimAsync(postgres, ReferenceServer, now, oldRanking: false, ct);
         await TrimAsync(postgres, BatchedServer, now, oldRanking: false, ct);
+
+        Assert.Null(await LeftOutAsync(postgres, BatchedServer, ct));
 
         var reference = await TableRowsAsync(postgres, ReferenceServer, ct);
         var batched = await TableRowsAsync(postgres, BatchedServer, ct);
@@ -288,6 +291,166 @@ WHERE server_id = $1;");
             Assert.Equal((long)excess, before[pass].Del);
             Assert.Equal((0L, 0L), after[pass]);
         }
+    }
+
+    /// <summary>
+    /// A server over the cap sighted on several collection cycles between two sweep passes leaves the same new rows out of every
+    /// cycle. The pass counts them once, as the trim counted a plan it deleted once per pass: the drop counts take them when the
+    /// pass runs and the pass's tally takes them as over-cap drops. A cycle counts nothing itself.
+    /// </summary>
+    [Fact]
+    public async Task SeveralCyclesBetweenTwoPasses_CountTheRowsLeftOutOncePerPass()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #8789 sightings test (it mints its own scratch database).");
+
+        const int leftOut = 50;
+        const int cycles = 3;
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await MigrateAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(ReadConnectionString(scratch));
+
+        var now = WholeSecond(DateTime.UtcNow);
+        await SeedHeldRowsAsync(postgres, BatchedServer, now.AddMinutes(10), Cap, ct);
+        var sightings = NewRows(leftOut);
+
+        /* Pass 1: three collection cycles, then the sweep's pass. */
+        for (var cycle = 1; cycle <= cycles; cycle++)
+        {
+            await OversizedPlanBacklog.RecordSightingsAsync(
+                postgres, BatchedServer, OversizedPlanBacklog.QueryStatsCollectorName, sightings, now.AddMinutes(cycle), Cap, Limit, null, ct);
+
+            Assert.Equal((0L, 0L), await DropTotalsAsync(postgres, BatchedServer, ct));
+            Assert.Equal((long)leftOut, await LeftOutAsync(postgres, BatchedServer, ct));
+        }
+
+        var firstPass = new OversizedPlanBacklogSweep.SweepTally();
+        await using (var connection = await postgres.OpenConnectionAsync(ct))
+        {
+            await OversizedPlanBacklogSweep.TrimAsync(connection, BatchedServer, now.AddMinutes(15), firstPass, null, ct);
+        }
+
+        Assert.Equal(leftOut, firstPass.RowsOverCap);
+        Assert.Equal(0, firstPass.RowsSuperseded);
+        Assert.Equal(((long)leftOut, (long)leftOut), await DropTotalsAsync(postgres, BatchedServer, ct));
+        Assert.Null(await LeftOutAsync(postgres, BatchedServer, ct));
+        Assert.Equal(0L, await CountAsync(postgres, "0xNEWER%", ct));
+
+        /* A pass with no cycle before it adds nothing. */
+        var emptyPass = new OversizedPlanBacklogSweep.SweepTally();
+        await using (var connection = await postgres.OpenConnectionAsync(ct))
+        {
+            await OversizedPlanBacklogSweep.TrimAsync(connection, BatchedServer, now.AddMinutes(30), emptyPass, null, ct);
+        }
+
+        Assert.Equal(0, emptyPass.RowsOverCap);
+        Assert.Equal(((long)leftOut, (long)leftOut), await DropTotalsAsync(postgres, BatchedServer, ct));
+
+        /* Pass 2: the same plans are left out again and count again, once. */
+        foreach (var cycle in new[] { 16, 17 })
+        {
+            await OversizedPlanBacklog.RecordSightingsAsync(
+                postgres, BatchedServer, OversizedPlanBacklog.QueryStatsCollectorName, sightings, now.AddMinutes(cycle), Cap, Limit, null, ct);
+        }
+
+        var secondPass = new OversizedPlanBacklogSweep.SweepTally();
+        await using (var connection = await postgres.OpenConnectionAsync(ct))
+        {
+            await OversizedPlanBacklogSweep.TrimAsync(connection, BatchedServer, now.AddMinutes(45), secondPass, null, ct);
+        }
+
+        Assert.Equal(leftOut, secondPass.RowsOverCap);
+        Assert.Equal(((long)(2 * leftOut), (long)(2 * leftOut)), await DropTotalsAsync(postgres, BatchedServer, ct));
+    }
+
+    /// <summary>
+    /// A server that drops back under the cap leaves nothing out, so the number the last cycle recorded goes to 0 and the next pass
+    /// adds nothing, even though the rows left out earlier were never counted by a pass.
+    /// </summary>
+    [Fact]
+    public async Task AServerThatDropsBackUnderTheCap_RecordsNothingLeftOut_AndTheNextPassAddsNothing()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #8789 sightings test (it mints its own scratch database).");
+
+        const int leftOut = 50;
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await MigrateAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(ReadConnectionString(scratch));
+
+        var now = WholeSecond(DateTime.UtcNow);
+        await SeedHeldRowsAsync(postgres, BatchedServer, now.AddMinutes(10), Cap, ct);
+        var sightings = NewRows(leftOut);
+
+        await OversizedPlanBacklog.RecordSightingsAsync(
+            postgres, BatchedServer, OversizedPlanBacklog.QueryStatsCollectorName, sightings, now.AddMinutes(1), Cap, Limit, null, ct);
+        Assert.Equal((long)leftOut, await LeftOutAsync(postgres, BatchedServer, ct));
+
+        /* The held rows leave (the sweep fetched them), so the table and the new rows are under the cap. */
+        await using (var delete = postgres.CreateCommand("DELETE FROM collect.oversized_plan_backlog WHERE server_id = $1 AND plan_handle LIKE '0xHELD%';"))
+        {
+            delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = BatchedServer });
+            await delete.ExecuteNonQueryAsync(ct);
+        }
+
+        var written = await OversizedPlanBacklog.RecordSightingsAsync(
+            postgres, BatchedServer, OversizedPlanBacklog.QueryStatsCollectorName, sightings, now.AddMinutes(2), Cap, Limit, null, ct);
+        Assert.Equal(leftOut, written);
+        Assert.Equal(0L, await LeftOutAsync(postgres, BatchedServer, ct));
+        Assert.Equal((long)leftOut, await CountAsync(postgres, "0xNEWER%", ct));
+
+        var pass = new OversizedPlanBacklogSweep.SweepTally();
+        await using (var connection = await postgres.OpenConnectionAsync(ct))
+        {
+            await OversizedPlanBacklogSweep.TrimAsync(connection, BatchedServer, now.AddMinutes(15), pass, null, ct);
+        }
+
+        Assert.Equal(0, pass.RowsOverCap);
+        Assert.Equal((0L, 0L), await DropTotalsAsync(postgres, BatchedServer, ct));
+        Assert.Null(await LeftOutAsync(postgres, BatchedServer, ct));
+    }
+
+    /// <summary>A table at the cap: rows of this collector, first sighted an hour before <paramref name="lastSeen"/> and last sighted at it.</summary>
+    private static async Task SeedHeldRowsAsync(NpgsqlDataSource postgres, int server, DateTime lastSeen, int rows, CancellationToken ct)
+    {
+        await using var seed = postgres.CreateCommand(@"
+INSERT INTO collect.oversized_plan_backlog
+(server_id, collector_name, plan_handle, sql_handle, statement_start_offset, statement_end_offset,
+ database_name, query_hash, observed_bytes, first_seen_at, last_seen_at)
+SELECT $1, 'query_stats', '0xHELD' || i, '0xHSQL' || i, 0, 400, 'sightings_db', NULL, 1000 + i,
+       $2 - interval '1 hour', $2
+FROM generate_series(1, $3) AS i;");
+        seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = server });
+        seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = lastSeen });
+        seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = rows });
+        await seed.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>New rows with MORE bytes than any held row, so only the tie-break or a later sighting time could keep them out.</summary>
+    private static List<OversizedPlanObservation> NewRows(int count) =>
+        Enumerable.Range(0, count)
+            .Select(k => new OversizedPlanObservation(
+                "0xNEWER" + k.ToString(CultureInfo.InvariantCulture), "0xNSQL", 0, 400, Database, null, 900_000 + k))
+            .ToList();
+
+    /// <summary>The number the sightings recorded as left out for the query_stats collector, or null when none is recorded.</summary>
+    private static async Task<long?> LeftOutAsync(NpgsqlDataSource postgres, int server, CancellationToken ct)
+    {
+        await using var command = postgres.CreateCommand(@"
+SELECT state_value::bigint
+FROM collect.collector_state
+WHERE server_id = $1
+AND   collector_name = 'oversized_plan_backlog'
+AND   state_key = 'query_stats';");
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = server });
+        var value = await command.ExecuteScalarAsync(ct);
+        return value is null or DBNull ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture);
     }
 
     private static List<OversizedPlanObservation> Sightings()

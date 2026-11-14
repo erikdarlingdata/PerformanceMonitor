@@ -178,6 +178,50 @@ CREATE TABLE IF NOT EXISTS collect.oversized_plan_backlog_drops
 );";
 
     /// <summary>
+    /// #8789: the <c>collector_name</c> under which <see cref="RecordSightingsSql"/> keeps, in <c>collect.collector_state</c>, how many
+    /// new rows its latest cycle left out (state key: the collector, state value: the number). No migration: the table is the
+    /// store's small per-server state, and a row here is one short number.
+    /// </summary>
+    public const string LeftOutStateOwner = "oversized_plan_backlog";
+
+    /// <summary>
+    /// #8789: the sweep's once-per-pass step that takes what <see cref="RecordSightingsSql"/> recorded as left out. $1 is the server
+    /// and $2 the pass's clock. It deletes the server's numbers (so the next cycle starts a new one, and the pass counts what it
+    /// took once), adds each to the hour of $2 in <c>collect.oversized_plan_backlog_drops</c> as <c>rows_dropped</c> and
+    /// <c>rows_first_seen</c>, the two columns the trim's own counting fills, and returns the total. One statement, so a number is
+    /// never deleted without being counted. A row the trim would have dropped in this pass is counted here as the trim counted it,
+    /// once per pass.
+    /// </summary>
+    public const string TakeLeftOutSql = @"
+WITH taken AS
+(
+    DELETE FROM collect.collector_state
+    WHERE server_id = $1
+    AND   collector_name = '" + LeftOutStateOwner + @"'
+    RETURNING
+        state_key,
+        state_value::bigint AS n
+),
+counted AS
+(
+    INSERT INTO collect.oversized_plan_backlog_drops AS d
+    (server_id, collector_name, hour_start, rows_dropped, rows_first_seen)
+    SELECT
+        $1,
+        t.state_key,
+        date_trunc('hour', $2::timestamp),
+        t.n,
+        t.n
+    FROM taken AS t
+    WHERE t.n > 0
+    ON CONFLICT ON CONSTRAINT pk_oversized_plan_backlog_drops DO UPDATE SET
+        rows_dropped = d.rows_dropped + EXCLUDED.rows_dropped,
+        rows_first_seen = d.rows_first_seen + EXCLUDED.rows_first_seen
+)
+SELECT COALESCE(sum(t.n), 0)::integer
+FROM taken AS t;";
+
+    /// <summary>
     /// The primary key as a bound predicate, written once so the three statements that stamp one row's
     /// outcome address exactly the row the claim handed back.
     /// </summary>
@@ -237,12 +281,20 @@ AND   statement_end_offset = $6";
     /// <para><b>A new row the trim would drop in the same pass is not inserted (#8789).</b> The statement runs the trim's two
     /// rules (<see cref="SupersedeSql"/>, then <see cref="DropOverCapSql"/>) over the rows the table would hold after this
     /// write, and leaves out the new rows the cap would drop. Inserting them only to have the next trim delete them
-    /// is what churned the table. A left-out row is counted as dropped in <c>collect.oversized_plan_backlog_drops</c>
-    /// the way the trim counts it, so the read's counts do not change. The statement leaves a row in, and the trim
+    /// is what churned the table. The statement leaves a row in, and the trim
     /// handles it as it always did, when leaving it out could change what the trim does to another row: when the
     /// supersede or the cap would stop at the pass's drop limit, and when the row is the newest sighting of a query
     /// whose older rows only it supersedes. It does none of this unless the server's pending rows plus the new ones are
     /// past the cap, so a server under the cap pays one count.</para>
+    ///
+    /// <para><b>How many it left out is recorded, not counted.</b> The trim counted an over-cap plan once per sweep pass. A
+    /// collector cycle runs far more often than a pass (every minute on the Balanced preset, a pass every 15 minutes), and the
+    /// same plans are left out again each cycle, so adding to <c>collect.oversized_plan_backlog_drops</c> here would read about
+    /// 15 times too high, and the drops would never reach the sweep's run record. This statement instead overwrites one number
+    /// per server and collector in <c>collect.collector_state</c> (<see cref="LeftOutStateOwner"/>, state key the collector): the
+    /// rows it left out on its LATEST cycle. It writes 0 when a cycle leaves none out and the number was not 0, so a server
+    /// that drops back under the cap does not leave a stale number. The sweep takes the number once per pass
+    /// (<see cref="TakeLeftOutSql"/>).</para>
     /// </summary>
     public static readonly string RecordSightingsSql = @"
 WITH incoming AS
@@ -463,21 +515,35 @@ written AS
         query_hash = COALESCE(EXCLUDED.query_hash, b.query_hash),
         expired_at = NULL
 ),
-counted AS
+left_out AS
 (
-    INSERT INTO collect.oversized_plan_backlog_drops AS d
-    (server_id, collector_name, hour_start, rows_dropped, rows_first_seen)
+    INSERT INTO collect.collector_state AS s
+    (server_id, collector_name, state_key, state_value, updated_at)
     SELECT
         $1,
+        '" + LeftOutStateOwner + @"',
         $2,
-        date_trunc('hour', $10::timestamp),
-        count(*),
-        count(*)
-    FROM skipped
-    HAVING count(*) > 0
-    ON CONFLICT ON CONSTRAINT pk_oversized_plan_backlog_drops DO UPDATE SET
-        rows_dropped = d.rows_dropped + EXCLUDED.rows_dropped,
-        rows_first_seen = d.rows_first_seen + EXCLUDED.rows_first_seen
+        c.n::text,
+        $10::timestamp
+    FROM
+    (
+        SELECT count(*) AS n
+        FROM skipped
+    ) AS c
+    WHERE c.n > 0
+    OR    EXISTS
+    (
+        SELECT 1
+        FROM collect.collector_state AS x
+        WHERE x.server_id = $1
+        AND   x.collector_name = '" + LeftOutStateOwner + @"'
+        AND   x.state_key = $2
+        AND   x.state_value <> '0'
+    )
+    ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
+        state_value = EXCLUDED.state_value,
+        updated_at = EXCLUDED.updated_at
+    WHERE s.state_value <> EXCLUDED.state_value
 )
 SELECT count(*)::integer
 FROM skipped;";
@@ -903,7 +969,8 @@ LIMIT 1;";
     /// <para>Never throws. A best-effort backlog that cannot be written is a lost opportunity to go back for
     /// a plan, not a reason to fail a collection cycle that stored every row it read.</para>
     /// </summary>
-    /// <returns>How many sightings were recorded (all of the batch, one transaction), or 0 when none were attempted or the write failed.</returns>
+    /// <returns>How many sightings were written: the batch less the new rows the statement left out for the trim (#8789), all or nothing
+    /// in one transaction, or 0 when none were attempted or the write failed.</returns>
     public static async Task<int> RecordSightingsAsync(
         NpgsqlDataSource postgres,
         int serverId,
@@ -977,7 +1044,7 @@ LIMIT 1;";
                     collectorName, serverId, notInserted, count);
             }
 
-            return count;
+            return count - notInserted;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
