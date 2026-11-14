@@ -295,6 +295,8 @@ public sealed class McpHostService : BackgroundService
                dropping the default keyword. The companion to stateless transport for issue #1074. */
             .WithGeminiCompatibleTools<McpDiscoveryTools>()
             .WithGeminiCompatibleTools<McpHealthTools>()
+            /* #8788: get_store_health, the health of Lite's own DuckDB store. */
+            .WithGeminiCompatibleTools<McpStoreHealthTools>()
             .WithGeminiCompatibleTools<McpWaitTools>()
             .WithGeminiCompatibleTools<McpBlockingTools>()
             /* #2028 get_plan_corrections — automatic plan correction activity + per-database
@@ -478,6 +480,9 @@ public sealed class McpHostService : BackgroundService
                 InvestigationServerNameLookup.FromServerManager(_serverManager));
             /* #5820: the one investigation store MainWindow built, as a singleton, for the four tools and get_notification_routes. */
             builder.Services.AddSingleton<IInvestigationRequestStore>(_investigationStore);
+            /* #8788: get_store_health reads the store's size, the archive folder and the housekeeping history, through the same reader the
+               Store Health window uses. */
+            builder.Services.AddSingleton(new StoreHealthReader(_duckDb, new StoreHousekeepingHistory(StoreHousekeepingHistory.PathFor(_duckDb.DatabasePath))));
 
             /* The write switch and the SDK's tool registration live in RegisterMcpServer, the method the tests that
                drive tools/call also use (see there). */

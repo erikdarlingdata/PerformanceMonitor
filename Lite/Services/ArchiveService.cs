@@ -264,6 +264,10 @@ public class ArchiveService
             .Concat([("config_alert_log", "alert_time"), ("collection_log", "collection_time")])
             .ToArray();
 
+    /// <summary>#8788: where each timed archive and each size reset is recorded for the Store Health window. Null records nothing.
+    /// The history is a file beside the store, not a table in it, so a size reset (which replaces the store) does not touch it.</summary>
+    internal StoreHousekeepingHistory? History { get; set; }
+
     public ArchiveService(DuckDbInitializer duckDb, string archivePath, ILogger<ArchiveService>? logger = null)
     {
         _duckDb = duckDb;
@@ -299,6 +303,12 @@ public class ArchiveService
         }
 
         var complete = true;
+        /* #8788: what this pass did, for the housekeeping history. */
+        long archivedRows = 0;
+        var archivedFiles = 0;
+        string? passNote = null;
+        var passFailed = false;
+        var usedMbAtStart = History is null ? null : _duckDb.GetUsedDataSizeMb();
 
         IsArchiving = true;
         try
@@ -348,6 +358,7 @@ public class ArchiveService
             if (cancellationToken.IsCancellationRequested)
             {
                 complete = false;
+                passNote ??= "Stopped: Lite was shutting down.";
                 _logger?.LogInformation("Archival stopped before {Table}: cancelled", table);
                 break;
             }
@@ -361,6 +372,7 @@ public class ArchiveService
                 if (File.Exists(PendingArchivePath(table)))
                 {
                     _logger?.LogWarning("Skipping {Table}: the journal of an earlier interrupted export is still there and could not be finished", table);
+                    passNote ??= $"{table}: the journal of an earlier interrupted export could not be finished.";
                     complete = false;
                     continue;
                 }
@@ -454,10 +466,13 @@ public class ArchiveService
                 }
 
                 TryDeletePendingArchive(table);
+                archivedRows += rowCount;
+                archivedFiles++;
                 _logger?.LogInformation("Archived {Count} rows from {Table} to {Path}", rowCount, table, parquetPath);
             }
             catch (StoreLockTimeoutException ex)
             {
+                passNote ??= $"{table}: {ex.Message}";
                 /* #5731: the write lock was not free within the budget, so nothing was promoted and no DELETE ran:
                    the rows are still in the table and still go next pass. The export itself is done and unused;
                    remove it, so the retry does not pile another file up beside it. Information, not Error: this is
@@ -472,6 +487,7 @@ public class ArchiveService
             }
             catch (ArchiveExportStaleException ex)
             {
+                passNote ??= $"{table}: {ex.Message}";
                 /* #5691: the table changed below the cutoff between the export and the DELETE. Nothing was promoted;
                    drop the export and let the next pass export the table as it is then. */
                 if (exportedTemp is not null)
@@ -485,6 +501,8 @@ public class ArchiveService
             catch (Exception ex) when (ex is not SimulatedKillException)
             {
                 _logger?.LogError(ex, "Failed to archive table {Table}", table);
+                passFailed = true;
+                passNote ??= $"{table}: {ex.Message}";
             }
         }
 
@@ -496,10 +514,12 @@ public class ArchiveService
             if (cancellationToken.IsCancellationRequested)
             {
                 complete = false;
+                passNote ??= "Stopped: Lite was shutting down.";
             }
             else if (!CompactParquetFiles())
             {
                 complete = false;
+                passNote ??= "Compaction did not finish. The next pass continues it.";
             }
         }
         finally
@@ -513,6 +533,12 @@ public class ArchiveService
             }
         }
 
+        History?.Record(new StoreHousekeepingEvent(
+            DateTime.UtcNow, StoreHousekeepingHistory.KindArchive,
+            passFailed ? StoreHousekeepingHistory.OutcomeFailed
+                : complete ? StoreHousekeepingHistory.OutcomeOk : StoreHousekeepingHistory.OutcomeIncomplete,
+            Rows: archivedRows, Files: archivedFiles, UsedMb: usedMbAtStart,
+            Message: passNote ?? (complete ? null : "Some tables were skipped and are retried soon.")));
         return complete;
         }
         finally
@@ -2042,6 +2068,11 @@ COPY (
         try { if (Directory.Exists(preserveDir)) Directory.Delete(preserveDir, recursive: true); } catch { /* best effort */ }
     }
 
+    /// <summary>#8788: one size-reset entry in the housekeeping history; a no-op without a history.</summary>
+    private void RecordReset(string outcome, long? rows, int? files, double? usedMb, string? message) =>
+        History?.Record(new StoreHousekeepingEvent(
+            DateTime.UtcNow, StoreHousekeepingHistory.KindSizeReset, outcome, rows, files, usedMb, message));
+
     /// <summary>
     /// Archives ALL data from every table to parquet, then deletes and reinitializes the database.
     /// Called when the database exceeds the size threshold. Data remains queryable through archive views.
@@ -2099,6 +2130,8 @@ COPY (
         }
 
         IsArchiving = true;
+        /* #8788: the data in the store when the reset started, for the housekeeping history. */
+        var usedMbAtStart = History is null ? null : _duckDb.GetUsedDataSizeMb();
         /* The preserved copy sits under the archive folder, not in %TEMP%, so it survives whatever clears the
            temp folder and startup finds it next to the marker that names it. Archive scans read the folder's top
            level only (GetFiles(_archivePath, "*.parquet"); DuckDB's * does not cross a slash), so a
@@ -2145,6 +2178,7 @@ COPY (
                a truncated file that matches the archive glob. One such file fails the table's archive view
                at bind, which hides every archived month of that table. */
             var exportsSucceeded = true;
+            string? exportError = null;
             using (_duckDb.AcquireWriteLock())
             {
                 using var connection = _duckDb.CreateConnection();
@@ -2200,6 +2234,7 @@ COPY (
                     catch (Exception ex)
                     {
                         exportsSucceeded = false;
+                        exportError = $"{table}: {ex.Message}";
                         _logger?.LogError(ex, "Failed to archive table {Table}; the database is not reset", table);
                         break;
                     }
@@ -2212,6 +2247,8 @@ COPY (
                 ResetRetryNotBeforeUtc = DateTime.UtcNow + ResetRetryBackoff;
                 _logger?.LogWarning("Database reset abandoned: an export failed, so every row stays in the database and no archive file was added. The next attempt is at {RetryAt:u}",
                     ResetRetryNotBeforeUtc);
+                RecordReset(StoreHousekeepingHistory.OutcomeFailed, null, null, usedMbAtStart,
+                    $"The export failed, so no data was moved and the store was not reset. {exportError}");
                 return;
             }
 
@@ -2372,6 +2409,14 @@ COPY (
 
             _logger?.LogInformation("Database reset complete — archive views now serve all historical data from Parquet");
 
+            /* #8788: the reset's own record, written once the fresh store exists. It goes to a file beside the store, so the
+               reset above has not touched the entries before it. A reset whose saved settings did not all come back is
+               incomplete: the next start retries the restore. */
+            RecordReset(
+                allRestoresSucceeded ? StoreHousekeepingHistory.OutcomeOk : StoreHousekeepingHistory.OutcomeIncomplete,
+                exportedRows, exports.Count, usedMbAtStart,
+                allRestoresSucceeded ? null : "The store was reset, but some saved settings were not all restored. The next start retries the restore.");
+
             /* The reset proper is done: the database is fresh and initialized, so collection can write to it. The gate
                is released here, before compaction (#5733). Compaction merges each month's new per-cycle files with
                that month's existing merged file, so it grows through the month (seconds on the 1st, minutes by month
@@ -2415,12 +2460,15 @@ COPY (
             ResetRetryNotBeforeUtc = DateTime.UtcNow + ResetRetryBackoff;
             _logger?.LogError(ex, "Archive-all-and-reset failed before the database was reset; its archive files were removed and the next attempt is at {RetryAt:u}",
                 ResetRetryNotBeforeUtc);
+            RecordReset(StoreHousekeepingHistory.OutcomeFailed, null, null, usedMbAtStart, $"The reset failed before the store was touched. {ex.Message}");
         }
         catch (Exception ex)
         {
             ResetRetryNotBeforeUtc = DateTime.UtcNow + ResetRetryBackoff;
             _logger?.LogError(ex, "Archive-all-and-reset failed after the reset began. The restore marker {Marker} and the copy in {Dir} are kept; the next start retries the restore",
                 RestoreMarkerPath, preserveDir);
+            RecordReset(StoreHousekeepingHistory.OutcomeFailed, null, null, usedMbAtStart,
+                $"The reset failed after it began. The next start retries the restore. {ex.Message}");
         }
         finally
         {
