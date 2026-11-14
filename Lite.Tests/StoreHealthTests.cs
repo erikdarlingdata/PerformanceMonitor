@@ -290,6 +290,58 @@ public sealed class StoreHealthTests : IDisposable
     }
 
     [Fact]
+    public async Task SizeReset_WhenAnExportFails_RecordsTheFailureAndKeepsTheRows()
+    {
+        await SeedAsync(Deadlock(1), Deadlock(2), Deadlock(3));
+        var history = new StoreHousekeepingHistory(_historyPath);
+        var service = new ArchiveService(_duckDb, _archiveDir, NullLogger<ArchiveService>.Instance)
+        {
+            History = history,
+            BeforeTableExportForTests = _ => throw new IOException("disk full for the test")
+        };
+
+        await service.ArchiveAllAndResetAsync();
+
+        /* The reset was abandoned: every row is still in the table. */
+        using (var connection = new DuckDBConnection($"Data Source={_dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM main.deadlocks";
+            Assert.Equal(3L, Convert.ToInt64(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken)));
+        }
+
+        var entry = Assert.Single(new StoreHousekeepingHistory(_historyPath).Read());
+        Assert.Equal(StoreHousekeepingHistory.KindSizeReset, entry.Kind);
+        Assert.Equal(StoreHousekeepingHistory.OutcomeFailed, entry.Outcome);
+        Assert.Contains("disk full for the test", entry.Message);
+        Assert.Contains("not reset", entry.Message);
+    }
+
+    [Fact]
+    public async Task Retention_WhenAFileCannotBeDeleted_RecordsTheFailure()
+    {
+        await SeedAsync();
+        var stuck = "202001_wait_stats.parquet";
+        WriteArchiveFile(stuck, 10);
+        var history = new StoreHousekeepingHistory(_historyPath);
+
+        /* An open handle with no sharing makes the delete throw. */
+        using (new FileStream(Path.Combine(_archiveDir, stuck), FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var deleted = await new RetentionService(_archiveDir, NullLogger<RetentionService>.Instance) { History = history }
+                .CleanupOldArchivesAndRefreshViewsAsync(_duckDb);
+
+            Assert.Equal(0, deleted);
+        }
+
+        var entry = Assert.Single(history.Read());
+        Assert.Equal(StoreHousekeepingHistory.KindRetention, entry.Kind);
+        Assert.Equal(StoreHousekeepingHistory.OutcomeFailed, entry.Outcome);
+        Assert.Contains(stuck, entry.Message);
+    }
+
+    [Fact]
     public async Task Retention_RecordsTheFilesItDeleted()
     {
         await SeedAsync();
@@ -322,6 +374,23 @@ public sealed class StoreHealthTests : IDisposable
         Assert.Equal(StoreHousekeepingHistory.OutcomeOk, entry.Outcome);
         Assert.True(entry.Rows >= 2);
         Assert.True(entry.Files >= 1);
+    }
+
+    [Fact]
+    public async Task TimedArchive_WhenCancelled_SaysLiteWasShuttingDown()
+    {
+        await SeedAsync(Deadlock(1), Deadlock(2));
+        var history = new StoreHousekeepingHistory(_historyPath);
+        using var cancelled = new System.Threading.CancellationTokenSource();
+        await cancelled.CancelAsync();
+
+        var complete = await new ArchiveService(_duckDb, _archiveDir, NullLogger<ArchiveService>.Instance) { History = history }
+            .ArchiveOldDataAsync(cancellationToken: cancelled.Token);
+
+        Assert.False(complete);
+        var entry = Assert.Single(history.Read());
+        Assert.Equal(StoreHousekeepingHistory.OutcomeIncomplete, entry.Outcome);
+        Assert.Equal("Stopped: Lite was shutting down.", entry.Message);
     }
 
     [Fact]

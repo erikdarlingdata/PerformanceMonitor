@@ -358,6 +358,7 @@ public class ArchiveService
             if (cancellationToken.IsCancellationRequested)
             {
                 complete = false;
+                passNote ??= "Stopped: Lite was shutting down.";
                 _logger?.LogInformation("Archival stopped before {Table}: cancelled", table);
                 break;
             }
@@ -513,10 +514,12 @@ public class ArchiveService
             if (cancellationToken.IsCancellationRequested)
             {
                 complete = false;
+                passNote ??= "Stopped: Lite was shutting down.";
             }
             else if (!CompactParquetFiles())
             {
                 complete = false;
+                passNote ??= "Compaction did not finish. The next pass continues it.";
             }
         }
         finally
