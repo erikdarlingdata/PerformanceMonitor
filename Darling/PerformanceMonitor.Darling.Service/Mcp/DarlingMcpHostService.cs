@@ -1632,6 +1632,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #3021 get_store_log — the store's OWN server-log census, the second self-monitoring
                surface beside get_store_metrics. */
             .WithGeminiCompatibleTools<DarlingMcpStoreLogTools>()
+            .WithGeminiCompatibleTools<DarlingMcpStoreTableHealthTools>()
             .WithGeminiCompatibleTools<DarlingMcpReadLatencyTools>()
             .WithGeminiCompatibleTools<DarlingMcpSlowReadTools>()
             /* #4214 part 2 get_store_host — the store HOST's profile (platform/RAM/data volume, store

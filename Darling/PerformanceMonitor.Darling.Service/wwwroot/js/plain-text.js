@@ -49,7 +49,7 @@ export const MCP_TOOL_NAMES = [
   "get_query_store_regressions", "get_query_store_top", "get_query_trend", "get_read_latency",
   "get_resource_semaphore", "get_schema_changes", "get_resource_use_by_tag", "get_running_jobs", "get_server_actions", "get_server_config", "get_server_config_changes", "get_server_settings",
   "get_server_properties", "get_server_summary", "get_server_trend", "get_session_stats", "get_slow_reads",
-  "get_spinlock_stats", "get_store_host", "get_store_log", "get_store_metrics", "get_store_query_history",
+  "get_spinlock_stats", "get_store_host", "get_store_log", "get_store_metrics", "get_store_table_health", "get_store_query_history",
   "get_store_query_stats", "get_sweep_reports", "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide",
   "get_top_procedures_by_cpu", "get_top_queries_by_cpu", "get_trace_flag_changes", "get_trace_flags",
   "get_wait_stats", "get_wait_trend", "get_wait_types", "get_waiting_tasks",

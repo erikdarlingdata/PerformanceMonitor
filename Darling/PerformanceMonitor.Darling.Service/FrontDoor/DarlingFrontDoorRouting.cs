@@ -103,6 +103,7 @@ internal static class DarlingFrontDoorRouting
         "get_store_host",
         "get_store_log",
         "get_store_metrics",
+        "get_store_table_health",
         "get_store_query_history",
         "get_store_query_stats",
         "get_sweep_reports",
