@@ -220,6 +220,7 @@ public partial class MainWindow : Window
         JobHistoryContent.StatusChanged += StatusWriterFor(JobHistoryTabItem);
         DatabaseProtectionContent.StatusChanged += StatusWriterFor(DatabaseProtectionTabItem);
         FleetSweepsContent.StatusChanged += StatusWriterFor(FleetSweepsTabItem);
+        StoreHealthContent.StatusChanged += StatusWriterFor(StoreHealthTabItem);
         AgentAlertsContent.StatusChanged += StatusWriterFor(AgentAlertsTabItem);
         IdentityCapacityContent.StatusChanged += StatusWriterFor(IdentityCapacityTabItem);
         AvailabilityGroupsContent.StatusChanged += StatusWriterFor(AvailabilityGroupsTabItem);
@@ -508,6 +509,9 @@ public partial class MainWindow : Window
 
         /* Fleet Sweeps (#6390): a self-loading read-only control over the fleet sweep engine's record. */
         FleetSweepsContent.Initialize(_dataService);
+
+        /* Store Health (#8787): a self-loading read-only control over the monitoring store's own tables and indexes. */
+        StoreHealthContent.Initialize(_dataService);
 
         /* Agent Alerts (#6874): a self-loading control over the SQL Server Agent alert setup of one server; it loads on activation and its own Refresh. */
         AgentAlertsContent.Initialize(_dataService);
@@ -1366,6 +1370,9 @@ public partial class MainWindow : Window
                     break;
                 case TabItem tab when ReferenceEquals(tab, FleetSweepsTabItem):
                     await FleetSweepsContent.RefreshAsync();
+                    break;
+                case TabItem tab when ReferenceEquals(tab, StoreHealthTabItem):
+                    await StoreHealthContent.RefreshAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, IdentityCapacityTabItem):
                     await IdentityCapacityContent.RefreshAsync();
