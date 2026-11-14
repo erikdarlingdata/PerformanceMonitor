@@ -197,7 +197,7 @@ public sealed class StoreHostSlowSizeLiveTests
 
             await using var postgres = NpgsqlDataSource.Create(cs!);
             var cache = new StoreHostProfileCache(TimeSpan.FromMinutes(5));
-            var json = await DarlingMcpStoreHostTools.GetStoreHost(postgres, new PostgresConfig { Managed = false }, cache, ct);
+            var json = await DarlingMcpStoreHostTools.GetStoreHost(postgres, new PostgresConfig { Managed = false }, cache, cancellationToken: ct);
 
             using var doc = JsonDocument.Parse(json);
             var store = doc.RootElement.GetProperty("store");

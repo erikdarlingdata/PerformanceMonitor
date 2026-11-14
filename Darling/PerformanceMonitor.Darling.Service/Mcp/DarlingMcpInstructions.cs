@@ -188,7 +188,7 @@ internal static class DarlingMcpInstructions
 
         return opening + $" {shared} are the same names Lite exposes. The remaining {count - shared} are unique to Darling: " +
                $"thirty-five are the PostgreSQL reads (`get_pg_*`), plus {families}, and central-store-only reads " +
-               "(`get_fleet_overview`, `get_ag_health` (Availability Groups), `get_sweep_reports`, `get_store_metrics`, `get_store_table_health`, " +
+               "(`get_fleet_overview`, `get_ag_health` (Availability Groups), `get_sweep_reports`, `get_store_metrics`, `get_store_table_health`, `measure_store_table`, `get_store_maintenance_readiness`, " +
                "`get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
     }
 
@@ -198,10 +198,10 @@ internal static class DarlingMcpInstructions
     /// are identical, so a new tool moves this or fails there.
     /// </summary>
     private const string CatalogCensus =
-        "This server exposes 287 tools. 112 are the same names Lite exposes. The remaining 175 are unique to Darling: " +
+        "This server exposes 289 tools. 112 are the same names Lite exposes. The remaining 177 are unique to Darling: " +
         "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server/query-tag, " +
         "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` (Availability Groups), " +
-        "`get_sweep_reports`, `get_store_metrics`, `get_store_table_health`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
+        "`get_sweep_reports`, `get_store_metrics`, `get_store_table_health`, `measure_store_table`, `get_store_maintenance_readiness`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
 
     /// <summary>
     /// Every tool name Performance Monitor Lite registers, so the census counts the overlap of what THIS server

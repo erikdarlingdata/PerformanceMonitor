@@ -268,6 +268,14 @@ public sealed class DarlingMcpStoreMetricsTools
                 deltas);
             var (page, truncated) = McpHelpers.BoundPage(ranked, limit);
 
+            /* #8787 part D2: TimescaleDB counts crashes apart from failures, and a crashed job backs off by its retry period times the
+               crashes, so the job rows carry the live crash counters. Read once, only when job rows are in the answer; a version or role
+               without the counters says "not available" and the tool carries on. Not stored in collect.store_metrics. */
+            var jobRowsServed = (kind is null || kind == StoreSelfMetrics.BackgroundJobObjectKind) && view != DarlingStoreMetricsReader.StoreMetricsView.Object
+                || (view == DarlingStoreMetricsReader.StoreMetricsView.Object && selection.Matched[0].ObjectKind == StoreSelfMetrics.BackgroundJobObjectKind);
+            var crashRead = jobRowsServed ? await DarlingStoreJobCrashReader.ReadAsync(postgres, cancellationToken) : null;
+            var crashesByJob = crashRead?.Jobs.ToDictionary(j => j.JobId) ?? new Dictionary<int, DarlingStoreJobCrashReader.StoreJobCrash>();
+
             object? fastestGrowing = null;
             object? backgroundJobs = null;
             if (summary)
@@ -292,7 +300,7 @@ public sealed class DarlingMcpStoreMetricsTools
                     jobs_matched = jobs.Count,
                     jobs_returned = jobPage.Count,
                     truncated = jobsTruncated,
-                    jobs = jobPage.Select(r => ObjectRow(r, deltas, aggregateStateByView)),
+                    jobs = jobPage.Select(r => ObjectRow(r, deltas, aggregateStateByView, crashesByJob, crashRead)),
                 };
             }
 
@@ -539,7 +547,7 @@ public sealed class DarlingMcpStoreMetricsTools
                 objects_matched = ranked.Count,
                 objects_returned = page.Count,
                 truncated,
-                objects = page.Select(r => ObjectRow(r, deltas, aggregateStateByView)),
+                objects = page.Select(r => ObjectRow(r, deltas, aggregateStateByView, crashesByJob, crashRead)),
                 /* #3903: the drill-down's daily series, one point per day, oldest first. Null on the other two
                    views: the per-object series is the payload #3903 took out of the default. */
                 series,
@@ -547,6 +555,7 @@ public sealed class DarlingMcpStoreMetricsTools
                    over the window, and the background jobs ranked failing-first then by cadence. */
                 fastest_growing = fastestGrowing,
                 background_jobs = backgroundJobs,
+                job_crash_read = crashRead is null ? null : crashRead.Available ? "live" : crashRead.UnavailableReason,
                 note = ViewNote(view, kind, name, ranked.Count, page.Count, truncated, limit, series?.Count),
             }, McpHelpers.JsonOptions);
         }
@@ -554,6 +563,20 @@ public sealed class DarlingMcpStoreMetricsTools
         {
             return McpHelpers.FormatError("get_store_metrics", ex);
         }
+    }
+
+    /// <summary>The live crash counters for a background_job row, found by the <c>[job_id]</c> suffix <see cref="StoreSelfMetrics.BackgroundJobObjectNameSql"/> ends the name with.</summary>
+    private static DarlingStoreJobCrashReader.StoreJobCrash? CrashFor(
+        DarlingStoreMetricsReader.StoreMetricRow row, IReadOnlyDictionary<int, DarlingStoreJobCrashReader.StoreJobCrash> crashesByJob)
+    {
+        var name = row.ObjectName;
+        var close = name.Length - 1;
+        var open = name.LastIndexOf('[');
+        return name.Length > 2 && name[close] == ']' && open >= 0
+            && int.TryParse(name.AsSpan(open + 1, close - open - 1), NumberStyles.None, CultureInfo.InvariantCulture, out var jobId)
+            && crashesByJob.TryGetValue(jobId, out var crash)
+            ? crash
+            : null;
     }
 
     private static DarlingStoreMetricsReader.ContinuousAggregateState? AggregateState(
@@ -574,7 +597,9 @@ public sealed class DarlingMcpStoreMetricsTools
     private static object ObjectRow(
         DarlingStoreMetricsReader.StoreMetricRow r,
         IReadOnlyDictionary<(string Kind, string Name), DarlingStoreMetricsReader.WindowDelta> deltas,
-        Dictionary<string, DarlingStoreMetricsReader.ContinuousAggregateState> aggregateStateByView)
+        Dictionary<string, DarlingStoreMetricsReader.ContinuousAggregateState> aggregateStateByView,
+        IReadOnlyDictionary<int, DarlingStoreJobCrashReader.StoreJobCrash> crashesByJob,
+        DarlingStoreJobCrashReader.StoreJobCrashRead? crashRead)
     {
         var delta = DarlingStoreMetricsReader.Delta(deltas, r);
 
@@ -597,6 +622,11 @@ public sealed class DarlingMcpStoreMetricsTools
                 delta_since = delta?.Since.ToString("yyyy-MM-dd"),
                 runs_in_window = delta?.RunsInWindow,
                 failures_in_window = delta?.FailuresInWindow,
+                /* #8787 part D2: live from TimescaleDB, joined on the [job_id] suffix of object_name. Null when the counters are not
+                   available (job_crash_read says why) or the job is gone. consecutive_crashes above zero means the job is backing off. */
+                consecutive_crashes = CrashFor(r, crashesByJob)?.ConsecutiveCrashes,
+                total_crashes = CrashFor(r, crashesByJob)?.TotalCrashes,
+                next_start = CrashFor(r, crashesByJob)?.NextStart?.ToString("o", CultureInfo.InvariantCulture),
             };
         }
 

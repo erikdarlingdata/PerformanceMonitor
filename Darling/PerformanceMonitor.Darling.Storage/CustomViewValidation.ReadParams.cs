@@ -144,7 +144,13 @@ public static partial class CustomViewValidation
             ["get_sweep_reports"] = new ReadPanelParam[] { new("hours", false), new("as_of", false), new("sweep_id", false), new("watch_state", false) },
             ["get_ag_health"] = new ReadPanelParam[] { new("server", false), new("limit", false) },
             ["get_store_metrics"] = new ReadPanelParam[] { new("days_back", false), new("object_kind", false), new("object_name", false), new("limit", false) },
+<<<<<<< HEAD
             ["get_store_table_health"] = new ReadPanelParam[] { new("top", false), new("candidates_only", false), new("section", false) },
+=======
+            ["get_store_table_health"] = new ReadPanelParam[] { new("top", false), new("candidates_only", false) },
+            ["measure_store_table"] = new ReadPanelParam[] { new("table", false) },
+            ["get_store_maintenance_readiness"] = Array.Empty<ReadPanelParam>(),
+>>>>>>> origin/fix/8787-store-health
             ["get_store_log"] = new ReadPanelParam[] { new("hours", false), new("limit", false), new("as_of", false) },
             ["get_store_query_history"] = new ReadPanelParam[] { new("query_id", false), new("role", false), new("hours", false), new("top", false) },
             ["get_store_query_stats"] = new ReadPanelParam[] { new("role", false), new("order_by", false), new("top", false), new("full_text", false) },
