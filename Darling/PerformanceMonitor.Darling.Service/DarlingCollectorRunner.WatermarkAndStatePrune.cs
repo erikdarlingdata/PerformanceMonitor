@@ -37,10 +37,34 @@ public sealed partial class DarlingCollectorRunner
     /// the whole point of keeping this state off the payload. Best-effort: a failed write leaves the older
     /// value, and the next cycle re-derives from it or falls back.
     /// </summary>
-    public async Task SaveCollectorStateAsync(
+    public Task SaveCollectorStateAsync(
         int serverId, string collectorName, IReadOnlyDictionary<string, string> state, CancellationToken cancellationToken)
     {
         if (state.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        return SaveCollectorStateRowsAsync(
+            serverId,
+            state.Select(entry => (collectorName, entry.Key, entry.Value)).ToList(),
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// #8795: upserts every <c>(collector, key, value)</c> row of one cycle as ONE statement, so the cycle pays one commit and
+    /// one WAL flush however many keys it saved. A fan-out collector that tracks a position per database saved one key per
+    /// statement before, and each statement was its own commit. The rows may name more than one owner, because one
+    /// run can land state under two collector names (Query Store's open-interval stamps live under the host's own owner).
+    /// The conflict handling and the <c>updated_at</c> stamp are the per-key statement's, and one stamp covers the whole call.
+    /// Best-effort like the single-owner overload: a failed write leaves the older values, and the next cycle re-derives
+    /// from them or falls back. The rows of one call must not repeat a <c>(collector, key)</c> pair, which both callers
+    /// guarantee by building them from dictionaries with disjoint owners.
+    /// </summary>
+    public async Task SaveCollectorStateRowsAsync(
+        int serverId, IReadOnlyList<(string CollectorName, string Key, string Value)> rows, CancellationToken cancellationToken)
+    {
+        if (rows.Count == 0)
         {
             return;
         }
@@ -48,36 +72,38 @@ public sealed partial class DarlingCollectorRunner
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            foreach (var entry in state)
-            {
-                /* One statement per key: Npgsql's positional parameters cannot span a multi-statement
-                   batch (they bind to the FIRST statement and the rest fail silently), and this loop
-                   runs over a single declared key today. */
-                using var command = new NpgsqlCommand(@"
+
+            /* One statement over three parallel arrays. Npgsql's positional parameters cannot span a multi-statement
+               batch (they bind to the FIRST statement and the rest fail silently), and a set-based insert needs none. */
+            using var command = new NpgsqlCommand(@"
 INSERT INTO collector_state (server_id, collector_name, state_key, state_value, updated_at)
-VALUES ($1, $2, $3, $4, $5)
+SELECT $1, u.collector_name, u.state_key, u.state_value, $5
+FROM unnest($2::text[], $3::text[], $4::text[]) AS u(collector_name, state_key, state_value)
 ON CONFLICT (server_id, collector_name, state_key)
 DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at", connection);
-                command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
-                command.Parameters.AddWithValue(serverId);
-                command.Parameters.AddWithValue(collectorName);
-                command.Parameters.AddWithValue(entry.Key);
-                command.Parameters.AddWithValue(entry.Value);
-                /* Naive UTC, Kind-Unspecified — the product-wide PG timestamp discipline
-                   (PgAlertStateStore.NaiveUtcNow, DarlingObservability, the storedCollectionTime below).
-                   updated_at is `timestamp` WITHOUT time zone, and binding a Kind=Utc DateTime does not
-                   fail: Npgsql infers `timestamptz` from the Kind, PostgreSQL casts it into the column,
-                   and the cast renders it in the SERVER's zone — so the row lands silently offset by the
-                   server's UTC offset (measured at exactly 4h on an America/New_York store) while every
-                   other timestamp in the store is UTC. Nothing throws and nothing logs; the column simply
-                   disagrees with the rest of the store. */
-                command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            }
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = rows.Select(row => row.CollectorName).ToArray() });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = rows.Select(row => row.Key).ToArray() });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = rows.Select(row => row.Value).ToArray() });
+            /* Naive UTC, Kind-Unspecified — the product-wide PG timestamp discipline
+               (PgAlertStateStore.NaiveUtcNow, DarlingObservability, the storedCollectionTime below).
+               updated_at is `timestamp` WITHOUT time zone, and binding a Kind=Utc DateTime does not
+               fail: Npgsql infers `timestamptz` from the Kind, PostgreSQL casts it into the column,
+               and the cast renders it in the SERVER's zone — so the row lands silently offset by the
+               server's UTC offset (measured at exactly 4h on an America/New_York store) while every
+               other timestamp in the store is UTC. Nothing throws and nothing logs; the column simply
+               disagrees with the rest of the store. */
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Timestamp,
+                Value = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+            });
+            await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)
         {
-            _logger?.LogDebug(ex, "Storing collector state for {Collector} failed; next cycle uses the older value", collectorName);
+            _logger?.LogDebug(ex, "Storing collector state for server {ServerId} failed; next cycle uses the older value", serverId);
         }
     }
 

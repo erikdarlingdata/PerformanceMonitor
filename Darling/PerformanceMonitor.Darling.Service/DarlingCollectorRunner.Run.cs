@@ -2579,16 +2579,18 @@ public sealed partial class DarlingCollectorRunner
 
             if (openIntervalKeys.Count > 0)
             {
-                await SaveCollectorStateAsync(
-                    server.ServerId, QueryStoreOpenIntervalState.StateCollectorName, openIntervalKeys, cancellationToken);
-
-                var others = context.PendingState
-                    .Where(entry => !openIntervalKeys.ContainsKey(entry.Key))
-                    .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
-                if (others.Count > 0)
+                /* #8795: both owners' keys land in ONE statement, so a run that carries the open-interval stamps and
+                   another key pays one commit rather than one per owner. */
+                var rows = new List<(string CollectorName, string Key, string Value)>(context.PendingState.Count);
+                foreach (var entry in context.PendingState)
                 {
-                    await SaveCollectorStateAsync(server.ServerId, definition.Name, others, cancellationToken);
+                    rows.Add((
+                        openIntervalKeys.ContainsKey(entry.Key) ? QueryStoreOpenIntervalState.StateCollectorName : definition.Name,
+                        entry.Key,
+                        entry.Value));
                 }
+
+                await SaveCollectorStateRowsAsync(server.ServerId, rows, cancellationToken);
             }
             else
             {
