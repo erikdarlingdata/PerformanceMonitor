@@ -495,7 +495,9 @@ function measureCell(r) {
 }
 
 function elapsedText(startedAt) {
-  return Math.max(0, Math.round((Date.now() - startedAt) / 1000)) + " s";
+  /* Tenths under 10 s, so a quick measure does not read "Took 0 s". */
+  const seconds = Math.max(0, (Date.now() - startedAt) / 1000);
+  return (seconds < 10 ? seconds.toFixed(1) : String(Math.round(seconds))) + " s";
 }
 
 /** Runs measure_store_table for one table and shows the result in the panel under the tables grid. */
