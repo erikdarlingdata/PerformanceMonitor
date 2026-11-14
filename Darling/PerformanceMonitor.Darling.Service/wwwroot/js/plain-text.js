@@ -49,7 +49,7 @@ export const MCP_TOOL_NAMES = [
   "get_query_store_regressions", "get_query_store_top", "get_query_trend", "get_read_latency",
   "get_resource_semaphore", "get_schema_changes", "get_resource_use_by_tag", "get_running_jobs", "get_server_actions", "get_server_config", "get_server_config_changes", "get_server_settings",
   "get_server_properties", "get_server_summary", "get_server_trend", "get_session_stats", "get_slow_reads",
-  "get_spinlock_stats", "get_store_host", "get_store_log", "get_store_metrics", "get_store_query_history",
+  "get_spinlock_stats", "get_store_host", "get_store_log", "get_store_metrics", "get_store_table_health", "get_store_maintenance_readiness", "get_store_query_history",
   "get_store_query_stats", "get_sweep_reports", "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide",
   "get_top_procedures_by_cpu", "get_top_queries_by_cpu", "get_trace_flag_changes", "get_trace_flags",
   "get_wait_stats", "get_wait_trend", "get_wait_types", "get_waiting_tasks",
@@ -60,7 +60,7 @@ const TOOL_NAME_SET = new Set(MCP_TOOL_NAMES);
     tools. A message that names one tells a client what to call next; a web reader cannot call it. WebPlainTextTests checks
     this list against the registry, like the get_ list above. */
 export const MCP_ACTION_TOOL_NAMES = [
-  "add_servers", "analyze_now", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
+  "add_servers", "measure_store_table", "analyze_now", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
   "analyze_server", "approve_investigation_note", "assign_query_tag", "assign_server_tag", "audit_config", "backtest_custom_alert_rule", "claim_investigation_request",
   "clear_quiet_window", "close_investigation_request", "compare_analysis", "create_custom_alert_rule", "create_custom_view", "create_known_pattern", "create_mute_rule",
   "create_notification_route", "create_query_tag", "create_query_tag_rule", "create_server_tag", "delete_custom_alert_rule",

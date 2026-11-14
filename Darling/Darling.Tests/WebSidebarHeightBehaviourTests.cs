@@ -108,16 +108,16 @@ public sealed class WebSidebarHeightBehaviourTests
         var r = all[$"{width}x{height}"];
         Assert.Equal(width, r.GetProperty("innerWidth").GetInt32());
         Assert.Equal(height, r.GetProperty("innerHeight").GetInt32());
-        Assert.Equal(16, r.GetProperty("pageLinks").GetInt32());
+        Assert.Equal(17, r.GetProperty("pageLinks").GetInt32());
         return r;
     }
 
     /// <summary>A 1080-high window has room for every page link and the server list's five rows, so no page link sits behind a scroll.</summary>
     [Fact]
-    public void ATallWindow_ShowsAllSixteenPageLinks_AndFiveServerRows_WithoutScrolling()
+    public void ATallWindow_ShowsEveryPageLink_AndFiveServerRows_WithoutScrolling()
     {
         var r = At(1920, 1080);
-        Assert.True(r.GetProperty("pageLinksVisible").GetInt32() == 16, "page links inside the viewport at 1920x1080: " + r);
+        Assert.True(r.GetProperty("pageLinksVisible").GetInt32() == 17, "page links inside the viewport at 1920x1080: " + r);
         Assert.True(r.GetProperty("serversVisible").GetInt32() >= 5, "server rows inside the viewport at 1920x1080: " + r);
         Assert.True(r.GetProperty("viewsHeadingVisible").GetBoolean(), "the Views heading at 1920x1080: " + r);
     }

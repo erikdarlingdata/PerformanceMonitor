@@ -1,0 +1,187 @@
+<UserControl x:Class="PerformanceMonitor.Darling.Viewer.StoreHealthTab"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             mc:Ignorable="d"
+             d:DesignHeight="800" d:DesignWidth="1100">
+    <!-- Store Health (#8787): the health of the monitoring store's own tables and indexes, read only. The Viewer twin of the web's
+         Store health page: both call the same Storage readers, so the figures match. Top: the header (counts and the maintenance
+         verdict). Then the tables, rewrite candidates first, with Measure for one plain table. Then the indexes (flagged ones first)
+         and the partition index coverage. The tables and the indexes load as two separate reads, so the tables show as soon as theirs
+         returns and the index sections say they are loading until theirs does. -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="2*" MinHeight="140"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*" MinHeight="120"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8,10,0" MinHeight="36">
+            <TextBlock Text="Store Health" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14"
+                       Foreground="{DynamicResource ForegroundBrush}"/>
+            <Button x:Name="RefreshButton" Content="Refresh" Click="RefreshButton_Click" Padding="10,4" MinWidth="70"/>
+            <TextBlock x:Name="LastRefreshedIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
+                       FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+        </WrapPanel>
+
+        <!-- Header: the counts line and the maintenance verdict. -->
+        <StackPanel Grid.Row="1" Margin="10,2,10,6">
+            <TextBlock x:Name="HeaderText" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundBrush}"
+                       Text="Loading store tables…"/>
+            <TextBlock x:Name="ReadinessTextBlock" TextWrapping="Wrap" Margin="0,4,0,0"
+                       Foreground="{DynamicResource ForegroundBrush}" Text="Checking whether now is a safe time for maintenance…"/>
+        </StackPanel>
+
+        <!-- Tables. -->
+        <Grid Grid.Row="2" Margin="10,0,10,0">
+            <DataGrid x:Name="TablesDataGrid"
+                      AutoGenerateColumns="False"
+                      IsReadOnly="True"
+                      GridLinesVisibility="Horizontal"
+                      HeadersVisibility="Column"
+                      SelectionMode="Single"
+                      SelectionChanged="TablesDataGrid_SelectionChanged">
+                <DataGrid.RowStyle>
+                    <Style TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsFlagged}" Value="True">
+                                <Setter Property="Foreground" Value="{DynamicResource WarningTextBrush}"/>
+                                <Setter Property="FontWeight" Value="SemiBold"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </DataGrid.RowStyle>
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Flag" Binding="{Binding Flag}" SortMemberPath="IsFlagged" Width="Auto" MinWidth="110"/>
+                    <DataGridTextColumn Header="Table" Binding="{Binding Table}" Width="Auto" MinWidth="170"/>
+                    <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="Auto" MinWidth="70"/>
+                    <DataGridTextColumn Header="Total size" Binding="{Binding TotalSize}" SortMemberPath="TotalSizeSort" Width="Auto" MinWidth="80"/>
+                    <DataGridTextColumn Header="Table data" Binding="{Binding HeapSize}" SortMemberPath="HeapSizeSort" Width="Auto" MinWidth="80"/>
+                    <DataGridTextColumn Header="Indexes" Binding="{Binding IndexSize}" SortMemberPath="IndexSizeSort" Width="Auto" MinWidth="70"/>
+                    <DataGridTextColumn Header="Large values" Binding="{Binding ToastSize}" SortMemberPath="ToastSizeSort" Width="Auto" MinWidth="80"/>
+                    <DataGridTextColumn Header="Rows (estimate)" Binding="{Binding Rows}" SortMemberPath="RowsSort" Width="Auto" MinWidth="90"/>
+                    <DataGridTextColumn Header="Empty space (estimate)" Binding="{Binding EmptySpace}" SortMemberPath="EmptySpaceSort" Width="Auto" MinWidth="170" MaxWidth="360">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                <Setter Property="ToolTip" Value="{Binding EmptySpace}"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Header="VACUUM can return it" Binding="{Binding VacuumCanReturn}" Width="Auto" MinWidth="130"/>
+                    <DataGridTextColumn Header="Dead rows" Binding="{Binding DeadRows}" SortMemberPath="DeadRowsSort" Width="Auto" MinWidth="80"/>
+                    <DataGridTextColumn Header="Autovacuum" Binding="{Binding Autovacuum}" Width="Auto" MinWidth="110"/>
+                    <DataGridTextColumn Header="Pages all visible" Binding="{Binding AllVisible}" SortMemberPath="AllVisibleSort" Width="Auto" MinWidth="90"/>
+                    <DataGridTextColumn Header="Rows deleted per day" Binding="{Binding Turnover}" SortMemberPath="TurnoverSort" Width="Auto" MinWidth="110"/>
+                    <DataGridTextColumn Header="Growth, 7 days" Binding="{Binding Growth7d}" SortMemberPath="Growth7dSort" Width="Auto" MinWidth="90"/>
+                    <DataGridTextColumn Header="Last vacuum" Binding="{Binding LastVacuum}" SortMemberPath="LastVacuumUtc" Width="Auto" MinWidth="120"/>
+                    <DataGridTextColumn Header="Last analyze" Binding="{Binding LastAnalyze}" SortMemberPath="LastAnalyzeUtc" Width="Auto" MinWidth="120"/>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="TablesMessage" TextWrapping="Wrap" TextAlignment="Center"
+                       FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Margin="20"
+                       Text="Loading store tables…"/>
+        </Grid>
+
+        <!-- Under the tables: the estimate note, then Measure and its result. -->
+        <StackPanel Grid.Row="3" Margin="10,4,10,0">
+            <TextBlock Text="The empty space figure is an estimate from statistics. Measure gives a measured figure for one table."
+                       TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+            <DockPanel Margin="0,6,0,0" LastChildFill="True">
+                <Button x:Name="MeasureButton" DockPanel.Dock="Left" Content="Measure" Click="MeasureButton_Click"
+                        Padding="10,4" MinWidth="70" VerticalAlignment="Top" IsEnabled="False"
+                        ToolTip="Reads every page of the selected plain table to count the empty ones. One table at a time."/>
+                <TextBlock x:Name="MeasureResultText" Margin="10,0,0,0" TextWrapping="Wrap" VerticalAlignment="Center"
+                           Foreground="{DynamicResource ForegroundBrush}" Text="Pick a plain table, then press Measure."/>
+            </DockPanel>
+        </StackPanel>
+
+        <!-- Indexes. -->
+        <StackPanel Grid.Row="4" Margin="10,10,10,4">
+            <TextBlock Text="Indexes" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}"/>
+            <TextBlock x:Name="IndexHeaderText" TextWrapping="Wrap" Text="Loading store indexes…"
+                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+        </StackPanel>
+        <Grid Grid.Row="5" Margin="10,0,10,0">
+            <DataGrid x:Name="IndexesDataGrid"
+                      AutoGenerateColumns="False"
+                      IsReadOnly="True"
+                      GridLinesVisibility="Horizontal"
+                      HeadersVisibility="Column"
+                      SelectionMode="Single">
+                <DataGrid.RowStyle>
+                    <Style TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsFlagged}" Value="True">
+                                <Setter Property="Foreground" Value="{DynamicResource WarningTextBrush}"/>
+                                <Setter Property="FontWeight" Value="SemiBold"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </DataGrid.RowStyle>
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Flags" Binding="{Binding Flags}" SortMemberPath="IsFlagged" Width="Auto" MinWidth="130"/>
+                    <DataGridTextColumn Header="Table" Binding="{Binding Table}" Width="Auto" MinWidth="170"/>
+                    <DataGridTextColumn Header="Index" Binding="{Binding Index}" Width="Auto" MinWidth="200"/>
+                    <DataGridTextColumn Header="Size" Binding="{Binding Size}" SortMemberPath="SizeSort" Width="Auto" MinWidth="80"/>
+                    <DataGridTextColumn Header="Table data size" Binding="{Binding TableSize}" SortMemberPath="TableSizeSort" Width="Auto" MinWidth="100"/>
+                    <DataGridTextColumn Header="Index to table" Binding="{Binding Ratio}" SortMemberPath="RatioSort" Width="Auto" MinWidth="90"/>
+                    <DataGridTextColumn Header="Scans" Binding="{Binding Scans}" SortMemberPath="ScansSort" Width="Auto" MinWidth="70"/>
+                    <DataGridTextColumn Header="Empty space (estimate)" Binding="{Binding Reclaimable}" SortMemberPath="ReclaimableSort" Width="Auto" MinWidth="150" MaxWidth="480">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                <Setter Property="ToolTip" Value="{Binding Reclaimable}"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="*" MinWidth="120"/>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="IndexesMessage" TextWrapping="Wrap" TextAlignment="Center"
+                       FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Margin="20"
+                       Text="Loading store indexes…"/>
+        </Grid>
+
+        <!-- Partition index coverage: hidden, with one line, when the store has none. -->
+        <StackPanel Grid.Row="6" Margin="10,10,10,10">
+            <TextBlock Text="Partition index coverage" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}"/>
+            <TextBlock x:Name="CoverageMessage" TextWrapping="Wrap" Margin="0,2,0,0" Text="Loading partition index coverage…"
+                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+            <DataGrid x:Name="CoverageDataGrid"
+                      AutoGenerateColumns="False"
+                      IsReadOnly="True"
+                      GridLinesVisibility="Horizontal"
+                      HeadersVisibility="Column"
+                      MaxHeight="150"
+                      Visibility="Collapsed">
+                <DataGrid.RowStyle>
+                    <Style TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsFlagged}" Value="True">
+                                <Setter Property="Foreground" Value="{DynamicResource WarningTextBrush}"/>
+                                <Setter Property="FontWeight" Value="SemiBold"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </DataGrid.RowStyle>
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Table" Binding="{Binding Table}" Width="Auto" MinWidth="170"/>
+                    <DataGridTextColumn Header="Index" Binding="{Binding Index}" Width="Auto" MinWidth="200"/>
+                    <DataGridTextColumn Header="Partitions" Binding="{Binding Leaves}" Width="Auto" MinWidth="80"/>
+                    <DataGridTextColumn Header="With the index" Binding="{Binding WithIndex}" Width="Auto" MinWidth="100"/>
+                    <DataGridTextColumn Header="Missing it" Binding="{Binding Missing}" Width="Auto" MinWidth="80"/>
+                    <DataGridTextColumn Header="Invalid" Binding="{Binding Invalid}" Width="Auto" MinWidth="70"/>
+                    <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" Width="*" MinWidth="200"/>
+                </DataGrid.Columns>
+            </DataGrid>
+        </StackPanel>
+    </Grid>
+</UserControl>

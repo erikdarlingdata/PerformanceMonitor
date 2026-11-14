@@ -217,6 +217,10 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "InvestigationsWindow.xaml", "FeedbackGivenGrid", "WhenDisplay", Name(typeof(InvestigationsWindow.FeedbackGivenItem)), "CreatedAtUtc" },
         { "KnownPatternsWindow.xaml", "PatternsGrid", "TimeDisplay", Name(typeof(KnownPatternRow)), "TimeOfDaySortKey" },
         { "KnownPatternsWindow.xaml", "PatternsGrid", "ExpiresDisplay", Name(typeof(KnownPatternRow)), "ExpiresSortUtc" },
+
+        /* #8787: the Store Health tab's table grid. */
+        { "StoreHealthTab.xaml", "TablesDataGrid", "LastVacuum", Name(typeof(StoreTableRow)), "LastVacuumUtc" },
+        { "StoreHealthTab.xaml", "TablesDataGrid", "LastAnalyze", Name(typeof(StoreTableRow)), "LastAnalyzeUtc" },
     };
 
     /// <summary>
@@ -247,6 +251,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         [("ViewerServerTab.xaml", "PgIndexBloatGrid", "SkippedReason")] = "the reason a measurement was skipped, text",
         [("ViewerServerTab.xaml", "PgExtensionCensusGrid", "DatabasesCreated")] = "a count of databases the extension is created in",
         [("KnownPatternsWindow.xaml", "PatternsGrid", "CreatedBy")] = "the name of whoever created the entry, not when",
+        [("StoreHealthTab.xaml", "TablesDataGrid", "Turnover")] = "rows deleted per day over live rows, a rate sorted by its number (TurnoverSort)",
     };
 
     /// <summary>

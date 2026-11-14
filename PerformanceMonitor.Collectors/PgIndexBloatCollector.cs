@@ -171,7 +171,9 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
         bool PgstattupleAvailable,
         long IndexOid);
 
-    private const string QueryText = @"WITH params AS (
+    /// <summary>The extension-free btree estimate statement. Public so the store health read (#8787) splices this one
+    /// statement for the store's own indexes instead of writing a second estimate.</summary>
+    public const string QueryText = @"WITH params AS (
     SELECT
         pg_catalog.current_setting('block_size')::int AS bs,
         CASE WHEN pg_catalog.version() ~ '64-bit|x86_64|ppc64|ia64|amd64|aarch64|arm64'

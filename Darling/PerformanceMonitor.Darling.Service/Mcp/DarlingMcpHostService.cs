@@ -1313,6 +1313,8 @@ public sealed class DarlingMcpHostService : BackgroundService
            path below) actually shares the one cache window. Registered through
            RegisterToolServices, which a test resolves every tool service parameter from (#5950). */
         services.AddSingleton<StoreHostProfileCache>(StoreHostProfileCache.Shared);
+        /* #8787 part D2: who owns the managed postmaster, for get_store_host. The process-wide instance the worker publishes into. */
+        services.AddSingleton<StoreProcessOwnership>(StoreProcessOwnership.Shared);
         /* #4602: the same analyzer config just registered above, so MCP's plan advisories (get_analysis_facts,
            analyze_server, drill-down) honor a user's disabled/overridden rules the same way the worker
            (DarlingWorker.cs) and the web endpoints (DarlingWebEndpoints.cs) already do. Before this fix the
@@ -1632,6 +1634,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #3021 get_store_log — the store's OWN server-log census, the second self-monitoring
                surface beside get_store_metrics. */
             .WithGeminiCompatibleTools<DarlingMcpStoreLogTools>()
+            .WithGeminiCompatibleTools<DarlingMcpStoreTableHealthTools>()
+            .WithGeminiCompatibleTools<DarlingMcpStoreTableMeasureTools>()
+            .WithGeminiCompatibleTools<DarlingMcpStoreMaintenanceReadinessTools>()
             .WithGeminiCompatibleTools<DarlingMcpReadLatencyTools>()
             .WithGeminiCompatibleTools<DarlingMcpSlowReadTools>()
             /* #4214 part 2 get_store_host — the store HOST's profile (platform/RAM/data volume, store
