@@ -101,6 +101,7 @@ public sealed class ReadAdmission
     {
         [DarlingWebEndpoints.InvestigationExportRoute] = "reads up to 2,000 cases with their reports, briefs and feedback into one file",
         /* #7643: the tool is keyed by name, so every call is heavy, not only the definition text search: that one reads every definition of a database with no index. */
+        ["measure_store_table"] = "scans every row location of one store table, about a second per 250,000 pages",
         ["find_schema_objects"] = "searches the text of a database's view, computed column, default, check and index filter definitions with no index",
     };
 

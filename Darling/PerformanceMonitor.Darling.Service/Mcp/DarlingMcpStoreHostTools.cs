@@ -79,10 +79,13 @@ public sealed class DarlingMcpStoreHostTools
         + "call; if that read times out or the role is refused it (any error but TimescaleDB being absent) they are "
         + "null, uncompressed_chunk_percent_of_ram is null with them, and uncompressed_unavailable_reason says why "
         + "(the SQLSTATE for a refusal); a store without TimescaleDB reports 0 chunks. The rest of the profile still "
-        + "returns (a slow fact fails alone). --check-settings reads the size live. This "
+        + "returns (a slow fact fails alone). --check-settings reads the size live. postgres_owner says who owns the PostgreSQL "
+        + "process: owner is started_by_this_service (stopping the service stops PostgreSQL), adopted_running (it leaves PostgreSQL running), "
+        + "not_managed or unknown (still starting), with the sentence in on_service_stop. This "
         + "tool never writes a setting or a conf file.")]
     public static async Task<string> GetStoreHost(
         NpgsqlDataSource postgres, PostgresConfig? postgresConfig, StoreHostProfileCache cache,
+        CollectorRuntimeState? collector = null,
         CancellationToken cancellationToken = default)
     {
         if (postgresConfig is null)
@@ -175,6 +178,14 @@ public sealed class DarlingMcpStoreHostTools
                         : "This is the service's own disk, not necessarily the store's: a bring-your-own postgres.connectionString may point at a different host entirely.",
                 },
                 managed = profile.IsManagedStore,
+                /* #8787 part D2: who owns the postmaster, from the service's own state (not SQL, and outside the 5-minute profile
+                   cache, so it is always current). The answer decides what a service stop does to the store. */
+                postgres_owner = new
+                {
+                    owner = !profile.IsManagedStore ? "not_managed" : OwnerName((collector?.Ownership) ?? CollectorRuntimeState.StoreOwnership.Unknown),
+                    started_by_this_service = profile.IsManagedStore && collector?.Ownership == CollectorRuntimeState.StoreOwnership.StartedByThisService,
+                    on_service_stop = CollectorRuntimeState.DescribeOwnership(profile.IsManagedStore, collector?.Ownership ?? CollectorRuntimeState.StoreOwnership.Unknown),
+                },
                 store = new
                 {
                     postgres_version = profile.Store.PostgresVersion,
@@ -217,6 +228,13 @@ public sealed class DarlingMcpStoreHostTools
             return McpHelpers.FormatError("get_store_host", FailureFor(ex));
         }
     }
+
+    private static string OwnerName(CollectorRuntimeState.StoreOwnership ownership) => ownership switch
+    {
+        CollectorRuntimeState.StoreOwnership.StartedByThisService => "started_by_this_service",
+        CollectorRuntimeState.StoreOwnership.AdoptedRunning => "adopted_running",
+        _ => "unknown",
+    };
 
     /// <summary>
     /// The exception whose message the error envelope carries for a failure that escaped the gather (#5718).

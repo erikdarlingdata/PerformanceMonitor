@@ -549,7 +549,7 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
            payload, so it carries size_as_of (when the sweep recorded the figure), size_age_seconds and
            size_unavailable_reason / uncompressed_unavailable_reason, and says why a figure is missing. */
         var host = DiagnosticsBundle.ParseReader(
-            await DarlingMcpStoreHostTools.GetStoreHost(postgres, config.Postgres, new StoreHostProfileCache(TimeSpan.FromMinutes(1)), ct));
+            await DarlingMcpStoreHostTools.GetStoreHost(postgres, config.Postgres, new StoreHostProfileCache(TimeSpan.FromMinutes(1)), cancellationToken: ct));
         return new JsonObject
         {
             ["schema_version_stored"] = stored,

@@ -371,6 +371,7 @@ public sealed partial class DarlingWorker
                         if (OperatingSystem.IsWindows())
                         {
                             storeConnectionString = await managedPostgres.EnsureRunningAsync(stoppingToken);
+                            _collectorState.PublishStoreOwnership(managedPostgres.StartedByThisProcess);
                             storeUpgradeReport = BuildStoreUpgradeReport(managedPostgres.LastUpgradeOutcome);
                             storeTimescaleReport = BuildStoreTimescaleReport(managedPostgres.LastTimescaleOutcome);
                         }
