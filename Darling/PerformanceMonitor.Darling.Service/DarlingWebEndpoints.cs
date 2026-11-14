@@ -567,7 +567,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         });
 
         /* One GET per read-only tool, calling the tool method directly (no SQL/projection re-implementation). */
-        foreach (var (name, handler) in BuildReadDispatch(logger, postgresConfig, registryState, readAdmission, collector))
+        foreach (var (name, handler) in BuildReadDispatch(logger, postgresConfig, registryState, readAdmission))
         {
             app.MapGet("/api/read/" + name, async (HttpContext context) =>
             {

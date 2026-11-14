@@ -60,7 +60,7 @@ public static partial class DarlingWebEndpoints
     /// <para><paramref name="readAdmission"/> (#5506 part 3) reaches only the <c>get_read_latency</c> mirror, for the same live
     /// <c>admission</c> object the MCP tool returns; a dispatch built without it answers without that object.</para>
     /// </summary>
-    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch(ILogger? logger = null, PostgresConfig? postgresConfig = null, MonitoredServerRegistryState? registryState = null, ReadAdmission? readAdmission = null, CollectorRuntimeState? collector = null)
+    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch(ILogger? logger = null, PostgresConfig? postgresConfig = null, MonitoredServerRegistryState? registryState = null, ReadAdmission? readAdmission = null)
     {
         var dispatch = new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
         {
@@ -404,7 +404,7 @@ public static partial class DarlingWebEndpoints
                static reference, not a new BuildReadDispatch parameter (round-1 review, Medium 2) — unlike
                postgresConfig, the cache instance never varies by caller, so no threading is needed. #4203:
                c.RequestAborted now reaches the gather via GetOrGatherAsync's linked token. */
-            ["get_store_host"] = (c, pg, an) => DarlingMcpStoreHostTools.GetStoreHost(pg, postgresConfig, StoreHostProfileCache.Shared, collector, c.RequestAborted),
+            ["get_store_host"] = (c, pg, an) => DarlingMcpStoreHostTools.GetStoreHost(pg, postgresConfig, StoreHostProfileCache.Shared, StoreProcessOwnership.Shared, c.RequestAborted),
             ["get_collector_cost"] = (c, pg, an) => DarlingMcpCollectorCostTools.GetCollectorCost(pg, QueryInt(c, "days_back", null, 7), Str(c, "collector_name"), c.RequestAborted),
             ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit), c.RequestAborted),
             ["get_oversized_plan_backlog"] = (c, pg, an) => DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(pg, Server(c), QueryBool(c, "include_rows", false), Rows(c, "limit", DarlingMcpOversizedPlanBacklogTools.DefaultLimit), c.RequestAborted),

@@ -12,6 +12,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -172,18 +173,45 @@ CREATE VIEW collect.zz_measure_view AS SELECT id FROM collect.zz_measure;", ct);
     [Fact]
     public void WhoOwnsPostgres_IsReadFromServiceState_BothWays()
     {
-        var state = new CollectorRuntimeState(null, Microsoft.Extensions.Logging.Abstractions.NullLogger<CollectorRuntimeState>.Instance);
-        Assert.Equal(CollectorRuntimeState.StoreOwnership.Unknown, state.Ownership);
-        Assert.Contains("not known yet", CollectorRuntimeState.DescribeOwnership(true, state.Ownership), StringComparison.Ordinal);
+        var state = new StoreProcessOwnership();
+        Assert.Equal(StoreProcessOwnership.Owner.Unknown, state.Current);
+        Assert.Contains("not known yet", StoreProcessOwnership.Describe(true, state.Current), StringComparison.Ordinal);
 
-        state.PublishStoreOwnership(startedByThisProcess: true);
-        Assert.Equal(CollectorRuntimeState.StoreOwnership.StartedByThisService, state.Ownership);
-        Assert.Contains("stops PostgreSQL with it", CollectorRuntimeState.DescribeOwnership(true, state.Ownership), StringComparison.Ordinal);
+        state.Publish(startedByThisProcess: true);
+        Assert.Equal(StoreProcessOwnership.Owner.StartedByThisService, state.Current);
+        Assert.Contains("stops PostgreSQL with it", StoreProcessOwnership.Describe(true, state.Current), StringComparison.Ordinal);
 
-        state.PublishStoreOwnership(startedByThisProcess: false);
-        Assert.Equal(CollectorRuntimeState.StoreOwnership.AdoptedRunning, state.Ownership);
-        Assert.Contains("leaves PostgreSQL running", CollectorRuntimeState.DescribeOwnership(true, state.Ownership), StringComparison.Ordinal);
+        state.Publish(startedByThisProcess: false);
+        Assert.Equal(StoreProcessOwnership.Owner.AdoptedRunning, state.Current);
+        Assert.Contains("leaves PostgreSQL running", StoreProcessOwnership.Describe(true, state.Current), StringComparison.Ordinal);
 
-        Assert.Contains("never stops the store", CollectorRuntimeState.DescribeOwnership(false, state.Ownership), StringComparison.Ordinal);
+        Assert.Contains("never stops the store", StoreProcessOwnership.Describe(false, state.Current), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetStoreHost_CarriesTheOwnerFromServiceState()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #8787 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var config = new PerformanceMonitor.Darling.Service.PostgresConfig { Managed = true };
+        foreach (var (started, expectedOwner, sentence) in new[]
+        {
+            (true, "started_by_this_service", "stops PostgreSQL with it"),
+            (false, "adopted_running", "leaves PostgreSQL running"),
+        })
+        {
+            var ownership = new StoreProcessOwnership();
+            ownership.Publish(started);
+            using var doc = JsonDocument.Parse(await DarlingMcpStoreHostTools.GetStoreHost(
+                dataSource, config, new StoreHostProfileCache(TimeSpan.FromMinutes(1)), ownership, ct));
+            var owner = doc.RootElement.GetProperty("postgres_owner");
+            Assert.Equal(expectedOwner, owner.GetProperty("owner").GetString());
+            Assert.Equal(started, owner.GetProperty("started_by_this_service").GetBoolean());
+            Assert.Contains(sentence, owner.GetProperty("on_service_stop").GetString(), StringComparison.Ordinal);
+        }
     }
 }

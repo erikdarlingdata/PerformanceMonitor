@@ -193,49 +193,6 @@ public sealed class CollectorRuntimeState
 
     private volatile Snapshot? _current;
 
-    private volatile int _storeOwnership = (int)StoreOwnership.Unknown;
-
-    /// <summary>
-    /// Who owns the managed PostgreSQL process (#8787 part D2), published by the worker once the managed store is up.
-    /// <see cref="StoreOwnership.Unknown"/> until then. A bring-your-own store never publishes (the host tool reads
-    /// <c>postgres.managed</c> for that). Stopping the service stops PostgreSQL only when it is
-    /// <see cref="StoreOwnership.StartedByThisService"/>.
-    /// </summary>
-    public StoreOwnership Ownership => (StoreOwnership)_storeOwnership;
-
-    /// <summary>Records whether this service started the managed postmaster or adopted one already running (worker only).</summary>
-    public void PublishStoreOwnership(bool startedByThisProcess)
-        => _storeOwnership = (int)(startedByThisProcess ? StoreOwnership.StartedByThisService : StoreOwnership.AdoptedRunning);
-
-    /// <summary>Who owns the managed PostgreSQL process.</summary>
-    public enum StoreOwnership
-    {
-        /// <summary>The managed store has not finished starting, so the answer is not known yet.</summary>
-        Unknown = 0,
-
-        /// <summary>This service started the postmaster, so it stops it on shutdown.</summary>
-        StartedByThisService = 1,
-
-        /// <summary>A postmaster was already running and this service adopted it, so it leaves it running on shutdown.</summary>
-        AdoptedRunning = 2,
-    }
-
-    /// <summary>
-    /// The sentence <c>get_store_host</c> carries about who owns PostgreSQL and what stopping the service does to it, from the
-    /// service's own state and the <c>postgres.managed</c> setting.
-    /// </summary>
-    public static string DescribeOwnership(bool managed, StoreOwnership ownership) => !managed
-        ? "This service does not manage PostgreSQL (postgres.managed is false), so stopping the service never stops the store."
-        : ownership switch
-        {
-            StoreOwnership.StartedByThisService =>
-                "This service started this PostgreSQL. Stopping the service stops PostgreSQL with it (a fast shutdown), so the store goes down and every reader loses it until the service starts again.",
-            StoreOwnership.AdoptedRunning =>
-                "PostgreSQL was already running when this service started, and the service adopted it. Stopping the service leaves PostgreSQL running: only collection and the web and MCP readers stop.",
-            _ =>
-                "Who owns PostgreSQL is not known yet: the service is still starting the managed store, or this call does not run inside the service.",
-        };
-
     private readonly string? _stoppedMarkerPath;
     private readonly ILogger? _logger;
     private int _markerFaultLogged;

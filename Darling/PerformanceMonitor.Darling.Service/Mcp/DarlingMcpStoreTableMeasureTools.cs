@@ -36,7 +36,7 @@ public sealed class DarlingMcpStoreTableMeasureTools
         + "over 20 GB. It reads only the row locations (no column data) under a 60 second limit and says so when the limit trips; the scan "
         + "took under a second per 250,000 pages in the field. Result fields: total_pages, pages_with_rows, empty_pages, empty_share, rows, "
         + "rows_per_used_page, last_used_block against last_file_block (the pages after the last used block are all VACUUM can return), "
-        + "trailing_empty_pages, the occupancy histogram (pages holding 1, 2 to 4, 5 to 10 and over 10 rows), vacuum_truncate_disabled, "
+        + "trailing_empty_pages, the occupancy histogram (pages holding 1, 2 to 4, 5 to 10 and over 10 rows), vacuum_shrink_disabled, "
         + "verdict_kind (dense, vacuum_can_truncate, rewrite_needed, no_pages) and verdict. Mostly empty means at least half the pages hold "
         + "no row. A page holding only dead rows counts as empty, because a VACUUM frees it. Nothing is written.")]
     public static async Task<string> MeasureStoreTable(
@@ -70,7 +70,7 @@ public sealed class DarlingMcpStoreTableMeasureTools
                 last_used_block = m.LastUsedBlock,
                 last_file_block = m.LastFileBlock,
                 trailing_empty_pages = m.TrailingEmptyPages,
-                vacuum_truncate_disabled = m.VacuumTruncateDisabled,
+                vacuum_shrink_disabled = m.VacuumTruncateDisabled,
                 occupancy = new
                 {
                     pages_with_1_row = m.PagesWith1Row,
