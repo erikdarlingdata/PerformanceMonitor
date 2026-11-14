@@ -285,7 +285,10 @@ AND   statement_end_offset = $6";
     /// handles it as it always did, when leaving it out could change what the trim does to another row: when the
     /// supersede or the cap would stop at the pass's drop limit, and when the row is the newest sighting of a query
     /// whose older rows only it supersedes. It does none of this unless the server's pending rows plus the new ones are
-    /// past the cap, so a server under the cap pays one count.</para>
+    /// past the cap, so a server under the cap pays one count. It also skips it when no new row can rank past the cap (the gate CTE):
+    /// a new row ranks behind every pending row seen at or after the sighting time, so when those plus this cycle's rows are within
+    /// the cap, none is left out. In normal running every pending row was seen before this cycle, so the ranking runs only when one
+    /// cycle sees more rows than the cap, or rows carry a later sighting time.</para>
     ///
     /// <para><b>How many it left out is recorded, not counted.</b> The trim counted an over-cap plan once per sweep pass. A
     /// collector cycle runs far more often than a pass (every minute on the Balanced preset, a pass every 15 minutes), and the
@@ -325,15 +328,27 @@ existing AS
       AND b.collector_name = $2
       AND " + SameKey("b") + @"
 ),
+pending_counts AS
+(
+    SELECT
+        count(*) AS pending_rows,
+        count(*) FILTER (WHERE last_seen_at >= $10) AS recent_rows
+    FROM collect.oversized_plan_backlog
+    WHERE server_id = $1
+    AND   " + NeverTriedPendingPredicate + @"
+),
 gate AS
 (
+    /* Over the cap, and (the second test) a new row could rank past it. A new row enters the ranking with last_seen_at = $10 and
+       the order starts last_seen_at DESC, so only rows seen at or after $10 can rank ahead of it. Its rank is at most the table's
+       pending rows seen at or after $10 plus every incoming row (an over-count: it can only send a cycle down the full path).
+       At or under the cap no new row can be left out, so the ranking is skipped. In normal running every pending row was seen
+       before this cycle, so this holds on every cycle. */
     SELECT
         (
             (
-                SELECT count(*)
-                FROM collect.oversized_plan_backlog
-                WHERE server_id = $1
-                AND   " + NeverTriedPendingPredicate + @"
+                SELECT p.pending_rows
+                FROM pending_counts AS p
             )
             +
             (
@@ -341,6 +356,15 @@ gate AS
                 FROM incoming AS i
                 WHERE NOT EXISTS (SELECT 1 FROM existing AS e WHERE " + SameKey("e") + @")
             )
+        ) > $11
+        AND
+        (
+            (
+                SELECT p.recent_rows
+                FROM pending_counts AS p
+            )
+            +
+            (SELECT count(*) FROM incoming)
         ) > $11 AS over_cap
 ),
 pending_after AS
