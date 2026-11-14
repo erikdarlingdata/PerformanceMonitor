@@ -1563,6 +1563,10 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly (string Key, string[] Files, string WhatWasCut)[] SecondBoundCutKeys =
     [
+        ("indexes_truncated", ["DarlingMcpStoreTableHealthTools.cs"],
+            "#8787: get_store_table_health's indexes section is capped at top, beside the tables section's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
+        ("partition_index_coverage_truncated", ["DarlingMcpStoreTableHealthTools.cs"],
+            "#8787: get_store_table_health's partition_index_coverage list is capped at top, a third bound beside the tables section's truncated and the indexes section's indexes_truncated, observed off the row count"),
         ("databases_truncated", ["DarlingMcpFinOpsTools.IndexAnalysis.cs"],
             "get_finops index_analysis' per-database roll-up list is capped at MaxIndexAnalysisDatabases (13), beside the recommendation list's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
         ("points_truncated", ["DarlingMcpQueryStoreHistoryTools.cs"],
