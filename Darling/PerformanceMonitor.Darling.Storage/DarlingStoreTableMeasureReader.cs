@@ -171,7 +171,7 @@ WITH p AS (
 )
 SELECT
     count(*) AS pages_with_rows,
-    coalesce(sum(n), 0)::bigint AS row_count,
+    coalesce(sum(n), 0)::bigint AS rows_total,
     coalesce(max(blk), -1)::bigint AS last_used_block,
     coalesce(round(avg(n), 2), 0)::float8 AS rows_per_used_page,
     pg_catalog.pg_relation_size($1::oid) / current_setting('block_size')::bigint AS total_pages,
@@ -375,7 +375,7 @@ FROM p";
         try
         {
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            await using (var setTimeout = new NpgsqlCommand("SELECT set_config('statement_timeout', $1, true)", connection, transaction))
+            await using (var setTimeout = new NpgsqlCommand("SELECT set_config('statement_timeout', $1, true)", connection, transaction) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds })
             {
                 setTimeout.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (TimeoutSeconds * 1000).ToString(CultureInfo.InvariantCulture) });
                 await setTimeout.ExecuteNonQueryAsync(cancellationToken);

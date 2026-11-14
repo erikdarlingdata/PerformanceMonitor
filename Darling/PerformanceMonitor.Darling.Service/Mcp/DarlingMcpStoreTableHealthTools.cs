@@ -72,19 +72,35 @@ public sealed class DarlingMcpStoreTableHealthTools
         + "postmaster start when they were never reset, as stats_since_source says) and nothing is recorded; turnover_per_day is "
         + "deletes per day over live rows. rarely_used is only set when the statistics window is at least 7 days old, never for a "
         + "primary key or unique index. Index bloat is the extension-free estimate the target index bloat collector uses. "
-        + "growth_bytes_7d is null for objects store_metrics does not record. A live read of the catalogs: allow a second or two on a "
+        + "growth_bytes_7d is null for objects store_metrics does not record. The reply is also held to the 32,768-byte response budget, whole rows only, "
+        + "the same number of rows from each section: budget_truncated = true says rows were left off the end for the budget, budget_note says how many "
+        + "fit, and has_more and next_offset read on (pass next_offset as offset). A live read of the catalogs: allow a second or two on a "
         + "store with many chunks.")]
-    public static async Task<string> GetStoreTableHealth(
+    public static Task<string> GetStoreTableHealth(
         NpgsqlDataSource postgres,
-        [Description("How many rows to return per section, in the answer's order. Default 50, max 1000.")] int top = DefaultTop,
+        [Description("How many rows to return per section, in the answer's order. Default 50, max 1000. The reply is also held to a byte budget: when rows were left off for it, budget_truncated is true and next_offset reads on.")] int top = DefaultTop,
         [Description("Return only rewrite candidates in the tables section. Default false.")] bool candidates_only = false,
         [Description("Which section: tables, indexes (the per-index rows and the partition leaf index coverage) or all. Default all.")] string? section = null,
-        CancellationToken cancellationToken = default)
+        [Description("Rows to skip in each section before the page starts. Default 0. Use next_offset when has_more is true.")] int offset = 0,
+        CancellationToken cancellationToken = default) =>
+        GetStoreTableHealth(postgres, top, candidates_only, section, offset, McpResponseBudget.DefaultBytes, cancellationToken);
+
+    /// <summary>
+    /// The read with its response budget. The MCP tool passes <see cref="McpResponseBudget.DefaultBytes"/>. The web route passes null:
+    /// the Store Health page asks for one section at a time and draws every row it asked for.
+    /// </summary>
+    internal static async Task<string> GetStoreTableHealth(
+        NpgsqlDataSource postgres, int top, bool candidates_only, string? section, int offset, int? responseByteBudget, CancellationToken cancellationToken)
     {
         var invalidTop = McpHelpers.ValidateTop(top, "top");
         if (invalidTop != null)
         {
             return invalidTop;
+        }
+
+        if (offset < 0)
+        {
+            return McpHelpers.Refusal("offset", $"Invalid offset value '{offset}'. Must be 0 or more.");
         }
 
         var invalidSection = McpHelpers.ValidateChoice(section, Sections, "section");
@@ -103,14 +119,18 @@ public sealed class DarlingMcpStoreTableHealthTools
             {
                 ["section"] = chosen,
                 ["top"] = top,
+                ["offset"] = offset,
             };
+
+            IReadOnlyList<DarlingStoreTableHealthReader.StoreTableHealthRow> tableRows = Array.Empty<DarlingStoreTableHealthReader.StoreTableHealthRow>();
+            IReadOnlyList<DarlingStoreTableHealthReader.StoreIndexHealthRow> indexRows = Array.Empty<DarlingStoreTableHealthReader.StoreIndexHealthRow>();
+            IReadOnlyList<DarlingStoreTableHealthReader.StoreIndexCoverageRow> coverageRows = Array.Empty<DarlingStoreTableHealthReader.StoreIndexCoverageRow>();
 
             if (wantTables)
             {
                 var all = await DarlingStoreTableHealthReader.GetAsync(postgres, cancellationToken);
                 var summary = DarlingStoreTableHealthReader.Summarize(all);
-                var matching = candidates_only ? all.Where(r => r.RewriteCandidate).ToList() : all;
-                var (page, truncated) = McpHelpers.BoundPage(matching, top);
+                tableRows = candidates_only ? all.Where(r => r.RewriteCandidate).ToList() : all;
 
                 var noEstimate = summary.WithoutEstimateByReason.Count == 0
                     ? "every table has a usable estimate"
@@ -118,10 +138,10 @@ public sealed class DarlingMcpStoreTableHealthTools
                         $"{p.Value} {DarlingStoreTableHealthReader.DescribeReason(p.Key)}"));
                 var pastFloorsUnread = all.Count(r => r.PastRewriteFloors && r.TailOccupied is null);
                 var header = string.Create(CultureInfo.InvariantCulture,
-                    $"{CountText.Plural(summary.TableCount, "store table")}, {summary.TotalBytes} bytes in total, {CountText.Plural(summary.RewriteCandidates, "rewrite candidate")}, "
+                    $"{CountText.Plural(summary.TableCount, "store table")}, {CountText.Grouped(summary.TotalBytes)} bytes in total, {CountText.Plural(summary.RewriteCandidates, "rewrite candidate")}, "
                     + $"{CountText.Grouped(summary.WithoutEstimate)} without a usable empty-space estimate ({noEstimate}).")
                     + (pastFloorsUnread > 0
-                        ? string.Create(CultureInfo.InvariantCulture, $" {pastFloorsUnread} past the empty-space floors with the end of the file not checked.")
+                        ? string.Create(CultureInfo.InvariantCulture, $" {CountText.Grouped(pastFloorsUnread)} past the empty-space floors with the end of the file not checked.")
                         : string.Empty);
 
                 result["header"] = header;
@@ -133,33 +153,65 @@ public sealed class DarlingMcpStoreTableHealthTools
                 result["without_estimate_by_reason"] = summary.WithoutEstimateByReason.ToDictionary(p => p.Key, p => p.Value);
                 result["without_estimate_reason_text"] = summary.WithoutEstimateByReason.ToDictionary(p => p.Key, p => DarlingStoreTableHealthReader.DescribeReason(p.Key));
                 result["candidates_only"] = candidates_only;
-                result["tables_returned"] = page.Count;
-                result["truncated"] = truncated;
-                result["tables"] = page.Select(Table).ToList();
             }
 
             if (wantIndexes)
             {
-                var indexRows = await DarlingStoreTableHealthReader.GetIndexesAsync(postgres, cancellationToken);
-                var coverageRows = await DarlingStoreTableHealthReader.GetIndexCoverageAsync(postgres, cancellationToken);
-                var (indexPage, indexTruncated) = McpHelpers.BoundPage(indexRows, top);
-                var (coveragePage, coverageTruncated) = McpHelpers.BoundPage(coverageRows, top);
+                indexRows = await DarlingStoreTableHealthReader.GetIndexesAsync(postgres, cancellationToken);
+                coverageRows = await DarlingStoreTableHealthReader.GetIndexCoverageAsync(postgres, cancellationToken);
                 var incomplete = coverageRows.Count(c => c.LeavesMissingIndex > 0 || c.LeavesInvalidIndex > 0);
 
                 result["index_header"] = string.Create(CultureInfo.InvariantCulture,
                     $"{CountText.Plural(indexRows.Count, "store index", "store indexes")}, {indexRows.Count(r => r.LargerThanHeap)} larger than their heap, {indexRows.Count(r => r.RarelyUsed)} rarely used, "
                     + $"{indexRows.Count(r => !r.Valid)} invalid, and {CountText.Plural(incomplete, "partitioned-parent index", "partitioned-parent indexes")} with a leaf missing or invalid.");
                 result["indexes_total"] = indexRows.Count;
-                result["indexes_returned"] = indexPage.Count;
-                result["indexes_truncated"] = indexTruncated;
-                result["indexes"] = indexPage.Select(Index).ToList();
                 result["partition_index_coverage_total"] = coverageRows.Count;
-                result["partition_index_coverage_returned"] = coveragePage.Count;
-                result["partition_index_coverage_truncated"] = coverageTruncated;
-                result["partition_index_coverage"] = coveragePage.Select(Coverage).ToList();
             }
 
-            return JsonSerializer.Serialize(result, McpHelpers.JsonOptions);
+            /* A page is the same number of rows from every section, so one offset reads on in all of them. */
+            var remaining = Math.Max(tableRows.Count, Math.Max(indexRows.Count, coverageRows.Count)) - offset;
+            var inScope = remaining > top ? top : Math.Max(0, remaining);
+
+            string Reply(int pageRows)
+            {
+                var tablePage = tableRows.Skip(offset).Take(pageRows).ToList();
+                var indexPage = indexRows.Skip(offset).Take(pageRows).ToList();
+                var coveragePage = coverageRows.Skip(offset).Take(pageRows).ToList();
+                var hasMore = tableRows.Count > offset + tablePage.Count
+                    || indexRows.Count > offset + indexPage.Count
+                    || coverageRows.Count > offset + coveragePage.Count;
+                var budgetCut = pageRows < top && hasMore;
+
+                if (wantTables)
+                {
+                    result["tables_returned"] = tablePage.Count;
+                    result["truncated"] = tableRows.Count > offset + tablePage.Count;
+                    result["tables"] = tablePage.Select(Table).ToList();
+                }
+
+                if (wantIndexes)
+                {
+                    result["indexes_returned"] = indexPage.Count;
+                    result["indexes_truncated"] = indexRows.Count > offset + indexPage.Count;
+                    result["indexes"] = indexPage.Select(Index).ToList();
+                    result["partition_index_coverage_returned"] = coveragePage.Count;
+                    result["partition_index_coverage_truncated"] = coverageRows.Count > offset + coveragePage.Count;
+                    result["partition_index_coverage"] = coveragePage.Select(Coverage).ToList();
+                }
+
+                result["budget_truncated"] = budgetCut;
+                result["budget_note"] = budgetCut
+                    ? McpResponseBudget.PageCutNote(inScope, pageRows, "the answer's order", "rows per section",
+                        $"Call again with offset {offset + pageRows} for the next rows, or ask for one section at a time (section \"tables\" or \"indexes\").")
+                    : null;
+                result["has_more"] = hasMore;
+                result["next_offset"] = hasMore ? offset + pageRows : null;
+                return JsonSerializer.Serialize(result, McpHelpers.JsonOptions);
+            }
+
+            return responseByteBudget is int budget
+                ? McpResponseBudget.FitPrefix(inScope, Reply, budget).Json
+                : Reply(top);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -181,7 +233,7 @@ public sealed class DarlingMcpStoreTableHealthTools
         chunk_count = r.ChunkCount,
         leaf_count = r.LeafCount,
         estimated_empty_bytes = r.EstimatedEmptyBytes,
-        estimated_empty_share = r.EstimatedEmptyShare,
+        estimated_empty_share = Round(r.EstimatedEmptyShare, 4),
         estimate_relations = r.EstimateRelations,
         estimate_relations_usable = r.EstimateRelationsUsable,
         estimate_unavailable_reason = r.EstimateUnavailableReason,
@@ -195,7 +247,7 @@ public sealed class DarlingMcpStoreTableHealthTools
         relpages = r.RelPages,
         relallvisible = r.RelAllVisible,
         relallfrozen = r.RelAllFrozen,
-        pct_all_visible = r.PctAllVisible,
+        pct_all_visible = Round(r.PctAllVisible, 2),
         dead_rows = r.DeadRows,
         vacuum_trigger_rows = r.VacuumTriggerRows,
         relations_past_vacuum_trigger = r.RelationsPastVacuumTrigger,
@@ -210,7 +262,7 @@ public sealed class DarlingMcpStoreTableHealthTools
         autovacuum_disabled = r.AutovacuumDisabled,
         stats_since = Iso(r.StatsSince),
         stats_since_source = r.StatsSinceSource,
-        stats_hours = r.StatsHours,
+        stats_hours = Math.Round(r.StatsHours, 4, MidpointRounding.AwayFromZero),
         tuples_inserted = r.TuplesInserted,
         tuples_updated = r.TuplesUpdated,
         tuples_hot_updated = r.TuplesHotUpdated,
@@ -218,11 +270,11 @@ public sealed class DarlingMcpStoreTableHealthTools
         tuples_deleted = r.TuplesDeleted,
         autovacuum_count = r.AutovacuumCount,
         autoanalyze_count = r.AutoanalyzeCount,
-        hot_update_share = r.HotUpdateShare,
-        inserts_per_day = r.InsertsPerDay,
-        updates_per_day = r.UpdatesPerDay,
-        deletes_per_day = r.DeletesPerDay,
-        turnover_per_day = r.TurnoverPerDay,
+        hot_update_share = Round(r.HotUpdateShare, 4),
+        inserts_per_day = Round(r.InsertsPerDay, 1),
+        updates_per_day = Round(r.UpdatesPerDay, 1),
+        deletes_per_day = Round(r.DeletesPerDay, 1),
+        turnover_per_day = Round(r.TurnoverPerDay, 4),
         growth_bytes_7d = r.GrowthBytes7d,
     };
 
@@ -237,7 +289,7 @@ public sealed class DarlingMcpStoreTableHealthTools
         leaf_count = r.LeafCount,
         bytes = r.Bytes,
         heap_bytes = r.HeapBytes,
-        index_to_heap = r.IndexToHeapRatio,
+        index_to_heap = Round(r.IndexToHeapRatio, 4),
         idx_scan = r.IndexScans,
         stats_since = Iso(r.StatsSince),
         stats_since_source = r.StatsSinceSource,
@@ -248,7 +300,7 @@ public sealed class DarlingMcpStoreTableHealthTools
         larger_than_heap_count = r.LargerThanHeapCount,
         rarely_used = r.RarelyUsed,
         estimated_reclaimable_bytes = r.EstimatedReclaimableBytes,
-        estimated_bloat_share = r.EstimatedBloatShare,
+        estimated_bloat_share = Round(r.EstimatedBloatShare, 4),
         estimate_indexes_usable = r.EstimateIndexesUsable,
         estimate_skipped_reason = r.EstimateSkippedReason,
     };
@@ -266,6 +318,9 @@ public sealed class DarlingMcpStoreTableHealthTools
         leaves_invalid_index = r.LeavesInvalidIndex,
         invalid_leaves = r.InvalidLeaves,
     };
+
+    /* Every figure is rounded here, where the reply is built, so a double never prints its float noise. */
+    private static double? Round(double? value, int places) => value is double v ? Math.Round(v, places, MidpointRounding.AwayFromZero) : null;
 
     private static string? Iso(DateTime? value) => value?.ToString("O", CultureInfo.InvariantCulture);
 }

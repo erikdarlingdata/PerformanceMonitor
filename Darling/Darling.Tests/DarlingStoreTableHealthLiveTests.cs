@@ -397,6 +397,46 @@ CREATE INDEX zz_part_d_idx ON collect.zz_part (d);", ct);
         Assert.Contains("Invalid section", await DarlingMcpStoreTableHealthTools.GetStoreTableHealth(dataSource, section: "bogus", cancellationToken: ct), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The MCP tool holds its reply to the response budget: a store with many tables asked for the most rows is cut to whole
+    /// rows that fit, says so, and next_offset reads on from the first row left out. The web route asks for no budget and
+    /// gets every row it asked for.
+    /// </summary>
+    [Fact]
+    public async Task AReplyOverTheByteBudget_IsCutToWholeRows_AndNextOffsetReadsOn()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #8787 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var all = await DarlingStoreTableHealthReader.GetAsync(dataSource, ct);
+        Assert.True(all.Count > 40, "the migrated store should hold enough tables to be cut: " + all.Count);
+
+        using var first = JsonDocument.Parse(await DarlingMcpStoreTableHealthTools.GetStoreTableHealth(dataSource, top: 1000, section: "tables", cancellationToken: ct));
+        var firstRoot = first.RootElement;
+        var returned = firstRoot.GetProperty("tables_returned").GetInt32();
+        Assert.True(returned > 0 && returned < all.Count, "the first page holds some rows and not all: " + returned);
+        Assert.True(firstRoot.GetProperty("budget_truncated").GetBoolean());
+        Assert.True(firstRoot.GetProperty("has_more").GetBoolean());
+        Assert.Contains("32,768-byte response budget", firstRoot.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+        Assert.Equal(returned, firstRoot.GetProperty("next_offset").GetInt32());
+        Assert.Equal(all[0].TableName, firstRoot.GetProperty("tables")[0].GetProperty("table_name").GetString());
+
+        using var second = JsonDocument.Parse(await DarlingMcpStoreTableHealthTools.GetStoreTableHealth(dataSource, top: 1000, section: "tables", offset: returned, cancellationToken: ct));
+        Assert.Equal(all[returned].TableName, second.RootElement.GetProperty("tables")[0].GetProperty("table_name").GetString());
+        Assert.Equal(returned, second.RootElement.GetProperty("offset").GetInt32());
+
+        var uncapped = await DarlingMcpStoreTableHealthTools.GetStoreTableHealth(dataSource, 1000, false, "tables", 0, null, ct);
+        using var whole = JsonDocument.Parse(uncapped);
+        Assert.Equal(all.Count, whole.RootElement.GetProperty("tables_returned").GetInt32());
+        Assert.False(whole.RootElement.GetProperty("budget_truncated").GetBoolean());
+        Assert.False(whole.RootElement.GetProperty("has_more").GetBoolean());
+
+        Assert.Contains("Invalid offset", await DarlingMcpStoreTableHealthTools.GetStoreTableHealth(dataSource, offset: -1, cancellationToken: ct), StringComparison.Ordinal);
+    }
+
     private static async Task<System.Collections.Generic.HashSet<string>> ChunkNamesAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         var names = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);

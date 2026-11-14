@@ -25,7 +25,7 @@
  * and the Refresh button on this page is the way to run it again.
  */
 
-import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, onPageLeave, fmtInt, fmtBytes, fmtPct } from "../util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, onPageLeave, fmtInt, fmtBytes, fmtPct, rollupTextId } from "../util.js";
 import { gridTable } from "../panels.js";
 import { detailColumn, firstSentence } from "../pg-grid-text.js";
 import { countWord, plainText } from "../plain-text.js";
@@ -358,11 +358,14 @@ function failure(res) {
 
 /* ─────────────────────────── the header and the tables ─────────────────────────── */
 
-function tile(num, label, sub, cls) {
+/** One figure tile. The number points at its label and sub-line, so a screen reader reads the figure with its words. `used` keeps the ids unique within one draw. */
+function tile(num, label, sub, cls, used) {
+  const lblId = rollupTextId(label, "lbl", used);
+  const subId = sub ? rollupTextId(label, "sub", used) : null;
   return el("div", { class: "tile" + (cls ? " " + cls : "") }, [
-    el("div", { class: "num", text: num }),
-    el("div", { class: "lbl", text: label }),
-    sub ? el("div", { class: "sub", text: sub }) : null,
+    el("div", { class: "num", text: num, "aria-describedby": subId ? lblId + " " + subId : lblId }),
+    el("div", { class: "lbl", id: lblId, text: label }),
+    sub ? el("div", { class: "sub", id: subId, text: sub }) : null,
   ]);
 }
 
@@ -381,11 +384,12 @@ function drawTables(res, headerBox, tablesBox) {
   const noEstimate = Number(d.tables_without_estimate) || 0;
   const unread = rows.filter((r) => r.past_rewrite_floors === true && r.tail_occupied == null).length;
 
+  const usedIds = new Set();
   const head = [
     el("div", { class: "rollup" }, [el("div", { class: "rollup-group" }, [
-      tile(fmtBytes(d.store_total_bytes), "Store tables and indexes", countWord(Number(d.store_tables) || 0, "table")),
-      tile(fmtInt(candidates), candidates === 1 ? "Rewrite candidate" : "Rewrite candidates", candidates > 0 ? "VACUUM cannot return the space" : "none", candidates > 0 ? "critical" : "healthy"),
-      tile(fmtInt(noEstimate), noEstimate === 1 ? "Table with no usable estimate" : "Tables with no usable estimate", noEstimate > 0 ? "empty space not known" : "every table has one", noEstimate > 0 ? "warning" : "healthy"),
+      tile(fmtBytes(d.store_total_bytes), "Store tables and indexes", countWord(Number(d.store_tables) || 0, "table"), undefined, usedIds),
+      tile(fmtInt(candidates), candidates === 1 ? "Rewrite candidate" : "Rewrite candidates", candidates > 0 ? "VACUUM cannot return the space" : "none", candidates > 0 ? "critical" : "healthy", usedIds),
+      tile(fmtInt(noEstimate), noEstimate === 1 ? "Table with no usable estimate" : "Tables with no usable estimate", noEstimate > 0 ? "empty space not known" : "every table has one", noEstimate > 0 ? "warning" : "healthy", usedIds),
     ])]),
   ];
   const reasons = d.without_estimate_by_reason && typeof d.without_estimate_by_reason === "object" ? Object.entries(d.without_estimate_by_reason) : [];

@@ -270,7 +270,7 @@ public sealed class DarlingMcpStoreMetricsTools
 
             /* #8787 part D2: TimescaleDB counts crashes apart from failures, and a crashed job backs off by its retry period times the
                crashes, so the job rows carry the live crash counters. Read once, only when job rows are in the answer; a version or role
-               without the counters says "not available" and the tool carries on. Not stored in collect.store_metrics. */
+               without the counters says "not available" and the tool carries on. Not kept in the store metrics table. */
             var jobRowsServed = (kind is null || kind == StoreSelfMetrics.BackgroundJobObjectKind) && view != DarlingStoreMetricsReader.StoreMetricsView.Object
                 || (view == DarlingStoreMetricsReader.StoreMetricsView.Object && selection.Matched[0].ObjectKind == StoreSelfMetrics.BackgroundJobObjectKind);
             var crashRead = jobRowsServed ? await DarlingStoreJobCrashReader.ReadAsync(postgres, cancellationToken) : null;
