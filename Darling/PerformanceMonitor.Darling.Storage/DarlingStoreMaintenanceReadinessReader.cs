@@ -274,10 +274,10 @@ SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'member'),
             switch (vacuum.Kind)
             {
                 case StoreVacuumKind.Manual:
-                    reasons.Add($"A manual VACUUM is running on {vacuum.Table}{progress}, and it does not stop when a rewrite asks for a lock.");
+                    reasons.Add($"A manual VACUUM is running on {vacuum.Table}{progress}. It does not stop when a rewrite asks for a lock.");
                     break;
                 case StoreVacuumKind.AutovacuumToPreventWraparound:
-                    reasons.Add($"An autovacuum to prevent wraparound is running on {vacuum.Table}{progress}, and it does not stop when a rewrite asks for a lock.");
+                    reasons.Add($"An autovacuum to prevent wraparound is running on {vacuum.Table}{progress}. It does not stop when a rewrite asks for a lock.");
                     break;
                 case StoreVacuumKind.Autovacuum:
                     autovacuumTables.Add(vacuum.Table ?? "a table");

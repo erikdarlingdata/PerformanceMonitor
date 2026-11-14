@@ -526,7 +526,7 @@ FROM p";
         if (trailing < minimum)
         {
             return string.Create(CultureInfo.InvariantCulture,
-                $"and only {CountText.Plural(trailing, "page")} at the end {(trailing == 1 ? "is" : "are")} empty, under the {CountText.Plural(minimum, "page")} VACUUM needs before it cuts a file shorter, so it cuts nothing");
+                $"and only {CountText.Plural(trailing, "page")} at the end {(trailing == 1 ? "is" : "are")} empty. VACUUM needs {CountText.Plural(minimum, "page")} before it cuts a file shorter, so it cuts nothing");
         }
 
         return "so VACUUM can cut off only " + CountText.Plural(trailing, "page");

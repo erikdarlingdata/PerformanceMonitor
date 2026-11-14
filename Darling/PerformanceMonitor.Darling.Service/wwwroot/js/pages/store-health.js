@@ -107,7 +107,7 @@ export const TABLE_COLUMNS = [
   { key: "table_name", label: "Table", name: true, display: named, sortValue: named },
   { key: "kind", label: "Kind", display: kindText, sortValue: kindText },
   { key: "rewrite_text", label: "Rewrite", sevKey: "rewrite_sev", sortValue: (r) => r.rewrite_rank,
-    hint: "Rewrite candidate: about half of the table or more is estimated empty, and that is a large amount of space. VACUUM gives space back only by cutting empty pages off the end of the file, so a live row near the end, or a table set not to truncate, means only a rewrite can." },
+    hint: "Rewrite candidate: about half of the table or more is estimated empty, and that is a large amount of space. VACUUM gives space back only by cutting empty pages off the end of the file. A live row near the end, or a table set not to truncate, means only a rewrite can." },
   { key: "total_bytes", label: "Total", format: "bytes" },
   { key: "heap_bytes", label: "Heap", format: "bytes", hint: "The table's own pages, without indexes and TOAST." },
   { key: "index_bytes", label: "Indexes", format: "bytes" },
@@ -121,7 +121,7 @@ export const TABLE_COLUMNS = [
     sortValue: (r) => (Number(r.estimate_relations) > 1 ? Number(r.estimate_relations_usable) / Number(r.estimate_relations) : null),
     hint: "For a hypertable or a partitioned table: how many of its chunks or partitions had usable statistics." },
   { key: "shrink_text", label: "VACUUM can shrink it", wrap: true, display: (r) => dash(r.shrink_text),
-    hint: "Only checked for a table with a lot of estimated empty space. No means a live row sits near the end of the file, or the table is set not to truncate, so VACUUM cannot cut it shorter. Not checked means the end of the file was too large to read, the read failed, or a hypertable has more mostly empty parts than are checked." },
+    hint: "Only checked for a table with a lot of estimated empty space. No means a live row sits near the end of the file, or the table is set not to truncate. VACUUM cannot cut it shorter then. Not checked means the end of the file was too large to read, or the read failed. For a hypertable it can also mean more mostly empty parts than are checked." },
   { key: "estimated_rows", label: "Rows (est.)", format: "int" },
   { key: "measure", label: "Measure", sortable: false, render: (r) => measureCell(r), copyValue: () => "" },
 
