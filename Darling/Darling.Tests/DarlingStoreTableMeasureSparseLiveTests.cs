@@ -73,6 +73,10 @@ DELETE FROM collect.zz_sparse WHERE random() < 0.8;", ct);
         Assert.Equal(DarlingStoreTableMeasureReader.VerdictRewriteNeeded, sparse.VerdictKind);
         Assert.Contains("only a rewrite", sparse.Verdict, StringComparison.Ordinal);
         Assert.Contains("Live rows fill", sparse.Verdict, StringComparison.Ordinal);
+        /* A live row on the last page leaves nothing for VACUUM to cut: the sentence says so, never "only 0 pages". */
+        Assert.Equal(0, sparse.TrailingEmptyPages);
+        Assert.Contains("a live row sits in the last page, so VACUUM cannot shrink the file", sparse.Verdict, StringComparison.Ordinal);
+        Assert.DoesNotContain("only 0", sparse.Verdict, StringComparison.Ordinal);
 
         var fresh = await MeasureAsync(dataSource, "collect.zz_fresh", ct);
         Assert.Equal(DarlingStoreTableMeasureReader.VerdictDense, fresh.VerdictKind);

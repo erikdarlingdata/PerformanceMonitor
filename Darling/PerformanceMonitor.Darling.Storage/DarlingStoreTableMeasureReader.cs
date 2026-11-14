@@ -508,7 +508,7 @@ FROM p";
         }
 
         return (VerdictRewriteNeeded, string.Create(CultureInfo.InvariantCulture,
-            $"Mostly empty, and only a rewrite returns the space. Live rows fill {fill}% of {pages} and {freeText} is free inside pages{reserve}. Live rows reach block {lastUsed} of {lastFile}, so VACUUM {(trailing == 0 ? "can cut off no pages" : "can cut off only " + CountText.Plural(trailing, "page"))}."));
+            $"Mostly empty, and only a rewrite returns the space. Live rows fill {fill}% of {pages} and {freeText} is free inside pages{reserve}. Live rows reach block {lastUsed} of {lastFile}, {(trailing == 0 ? "and a live row sits in the last page, so VACUUM cannot shrink the file" : "so VACUUM can cut off only " + CountText.Plural(trailing, "page"))}."));
     }
 
     private static StoreTableMeasureResult Refuse(string sentence) => new(StoreTableMeasureOutcome.Refused, sentence, null);
