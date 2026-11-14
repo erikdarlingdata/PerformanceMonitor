@@ -9,15 +9,22 @@
         Background="{DynamicResource BackgroundBrush}">
     <!-- #8788: the health of the local DuckDB store. Four sections (Store, Archives, Housekeeping history, Tables), the same ones
          get_store_health returns. Read only: every read runs off the UI thread and takes only the store's read lock. -->
+    <Window.Resources>
+        <!-- A message longer than its cell ends in an ellipsis on one line and shows the whole text in a tooltip. -->
+        <Style x:Key="MessageCell" TargetType="TextBlock" BasedOn="{StaticResource DataGridCellText}">
+            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+            <Setter Property="ToolTip" Value="{Binding Message}"/>
+        </Style>
+    </Window.Resources>
     <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="3*"/>
+            <RowDefinition Height="*" MinHeight="245"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="4*"/>
+            <RowDefinition Height="*" MinHeight="120"/>
         </Grid.RowDefinitions>
 
         <Grid Grid.Row="0" Margin="0,0,0,8">
@@ -83,10 +90,10 @@
                         <DataGridTextColumn Header="Time (UTC)" Binding="{Binding Time}" SortMemberPath="TimeUtc" Width="140"/>
                         <DataGridTextColumn Header="What" Binding="{Binding Kind}" Width="130"/>
                         <DataGridTextColumn Header="Outcome" Binding="{Binding Outcome}" Width="90"/>
-                        <DataGridTextColumn Header="Moved" Binding="{Binding Work}" Width="150"/>
+                        <DataGridTextColumn Header="Moved" Binding="{Binding Work}" Width="Auto"/>
                         <DataGridTextColumn Header="In store (MB)" Binding="{Binding UsedMb}" ElementStyle="{StaticResource NumericCell}" Width="95"/>
                         <DataGridTextColumn Header="Times" Binding="{Binding Count}" ElementStyle="{StaticResource NumericCell}" Width="55"/>
-                        <DataGridTextColumn Header="Message" Binding="{Binding Message}" Width="*"/>
+                        <DataGridTextColumn Header="Message" Binding="{Binding MessageLine}" ElementStyle="{StaticResource MessageCell}" Width="*"/>
                     </DataGrid.Columns>
                 </DataGrid>
                 <TextBlock x:Name="NoHistoryMessage" Text="Nothing recorded yet. The first timed archive runs within an hour of Lite starting."

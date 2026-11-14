@@ -24,7 +24,11 @@ namespace PerformanceMonitorLite.Windows;
 public partial class StoreHealthWindow : Window
 {
     /// <summary>One housekeeping history line, formatted for the grid.</summary>
-    internal sealed record HistoryRow(string Time, DateTime TimeUtc, string Kind, string Outcome, string Work, string UsedMb, int Count, string Message, bool IsFailed);
+    internal sealed record HistoryRow(string Time, DateTime TimeUtc, string Kind, string Outcome, string Work, string UsedMb, int Count, string Message, bool IsFailed)
+    {
+        /// <summary>The message on one line for the cell. The tooltip carries the full text.</summary>
+        public string MessageLine => string.Join(" ", Message.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+    }
 
     /// <summary>One table line, formatted for the grid.</summary>
     internal sealed record TableRow(string Name, string Rows, long EstimatedRows);
@@ -86,7 +90,7 @@ public partial class StoreHealthWindow : Window
         StoreNoteText.Visibility = snapshot.StoreNote is null ? Visibility.Collapsed : Visibility.Visible;
 
         var a = snapshot.Archives;
-        var undated = a.UndatedFiles > 0 ? string.Create(ci, $"   {a.UndatedFiles:N0} files have no date in their name and are never deleted by retention.") : "";
+        var undated = a.UndatedFiles > 0 ? "   " + StoreHealthText.UndatedSentence(a.UndatedFiles) : "";
         ArchiveFactsText.Text = string.Create(ci,
             $"{a.FileCount:N0} parquet files, {StoreHealthText.Bytes(a.TotalBytes)} on disk.   Oldest month: {StoreHealthText.Month(a.OldestMonth)}.   Newest month: {StoreHealthText.Month(a.NewestMonth)}.") + undated;
         ArchiveSentenceText.Text = StoreHealthText.ArchiveSentence(a);

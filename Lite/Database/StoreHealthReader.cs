@@ -208,8 +208,12 @@ public static class StoreHealthText
 {
     public static string StoreSentence(StoreSizeInfo store) =>
         string.Create(CultureInfo.InvariantCulture,
-            $"Lite archives all data and starts a fresh store when the store file reaches {store.ResetAtMb:0} MB. " +
-            $"The file is {store.FileMb:0.0} MB now, {store.FilePercentOfReset:0}% of that point.");
+            $"Lite archives all data and starts a fresh store when the store file reaches {store.ResetAtMb:0} MB.");
+
+    public static string UndatedSentence(int files) =>
+        files == 1
+            ? "1 file has no date in its name and is never deleted by retention."
+            : string.Create(CultureInfo.InvariantCulture, $"{files:N0} files have no date in their name and are never deleted by retention.");
 
     public static string ArchiveSentence(ArchiveFolderInfo archives) =>
         string.Create(CultureInfo.InvariantCulture,
@@ -277,7 +281,7 @@ public static class StoreHealthText
         sb.AppendLine("  " + ArchiveSentence(a));
         if (a.UndatedFiles > 0)
         {
-            sb.AppendLine(ci, $"  {a.UndatedFiles:N0} files have no date in their name and are never deleted by retention.");
+            sb.AppendLine("  " + UndatedSentence(a.UndatedFiles));
         }
 
         sb.AppendLine();
