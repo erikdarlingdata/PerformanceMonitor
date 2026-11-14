@@ -57,10 +57,15 @@ public sealed class DarlingMcpStoreTableHealthTools
         + "estimate (below_size_floor, never_analyzed, no_column_statistics, analyze_record_lost, stale_statistics, no_chunks). "
         + "It is NOT n_live_tup over n_live_tup plus n_dead_tup, which reads 100 percent after a vacuum. A measured figure needs "
         + "pgstattuple, which is never installed. past_rewrite_floors = estimated share at least 50 percent AND estimated empty bytes "
-        + "at least 64 MiB. rewrite_candidate = past_rewrite_floors AND tail_occupied: a live row in the last 64 pages of the file "
-        + "means plain VACUUM cannot truncate it, so only a rewrite returns the space (for a roll-up the emptiest relations are "
-        + "checked, at most 10: tail_relations_checked of tail_relations_eligible). tail_occupied is null when it was not read or the "
-        + "read failed, and rewrite_candidate is then false while past_rewrite_floors stays true. vacuum_trigger_rows is "
+        + "at least 64 MiB. Plain VACUUM gives space back only by cutting the empty pages off the END of the file, and only when that run "
+        + "reaches PostgreSQL's truncate minimum (the smaller of 1000 pages and a sixteenth of the file), holds at least half of the "
+        + "empty bytes, and the table's vacuum_truncate option is not off. rewrite_candidate = past_rewrite_floors AND tail_occupied: a "
+        + "live row sits in the window at the end of the file (the larger of that minimum and the pages half the estimated empty bytes "
+        + "fill, at most 32768 pages per relation), or vacuum_truncate is off, so only a rewrite returns the space. For a roll-up the "
+        + "emptiest relations are checked, at most 10: tail_relations_checked of tail_relations_eligible. tail_occupied is false only "
+        + "when every eligible relation was checked and VACUUM can cut each one. It is null when it was not read, when a window was "
+        + "over the cap, when a roll-up has more eligible relations than were checked, or when the read failed: the tail is then "
+        + "unknown, rewrite_candidate is false, and past_rewrite_floors stays true. vacuum_trigger_rows is "
         + "threshold + scale_factor x rows from the table's own settings or the server's (capped by the max threshold on PostgreSQL 18): "
         + "compare it with dead_rows, because many dead rows below the trigger are not yet due; relations_past_vacuum_trigger counts "
         + "the relations of a roll-up that are. The churn counters and rates are since stats_since (the statistics reset, or the "
@@ -116,7 +121,7 @@ public sealed class DarlingMcpStoreTableHealthTools
                     $"{CountText.Plural(summary.TableCount, "store table")}, {summary.TotalBytes} bytes in total, {CountText.Plural(summary.RewriteCandidates, "rewrite candidate")}, "
                     + $"{CountText.Grouped(summary.WithoutEstimate)} without a usable empty-space estimate ({noEstimate}).")
                     + (pastFloorsUnread > 0
-                        ? string.Create(CultureInfo.InvariantCulture, $" {pastFloorsUnread} past the empty-space floors with an unreadable tail.")
+                        ? string.Create(CultureInfo.InvariantCulture, $" {pastFloorsUnread} past the empty-space floors with the end of the file not checked.")
                         : string.Empty);
 
                 result["header"] = header;

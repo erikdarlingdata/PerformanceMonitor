@@ -32,7 +32,9 @@ public static class DarlingStoreJobCrashReader
 {
     /// <summary>The read. One row per job TimescaleDB has run at least once (a job that never ran has no stat row).</summary>
     public const string Sql = @"
-SELECT s.job_id, j.proc_name, j.hypertable_name, s.consecutive_crashes, s.total_crashes, s.consecutive_failures, s.next_start
+SELECT s.job_id, j.proc_name, j.hypertable_name, s.consecutive_crashes, s.total_crashes, s.consecutive_failures,
+       CASE WHEN pg_catalog.isfinite(s.next_start) THEN s.next_start END AS next_start,
+       (s.next_start = '-infinity' AND s.consecutive_crashes > 0) AS crash_backoff
 FROM _timescaledb_internal.bgw_job_stat AS s
 JOIN timescaledb_information.jobs AS j USING (job_id)
 ORDER BY s.consecutive_crashes DESC, s.total_crashes DESC, s.job_id";
@@ -44,9 +46,12 @@ ORDER BY s.consecutive_crashes DESC, s.total_crashes DESC, s.job_id";
     /// <param name="ConsecutiveCrashes">Crashes since the job last finished a run. Above zero the job is backing off.</param>
     /// <param name="TotalCrashes">Crashes over the job's life.</param>
     /// <param name="ConsecutiveFailures">Failures (error returns) since the job last succeeded.</param>
-    /// <param name="NextStart">When TimescaleDB will start the job next (UTC), null when none is scheduled.</param>
+    /// <param name="NextStart">When TimescaleDB will start the job next (UTC). Null when none is scheduled, and null for an infinite
+    /// value, which Npgsql would otherwise turn into the year 0001.</param>
+    /// <param name="CrashBackoff">True when <c>next_start</c> is <c>-infinity</c> and the job has crashed since it last finished a run.
+    /// That is a crash backoff: the scheduler sets the next start itself, so the job is not lost.</param>
     public sealed record StoreJobCrash(
-        int JobId, string ProcName, string? HypertableName, int ConsecutiveCrashes, long TotalCrashes, int ConsecutiveFailures, DateTime? NextStart);
+        int JobId, string ProcName, string? HypertableName, int ConsecutiveCrashes, long TotalCrashes, int ConsecutiveFailures, DateTime? NextStart, bool CrashBackoff);
 
     /// <summary>The result of <see cref="ReadAsync"/>.</summary>
     /// <param name="Available">True when the counters were read (a store without TimescaleDB reads as available with no jobs).</param>
@@ -99,7 +104,8 @@ ORDER BY s.consecutive_crashes DESC, s.total_crashes DESC, s.job_id";
                     ConsecutiveCrashes: reader.GetInt32(3),
                     TotalCrashes: reader.GetInt64(4),
                     ConsecutiveFailures: reader.GetInt32(5),
-                    NextStart: reader.IsDBNull(6) ? null : DateTime.SpecifyKind(reader.GetDateTime(6), DateTimeKind.Utc)));
+                    NextStart: reader.IsDBNull(6) ? null : DateTime.SpecifyKind(reader.GetDateTime(6), DateTimeKind.Utc),
+                    CrashBackoff: reader.GetBoolean(7)));
             }
 
             return new StoreJobCrashRead(true, null, jobs);

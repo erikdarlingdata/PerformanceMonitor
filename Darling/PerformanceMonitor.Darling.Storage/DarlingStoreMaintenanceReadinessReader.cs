@@ -32,9 +32,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// granted blocks. The lock read works for every role.</item>
 /// <item><b>Transactions open longer than <see cref="DefaultLongTransactionSeconds"/> seconds</b> in this database. They hold back
 /// vacuum and make a table rewrite wait behind them. Autovacuum workers are left out here (they are the next item).</item>
-/// <item><b>A vacuum running</b> in this database (<c>pg_stat_progress_vacuum</c>), listed with its phase and progress.</item>
+/// <item><b>A manual VACUUM, or an autovacuum to prevent wraparound, running</b> in this database (<c>pg_stat_progress_vacuum</c>
+/// joined to <c>pg_stat_activity</c>). Every running vacuum is listed with its phase and progress, but a plain autovacuum is not a
+/// reason: it runs almost all the time on a busy store, and it cancels itself when another session asks for a conflicting lock, so it
+/// does not hold a rewrite up. A manual VACUUM does not cancel, and neither does an autovacuum to prevent wraparound, so both do.</item>
 /// <item><b>An inactive replication slot retaining at least <see cref="SlotRetainedReasonBytes"/> of WAL</b>: maintenance writes a lot
-/// of WAL, and an abandoned slot keeps all of it. An active slot, or a small one, is listed and is not a reason.</item>
+/// of WAL, and an abandoned slot keeps all of it. The slot check covers the whole server, not this database, because any slot holds WAL
+/// for the cluster. An active slot, or a small one, is listed and is not a reason.</item>
 /// <item><b>A TimescaleDB background job crashing</b> (<see cref="DarlingStoreJobCrashReader"/>, <c>consecutive_crashes</c> above
 /// zero): a crashed job backs off, and maintenance on top of it hides whether the cause was the maintenance.</item>
 /// <item><b>A check that could not run</b> (a refused read), named, never counted as clear.</item>
@@ -44,7 +48,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <c>pg_read_all_stats</c>. The <c>mcp</c> and <c>viewer</c> roles are neither, so for them every other role's session reads NULL and
 /// the transaction-age check cannot see it. The result says so (<see cref="StoreMaintenanceReadiness.CanSeeAllSessions"/> false and
 /// <see cref="StoreMaintenanceReadiness.HiddenSessionCount"/> sessions) and the safe verdict carries a sentence naming that gap. The
-/// lock, vacuum, slot and job checks are not limited by it.</para>
+/// same holds for a vacuum another role started: PostgreSQL gives such a role the row but hides its table, phase and backend type, so
+/// it is listed as <see cref="StoreVacuumKind.Hidden"/> and the safe verdict says how many there are. The lock, slot and job checks are
+/// not limited by it.</para>
+///
+/// <para><b>Scope.</b> The lock, vacuum and job checks cover this database. The slot check covers the whole server, because any slot
+/// holds WAL for every database.</para>
 ///
 /// <para>The job crash read can be missing on a TimescaleDB version or a role without it. That is not a reason: the verdict names the
 /// check as not run.</para>
@@ -85,13 +94,18 @@ AND   a.backend_type IS DISTINCT FROM 'autovacuum worker'
 ORDER BY a.xact_start
 LIMIT 200";
 
+    /* LEFT JOINs: a role that is not a superuser or a member of pg_read_all_stats gets the progress row of another role's vacuum
+       with relid, phase and the block counts NULL, and its pg_stat_activity backend_type and query hidden. Such a row stays in the
+       answer (Hidden) instead of dropping out. An autovacuum to prevent wraparound ends its query text with that phrase. */
     private const string VacuumsSql = @"
-SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname), p.phase, p.heap_blks_scanned, p.heap_blks_total
+SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname), p.phase, p.heap_blks_scanned, p.heap_blks_total,
+       a.backend_type, COALESCE(a.query ~ '\(to prevent wraparound\)$', false)
 FROM pg_catalog.pg_stat_progress_vacuum AS p
-JOIN pg_catalog.pg_class AS c ON c.oid = p.relid
-JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+LEFT JOIN pg_catalog.pg_class AS c ON c.oid = p.relid
+LEFT JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+LEFT JOIN pg_catalog.pg_stat_activity AS a ON a.pid = p.pid
 WHERE p.datid = (SELECT d.oid FROM pg_catalog.pg_database AS d WHERE d.datname = current_database())
-ORDER BY 1";
+ORDER BY 1 NULLS LAST, p.pid";
 
     private const string SlotsSql = @"
 SELECT s.slot_name, s.active,
@@ -122,12 +136,29 @@ SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'member'),
     /// <param name="AgeSeconds">How long the transaction has been open.</param>
     public sealed record StoreLongTransaction(string? ApplicationName, string? BackendType, string? State, long AgeSeconds);
 
+    /// <summary>What started a running vacuum, which decides whether it is a reason not to start maintenance.</summary>
+    public enum StoreVacuumKind
+    {
+        /// <summary>A plain autovacuum. It cancels itself when another session waits for a conflicting lock, so it is not a reason.</summary>
+        Autovacuum,
+
+        /// <summary>An autovacuum to prevent wraparound. It does not cancel itself, so it is a reason.</summary>
+        AutovacuumToPreventWraparound,
+
+        /// <summary>A VACUUM a person or a script ran: any backend that is not an autovacuum worker. It does not cancel itself, so it is a reason.</summary>
+        Manual,
+
+        /// <summary>A vacuum of another role that this role cannot read (no table, no backend type). It is listed, and the safe verdict says it could not be told apart.</summary>
+        Hidden,
+    }
+
     /// <summary>A vacuum in progress.</summary>
-    /// <param name="Table">The schema-qualified, quoted table name.</param>
-    /// <param name="Phase">The vacuum's phase, for example <c>scanning heap</c>.</param>
-    /// <param name="HeapBlocksScanned">Heap blocks scanned so far.</param>
-    /// <param name="HeapBlocksTotal">Heap blocks to scan.</param>
-    public sealed record StoreRunningVacuum(string Table, string Phase, long HeapBlocksScanned, long HeapBlocksTotal);
+    /// <param name="Table">The schema-qualified, quoted table name. Null for a <see cref="StoreVacuumKind.Hidden"/> vacuum.</param>
+    /// <param name="Phase">The vacuum's phase, for example <c>scanning heap</c>. Null when hidden.</param>
+    /// <param name="HeapBlocksScanned">Heap blocks scanned so far. Null when hidden.</param>
+    /// <param name="HeapBlocksTotal">Heap blocks to scan. Null when hidden.</param>
+    /// <param name="Kind">What started it.</param>
+    public sealed record StoreRunningVacuum(string? Table, string? Phase, long? HeapBlocksScanned, long? HeapBlocksTotal, StoreVacuumKind Kind);
 
     /// <summary>A replication slot.</summary>
     /// <param name="SlotName">The slot's name.</param>
@@ -193,11 +224,8 @@ SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'member'),
                 $"A transaction has been open for {Age(transaction.AgeSeconds)}{Holder(transaction.ApplicationName, transaction.BackendType)}{State(transaction.State)}."));
         }
 
-        foreach (var vacuum in vacuums)
-        {
-            reasons.Add(string.Create(CultureInfo.InvariantCulture,
-                $"A vacuum is running on {vacuum.Table} ({vacuum.Phase}, {vacuum.HeapBlocksScanned} of {vacuum.HeapBlocksTotal} heap blocks)."));
-        }
+        var (vacuumReasons, vacuumNotes) = JudgeVacuums(vacuums);
+        reasons.AddRange(vacuumReasons);
 
         foreach (var slot in slots.Where(s => !s.Active && s.RetainedBytes >= SlotRetainedReasonBytes))
         {
@@ -214,7 +242,7 @@ SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'member'),
         var safe = reasons.Count == 0;
         return new StoreMaintenanceReadiness(
             safe,
-            Verdict(safe, reasons, canSee, hidden, crashes),
+            Verdict(safe, reasons, canSee, hidden, crashes, vacuumNotes),
             reasons,
             locks,
             transactions,
@@ -226,9 +254,60 @@ SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'member'),
             DateTime.UtcNow);
     }
 
-    /// <summary>The verdict sentence. Public so the wording is testable without a store.</summary>
+    /// <summary>
+    /// Sorts the running vacuums into reasons not to start and notes. A manual VACUUM and an autovacuum to prevent wraparound are
+    /// reasons. A plain autovacuum and a vacuum this role cannot read are notes: the safe verdict carries them. Pure, so the three
+    /// cases are testable without a store.
+    /// </summary>
+    public static (List<string> Reasons, List<string> Notes) JudgeVacuums(IReadOnlyList<StoreRunningVacuum> vacuums)
+    {
+        ArgumentNullException.ThrowIfNull(vacuums);
+        var reasons = new List<string>();
+        var notes = new List<string>();
+        var autovacuumTables = new List<string>();
+        var hidden = 0;
+        foreach (var vacuum in vacuums)
+        {
+            var progress = vacuum.Phase is null
+                ? string.Empty
+                : string.Create(CultureInfo.InvariantCulture, $" ({vacuum.Phase}, {vacuum.HeapBlocksScanned} of {vacuum.HeapBlocksTotal} heap blocks)");
+            switch (vacuum.Kind)
+            {
+                case StoreVacuumKind.Manual:
+                    reasons.Add($"A manual VACUUM is running on {vacuum.Table}{progress}, and it does not stop when a rewrite asks for a lock.");
+                    break;
+                case StoreVacuumKind.AutovacuumToPreventWraparound:
+                    reasons.Add($"An autovacuum to prevent wraparound is running on {vacuum.Table}{progress}, and it does not stop when a rewrite asks for a lock.");
+                    break;
+                case StoreVacuumKind.Autovacuum:
+                    autovacuumTables.Add(vacuum.Table ?? "a table");
+                    break;
+                default:
+                    hidden++;
+                    break;
+            }
+        }
+
+        if (autovacuumTables.Count > 0)
+        {
+            notes.Add(string.Create(CultureInfo.InvariantCulture,
+                $"{CountText.Plural(autovacuumTables.Count, "autovacuum")} {(autovacuumTables.Count == 1 ? "is" : "are")} running on {string.Join(", ", autovacuumTables)}. An autovacuum stops by itself when a rewrite asks for a lock on its table, so it does not hold maintenance up."));
+        }
+
+        if (hidden > 0)
+        {
+            notes.Add(string.Create(CultureInfo.InvariantCulture,
+                $"{CountText.Plural(hidden, "vacuum")} of other roles {(hidden == 1 ? "is" : "are")} running that this role cannot read, so whether {(hidden == 1 ? "it was" : "they were")} started by hand is unknown."));
+        }
+
+        return (reasons, notes);
+    }
+
+    /// <summary>The verdict sentence. Public so the wording is testable without a store. <paramref name="notes"/> are sentences a
+    /// safe verdict carries (see <see cref="JudgeVacuums"/>).</summary>
     public static string Verdict(
-        bool safe, IReadOnlyList<string> reasons, bool canSeeAllSessions, int hiddenSessionCount, DarlingStoreJobCrashReader.StoreJobCrashRead crashes)
+        bool safe, IReadOnlyList<string> reasons, bool canSeeAllSessions, int hiddenSessionCount, DarlingStoreJobCrashReader.StoreJobCrashRead crashes,
+        IReadOnlyList<string>? notes = null)
     {
         if (!safe)
         {
@@ -245,6 +324,14 @@ SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'member'),
         if (!crashes.Available)
         {
             verdict += " Background job crashes were not checked (" + crashes.UnavailableReason + ").";
+        }
+
+        if (notes is not null)
+        {
+            foreach (var note in notes)
+            {
+                verdict += " " + note.TrimEnd('.') + ".";
+            }
         }
 
         return verdict;
@@ -357,7 +444,19 @@ SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'member'),
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new StoreRunningVacuum(reader.GetString(0), reader.GetString(1), reader.GetInt64(2), reader.GetInt64(3)));
+            var table = reader.IsDBNull(0) ? null : reader.GetString(0);
+            var backend = reader.IsDBNull(4) ? null : reader.GetString(4);
+            var kind = table is null
+                ? StoreVacuumKind.Hidden
+                : backend != "autovacuum worker"
+                    ? StoreVacuumKind.Manual
+                    : reader.GetBoolean(5) ? StoreVacuumKind.AutovacuumToPreventWraparound : StoreVacuumKind.Autovacuum;
+            rows.Add(new StoreRunningVacuum(
+                table,
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetInt64(2),
+                reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                kind));
         }
 
         return rows;

@@ -31,12 +31,16 @@ public sealed class DarlingMcpStoreMaintenanceReadinessTools
         "Says whether the monitoring STORE (not a monitored server) is safe for maintenance right now: an install, an upgrade or a table "
         + "rewrite. One verdict line, 'Safe for maintenance now.' or the reasons it is not, plus the detail. Run it before every install. "
         + "<<GUIDE>> No server_name. Reasons: a strong lock (SHARE ROW EXCLUSIVE, EXCLUSIVE or ACCESS EXCLUSIVE) granted to another session on "
-        + "a product table, a transaction open longer than 2 minutes, a vacuum running, an inactive replication slot holding at least 1 GB of WAL, "
-        + "a TimescaleDB background job that has crashed (consecutive_crashes above zero), and any check that could not run (never counted as "
-        + "clear). Detail lists: strong_locks (held or waiting, with mode, application_name, backend_type, transaction_start), long_transactions, "
-        + "vacuums_running (phase, heap blocks scanned of total), replication_slots (retained_bytes) and job_crashes (read: available or "
-        + "not available with the reason). It never returns another session's query text. Transaction age is visible only for sessions the role "
-        + "can read: sessions_hidden_from_role says how many other-role sessions it cannot see, and the safe verdict says so. Read-only and live.")]
+        + "a product table, a transaction open longer than 2 minutes, a manual VACUUM or an autovacuum to prevent wraparound running (a plain "
+        + "autovacuum is listed but is not a reason, because it stops by itself when a rewrite asks for a lock), an inactive replication slot "
+        + "holding at least 1 GB of WAL, a TimescaleDB background job that has crashed (consecutive_crashes above zero), and any check that "
+        + "could not run (never counted as clear). The lock, vacuum and job checks cover this database. The slot check covers the whole "
+        + "server, because any slot holds WAL. Detail lists: strong_locks (held or waiting, with mode, application_name, backend_type, "
+        + "transaction_start), long_transactions, vacuums_running (kind, phase, heap blocks scanned of total), replication_slots "
+        + "(retained_bytes) and job_crashes (read: available or not available with the reason; per job next_start, which is null while the "
+        + "job is in crash backoff, and crash_backoff, true then because the scheduler sets the next start itself). It never returns another "
+        + "session's query text. Transaction age and another role's vacuums are visible only for a role that can read them: "
+        + "sessions_hidden_from_role says how many other-role sessions it cannot see, and the safe verdict says so. Read-only and live.")]
     public static async Task<string> GetStoreMaintenanceReadiness(
         NpgsqlDataSource postgres,
         CancellationToken cancellationToken = default)
@@ -72,6 +76,13 @@ public sealed class DarlingMcpStoreMaintenanceReadinessTools
                 vacuums_running = r.Vacuums.Select(v => new
                 {
                     table = v.Table,
+                    kind = v.Kind switch
+                    {
+                        DarlingStoreMaintenanceReadinessReader.StoreVacuumKind.Manual => "manual",
+                        DarlingStoreMaintenanceReadinessReader.StoreVacuumKind.AutovacuumToPreventWraparound => "autovacuum_to_prevent_wraparound",
+                        DarlingStoreMaintenanceReadinessReader.StoreVacuumKind.Autovacuum => "autovacuum",
+                        _ => "hidden",
+                    },
                     phase = v.Phase,
                     heap_blocks_scanned = v.HeapBlocksScanned,
                     heap_blocks_total = v.HeapBlocksTotal,
@@ -93,6 +104,7 @@ public sealed class DarlingMcpStoreMaintenanceReadinessTools
                         consecutive_crashes = j.ConsecutiveCrashes,
                         total_crashes = j.TotalCrashes,
                         next_start = Iso(j.NextStart),
+                        crash_backoff = j.CrashBackoff,
                     }),
                 },
             }, McpHelpers.JsonOptions);

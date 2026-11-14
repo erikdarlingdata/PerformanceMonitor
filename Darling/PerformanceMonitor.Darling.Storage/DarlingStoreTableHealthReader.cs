@@ -174,8 +174,8 @@ public static class DarlingStoreTableHealthReader
     /// in the last 7 days, over rows of one sizing form (estimate or exact). NULL when the object is not recorded
     /// there or has fewer than two rows in the window.</param>
     /// <param name="RewriteCandidate">True when <see cref="PastRewriteFloors"/> AND <see cref="TailOccupied"/> is true:
-    /// the estimated empty space is large AND plain VACUUM cannot truncate the file, so only a rewrite gives it back.
-    /// False when the tail is empty (VACUUM can truncate) and when the tail could not be read (see
+    /// the estimated empty space is large AND plain VACUUM cannot give it back (see <see cref="DarlingVacuumTruncateRule"/>), so
+    /// only a rewrite does. False when VACUUM can give it back, and when the tail was not read or could not be judged (see
     /// <see cref="PastRewriteFloors"/>, which stays true in that case).</param>
     /// <param name="RelPages">Visibility map: <c>pg_class.relpages</c> summed over the object's heap relations, as of the
     /// last vacuum or analyze.</param>
@@ -217,12 +217,15 @@ public static class DarlingStoreTableHealthReader
     /// <see cref="RewriteCandidateMinEmptyBytes"/>. This was the whole of <see cref="RewriteCandidate"/> before the tail check.</param>
     /// <param name="TailRelationsEligible">For an object past the floors: how many of its heap relations are estimated at half
     /// empty or more, the pool the tail check picks from. Otherwise 0.</param>
-    /// <param name="TailRelationsChecked">How many of those had their last <see cref="TailProbePages"/> pages read: the
-    /// emptiest first, at most <see cref="TailProbeMaxRelations"/>. 0 when the object is not past the floors or the read failed.</param>
-    /// <param name="TailRelationsOccupied">How many of the checked relations hold a live row in those pages.</param>
-    /// <param name="TailOccupied">True when a checked relation holds a live row in its last <see cref="TailProbePages"/> pages, so
-    /// plain VACUUM cannot truncate that file and only a rewrite returns the space. False when none does. NULL when the object
-    /// is not past the floors (not read) or the tail read failed.</param>
+    /// <param name="TailRelationsChecked">How many of those could be judged: the emptiest first, at most
+    /// <see cref="TailProbeMaxRelations"/>, leaving out a relation whose window was over <see cref="TailProbeMaxWindowPages"/> pages
+    /// or whose read failed. 0 when the object is not past the floors.</param>
+    /// <param name="TailRelationsOccupied">How many of the checked relations VACUUM cannot give the space back for: a live row
+    /// sits in the window at the end of the file, or the table's <c>vacuum_truncate</c> option is off.</param>
+    /// <param name="TailOccupied">True when a checked relation's space VACUUM cannot give back, so only a rewrite returns it. False
+    /// when every eligible relation was checked and VACUUM can give each one back. NULL when the object is not past the floors (not
+    /// read), or when no relation was found occupied and some could not be judged (a window over the cap, a read that failed, or
+    /// more eligible relations than are checked): the tail is then unknown, never "VACUUM can shrink it".</param>
     public sealed record StoreTableHealthRow(
         string SchemaName,
         string TableName,
@@ -300,9 +303,11 @@ public static class DarlingStoreTableHealthReader
     /// <summary>The statistics were never reset, so the counters are dated from the postmaster start: a lower bound on their age.</summary>
     public const string StatsSourcePostmasterStart = "postmaster_start";
 
-    /// <summary>How many pages at the end of a file the tail check reads. A live row there means plain VACUUM, which can
-    /// only truncate empty pages off the end, cannot shrink the file.</summary>
-    public const int TailProbePages = 64;
+    /// <summary>The most pages the tail check reads for one relation (256 MB at the 8 KB block size). The window the check reads is the
+    /// larger of PostgreSQL's truncate minimum and the pages half the estimated empty bytes fill (see
+    /// <see cref="DarlingVacuumTruncateRule.TailWindowPages"/>), and a file with no live row in it is read to the end of the window.
+    /// A window over this cap is not read: the tail of that relation is unknown, which the row says.</summary>
+    public const long TailProbeMaxWindowPages = 32768;
 
     /// <summary>For a roll-up past the floors, the most relations whose tail is read (the emptiest first).</summary>
     public const int TailProbeMaxRelations = 10;
@@ -581,6 +586,8 @@ sized AS (
         EXISTS (
             SELECT 1 FROM pg_catalog.unnest(c.reloptions) AS o(opt)
             WHERE o.opt ~* '^autovacuum_enabled=(f|fa|fal|fals|false|of|off|n|no|0)$') AS autovacuum_disabled,
+        ({DarlingVacuumTruncateRule.TruncateOffSql}) AS truncate_off,
+        pg_catalog.pg_relation_size(c.oid) / pg_catalog.current_setting('block_size')::bigint AS rel_heap_pages,
         st.n_dead_tup,
         st.n_mod_since_analyze,
         st.n_live_tup,
@@ -699,7 +706,10 @@ agg AS (
         COALESCE(sum(s.autovacuum_count) FILTER (WHERE s.member_role = 'heap'), 0)::bigint AS autovacuum_count,
         COALESCE(sum(s.autoanalyze_count) FILTER (WHERE s.member_role = 'heap'), 0)::bigint AS autoanalyze_count,
         (count(*) FILTER (WHERE s.tail_eligible))::int AS tail_eligible,
-        array_agg(s.rel_qualified ORDER BY s.tail_rank) FILTER (WHERE s.tail_rank <= {TailProbeMaxRelations}) AS tail_rels
+        array_agg(s.rel_qualified ORDER BY s.tail_rank) FILTER (WHERE s.tail_rank <= {TailProbeMaxRelations}) AS tail_rels,
+        array_agg(s.rel_heap_pages ORDER BY s.tail_rank) FILTER (WHERE s.tail_rank <= {TailProbeMaxRelations}) AS tail_pages,
+        array_agg(s.bloat_bytes_estimate::bigint ORDER BY s.tail_rank) FILTER (WHERE s.tail_rank <= {TailProbeMaxRelations}) AS tail_empty_bytes,
+        array_agg(s.truncate_off ORDER BY s.tail_rank) FILTER (WHERE s.tail_rank <= {TailProbeMaxRelations}) AS tail_truncate_off
     FROM ranked AS s
     GROUP BY s.obj_schema, s.obj_name, s.kind
 ),
@@ -782,7 +792,10 @@ SELECT
     si.from_reset AS stats_from_reset,
     GREATEST(extract(epoch FROM (pg_catalog.now() - si.since)) / 3600.0, 0)::double precision AS stats_hours,
     a.tail_eligible,
-    CASE WHEN a.past_floors THEN a.tail_rels END AS tail_rels
+    CASE WHEN a.past_floors THEN a.tail_rels END AS tail_rels,
+    CASE WHEN a.past_floors THEN a.tail_pages END AS tail_pages,
+    CASE WHEN a.past_floors THEN a.tail_empty_bytes END AS tail_empty_bytes,
+    CASE WHEN a.past_floors THEN a.tail_truncate_off END AS tail_truncate_off
 FROM scored AS a
 CROSS JOIN statsinfo AS si
 LEFT JOIN growth AS g ON g.kind = CASE a.kind WHEN 'partitioned' THEN 'table' ELSE a.kind END AND g.qualified_name = a.obj_schema || '.' || a.obj_name
@@ -965,8 +978,8 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
     /// <summary>
     /// Reads every store table's health, in the order the surfaces show it: rewrite candidates first, then objects past the
     /// floors whose tail could not be judged, then estimated empty bytes descending (rows with no estimate last), then total
-    /// bytes descending. The probe, the read, and one small read per object past the floors (its last
-    /// <see cref="TailProbePages"/> pages, for the emptiest <see cref="TailProbeMaxRelations"/> relations). Each statement is
+    /// bytes descending. The probe, the read, and one small read per object past the floors (a window at
+    /// the end of the file for each of the emptiest <see cref="TailProbeMaxRelations"/> relations). Each statement is
     /// bounded by <see cref="StorageCommandDeadlines.McpReadSeconds"/>.
     /// </summary>
     public static async Task<List<StoreTableHealthRow>> GetAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
@@ -975,7 +988,7 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
 
         var (timescale, serverVersion) = await ProbeAsync(postgres, cancellationToken);
 
-        var read = new List<(StoreTableHealthRow Row, string[] TailRelations)>();
+        var read = new List<(StoreTableHealthRow Row, TailRelation[] TailRelations)>();
         await using (var command = postgres.CreateCommand(BuildSql(timescale, serverVersion)))
         {
             command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
@@ -1032,7 +1045,11 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
                     TailRelationsChecked: 0,
                     TailRelationsOccupied: 0,
                     TailOccupied: null);
-                read.Add((row, reader.IsDBNull(45) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(45)));
+                var tailNames = reader.IsDBNull(45) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(45);
+                var tailPages = reader.IsDBNull(46) ? Array.Empty<long>() : reader.GetFieldValue<long[]>(46);
+                var tailEmpty = reader.IsDBNull(47) ? Array.Empty<long>() : reader.GetFieldValue<long[]>(47);
+                var tailOff = reader.IsDBNull(48) ? Array.Empty<bool>() : reader.GetFieldValue<bool[]>(48);
+                read.Add((row, tailNames.Select((name, i) => new TailRelation(name, tailPages[i], tailEmpty[i], tailOff[i])).ToArray()));
             }
         }
 
@@ -1054,51 +1071,79 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
             .ToList();
     }
 
-    /// <summary>
-    /// The tail statement: one row per relation, true when the relation holds a live row in its last
-    /// <see cref="TailProbePages"/> pages. A TID range scan reads only those pages, but only when the bound is a sub-select:
-    /// <c>pg_relation_size</c> is volatile, and a volatile bound in the filter makes PostgreSQL scan the whole table instead
-    /// (measured: a minute on a cold 1 GB table). <paramref name="qualifiedRelations"/> come from
-    /// <c>format('%I.%I')</c> in the read, already quoted.
-    /// </summary>
-    public static string BuildTailProbeSql(IReadOnlyList<string> qualifiedRelations)
+    /// <summary>One relation the tail check picks: its quoted name, its size in pages at the read, its estimated empty bytes, and
+    /// whether its <c>vacuum_truncate</c> option is off.</summary>
+    public readonly record struct TailRelation(string QualifiedName, long Pages, long EstimatedEmptyBytes, bool TruncateOff)
     {
-        ArgumentNullException.ThrowIfNull(qualifiedRelations);
-        return string.Join("\nUNION ALL\n", qualifiedRelations.Select((q, i) =>
-            string.Create(CultureInfo.InvariantCulture,
-                $@"SELECT {i} AS ord, EXISTS (SELECT 1 FROM {q} WHERE ctid >= (SELECT pg_catalog.format('(%s,0)', GREATEST(pg_catalog.pg_relation_size('{q.Replace("'", "''", StringComparison.Ordinal)}'::pg_catalog.regclass) / pg_catalog.current_setting('block_size')::bigint - {TailProbePages}, 0))::pg_catalog.tid)) AS occupied")));
+        /// <summary>The pages at the end of the file whose emptiness answers whether VACUUM can give the space back.</summary>
+        public long WindowPages(long blockSize = 8192) => DarlingVacuumTruncateRule.TailWindowPages(Pages, EstimatedEmptyBytes, blockSize);
     }
 
-    private static async Task<StoreTableHealthRow> WithTailAsync(NpgsqlDataSource postgres, StoreTableHealthRow row, string[] relations, CancellationToken cancellationToken)
+    /// <summary>
+    /// The tail statement: one row per relation, true when the relation holds a live row at or after the first block of its
+    /// window (the last <c>WindowPages</c> pages). A TID range scan reads only those pages, but only when the bound is a sub-select:
+    /// <c>pg_relation_size</c> is volatile, and a volatile bound in the filter makes PostgreSQL scan the whole table instead
+    /// (measured: a minute on a cold 1 GB table). The qualified names come from <c>format('%I.%I')</c> in the read, already quoted.
+    /// </summary>
+    public static string BuildTailProbeSql(IReadOnlyList<(string QualifiedName, long WindowPages)> probes)
     {
-        try
-        {
-            var occupied = 0;
-            await using var command = postgres.CreateCommand(BuildTailProbeSql(relations));
-            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                if (reader.GetBoolean(1))
-                {
-                    occupied++;
-                }
-            }
+        ArgumentNullException.ThrowIfNull(probes);
+        return string.Join("\nUNION ALL\n", probes.Select((p, i) =>
+            string.Create(CultureInfo.InvariantCulture,
+                $@"SELECT {i} AS ord, EXISTS (SELECT 1 FROM {p.QualifiedName} WHERE ctid >= (SELECT pg_catalog.format('(%s,0)', GREATEST(pg_catalog.pg_relation_size('{p.QualifiedName.Replace("'", "''", StringComparison.Ordinal)}'::pg_catalog.regclass) / pg_catalog.current_setting('block_size')::bigint - {p.WindowPages}, 0))::pg_catalog.tid)) AS occupied")));
+    }
 
-            return row with
-            {
-                TailRelationsChecked = relations.Length,
-                TailRelationsOccupied = occupied,
-                TailOccupied = occupied > 0,
-                RewriteCandidate = occupied > 0,
-            };
-        }
-        catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException)
+    private static async Task<StoreTableHealthRow> WithTailAsync(NpgsqlDataSource postgres, StoreTableHealthRow row, TailRelation[] relations, CancellationToken cancellationToken)
+    {
+        /* A relation with vacuum_truncate off needs no read: VACUUM will not cut its file whatever sits at the end. A relation
+           whose window is over the cap is not read and stays unknown. The rest are read, one window each. */
+        var settled = relations.Count(r => r.TruncateOff);
+        var occupied = settled;
+        var checkedCount = settled;
+        var probes = relations
+            .Where(r => !r.TruncateOff && r.WindowPages() <= TailProbeMaxWindowPages)
+            .Select(r => (r.QualifiedName, WindowPages: r.WindowPages()))
+            .ToList();
+
+        if (probes.Count > 0)
         {
-            /* A relation dropped between the two statements, or a permission the login lacks. The tail is then unknown, not
-               empty: TailOccupied stays NULL and PastRewriteFloors still says the object is large and mostly empty. */
-            return row;
+            try
+            {
+                await using var command = postgres.CreateCommand(BuildTailProbeSql(probes));
+                command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                var readChecked = 0;
+                var readOccupied = 0;
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    readChecked++;
+                    if (reader.GetBoolean(1))
+                    {
+                        readOccupied++;
+                    }
+                }
+
+                checkedCount += readChecked;
+                occupied += readOccupied;
+            }
+            catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException)
+            {
+                /* A relation dropped between the two statements, or a permission the login lacks. Those relations are then
+                   unknown, not empty: only what was settled without a read counts. */
+            }
         }
+
+        /* One relation VACUUM cannot give back makes the object a candidate whatever the others say. "VACUUM can give it
+           back" is claimed only when every eligible relation was checked and each one passed. */
+        var allJudged = checkedCount == relations.Length && relations.Length == row.TailRelationsEligible;
+        bool? tailOccupied = occupied > 0 ? true : allJudged ? false : null;
+        return row with
+        {
+            TailRelationsChecked = checkedCount,
+            TailRelationsOccupied = occupied,
+            TailOccupied = tailOccupied,
+            RewriteCandidate = tailOccupied == true,
+        };
     }
 
     /// <summary>Reads every store index, rolled up (see <see cref="StoreIndexHealthRow"/>): invalid first, then larger than

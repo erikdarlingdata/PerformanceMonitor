@@ -107,7 +107,7 @@ public static class DarlingStoreTableMeasureReader
     c.relkind::text,
     quote_ident(n.nspname) || '.' || quote_ident(c.relname),
     pg_catalog.pg_relation_size(c.oid),
-    coalesce(c.reloptions @> ARRAY['vacuum_truncate=false'], false),";
+    " + DarlingVacuumTruncateRule.TruncateOffSql + @",";
 
     private const string ResolvePlainSql = @"
 SELECT" + ResolveColumns + @"
@@ -493,13 +493,10 @@ FROM p";
             return (VerdictDense, $"Dense: live rows fill {fill}% of {pages} and {freeText} is free{reserve}. There is little space to return.");
         }
 
-        if (trailing > 0 && trailingBytes * 2 >= free)
+        if (DarlingVacuumTruncateRule.CanReturnSpace(totalPages, trailing, trailingBytes, free, truncateOff))
         {
-            var off = truncateOff
-                ? " The table's vacuum_truncate option is off, so VACUUM will not do it until that option is turned on."
-                : string.Empty;
             return (VerdictVacuumCanTruncate, string.Create(CultureInfo.InvariantCulture,
-                $"Mostly empty, and VACUUM can truncate the tail. Live rows fill {fill}% of {pages} and {freeText} is free{reserve}. {CountText.Grouped(trailing)} of its {CountText.Plural(empty, "page")} with no row {(trailing == 1 ? "is" : "are")} after the last used block ({lastUsed} of {lastFile}).{off}"));
+                $"Mostly empty, and VACUUM can truncate the tail. Live rows fill {fill}% of {pages} and {freeText} is free{reserve}. {CountText.Grouped(trailing)} of its {CountText.Plural(empty, "page")} with no row {(trailing == 1 ? "is" : "are")} after the last used block ({lastUsed} of {lastFile})."));
         }
 
         if (free < RewriteMinFreeBytes)
@@ -508,7 +505,31 @@ FROM p";
         }
 
         return (VerdictRewriteNeeded, string.Create(CultureInfo.InvariantCulture,
-            $"Mostly empty, and only a rewrite returns the space. Live rows fill {fill}% of {pages} and {freeText} is free inside pages{reserve}. Live rows reach block {lastUsed} of {lastFile}, {(trailing == 0 ? "and a live row sits in the last page, so VACUUM cannot shrink the file" : "so VACUUM can cut off only " + CountText.Plural(trailing, "page"))}."));
+            $"Mostly empty, and only a rewrite returns the space. Live rows fill {fill}% of {pages} and {freeText} is free inside pages{reserve}. Live rows reach block {lastUsed} of {lastFile}, {WhyVacuumCannotReturn(totalPages, trailing, trailingBytes, free, truncateOff)}."));
+    }
+
+    /// <summary>The clause that says why VACUUM cannot return the space of a mostly empty table, one per condition of
+    /// <see cref="DarlingVacuumTruncateRule.CanReturnSpace"/> that failed.</summary>
+    private static string WhyVacuumCannotReturn(long totalPages, long trailing, double trailingBytes, long free, bool truncateOff)
+    {
+        if (truncateOff)
+        {
+            return "and the table's vacuum_truncate option is off, so VACUUM will not cut the file";
+        }
+
+        if (trailing == 0)
+        {
+            return "and a live row sits in the last page, so VACUUM cannot shrink the file";
+        }
+
+        var minimum = DarlingVacuumTruncateRule.MinimumTrailingPages(totalPages);
+        if (trailing < minimum)
+        {
+            return string.Create(CultureInfo.InvariantCulture,
+                $"and only {CountText.Plural(trailing, "page")} at the end {(trailing == 1 ? "is" : "are")} empty, under the {CountText.Plural(minimum, "page")} VACUUM needs before it cuts a file shorter, so it cuts nothing");
+        }
+
+        return "so VACUUM can cut off only " + CountText.Plural(trailing, "page");
     }
 
     private static StoreTableMeasureResult Refuse(string sentence) => new(StoreTableMeasureOutcome.Refused, sentence, null);

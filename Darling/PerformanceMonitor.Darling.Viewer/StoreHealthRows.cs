@@ -124,7 +124,7 @@ internal static class StoreHealthRows
     /// <summary>Whether plain VACUUM can give the empty space back. Only read for a table past the floors.</summary>
     internal static string VacuumCanReturnText(StoreTableHealthRow r) => r.TailOccupied switch
     {
-        true => "No, a live row is near the end",
+        true => "No, VACUUM cannot cut it shorter",
         false => "Yes",
         null => r.PastRewriteFloors ? "Not checked" : "",
     };

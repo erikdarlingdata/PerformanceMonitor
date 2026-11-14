@@ -242,12 +242,8 @@ CREATE TABLE collect.zz_default (id integer);", ct);
         Assert.Equal(0, plain.RelationsPastVacuumTrigger);
     }
 
-    private const string BigChurnTable = @"
-CREATE TABLE collect.{0} (id integer, payload text) WITH (autovacuum_enabled = false);
-INSERT INTO collect.{0} SELECT g, repeat('x', 200) FROM generate_series(1, 450000) AS g;";
-
     [Fact]
-    public async Task TheTailRule_AMostlyEmptyTableWithALiveRowAtTheEndIsACandidate_OneWithAnEmptyTailIsNot()
+    public async Task TheTailRule_ALiveRowInTheWindowIsACandidate_AnEmptyRunVacuumCanCutIsNot_AndTruncateOffIsACandidate()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #8787 live tests.");
@@ -258,14 +254,30 @@ INSERT INTO collect.{0} SELECT g, repeat('x', 200) FROM generate_series(1, 45000
         await connection.OpenAsync(ct);
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        /* Both tables lose nine rows in ten. The second also loses its last rows, a few hundred pages' worth, which is under
-           the point where VACUUM truncates a file, so after a plain VACUUM the last pages are empty and the file keeps its size. */
-        await ExecAsync(connection, string.Format(System.Globalization.CultureInfo.InvariantCulture, BigChurnTable, "zz_tail_live")
-            + string.Format(System.Globalization.CultureInfo.InvariantCulture, BigChurnTable, "zz_tail_empty")
+        /* zz_tail_live and zz_tail_empty lose nine rows in ten. zz_tail_empty also loses its last rows, a few hundred pages' worth,
+           under the 1000 pages (a sixteenth of the file) VACUUM needs before it truncates, so after a plain VACUUM the last pages
+           are empty and the file keeps its size: roughly 90 MB sits free inside pages and VACUUM gives nothing back, so it IS a
+           candidate. zz_tail_free loses the top 60 percent of its ids and is analyzed without a VACUUM, so the file still holds
+           those pages and no live row sits in the window at the end: VACUUM can cut that run. zz_tail_off is zz_tail_free with
+           vacuum_truncate off, which stops VACUUM cutting it. */
+        var fmt = System.Globalization.CultureInfo.InvariantCulture;
+        const string bigTable = @"
+CREATE TABLE collect.{0} (id integer, payload text) WITH (autovacuum_enabled = false{1});
+INSERT INTO collect.{0} SELECT g, repeat('x', 200) FROM generate_series(1, {2}) AS g;";
+        await ExecAsync(connection, string.Format(fmt, bigTable, "zz_tail_live", "", 450000)
+            + string.Format(fmt, bigTable, "zz_tail_empty", "", 450000)
+            + string.Format(fmt, bigTable, "zz_tail_free", "", 700000)
+            + string.Format(fmt, bigTable, "zz_tail_off", ", vacuum_truncate = off", 700000)
             + @"
 DELETE FROM collect.zz_tail_live WHERE id % 10 <> 0;
-DELETE FROM collect.zz_tail_empty WHERE id % 10 <> 0 OR id > 440000;", ct);
-        await FlushThenAsync(connection, new[] { "VACUUM collect.zz_tail_live", "ANALYZE collect.zz_tail_live", "VACUUM collect.zz_tail_empty", "ANALYZE collect.zz_tail_empty" }, ct);
+DELETE FROM collect.zz_tail_empty WHERE id % 10 <> 0 OR id > 440000;
+DELETE FROM collect.zz_tail_free WHERE id > 280000;
+DELETE FROM collect.zz_tail_off WHERE id > 280000;", ct);
+        await FlushThenAsync(connection, new[]
+        {
+            "VACUUM collect.zz_tail_live", "ANALYZE collect.zz_tail_live", "VACUUM collect.zz_tail_empty", "ANALYZE collect.zz_tail_empty",
+            "ANALYZE collect.zz_tail_free", "ANALYZE collect.zz_tail_off",
+        }, ct);
 
         var rows = await DarlingStoreTableHealthReader.GetAsync(dataSource, ct);
 
@@ -278,16 +290,28 @@ DELETE FROM collect.zz_tail_empty WHERE id % 10 <> 0 OR id > 440000;", ct);
 
         var empty = Assert.Single(rows, r => r.TableName == "zz_tail_empty");
         Assert.True(empty.PastRewriteFloors, $"share {empty.EstimatedEmptyShare}, empty bytes {empty.EstimatedEmptyBytes}");
-        Assert.False(empty.TailOccupied);
-        Assert.Equal(1, empty.TailRelationsChecked);
-        Assert.Equal(0, empty.TailRelationsOccupied);
-        Assert.False(empty.RewriteCandidate);
+        Assert.True(empty.TailOccupied);
+        Assert.Equal(1, empty.TailRelationsOccupied);
+        Assert.True(empty.RewriteCandidate);
 
-        /* Candidates first, then the table past the floors whose tail is empty. */
-        Assert.Equal("zz_tail_live", rows[0].TableName);
+        var free = Assert.Single(rows, r => r.TableName == "zz_tail_free");
+        Assert.True(free.PastRewriteFloors, $"share {free.EstimatedEmptyShare}, empty bytes {free.EstimatedEmptyBytes}");
+        Assert.False(free.TailOccupied);
+        Assert.Equal(1, free.TailRelationsChecked);
+        Assert.Equal(0, free.TailRelationsOccupied);
+        Assert.False(free.RewriteCandidate);
+
+        var off = Assert.Single(rows, r => r.TableName == "zz_tail_off");
+        Assert.True(off.PastRewriteFloors);
+        Assert.True(off.TailOccupied);
+        Assert.True(off.RewriteCandidate);
+
+        /* Candidates first, then the table past the floors whose empty run VACUUM can cut. */
+        Assert.Equal(new[] { "zz_tail_empty", "zz_tail_live", "zz_tail_off" }, rows.Where(r => r.RewriteCandidate && r.TableName.StartsWith("zz_tail", StringComparison.Ordinal)).Select(r => r.TableName).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+        Assert.True(rows.ToList().FindIndex(r => r.TableName == "zz_tail_free") > rows.ToList().FindLastIndex(r => r.RewriteCandidate));
 
         using var only = JsonDocument.Parse(await DarlingMcpStoreTableHealthTools.GetStoreTableHealth(dataSource, candidates_only: true, cancellationToken: ct));
-        Assert.Equal(new[] { "zz_tail_live" }, only.RootElement.GetProperty("tables").EnumerateArray().Select(t => t.GetProperty("table_name").GetString()).ToArray());
+        Assert.DoesNotContain(only.RootElement.GetProperty("tables").EnumerateArray(), t => t.GetProperty("table_name").GetString() == "zz_tail_free");
     }
 
     [Fact]

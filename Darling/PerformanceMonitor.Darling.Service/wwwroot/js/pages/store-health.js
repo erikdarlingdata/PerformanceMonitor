@@ -67,7 +67,7 @@ export function describeTable(r) {
     out.rewrite_sev = "Warning";
     out.rewrite_rank = 2;
   } else if (r.past_rewrite_floors === true) {
-    out.rewrite_text = "Last pages not read";
+    out.rewrite_text = "End not checked";
     out.rewrite_sev = "Warning";
     out.rewrite_rank = 1;
   } else {
@@ -76,9 +76,9 @@ export function describeTable(r) {
     out.rewrite_rank = 0;
   }
   if (r.past_rewrite_floors !== true) out.shrink_text = null;
-  else if (r.tail_occupied === true) out.shrink_text = "No, a live row sits in the last pages";
+  else if (r.tail_occupied === true) out.shrink_text = "No, VACUUM cannot cut it shorter";
   else if (r.tail_occupied === false) out.shrink_text = "Yes";
-  else out.shrink_text = "Not known, the last pages could not be read";
+  else out.shrink_text = "Not checked";
   out.last_vacuum_at = later(r.last_vacuum, r.last_autovacuum);
   out.last_analyze_at = later(r.last_analyze, r.last_autoanalyze);
   out.vacuum_due_text = r.vacuum_trigger_rows == null ? null : Number(r.relations_past_vacuum_trigger) > 0 ? "Due" : "Not yet";
@@ -107,7 +107,7 @@ export const TABLE_COLUMNS = [
   { key: "table_name", label: "Table", name: true, display: named, sortValue: named },
   { key: "kind", label: "Kind", display: kindText, sortValue: kindText },
   { key: "rewrite_text", label: "Rewrite", sevKey: "rewrite_sev", sortValue: (r) => r.rewrite_rank,
-    hint: "Rewrite candidate: about half of the table or more is estimated empty, and that is a large amount of space. A live row in the last pages stops VACUUM from giving it back, so only a rewrite can." },
+    hint: "Rewrite candidate: about half of the table or more is estimated empty, and that is a large amount of space. VACUUM gives space back only by cutting empty pages off the end of the file, so a live row near the end, or a table set not to truncate, means only a rewrite can." },
   { key: "total_bytes", label: "Total", format: "bytes" },
   { key: "heap_bytes", label: "Heap", format: "bytes", hint: "The table's own pages, without indexes and TOAST." },
   { key: "index_bytes", label: "Indexes", format: "bytes" },
@@ -121,7 +121,7 @@ export const TABLE_COLUMNS = [
     sortValue: (r) => (Number(r.estimate_relations) > 1 ? Number(r.estimate_relations_usable) / Number(r.estimate_relations) : null),
     hint: "For a hypertable or a partitioned table: how many of its chunks or partitions had usable statistics." },
   { key: "shrink_text", label: "VACUUM can shrink it", wrap: true, display: (r) => dash(r.shrink_text),
-    hint: "Only checked for a table with a lot of estimated empty space. A live row in the last pages means VACUUM cannot cut the file shorter." },
+    hint: "Only checked for a table with a lot of estimated empty space. No means a live row sits near the end of the file, or the table is set not to truncate, so VACUUM cannot cut it shorter. Not checked means the end of the file was too large to read, the read failed, or a hypertable has more mostly empty parts than are checked." },
   { key: "estimated_rows", label: "Rows (est.)", format: "int" },
   { key: "measure", label: "Measure", sortable: false, render: (r) => measureCell(r), copyValue: () => "" },
 

@@ -623,10 +623,12 @@ public sealed class DarlingMcpStoreMetricsTools
                 runs_in_window = delta?.RunsInWindow,
                 failures_in_window = delta?.FailuresInWindow,
                 /* #8787 part D2: live from TimescaleDB, joined on the [job_id] suffix of object_name. Null when the counters are not
-                   available (job_crash_read says why) or the job is gone. consecutive_crashes above zero means the job is backing off. */
+                   available (job_crash_read says why) or the job is gone. consecutive_crashes above zero means the job is backing off.
+                   next_start is null while a crashed job is in backoff (crash_backoff true): the scheduler sets the next start itself. */
                 consecutive_crashes = CrashFor(r, crashesByJob)?.ConsecutiveCrashes,
                 total_crashes = CrashFor(r, crashesByJob)?.TotalCrashes,
                 next_start = CrashFor(r, crashesByJob)?.NextStart?.ToString("o", CultureInfo.InvariantCulture),
+                crash_backoff = CrashFor(r, crashesByJob)?.CrashBackoff,
             };
         }
 
