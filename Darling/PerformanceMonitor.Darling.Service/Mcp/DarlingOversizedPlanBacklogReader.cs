@@ -33,7 +33,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// be anything else.</b> <c>captured</c> is <c>captured_at IS NOT NULL</c>; <c>expired</c> excludes a row
 /// that also carries content, because a capture retires a standing expiry
 /// (<see cref="OversizedPlanBacklog.RecordCaptureSql"/>) and so does a re-sighting
-/// (<see cref="OversizedPlanBacklog.UpsertSightingSql"/>); <c>pending</c> is the sweep's own claim
+/// (<see cref="OversizedPlanBacklog.RecordSightingsSql"/>); <c>pending</c> is the sweep's own claim
 /// predicate. A row with no content and a standing <c>expired_at</c> is <c>expired</c> when a fetch stamped
 /// it, which also stamps <c>last_attempt_at</c>, and <c>dropped</c> when the sweep's trim did, which only
 /// ever stamps a row never attempted (#8567). Every row therefore lands in exactly one bucket and
