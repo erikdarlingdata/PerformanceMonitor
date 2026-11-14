@@ -86,7 +86,7 @@ internal static class DataRootMigration
     private static readonly string[] s_directories = { "config", "archive", "logs", "monitor.duckdb.tmp" };
 
     /// <summary>Files Lite owns directly under its data root.</summary>
-    private static readonly string[] s_files = { "monitor.duckdb", "monitor.duckdb.wal", "alert_state.json" };
+    private static readonly string[] s_files = { "monitor.duckdb", "monitor.duckdb.wal", "alert_state.json", "store-health-history.json" };
 
     /// <summary>
     /// The two artifacts that make a root "the live install": user settings and the store. If BOTH are

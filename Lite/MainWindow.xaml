@@ -353,6 +353,7 @@
                                             ImportSettingsClick="ImportSettingsButton_Click"
                                             ViewLogClick="ViewLogButton_Click"
                                             OpenLogFolderClick="OpenLogFolderButton_Click"
+                                            StoreHealthClick="StoreHealthButton_Click"
                                             AboutClick="AboutButton_Click"/>
                 </Border>
             </Grid>

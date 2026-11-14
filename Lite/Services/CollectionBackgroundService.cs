@@ -166,7 +166,7 @@ public class CollectionBackgroundService : BackgroundService
        to parquet and reset the database. INSERT performance degrades badly with
        large tables (33x slower at 667MB in testing). Data remains fully queryable
        through the archive views (hot UNION parquet). */
-    private const double ArchiveSizeThresholdMb = 512;
+    internal const double ArchiveSizeThresholdMb = 512;
 
     public bool IsPaused { get; set; }
     public DateTime? LastCollectionTime { get; private set; }
@@ -809,6 +809,10 @@ public class CollectionBackgroundService : BackgroundService
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Archival cycle failed");
+            /* #8788: a pass that threw before it could record itself (the services record their own handled outcomes). */
+            _archiveService.History?.Record(new StoreHousekeepingEvent(
+                DateTime.UtcNow, sizeDue ? StoreHousekeepingHistory.KindSizeReset : StoreHousekeepingHistory.KindArchive,
+                StoreHousekeepingHistory.OutcomeFailed, Message: ex.Message));
         }
     }
 
@@ -849,6 +853,9 @@ public class CollectionBackgroundService : BackgroundService
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Retention cleanup failed");
+            /* #8788: a cleanup that threw before it could record itself. */
+            _retentionService.History?.Record(new StoreHousekeepingEvent(
+                DateTime.UtcNow, StoreHousekeepingHistory.KindRetention, StoreHousekeepingHistory.OutcomeFailed, Message: ex.Message));
         }
     }
 

@@ -21,7 +21,7 @@ internal static class McpInstructions
     /// <summary>The census of the whole catalog, as <see cref="Text"/> carries it. The count the investigations setting adds is the
     /// size of <see cref="McpInvestigationPolicy.InvestigationTools"/>, so it follows the set (#8463).</summary>
     private static string CatalogCensus =>
-        $"113 tools (99 by default; `{McpWritePolicy.WritesSetting}` adds the twelve write tools, `{McpInvestigationPolicy.InvestigationsSetting}` the {McpInvestigationPolicy.InvestigationTools.Count} claim and report tools)";
+        $"114 tools (100 by default; `{McpWritePolicy.WritesSetting}` adds the twelve write tools, `{McpInvestigationPolicy.InvestigationsSetting}` the {McpInvestigationPolicy.InvestigationTools.Count} claim and report tools)";
 
     /// <summary>
     /// #5789: the instructions THIS server sends. The census counts <paramref name="served"/> (the tools left after
