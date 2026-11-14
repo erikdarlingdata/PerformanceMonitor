@@ -128,6 +128,7 @@ public sealed class DarlingMcpStoreTableHealthTools
                 result["rewrite_candidates"] = summary.RewriteCandidates;
                 result["tables_without_estimate"] = summary.WithoutEstimate;
                 result["without_estimate_by_reason"] = summary.WithoutEstimateByReason.ToDictionary(p => p.Key, p => p.Value);
+                result["without_estimate_reason_text"] = summary.WithoutEstimateByReason.ToDictionary(p => p.Key, p => DarlingStoreTableHealthReader.DescribeReason(p.Key));
                 result["candidates_only"] = candidates_only;
                 result["tables_returned"] = page.Count;
                 result["truncated"] = truncated;
@@ -181,6 +182,7 @@ public sealed class DarlingMcpStoreTableHealthTools
         estimate_relations = r.EstimateRelations,
         estimate_relations_usable = r.EstimateRelationsUsable,
         estimate_unavailable_reason = r.EstimateUnavailableReason,
+        estimate_unavailable_text = r.EstimateUnavailableReason is null ? null : DarlingStoreTableHealthReader.DescribeReason(r.EstimateUnavailableReason),
         past_rewrite_floors = r.PastRewriteFloors,
         tail_occupied = r.TailOccupied,
         tail_relations_eligible = r.TailRelationsEligible,

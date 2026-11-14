@@ -12,6 +12,7 @@
  *   #/fleet             — Fleet Overview (default)
  *   #/ag                — Availability Group topology (#991; nav entry revealed only when the store has AG data)
  *   #/sweeps            — Fleet Sweep reports: the sweep-with-memory timeline (#3466)
+ *   #/store-health      — the monitoring store's own table and index health (#8787)
  *   #/server/{name}     — one server's detail (Overview)
  *   #/server/{name}/{tab} — one server's detail, opened on a named sub-tab (pages/server-tabs.js)
  *   #/alerts            — fleet-wide Alert History
@@ -44,6 +45,7 @@ import { makeScrollReset } from "./scroll-reset.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
 import { renderSweeps } from "./pages/sweeps.js";
+import { renderStoreHealth } from "./pages/store-health.js";
 import { renderAdmin } from "./pages/admin.js";
 import { renderServer } from "./pages/server.js";
 import { renderFinops } from "./pages/finops.js";
@@ -96,6 +98,8 @@ export function currentRoute() {
   if (h === "#/finops" || h.startsWith("#/finops/")) return finopsRoute(h.slice("#/finops".length).replace(/^\//, ""));
   if (h === "#/ag" || h === "#/ag/") return { name: "ag" };
   if (h === "#/sweeps" || h === "#/sweeps/") return { name: "sweeps" };
+  /* #8787: the monitoring store's own table and index health. Fleet-wide, so not a scoped route. */
+  if (h === "#/store-health" || h === "#/store-health/") return { name: "storeHealth" };
   /* #/triage?server=...&metric=...&at=...&dedup=... (#2710) — the deep-link every alert webhook carries.
      The query rides INSIDE the hash (a static SPA route), so it is split off here and parsed by the page.
      Checked before #/alerts only for symmetry; the two prefixes cannot collide. */
@@ -272,6 +276,7 @@ export const ROUTE_RENDERERS = {
   finops: (m, r, o) => renderFinops(m, r.param, r.tab, o),
   ag: (m, r, o) => renderAg(m, o),
   sweeps: (m, r, o) => renderSweeps(m, o),
+  storeHealth: (m) => renderStoreHealth(m),
   alerts: (m) => renderAlerts(m),
   investigations: (m, r) => renderInvestigations(m, r.request),
   proposals: (m, r, o) => renderProposals(m, r.proposal, o),
@@ -359,6 +364,7 @@ function navKeyFor(r) {
   if (r.name === "manageQueryTags") return "manage-query-tags";
   if (r.name === "queryTagUsage") return "query-tag-usage";
   if (r.name === "jobHistory") return "job-history";
+  if (r.name === "storeHealth") return "store-health";
   return r.name;
 }
 
@@ -658,10 +664,11 @@ function updateStatusBar(d) {
    "don't waste a read against a page you opened to read once" rather than "don't discard an edit". hashchange
    still routes there normally on first load / a fresh alert link.
    Query Tag Usage (#6793): its figures are 24 hour totals and the fleet read can take minutes on a large store, so a 60 s
-   re-read adds almost nothing and costs a lot. The page's own server picker and range picker still re-read it. */
+   re-read adds almost nothing and costs a lot. The page's own server picker and range picker still re-read it.
+   Store Health (#8787): one read takes seconds of catalog work, and the page has its own Refresh button. */
 function isNoPollRoute(routeName) {
   return routeName === "editor" || routeName === "notebookEditor" || routeName === "alertEditor"
-    || routeName === "triage" || routeName === "queryTagUsage";
+    || routeName === "triage" || routeName === "queryTagUsage" || routeName === "storeHealth";
 }
 
 /* Per-page schedule (#4666). pageNextRefreshAt is when the page may re-render next (Infinity = never);
