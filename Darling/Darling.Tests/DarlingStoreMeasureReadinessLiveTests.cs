@@ -37,7 +37,7 @@ public sealed class DarlingStoreMeasureReadinessLiveTests
     }
 
     [Fact]
-    public async Task Measure_ReadsMostlyEmptyAsRewrite_ThenVacuumCanTruncate_AndRefusesWhatItShould()
+    public async Task Measure_ReadsASmallMostlyEmptyTableAsDense_ThenVacuumCanTruncate_AndRefusesWhatItShould()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #8787 live tests.");
@@ -60,8 +60,11 @@ CREATE VIEW collect.zz_measure_view AS SELECT id FROM collect.zz_measure;", ct);
         var mostlyEmpty = first.Measure!;
         Assert.True(mostlyEmpty.EmptyShare > 0.8, $"share {mostlyEmpty.EmptyShare}");
         Assert.Equal(102, mostlyEmpty.Rows);
-        Assert.Equal(DarlingStoreTableMeasureReader.VerdictRewriteNeeded, mostlyEmpty.VerdictKind);
-        Assert.Contains("only a rewrite", mostlyEmpty.Verdict, StringComparison.Ordinal);
+        /* Mostly empty, but far under the 64 MiB a rewrite must free: it reads dense and says why. */
+        Assert.True(mostlyEmpty.FreeShare > 0.8, $"free share {mostlyEmpty.FreeShare}");
+        Assert.True(mostlyEmpty.FreeBytes < DarlingStoreTableMeasureReader.RewriteMinFreeBytes);
+        Assert.Equal(DarlingStoreTableMeasureReader.VerdictDense, mostlyEmpty.VerdictKind);
+        Assert.Contains("Mostly empty but small", mostlyEmpty.Verdict, StringComparison.Ordinal);
         Assert.Equal(mostlyEmpty.TotalPages - 1, mostlyEmpty.LastFileBlock);
         Assert.Equal(mostlyEmpty.TotalPages, mostlyEmpty.PagesWithRows + mostlyEmpty.EmptyPages);
 

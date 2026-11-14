@@ -95,6 +95,7 @@ const INDEXES = [
   index({ index_name: "ix_broken", valid: false }),
   index({ index_name: "ix_big", larger_than_heap: true, bytes: 900 * MB, index_to_heap: 1.1 }),
   index({ index_name: "ix_ok" }),
+  index({ index_name: "ix_unanalyzed", estimate_skipped_reason: "The table has never been analyzed, so no estimate is made." }),
 ];
 const coverage = (o) => ({ schema_name: "collect", table_name: "parts", index_name: "ix_parts", parent_index_valid: true, leaf_count: 3, leaves_with_index: 3, leaves_missing_index: 0, missing_leaves: [], leaves_invalid_index: 0, invalid_leaves: [], ...o });
 const indexesAnswer = (cov) => ({
@@ -103,7 +104,7 @@ const indexesAnswer = (cov) => ({
 });
 const MEASURE = {
   verdict: "Mostly empty and only a rewrite returns the space.", verdict_kind: "rewrite_needed", table: "collect.store_metrics", total_pages: 1000, pages_with_rows: 300, empty_pages: 700,
-  empty_share: 0.7, rows: 3000, rows_per_used_page: 10, last_used_block: 998, last_file_block: 999, trailing_empty_pages: 0, vacuum_shrink_disabled: false,
+  empty_share: 0.7, live_bytes: 2000000, free_bytes: 6000000, free_share: 0.75, fillfactor: 100, rows: 3000, rows_per_used_page: 10, last_used_block: 998, last_file_block: 999, trailing_empty_pages: 0, vacuum_shrink_disabled: false,
   occupancy: { pages_with_1_row: 10, pages_with_2_to_4_rows: 20, pages_with_5_to_10_rows: 270, pages_with_over_10_rows: 0 }, elapsed_ms: 40,
 };
 

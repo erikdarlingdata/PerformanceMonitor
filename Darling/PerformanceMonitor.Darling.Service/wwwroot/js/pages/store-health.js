@@ -27,7 +27,7 @@
 
 import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, onPageLeave, fmtInt, fmtBytes, fmtPct } from "../util.js";
 import { gridTable } from "../panels.js";
-import { detailColumn, indexSkipWord } from "../pg-grid-text.js";
+import { detailColumn, firstSentence } from "../pg-grid-text.js";
 import { countWord, plainText } from "../plain-text.js";
 
 /** Rows asked for per section. The read takes at most 1000. */
@@ -41,7 +41,7 @@ const KIND_LABELS = {
 };
 
 /** The sentence under the tables grid. */
-export const ESTIMATE_NOTE = "Empty space is an estimate worked out from table statistics. Measure counts the pages of one table and gives a measured figure.";
+export const ESTIMATE_NOTE = "Empty space is an estimate worked out from table statistics. Measure reads one table and gives a measured figure.";
 
 /** The one line that replaces the coverage section when every partition has every index. */
 export const COVERAGE_CLEAN_LINE = "Every partition of every partitioned table has each index of its parent, and none is invalid.";
@@ -163,14 +163,31 @@ export function indexFlags(r) {
 
 const indexFlagText = (r) => (indexFlags(r).join(", ") || "—");
 
+/** The read gives the reason an index has no estimate as one plain sentence. The grid shows it in a few words and opens the sentence on a click. */
+const INDEX_SKIP_WORDS = [
+  [/^The index covers only some rows/, "Partial index"],
+  [/^The table has never been analyzed/, "Table not analyzed"],
+  [/^A key column uses the name type/, "Key column type"],
+  [/^The column sizes are not visible/, "No column sizes"],
+  [/^The index holds no pages yet/, "Empty index"],
+  [/^The estimate came out below zero/, "Estimate below zero"],
+  [/^The index is not valid or not ready/, "Not valid or not ready"],
+];
+
+export function indexSkipText(text) {
+  if (typeof text !== "string" || text === "") return null;
+  for (const [re, word] of INDEX_SKIP_WORDS) if (re.test(text)) return word;
+  return firstSentence(text);
+}
+
 export const INDEX_COLUMNS = [
   { key: "flags", label: "Flags", display: indexFlagText, sortValue: (r) => (r.valid === false ? 3 : r.larger_than_heap === true ? 2 : r.rarely_used === true ? 1 : 0),
     cellClass: (r) => (r.valid === false ? "sev-Critical" : indexFlags(r).length ? "sev-Warning" : null) },
   { key: "index_name", label: "Index", name: true },
   { key: "table_name", label: "Table", display: named, sortValue: named },
-  { key: "kind", label: "Kind", display: (r) => KIND_LABELS[r.kind] || String(r.kind ?? "") },
+  { key: "kind", label: "Kind", group: "More", display: (r) => KIND_LABELS[r.kind] || String(r.kind ?? "") },
   { key: "bytes", label: "Size", format: "bytes" },
-  { key: "heap_bytes", label: "Table size", format: "bytes" },
+  { key: "heap_bytes", label: "Table size", group: "More", format: "bytes" },
   { key: "index_to_heap", label: "Index vs table %", display: (r) => (r.index_to_heap == null ? "—" : fmtPct(Number(r.index_to_heap) * 100)),
     sortValue: (r) => (r.index_to_heap == null ? null : Number(r.index_to_heap)),
     hint: "The index size as a share of its table's size. Over 100% means the index is larger than the table." },
@@ -178,11 +195,11 @@ export const INDEX_COLUMNS = [
   { key: "estimated_reclaimable_bytes", label: "Empty (est.)", format: "bytes", hint: "The estimated empty space in the index. Blank when no estimate can be made." },
   { key: "estimated_bloat_share", label: "Empty % (est.)", display: (r) => (r.estimated_bloat_share == null ? "—" : fmtPct(Number(r.estimated_bloat_share) * 100)),
     sortValue: (r) => (r.estimated_bloat_share == null ? null : Number(r.estimated_bloat_share)) },
-  detailColumn("estimate_skipped_reason", "Not Estimated", indexSkipWord, "Why no empty-space figure could be estimated for this index. Blank means it was estimated."),
-  { key: "index_count", label: "Copies", display: (r) => (Number(r.index_count) > 1 ? String(r.index_count) : "—"), sortValue: (r) => Number(r.index_count),
+  detailColumn("estimate_skipped_reason", "Not Estimated", indexSkipText, "Why no empty-space figure could be estimated for this index. Blank means it was estimated."),
+  { key: "index_count", label: "Copies", group: "More", display: (r) => (Number(r.index_count) > 1 ? String(r.index_count) : "—"), sortValue: (r) => Number(r.index_count),
     hint: "For a hypertable or a partitioned table: how many chunk or partition indexes this row adds up." },
-  { key: "is_primary_key", label: "Primary key", format: "bool" },
-  { key: "is_unique", label: "Unique", format: "bool" },
+  { key: "is_primary_key", label: "Primary key", group: "More", format: "bool" },
+  { key: "is_unique", label: "Unique", group: "More", format: "bool" },
 ];
 
 /** The rows of the coverage grid: a parent index with a partition that lacks it or holds it invalid, or a parent index that is invalid. */
@@ -367,8 +384,8 @@ function drawTables(res, headerBox, tablesBox) {
   const head = [
     el("div", { class: "rollup" }, [el("div", { class: "rollup-group" }, [
       tile(fmtBytes(d.store_total_bytes), "Store tables and indexes", countWord(Number(d.store_tables) || 0, "table")),
-      tile(fmtInt(candidates), "Rewrite candidates", candidates > 0 ? "VACUUM cannot return the space" : "none", candidates > 0 ? "critical" : "healthy"),
-      tile(fmtInt(noEstimate), "Tables with no usable estimate", noEstimate > 0 ? "empty space not known" : "every table has one", noEstimate > 0 ? "warning" : "healthy"),
+      tile(fmtInt(candidates), candidates === 1 ? "Rewrite candidate" : "Rewrite candidates", candidates > 0 ? "VACUUM cannot return the space" : "none", candidates > 0 ? "critical" : "healthy"),
+      tile(fmtInt(noEstimate), noEstimate === 1 ? "Table with no usable estimate" : "Tables with no usable estimate", noEstimate > 0 ? "empty space not known" : "every table has one", noEstimate > 0 ? "warning" : "healthy"),
     ])]),
   ];
   const reasons = d.without_estimate_by_reason && typeof d.without_estimate_by_reason === "object" ? Object.entries(d.without_estimate_by_reason) : [];
@@ -423,6 +440,8 @@ function drawIndexes(res, indexesBox, coverageBox) {
     id: "store-health|indexes",
     title: "Store indexes",
     columns: INDEX_COLUMNS,
+    groups: ["More"],
+    defaultGroups: [],
     emptyText: "The store has no indexes to show.",
   }));
   mount(indexesBox, parts);
@@ -465,7 +484,7 @@ function drawReadiness(res, box) {
 function measureCell(r) {
   if (r.kind !== "table") return el("span", { class: "meta", text: "—", title: "Measure works on one plain table. A hypertable or a partitioned table is measured through its chunks or partitions." });
   const name = named(r);
-  const btn = el("button", { class: "btn small", type: "button", text: "Measure", title: "Count the pages of " + name + " that hold a live row. This reads every row location of the table." });
+  const btn = el("button", { class: "btn small", type: "button", text: "Measure", title: "Measure how much of the pages of " + name + " its live rows fill. This reads the whole table once, but not its large stored values." });
   btn.addEventListener("click", () => measureTable(name));
   measureButtons.push(btn);
   if (measuring !== null) {
@@ -521,6 +540,14 @@ export function truncateText(m) {
   return "There is no empty page to give back.";
 }
 
+/** What the live rows take and what they leave free, from the measure's own fields. */
+export function freeText(m) {
+  if (m.live_bytes == null || m.free_bytes == null) return "—";
+  const ff = Number(m.fillfactor);
+  const reserve = ff > 0 && ff < 100 ? ", beyond the " + ff + "% fillfactor the table keeps free on purpose" : "";
+  return fmtBytes(m.live_bytes) + " used by live rows, " + fmtBytes(m.free_bytes) + " free (" + (m.free_share == null ? "—" : fmtPct(Number(m.free_share) * 100)) + ")" + reserve + ".";
+}
+
 function measureResult(table, m, took) {
   const pages = Number(m.total_pages) || 0;
   const occ = m.occupancy && typeof m.occupancy === "object" ? m.occupancy : {};
@@ -543,12 +570,13 @@ function measureResult(table, m, took) {
     el("h4", { text: "Measured: " + table }),
     el("div", { text: plainText(String(m.verdict || "")) }),
     el("table", { class: "kv" }, [el("tbody", {}, [
+      fact("Space in the pages", freeText(m)),
       fact("Empty pages", fmtInt(m.empty_pages) + " of " + fmtInt(pages) + " (" + (m.empty_share == null ? "—" : fmtPct(Number(m.empty_share) * 100)) + ")"),
       fact("Rows per page that holds rows", m.rows_per_used_page == null ? "—" : Number(m.rows_per_used_page).toLocaleString(undefined, { maximumFractionDigits: 1 })),
       fact("Rows", fmtInt(m.rows)),
       fact("Can VACUUM shrink the file?", truncateText(m)),
     ])]),
     histogram,
-    el("div", { class: "meta", text: took + " A page that holds only dead rows counts as empty, because VACUUM frees it." }),
+    el("div", { class: "meta", text: took + " Free space is worked out from the size of every live row. Column padding is not counted, so it reads a little high. A page that holds only dead rows counts as empty, because VACUUM frees it." }),
   ]);
 }

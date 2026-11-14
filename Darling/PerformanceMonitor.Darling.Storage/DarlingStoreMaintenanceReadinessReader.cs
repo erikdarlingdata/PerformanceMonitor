@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -207,7 +208,7 @@ SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'member'),
         foreach (var job in crashes.Crashing)
         {
             reasons.Add(string.Create(CultureInfo.InvariantCulture,
-                $"The background job {job.ProcName}{(job.HypertableName is null ? string.Empty : " on " + job.HypertableName)} (job {job.JobId}) has crashed {job.ConsecutiveCrashes} times in a row."));
+                $"The background job {job.ProcName}{(job.HypertableName is null ? string.Empty : " on " + job.HypertableName)} (job {job.JobId}) has crashed {CountText.Plural(job.ConsecutiveCrashes, "time")} in a row."));
         }
 
         var safe = reasons.Count == 0;
@@ -238,7 +239,7 @@ SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'member'),
         if (!canSeeAllSessions && hiddenSessionCount > 0)
         {
             verdict += string.Create(CultureInfo.InvariantCulture,
-                $" Transaction age was checked only for sessions this role can see: {hiddenSessionCount} sessions of other roles are hidden from it, so how long their transactions have been open is unknown. Locks, vacuums, slots and job crashes were checked in full.");
+                $" Transaction age was checked only for sessions this role can see: {CountText.Plural(hiddenSessionCount, "session")} of other roles {(hiddenSessionCount == 1 ? "is" : "are")} hidden from it, so how long their transactions have been open is unknown. Locks, vacuums, slots and job crashes were checked in full.");
         }
 
         if (!crashes.Available)
@@ -278,7 +279,7 @@ SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'member'),
     private static string Clip(string text) => text.Length <= 60 ? text : text[..60] + "...";
 
     private static string Age(long seconds) => seconds < 120
-        ? string.Create(CultureInfo.InvariantCulture, $"{seconds} seconds")
+        ? CountText.Plural(seconds, "second")
         : seconds < 7200
             ? string.Create(CultureInfo.InvariantCulture, $"{seconds / 60} minutes")
             : string.Create(CultureInfo.InvariantCulture, $"{seconds / 3600.0:0.#} hours");

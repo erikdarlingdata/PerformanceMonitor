@@ -43,13 +43,11 @@ public sealed class DarlingMcpStoreTableHealthTools
     internal static readonly string[] Sections = { "tables", "indexes", "all" };
 
     [McpServerTool(Name = "get_store_table_health"), Description(
-        "Gets the health of the monitoring STORE's OWN tables (plain, partitioned, hypertable, continuous aggregate) and indexes, not a "
-        + "monitored server's; no server_name. Per table: size split (heap/index/toast), estimated empty space from table "
-        + "statistics (an ESTIMATE; null with a reason when statistics are missing or stale, never zero), visibility map coverage, "
-        + "distance to the next autovacuum, insert/update/delete/HOT rates since the statistics were reset, dead rows, last "
-        + "vacuum/analyze, autovacuum off, 7-day growth where store_metrics records it, whether plain VACUUM can give the space back, "
-        + "and rewrite_candidate. Rewrite candidates first. Per index: size, scans, index-to-heap ratio, validity, larger_than_heap, "
-        + "rarely_used, a bloat estimate; plus leaf index coverage for partitioned parents. <<GUIDE>> Reads the catalogs of the "
+        "Gets the health of the monitoring STORE's OWN tables and indexes, not a monitored server's; no server_name. Per table: size "
+        + "split, estimated empty space (an ESTIMATE, null with a reason when statistics are missing or stale, never zero), dead rows, "
+        + "autovacuum distance, change rates, whether plain VACUUM can give the space back, and rewrite_candidate (candidates first). "
+        + "Per index: size, scans, bloat estimate, validity; plus index coverage for partitioned parents. "
+        + "<<GUIDE>> Also per table: plain, partitioned, hypertable and continuous aggregate kinds, the size split (heap, index, toast), visibility map coverage, insert, update, delete and HOT rates since the statistics were reset, last vacuum and analyze, autovacuum off, 7-day growth where store_metrics records it. Per index: scans, index-to-heap ratio, larger_than_heap and rarely_used. Reads the catalogs of the "
         + "monitoring store live. Hypertable chunks and the relations holding compressed data roll up to the hypertable "
         + "(chunk_count), a continuous aggregate to its view name, and a partitioned table's leaves to the parent (leaf_count); a "
         + "leaf or chunk is never its own row, and chunk or leaf indexes that are clones of one parent index are one index row. "
@@ -115,8 +113,8 @@ public sealed class DarlingMcpStoreTableHealthTools
                         $"{p.Value} {DarlingStoreTableHealthReader.DescribeReason(p.Key)}"));
                 var pastFloorsUnread = all.Count(r => r.PastRewriteFloors && r.TailOccupied is null);
                 var header = string.Create(CultureInfo.InvariantCulture,
-                    $"{summary.TableCount} store tables, {summary.TotalBytes} bytes in total, {summary.RewriteCandidates} rewrite candidates, "
-                    + $"{summary.WithoutEstimate} without a usable empty-space estimate ({noEstimate}).")
+                    $"{CountText.Plural(summary.TableCount, "store table")}, {summary.TotalBytes} bytes in total, {CountText.Plural(summary.RewriteCandidates, "rewrite candidate")}, "
+                    + $"{CountText.Grouped(summary.WithoutEstimate)} without a usable empty-space estimate ({noEstimate}).")
                     + (pastFloorsUnread > 0
                         ? string.Create(CultureInfo.InvariantCulture, $" {pastFloorsUnread} past the empty-space floors with an unreadable tail.")
                         : string.Empty);
@@ -144,8 +142,8 @@ public sealed class DarlingMcpStoreTableHealthTools
                 var incomplete = coverageRows.Count(c => c.LeavesMissingIndex > 0 || c.LeavesInvalidIndex > 0);
 
                 result["index_header"] = string.Create(CultureInfo.InvariantCulture,
-                    $"{indexRows.Count} store indexes, {indexRows.Count(r => r.LargerThanHeap)} larger than their heap, {indexRows.Count(r => r.RarelyUsed)} rarely used, "
-                    + $"{indexRows.Count(r => !r.Valid)} invalid; {incomplete} partitioned-parent indexes with a leaf missing or invalid.");
+                    $"{CountText.Plural(indexRows.Count, "store index", "store indexes")}, {indexRows.Count(r => r.LargerThanHeap)} larger than their heap, {indexRows.Count(r => r.RarelyUsed)} rarely used, "
+                    + $"{indexRows.Count(r => !r.Valid)} invalid, and {CountText.Plural(incomplete, "partitioned-parent index", "partitioned-parent indexes")} with a leaf missing or invalid.");
                 result["indexes_total"] = indexRows.Count;
                 result["indexes_returned"] = indexPage.Count;
                 result["indexes_truncated"] = indexTruncated;

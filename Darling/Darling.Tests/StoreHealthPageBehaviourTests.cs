@@ -98,7 +98,7 @@ public sealed class StoreHealthPageBehaviourTests
     {
         var first = Result.Value.GetProperty("first");
         var tiles = first.GetProperty("tiles").EnumerateArray().Select(t => t.GetString()!).ToArray();
-        Assert.Contains(tiles, t => t.Contains("Rewrite candidates", StringComparison.Ordinal) && t.StartsWith("1", StringComparison.Ordinal));
+        Assert.Contains(tiles, t => t.Contains("Rewrite candidate", StringComparison.Ordinal) && !t.Contains("Rewrite candidates", StringComparison.Ordinal) && t.StartsWith("1", StringComparison.Ordinal));
         Assert.Contains("Never analyzed: 1", first.GetProperty("headerText").GetString()!, StringComparison.Ordinal);
         Assert.Contains("Not safe for maintenance now.", first.GetProperty("readiness").GetString()!, StringComparison.Ordinal);
         Assert.Contains("estimate", first.GetProperty("note")[0].GetString()!, StringComparison.Ordinal);
@@ -111,6 +111,8 @@ public sealed class StoreHealthPageBehaviourTests
         var rows = Rows(after.GetProperty("indexRows"));
         Assert.Equal("Invalid", rows[0][0]);
         Assert.Equal("Larger than its table", rows[1][0]);
+        Assert.Contains(rows, r => r.Any(c => c.Contains("Table not analyzed", StringComparison.Ordinal)));
+        Assert.DoesNotContain(rows, r => r.Any(c => c.Contains("reltuples", StringComparison.Ordinal)));
         var coverage = Rows(after.GetProperty("coverageRows"));
         Assert.Single(coverage);
         Assert.Equal("collect.parts_2", coverage[0][6]);
@@ -137,6 +139,7 @@ public sealed class StoreHealthPageBehaviourTests
         var panel = m.GetProperty("panelText").GetString()!;
         Assert.Contains("700 of 1,000", panel, StringComparison.Ordinal);
         Assert.Contains("Can VACUUM shrink the file?", panel, StringComparison.Ordinal);
+        Assert.Contains("used by live rows", panel, StringComparison.Ordinal);
         Assert.Equal(4, m.GetProperty("histogramRows").GetArrayLength());
     }
 }

@@ -27,18 +27,21 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpStoreTableMeasureTools
 {
     [McpServerTool(Name = "measure_store_table"), Description(
-        "Measures the empty space of ONE table in the monitoring STORE (not a monitored server's), by counting which file pages hold "
-        + "a live row: a measurement, where get_store_table_health gives an estimate. One call, one table, never a sweep. "
+        "Measures the empty space of ONE table in the monitoring STORE (not a monitored server's), by adding up the size of its live rows "
+        + "against the space of its file pages and counting which pages hold a live row: a measurement, where get_store_table_health gives an estimate. One call, one table, never a sweep. "
         + "Returns a one-line verdict: dense, mostly empty and only a rewrite returns the space, or mostly empty and VACUUM can truncate the tail. "
         + "<<GUIDE>> table is schema-qualified (for example collect.store_metrics). Accepted: an ordinary table in the collect or config "
         + "schema, a partition, or a chunk of a product hypertable. A hypertable or partitioned parent is refused with a sentence naming its "
         + "largest chunks or partitions to measure instead, and so is a view, a name outside the product schemas, an unknown name and a heap "
-        + "over 20 GB. It reads only the row locations (no column data) under a 60 second limit and says so when the limit trips; the scan "
-        + "took under a second per 250,000 pages in the field. Result fields: total_pages, pages_with_rows, empty_pages, empty_share, rows, "
+        + "over 20 GB. It scans the table once under a 60 second limit and says so when the limit trips. It adds up the stored size of each column "
+        + "but does not read large stored values (TOAST), and returns no row data. Result fields: total_pages, pages_with_rows, empty_pages, empty_share "
+        + "(pages with no live row over all pages), live_bytes (what the live rows take in pages, without column padding, so free space reads slightly high), "
+        + "free_bytes and free_share (the space the live rows leave free, after the table's fillfactor reserve, which is kept free on purpose), fillfactor, rows, "
         + "rows_per_used_page, last_used_block against last_file_block (the pages after the last used block are all VACUUM can return), "
         + "trailing_empty_pages, the occupancy histogram (pages holding 1, 2 to 4, 5 to 10 and over 10 rows), vacuum_shrink_disabled, "
-        + "verdict_kind (dense, vacuum_can_truncate, rewrite_needed, no_pages) and verdict. Mostly empty means at least half the pages hold "
-        + "no row. A page holding only dead rows counts as empty, because a VACUUM frees it. Nothing is written.")]
+        + "verdict_kind (dense, vacuum_can_truncate, rewrite_needed, no_pages) and verdict. Mostly empty means the live rows leave at least half "
+        + "the page space free. A rewrite is called for only when at least 64 MiB is free as well. A page holding only dead rows counts as empty, "
+        + "because a VACUUM frees it. Nothing is written.")]
     public static async Task<string> MeasureStoreTable(
         NpgsqlDataSource postgres,
         [Description("The table, schema-qualified, for example collect.store_metrics.")] string? table = null,
@@ -65,6 +68,10 @@ public sealed class DarlingMcpStoreTableMeasureTools
                 pages_with_rows = m.PagesWithRows,
                 empty_pages = m.EmptyPages,
                 empty_share = Math.Round(m.EmptyShare, 4),
+                live_bytes = m.LiveBytes,
+                free_bytes = m.FreeBytes,
+                free_share = Math.Round(m.FreeShare, 4),
+                fillfactor = m.Fillfactor,
                 rows = m.Rows,
                 rows_per_used_page = m.RowsPerUsedPage,
                 last_used_block = m.LastUsedBlock,

@@ -102,7 +102,7 @@ INSERT INTO collect.zz_nostats SELECT g, repeat('x', 200) FROM generate_series(1
         using var doc = JsonDocument.Parse(await DarlingMcpStoreTableHealthTools.GetStoreTableHealth(dataSource, cancellationToken: ct));
         var header = doc.RootElement.GetProperty("header").GetString()!;
         Assert.Contains("store tables", header, StringComparison.Ordinal);
-        Assert.Contains("1 rewrite candidates", header, StringComparison.Ordinal);
+        Assert.Contains("1 rewrite candidate,", header, StringComparison.Ordinal);
         Assert.Contains("never analyzed", header, StringComparison.Ordinal);
         var note = doc.RootElement.GetProperty("estimate_note").GetString()!;
         Assert.Contains("ESTIMATES", note, StringComparison.Ordinal);

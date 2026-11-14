@@ -15,16 +15,18 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
-/// MEASURES one store table's empty space (#8787 part D2): how many of the file's pages hold no row at all, how the used
-/// pages fill, and whether a VACUUM could cut the file shorter. It is the measured figure that sits beside the ESTIMATE in
-/// <see cref="DarlingStoreTableHealthReader"/>, and it needs no extension: a scan of the table's <c>ctid</c> column only
-/// (no column is detoasted, no heap tuple is returned to the client), grouped by block number. On a field store it took
-/// 0.6 to 0.9 seconds for 250,000 pages. That is cheap for one table and wrong to run over every table, so it is on demand for ONE
-/// table per call and never fanned out. The MCP tool <c>measure_store_table</c> and its web read wrap this class, and the
+/// MEASURES one store table's empty space (#8787 part D2): how much of the file's page space the live rows take, how many pages
+/// hold no row at all, and whether a VACUUM could cut the file shorter. It is the measured figure that sits beside the ESTIMATE in
+/// <see cref="DarlingStoreTableHealthReader"/>, and it needs no extension: one scan of the table, grouped by block number, that
+/// counts rows and adds up <c>pg_column_size</c> of every column. <c>pg_column_size</c> of a toasted value is its stored size and
+/// does not detoast it, so the TOAST table is never read, and no row is returned to the client. On a field store the
+/// row-location part of that scan took 0.6 to 0.9 seconds for 250,000 pages. That is cheap for one table and wrong to run over every
+/// table, so it is on demand for ONE table per call and never fanned out. The MCP tool <c>measure_store_table</c> and its web read wrap this class, and the
 /// Viewer calls it directly.
 ///
 /// <para><b>Which tables are accepted.</b> The caller's text is never spliced into SQL. It is resolved with
@@ -39,11 +41,17 @@ namespace PerformanceMonitor.Darling.Storage;
 /// set for that transaction only. A trip comes back as <see cref="StoreTableMeasureOutcome.TimedOut"/> with a sentence that says
 /// so. Nothing is written, and the read holds only an <c>ACCESS SHARE</c> lock.</para>
 ///
-/// <para><b>Reading the numbers.</b> <see cref="StoreTableMeasure.EmptyPages"/> counts pages with no live row, so a page holding
-/// only dead tuples counts as empty (a VACUUM would free it). <see cref="StoreTableMeasure.LastUsedBlock"/> against
-/// <see cref="StoreTableMeasure.LastFileBlock"/> is what decides the verdict: VACUUM returns only the empty pages AFTER the last
-/// used block (it truncates the tail), so a table whose last page holds one live row cannot shrink however empty the rest is. Only a
-/// rewrite (<c>VACUUM FULL</c>, <c>CLUSTER</c> or a copy into a new table) returns that space.</para>
+/// <para><b>Reading the numbers.</b> The free share is what the live rows leave free of the file's page space. After scattered
+/// deletes and a VACUUM nearly every page can keep a few rows, so counting only pages with NO row calls a mostly empty table dense:
+/// the live bytes are what tell them apart. A live row is its column sizes plus a 24 byte tuple header plus a 4 byte line pointer,
+/// against a page's block size less its 24 byte header. Column alignment padding and the null bitmap are not counted, so the free
+/// space reads slightly high. The share is judged after the table's fillfactor: the space a fillfactor of 70 keeps free on purpose is
+/// not waste. <see cref="StoreTableMeasure.EmptyPages"/> counts pages with no live row, so a page holding only dead tuples counts as
+/// empty (a VACUUM would free it). <see cref="StoreTableMeasure.LastUsedBlock"/> against <see cref="StoreTableMeasure.LastFileBlock"/>
+/// decides whether VACUUM can return the space: it returns only the empty pages AFTER the last used block (it truncates the tail), so
+/// a table whose last page holds one live row cannot shrink however empty the rest is. Only a rewrite (<c>VACUUM FULL</c>,
+/// <c>CLUSTER</c> or a copy into a new table) returns that space. A rewrite is called for only past the same floors as the table
+/// health rewrite candidate flag: at least half free and at least <see cref="RewriteMinFreeBytes"/> free.</para>
 /// </summary>
 public static class DarlingStoreTableMeasureReader
 {
@@ -63,6 +71,19 @@ public static class DarlingStoreTableMeasureReader
     /// <summary>The empty share at and above which a table is called mostly empty: half, the same line the table health rewrite
     /// candidate flag uses (<see cref="DarlingStoreTableHealthReader.RewriteCandidateMinShare"/>).</summary>
     public const double MostlyEmptyShare = 0.5;
+
+    /// <summary>The free bytes below which a mostly empty table is not worth a rewrite: the same floor the table health rewrite
+    /// candidate flag uses (<see cref="DarlingStoreTableHealthReader.RewriteCandidateMinEmptyBytes"/>), 64 MiB.</summary>
+    public const long RewriteMinFreeBytes = DarlingStoreTableHealthReader.RewriteCandidateMinEmptyBytes;
+
+    /// <summary>Bytes in a heap page before its first tuple (PostgreSQL's <c>SizeOfPageHeaderData</c>).</summary>
+    public const int PageHeaderBytes = 24;
+
+    /// <summary>Bytes in a heap tuple's fixed header (<c>SizeofHeapTupleHeader</c>, without the null bitmap).</summary>
+    public const int TupleHeaderBytes = 24;
+
+    /// <summary>Bytes in a page's line pointer for one tuple (<c>sizeof(ItemIdData)</c>).</summary>
+    public const int LinePointerBytes = 4;
 
     /// <summary>The longest caller text this read resolves. A longer one is refused before it reaches the database.</summary>
     public const int MaxNameLength = 300;
@@ -123,14 +144,29 @@ WHERE t.isleaf
 ORDER BY 2 DESC, 1
 LIMIT 3";
 
-    /// <summary>The measurement, in two halves around the resolved, quoted table name. <c>ONLY</c> keeps an inheritance child out of the
-    /// scan. The page figures come from the file's size, the row figures from the grouped scan.</summary>
+    /// <summary>The table's column-size expression and storage facts, read before the scan. The expression is built from the catalog's
+    /// <c>quote_ident</c> names (never caller text) and sums <c>pg_column_size</c> of each live column. It never uses a whole-row value
+    /// (<c>t.*</c> or <c>ROW(...)</c>), because a whole-row value flattens TOAST and reads it. A dropped column and a virtual
+    /// generated column hold no stored bytes, so neither is summed.</summary>
+    private const string LayoutSql = @"
+SELECT
+    coalesce((SELECT string_agg('coalesce(pg_catalog.pg_column_size(t.' || quote_ident(a.attname) || '), 0)', ' + ' ORDER BY a.attnum)
+              FROM pg_catalog.pg_attribute AS a
+              WHERE a.attrelid = $1::oid AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated <> 'v'), '0'),
+    coalesce((SELECT split_part(o, '=', 2)::int FROM pg_catalog.pg_class AS c, unnest(c.reloptions) AS o
+              WHERE c.oid = $1::oid AND o LIKE 'fillfactor=%'), 100),
+    current_setting('block_size')::bigint";
+
+    /// <summary>The measurement, in three parts around the column-size expression and the resolved, quoted table name. <c>ONLY</c> keeps
+    /// an inheritance child out of the scan. The page figures come from the file's size, the row figures from the grouped scan.</summary>
     private const string MeasureSqlHead = @"
 WITH p AS (
-    SELECT (ctid::text::point)[0]::bigint AS blk, count(*) AS n
+    SELECT (t.ctid::text::point)[0]::bigint AS blk, count(*) AS n, sum(";
+
+    private const string MeasureSqlMid = @")::bigint AS data_bytes
     FROM ONLY ";
 
-    private const string MeasureSqlTail = @"
+    private const string MeasureSqlTail = @" AS t
     GROUP BY 1
 )
 SELECT
@@ -142,7 +178,8 @@ SELECT
     count(*) FILTER (WHERE n = 1) AS pages_1_row,
     count(*) FILTER (WHERE n BETWEEN 2 AND 4) AS pages_2_to_4_rows,
     count(*) FILTER (WHERE n BETWEEN 5 AND 10) AS pages_5_to_10_rows,
-    count(*) FILTER (WHERE n > 10) AS pages_over_10_rows
+    count(*) FILTER (WHERE n > 10) AS pages_over_10_rows,
+    coalesce(sum(data_bytes), 0)::bigint AS data_bytes
 FROM p";
 
     /// <summary>What a call came to.</summary>
@@ -163,7 +200,7 @@ FROM p";
     /// <param name="TotalPages">The pages in the file (its size over the block size).</param>
     /// <param name="PagesWithRows">Pages holding at least one live row.</param>
     /// <param name="EmptyPages">Pages holding no live row (<paramref name="TotalPages"/> minus <paramref name="PagesWithRows"/>, never below zero).</param>
-    /// <param name="EmptyShare">Empty pages over total pages, 0 to 1. Zero for a file with no pages.</param>
+    /// <param name="EmptyShare">Pages with no live row over total pages, 0 to 1. Zero for a file with no pages. Not what the verdict is judged on: see <paramref name="FreeShare"/>.</param>
     /// <param name="Rows">Live rows.</param>
     /// <param name="RowsPerUsedPage">Average live rows on a page that holds any, rounded to two places.</param>
     /// <param name="LastUsedBlock">The block number of the last page holding a live row, minus one when there is none.</param>
@@ -173,6 +210,12 @@ FROM p";
     /// <param name="PagesWith2To4Rows">Used pages holding two to four rows.</param>
     /// <param name="PagesWith5To10Rows">Used pages holding five to ten rows.</param>
     /// <param name="PagesWithOver10Rows">Used pages holding more than ten rows.</param>
+    /// <param name="LiveBytes">The bytes the live rows take in pages: their column sizes, plus <see cref="TupleHeaderBytes"/> and
+    /// <see cref="LinePointerBytes"/> per row. Column alignment padding is not counted.</param>
+    /// <param name="FreeBytes">The page space the live rows leave free, after the table's fillfactor reserve, never below zero.</param>
+    /// <param name="FreeShare"><paramref name="FreeBytes"/> over the file's page space at the table's fillfactor, 0 to 1. The share the
+    /// verdict is judged on.</param>
+    /// <param name="Fillfactor">The table's fillfactor percent, 100 when it has none.</param>
     /// <param name="VacuumTruncateDisabled">True when the table's <c>vacuum_truncate</c> storage option is off, which stops VACUUM cutting the tail.</param>
     /// <param name="VerdictKind">One of <see cref="VerdictDense"/>, <see cref="VerdictVacuumCanTruncate"/>, <see cref="VerdictRewriteNeeded"/>, <see cref="VerdictNoPages"/>.</param>
     /// <param name="Verdict">The one-line verdict, a sentence.</param>
@@ -192,6 +235,10 @@ FROM p";
         long PagesWith2To4Rows,
         long PagesWith5To10Rows,
         long PagesWithOver10Rows,
+        long LiveBytes,
+        long FreeBytes,
+        double FreeShare,
+        int Fillfactor,
         bool VacuumTruncateDisabled,
         string VerdictKind,
         string Verdict,
@@ -334,9 +381,22 @@ FROM p";
                 await setTimeout.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            /* The name is the catalog's quote_ident output for the relation the caller's text resolved to, never the caller's text. */
-            var sql = MeasureSqlHead + resolved.QualifiedName + MeasureSqlTail;
-            long pagesWithRows, rows, lastUsed, totalPages, one, twoToFour, fiveToTen, over10;
+            string sizeExpression;
+            int fillfactor;
+            long blockSize;
+            await using (var layout = new NpgsqlCommand(LayoutSql, connection, transaction) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds })
+            {
+                layout.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = resolved.Oid });
+                await using var layoutReader = await layout.ExecuteReaderAsync(cancellationToken);
+                await layoutReader.ReadAsync(cancellationToken);
+                sizeExpression = layoutReader.GetString(0);
+                fillfactor = layoutReader.GetInt32(1);
+                blockSize = layoutReader.GetInt64(2);
+            }
+
+            /* The name and every column in the size expression are the catalog's quote_ident output, never the caller's text. */
+            var sql = MeasureSqlHead + sizeExpression + MeasureSqlMid + resolved.QualifiedName + MeasureSqlTail;
+            long pagesWithRows, rows, lastUsed, totalPages, one, twoToFour, fiveToTen, over10, dataBytes;
             double rowsPerPage;
             await using (var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = TimeoutSeconds + 15 })
             {
@@ -352,13 +412,14 @@ FROM p";
                 twoToFour = reader.GetInt64(6);
                 fiveToTen = reader.GetInt64(7);
                 over10 = reader.GetInt64(8);
+                dataBytes = reader.GetInt64(9);
             }
 
             await transaction.CommitAsync(cancellationToken);
             stopwatch.Stop();
             return new StoreTableMeasureResult(StoreTableMeasureOutcome.Measured, null,
                 Build(resolved.QualifiedName, totalPages, pagesWithRows, rows, rowsPerPage, lastUsed, one, twoToFour, fiveToTen, over10,
-                    stopwatch.ElapsedMilliseconds, resolved.VacuumTruncateOff));
+                    stopwatch.ElapsedMilliseconds, dataBytes, blockSize, fillfactor, resolved.VacuumTruncateOff));
         }
         catch (PostgresException ex) when (ex.SqlState == "57014" && !cancellationToken.IsCancellationRequested)
         {
@@ -380,49 +441,74 @@ FROM p";
                 $"The measurement of {resolved.QualifiedName} did not finish in {TimeoutSeconds} seconds and was stopped. Nothing was changed. The store is busy or the table is very large: try again when it is quieter, or measure one of its partitions or chunks."),
             null);
 
-    /// <summary>Builds the figures and the verdict from the raw scan. Public so the verdict rule is testable without a table of that shape.</summary>
+    /// <summary>Builds the figures and the verdict from the raw scan. Public so the verdict rule is testable without a table of that shape.
+    /// <paramref name="dataBytes"/> is the sum of the live rows' column sizes, before the per-row header and line pointer.</summary>
     public static StoreTableMeasure Build(
         string qualifiedName, long totalPages, long pagesWithRows, long rows, double rowsPerUsedPage, long lastUsedBlock,
-        long pages1Row, long pages2To4, long pages5To10, long pagesOver10, long elapsedMilliseconds, bool vacuumTruncateDisabled = false)
+        long pages1Row, long pages2To4, long pages5To10, long pagesOver10, long elapsedMilliseconds,
+        long dataBytes, long blockSize = 8192, int fillfactor = 100, bool vacuumTruncateDisabled = false)
     {
         var empty = Math.Max(0, totalPages - pagesWithRows);
-        var share = totalPages > 0 ? (double)empty / totalPages : 0.0;
+        var emptyShare = totalPages > 0 ? (double)empty / totalPages : 0.0;
         var lastFile = totalPages - 1;
         var trailing = Math.Max(0, lastFile - lastUsedBlock);
-        var (kind, sentence) = Judge(totalPages, empty, share, trailing, lastUsedBlock, lastFile, rowsPerUsedPage, vacuumTruncateDisabled);
-        return new StoreTableMeasure(qualifiedName, totalPages, pagesWithRows, empty, share, rows, rowsPerUsedPage, lastUsedBlock, lastFile,
-            trailing, pages1Row, pages2To4, pages5To10, pagesOver10, vacuumTruncateDisabled, kind, sentence, elapsedMilliseconds);
+        var live = dataBytes + rows * (TupleHeaderBytes + LinePointerBytes);
+
+        var usablePerPage = Math.Max(1, blockSize - PageHeaderBytes);
+        var ff = Math.Clamp(fillfactor, 10, 100);
+        var fileSpace = (double)totalPages * usablePerPage;
+        var capacity = fileSpace * ff / 100.0;
+        var free = (long)Math.Max(0.0, capacity - live);
+        var freeShare = capacity > 0 ? Math.Min(1.0, free / capacity) : 0.0;
+        var fillPercent = fileSpace > 0 ? Math.Min(100.0, live * 100.0 / fileSpace) : 0.0;
+        var trailingBytes = trailing * usablePerPage * ff / 100.0;
+
+        var (kind, sentence) = Judge(totalPages, empty, trailing, lastUsedBlock, lastFile, free, freeShare, fillPercent, trailingBytes, ff, vacuumTruncateDisabled);
+        return new StoreTableMeasure(qualifiedName, totalPages, pagesWithRows, empty, emptyShare, rows, rowsPerUsedPage, lastUsedBlock, lastFile,
+            trailing, pages1Row, pages2To4, pages5To10, pagesOver10, live, free, freeShare, ff, vacuumTruncateDisabled, kind, sentence, elapsedMilliseconds);
     }
 
-    /// <summary>The verdict rule. Mostly empty means at least <see cref="MostlyEmptyShare"/> of the pages hold no row. A mostly empty
-    /// table whose empty pages are mostly (half or more) after the last used block can be cut shorter by VACUUM. Otherwise the space is
-    /// stuck behind live rows and only a rewrite returns it.</summary>
+    /// <summary>The verdict rule. Mostly empty means the live rows leave at least <see cref="MostlyEmptyShare"/> of the page space free
+    /// after the fillfactor reserve. A mostly empty table whose trailing empty pages hold half or more of that free space can be cut
+    /// shorter by VACUUM. Otherwise only a rewrite returns it, and only when at least <see cref="RewriteMinFreeBytes"/> is free: a
+    /// smaller table reads dense with a sentence that says why.</summary>
     private static (string Kind, string Sentence) Judge(
-        long totalPages, long empty, double share, long trailing, long lastUsed, long lastFile, double rowsPerUsedPage, bool truncateOff)
+        long totalPages, long empty, long trailing, long lastUsed, long lastFile, long free, double freeShare,
+        double fillPercent, double trailingBytes, int fillfactor, bool truncateOff)
     {
-        var pct = (share * 100).ToString("0.#", CultureInfo.InvariantCulture);
         if (totalPages == 0)
         {
             return (VerdictNoPages, "The table's file has no pages, so there is no space to return.");
         }
 
-        if (share < MostlyEmptyShare)
+        var pages = CountText.Plural(totalPages, "page");
+        var fill = fillPercent.ToString("0", CultureInfo.InvariantCulture);
+        var reserve = fillfactor < 100
+            ? string.Create(CultureInfo.InvariantCulture, $" beyond the {fillfactor}% fillfactor the table keeps free on purpose")
+            : string.Empty;
+        var freeText = RollupBackfillPlan.FormatBytes(free);
+
+        if (freeShare < MostlyEmptyShare)
         {
-            return (VerdictDense, string.Create(CultureInfo.InvariantCulture,
-                $"Dense: {pct}% of the file's {totalPages} pages hold no row, with {rowsPerUsedPage} rows per used page. There is little space to return."));
+            return (VerdictDense, $"Dense: live rows fill {fill}% of {pages} and {freeText} is free{reserve}. There is little space to return.");
         }
 
-        if (trailing > 0 && trailing * 2 >= empty)
+        if (trailing > 0 && trailingBytes * 2 >= free)
         {
             var off = truncateOff
                 ? " The table's vacuum_truncate option is off, so VACUUM will not do it until that option is turned on."
                 : string.Empty;
             return (VerdictVacuumCanTruncate, string.Create(CultureInfo.InvariantCulture,
-                $"Mostly empty, and VACUUM can truncate the tail: {pct}% of the {totalPages} pages hold no row and {trailing} of the {empty} empty pages are after the last used block ({lastUsed} of {lastFile}).{off}"));
+                $"Mostly empty, and VACUUM can truncate the tail. Live rows fill {fill}% of {pages} and {freeText} is free{reserve}. {CountText.Grouped(trailing)} of its {CountText.Plural(empty, "page")} with no row {(trailing == 1 ? "is" : "are")} after the last used block ({lastUsed} of {lastFile}).{off}"));
+        }
+
+        if (free < RewriteMinFreeBytes)
+        {
+            return (VerdictDense, $"Mostly empty but small: live rows fill {fill}% of {pages} and {freeText} is free{reserve}, under the {RollupBackfillPlan.FormatBytes(RewriteMinFreeBytes)} that is worth a rewrite.");
         }
 
         return (VerdictRewriteNeeded, string.Create(CultureInfo.InvariantCulture,
-            $"Mostly empty, and only a rewrite returns the space: {pct}% of the {totalPages} pages hold no row, but live rows reach block {lastUsed} of {lastFile}, so VACUUM can cut off only {trailing} pages."));
+            $"Mostly empty, and only a rewrite returns the space. Live rows fill {fill}% of {pages} and {freeText} is free inside pages{reserve}. Live rows reach block {lastUsed} of {lastFile}, so VACUUM {(trailing == 0 ? "can cut off no pages" : "can cut off only " + CountText.Plural(trailing, "page"))}."));
     }
 
     private static StoreTableMeasureResult Refuse(string sentence) => new(StoreTableMeasureOutcome.Refused, sentence, null);

@@ -133,7 +133,7 @@
                     <DataGridTextColumn Header="Table data size" Binding="{Binding TableSize}" SortMemberPath="TableSizeSort" Width="Auto" MinWidth="100"/>
                     <DataGridTextColumn Header="Index to table" Binding="{Binding Ratio}" SortMemberPath="RatioSort" Width="Auto" MinWidth="90"/>
                     <DataGridTextColumn Header="Scans" Binding="{Binding Scans}" SortMemberPath="ScansSort" Width="Auto" MinWidth="70"/>
-                    <DataGridTextColumn Header="Empty space (estimate)" Binding="{Binding Reclaimable}" SortMemberPath="ReclaimableSort" Width="Auto" MinWidth="150" MaxWidth="360">
+                    <DataGridTextColumn Header="Empty space (estimate)" Binding="{Binding Reclaimable}" SortMemberPath="ReclaimableSort" Width="Auto" MinWidth="150" MaxWidth="480">
                         <DataGridTextColumn.ElementStyle>
                             <Style TargetType="TextBlock">
                                 <Setter Property="TextTrimming" Value="CharacterEllipsis"/>

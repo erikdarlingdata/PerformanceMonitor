@@ -88,6 +88,34 @@ public static class DarlingStoreTableHealthReader
     /// </summary>
     public const long RewriteCandidateMinEmptyBytes = PgTargetScorer.BloatSizeFloorBytes;
 
+    /// <summary>The note on an index that is not a valid, ready btree, so it has no estimate.</summary>
+    public const string InvalidIndexReason = "The index is not valid or not ready, so no estimate is made.";
+
+    /// <summary>
+    /// The plain sentence for an index estimate's stored reason. The index bloat collector writes its reasons for people who
+    /// read PostgreSQL catalogs ("reltuples = -1", "pg_stats", "name-typed"), and the collected data elsewhere keeps that text, so
+    /// the collector is left alone and this read maps each known reason to a sentence the store health page, the Viewer tab and
+    /// the MCP tool can show as it is. A reason this build does not recognize passes through unchanged.
+    /// </summary>
+    public static string? PlainEstimateReason(string? stored)
+    {
+        if (string.IsNullOrWhiteSpace(stored))
+        {
+            return stored;
+        }
+
+        return PgIndexBloatCoverage.Bucket(stored) switch
+        {
+            PgIndexBloatSuppression.Partial => "The index covers only some rows of its table, so no estimate is made.",
+            PgIndexBloatSuppression.ParentNeverAnalyzed => "The table has never been analyzed, so no estimate is made.",
+            PgIndexBloatSuppression.NameTypedKey => "A key column uses the name type, so no estimate is made.",
+            PgIndexBloatSuppression.ColumnWidthsNotVisible => "The column sizes are not visible for every key column, so no estimate is made.",
+            PgIndexBloatSuppression.NoPagesYet => "The index holds no pages yet, so there is nothing to estimate.",
+            PgIndexBloatSuppression.NegativeBloat => "The estimate came out below zero, so it is not shown.",
+            _ => stored,
+        };
+    }
+
     /// <summary>The relation is under <see cref="EstimateMinimumHeapBytes"/>, so the estimate was not run.</summary>
     public const string ReasonBelowSizeFloor = "below_size_floor";
 
@@ -874,7 +902,7 @@ SELECT
     CASE WHEN g.est_basis_bytes > 0 THEN g.est_reclaimable_bytes::double precision / g.est_basis_bytes END AS est_bloat_share,
     g.est_usable,
     CASE WHEN g.est_usable > 0 THEN NULL
-         ELSE COALESCE(g.skipped_reason, 'not estimated: not a valid, ready btree index') END AS est_skipped_reason
+         ELSE COALESCE(g.skipped_reason, '{InvalidIndexReason}') END AS est_skipped_reason
 FROM grp AS g
 CROSS JOIN statsinfo AS si
 ORDER BY (NOT g.valid) DESC,
@@ -1110,7 +1138,7 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
                 EstimatedReclaimableBytes: reader.IsDBNull(18) ? null : reader.GetInt64(18),
                 EstimatedBloatShare: reader.IsDBNull(19) ? null : reader.GetDouble(19),
                 EstimateIndexesUsable: reader.GetInt32(20),
-                EstimateSkippedReason: reader.IsDBNull(21) ? null : reader.GetString(21)));
+                EstimateSkippedReason: reader.IsDBNull(21) ? null : PlainEstimateReason(reader.GetString(21))));
         }
 
         return rows;

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using static PerformanceMonitor.Darling.Storage.DarlingStoreMaintenanceReadinessReader;
 using static PerformanceMonitor.Darling.Storage.DarlingStoreTableHealthReader;
@@ -284,9 +285,9 @@ internal static class StoreHealthRows
     internal static string HeaderText(IReadOnlyList<StoreTableHealthRow> rows)
     {
         var summary = Summarize(rows);
-        var text = $"{Number(summary.TableCount)} store tables, {PgDisplay.Bytes(summary.TotalBytes)} in total. "
-            + $"{Number(summary.RewriteCandidates)} rewrite candidates. "
-            + $"{Number(summary.WithoutEstimate)} tables without a usable empty space estimate";
+        var text = $"{CountText.Plural(summary.TableCount, "store table")}, {PgDisplay.Bytes(summary.TotalBytes)} in total. "
+            + $"{CountText.Plural(summary.RewriteCandidates, "rewrite candidate")}. "
+            + $"{CountText.Plural(summary.WithoutEstimate, "table")} without a usable empty space estimate";
         text += summary.WithoutEstimateByReason.Count == 0
             ? "."
             : " (" + string.Join(", ", summary.WithoutEstimateByReason.Select(p => $"{p.Value} {DescribeReason(p.Key)}")) + ").";
@@ -307,7 +308,7 @@ internal static class StoreHealthRows
 
     /// <summary>The index section's header line.</summary>
     internal static string IndexHeaderText(IReadOnlyList<StoreIndexHealthRow> indexes) =>
-        $"{Number(indexes.Count)} store indexes. {Number(indexes.Count(r => r.LargerThanHeap))} larger than their table, "
+        $"{CountText.Plural(indexes.Count, "store index", "store indexes")}. {Number(indexes.Count(r => r.LargerThanHeap))} larger than their table, "
         + $"{Number(indexes.Count(r => r.RarelyUsed))} rarely used, {Number(indexes.Count(r => !r.Valid))} invalid.";
 
     /// <summary>The measured result in plain words: the verdict, then the page counts, with the time the read took.</summary>
@@ -319,10 +320,10 @@ internal static class StoreHealthRows
             return $"{table}: {result.Sentence ?? "not measured"} ({took})";
         }
 
-        var text = $"{table}: {m.Verdict} {Number(m.Rows)} rows in {Number(m.TotalPages)} pages.";
+        var text = $"{table}: {m.Verdict} {CountText.Plural(m.Rows, "row")} in {CountText.Plural(m.TotalPages, "page")}.";
         if (m.TrailingEmptyPages > 0)
         {
-            text += $" {Number(m.TrailingEmptyPages)} empty pages sit at the end of the file, which is the most VACUUM can return.";
+            text += $" {CountText.Plural(m.TrailingEmptyPages, "empty page")} {(m.TrailingEmptyPages == 1 ? "sits" : "sit")} at the end of the file, which is the most VACUUM can return.";
         }
 
         text += $" ({took})";

@@ -101,9 +101,66 @@ public sealed class ViewerStoreHealthTests
         var header = StoreHealthRows.HeaderText(rows);
 
         Assert.Contains("3 store tables", header);
-        Assert.Contains("1 rewrite candidates", header);
+        Assert.Contains("1 rewrite candidate.", header);
         Assert.Contains("2 tables without a usable empty space estimate", header);
         Assert.Contains("2 " + DescribeReason(ReasonNeverAnalyzed), header);
+    }
+
+    [Fact]
+    public void TheCountSentences_SayOneInTheSingular()
+    {
+        var one = new List<StoreTableHealthRow>
+        {
+            TableRow("a", candidate: true, pastFloors: true, tailOccupied: true),
+        };
+        var oneWithoutEstimate = new List<StoreTableHealthRow>
+        {
+            TableRow("b", emptyBytes: null, emptyShare: null, reason: ReasonNeverAnalyzed),
+        };
+
+        var header = StoreHealthRows.HeaderText(one);
+        Assert.Contains("1 store table,", header);
+        Assert.Contains("1 rewrite candidate.", header);
+        Assert.Contains("0 tables without a usable empty space estimate", header);
+        Assert.Contains("1 table without a usable empty space estimate", StoreHealthRows.HeaderText(oneWithoutEstimate));
+
+        Assert.StartsWith("1 store index.", StoreHealthRows.IndexHeaderText(new[] { IndexRow("ix_only", 100) }));
+        Assert.StartsWith("2 store indexes.", StoreHealthRows.IndexHeaderText(new[] { IndexRow("ix_one", 100), IndexRow("ix_two", 200) }));
+
+        var measure = new StoreTableMeasure("collect.store_things", 1, 1, 0, 0.0, 1, 1.0, 0, 0, 0, 1, 0, 0, 0, 100, 8000, 0.9, 100, false,
+            VerdictDense, "Dense.", 5);
+        var text = StoreHealthRows.MeasureText("collect.store_things",
+            new StoreTableMeasureResult(StoreTableMeasureOutcome.Measured, null, measure), TimeSpan.FromSeconds(1));
+        Assert.Contains("1 row in 1 page.", text);
+        var trailing = measure with { TotalPages = 3, TrailingEmptyPages = 1 };
+        Assert.Contains("1 empty page sits at the end", StoreHealthRows.MeasureText("collect.store_things",
+            new StoreTableMeasureResult(StoreTableMeasureOutcome.Measured, null, trailing), TimeSpan.FromSeconds(1)));
+    }
+
+    [Fact]
+    public void AnIndexWithNoEstimate_ShowsAPlainSentence_NotCatalogWords()
+    {
+        const string collectorText = "the parent table has never been analyzed (reltuples = -1), so there is no row count to model from. "
+            + "An ANALYZE of the parent makes this index estimable.";
+        Assert.Equal("The table has never been analyzed, so no estimate is made.", PlainEstimateReason(collectorText));
+        Assert.Equal(InvalidIndexReason, PlainEstimateReason(InvalidIndexReason));
+        Assert.Equal("Some new reason this build does not know.", PlainEstimateReason("Some new reason this build does not know."));
+        Assert.Null(PlainEstimateReason(null));
+        foreach (var stored in new[]
+        {
+            "partial index: the model scales the parent reltuples, but the index holds only the rows matching its predicate.",
+            "a key column is name-typed, whose pg_stats width is the padded 64 bytes.",
+            "column widths are not visible for every key: pg_stats filters on has_column_privilege.",
+            "the index occupies no pages yet, so there is nothing to be bloated.",
+            "the model predicts more pages than the index occupies, which is negative bloat.",
+        })
+        {
+            var plain = PlainEstimateReason(stored)!;
+            Assert.DoesNotContain("reltuples", plain, StringComparison.Ordinal);
+            Assert.DoesNotContain("pg_stats", plain, StringComparison.Ordinal);
+            Assert.DoesNotContain("-typed", plain, StringComparison.Ordinal);
+            Assert.NotEqual(stored, plain);
+        }
     }
 
     [Fact]
@@ -140,7 +197,7 @@ public sealed class ViewerStoreHealthTests
     [Fact]
     public void TheMeasureText_ShowsTheVerdictAndTheElapsedTime_AndARefusalKeepsItsSentence()
     {
-        var measure = new StoreTableMeasure("collect.store_things", 1000, 100, 900, 0.9, 5000, 50.0, 99, 999, 900, 0, 0, 0, 100, false,
+        var measure = new StoreTableMeasure("collect.store_things", 1000, 100, 900, 0.9, 5000, 50.0, 99, 999, 900, 0, 0, 0, 100, 1_000_000, 7_000_000, 0.9, 100, false,
             VerdictVacuumCanTruncate, "VACUUM can give the space back.", 1400);
         var measured = StoreHealthRows.MeasureText("collect.store_things",
             new StoreTableMeasureResult(StoreTableMeasureOutcome.Measured, null, measure), TimeSpan.FromSeconds(1.4));
