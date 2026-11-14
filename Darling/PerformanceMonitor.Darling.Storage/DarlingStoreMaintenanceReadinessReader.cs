@@ -303,6 +303,12 @@ SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'member'),
         return (reasons, notes);
     }
 
+    /// <summary>The opening words of a safe verdict. The Viewer shows them in a heavier weight than the sentences after them.</summary>
+    public const string SafeLead = "Safe for maintenance now.";
+
+    /// <summary>The opening words of a not-safe verdict, before its reasons.</summary>
+    public const string NotSafeLead = "Not safe for maintenance now:";
+
     /// <summary>The verdict sentence. Public so the wording is testable without a store. <paramref name="notes"/> are sentences a
     /// safe verdict carries (see <see cref="JudgeVacuums"/>).</summary>
     public static string Verdict(
@@ -311,10 +317,10 @@ SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'member'),
     {
         if (!safe)
         {
-            return "Not safe for maintenance now: " + string.Join(" ", reasons.Select(r => r.TrimEnd('.') + ".")).TrimEnd();
+            return NotSafeLead + " " + string.Join(" ", reasons.Select(r => r.TrimEnd('.') + ".")).TrimEnd();
         }
 
-        var verdict = "Safe for maintenance now.";
+        var verdict = SafeLead;
         if (!canSeeAllSessions && hiddenSessionCount > 0)
         {
             verdict += string.Create(CultureInfo.InvariantCulture,

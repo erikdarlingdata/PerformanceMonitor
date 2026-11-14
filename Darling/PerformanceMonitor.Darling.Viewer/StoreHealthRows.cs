@@ -306,6 +306,25 @@ internal static class StoreHealthRows
             ? readiness.Verdict
             : readiness.Verdict + Environment.NewLine + string.Join(Environment.NewLine, readiness.Reasons.Select(r => "- " + r));
 
+    /// <summary>
+    /// <see cref="ReadinessText"/> in two parts: the lead of the verdict (shown in a heavier weight) and everything after it (the
+    /// caveat and note sentences, the reasons). The lead is a fixed phrase the reader sets, so no sentence is split on a full stop
+    /// (a table name has dots in it). A verdict that starts with neither phrase has no lead.
+    /// </summary>
+    internal static (string Lead, string After) ReadinessParts(StoreMaintenanceReadiness readiness)
+    {
+        var text = ReadinessText(readiness);
+        foreach (var lead in new[] { SafeLead, NotSafeLead })
+        {
+            if (text.StartsWith(lead, StringComparison.Ordinal))
+            {
+                return (lead, text[lead.Length..]);
+            }
+        }
+
+        return (string.Empty, text);
+    }
+
     /// <summary>The index section's header line.</summary>
     internal static string IndexHeaderText(IReadOnlyList<StoreIndexHealthRow> indexes) =>
         $"{CountText.Plural(indexes.Count, "store index", "store indexes")}. {Number(indexes.Count(r => r.LargerThanHeap))} larger than their table, "

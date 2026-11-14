@@ -11,6 +11,7 @@ using System.Diagnostics;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -156,7 +157,7 @@ public partial class StoreHealthTab : UserControl
             var readiness = await _dataService!.GetStoreMaintenanceReadinessAsync();
             if (_loads.Superseded(nameof(LoadReadinessAsync), gen)) return;
 
-            ReadinessTextBlock.Text = StoreHealthRows.ReadinessText(readiness);
+            ShowReadiness(StoreHealthRows.ReadinessParts(readiness));
             _readinessLoaded = true;
         }
         catch (Exception ex)
@@ -166,6 +167,21 @@ public partial class StoreHealthTab : UserControl
             _readinessLoaded = false;
             ReadinessTextBlock.Text = $"The maintenance check failed: {ex.Message}";
             StatusChanged?.Invoke($"failed to run the store maintenance check: {ex.Message}");
+        }
+    }
+
+    /// <summary>Fills the verdict block: the verdict lead in semibold, the sentences and reasons after it in normal weight.</summary>
+    private void ShowReadiness((string Lead, string After) parts)
+    {
+        ReadinessTextBlock.Inlines.Clear();
+        if (parts.Lead.Length > 0)
+        {
+            ReadinessTextBlock.Inlines.Add(new Run(parts.Lead) { FontWeight = FontWeights.SemiBold });
+        }
+
+        if (parts.After.Length > 0)
+        {
+            ReadinessTextBlock.Inlines.Add(new Run(parts.After));
         }
     }
 

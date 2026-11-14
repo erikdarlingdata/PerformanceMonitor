@@ -33,7 +33,7 @@
         <StackPanel Grid.Row="1" Margin="10,2,10,6">
             <TextBlock x:Name="HeaderText" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundBrush}"
                        Text="Loading store tables…"/>
-            <TextBlock x:Name="ReadinessTextBlock" TextWrapping="Wrap" Margin="0,4,0,0" FontWeight="SemiBold"
+            <TextBlock x:Name="ReadinessTextBlock" TextWrapping="Wrap" Margin="0,4,0,0"
                        Foreground="{DynamicResource ForegroundBrush}" Text="Checking whether now is a safe time for maintenance…"/>
         </StackPanel>
 
