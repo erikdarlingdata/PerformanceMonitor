@@ -166,6 +166,24 @@ public sealed class QueryReadsResponseBudgetLiveTests
         }
     }
 
+    /// <summary>One entry per server, the statement running on every one: server 001 is the lightest, server 150 the heaviest. Returns the window's end.</summary>
+    private static async Task<DateTime> SeedFleetAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        for (var i = 1; i <= FleetServers; i++)
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, -881300 - i, $"a8812-fleet-{i:D3}", ct);
+        }
+
+        var end = WindowEnd();
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+                  delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, total_logical_reads, sample_interval_seconds)
+              SELECT $1 + g, $2, -881300 - g, 'a8812-fleet-' || lpad(g::text, 3, '0'), 'BudgetDb', $3, '0xH1', 10, g * 1000000, g * 2000000, 100, 100, 3600
+              FROM generate_series(1, $4) AS g",
+            CollectionIdGenerator.Next(), end.AddHours(-3), FleetHash, FleetServers);
+        return end;
+    }
+
     [Fact]
     public async Task QueryFleetSummary_AtTheWidestLimit_FitsTheBudget_HeaviestFirst_AndNamesItsOwnCut()
     {
@@ -178,22 +196,10 @@ public sealed class QueryReadsResponseBudgetLiveTests
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        for (var i = 1; i <= FleetServers; i++)
-        {
-            await DarlingMcpTestData.RegisterServerAsync(connection, -881300 - i, $"a8812-fleet-{i:D3}", ct);
-        }
-
         var bodySucceeded = false;
         try
         {
-            var end = WindowEnd();
-            /* One entry per server, the statement running on every one: server 001 is the lightest, server 150 the heaviest. */
-            await DarlingMcpTestData.ExecAsync(connection, ct,
-                @"INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
-                      delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, total_logical_reads, sample_interval_seconds)
-                  SELECT $1 + g, $2, -881300 - g, 'a8812-fleet-' || lpad(g::text, 3, '0'), 'BudgetDb', $3, '0xH1', 10, g * 1000000, g * 2000000, 100, 100, 3600
-                  FROM generate_series(1, $4) AS g",
-                CollectionIdGenerator.Next(), end.AddHours(-3), FleetHash, FleetServers);
+            var end = await SeedFleetAsync(connection, ct);
 
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
             var json = await DarlingMcpQueryFleetSummaryTools.GetQueryFleetSummary(postgres, FleetHash, 24, AsOf(end), 200, ct);
@@ -234,6 +240,49 @@ public sealed class QueryReadsResponseBudgetLiveTests
             using var webDoc = JsonDocument.Parse(web);
             Assert.False(webDoc.RootElement.TryGetProperty("budget_truncated", out _), web);
             Assert.Equal(FleetServers, webDoc.RootElement.GetProperty("rows_returned").GetInt32());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task QueryFleetSummary_WhenTheLimitAndTheBudgetBothCut_TheLimitNoteCountsTheRowsListed()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live fleet summary response budget test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var end = await SeedFleetAsync(connection, ct);
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+            /* 150 pairs, limit 130: the limit leaves 20 off, and the budget keeps fewer than the limit admitted. */
+            const int limit = 130;
+            var json = await DarlingMcpQueryFleetSummaryTools.GetQueryFleetSummary(postgres, FleetHash, 24, AsOf(end), limit, ct);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            Assert.False(root.TryGetProperty("error", out _), json);
+            Assert.True(root.GetProperty("truncated").GetBoolean(), json);
+            Assert.True(root.GetProperty("budget_truncated").GetBoolean(), json);
+            var servers = root.GetProperty("servers").EnumerateArray().ToArray();
+            Assert.InRange(servers.Length, 20, limit - 1);
+            Assert.Equal(servers.Length, root.GetProperty("rows_returned").GetInt32());
+
+            /* The limit's note names the rows the reply lists, not the rows the limit admitted before the budget cut. */
+            var note = root.GetProperty("note").GetString()!;
+            Assert.Contains($"limit {limit} cut the list: {servers.Length} of {FleetServers} server, database and source rows are shown", note, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

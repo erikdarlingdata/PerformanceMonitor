@@ -550,6 +550,10 @@ public sealed class DarlingMcpQueryFleetSummaryTools
         return (rows, pairs);
     }
 
+    /// <summary>The limit's note: how many of the pairs the reply lists. The budget hook restates it for the rows it keeps, so the note never names a count the reply does not list.</summary>
+    private static string LimitCutNote(int limit, int shown, int pairs) =>
+        $"limit {limit} cut the list: {shown} of {pairs} server, database and source rows are shown, the heaviest by CPU. Raise limit (most {MaxLimit}) to see more.";
+
     [McpServerTool(Name = "get_query_fleet_summary"), Description("Where one statement runs and what it costs on every monitored server, in one read: one entry per server, database and source (plan_cache or query_store) for a query_hash, ranked by CPU. Use it instead of calling get_query_trend or get_top_queries_by_cpu once per server. There is no server_name: it reads the whole fleet. <<GUIDE>> Where one statement runs and what it costs on every monitored server, in one read: one entry per server, database and source (plan_cache or query_store) for a query_hash, ranked by CPU. Use it instead of calling get_query_trend or get_top_queries_by_cpu once per server. There is no server_name: it reads the whole fleet. Give a query_hash (from get_top_queries_by_cpu, get_query_store_top or a plan). Each entry has source, execution_count, cpu_ms, elapsed_ms, avg_cpu_ms, avg_elapsed_ms and the first and last hour the statement was seen. hours_back reaches 2160 (90 days), default 168; a 42-target store answered in 4.3 s (7 days), 5.8 s (28 days) and 9.0 s (90 days) with a cold cache. Reads the plan cache's hourly tier, the tier get_query_trend reads, with the newest hours the rollup has not built yet summed from the raw rows, so no hour is counted twice and none is left out. It also reads Query Store (the corrected hourly rollup plus the raw tail) for up to 7 days: each row has a source of plan_cache or query_store, and a longer window answers the plan cache in full and says the Query Store part was cut to 7 days. limit defaults to 50 and reaches 200: server_database_pairs counts every server, database and source entry in the window (a server and database present in both sources counts once per source), and truncated is true when limit cut entries. The answer is held to the 32,768-byte response budget: when entries were left off the end (the lightest by CPU), budget_truncated is true, budget_note says how many fit, and rows_returned and servers_returned count what is listed. A statement that ran nowhere in the window answers status empty.")]
     public static Task<string> GetQueryFleetSummary(
         NpgsqlDataSource postgres,
@@ -693,9 +697,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                 limit,
                 truncated = pairs > rows.Count,
                 ordering = "cpu_ms descending",
-                note = pairs > rows.Count
-                    ? $"limit {limit} cut the list: {rows.Count} of {pairs} server, database and source rows are shown, the heaviest by CPU. Raise limit (most {MaxLimit}) to see more."
-                    : null,
+                note = pairs > rows.Count ? LimitCutNote(limit, rows.Count, pairs) : null,
                 servers = rows.Select(r => new
                 {
                     server_name = r.Server,
@@ -722,6 +724,11 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                     (node, kept) =>
                     {
                         node["rows_returned"] = kept;
+                        /* The limit's note counts the rows shown, so a budget cut under the limit restates it for the rows kept. */
+                        if (node["note"] is not null)
+                        {
+                            node["note"] = LimitCutNote(limit, kept, pairs);
+                        }
                         node["servers_returned"] = rows.Take(kept).Select(r => r.Server).Distinct(StringComparer.Ordinal).Count();
                     })
                 : payload.ToJsonString(McpHelpers.JsonOptions);
