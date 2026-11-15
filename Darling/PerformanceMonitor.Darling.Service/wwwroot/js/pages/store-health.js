@@ -450,6 +450,14 @@ function drawIndexes(res, indexesBox, coverageBox) {
   }));
   mount(indexesBox, parts);
 
+  /* The coverage read ran past its limit: the index rows above stand, and the coverage section says it was left out, never that every partition is fine. */
+  if (typeof d.coverage_left_out_note === "string" && d.coverage_left_out_note) {
+    mount(coverageBox, [
+      el("h3", { class: "section-title", text: "Partition index coverage" }),
+      noticeStrip("The partition index coverage was left out. " + d.coverage_left_out_note),
+    ]);
+    return;
+  }
   const incomplete = incompleteCoverage(d.partition_index_coverage);
   if (!incomplete.length) {
     mount(coverageBox, el("div", { class: "meta", text: COVERAGE_CLEAN_LINE }));

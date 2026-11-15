@@ -15,10 +15,12 @@ using PerformanceMonitor.Darling.Storage;
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>The index half of the Store Health tab: the index rows and the partition coverage rows, read together (the coverage read is
-/// a few milliseconds beside the index read).</summary>
+/// a few milliseconds beside the index read). When only the coverage read runs past its limit, the index rows stand, <see cref="Coverage"/>
+/// is empty and <see cref="CoverageLeftOutNote"/> says the coverage was left out.</summary>
 public sealed record StoreIndexHealth(
     IReadOnlyList<DarlingStoreTableHealthReader.StoreIndexHealthRow> Indexes,
-    IReadOnlyList<DarlingStoreTableHealthReader.StoreIndexCoverageRow> Coverage);
+    IReadOnlyList<DarlingStoreTableHealthReader.StoreIndexCoverageRow> Coverage,
+    string? CoverageLeftOutNote = null);
 
 /// <summary>
 /// The reads the Store Health tab makes (#8787): the store's own tables and indexes, whether now is a safe time for maintenance, and a
@@ -36,8 +38,15 @@ public sealed partial class ViewerDataService
     public async Task<StoreIndexHealth> GetStoreIndexHealthAsync(CancellationToken cancellationToken = default)
     {
         var indexes = await DarlingStoreTableHealthReader.GetIndexesAsync(_dataSource, cancellationToken);
-        var coverage = await DarlingStoreTableHealthReader.GetIndexCoverageAsync(_dataSource, cancellationToken);
-        return new StoreIndexHealth(indexes, coverage);
+        try
+        {
+            var coverage = await DarlingStoreTableHealthReader.GetIndexCoverageAsync(_dataSource, cancellationToken);
+            return new StoreIndexHealth(indexes, coverage);
+        }
+        catch (StoreTableHealthTimeoutException ex)
+        {
+            return new StoreIndexHealth(indexes, Array.Empty<DarlingStoreTableHealthReader.StoreIndexCoverageRow>(), ex.Message);
+        }
     }
 
     /// <summary>The "safe for maintenance now" verdict with its reasons.</summary>

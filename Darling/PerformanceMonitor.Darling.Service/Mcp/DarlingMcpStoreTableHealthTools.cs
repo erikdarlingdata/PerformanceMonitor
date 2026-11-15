@@ -76,7 +76,7 @@ public sealed class DarlingMcpStoreTableHealthTools
         + "the same number of rows from each section: budget_truncated = true says rows were left off the end for the budget, budget_note says how many "
         + "fit, and has_more and next_offset read on (pass next_offset as offset). A live read of the catalogs: allow a second or two on a "
         + "store with many chunks. A part that runs past its read limit is left out and named in tables_left_out_note or indexes_left_out_note, "
-        + "and the other part is still returned. When every part asked for ran past the limit, status is timed_out.")]
+        + "and the other part is still returned. When only the partition index coverage read runs past it, the index rows are still returned and coverage_left_out_note names the coverage that was left out. When every part asked for ran past the limit, status is timed_out.")]
     public static Task<string> GetStoreTableHealth(
         NpgsqlDataSource postgres,
         [Description("How many rows to return per section, in the answer's order. Default 50, max 1000. The reply is also held to a byte budget: when rows were left off for it, budget_truncated is true and next_offset reads on.")] int top = DefaultTop,
@@ -89,11 +89,12 @@ public sealed class DarlingMcpStoreTableHealthTools
     /// <summary>
     /// The read with its response budget. The MCP tool passes <see cref="McpResponseBudget.DefaultBytes"/>. The web route passes null:
     /// the Store Health page asks for one section at a time and draws every row it asked for. <paramref name="indexSource"/> is the store
-    /// the index reads use (the tool's own store when null): a test gives it a store whose statements trip the deadline.
+    /// the index reads use (the tool's own store when null): a test gives it a store whose statements trip the deadline. <paramref name="coverageSource"/> is
+    /// the same for the partition index coverage read alone (the index source when null).
     /// </summary>
     internal static async Task<string> GetStoreTableHealth(
         NpgsqlDataSource postgres, int top, bool candidates_only, string? section, int offset, int? responseByteBudget, CancellationToken cancellationToken,
-        NpgsqlDataSource? indexSource = null)
+        NpgsqlDataSource? indexSource = null, NpgsqlDataSource? coverageSource = null)
     {
         var invalidTop = McpHelpers.ValidateTop(top, "top");
         if (invalidTop != null)
@@ -131,6 +132,7 @@ public sealed class DarlingMcpStoreTableHealthTools
 
             string? tablesTimeout = null;
             string? indexesTimeout = null;
+            string? coverageTimeout = null;
 
             if (wantTables)
             {
@@ -185,28 +187,49 @@ public sealed class DarlingMcpStoreTableHealthTools
                 try
                 {
                     indexRows = await DarlingStoreTableHealthReader.GetIndexesAsync(indexSource ?? postgres, cancellationToken);
-                    coverageRows = await DarlingStoreTableHealthReader.GetIndexCoverageAsync(indexSource ?? postgres, cancellationToken);
                 }
                 catch (StoreTableHealthTimeoutException ex)
                 {
                     indexesTimeout = ex.Message;
                 }
 
-                var incomplete = coverageRows.Count(c => c.LeavesMissingIndex > 0 || c.LeavesInvalidIndex > 0);
-
-                result["index_header"] = indexesTimeout is not null
-                    ? "The index part was left out: " + indexesTimeout
-                    : string.Create(CultureInfo.InvariantCulture,
-                    $"{CountText.Plural(indexRows.Count, "store index", "store indexes")}, {indexRows.Count(r => r.LargerThanHeap)} larger than their heap, {indexRows.Count(r => r.RarelyUsed)} rarely used, "
-                    + $"{indexRows.Count(r => !r.Valid)} invalid, and {CountText.Plural(incomplete, "partitioned-parent index", "partitioned-parent indexes")} with a leaf missing or invalid.");
                 if (indexesTimeout is null)
                 {
-                    result["indexes_total"] = indexRows.Count;
-                    result["partition_index_coverage_total"] = coverageRows.Count;
+                    /* The index rows are in hand. A coverage read that runs past its limit leaves out only the coverage part. */
+                    try
+                    {
+                        coverageRows = await DarlingStoreTableHealthReader.GetIndexCoverageAsync(coverageSource ?? indexSource ?? postgres, cancellationToken);
+                    }
+                    catch (StoreTableHealthTimeoutException ex)
+                    {
+                        coverageTimeout = ex.Message;
+                    }
+                }
+
+                var incomplete = coverageRows.Count(c => c.LeavesMissingIndex > 0 || c.LeavesInvalidIndex > 0);
+
+                if (indexesTimeout is not null)
+                {
+                    result["index_header"] = "The index part was left out: " + indexesTimeout;
+                    result["indexes_left_out_note"] = indexesTimeout;
                 }
                 else
                 {
-                    result["indexes_left_out_note"] = indexesTimeout;
+                    var indexCounts = string.Create(CultureInfo.InvariantCulture,
+                        $"{CountText.Plural(indexRows.Count, "store index", "store indexes")}, {indexRows.Count(r => r.LargerThanHeap)} larger than their heap, {indexRows.Count(r => r.RarelyUsed)} rarely used, ");
+                    result["index_header"] = coverageTimeout is null
+                        ? indexCounts + string.Create(CultureInfo.InvariantCulture,
+                            $"{indexRows.Count(r => !r.Valid)} invalid, and {CountText.Plural(incomplete, "partitioned-parent index", "partitioned-parent indexes")} with a leaf missing or invalid.")
+                        : indexCounts + string.Create(CultureInfo.InvariantCulture, $"and {indexRows.Count(r => !r.Valid)} invalid. The partition index coverage was left out: ") + coverageTimeout;
+                    result["indexes_total"] = indexRows.Count;
+                    if (coverageTimeout is null)
+                    {
+                        result["partition_index_coverage_total"] = coverageRows.Count;
+                    }
+                    else
+                    {
+                        result["coverage_left_out_note"] = coverageTimeout;
+                    }
                 }
             }
 
@@ -242,9 +265,12 @@ public sealed class DarlingMcpStoreTableHealthTools
                     result["indexes_returned"] = indexPage.Count;
                     result["indexes_truncated"] = indexRows.Count > offset + indexPage.Count;
                     result["indexes"] = indexPage.Select(Index).ToList();
-                    result["partition_index_coverage_returned"] = coveragePage.Count;
-                    result["partition_index_coverage_truncated"] = coverageRows.Count > offset + coveragePage.Count;
-                    result["partition_index_coverage"] = coveragePage.Select(Coverage).ToList();
+                    if (coverageTimeout is null)
+                    {
+                        result["partition_index_coverage_returned"] = coveragePage.Count;
+                        result["partition_index_coverage_truncated"] = coverageRows.Count > offset + coveragePage.Count;
+                        result["partition_index_coverage"] = coveragePage.Select(Coverage).ToList();
+                    }
                 }
 
                 result["budget_truncated"] = budgetCut;

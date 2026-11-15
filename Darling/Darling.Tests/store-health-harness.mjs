@@ -98,10 +98,13 @@ const INDEXES = [
   index({ index_name: "ix_unanalyzed", estimate_skipped_reason: "The table has never been analyzed, so no estimate is made." }),
 ];
 const coverage = (o) => ({ schema_name: "collect", table_name: "parts", index_name: "ix_parts", parent_index_valid: true, leaf_count: 3, leaves_with_index: 3, leaves_missing_index: 0, missing_leaves: [], leaves_invalid_index: 0, invalid_leaves: [], ...o });
-const indexesAnswer = (cov) => ({
-  section: "indexes", index_header: "x", indexes_total: INDEXES.length, indexes_returned: INDEXES.length, indexes_truncated: false, indexes: INDEXES,
-  partition_index_coverage_total: cov.length, partition_index_coverage_returned: cov.length, partition_index_coverage_truncated: false, partition_index_coverage: cov,
-});
+const indexesAnswer = (cov) => cov === null
+  ? { section: "indexes", index_header: "x", indexes_total: INDEXES.length, indexes_returned: INDEXES.length, indexes_truncated: false, indexes: INDEXES,
+      coverage_left_out_note: "The store table health read ran past its 30-second limit and was stopped." }
+  : {
+      section: "indexes", index_header: "x", indexes_total: INDEXES.length, indexes_returned: INDEXES.length, indexes_truncated: false, indexes: INDEXES,
+      partition_index_coverage_total: cov.length, partition_index_coverage_returned: cov.length, partition_index_coverage_truncated: false, partition_index_coverage: cov,
+    };
 const MEASURE = {
   verdict: "Mostly empty and only a rewrite returns the space.", verdict_kind: "rewrite_needed", table: "collect.store_metrics", total_pages: 1000, pages_with_rows: 300, empty_pages: 700,
   empty_share: 0.7, live_bytes: 2000000, free_bytes: 6000000, free_share: 0.75, fillfactor: 100, rows: 3000, rows_per_used_page: 10, last_used_block: 998, last_file_block: 999, trailing_empty_pages: 0, vacuum_shrink_disabled: false,
@@ -226,6 +229,18 @@ function gridRowsOfPlain(root) {
   await flush();
   const sections = main2.children[0].children;
   out.cleanCoverage = { text: sections[8].textContent, headings: byClass(sections[8], "section-title").length };
+}
+
+/* 3b. The coverage read ran past its limit: the index rows are drawn and the coverage section says it was left out. */
+{
+  coverageRows = null;
+  const main3 = new FakeNode("main");
+  main3.isRoot = true;
+  page.renderStoreHealth(main3);
+  await flush();
+  const sections = main3.children[0].children;
+  out.coverageLeftOut = { text: sections[8].textContent, indexGridRows: gridRows(sections[7]).length };
+  coverageRows = [coverage({})];
 }
 
 /* 4. Refresh runs the tables and the indexes again, as two reads and never as section "all". */

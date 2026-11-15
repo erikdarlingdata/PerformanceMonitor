@@ -85,6 +85,40 @@ public sealed class DarlingStoreTableHealthDeadlineTests
         Assert.False(root.TryGetProperty("tables_left_out_note", out _));
     }
 
+    [Theory]
+    [InlineData("all")]
+    [InlineData("indexes")]
+    public async Task ACoverageReadPastItsLimit_KeepsTheIndexRows_AndLeavesOutOnlyTheCoverage(string section)
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #8806 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var healthy = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await using var tripping = TrippingSource(scratch.ConnectionString);
+
+        var reply = await DarlingMcpStoreTableHealthTools.GetStoreTableHealth(healthy, 1000, false, section, 0, null, ct, indexSource: healthy, coverageSource: tripping);
+        using var json = JsonDocument.Parse(reply);
+        var root = json.RootElement;
+
+        Assert.False(root.TryGetProperty("status", out _), "the index rows were read, so the reply is not a whole-read failure: " + reply);
+        var returned = root.GetProperty("indexes_returned").GetInt32();
+        Assert.True(returned > 0, "the index rows that were read still come back");
+        Assert.Equal(returned, root.GetProperty("indexes").GetArrayLength());
+        Assert.Equal(returned, root.GetProperty("indexes_total").GetInt32());
+        Assert.False(root.TryGetProperty("indexes_left_out_note", out _));
+        Assert.DoesNotContain("The index part was left out", root.GetProperty("index_header").GetString()!, StringComparison.Ordinal);
+        AssertReadsAsATimeout(root.GetProperty("coverage_left_out_note").GetString()!);
+        Assert.Contains("coverage was left out", root.GetProperty("index_header").GetString()!, StringComparison.Ordinal);
+        Assert.False(root.TryGetProperty("partition_index_coverage", out _));
+        Assert.False(root.TryGetProperty("tables_left_out_note", out _));
+        if (section == "all")
+        {
+            Assert.True(root.GetProperty("tables_returned").GetInt32() > 0, "the table rows still come back");
+        }
+    }
+
     [Fact]
     public async Task ATableReadPastItsLimit_LeavesTheTablePartOut_AndTheIndexRowsStillReturn()
     {
