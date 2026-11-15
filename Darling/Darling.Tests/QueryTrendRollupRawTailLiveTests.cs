@@ -268,8 +268,10 @@ public sealed class QueryTrendRollupRawTailLiveTests
 
                 await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
+                /* H is two whole days behind the test clock's hour: the reads' as_of stays behind the product's own clock when
+                   DARLING_TEST_CLOCK_UTC runs ahead of it, and H keeps the hour of day the override is proving. */
                 var now = LiveClock.Now();
-                var h = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(-1);
+                var h = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddDays(-2);
                 var firstHour = h.AddHours(-SeededHours);
 
                 /* One collection five minutes into every hour from H-172 to H-1, and one a minute into H. */
