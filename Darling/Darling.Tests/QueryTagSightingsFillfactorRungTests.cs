@@ -32,14 +32,29 @@ public sealed class QueryTagSightingsFillfactorRungTests
     {
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal("hasQueryTagSightingsFillfactor", parameters[^1].Name);
+        var ordinal = SentinelOrdinal();
 
+        /* Every sentinel but the newer rungs' answers V266; without the fillfactor the store maps one rung lower. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
+        for (var i = ordinal + 1; i < parameters.Length; i++)
+        {
+            all[i] = false;
+        }
+
         Assert.Equal(266, (int)method.Invoke(null, all)!);
 
         var without = (object[])all.Clone();
-        without[^1] = false;
+        without[ordinal] = false;
         Assert.Equal(265, (int)method.Invoke(null, without)!);
+    }
+
+    /// <summary>The fillfactor sentinel's place in the mapper's parameters, which is also its column in the probe's row.</summary>
+    private static int SentinelOrdinal()
+    {
+        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var ordinal = Array.FindIndex(method.GetParameters(), p => p.Name == "hasQueryTagSightingsFillfactor");
+        Assert.True(ordinal >= 0);
+        return ordinal;
     }
 
     [Fact]
@@ -83,7 +98,7 @@ public sealed class QueryTagSightingsFillfactorRungTests
         await using (var reader = await probe.ExecuteReaderAsync(ct))
         {
             Assert.True(await reader.ReadAsync(ct));
-            Assert.True(reader.GetBoolean(reader.FieldCount - 1));
+            Assert.True(reader.GetBoolean(SentinelOrdinal()));
         }
     }
 }
