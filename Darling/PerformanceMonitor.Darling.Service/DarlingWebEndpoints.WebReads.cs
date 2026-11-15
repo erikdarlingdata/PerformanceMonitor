@@ -372,12 +372,12 @@ public static partial class DarlingWebEndpoints
                 ? DarlingMcpTrendTools.GetQueryStoreDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), databases, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
             ["get_query_fleet_summary"] = (c, pg, an) => RequireText(c, "query_hash", out var qfsHash)
-                ? DarlingMcpQueryFleetSummaryTools.GetQueryFleetSummary(pg, qfsHash, Hours(c, DarlingMcpQueryFleetSummaryTools.DefaultHoursBack), AsOf(c), Rows(c, "limit", DarlingMcpQueryFleetSummaryTools.DefaultLimit), c.RequestAborted)
+                ? DarlingMcpQueryFleetSummaryTools.GetQueryFleetSummary(pg, qfsHash, Hours(c, DarlingMcpQueryFleetSummaryTools.DefaultHoursBack), AsOf(c), Rows(c, "limit", DarlingMcpQueryFleetSummaryTools.DefaultLimit), null, c.RequestAborted)
                 : MissingParam("query_hash"),
             ["get_query_trend"] = (c, pg, an) => RequireText(c, "query_hash", out var queryHash)
                 ? (RequireText(c, "database_name", out var db)
                     ? (OptionalInt(c, "bucket_minutes", out var queryTrendBucketMinutes)
-                        ? DarlingMcpTrendTools.GetQueryTrend(pg, queryHash, db, Server(c), Hours(c, 24), as_of: AsOf(c), bucket_minutes: queryTrendBucketMinutes, cancellationToken: c.RequestAborted)
+                        ? DarlingMcpTrendTools.GetQueryTrend(pg, queryHash, db, Server(c), Hours(c, 24), AsOf(c), queryTrendBucketMinutes, TrendBudget.Mcp(TrendBuckets.QueryTrendMaxPoints), null, c.RequestAborted)
                         : UnparseableParam("bucket_minutes"))
                     : MissingParam("database_name"))
                 : MissingParam("query_hash"),

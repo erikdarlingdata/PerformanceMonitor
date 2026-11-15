@@ -550,13 +550,23 @@ public sealed class DarlingMcpQueryFleetSummaryTools
         return (rows, pairs);
     }
 
-    [McpServerTool(Name = "get_query_fleet_summary"), Description("Where one statement runs and what it costs on every monitored server, in one read: one entry per server, database and source (plan_cache or query_store) for a query_hash, ranked by CPU. Use it instead of calling get_query_trend or get_top_queries_by_cpu once per server. There is no server_name: it reads the whole fleet. <<GUIDE>> Where one statement runs and what it costs on every monitored server, in one read: one entry per server, database and source (plan_cache or query_store) for a query_hash, ranked by CPU. Use it instead of calling get_query_trend or get_top_queries_by_cpu once per server. There is no server_name: it reads the whole fleet. Give a query_hash (from get_top_queries_by_cpu, get_query_store_top or a plan). Each entry has source, execution_count, cpu_ms, elapsed_ms, avg_cpu_ms, avg_elapsed_ms and the first and last hour the statement was seen. hours_back reaches 2160 (90 days), default 168; a 42-target store answered in 4.3 s (7 days), 5.8 s (28 days) and 9.0 s (90 days) with a cold cache. Reads the plan cache's hourly tier, the tier get_query_trend reads, with the newest hours the rollup has not built yet summed from the raw rows, so no hour is counted twice and none is left out. It also reads Query Store (the corrected hourly rollup plus the raw tail) for up to 7 days: each row has a source of plan_cache or query_store, and a longer window answers the plan cache in full and says the Query Store part was cut to 7 days. limit defaults to 50 and reaches 200: server_database_pairs counts every server, database and source entry in the window (a server and database present in both sources counts once per source), and truncated is true when limit cut entries. A statement that ran nowhere in the window answers status empty.")]
-    public static async Task<string> GetQueryFleetSummary(
+    [McpServerTool(Name = "get_query_fleet_summary"), Description("Where one statement runs and what it costs on every monitored server, in one read: one entry per server, database and source (plan_cache or query_store) for a query_hash, ranked by CPU. Use it instead of calling get_query_trend or get_top_queries_by_cpu once per server. There is no server_name: it reads the whole fleet. <<GUIDE>> Where one statement runs and what it costs on every monitored server, in one read: one entry per server, database and source (plan_cache or query_store) for a query_hash, ranked by CPU. Use it instead of calling get_query_trend or get_top_queries_by_cpu once per server. There is no server_name: it reads the whole fleet. Give a query_hash (from get_top_queries_by_cpu, get_query_store_top or a plan). Each entry has source, execution_count, cpu_ms, elapsed_ms, avg_cpu_ms, avg_elapsed_ms and the first and last hour the statement was seen. hours_back reaches 2160 (90 days), default 168; a 42-target store answered in 4.3 s (7 days), 5.8 s (28 days) and 9.0 s (90 days) with a cold cache. Reads the plan cache's hourly tier, the tier get_query_trend reads, with the newest hours the rollup has not built yet summed from the raw rows, so no hour is counted twice and none is left out. It also reads Query Store (the corrected hourly rollup plus the raw tail) for up to 7 days: each row has a source of plan_cache or query_store, and a longer window answers the plan cache in full and says the Query Store part was cut to 7 days. limit defaults to 50 and reaches 200: server_database_pairs counts every server, database and source entry in the window (a server and database present in both sources counts once per source), and truncated is true when limit cut entries. The answer is held to the 32,768-byte response budget: when entries were left off the end (the lightest by CPU), budget_truncated is true, budget_note says how many fit, and rows_returned and servers_returned count what is listed. A statement that ran nowhere in the window answers status empty.")]
+    public static Task<string> GetQueryFleetSummary(
         NpgsqlDataSource postgres,
         [Description("The query_hash value from get_top_queries_by_cpu, get_query_store_top or a plan.")] string query_hash,
         [Description("Hours of history. Default 168.")] int hours_back = DefaultHoursBack,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Maximum server and database rows, ranked by CPU. Default 50, most 200.")] int limit = DefaultLimit,
+        CancellationToken cancellationToken = default) =>
+        GetQueryFleetSummary(postgres, query_hash, hours_back, as_of, limit, McpResponseBudget.DefaultBytes, cancellationToken);
+
+    /// <summary>
+    /// get_query_fleet_summary under an explicit <paramref name="responseByteBudget"/> (#8812): the MCP tool passes the shared 32 KB budget
+    /// and answers cut to it with <c>budget_truncated</c> and <c>budget_note</c>, entry count and server count following the cut. The web
+    /// viewer's <c>/api/read</c> mirror passes none and keeps every entry <c>limit</c> allows.
+    /// </summary>
+    internal static async Task<string> GetQueryFleetSummary(
+        NpgsqlDataSource postgres, string query_hash, int hours_back, string? as_of, int limit, int? responseByteBudget,
         CancellationToken cancellationToken = default)
     {
         var hash = (query_hash ?? string.Empty).Trim();
@@ -660,7 +670,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                     "Confirm the hash with get_top_queries_by_cpu before concluding the statement did not run." + (qsNote is null ? "" : " " + qsNote));
             }
 
-            return JsonSerializer.Serialize(new
+            var payload = JsonSerializer.SerializeToNode(new
             {
                 query_hash = hash,
                 hours_back,
@@ -700,7 +710,21 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                     first_hour = r.First.ToString("o", CultureInfo.InvariantCulture),
                     last_hour = r.Last.ToString("o", CultureInfo.InvariantCulture),
                 }),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions)!.AsObject();
+
+            /* #8812: an answer over the response budget ends at the last whole entry that fits it, heaviest CPU first, and says so
+               under its own keys: truncated and note stay the limit's cut. The counts follow the entries listed. */
+            return responseByteBudget is int byteBudget
+                ? McpResponseBudget.CapArray(
+                    payload, "servers", "heaviest by CPU first", "server and database entries",
+                    _ => "Narrow hours_back to list only the servers that ran the statement in a shorter window.", byteBudget,
+                    "budget_truncated", "budget_note",
+                    (node, kept) =>
+                    {
+                        node["rows_returned"] = kept;
+                        node["servers_returned"] = rows.Take(kept).Select(r => r.Server).Distinct(StringComparer.Ordinal).Count();
+                    })
+                : payload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

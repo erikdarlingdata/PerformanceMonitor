@@ -196,6 +196,12 @@ internal static class TrendBuckets
     /// deltas, weighted averages, DOP pair and plan facts.</summary>
     public const int QueryTrendMaxPoints = 750;
 
+    /// <summary><c>get_query_trend</c>'s own MCP auto-sizing target (#8812), narrower than the shared <see cref="McpPointBudget"/> for the
+    /// same reason as <see cref="PgIoMcpAutoPoints"/>: at about 345 bytes a point the shared target's hourly points over a week (169) answered
+    /// 58 KB, over <see cref="McpResponseBudget.DefaultBytes"/> (32 KB). 70 keeps the answer under about 28 KB: a day is 30-minute points,
+    /// four days 2-hour ones and a week 3-hour ones. A width the caller names is still cut to the budget by the read.</summary>
+    public const int QueryTrendMcpAutoPoints = 70;
+
     /// <summary>
     /// The fixed origin every bucketing read aligns to, as a SQL literal both dialects accept (PostgreSQL
     /// <c>date_bin</c>, DuckDB <c>time_bucket</c>). A midnight, so every ladder width lands on round clock times.
@@ -380,6 +386,20 @@ internal static class TrendBuckets
     /// automatic width would ask the rollup for points it does not hold.
     /// </summary>
     public static int OnHourlyTier(int? requested, int resolved) => requested ?? Math.Max(60, resolved);
+
+    /// <summary>
+    /// The sentence a trend read ends its budget cut note with (#8812): the bucket width whose points fit in <paramref name="keptPoints"/>
+    /// over a window of <paramref name="hoursBack"/> hours, at least <paramref name="floorMinutes"/> (the hourly rollup's hour), or the
+    /// way to a shorter window when even the widest bucket holds more points than that.
+    /// </summary>
+    public static string BudgetCutRemedy(int hoursBack, int keptPoints, int floorMinutes)
+    {
+        var windowMinutes = hoursBack * 60;
+        var width = Math.Max(floorMinutes, AutoMinutes(windowMinutes, 1, keptPoints));
+        return PointsFor(windowMinutes, width, 1) <= keptPoints
+            ? $"Use bucket_minutes {width.ToString(CultureInfo.InvariantCulture)} to read the whole window in one reply, or move as_of to read the points after the last one returned."
+            : "Narrow hours_back, or move as_of to read the points after the last one returned.";
+    }
 
     /// <summary>The width as a word for the payload's <c>bucket</c> key: <c>1 minute</c>, <c>10 minutes</c>,
     /// <c>1 hour</c>, <c>6 hours</c>, <c>1 day</c>. The hourly tier's existing spelling (<c>1 hour</c>) is the same
