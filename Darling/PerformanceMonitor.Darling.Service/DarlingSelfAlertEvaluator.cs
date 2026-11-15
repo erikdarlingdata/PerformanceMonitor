@@ -5465,8 +5465,9 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>
     /// Edge-applies "Identity Capacity" (#6875) from <see cref="ReadIdentityCapacityAsync"/>. A column is judged by the same percent and the same
-    /// <see cref="IdentityCapacityMath.Band(double, double, double)"/> the tool and the Viewer use, against the bars that apply to its server and
-    /// database (a threshold override replaces the global bar for that scope, the critical bar never below the warning bar). Fires once when a column
+    /// <see cref="IdentityCapacityMath.Grade"/> the tool and the Viewer use, against the percent bars that apply to its server and
+    /// database (a threshold override replaces the global bar for that scope, the critical bar never below the warning bar) and the fixed days-left bars
+    /// (#8818: under 30 days is warning, under 7 critical, the worse grade wins, and no days grade without a rate). Fires once when a column
     /// reaches a bar, again when the worst band rises from warning to critical, re-fires after the cooldown while one stands, and writes one
     /// "Identity Capacity Cleared" history row when no column is at a bar any more. A null <paramref name="read"/> judges nothing. Off unless the
     /// <c>identity_capacity_enabled</c> setting is on, and gated on the master alerts switch.
@@ -5483,7 +5484,7 @@ internal sealed class DarlingSelfAlertEvaluator
         var now = _utcNow();
         var globalWarning = Math.Clamp(_identityCapacityWarningPercent(), 1, 100);
         var globalCritical = Math.Clamp(_identityCapacityCriticalPercent(), globalWarning, 100);
-        var hits = new List<(IdentityColumnFact Column, double Percent, string Band, int Warning, int Critical)>();
+        var hits = new List<(IdentityColumnFact Column, double Percent, string Band, string? Reason, int Warning, int Critical)>();
         foreach (var column in read.Columns)
         {
             if (column.PercentUsed is not double percent)
@@ -5493,16 +5494,18 @@ internal sealed class DarlingSelfAlertEvaluator
 
             var warning = Math.Clamp(_resolveThreshold(DarlingThresholdKeys.IdentityCapacityWarning, key, column.DatabaseName, globalWarning), 1, 100);
             var critical = Math.Max(warning, Math.Clamp(_resolveThreshold(DarlingThresholdKeys.IdentityCapacityCritical, key, column.DatabaseName, globalCritical), 1, 100));
-            var band = IdentityCapacityMath.Band(percent, warning, critical);
-            if (band != IdentityCapacityMath.BandOk)
+            /* #8818: the percent grade against this scope's bars and the days-left grade against the fixed days bars, the worse winning. */
+            var graded = IdentityCapacityMath.Grade(percent, column.Exhaustion?.DaysLeft, warning, critical);
+            if (graded.Band != IdentityCapacityMath.BandOk)
             {
-                hits.Add((column, percent, band, warning, critical));
+                hits.Add((column, percent, graded.Band, graded.Reason, warning, critical));
             }
         }
 
         if (hits.Count > 0)
         {
-            hits.Sort((a, b) => b.Percent.CompareTo(a.Percent));
+            /* The worst first: critical before warning, then the fullest. A column banded on days can be less full than one banded on percent. */
+            hits.Sort((a, b) => IdentityCapacityMath.Rank(b.Band).CompareTo(IdentityCapacityMath.Rank(a.Band)) is var byBand and not 0 ? byBand : b.Percent.CompareTo(a.Percent));
             var isCritical = hits.Any(h => h.Band == IdentityCapacityMath.BandCritical);
             _activeIdentityCapacity[key] = true;
             await SeedStandingStateAsync(_lastIdentityCapacityAlert, key, key, key, IdentityCapacityMetric, cancellationToken, ranked: true);
@@ -5512,23 +5515,26 @@ internal sealed class DarlingSelfAlertEvaluator
                 _lastIdentityCapacityAlert[key] = now;
                 var worst = hits[0];
                 var worstBar = worst.Band == IdentityCapacityMath.BandCritical ? worst.Critical : worst.Warning;
+                var worstOnDays = worst.Reason == IdentityCapacityMath.ReasonDays && worst.Column.Exhaustion is not null;
+                var worstDays = worstOnDays ? worst.Column.Exhaustion!.Value.DaysLeft : 0;
+                var worstDaysBar = worst.Band == IdentityCapacityMath.BandCritical ? IdentityCapacityMath.CriticalDays : IdentityCapacityMath.WarningDays;
                 var lines = hits.Take(IdentityCapacityDetailColumns).Select(h =>
-                    $"{h.Column.DatabaseName}.{h.Column.SchemaName}.{h.Column.TableName}.{h.Column.ColumnName}: {h.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used ({h.Band}), " +
+                    $"{h.Column.DatabaseName}.{h.Column.SchemaName}.{h.Column.TableName}.{h.Column.ColumnName}: {h.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used ({h.Band}{(h.Reason == IdentityCapacityMath.ReasonDays ? " on days left" : "")}), " +
                     (h.Column.Exhaustion is { } e
                         ? $"about {e.DaysLeft.ToString("F0", CultureInfo.InvariantCulture)} days to exhaustion."
                         : "days to exhaustion unknown."));
                 var more = hits.Count > IdentityCapacityDetailColumns ? $" And {hits.Count - IdentityCapacityDetailColumns} more." : "";
                 var delivery = await FireAsync(
                     key, serverName, IdentityCapacityMetric,
-                    $"{worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}%",
-                    $"{worstBar.ToString(CultureInfo.InvariantCulture)}%",
+                    worstOnDays ? $"{worstDays.ToString("F1", CultureInfo.InvariantCulture)} days" : $"{worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}%",
+                    worstOnDays ? $"{worstDaysBar.ToString("F0", CultureInfo.InvariantCulture)} days" : $"{worstBar.ToString(CultureInfo.InvariantCulture)}%",
                     detail: StateRepeatNote(decision, refire) +
                         $"{CountText.Plural(hits.Count, "identity column")} on this server {(hits.Count == 1 ? "is" : "are")} near the end of {(hits.Count == 1 ? "its" : "their")} type. An identity column that runs out stops every insert into its table. " +
                         string.Join(" ", lines) + more,
                     severity: isCritical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
                     shortMessage: $"{CountText.Plural(hits.Count, "identity column")} near the end of {(hits.Count == 1 ? "its" : "their")} type, fullest {worst.Column.DatabaseName}.{worst.Column.TableName}.{worst.Column.ColumnName} at {worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used",
-                    numericCurrentValue: worst.Percent,
-                    numericThresholdValue: worstBar,
+                    numericCurrentValue: worstOnDays ? worstDays : worst.Percent,
+                    numericThresholdValue: worstOnDays ? worstDaysBar : worstBar,
                     cancellationToken);
                 if (IsStaleSweep(serverId, sweepGeneration))
                 {
