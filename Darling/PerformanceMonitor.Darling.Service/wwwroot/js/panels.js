@@ -127,6 +127,18 @@ export function emptyHeadline(desc, res) {
 }
 
 /**
+ * #8840: what two panels that read the same tool with different parameters share, so the second can point at the first when both come back
+ * empty with one message. `fanout` does this for panels over ONE read; two reads cannot, so the page makes one of these per tab build and
+ * gives it to both panels as `emptyShare: { holder, leads }`. The leading panel records what it said; the follower waits for the leader's
+ * read to settle (in any way) and points at it only when the leader said the same message.
+ */
+export function emptyShare() {
+  let settle;
+  const settled = new Promise((resolve) => { settle = resolve; });
+  return { said: null, settled, settle };
+}
+
+/**
  * #7410: the strip an empty reply draws in a panel. A panel's agreed sentence (emptyWins) or a reply with no structured reason shows
  * the message as before. A reply that names a missing extension, a source the login cannot read, or plan capture that is not ready
  * shows one plain sentence built from its `hints`, and the tool's full text is behind "More detail". A panel whose
@@ -225,6 +237,8 @@ async function loadPanel(desc, body, signal, onSettled, onRetry = null) {
   try {
     await loadPanelBody(desc, body, signal, onRetry);
   } finally {
+    /* #8840: the follower of a shared empty message must never wait on a leader that was aborted or failed. */
+    if (desc.emptyShare && desc.emptyShare.leads) desc.emptyShare.holder.settle();
     if (onSettled) onSettled();
   }
 }
@@ -281,6 +295,19 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
        window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a
        new server's empty week does not read as a quiet one. windowFloorStrip is null for a chart and for an envelope
        without the note. */
+    const share = desc.emptyShare;
+    if (share && res.status === "empty") {
+      if (share.leads) {
+        share.holder.said = { title: desc.title, message: res.message };
+      } else {
+        await share.holder.settled;
+        const said = share.holder.said;
+        if (said && said.message === res.message) {
+          mount(body, [kept, readPinStrip(desc, res), windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), emptyStrip("Empty for the same reason as " + said.title + ".")]);
+          return;
+        }
+      }
+    }
     mount(body, [kept, readPinStrip(desc, res), windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), panelEmptyStrip(desc, res)]);
     return;
   }
