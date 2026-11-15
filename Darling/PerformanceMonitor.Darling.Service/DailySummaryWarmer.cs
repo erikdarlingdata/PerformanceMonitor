@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 
@@ -44,7 +45,12 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Load.</b> One server at a time, each read under the read-admission gate (<see cref="ReadAdmission"/>) as the
 /// <c>7d+</c> web read it stands in for, so it takes one of <c>reads.maxHeavyReads</c> slots and queues behind a
 /// visitor's read like any other. A refusal (the store is busy) ends the pass. A server already warm costs the open
-/// day's read only, so a retry pass re-reads only what failed.</para>
+/// day's read, the days before the retention horizon and the trend read, and a retry pass re-reads only what failed.</para>
+///
+/// <para><b>Refresh (#8824).</b> A pass repeats every <see cref="RefreshInterval"/>, not once a day, because a block serves the days
+/// before the retention horizon for one hour only and a visitor after the hour paid their read, with the open day's, on pages
+/// no one had read since the pass. Each repeat re-reads them (the warm read passes <c>refreshSubHorizon</c>) and the 24-hour
+/// <c>total_waits</c> trend the Overview's wait strip reads. A failed or refused pass backs off 15, 30, 60, then 120 minutes, never the 30-minute interval.</para>
 /// </summary>
 public sealed class DailySummaryWarmer
 {
@@ -70,6 +76,13 @@ public sealed class DailySummaryWarmer
     internal static readonly TimeSpan DeferredRecheck = TimeSpan.FromMinutes(1);
 
     internal static readonly TimeSpan MaxRetryDelay = TimeSpan.FromHours(2);
+
+    /// <summary>#8824: the longest the warmer waits between passes. Each pass re-reads every server's days before the retention
+    /// horizon (a block serves them for <see cref="DailySummaryRangeCache{TRow}.SubHorizonTtl"/>, one hour) and its open day, and
+    /// reads the 24-hour wait trend, so a visitor an hour or more after the start no longer pays for those reads, the first of
+    /// which found the store's pages cold. Half the hour, so a pass that runs long still lands inside it, and the pages the
+    /// reads touched are recent when the visitor comes.</summary>
+    internal static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(30);
 
     private readonly Func<IReadOnlyList<(int ServerId, string Name)>> _servers;
     private readonly Func<int, string, CancellationToken, Task> _warm;
@@ -132,7 +145,19 @@ public sealed class DailySummaryWarmer
         var separatelyMonitored = await DarlingMcpHealthTools.ResolveSeparatelyMonitoredAsync(postgres, serverId, registryState, logger, cancellationToken).ConfigureAwait(false);
         await DarlingHealthReader.GetDailySummaryRangeAsync(
             postgres, serverId, fromDate, toDate, referenceUtc: null, asOfNow: true,
-            separatelyMonitored: separatelyMonitored, logger: logger, cancellationToken: cancellationToken).ConfigureAwait(false);
+            separatelyMonitored: separatelyMonitored, logger: logger, cancellationToken: cancellationToken,
+            refreshSubHorizon: true).ConfigureAwait(false);
+
+        /* #8824: the Overview's wait strip reads the 24-hour total_waits trend, which has no cache of its own, so its first read
+           of a server after the pages left the store's buffers paid 4 to 8 seconds against about half a second for the next.
+           The same read here, answer discarded, keeps those pages warm. A failed read comes back as an error or refusal answer, not
+           a throw: it is logged like a failed server read, and the pass stays complete (the daily summary block is built). */
+        var trend = await DarlingMcpServerTrendTools.GetServerTrend(
+            postgres, "total_waits", name, 24, null, null, null, null, TrendBudget.ChartFor(null), cancellationToken).ConfigureAwait(false);
+        if (McpHelpers.IsErrorEnvelope(trend) || McpHelpers.IsRefusalEnvelope(trend))
+        {
+            logger?.LogWarning("Daily summary warm for {Server}: the 24-hour wait trend read failed ({Reason}); the daily summary block is built, the trend pages are not warmed", name, McpHelpers.ErrorMessageOf(trend));
+        }
     }
 
     /// <summary>The loop: wait, pass, wait for the boundary (or a retry), until <paramref name="stoppingToken"/> cancels.</summary>
@@ -192,8 +217,10 @@ public sealed class DailySummaryWarmer
             var untilDue = dueUtc > now ? dueUtc - now : TimeSpan.Zero;
             if (pass.Complete)
             {
+                /* #8824: the refresh interval is the cadence of a healthy pass only. A failed or refused pass backs off by
+                   RetryDelayFor, so a failing server is not retried every 30 minutes, each try holding a heavy slot. */
                 consecutiveFailures = 0;
-                delay = untilDue;
+                delay = Min(untilDue, RefreshInterval);
             }
             else
             {
