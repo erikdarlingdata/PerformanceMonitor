@@ -238,4 +238,69 @@ public abstract class WalkBase : IAsyncLifetime
         Console.WriteLine($"{automationId}: {count} {rowType} rows");
         return count;
     }
+
+    private readonly List<string> _dialogFailures = new();
+
+    /// <summary>Runs one dialog measurement. A failure is kept and the walk goes on to the next dialog, after Escape has closed
+    /// whatever the failed one left open. <see cref="ThrowDialogFailures"/> then fails the walk with all of them.</summary>
+    protected void Safely(string name, Action body)
+    {
+        try
+        {
+            body();
+        }
+        catch (Exception ex)
+        {
+            _dialogFailures.Add(name + ": " + ex.Message.ReplaceLineEndings(" "));
+            Console.WriteLine("DIALOG FAILED: " + name + ": " + ex.Message.ReplaceLineEndings(" "));
+            Shot("failed-" + name.Replace(' ', '-'));
+            for (var i = 0; i < 3; i++)
+            {
+                Keyboard.Type(VirtualKeyShort.ESCAPE);
+                System.Threading.Thread.Sleep(500);
+            }
+        }
+    }
+
+    protected void ThrowDialogFailures()
+    {
+        if (_dialogFailures.Count > 0)
+            throw new Xunit.Sdk.XunitException("dialog steps failed: " + string.Join(" | ", _dialogFailures));
+    }
+
+    /// <summary>Runs <paramref name="open"/> (a click that opens a window), then returns the window that holds the control
+    /// with <paramref name="markerId"/>, found from the desktop and walked up to its Window.</summary>
+    protected Window OpenWindow(string step, Action open, string markerId) => Step(step, () =>
+    {
+        open();
+        var marker = WaitFor(() => Automation.GetDesktop().FindFirstDescendant(cf => cf.ByAutomationId(markerId)),
+            "an element with AutomationId " + markerId + " on the desktop");
+        var w = marker;
+        while (w is not null && w.ControlType != ControlType.Window) w = w.Parent;
+        return (w ?? throw new Xunit.Sdk.XunitException(markerId + " has no Window ancestor")).AsWindow();
+    });
+
+    /// <summary>Logs where a window sits on the screen (the numbers #8804 needs) and takes the screenshot. The desktop's
+    /// rectangle is the screen, and the taskbar's top edge is the bottom of the work area.</summary>
+    protected void ShotDialog(string name, Window w)
+    {
+        try { w.Focus(); } catch { /* the shot below still shows it */ }
+        var screen = Automation.GetDesktop().BoundingRectangle;
+        var r = w.BoundingRectangle;
+        var tray = Automation.GetDesktop().FindFirstChild(cf => cf.ByClassName("Shell_TrayWnd"));
+        var workBottom = tray is not null && tray.BoundingRectangle.Top > 0 ? tray.BoundingRectangle.Top : screen.Bottom;
+        Console.WriteLine($"DIALOG {name}: top={r.Top} bottom={r.Bottom} height={r.Height} width={r.Width} left={r.Left} right={r.Right} "
+            + $"screen={screen.Width}x{screen.Height} workAreaBottom={workBottom} fitsWorkArea={r.Top >= 0 && r.Bottom <= workBottom}");
+        Shot(name);
+    }
+
+    /// <summary>Closes a window the walk opened and waits until its marker control is gone from the desktop.</summary>
+    protected void CloseWindow(string step, Window w, string markerId) => Step(step, () =>
+    {
+        w.Close();
+        var gone = Retry.WhileFalse(() => Automation.GetDesktop().FindFirstDescendant(cf => cf.ByAutomationId(markerId)) is null,
+            TimeSpan.FromSeconds(15), TimeSpan.FromMilliseconds(500), ignoreException: true);
+        Assert.True(gone.Result, markerId + " still on the desktop after closing " + step);
+        return true;
+    });
 }
