@@ -423,8 +423,8 @@ public sealed class DarlingMcpTrendTools
         $"No read or write activity was recorded for {DatabaseFilter.ManyDatabasesDescription} on {serverName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}. "
         + "Each name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
 
-    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time. Points are time buckets (bucket, bucket_minutes, aggregate_note) sized to the window unless bucket_minutes names a width: each point sums the collections it holds across the query's plans and handles, collection_count says how many, and avg_cpu_ms and avg_elapsed_ms are weighted by executions. min_dop and max_dop are each plan's cached extremes across the plans that ran in the bucket (a bucket where nothing ran leaves both blank), plan_count says how many plans, and query_plan_hash is null when that is more than one or no hash was captured. Past the raw tier's four days the hourly rollup answers, in buckets of whole hours (bucket_minutes a multiple of 60): executions, CPU and elapsed are summed across handles, and the other fields are null, collection_count included." + McpHelpers.UtcStampsDescription + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
-    public static async Task<string> GetQueryTrend(
+    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time. Points are time buckets (bucket, bucket_minutes, aggregate_note) sized to the window unless bucket_minutes names a width: each point sums the collections it holds across the query's plans and handles, collection_count says how many, and avg_cpu_ms and avg_elapsed_ms are weighted by executions. min_dop and max_dop are each plan's cached extremes across the plans that ran in the bucket (a bucket where nothing ran leaves both blank), plan_count says how many plans, and query_plan_hash is null when that is more than one or no hash was captured. Past the raw tier's four days the hourly rollup answers, in buckets of whole hours (bucket_minutes a multiple of 60): executions, CPU and elapsed are summed across handles, and the other fields are null, collection_count included. The answer is held to the 32,768-byte response budget: when points were left off the start (the oldest, so the newest are kept and the points stay oldest first), budget_truncated is true and budget_note says how many fit, which bucket_minutes reads the whole window, and the as_of that reads the points before the first one returned." + McpHelpers.UtcStampsDescription + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    public static Task<string> GetQueryTrend(
         NpgsqlDataSource postgres,
         [Description("The query_hash value from get_top_queries_by_cpu or get_query_store_top.")] string query_hash,
         [Description("The database name the query belongs to.")] string database_name,
@@ -432,7 +432,20 @@ public sealed class DarlingMcpTrendTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetQueryTrend(
+            postgres, query_hash, database_name, server_name, hours_back, as_of, bucket_minutes,
+            TrendBudget.Mcp(TrendBuckets.QueryTrendMcpAutoPoints, TrendBuckets.QueryTrendMaxPoints), McpResponseBudget.DefaultBytes, cancellationToken);
+
+    /// <summary>
+    /// get_query_trend under an explicit <paramref name="budget"/> and <paramref name="responseByteBudget"/> (#8812): the MCP tool passes
+    /// the narrower auto target sized to the 32 KB response budget and that budget, and answers cut to it with <c>budget_truncated</c>
+    /// and <c>budget_note</c>. The web viewer's <c>/api/read</c> mirror passes the shared 200-point target and no byte budget, so its chart
+    /// keeps the points it always had.
+    /// </summary>
+    internal static async Task<string> GetQueryTrend(
+        NpgsqlDataSource postgres, string query_hash, string database_name, string? server_name, int hours_back, string? as_of,
+        int? bucket_minutes, TrendBudget budget, int? responseByteBudget, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -441,9 +454,8 @@ public sealed class DarlingMcpTrendTools
         if (validation != null) return validation;
 
         /* #8063: the width is sized the way Lite's twin (#7907) and the duration siblings size theirs: the ladder's pick for the
-           shared auto target when the caller leaves it, the caller's own width when it fits the read's cap, a refusal naming the
+           auto target when the caller leaves it, the caller's own width when it fits the read's cap, a refusal naming the
            width that fits when it does not. */
-        var budget = TrendBudget.Mcp(TrendBuckets.QueryTrendMaxPoints);
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
         if (bucketError != null) return bucketError;
 
@@ -542,7 +554,7 @@ public sealed class DarlingMcpTrendTools
             });
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken);
 
-            return JsonSerializer.Serialize(new
+            var payload = JsonSerializer.SerializeToNode(new
             {
                 server = resolved.DisplayName,
                 database_name,
@@ -571,7 +583,17 @@ public sealed class DarlingMcpTrendTools
                 data_points = rows.Count,
                 trend = result,
                 discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions)!.AsObject();
+
+            /* #8812: an answer over the response budget keeps the NEWEST points that fit it, still oldest first, and says so
+               (budget_truncated, budget_note, with the first point returned, the bucket width that fits the window and the as_of that
+               reads the points before it). window_truncated stays the tier's reach. */
+            return responseByteBudget is int byteBudget
+                ? McpResponseBudget.CapArray(
+                    payload, "trend", "newest points kept, oldest first", "points",
+                    kept => TrendBuckets.BudgetCutRemedy(hours_back, kept, aggregated ? 60 : 1, rows[rows.Count - kept].CollectionTime), byteBudget,
+                    "budget_truncated", "budget_note", (node, kept) => node["data_points"] = kept, keepNewest: true)
+                : payload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
