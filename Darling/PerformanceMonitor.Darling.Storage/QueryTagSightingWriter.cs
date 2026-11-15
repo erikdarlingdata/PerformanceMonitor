@@ -26,7 +26,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <para><b>One statement per flush, and no connection for an empty one.</b> The same identity sighted twice is
 /// collapsed first (a single <c>INSERT ... ON CONFLICT DO UPDATE</c> cannot touch one row twice), with the occurrences
 /// added to <c>seen_count</c>. The conflict target is the table's own unique index (V194), so a key seen under the same
-/// caller in the same database again adds to <c>seen_count</c>, moves <c>last_seen</c> at most once an hour (#8716) and keeps its first text sample.</para>
+/// caller in the same database again adds to <c>seen_count</c>, moves <c>last_seen</c> at most once an hour (#8716), to a stamp behind the
+/// map's extend window (<see cref="ReSightingBackdate"/>), and keeps its first text sample.</para>
 ///
 /// <para><b>The database is part of the identity (V194).</b> One hash seen in two databases is two rows, so the map
 /// builder, which resolves a key against every sighting row it has, tests a database rule against each of them. An
@@ -56,14 +57,29 @@ public static class QueryTagSightingWriter
     public const int RowsPerStatement = 10_000;
 
     /// <summary>
-    /// Statement parameters: $1..$10, the ten columns of the flush as arrays (server id first, the count last).
+    /// How far behind its statement's <c>now()</c> a plain hourly re-sighting stamps <c>last_seen</c>. A plain re-sighting
+    /// changes nothing the map resolver reads, so the map's extend never needs to read it, and the extend reads every
+    /// sighting row of each key it finds (<see cref="QueryTagMapStore.SightingsOfKeysSql"/>). The extend finds keys from
+    /// the previous pass's clock less <see cref="QueryTagMapBuilder.ExtendOverlap"/>, and a flush runs at a pass's start or
+    /// between passes a minute apart, so a stamp this far back is below the cursor of every extend that can see it while
+    /// passes start within three minutes of each other. When they do not, the extend reads the key again and the map write
+    /// skips a row that already says the same. Inserts and fills keep <c>now()</c>, so the extend still reads them. The
+    /// value is threaded into the SQL as a parameter (#3684), never written there.
+    /// </summary>
+    public static readonly TimeSpan ReSightingBackdate = QueryTagMapBuilder.ExtendOverlap + TimeSpan.FromMinutes(3);
+
+    /// <summary>
+    /// Statement parameters: $1..$10, the ten columns of the flush as arrays (server id first, the count last), and $11
+    /// <see cref="ReSightingBackdate"/>.
     /// <para><b>A re-sighting moves <c>last_seen</c> at most once an hour (#8716).</b> <c>last_seen</c> is indexed, so bumping it on
     /// every conflict made every update non-HOT: each one wrote all four indexes, and a busy store's table and its
     /// <c>last_seen</c> index grew by hundreds of thousands of pages a day with autovacuum removing nothing. The count still
-    /// adds up on every conflict (it is not indexed). <c>last_seen</c> moves when the stored value is over an hour old, and
-    /// also when the conflict fills an object name or text sample the row lacked, because those are what the map resolver
-    /// reads and the map's changed-keys read (<see cref="QueryTagMapStore.ChangedKeysSql"/>) finds a key by this column.
-    /// The time source is the statement's own <c>now()</c>, as before, reached through the column default and read as <c>EXCLUDED.last_seen</c> (the insert list leaves <c>last_seen</c> out). That is the same clock as the stored value, and it keeps the comparison <c>timestamptz</c> against <c>timestamptz</c>.</para>
+    /// adds up on every conflict (it is not indexed). <c>last_seen</c> moves to <c>now()</c> when the conflict fills an object
+    /// name or text sample the row lacked, because those are what the map resolver reads and the map's changed-keys read
+    /// (<see cref="QueryTagMapStore.ChangedKeysSql"/>) finds a key by this column. Otherwise it moves when the stored value
+    /// is over an hour older than the backdated stamp, to <c>now()</c> less <see cref="ReSightingBackdate"/>, so an active
+    /// row moves once an hour and never inside the extend window.
+    /// The time source is the statement's own <c>now()</c>, reached through the column default and read as <c>EXCLUDED.last_seen</c> (the insert list leaves <c>last_seen</c> out). That is the same clock as the stored value, and it keeps the comparison <c>timestamptz</c> against <c>timestamptz</c>.</para>
     /// </summary>
     internal const string UpsertSql = """
 INSERT INTO collect.query_tag_sightings AS t
@@ -74,10 +90,12 @@ FROM unnest($1::integer[], $2::text[], $3::text[], $4::text[], $5::text[], $6::t
 ON CONFLICT (server_id, key_kind, key, COALESCE(application_name, ''), COALESCE(login_name, ''), COALESCE(host_name, ''), COALESCE(database_name, ''))
 DO UPDATE SET
     last_seen = CASE
-        WHEN t.last_seen < EXCLUDED.last_seen - interval '1 hour'
-          OR (t.object_name IS NULL AND EXCLUDED.object_name IS NOT NULL)
+        WHEN (t.object_name IS NULL AND EXCLUDED.object_name IS NOT NULL)
           OR (t.text_sample IS NULL AND EXCLUDED.text_sample IS NOT NULL)
-        THEN EXCLUDED.last_seen ELSE t.last_seen END,
+        THEN EXCLUDED.last_seen
+        WHEN t.last_seen < EXCLUDED.last_seen - $11::interval - interval '1 hour'
+        THEN EXCLUDED.last_seen - $11::interval
+        ELSE t.last_seen END,
     seen_count = t.seen_count + EXCLUDED.seen_count,
     object_name = COALESCE(t.object_name, EXCLUDED.object_name),
     text_sample = COALESCE(t.text_sample, EXCLUDED.text_sample)
@@ -202,6 +220,7 @@ DO UPDATE SET
                 AddText(command, rows, start, length, c => c.Host);
                 AddText(command, rows, start, length, c => c.TextSample);
                 command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = counts });
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = ReSightingBackdate });
                 await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 written += length;
                 if (progress is not null)
