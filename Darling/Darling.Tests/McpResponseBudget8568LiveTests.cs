@@ -578,8 +578,11 @@ VALUES ($1, $2, $3, $4, $5, $6, 'kB', 'Resource Usage / Memory', 'sighup', 'inte
             Assert.Equal(retained, seen.Distinct().Count());
             Assert.All(named, page => Assert.Contains($"offset={page.Offset}", page.Note, StringComparison.Ordinal));
 
-            /* Rows that tie on capture and count are listed by class, so every read lists them the same way. */
-            Assert.Equal(seen.Select(r => r.EventClass).OrderBy(c => c, StringComparer.Ordinal), seen.Select(r => r.EventClass));
+            /* Inside one capture the errors come first (#8813), then rows that tie on count are listed by class, so every
+               read lists them the same way. */
+            Assert.Equal(
+                seen.Select(r => r.EventClass).OrderBy(c => c == StoreLogClassifier.SlowPlanClass ? 1 : 0).ThenBy(c => c, StringComparer.Ordinal),
+                seen.Select(r => r.EventClass));
 
             /* The web viewer's read is not held to the budget: one answer, every message. */
             var mirror = JsonDocument.Parse(await DarlingWebEndpoints.BuildReadDispatch()["get_store_log"](new DefaultHttpContext(), postgres, null!)).RootElement;
