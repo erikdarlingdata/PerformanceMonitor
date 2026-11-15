@@ -294,6 +294,22 @@ public abstract class WalkBase : IAsyncLifetime
         Shot(name);
     }
 
+    /// <summary>Selects the first tab with this header inside one window, on-screen or not. A strip that scrolls (the viewer's
+    /// "more tabs" button) keeps the tabs that do not fit in the tree, so <see cref="SelectTab"/>'s on-screen filter would never
+    /// find them.</summary>
+    protected static bool SelectTabInWindow(AutomationElement root, string header)
+    {
+        var tab = Retry.WhileNull(() => root.FindAllDescendants(cf => cf.ByControlType(ControlType.TabItem))
+            .FirstOrDefault(t => t.Name == header), TimeSpan.FromSeconds(30), TimeSpan.FromMilliseconds(500), ignoreException: true).Result;
+        if (tab is null)
+        {
+            Console.WriteLine("tabs found: " + string.Join(" | ", root.FindAllDescendants(cf => cf.ByControlType(ControlType.TabItem)).Select(t => "'" + t.Name + "'")));
+            throw new Xunit.Sdk.XunitException("no TabItem named " + header);
+        }
+        tab.AsTabItem().Select();
+        return true;
+    }
+
     /// <summary>Closes a window the walk opened and waits until its marker control is gone from the desktop.</summary>
     protected void CloseWindow(string step, Window w, string markerId) => Step(step, () =>
     {

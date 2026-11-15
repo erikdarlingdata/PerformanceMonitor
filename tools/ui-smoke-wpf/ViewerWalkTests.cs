@@ -32,7 +32,7 @@ public sealed class ViewerWalkTests : WalkBase
     /// logged ("DIALOG ..." lines), and closed. The notification route dialog is reached through Settings.</summary>
     protected override void ExtraSteps(AutomationElement main)
     {
-        Step("Alert History tab", () => SelectTab(main, "Alert History"));
+        Step("Alert History tab", () => SelectTabInWindow(main, "Alert History"));
 
         Safely("viewer mute dialog", () =>
         {
@@ -70,7 +70,7 @@ public sealed class ViewerWalkTests : WalkBase
         Safely("viewer route dialog", () =>
         {
             var settings = OpenWindow("Settings", () => Find(main, "SettingsSidebarButton").AsButton().Invoke(), "ManageNotificationRoutesButton");
-            Step("Delivery tab", () => SelectTab(settings, "Delivery"));
+            Step("Delivery tab", () => SelectTabInWindow(settings, "Delivery"));
             var routes = OpenWindow("Notification Routes window",
                 () => Find(settings, "ManageNotificationRoutesButton").AsButton().Invoke(), "RoutesGrid");
             var dialog = OpenWindow("route dialog", () => Find(routes, "AddRouteButton").AsButton().Invoke(), "ScopeCombo");
