@@ -84,7 +84,7 @@ public sealed class DarlingMcpStoreMetricsTools
         NpgsqlDataSource postgres,
         [Description("Days of history the window deltas and series cover. Default 30; max 400 (the series' own retention).")] int days_back = 30,
         [Description("List every object of this kind instead of the summary: hypertable, continuous_aggregate, dimension, table, other, system or background_job.")] string? object_kind = null,
-        [Description("An exact object name returns that object's daily series; otherwise the objects whose names contain it are listed. A relation named in inventory.largest_unenumerated is answered with its current size and no series, because the sweep keeps none for it.")] string? object_name = null,
+        [Description("An exact object name returns that object's daily series; otherwise the objects whose names contain it are listed. A name from inventory.largest_unenumerated answers with its size now and no series.")] string? object_name = null,
         [Description("Rows per list. Default 10, max 1000.")] int limit = DefaultLimit,
         CancellationToken cancellationToken = default)
     {
