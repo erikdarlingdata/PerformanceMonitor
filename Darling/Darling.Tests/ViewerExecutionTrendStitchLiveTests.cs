@@ -47,7 +47,7 @@ public sealed class ViewerExecutionTrendStitchLiveTests
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        Assert.SkipWhen(!await TimescaleSupport.TryEnableAsync(connection, null, ct), "The live #8821 stitch test needs TimescaleDB.");
+        Assert.SkipWhen(!await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "The live #8821 stitch test needs TimescaleDB.");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
         Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
 
