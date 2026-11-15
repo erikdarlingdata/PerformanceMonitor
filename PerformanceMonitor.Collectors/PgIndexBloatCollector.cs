@@ -172,7 +172,12 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
         long IndexOid);
 
     /// <summary>The extension-free btree estimate statement. Public so the store health read (#8787) splices this one
-    /// statement for the store's own indexes instead of writing a second estimate.</summary>
+    /// statement for the store's own indexes instead of writing a second estimate.
+    /// <para>The <c>pg_stats</c> lookups are <c>LEFT JOIN LATERAL ... OFFSET 0</c>, one lookup per index column by schema, table
+    /// and column name together. As a plain join of a view, the planner could merge on the schema name alone and filter the
+    /// other two names after, which on a store with thousands of chunks in one schema compared every index column with every
+    /// statistics row of the schema (1.7 billion pairs, over three minutes, #8806). <c>OFFSET 0</c> keeps the subquery from
+    /// being flattened back into that join.</para></summary>
     public const string QueryText = @"WITH params AS (
     SELECT
         pg_catalog.current_setting('block_size')::int AS bs,
@@ -222,17 +227,23 @@ keycols AS (
       ON  pa.attrelid = i.table_oid
       AND pa.attnum   = i.indkey[ia.attnum - 1]
       AND i.indkey[ia.attnum - 1] > 0
-    LEFT JOIN pg_catalog.pg_stats AS sp
-      ON  sp.schemaname = i.schema_name
-      AND sp.tablename  = i.table_name
-      AND sp.attname    = pa.attname
-      AND sp.inherited  = false
-    LEFT JOIN pg_catalog.pg_stats AS se
-      ON  i.indkey[ia.attnum - 1] = 0
-      AND se.schemaname = i.schema_name
-      AND se.tablename  = i.index_name
-      AND se.attname    = ia.attname
-      AND se.inherited  = false
+    LEFT JOIN LATERAL (SELECT s.avg_width, s.null_frac
+                       FROM pg_catalog.pg_stats AS s
+                       WHERE s.schemaname = i.schema_name
+                       AND   s.tablename  = i.table_name
+                       AND   s.attname    = pa.attname
+                       AND   s.inherited  = false
+                       OFFSET 0) AS sp
+      ON true
+    LEFT JOIN LATERAL (SELECT s.avg_width, s.null_frac
+                       FROM pg_catalog.pg_stats AS s
+                       WHERE i.indkey[ia.attnum - 1] = 0
+                       AND   s.schemaname = i.schema_name
+                       AND   s.tablename  = i.index_name
+                       AND   s.attname    = ia.attname
+                       AND   s.inherited  = false
+                       OFFSET 0) AS se
+      ON true
 ),
 agg AS (
     SELECT

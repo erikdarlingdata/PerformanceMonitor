@@ -518,6 +518,14 @@ chunk_rels AS (
     /// <summary>The first PostgreSQL major with <c>pg_stat_all_tables.n_tup_newpage_upd</c>.</summary>
     private const int NewPageUpdMinVersion = 160000;
 
+    /// <summary>
+    /// The one extra condition the per-table read adds to the bloat estimate (#8806): only the relations that reach the size floor.
+    /// The estimate is read only for a member relation's own heap and is NULL below the floor either way, so the rows are the
+    /// same, and the estimate's column, statistics and size work is done for those relations and not for every chunk.
+    /// </summary>
+    private static readonly string EstimateRelationFilterSql =
+        "\n              AND tbl.oid IN (SELECT z.rel_oid FROM relsz AS z WHERE z.member_role = 'heap' AND z.heap_bytes >= " + PgTableBloatStatsCollector.MinimumHeapBytes + ")";
+
     private static string FloorsSql() =>
         $@"a.empty_bytes IS NOT NULL
      AND a.basis_bytes > 0
@@ -571,10 +579,27 @@ members AS (
             ? "(CASE WHEN c.relpages > 0 THEN 1 - LEAST(c.relallfrozen, c.relpages)::float8 / c.relpages ELSE 1 END)"
             : "1";
         return $@"
-WITH est AS MATERIALIZED (
-{PgTableBloatStatsCollector.QueryText}
+WITH {BuildMembersCtes(timescale)},
+relsz AS MATERIALIZED (
+    /* Each member relation is sized once, here, and nothing below calls a size function again: on a store with thousands
+       of chunks the size functions (a file stat or more per relation) are most of the time the read takes (#8806). */
+    SELECT
+        m.obj_schema,
+        m.obj_name,
+        m.kind,
+        m.member_role,
+        m.grouped,
+        m.is_compressed,
+        m.rel_oid,
+        pg_catalog.pg_relation_size(m.rel_oid) AS heap_bytes,
+        pg_catalog.pg_indexes_size(m.rel_oid) AS index_bytes,
+        COALESCE(pg_catalog.pg_total_relation_size(NULLIF(c.reltoastrelid, 0)), 0) AS toast_bytes
+    FROM members AS m
+    JOIN pg_catalog.pg_class AS c ON c.oid = m.rel_oid
 ),
-{BuildMembersCtes(timescale)},
+est AS MATERIALIZED (
+{PgTableBloatStatsCollector.BuildQueryText(EstimateRelationFilterSql)}
+),
 {StatsInfoCte},
 sized AS (
     SELECT
@@ -586,9 +611,9 @@ sized AS (
         m.is_compressed,
         c.oid AS rel_oid,
         pg_catalog.format('%I.%I', n.nspname, c.relname) AS rel_qualified,
-        pg_catalog.pg_relation_size(c.oid) AS heap_bytes,
-        pg_catalog.pg_indexes_size(c.oid) AS index_bytes,
-        COALESCE(pg_catalog.pg_total_relation_size(NULLIF(c.reltoastrelid, 0)), 0) AS toast_bytes,
+        m.heap_bytes,
+        m.index_bytes,
+        m.toast_bytes,
         c.reltuples,
         c.relpages::bigint AS relpages,
         c.relallvisible::bigint AS relallvisible,
@@ -597,7 +622,7 @@ sized AS (
             SELECT 1 FROM pg_catalog.unnest(c.reloptions) AS o(opt)
             WHERE o.opt ~* '^autovacuum_enabled=(f|fa|fal|fals|false|of|off|n|no|0)$') AS autovacuum_disabled,
         ({DarlingVacuumTruncateRule.TruncateOffSql}) AS truncate_off,
-        pg_catalog.pg_relation_size(c.oid) / pg_catalog.current_setting('block_size')::bigint AS rel_heap_pages,
+        m.heap_bytes / pg_catalog.current_setting('block_size')::bigint AS rel_heap_pages,
         st.n_dead_tup,
         st.n_mod_since_analyze,
         st.n_live_tup,
@@ -623,7 +648,7 @@ sized AS (
              ELSE 5 END AS reason_rank,
         l.bloat_bytes_estimate,
         l.heap_pages * pg_catalog.current_setting('block_size')::bigint AS catalog_heap_bytes
-    FROM members AS m
+    FROM relsz AS m
     JOIN pg_catalog.pg_class AS c ON c.oid = m.rel_oid
     JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
     LEFT JOIN pg_catalog.pg_stat_all_tables AS st ON st.relid = c.oid
@@ -990,9 +1015,21 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
     /// floors whose tail could not be judged, then estimated empty bytes descending (rows with no estimate last), then total
     /// bytes descending. The probe, the read, and one small read per object past the floors (a window at
     /// the end of the file for each of the emptiest <see cref="TailProbeMaxRelations"/> relations). Each statement is
-    /// bounded by <see cref="StorageCommandDeadlines.McpReadSeconds"/>.
+    /// bounded by <see cref="StorageCommandDeadlines.McpReadSeconds"/>. A statement past it throws <see cref="StoreTableHealthTimeoutException"/>.
     /// </summary>
     public static async Task<List<StoreTableHealthRow>> GetAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await ReadTablesAsync(postgres, cancellationToken);
+        }
+        catch (Exception ex) when (StoreTableHealthTimeoutException.IsDeadlineTrip(ex, cancellationToken))
+        {
+            throw new StoreTableHealthTimeoutException(ex);
+        }
+    }
+
+    private static async Task<List<StoreTableHealthRow>> ReadTablesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
@@ -1160,6 +1197,18 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
     /// the heap, then rarely used, then by size.</summary>
     public static async Task<List<StoreIndexHealthRow>> GetIndexesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
+        try
+        {
+            return await ReadIndexesAsync(postgres, cancellationToken);
+        }
+        catch (Exception ex) when (StoreTableHealthTimeoutException.IsDeadlineTrip(ex, cancellationToken))
+        {
+            throw new StoreTableHealthTimeoutException(ex);
+        }
+    }
+
+    private static async Task<List<StoreIndexHealthRow>> ReadIndexesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(postgres);
 
         var (timescale, _) = await ProbeAsync(postgres, cancellationToken);
@@ -1201,6 +1250,18 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
 
     /// <summary>Reads the leaf index coverage of every partitioned parent's indexes: missing or invalid leaf indexes first.</summary>
     public static async Task<List<StoreIndexCoverageRow>> GetIndexCoverageAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await ReadIndexCoverageAsync(postgres, cancellationToken);
+        }
+        catch (Exception ex) when (StoreTableHealthTimeoutException.IsDeadlineTrip(ex, cancellationToken))
+        {
+            throw new StoreTableHealthTimeoutException(ex);
+        }
+    }
+
+    private static async Task<List<StoreIndexCoverageRow>> ReadIndexCoverageAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 

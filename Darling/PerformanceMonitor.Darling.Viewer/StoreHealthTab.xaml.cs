@@ -236,7 +236,9 @@ public partial class StoreHealthTab : UserControl
             var coverageRows = StoreHealthRows.CoverageRows(read.Coverage);
             CoverageDataGrid.ItemsSource = coverageRows;
             CoverageDataGrid.Visibility = coverageRows.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
-            CoverageMessage.Text = "No partitioned tables in the store have indexes to check.";
+            CoverageMessage.Text = read.CoverageLeftOutNote is null
+                ? "No partitioned tables in the store have indexes to check."
+                : "The partition index coverage was left out. " + read.CoverageLeftOutNote;
             CoverageMessage.Visibility = coverageRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             _indexesLoaded = true;
         }

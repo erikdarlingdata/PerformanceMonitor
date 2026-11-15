@@ -138,6 +138,16 @@ public sealed class StoreHealthPageBehaviourTests
     }
 
     [Fact]
+    public void WhenOnlyTheCoverageReadRanPastItsLimit_TheIndexRowsStay_AndTheCoverageSectionSaysItWasLeftOut()
+    {
+        var left = Result.Value.GetProperty("coverageLeftOut");
+        Assert.True(left.GetProperty("indexGridRows").GetInt32() > 0, "the index rows are still drawn");
+        var text = left.GetProperty("text").GetString()!;
+        Assert.Contains("coverage was left out", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Every partition", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Measure_AsksForTheRowsTable_LocksEveryButtonWhileItRuns_AndShowsTheResult()
     {
         var m = Result.Value.GetProperty("measure");
