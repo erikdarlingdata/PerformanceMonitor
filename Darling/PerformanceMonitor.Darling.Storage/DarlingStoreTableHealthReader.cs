@@ -208,10 +208,13 @@ public static class DarlingStoreTableHealthReader
     /// <param name="AutoanalyzeCount"><c>autoanalyze_count</c> since the reset, summed.</param>
     /// <param name="StatsSince">When the counters above began (UTC): <c>pg_stat_database.stats_reset</c> for the store database,
     /// or the postmaster start when the statistics were never reset (see <see cref="StatsSinceSource"/>). Nothing is recorded
-    /// anywhere: the rates are since this moment and nothing older.</param>
+    /// anywhere. Only a real reset dates the counters: the postmaster start is later than their true start, so no rate is worked out
+    /// from it (see <see cref="RatesKnown"/>).</param>
     /// <param name="StatsSinceSource"><see cref="StatsSourceReset"/> or <see cref="StatsSourcePostmasterStart"/>. The postmaster
-    /// start is a lower bound on the counters' age, because statistics survive a clean restart.</param>
-    /// <param name="StatsHours">Hours between <see cref="StatsSince"/> and the read. Rates over a short window are noisy.</param>
+    /// start is NOT when the counters began: statistics survive a clean restart, so they can be much older. With that source the
+    /// age of the counters is unknown and the per-day rates are NULL (#8823).</param>
+    /// <param name="StatsHours">Hours between <see cref="StatsSince"/> and the read. Rates over a short window are noisy. Not the age of
+    /// the counters when the source is the postmaster start.</param>
     /// <param name="PastRewriteFloors">True when <see cref="EstimatedEmptyShare"/> is at least
     /// <see cref="RewriteCandidateMinShare"/> and <see cref="EstimatedEmptyBytes"/> at least
     /// <see cref="RewriteCandidateMinEmptyBytes"/>. This was the whole of <see cref="RewriteCandidate"/> before the tail check.</param>
@@ -280,7 +283,13 @@ public static class DarlingStoreTableHealthReader
         /// <summary>Share of updates that were HOT (heap-only, no index entry written), 0 to 1. NULL when there were no updates.</summary>
         public double? HotUpdateShare => TuplesUpdated > 0 ? (double)TuplesHotUpdated / TuplesUpdated : null;
 
-        /// <summary>Rows inserted per day since <see cref="StatsSince"/>. NULL when the window is empty.</summary>
+        /// <summary>True when <see cref="StatsSince"/> is a statistics reset, so the counters' age is known and the per-day rates are
+        /// worked out. False when the source is the postmaster start: the counters are older than that start by an unknown amount, and
+        /// dividing them by the time since it gives a rate too high by the ratio of the two ages (#8823), so no rate is given.</summary>
+        public bool RatesKnown => StatsSinceSource == StatsSourceReset;
+
+        /// <summary>Rows inserted per day since <see cref="StatsSince"/>. NULL when the window is empty or the counters' age is unknown
+        /// (<see cref="RatesKnown"/>).</summary>
         public double? InsertsPerDay => PerDay(TuplesInserted, StatsHours);
 
         /// <summary>Row updates per day since <see cref="StatsSince"/>.</summary>
@@ -294,13 +303,14 @@ public static class DarlingStoreTableHealthReader
         /// or no window.</summary>
         public double? TurnoverPerDay => LiveRows > 0 && DeletesPerDay is double d ? d / LiveRows : null;
 
-        private static double? PerDay(long count, double hours) => hours > 0 ? count / (hours / 24.0) : null;
+        private double? PerDay(long count, double hours) => RatesKnown && hours > 0 ? count / (hours / 24.0) : null;
     }
 
     /// <summary>The counters began at <c>pg_stat_database.stats_reset</c>.</summary>
     public const string StatsSourceReset = "stats_reset";
 
-    /// <summary>The statistics were never reset, so the counters are dated from the postmaster start: a lower bound on their age.</summary>
+    /// <summary>The statistics were never reset, so the counters' start is unknown: the postmaster start is later than it, because
+    /// statistics survive a clean restart. It is shown as "before" that start, and no per-day rate is given.</summary>
     public const string StatsSourcePostmasterStart = "postmaster_start";
 
     /// <summary>The most pages the tail check reads for one relation (256 MB at the 8 KB block size). The window the check reads is the

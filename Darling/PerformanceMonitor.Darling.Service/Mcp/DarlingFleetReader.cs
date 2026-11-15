@@ -1098,7 +1098,12 @@ GROUP BY server_id, collector_name";
     /// over the whole table is never used, so a fleet load does not walk the 90-day table. Like <see cref="FleetCpuSql"/> and its siblings it
     /// skips a disabled server and a PostgreSQL target, which never write this table, so they get no probe (the filter sits after the lateral, the
     /// form the siblings use, and the planner applies it to <c>servers</c> before the lateral runs). A skip row (<c>skip_reason</c> set) is not a
-    /// scan marker. $1 is the window start, $2 the percent of the warning bar.
+    /// scan marker. $1 is the window start.
+    ///
+    /// <para><b>#8818.</b> Every kept column comes back, not only those at the warning percent: a column filling fast is graded warning or critical on
+    /// its days left (<see cref="IdentityCapacityMath.Grade"/>) whatever its percent. The oldest sample of each column in the window (<c>f</c>, the
+    /// first row of the server's <c>idx_identity_capacity_time</c> range that matches the column) gives the rate, as <see cref="DarlingIdentityCapacityReader.ScanSql"/>
+    /// does for the tool.</para>
     ///
     /// <para><b>Measured (EXPLAIN (ANALYZE, BUFFERS), PostgreSQL 18.6 scratch store, 60 registered servers of which 41 enabled SQL Server targets wrote rows,
     /// 265,680 rows over 90 days, six databases each).</b> Without the filter the lateral ran 60 times (19 probes for servers that never write this
@@ -1110,7 +1115,7 @@ GROUP BY server_id, collector_name";
     /// </summary>
     internal const string FleetIdentityCapacitySql = $@"
 SELECT c.server_id, c.percent_used, c.database_name, c.schema_name, c.table_name, c.column_name, c.data_type, c.type_precision,
-       c.last_value::text, c.seed_value::text, c.increment_value::text, c.collection_time
+       c.last_value::text, c.seed_value::text, c.increment_value::text, c.collection_time, f.collection_time, f.last_value
 FROM servers AS s
 CROSS JOIN LATERAL
 (
@@ -1125,22 +1130,30 @@ CROSS JOIN LATERAL
 JOIN collect.identity_capacity AS c
   ON c.server_id = s.server_id AND c.collection_time = n.collection_time AND c.database_name = n.database_name
   AND c.collection_time >= $1
+LEFT JOIN LATERAL
+(
+    SELECT w.collection_time, w.last_value::text AS last_value
+    FROM collect.identity_capacity AS w
+    WHERE w.server_id = s.server_id AND w.collection_time >= $1
+    AND   w.database_name = c.database_name AND w.schema_name = c.schema_name AND w.table_name = c.table_name AND w.column_name = c.column_name
+    ORDER BY w.collection_time
+    LIMIT 1
+) AS f ON true
 WHERE s.is_enabled
 AND   {SqlServerCollectedTargetSql}
-AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
+AND   c.column_name IS NOT NULL";
 
     /// <summary>The worst band and the count of columns at warning or critical per server, for the servers that have any (#6875). The band is
-    /// <see cref="IdentityCapacityMath.Band(double)"/>.</summary>
+    /// <see cref="IdentityColumnFact.Graded"/>: the worse of the percent grade and the days-left grade (#8818).</summary>
     internal static async Task<Dictionary<int, FleetIdentityCapacity>> ReadIdentityCapacityAsync(
         NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken, ILogger? logger = null)
     {
-        var counts = new Dictionary<int, (int Columns, int CriticalColumns, IdentityColumnFact? Worst, double WorstPercent)>();
+        var counts = new Dictionary<int, (int Columns, int CriticalColumns, IdentityColumnFact? Worst, double WorstPercent, int WorstRank)>();
         var rows = new List<(int ServerId, double Percent, string Band, IdentityColumnFact Column, DateTime ScannedAt)>();
         await using (var command = postgres.CreateCommand(FleetIdentityCapacitySql))
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             command.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - IdentityCapacityWindow, DateTimeKind.Unspecified));
-            command.Parameters.AddWithValue(IdentityCapacityMath.WarningPercent);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -1149,14 +1162,15 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                     continue;
                 }
 
-                var band = IdentityCapacityMath.Band(reader.GetDouble(1));
+                var percent = reader.GetDouble(1);
+                var column = ColumnOf(reader, percent);
+                var band = column.Band ?? IdentityCapacityMath.BandOk;
                 if (band == IdentityCapacityMath.BandOk)
                 {
                     continue;
                 }
 
-                var percent = reader.GetDouble(1);
-                rows.Add((reader.GetInt32(0), percent, band, ColumnOf(reader, percent, nowUtc), reader.GetDateTime(11)));
+                rows.Add((reader.GetInt32(0), percent, band, column, reader.GetDateTime(11)));
             }
         }
 
@@ -1167,10 +1181,12 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         foreach (var (serverId, percent, band, column, _) in rows)
         {
             counts.TryGetValue(serverId, out var seen);
-            /* #7416: the fullest column, so the tile can name it. The first of a tie wins, as the order of the rows decides. */
-            var isWorst = seen.Worst is null || percent > seen.WorstPercent;
+            /* #7416: the fullest column, so the tile can name it. #8818: a column at the critical band outranks a fuller one at warning, so the tile
+               names the column that bands the server. The first of a tie wins, as the order of the rows decides. */
+            var rank = IdentityCapacityMath.Rank(band);
+            var isWorst = seen.Worst is null || rank > seen.WorstRank || (rank == seen.WorstRank && percent > seen.WorstPercent);
             counts[serverId] = (seen.Columns + 1, seen.CriticalColumns + (band == IdentityCapacityMath.BandCritical ? 1 : 0),
-                isWorst ? column : seen.Worst, isWorst ? percent : seen.WorstPercent);
+                isWorst ? column : seen.Worst, isWorst ? percent : seen.WorstPercent, isWorst ? rank : seen.WorstRank);
         }
 
         return counts.ToDictionary(
@@ -1200,13 +1216,13 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         return map;
     }
 
-    private static IdentityColumnFact ColumnOf(NpgsqlDataReader reader, double percent, DateTime nowUtc)
+    private static IdentityColumnFact ColumnOf(NpgsqlDataReader reader, double percent)
     {
         string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
         System.Numerics.BigInteger? Big(int i) => reader.IsDBNull(i) ? null : System.Numerics.BigInteger.Parse(reader.GetString(i), CultureInfo.InvariantCulture);
         return new IdentityColumnFact(
             Text(2) ?? "", Text(3), Text(4), Text(5), Text(6), reader.IsDBNull(7) ? null : reader.GetInt32(7),
-            Big(8), Big(9), Big(10), percent, nowUtc, null, null);
+            Big(8), Big(9), Big(10), percent, reader.GetDateTime(11), Big(13), reader.IsDBNull(12) ? null : reader.GetDateTime(12));
     }
 
     internal static FleetServerCard BuildCard(
@@ -1686,9 +1702,11 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
 
         if (c.ThreadsSeverity >= HealthSeverity.Warning)
         {
+            /* #8825: the figure that set the band, in the chip's words. Starved requests set Critical, 20 or more
+               runnable tasks set Warning (ServerHealthClassifier.ThreadsSeverity), so a Warning here is the runnable count. */
             parts.Add(c.RequestsWaitingForThreads > 0
                 ? $"Threads {c.RequestsWaitingForThreads} starved"
-                : "Threads low");
+                : $"Threads {c.ThreadsWaitingForCpu ?? 0} runnable");
         }
 
         if (c.MemorySeverity >= HealthSeverity.Warning && c.HasMemoryPressure == true)
@@ -3522,7 +3540,10 @@ public sealed record FleetIdentityCapacity(
     [property: JsonPropertyName("worst_table")] string? WorstTable = null,
     [property: JsonPropertyName("worst_column")] string? WorstColumn = null,
     [property: JsonPropertyName("worst_percent_used")] double? WorstPercentUsed = null,
-    [property: JsonPropertyName("worst_values_remaining")] string? WorstValuesRemaining = null)
+    [property: JsonPropertyName("worst_values_remaining")] string? WorstValuesRemaining = null,
+    /* #8818: which grade set the worst column's band (percent or days) and its days left, null with one sample, so a column banded on days reads as intended. */
+    [property: JsonPropertyName("worst_band_reason")] string? WorstBandReason = null,
+    [property: JsonPropertyName("worst_days_to_exhaustion")] double? WorstDaysToExhaustion = null)
 {
     internal static FleetIdentityCapacity Of(string band, int columns, int criticalColumns, IdentityColumnFact? worst) =>
         worst is null
@@ -3531,7 +3552,8 @@ public sealed record FleetIdentityCapacity(
                 band, columns, criticalColumns, worst.DatabaseName,
                 string.IsNullOrEmpty(worst.SchemaName) ? worst.TableName : worst.SchemaName + "." + worst.TableName,
                 worst.ColumnName, worst.StoredPercent,
-                worst.ValuesRemaining?.ToString(CultureInfo.InvariantCulture));
+                worst.ValuesRemaining?.ToString(CultureInfo.InvariantCulture),
+                worst.BandReason, worst.Exhaustion?.DaysLeft is double days ? Math.Round(days, 1) : null);
 }
 
 /// <summary>One tag on a fleet card — read-only, for the web pills (#2020). Serialized snake_case like the card.

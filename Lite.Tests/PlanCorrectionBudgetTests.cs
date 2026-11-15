@@ -126,6 +126,24 @@ public sealed class PlanCorrectionBudgetTests : IClassFixture<SharedDuckDbFixtur
         Assert.False(fullRow.GetProperty("query_text_truncated").GetBoolean());
     }
 
+    /// <summary>#8815: the stored CPU averages and the estimated gain are doubles; the reply writes them to two places, as Darling's read does.</summary>
+    [Fact]
+    public async Task Answer_WritesAveragesAndGainToTwoPlaces()
+    {
+        await SeedAsync();
+        await ExecAsync("UPDATE plan_correction SET regressed_plan_cpu_time_average_ms = 448.6634444444444, last_good_plan_cpu_time_average_ms = 0.10196666666666669, estimated_gain_seconds = 380.82869463333327");
+
+        var answer = await McpPlanCorrectionTools.GetPlanCorrections(_dataService, _serverManager, ServerName, limit: 1);
+
+        using var doc = JsonDocument.Parse(answer);
+        var row = doc.RootElement.GetProperty("recommendations")[0];
+        Assert.Equal(380.83, row.GetProperty("estimated_gain_seconds").GetDouble(), 2);
+        Assert.Equal(448.66, row.GetProperty("regressed_plan_cpu_time_average_ms").GetDouble(), 2);
+        Assert.Equal(0.1, row.GetProperty("last_good_plan_cpu_time_average_ms").GetDouble(), 2);
+        Assert.Contains("\"regressed_plan_cpu_time_average_ms\":448.66,", answer, StringComparison.Ordinal);
+        Assert.Contains("\"estimated_gain_seconds\":380.83,", answer, StringComparison.Ordinal);
+    }
+
     private async Task<string> SeedAsync()
     {
         var newest = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-2));

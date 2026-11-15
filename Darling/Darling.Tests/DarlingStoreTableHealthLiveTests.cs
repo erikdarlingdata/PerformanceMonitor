@@ -172,6 +172,8 @@ INSERT INTO collect.zz_part SELECT date '2026-01-01' + (g % 85), repeat('p', 100
         await connection.OpenAsync(ct);
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
 
+        /* Per-day rates need a counters' start the store knows (#8823): a reset of this test database's own statistics gives one. */
+        await ExecAsync(connection, "SELECT pg_stat_reset()", ct);
         await ExecAsync(connection, @"
 CREATE TABLE collect.zz_vis (id integer, payload text) WITH (autovacuum_enabled = false);
 INSERT INTO collect.zz_vis SELECT g, repeat('x', 100) FROM generate_series(1, 60000) AS g;", ct);
@@ -195,9 +197,92 @@ INSERT INTO collect.zz_vis SELECT g, repeat('x', 100) FROM generate_series(1, 60
         Assert.True(afterUpdate.TuplesInserted >= 60000);
         Assert.NotNull(afterUpdate.HotUpdateShare);
         Assert.NotNull(afterUpdate.StatsSince);
-        Assert.Contains(afterUpdate.StatsSinceSource, new[] { DarlingStoreTableHealthReader.StatsSourceReset, DarlingStoreTableHealthReader.StatsSourcePostmasterStart });
+        Assert.Equal(DarlingStoreTableHealthReader.StatsSourceReset, afterUpdate.StatsSinceSource);
         Assert.True(afterUpdate.StatsHours > 0);
         Assert.NotNull(afterUpdate.UpdatesPerDay);
+    }
+
+    /* #8823: PostgreSQL keeps table statistics across a restart, so with no statistics reset the counters are older than the postmaster start by an unknown
+       amount. Dividing them by the time since that start gave per-day rates too high by the ratio of the two ages. A fresh test database has stats_reset NULL,
+       which is the field's "never reset" case. */
+    [Fact]
+    public async Task WhenTheStatisticsWereNeverReset_TheRatesAreNull_TheCountersStay_AndTheReplySaysWhy()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #8823 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await ExecAsync(connection, @"
+CREATE TABLE collect.zz_rates (id integer, payload text) WITH (autovacuum_enabled = false);
+INSERT INTO collect.zz_rates SELECT g, repeat('x', 50) FROM generate_series(1, 2000) AS g;
+DELETE FROM collect.zz_rates WHERE id <= 1000;", ct);
+        await FlushThenAsync(connection, new[] { "ANALYZE collect.zz_rates" }, ct);
+
+        var row = Assert.Single(await DarlingStoreTableHealthReader.GetAsync(dataSource, ct), r => r.TableName == "zz_rates");
+        Assert.Equal(DarlingStoreTableHealthReader.StatsSourcePostmasterStart, row.StatsSinceSource);
+        Assert.False(row.RatesKnown);
+        Assert.Null(row.InsertsPerDay);
+        Assert.Null(row.UpdatesPerDay);
+        Assert.Null(row.DeletesPerDay);
+        Assert.Null(row.TurnoverPerDay);
+        Assert.Equal(2000, row.TuplesInserted);
+        Assert.Equal(1000, row.TuplesDeleted);
+
+        using var doc = JsonDocument.Parse(await DarlingMcpStoreTableHealthTools.GetStoreTableHealth(dataSource, section: "tables", cancellationToken: ct));
+        var root = doc.RootElement;
+        Assert.False(root.GetProperty("rates_known").GetBoolean());
+        var note = root.GetProperty("rates_note").GetString()!;
+        Assert.Contains("never reset", note, StringComparison.Ordinal);
+        Assert.Contains("older than the last start", note, StringComparison.Ordinal);
+        var tableJson = root.GetProperty("tables").EnumerateArray().Single(t => t.GetProperty("table_name").GetString() == "zz_rates");
+        Assert.Equal("postmaster_start", tableJson.GetProperty("stats_since_source").GetString());
+        Assert.Equal(JsonValueKind.Null, tableJson.GetProperty("inserts_per_day").ValueKind);
+        Assert.Equal(JsonValueKind.Null, tableJson.GetProperty("deletes_per_day").ValueKind);
+        Assert.Equal(JsonValueKind.Null, tableJson.GetProperty("turnover_per_day").ValueKind);
+        Assert.Equal(2000, tableJson.GetProperty("tuples_inserted").GetInt64());
+        Assert.Equal(1000, tableJson.GetProperty("tuples_deleted").GetInt64());
+    }
+
+    [Fact]
+    public async Task AfterAStatisticsReset_TheRatesAreWorkedOut_AndTheReplyHasNoNote()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #8823 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        /* pg_stat_reset() resets only the database the connection is on: this test's own database. */
+        await ExecAsync(connection, "SELECT pg_stat_reset()", ct);
+        await ExecAsync(connection, @"
+CREATE TABLE collect.zz_rates (id integer, payload text) WITH (autovacuum_enabled = false);
+INSERT INTO collect.zz_rates SELECT g, repeat('x', 50) FROM generate_series(1, 2000) AS g;
+DELETE FROM collect.zz_rates WHERE id <= 1000;", ct);
+        await FlushThenAsync(connection, new[] { "ANALYZE collect.zz_rates" }, ct);
+
+        var row = Assert.Single(await DarlingStoreTableHealthReader.GetAsync(dataSource, ct), r => r.TableName == "zz_rates");
+        Assert.Equal(DarlingStoreTableHealthReader.StatsSourceReset, row.StatsSinceSource);
+        Assert.True(row.RatesKnown);
+        Assert.NotNull(row.InsertsPerDay);
+        Assert.NotNull(row.DeletesPerDay);
+        Assert.NotNull(row.TurnoverPerDay);
+
+        using var doc = JsonDocument.Parse(await DarlingMcpStoreTableHealthTools.GetStoreTableHealth(dataSource, section: "tables", cancellationToken: ct));
+        var root = doc.RootElement;
+        Assert.True(root.GetProperty("rates_known").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("rates_note").ValueKind);
+        var tableJson = root.GetProperty("tables").EnumerateArray().Single(t => t.GetProperty("table_name").GetString() == "zz_rates");
+        Assert.Equal("stats_reset", tableJson.GetProperty("stats_since_source").GetString());
+        Assert.Equal(JsonValueKind.Number, tableJson.GetProperty("inserts_per_day").ValueKind);
+        Assert.Equal(JsonValueKind.Number, tableJson.GetProperty("turnover_per_day").ValueKind);
     }
 
     [Fact]
@@ -212,6 +297,8 @@ INSERT INTO collect.zz_vis SELECT g, repeat('x', 100) FROM generate_series(1, 60
         await connection.OpenAsync(ct);
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
 
+        /* Per-day rates need a counters' start the store knows (#8823): a reset of this test database's own statistics gives one. */
+        await ExecAsync(connection, "SELECT pg_stat_reset()", ct);
         await ExecAsync(connection, @"
 CREATE TABLE collect.zz_trig (id integer) WITH (autovacuum_enabled = false, autovacuum_vacuum_threshold = 10, autovacuum_vacuum_scale_factor = 0);
 INSERT INTO collect.zz_trig SELECT g FROM generate_series(1, 100) AS g;

@@ -354,7 +354,7 @@ internal static class DarlingAgReader
 
             /* The AGs (seed keys) with no chosen view at all: the note must not claim a coverage it lacks. */
             var chosenKeys = new HashSet<string>(chosen.Select(i => GroupKey(groups[i])), StringComparer.Ordinal);
-            var missing = seedByKey.Where(kv => !chosenKeys.Contains(kv.Key)).Select(kv => groups[kv.Value].AgName).OrderBy(n => n, StringComparer.Ordinal).ToList();
+            var missing = seedByKey.Where(kv => !chosenKeys.Contains(kv.Key)).Select(kv => MissingViewLabel(groups[kv.Value])).OrderBy(n => n, StringComparer.Ordinal).ToList();
             var order = missing.Count == 0
                 ? "at least one view of each availability group is kept first, then most severe first, then by the largest lag/queue depth"
                 : "most severe first, then by the largest lag/queue depth";
@@ -383,6 +383,23 @@ internal static class DarlingAgReader
         }
 
         return result;
+    }
+
+    /// <summary>#8816: how the truncation note names a left-out view. Every Amazon RDS Multi-AZ instance calls its group the
+    /// same thing, so the group name alone lists one name over and over. The reporting server (the display name) is what a
+    /// caller can scope by, so it leads, and the group name follows in parentheses only when it differs from the server name.</summary>
+    private static string MissingViewLabel(AvailabilityGroupView view)
+    {
+        var server = view.ServerName;
+        var group = view.AgName;
+        if (string.IsNullOrWhiteSpace(server))
+        {
+            return string.IsNullOrWhiteSpace(group) ? "(unnamed group)" : group;
+        }
+
+        return string.IsNullOrWhiteSpace(group) || string.Equals(group, server, StringComparison.OrdinalIgnoreCase)
+            ? server
+            : $"{server} ({group})";
     }
 
     /// <summary>The identity of the availability group a view belongs to: its group_id (V151) when known, else

@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -191,7 +192,10 @@ public sealed class QueryTrendRollupRawTailLiveTests
     /// <summary><c>get_query_trend</c> over the 168 hours ending at <paramref name="end"/>, at the named width.</summary>
     private static async Task<JsonElement> ReadTrendAsync(NpgsqlDataSource postgres, DateTime end, int bucketMinutes, CancellationToken ct)
     {
-        var json = await DarlingMcpTrendTools.GetQueryTrend(postgres, QueryHash, Db, ServerName, 168, AsOf(end), bucketMinutes, ct);
+        /* #8812: the web viewer's overload, with no response byte budget: the tool's own 169 hourly points are cut to the budget, and this
+           test reads every one of them to check the sums either side of the rollup's end. */
+        var json = await DarlingMcpTrendTools.GetQueryTrend(
+            postgres, QueryHash, Db, ServerName, 168, AsOf(end), bucketMinutes, TrendBudget.Mcp(TrendBuckets.QueryTrendMaxPoints), null, ct);
         var root = JsonDocument.Parse(json).RootElement;
         Assert.False(root.TryGetProperty("error", out _), json);
         Assert.True(root.TryGetProperty("trend", out _), json);

@@ -83,13 +83,13 @@ public sealed class WebTileTruthsTests
         var r = Run();
         var chip = r.GetProperty("identityChip").GetString()!;
         Assert.Contains("Sales.dbo.Orders.OrderId: 100% used, 0 left", chip, StringComparison.Ordinal);
-        Assert.Contains("fullest of 3 columns", chip, StringComparison.Ordinal);
+        Assert.Contains("worst of 3 columns", chip, StringComparison.Ordinal);
         Assert.True(r.GetProperty("identityClickStopped").GetBoolean(), "the tile keeps its click, so the card around it does not also open the server");
         Assert.Equal("#/server/srv-a/config", r.GetProperty("hashAfterClick").GetString());
         Assert.Contains("[data-title=\"Identity Capacity\"]", Strings(r.GetProperty("scrolledTo")));
 
         /* A service that sends no column keeps the generic sentence. */
-        Assert.Contains("The fullest is warning", r.GetProperty("legacyIdentityChip").GetString()!, StringComparison.Ordinal);
+        Assert.Contains("The worst is warning", r.GetProperty("legacyIdentityChip").GetString()!, StringComparison.Ordinal);
     }
 
     [Fact]

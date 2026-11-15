@@ -438,15 +438,10 @@ HAVING sum(delta_execution_count) > 0";
         }
     }
 
-    /// <summary>Folds each not-measured entry into the notes and builds the evaluation; both engines end here so they answer in one shape.</summary>
+    /// <summary>Builds the evaluation; both engines end here so they answer in one shape. Each not-measured reason is kept in <c>not_measured</c> only (#8815), not repeated as a note.</summary>
     internal static ChangeWatchEvaluation Complete(
         ChangeWatchRow watch, List<ChangeWatchMeasure> measures, bool hadData, List<string> notes, List<ChangeWatchNotMeasured> notMeasured)
     {
-        foreach (var n in notMeasured)
-        {
-            notes.Add($"not measured: {n.Measure}: {n.Reason}");
-        }
-
         return new ChangeWatchEvaluation(hadData, measures, DetailText(watch, measures), ResultJson(watch, measures, hadData, notes, notMeasured), notes, notMeasured);
     }
 
@@ -545,7 +540,7 @@ HAVING sum(delta_execution_count) > 0";
                             ? $"Query Store holds no interval for query {queryId} in {database} that ended at or before the change (the interval length leaves no whole interval in the hour before it), so there is no pre-change baseline"
                             : $"Query Store holds no interval for query {queryId} in {database} that started at or after the change yet, so there is no post-change measure";
                         notMeasured.Add(new ChangeWatchNotMeasured(measureName, reason));
-                        /* The reason is in the notes through Complete (every not-measured entry is); only the fallback is added here (#6239 round 3, L9). */
+                        /* The reason is in not_measured (#6239 round 3, L9); only the fallback is added to the notes here. */
                         notes.Add($"{measureName}: the top {TopQueries} queries by total duration in the changed databases were measured instead");
                         continue;
                     }

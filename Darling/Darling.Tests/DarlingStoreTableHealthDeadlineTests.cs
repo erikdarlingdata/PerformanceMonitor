@@ -132,6 +132,9 @@ public sealed class DarlingStoreTableHealthDeadlineTests
         AssertReadsAsATimeout(root.GetProperty("indexes_left_out_note").GetString()!);
         Assert.StartsWith("The index part was left out", root.GetProperty("index_header").GetString(), StringComparison.Ordinal);
         Assert.False(root.TryGetProperty("tables_left_out_note", out _));
+        /* #8823 meets #8806: a fresh store has never had its statistics reset, so the table rows carry the rates note beside the index note. */
+        Assert.False(root.GetProperty("rates_known").GetBoolean());
+        Assert.Contains("never reset", root.GetProperty("rates_note").GetString()!, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -165,6 +168,8 @@ public sealed class DarlingStoreTableHealthDeadlineTests
         if (section == "all")
         {
             Assert.True(root.GetProperty("tables_returned").GetInt32() > 0, "the table rows still come back");
+            Assert.False(root.GetProperty("rates_known").GetBoolean());
+            Assert.Contains("never reset", root.GetProperty("rates_note").GetString()!, StringComparison.Ordinal);
         }
     }
 
@@ -188,6 +193,9 @@ public sealed class DarlingStoreTableHealthDeadlineTests
         Assert.True(root.GetProperty("indexes_returned").GetInt32() > 0, "the index rows still come back");
         AssertReadsAsATimeout(root.GetProperty("tables_left_out_note").GetString()!);
         Assert.False(root.TryGetProperty("indexes_left_out_note", out _));
+        /* The table part was left out, so there are no rows to judge the rates by: no rates note is built from none. */
+        Assert.False(root.TryGetProperty("rates_note", out _));
+        Assert.False(root.TryGetProperty("rates_known", out _));
     }
 
     [Fact]
