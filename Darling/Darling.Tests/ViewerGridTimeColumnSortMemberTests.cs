@@ -221,6 +221,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         /* #8787: the Store Health tab's table grid. */
         { "StoreHealthTab.xaml", "TablesDataGrid", "LastVacuum", Name(typeof(StoreTableRow)), "LastVacuumUtc" },
         { "StoreHealthTab.xaml", "TablesDataGrid", "LastAnalyze", Name(typeof(StoreTableRow)), "LastAnalyzeUtc" },
+        { "StoreHealthTab.xaml", "TablesDataGrid", "CountedSince", Name(typeof(StoreTableRow)), "CountedSinceUtc" },
     };
 
     /// <summary>

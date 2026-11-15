@@ -39,6 +39,12 @@ public sealed class DarlingMcpStoreTableHealthTools
         + "PostgreSQL target table bloat collector uses), not measurements. A measured figure needs the pgstattuple extension, "
         + "which this read never installs. A table with no usable statistics has a null estimate and a reason, never zero.";
 
+    /// <summary>The sentence a tables answer carries when the statistics were never reset, so the per-day rates are null (#8823).</summary>
+    internal const string RatesNote =
+        "The statistics were never reset, so the counters are older than the last start (stats_since) and their age is not known. "
+        + "The per-day rates (inserts_per_day, updates_per_day, deletes_per_day, turnover_per_day) are null instead of a figure that "
+        + "would be too high. The counters themselves are real. A statistics reset gives rates from the next read after it.";
+
     /// <summary>The sections the tool can return.</summary>
     internal static readonly string[] Sections = { "tables", "indexes", "all" };
 
@@ -68,9 +74,11 @@ public sealed class DarlingMcpStoreTableHealthTools
         + "unknown, rewrite_candidate is false, and past_rewrite_floors stays true. vacuum_trigger_rows is "
         + "threshold + scale_factor x rows from the table's own settings or the server's (capped by the max threshold on PostgreSQL 18): "
         + "compare it with dead_rows, because many dead rows below the trigger are not yet due; relations_past_vacuum_trigger counts "
-        + "the relations of a roll-up that are. The churn counters and rates are since stats_since (the statistics reset, or the "
-        + "postmaster start when they were never reset, as stats_since_source says) and nothing is recorded; turnover_per_day is "
-        + "deletes per day over live rows. rarely_used is only set when the statistics window is at least 7 days old, never for a "
+        + "the relations of a roll-up that are. The churn counters are since the last statistics reset. stats_since_source is stats_reset "
+        + "when stats_since is that reset: the per-day rates (inserts, updates, deletes, turnover_per_day = deletes per day over live rows) are "
+        + "worked out from it. When the statistics were never reset it is postmaster_start: the counters then began BEFORE stats_since, "
+        + "because statistics survive a restart, so their age is unknown, the rates are null and rates_note says why; the raw counters "
+        + "stay. Nothing is recorded. rarely_used is only set when the statistics window is at least 7 days old, never for a "
         + "primary key or unique index. Index bloat is the extension-free estimate the target index bloat collector uses. "
         + "growth_bytes_7d is null for objects store_metrics does not record. The reply is also held to the 32,768-byte response budget, whole rows only, "
         + "the same number of rows from each section: budget_truncated = true says rows were left off the end for the budget, budget_note says how many "
@@ -146,6 +154,9 @@ public sealed class DarlingMcpStoreTableHealthTools
 
                 result["header"] = header;
                 result["estimate_note"] = EstimateNote;
+                var ratesKnown = all.Count == 0 || all.All(r => r.RatesKnown);
+                result["rates_known"] = ratesKnown;
+                result["rates_note"] = ratesKnown ? null : RatesNote;
                 result["store_tables"] = summary.TableCount;
                 result["store_total_bytes"] = summary.TotalBytes;
                 result["rewrite_candidates"] = summary.RewriteCandidates;
