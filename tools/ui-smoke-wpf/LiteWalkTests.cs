@@ -44,8 +44,25 @@ public sealed class LiteWalkTests : WalkBase
             item.AsMenuItem().Invoke();
             return true;
         });
-        var window = Step("Store Health window", () => WaitFor(() => Automation.GetDesktop()
-            .FindFirstChild(cf => cf.ByControlType(ControlType.Window).And(cf.ByName("Store Health")))?.AsWindow(), "a top-level window titled Store Health"));
+        // The window is found through its own StoreSentenceText, from the desktop, then walked up to its Window: the
+        // desktop-child lookup by title did not find it on the runner (the shot shows it open).
+        var window = Step("Store Health window", () =>
+        {
+            try
+            {
+                var text = WaitFor(() => Automation.GetDesktop().FindFirstDescendant(cf => cf.ByAutomationId("StoreSentenceText")),
+                    "StoreSentenceText on the desktop");
+                var w = text;
+                while (w is not null && w.ControlType != ControlType.Window) w = w.Parent;
+                return (w ?? throw new Xunit.Sdk.XunitException("StoreSentenceText has no Window ancestor")).AsWindow();
+            }
+            catch
+            {
+                foreach (var c in Automation.GetDesktop().FindAllChildren())
+                    Console.WriteLine("desktop child: " + c.ControlType + " '" + c.Name + "' " + c.Properties.ProcessId.ValueOrDefault);
+                throw;
+            }
+        });
         Step("Store Health read", () => WaitFor(() =>
             window.FindFirstDescendant(cf => cf.ByAutomationId("StatusText")) is { } status && status.Name.StartsWith("Read at", StringComparison.Ordinal)
                 ? status : null, "StatusText reading 'Read at'"));
