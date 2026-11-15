@@ -23,8 +23,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// MEASURES one store table's empty space (#8787 part D2): how much of the file's page space the live rows take, how many pages
 /// hold no row at all, and whether a VACUUM could cut the file shorter. It is the measured figure that sits beside the ESTIMATE in
 /// <see cref="DarlingStoreTableHealthReader"/>, and it needs no extension: one scan of the table, grouped by block number, that
-/// counts rows and adds up <c>pg_column_size</c> of every column. <c>pg_column_size</c> of a toasted value is its stored size and
-/// does not detoast it, so the TOAST table is never read, and no row is returned to the client. On a field store the
+/// counts rows and adds up each column's size IN ITS PAGE. A value stored out of line in TOAST takes only its 18 byte pointer in the
+/// heap page, so it is counted as 18 bytes (<c>TOAST_POINTER_SIZE</c>), not as the size of the value in the TOAST table, which
+/// <c>pg_column_size</c> reports for it (#8807). Every other value, compressed or not, is counted at its <c>pg_column_size</c>.
+/// Neither function detoasts, so the TOAST table is never read, and no row is returned to the client. On a field store the
 /// row-location part of that scan took 0.6 to 0.9 seconds for 250,000 pages. That is cheap for one table and wrong to run over every
 /// table, so it is on demand for ONE table per call and never fanned out. The MCP tool <c>measure_store_table</c> and its web read wrap this class, and the
 /// Viewer calls it directly.
@@ -145,17 +147,59 @@ ORDER BY 2 DESC, 1
 LIMIT 3";
 
     /// <summary>The table's column-size expression and storage facts, read before the scan. The expression is built from the catalog's
-    /// <c>quote_ident</c> names (never caller text) and sums <c>pg_column_size</c> of each live column. It never uses a whole-row value
-    /// (<c>t.*</c> or <c>ROW(...)</c>), because a whole-row value flattens TOAST and reads it. A dropped column and a virtual
-    /// generated column hold no stored bytes, so neither is summed.</summary>
-    private const string LayoutSql = @"
+    /// <c>quote_ident</c> names (never caller text), counts each live column as it sits in its page, and sums the counts. It never uses
+    /// a whole-row value (<c>t.*</c> or <c>ROW(...)</c>), because a whole-row value flattens TOAST and reads it. A dropped column and a
+    /// virtual generated column hold no stored bytes, so neither is summed.
+    ///
+    /// <para>Telling an out-of-line value from an inline one, by <c>server_version_num</c>. On PostgreSQL 17 and later a varlena column
+    /// that can be toasted is checked with <c>pg_column_toast_chunk_id</c>, which is not NULL exactly for an out-of-line value, so it
+    /// is counted as the pointer. Before 17 there is no such function, so a column whose storage is <c>x</c> (extended) or <c>e</c>
+    /// (external) is judged by its stored size against a cutoff. The toaster runs only for a row longer than <c>TOAST_TUPLE_THRESHOLD</c>,
+    /// a compile-time value of 2032 bytes at 8 kB pages (the block size less the 40 byte page header and four line pointers, over four,
+    /// rounded down to 8). Once it runs it moves values out of line, largest first, until the row fits under the table's
+    /// <c>toast_tuple_target</c> option, or under the same 2032 when there is no option. So an inline value can be as large as the
+    /// larger of the two: with a lowered option, a row under the threshold keeps every value inline, up to the threshold, and with a raised
+    /// option, values up to the option stay inline. The cutoff is therefore <c>greatest(option, default)</c>, and a <c>pg_column_size</c> over
+    /// it is out of line and is counted as the pointer. That test is exact for a value over the cutoff. The limit: a row of several
+    /// mid-size values can move one under the cutoff out of line as well, and on 16 that value is still counted at its stored size, so live
+    /// bytes read a little high for such a row. A <c>main</c> column is counted at its stored size, because the toaster moves it out of
+    /// line only after everything else.</para></summary>
+    private const string LayoutSqlTemplate = @"
+WITH tgt AS (
+    SELECT greatest(coalesce((SELECT split_part(o, '=', 2)::int FROM pg_catalog.pg_class AS c, unnest(c.reloptions) AS o
+                              WHERE c.oid = $1::oid AND o LIKE 'toast_tuple_target=%'), 0),
+                    ((current_setting('block_size')::int - 40) / 4) / 8 * 8) AS v
+)
 SELECT
-    coalesce((SELECT string_agg('coalesce(pg_catalog.pg_column_size(t.' || quote_ident(a.attname) || '), 0)', ' + ' ORDER BY a.attnum)
+    coalesce((SELECT string_agg(
+                  CASE
+                      WHEN a.attlen = -1 AND a.attstorage <> 'p' AND current_setting('server_version_num')::int >= <<CHUNKID_MIN_VERSION>>
+                          THEN 'CASE WHEN pg_catalog.pg_column_toast_chunk_id(t.' || quote_ident(a.attname) || ') IS NOT NULL THEN 18'
+                               || ' ELSE coalesce(pg_catalog.pg_column_size(t.' || quote_ident(a.attname) || '), 0) END'
+                      WHEN a.attlen = -1 AND a.attstorage IN ('x', 'e')
+                          THEN 'CASE WHEN pg_catalog.pg_column_size(t.' || quote_ident(a.attname) || ') > ' || (SELECT v FROM tgt)::text
+                               || ' THEN 18 ELSE coalesce(pg_catalog.pg_column_size(t.' || quote_ident(a.attname) || '), 0) END'
+                      ELSE 'coalesce(pg_catalog.pg_column_size(t.' || quote_ident(a.attname) || '), 0)'
+                  END, ' + ' ORDER BY a.attnum)
               FROM pg_catalog.pg_attribute AS a
               WHERE a.attrelid = $1::oid AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated <> 'v'), '0'),
     coalesce((SELECT split_part(o, '=', 2)::int FROM pg_catalog.pg_class AS c, unnest(c.reloptions) AS o
               WHERE c.oid = $1::oid AND o LIKE 'fillfactor=%'), 100),
     current_setting('block_size')::bigint";
+
+    /// <summary>The first <c>server_version_num</c> with <c>pg_column_toast_chunk_id</c>, which is PostgreSQL 17.</summary>
+    private const int ToastChunkIdMinVersion = 170000;
+
+    private static readonly string LayoutSql = LayoutSqlFor(ToastChunkIdMinVersion);
+
+    /// <summary>The layout statement that uses <c>pg_column_toast_chunk_id</c> from <paramref name="chunkIdMinVersion"/> up and the
+    /// storage-size test below it. The tests pass a version no server reaches to run the PostgreSQL 16 form on a newer server.</summary>
+    internal static string LayoutSqlFor(int chunkIdMinVersion) =>
+        LayoutSqlTemplate.Replace("<<CHUNKID_MIN_VERSION>>", chunkIdMinVersion.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
+
+    /// <summary>The measurement statement for a column-size expression and a resolved, quoted table name.</summary>
+    internal static string MeasureSqlFor(string sizeExpression, string qualifiedName) =>
+        MeasureSqlHead + sizeExpression + MeasureSqlMid + qualifiedName + MeasureSqlTail;
 
     /// <summary>The measurement, in three parts around the column-size expression and the resolved, quoted table name. <c>ONLY</c> keeps
     /// an inheritance child out of the scan. The page figures come from the file's size, the row figures from the grouped scan.</summary>
@@ -395,7 +439,7 @@ FROM p";
             }
 
             /* The name and every column in the size expression are the catalog's quote_ident output, never the caller's text. */
-            var sql = MeasureSqlHead + sizeExpression + MeasureSqlMid + resolved.QualifiedName + MeasureSqlTail;
+            var sql = MeasureSqlFor(sizeExpression, resolved.QualifiedName);
             long pagesWithRows, rows, lastUsed, totalPages, one, twoToFour, fiveToTen, over10, dataBytes;
             double rowsPerPage;
             await using (var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = TimeoutSeconds + 15 })
