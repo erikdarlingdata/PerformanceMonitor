@@ -80,8 +80,8 @@ public sealed class DailySummaryWarmerLiveTests
             await PlantWaitAsync(connection, ServerIdA, ServerA, closedDay.AddHours(11), 4000, ct);
             await PlantWaitAsync(connection, ServerIdB, ServerB, closedDay.AddHours(11), 4000, ct);
 
-            Assert.Equal(1000m, await ClosedDayWaitMsAsync(dataSource, ServerA, closedDay));
-            Assert.Equal(3000m, await ClosedDayWaitMsAsync(dataSource, ServerB, closedDay));
+            Assert.Equal(1000m, await ClosedDayWaitMsAsync(dataSource, ServerA, closedDay, today));
+            Assert.Equal(3000m, await ClosedDayWaitMsAsync(dataSource, ServerB, closedDay, today));
 
             bodySucceeded = true;
         }
@@ -136,8 +136,8 @@ public sealed class DailySummaryWarmerLiveTests
             await PlantWaitAsync(connection, ServerIdA, ServerA, closedDay.AddHours(11), 4000, ct);
             await PlantWaitAsync(connection, ServerIdB, ServerB, closedDay.AddHours(11), 4000, ct);
 
-            Assert.Equal(1000m, await ClosedDayWaitMsAsync(webPool, ServerA, closedDay));
-            Assert.Equal(3000m, await ClosedDayWaitMsAsync(webPool, ServerB, closedDay));
+            Assert.Equal(1000m, await ClosedDayWaitMsAsync(webPool, ServerA, closedDay, today));
+            Assert.Equal(3000m, await ClosedDayWaitMsAsync(webPool, ServerB, closedDay, today));
 
             bodySucceeded = true;
         }
@@ -204,6 +204,7 @@ public sealed class DailySummaryWarmerLiveTests
             var first = await StatementsRunAsync(() => DarlingMcpHealthTools.GetDailySummaryRange(dataSource, ServerA, 31));
             var second = await StatementsRunAsync(() => DarlingMcpHealthTools.GetDailySummaryRange(dataSource, ServerA, 31));
 
+            SkipWhenTheDayChanged(today);
             Assert.True(first == second,
                 $"the first visit after the hour ran {first} statements and the visit after it ran {second}: the first one re-read the days before the retention horizon");
 
@@ -217,6 +218,125 @@ public sealed class DailySummaryWarmerLiveTests
         }
     }
 
+    /// <summary>#8824: the Overview's wait strip reads the 24-hour <c>total_waits</c> trend, which has no cache of its own, so
+    /// the warm pass makes the same read to keep the store's pages recent. The read is seen by what it costs the store: a warm
+    /// of a server the trend read resolves runs more statements than the same warm of a name it cannot resolve.</summary>
+    [Fact]
+    public async Task WarmAsync_AlsoReadsTheWaitTrend_ForTheServer()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live daily-summary warmer test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerIdA, ServerA, ct);
+            var today = DateTime.UtcNow.Date;
+            await PlantWaitAsync(connection, ServerIdA, ServerA, DateTime.UtcNow.AddHours(-3), 1000, ct);
+
+            /* One warm first, so what the first read of a store warms (registry, settings) is not counted against either side. */
+            await Warmers.WarmAsync(dataSource, ServerIdA, "no-such-server-for-the-trend-read", ct);
+
+            DarlingHealthReader.ResetRangeCacheForTests();
+            var withoutTrend = await StatementsRunAsync(async () =>
+            {
+                await Warmers.WarmAsync(dataSource, ServerIdA, "no-such-server-for-the-trend-read", ct);
+                return string.Empty;
+            });
+
+            DarlingHealthReader.ResetRangeCacheForTests();
+            var withTrend = await StatementsRunAsync(async () =>
+            {
+                await Warmers.WarmAsync(dataSource, ServerIdA, ServerA, ct);
+                return string.Empty;
+            });
+
+            SkipWhenTheDayChanged(today);
+            Assert.True(withTrend > withoutTrend,
+                $"the warm of a resolvable server ran {withTrend} statements and the warm of an unresolvable name ran {withoutTrend}: the pass did not read the wait trend");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            DarlingHealthReader.ResetRangeCacheForTests();
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>#8824: the trend read answers a failure as a refusal or an error envelope, not a throw. A pass whose trend read
+    /// failed still builds the daily summary block, counts the server as warmed (so the pass is complete and waits the refresh
+    /// interval, not the retry ladder) and says in the log that the trend read failed. A server name the trend read cannot
+    /// resolve stands for any failed trend read.</summary>
+    [Fact]
+    public async Task WarmerPass_WhenTheTrendReadFails_StillWarmsTheDailySummary_CountsTheServerDone_AndLogsTheFailure()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live daily-summary warmer test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerIdA, ServerA, ct);
+
+            var today = DateTime.UtcNow.Date;
+            var closedDay = today.AddDays(-2);
+            await PlantWaitAsync(connection, ServerIdA, ServerA, closedDay.AddHours(10), 1000, ct);
+
+            DarlingHealthReader.ResetRangeCacheForTests();
+
+            var log = new CapturingTestLogger();
+            var warmer = Warmers.Create(
+                servers: () => [(ServerIdA, "no-such-server-for-the-trend-read")],
+                warm: (serverId, name, token) => Warmers.WarmAsync(dataSource, serverId, name, token, log),
+                enabled: () => true,
+                admission: null);
+            var pass = await Warmers.RunPassAsync(warmer, ct);
+
+            await PlantWaitAsync(connection, ServerIdA, ServerA, closedDay.AddHours(11), 4000, ct);
+
+            Assert.Equal(1, pass.Warmed);
+            Assert.Equal(0, pass.Failed);
+            Assert.True(pass.Complete);
+            Assert.Contains(log.Lines, line => line.Contains("wait trend read failed", StringComparison.Ordinal));
+            Assert.Equal(1, log.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+            Assert.Equal(1000m, await ClosedDayWaitMsAsync(dataSource, ServerA, closedDay, today));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            DarlingHealthReader.ResetRangeCacheForTests();
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>The warmer and the visitor read the UTC day from the real clock themselves, so a run that crosses 00:00 UTC
+    /// plants its rows for one day and reads another, and fails on correct code. Such a run is skipped, with the reason.</summary>
+    private static void SkipWhenTheDayChanged(DateTime today) =>
+        Assert.SkipWhen(DateTime.UtcNow.Date != today,
+            $"UTC midnight passed during the test (it started on {today:yyyy-MM-dd}): the warmer and the visitor read the real clock, so the day they asked for is not the day the rows were planted for.");
+
     /// <summary>How many store statements the read ran, counted the way the slow-read log counts them.</summary>
     private static async Task<int> StatementsRunAsync(Func<Task<string>> read)
     {
@@ -229,9 +349,10 @@ public sealed class DailySummaryWarmerLiveTests
 
     /// <summary>The closed day's total wait in ms from the FIRST <c>get_daily_summary_range</c> call this test makes for
     /// the server: the Overview's own read, 31 days ending today with no anchor.</summary>
-    private static async Task<decimal> ClosedDayWaitMsAsync(NpgsqlDataSource dataSource, string serverName, DateTime closedDay)
+    private static async Task<decimal> ClosedDayWaitMsAsync(NpgsqlDataSource dataSource, string serverName, DateTime closedDay, DateTime today)
     {
         var json = await DarlingMcpHealthTools.GetDailySummaryRange(dataSource, serverName, 31);
+        SkipWhenTheDayChanged(today);
         using var doc = JsonDocument.Parse(json);
         var days = doc.RootElement.GetProperty("days").EnumerateArray().ToArray();
         var row = Assert.Single(days, d => d.GetProperty("summary_date").GetString() == closedDay.ToString("yyyy-MM-dd"));

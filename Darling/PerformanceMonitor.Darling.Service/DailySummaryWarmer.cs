@@ -50,7 +50,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Refresh (#8824).</b> A pass repeats every <see cref="RefreshInterval"/>, not once a day, because a block serves the days
 /// before the retention horizon for one hour only and a visitor after the hour paid their read, with the open day's, on pages
 /// no one had read since the pass. Each repeat re-reads them (the warm read passes <c>refreshSubHorizon</c>) and the 24-hour
-/// <c>total_waits</c> trend the Overview's wait strip reads. A failed or refused pass still retries sooner.</para>
+/// <c>total_waits</c> trend the Overview's wait strip reads. A failed or refused pass backs off 15, 30, 60, then 120 minutes, never the 30-minute interval.</para>
 /// </summary>
 public sealed class DailySummaryWarmer
 {
@@ -150,9 +150,14 @@ public sealed class DailySummaryWarmer
 
         /* #8824: the Overview's wait strip reads the 24-hour total_waits trend, which has no cache of its own, so its first read
            of a server after the pages left the store's buffers paid 4 to 8 seconds against about half a second for the next.
-           The same read here, answer discarded, keeps those pages warm. A failed read comes back as an error answer, not a throw. */
-        _ = await DarlingMcpServerTrendTools.GetServerTrend(
+           The same read here, answer discarded, keeps those pages warm. A failed read comes back as an error or refusal answer, not
+           a throw: it is logged like a failed server read, and the pass stays complete (the daily summary block is built). */
+        var trend = await DarlingMcpServerTrendTools.GetServerTrend(
             postgres, "total_waits", name, 24, null, null, null, null, TrendBudget.ChartFor(null), cancellationToken).ConfigureAwait(false);
+        if (McpHelpers.IsErrorEnvelope(trend) || McpHelpers.IsRefusalEnvelope(trend))
+        {
+            logger?.LogWarning("Daily summary warm for {Server}: the 24-hour wait trend read failed ({Reason}); the daily summary block is built, the trend pages are not warmed", name, McpHelpers.ErrorMessageOf(trend));
+        }
     }
 
     /// <summary>The loop: wait, pass, wait for the boundary (or a retry), until <paramref name="stoppingToken"/> cancels.</summary>
@@ -212,16 +217,16 @@ public sealed class DailySummaryWarmer
             var untilDue = dueUtc > now ? dueUtc - now : TimeSpan.Zero;
             if (pass.Complete)
             {
+                /* #8824: the refresh interval is the cadence of a healthy pass only. A failed or refused pass backs off by
+                   RetryDelayFor, so a failing server is not retried every 30 minutes, each try holding a heavy slot. */
                 consecutiveFailures = 0;
-                delay = untilDue;
+                delay = Min(untilDue, RefreshInterval);
             }
             else
             {
                 consecutiveFailures++;
                 delay = Min(RetryDelayFor(consecutiveFailures), untilDue);
             }
-
-            delay = Min(delay, RefreshInterval);
         }
     }
 
