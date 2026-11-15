@@ -2408,12 +2408,13 @@ public sealed class McpQueryTools
                 await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd));
 
 
-            /* #8812: an answer over the response budget ends at the last whole point that fits it, oldest first, and says so
-               (budget_truncated, budget_note, with the bucket width that fits the window), as Darling's twin does. */
+            /* #8812: an answer over the response budget keeps the NEWEST points that fit it, still oldest first, and says so
+               (budget_truncated, budget_note, with the first point returned, the bucket width that fits the window and the as_of
+               that reads the points before it), as Darling's twin does. */
             return McpResponseBudget.CapArray(
-                JsonSerializer.SerializeToNode(envelope, McpHelpers.JsonOptions)!.AsObject(), "trend", "oldest first", "points",
-                kept => TrendBuckets.BudgetCutRemedy(hours_back, kept, 1), McpResponseBudget.DefaultBytes,
-                "budget_truncated", "budget_note", (node, kept) => node["data_points"] = kept);
+                JsonSerializer.SerializeToNode(envelope, McpHelpers.JsonOptions)!.AsObject(), "trend", "newest points kept, oldest first", "points",
+                kept => TrendBuckets.BudgetCutRemedy(hours_back, kept, 1, points[points.Count - kept].BucketStart), McpResponseBudget.DefaultBytes,
+                "budget_truncated", "budget_note", (node, kept) => node["data_points"] = kept, keepNewest: true);
         }
         catch (Exception ex)
         {

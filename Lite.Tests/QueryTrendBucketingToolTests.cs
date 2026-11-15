@@ -167,8 +167,8 @@ public sealed class QueryTrendBucketingToolTests : IClassFixture<SharedDuckDbFix
 
     /// <summary>
     /// #8812: a week at the default width stays inside the 32,768-byte response budget (the shared 200-point target put 169 hourly
-    /// points, about 56 KB, on the wire), and a width the caller names that is still over it is cut to the last whole point that fits,
-    /// oldest first, with <c>budget_truncated</c> and a <c>budget_note</c> that names the width that reads the whole window.
+    /// points, about 56 KB, on the wire), and a width the caller names that is still over it is cut to the newest whole points that fit (the
+    /// oldest are left off, the rest stay oldest first), with <c>budget_truncated</c> and a <c>budget_note</c> that names the width that reads the whole window.
     /// </summary>
     [Fact]
     public async Task AWeekAtTheDefaultWidth_FitsTheResponseBudget_AndANamedWidthOverItIsCutAndSaysSo()
@@ -196,13 +196,40 @@ public sealed class QueryTrendBucketingToolTests : IClassFixture<SharedDuckDbFix
         var points = cutRoot.GetProperty("trend").EnumerateArray().ToList();
         Assert.InRange(points.Count, 20, 168);
         Assert.Equal(points.Count, cutRoot.GetProperty("data_points").GetInt32());
-        Assert.Equal(DateTime.SpecifyKind(asOf.AddHours(-168), DateTimeKind.Unspecified).ToString("o"), points[0].GetProperty("collection_time").GetString());
+
+        /* The newest point of the window (its last hour) is in the reply, and the window's oldest (its start) is the one left off. */
+        var oldestStamp = DateTime.SpecifyKind(asOf.AddHours(-168), DateTimeKind.Unspecified).ToString("o");
+        Assert.Equal(DateTime.SpecifyKind(asOf.AddHours(-1), DateTimeKind.Unspecified).ToString("o"), points[^1].GetProperty("collection_time").GetString());
+        Assert.NotEqual(oldestStamp, points[0].GetProperty("collection_time").GetString());
 
         var note = cutRoot.GetProperty("budget_note").GetString()!;
         Assert.Contains("response budget", note, StringComparison.Ordinal);
         Assert.Contains($"only {points.Count:N0} fit", note, StringComparison.Ordinal);
+        var firstStamp = DateTime.Parse(points[0].GetProperty("collection_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind);
+        Assert.Contains($"first point returned is at {firstStamp:yyyy-MM-dd'T'HH:mm:ss}Z", note, StringComparison.Ordinal);
         var named = int.Parse(System.Text.RegularExpressions.Regex.Match(note, @"bucket_minutes (\d+)").Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
         Assert.True(PerformanceMonitor.Common.TrendBuckets.PointsFor(168 * 60, named, 1) <= points.Count, note);
+
+        /* Following the note's as_of reads the points before the first one returned, and repeating it reaches the window's oldest point. */
+        var reachedOldest = false;
+        var asOfToRead = asOf.ToString("o");
+        for (var page = 0; page < 12 && !reachedOldest; page++)
+        {
+            var pageRoot = JsonDocument.Parse(await McpQueryTools.GetQueryTrend(
+                service, _serverManager, Hash, Database, ServerName, 168, asOfToRead, bucket_minutes: 60)).RootElement;
+            var pageStamps = pageRoot.GetProperty("trend").EnumerateArray().Select(p => p.GetProperty("collection_time").GetString()!).ToList();
+            if (pageStamps.Contains(oldestStamp, StringComparer.Ordinal))
+            {
+                reachedOldest = true;
+                break;
+            }
+
+            var next = System.Text.RegularExpressions.Regex.Match(pageRoot.GetProperty("budget_note").GetString()!, @"set as_of to (\S+Z) to read the points before it");
+            Assert.True(next.Success, pageRoot.GetRawText());
+            asOfToRead = next.Groups[1].Value;
+        }
+
+        Assert.True(reachedOldest, "following the note's as_of never reached the window's oldest point");
     }
 
     /// <summary>

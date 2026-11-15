@@ -63,8 +63,10 @@ public sealed class QueryTrendBucketingLiveTests
         var bodySucceeded = false;
         try
         {
-            /* The window ends on the ladder's 10-minute grid, so every bucket is whole and the first sits exactly at the start. */
+            /* The window ends on the hour, which is on the grid of every width the ladder serves a day at (10, 15, 20, 30 minutes),
+               so every bucket is whole and the first sits exactly at the start. */
             var end = WindowEnd(minuteModTen: 0);
+            end = end.AddMinutes(-end.Minute);
             var start = end.AddHours(-24);
             await SeedMinuteCollectionsAsync(connection, ct, start, 1440);
 

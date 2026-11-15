@@ -28,7 +28,7 @@ namespace Darling.Tests;
 /// <summary>
 /// #8812: <c>get_query_trend</c> and <c>get_query_fleet_summary</c> keep to the 32,768-byte response budget at the arguments they
 /// accept, not only at their defaults, and say what they cut. The trend's automatic width is sized to the budget, a width the caller
-/// names is cut to the last whole point that fits, and the fleet summary ends at the last whole entry that fits, heaviest CPU first,
+/// names is cut to the newest whole points that fit (the oldest are left off), and the fleet summary ends at the last whole entry that fits, heaviest CPU first,
 /// under its own <c>budget_truncated</c> and <c>budget_note</c> (the limit's <c>truncated</c> and <c>note</c> stay the limit's).
 /// </summary>
 public sealed class QueryReadsResponseBudgetLiveTests
@@ -48,6 +48,8 @@ public sealed class QueryReadsResponseBudgetLiveTests
         var onTheHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
         return onTheHour.AddHours(-1);
     }
+
+    private static string Stamp(DateTime t) => t.ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture);
 
     private static string AsOf(DateTime end) => end.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
 
@@ -95,7 +97,7 @@ public sealed class QueryReadsResponseBudgetLiveTests
                 Assert.Equal(168 * 12, points.Sum(p => p.GetProperty("collection_count").GetInt32()));
             }
 
-            /* A named width the cap allows (289 points over a day at 5 minutes) is cut to the budget, oldest points first. */
+            /* A named width the cap allows (289 points over a day at 5 minutes) is cut to the budget: the OLDEST points are left off and the newest kept. */
             var cutJson = await DarlingMcpTrendTools.GetQueryTrend(postgres, TrendHash, Db, TrendServerName, 24, AsOf(end), 5, cancellationToken: ct);
             using (var doc = JsonDocument.Parse(cutJson))
             {
@@ -107,11 +109,15 @@ public sealed class QueryReadsResponseBudgetLiveTests
                 var points = root.GetProperty("trend").EnumerateArray().ToArray();
                 Assert.Equal(points.Length, root.GetProperty("data_points").GetInt32());
                 Assert.InRange(points.Length, 20, 288);
-                Assert.Equal(end.AddHours(-24).ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture), points[0].GetProperty("collection_time").GetString()![..19]);
+                /* The newest point of the window (the last collection, five minutes before its end) is in the reply, and the window's oldest is not. */
+                Assert.Equal(Stamp(end.AddMinutes(-5)), points[^1].GetProperty("collection_time").GetString()![..19]);
+                var firstStamp = points[0].GetProperty("collection_time").GetString()![..19];
+                Assert.NotEqual(Stamp(end.AddHours(-24)), firstStamp);
 
                 var note = root.GetProperty("budget_note").GetString()!;
                 Assert.Contains("response budget", note, StringComparison.Ordinal);
                 Assert.Contains($"only {points.Length:#,0} fit", note, StringComparison.Ordinal);
+                Assert.Contains($"first point returned is at {firstStamp}Z", note, StringComparison.Ordinal);
 
                 /* The width the note names reads the whole day inside the points that fit. */
                 var named = int.Parse(Regex.Match(note, @"bucket_minutes (\d+)").Groups[1].Value, CultureInfo.InvariantCulture);
@@ -121,6 +127,27 @@ public sealed class QueryReadsResponseBudgetLiveTests
                 Assert.False(fittedDoc.RootElement.GetProperty("budget_truncated").GetBoolean(), fitted);
                 Assert.Equal(24 * 12, fittedDoc.RootElement.GetProperty("trend").EnumerateArray().Sum(p => p.GetProperty("collection_count").GetInt32()));
             }
+
+            /* Following the note's as_of reads the points before the first one returned, and repeating it reaches the window's oldest point. */
+            var reachedOldest = false;
+            var asOfToRead = AsOf(end);
+            for (var page = 0; page < 12 && !reachedOldest; page++)
+            {
+                var pageJson = await DarlingMcpTrendTools.GetQueryTrend(postgres, TrendHash, Db, TrendServerName, 24, asOfToRead, 5, cancellationToken: ct);
+                using var pageDoc = JsonDocument.Parse(pageJson);
+                var pagePoints = pageDoc.RootElement.GetProperty("trend").EnumerateArray().ToArray();
+                if (pagePoints.Any(p => p.GetProperty("collection_time").GetString()![..19] == Stamp(end.AddHours(-24))))
+                {
+                    reachedOldest = true;
+                    break;
+                }
+
+                var next = Regex.Match(pageDoc.RootElement.GetProperty("budget_note").GetString()!, @"set as_of to (\S+Z) to read the points before it");
+                Assert.True(next.Success, pageJson);
+                asOfToRead = next.Groups[1].Value;
+            }
+
+            Assert.True(reachedOldest, "following the note's as_of never reached the window's oldest point");
 
             /* The web viewer's mirror passes no byte budget and keeps every point the cap allows. */
             var chart = await DarlingMcpTrendTools.GetQueryTrend(

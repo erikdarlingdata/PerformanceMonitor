@@ -388,17 +388,20 @@ internal static class TrendBuckets
     public static int OnHourlyTier(int? requested, int resolved) => requested ?? Math.Max(60, resolved);
 
     /// <summary>
-    /// The sentence a trend read ends its budget cut note with (#8812): the bucket width whose points fit in <paramref name="keptPoints"/>
-    /// over a window of <paramref name="hoursBack"/> hours, at least <paramref name="floorMinutes"/> (the hourly rollup's hour), or the
-    /// way to a shorter window when even the widest bucket holds more points than that.
+    /// The sentence a trend read ends its budget cut note with (#8812): the first point the reply starts at (the oldest points are the ones left
+    /// off, so the newest are kept), then the bucket width whose points fit in <paramref name="keptPoints"/> over a window of <paramref name="hoursBack"/>
+    /// hours, at least <paramref name="floorMinutes"/> (the hourly rollup's hour), or the way to a shorter window when even the widest bucket holds
+    /// more points than that. <c>as_of</c> is the window's END, so setting it to <paramref name="firstKept"/> ends the next read where this one begins.
     /// </summary>
-    public static string BudgetCutRemedy(int hoursBack, int keptPoints, int floorMinutes)
+    public static string BudgetCutRemedy(int hoursBack, int keptPoints, int floorMinutes, DateTime firstKept)
     {
         var windowMinutes = hoursBack * 60;
         var width = Math.Max(floorMinutes, AutoMinutes(windowMinutes, 1, keptPoints));
+        var stamp = firstKept.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+        var before = $"set as_of to {stamp} to read the points before it";
         return PointsFor(windowMinutes, width, 1) <= keptPoints
-            ? $"Use bucket_minutes {width.ToString(CultureInfo.InvariantCulture)} to read the whole window in one reply, or move as_of to read the points after the last one returned."
-            : "Narrow hours_back, or move as_of to read the points after the last one returned.";
+            ? $"The oldest points were left off and the first point returned is at {stamp}. Use bucket_minutes {width.ToString(CultureInfo.InvariantCulture)} to read the whole window in one reply, or {before}."
+            : $"The oldest points were left off and the first point returned is at {stamp}. Narrow hours_back, or {before}.";
     }
 
     /// <summary>The width as a word for the payload's <c>bucket</c> key: <c>1 minute</c>, <c>10 minutes</c>,

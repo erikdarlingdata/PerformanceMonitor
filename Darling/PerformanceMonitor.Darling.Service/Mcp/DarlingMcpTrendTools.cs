@@ -585,13 +585,14 @@ public sealed class DarlingMcpTrendTools
                 discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
             }, McpHelpers.JsonOptions)!.AsObject();
 
-            /* #8812: an answer over the response budget ends at the last whole point that fits it, oldest first, and says so
-               (budget_truncated, budget_note, with the bucket width that fits the window). window_truncated stays the tier's reach. */
+            /* #8812: an answer over the response budget keeps the NEWEST points that fit it, still oldest first, and says so
+               (budget_truncated, budget_note, with the first point returned, the bucket width that fits the window and the as_of that
+               reads the points before it). window_truncated stays the tier's reach. */
             return responseByteBudget is int byteBudget
                 ? McpResponseBudget.CapArray(
-                    payload, "trend", "oldest first", "points",
-                    kept => TrendBuckets.BudgetCutRemedy(hours_back, kept, aggregated ? 60 : 1), byteBudget,
-                    "budget_truncated", "budget_note", (node, kept) => node["data_points"] = kept)
+                    payload, "trend", "newest points kept, oldest first", "points",
+                    kept => TrendBuckets.BudgetCutRemedy(hours_back, kept, aggregated ? 60 : 1, rows[rows.Count - kept].CollectionTime), byteBudget,
+                    "budget_truncated", "budget_note", (node, kept) => node["data_points"] = kept, keepNewest: true)
                 : payload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

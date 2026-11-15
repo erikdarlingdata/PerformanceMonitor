@@ -201,12 +201,13 @@ public static class McpResponseBudget
     /// payload already uses <c>truncated</c> (a limit cut) or <c>window_truncated</c>, or that carries counts of the array it cuts (#8812). The
     /// cut is written under <paramref name="truncatedKey"/> and <paramref name="noteKey"/> (the fleet overview's <c>budget_truncated</c> and
     /// <c>budget_note</c>), the remedy is built from the count that was kept (a trend names the bucket width that fits that many points), and
-    /// <paramref name="onKept"/> rewrites the payload's own counts for the rows kept. The rows left off are the last ones, so a ranked page loses
-    /// its lightest rows and a trend its newest points.
+    /// <paramref name="onKept"/> rewrites the payload's own counts for the rows kept. By default the rows left off are the last ones, so a ranked page
+    /// loses its lightest rows. With <paramref name="keepNewest"/> they are the FIRST ones instead and the rows kept are the last that fit, still in
+    /// their order: a trend loses its oldest points and keeps the newest, which a caller checking a recent change needs.
     /// </summary>
     public static string CapArray(
         System.Text.Json.Nodes.JsonObject payload, string arrayKey, string order, string noun, Func<int, string?>? remedyForKept, int budgetBytes,
-        string truncatedKey, string noteKey, Action<System.Text.Json.Nodes.JsonObject, int>? onKept)
+        string truncatedKey, string noteKey, Action<System.Text.Json.Nodes.JsonObject, int>? onKept, bool keepNewest = false)
     {
         if (payload[arrayKey] is not System.Text.Json.Nodes.JsonArray page)
         {
@@ -219,7 +220,7 @@ public static class McpResponseBudget
         string Measure(int n)
         {
             var cut = n < inScope;
-            payload[arrayKey] = new System.Text.Json.Nodes.JsonArray(rowNodes.Take(n).Select(x => x?.DeepClone()).ToArray());
+            payload[arrayKey] = new System.Text.Json.Nodes.JsonArray((keepNewest ? rowNodes.Skip(inScope - n) : rowNodes.Take(n)).Select(x => x?.DeepClone()).ToArray());
             onKept?.Invoke(payload, n);
             payload[truncatedKey] = cut;
             var remedy = cut ? remedyForKept?.Invoke(n) : null;
