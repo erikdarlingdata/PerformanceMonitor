@@ -77,7 +77,8 @@
                     <DataGridTextColumn Header="Dead rows" Binding="{Binding DeadRows}" SortMemberPath="DeadRowsSort" Width="Auto" MinWidth="80"/>
                     <DataGridTextColumn Header="Autovacuum" Binding="{Binding Autovacuum}" Width="Auto" MinWidth="110"/>
                     <DataGridTextColumn Header="Pages all visible" Binding="{Binding AllVisible}" SortMemberPath="AllVisibleSort" Width="Auto" MinWidth="90"/>
-                    <DataGridTextColumn Header="Rows deleted per day" Binding="{Binding Turnover}" SortMemberPath="TurnoverSort" Width="Auto" MinWidth="110"/>
+                    <DataGridTextColumn Header="Deleted per day, % of rows" Binding="{Binding Turnover}" SortMemberPath="TurnoverSort" Width="Auto" MinWidth="110"/>
+                    <DataGridTextColumn Header="Counted since" Binding="{Binding CountedSince}" SortMemberPath="CountedSinceUtc" Width="Auto" MinWidth="140"/>
                     <DataGridTextColumn Header="Growth, 7 days" Binding="{Binding Growth7d}" SortMemberPath="Growth7dSort" Width="Auto" MinWidth="90"/>
                     <DataGridTextColumn Header="Last vacuum" Binding="{Binding LastVacuum}" SortMemberPath="LastVacuumUtc" Width="Auto" MinWidth="120"/>
                     <DataGridTextColumn Header="Last analyze" Binding="{Binding LastAnalyze}" SortMemberPath="LastAnalyzeUtc" Width="Auto" MinWidth="120"/>

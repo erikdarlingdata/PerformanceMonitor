@@ -64,6 +64,17 @@ public sealed class StoreHealthPageBehaviourTests
         asks.EnumerateArray().Select(a => a.GetProperty("section").ValueKind == JsonValueKind.Null ? noSection : a.GetProperty("section").GetString()!).ToArray();
 
     [Fact]
+    public void WhenTheStatisticsWereNeverReset_ThePageSaysWhyThePerDayColumnsAreEmpty_AndCountedSinceReadsBefore()
+    {
+        var never = Result.Value.GetProperty("neverReset");
+        var notes = never.GetProperty("note").EnumerateArray().Select(n => n.GetString()!).ToArray();
+        Assert.Contains(notes, n => n.Contains("per-day columns are empty", StringComparison.Ordinal) && n.Contains("never reset", StringComparison.Ordinal));
+        Assert.DoesNotContain(never.GetProperty("noteAfterReset").EnumerateArray().Select(n => n.GetString()!), n => n.Contains("per-day columns", StringComparison.Ordinal));
+        Assert.StartsWith("before ", never.GetProperty("postmasterCell").GetString()!, StringComparison.Ordinal);
+        Assert.DoesNotContain("before", never.GetProperty("resetCell").GetString()!, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ThePage_ReadsTablesAndIndexesAsTwoReads_AndNeverAsksForAll()
     {
         var r = Result.Value;

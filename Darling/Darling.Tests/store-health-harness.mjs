@@ -82,7 +82,9 @@ const TABLES = [
   table({ table_name: "query_stats", kind: "hypertable", chunk_count: 441, estimate_relations: 441, estimate_relations_usable: 400, estimated_empty_bytes: 5 * MB, estimated_empty_share: 0.05 }),
   table({ table_name: "emptied", estimated_empty_bytes: 300 * MB, estimated_empty_share: 0.8, estimate_relations_usable: 1, past_rewrite_floors: true, tail_occupied: false }),
 ];
+let neverReset = false;
 const tablesAnswer = () => ({
+  ...(neverReset ? { rates_known: false, rates_note: "x" } : { rates_known: true, rates_note: null }),
   section: "tables", header: "x", estimate_note: "x", store_tables: 4, store_total_bytes: 1000 * MB, rewrite_candidates: 1, tables_without_estimate: 1,
   without_estimate_by_reason: { never_analyzed: 1 }, without_estimate_reason_text: { never_analyzed: NEVER }, truncated: false, tables_returned: 4, tables: TABLES,
 });
@@ -235,6 +237,26 @@ function gridRowsOfPlain(root) {
   refresh.fire("click");
   await flush();
   out.refresh = { asks: asks.slice(before).map((a) => ({ name: a.name, section: a.q.section ?? null })) };
+}
+/* 5. #8823: with the statistics never reset the page says why the per-day columns are empty, and Counted since reads "before". */
+{
+  neverReset = true;
+  const main3 = new FakeNode("main");
+  main3.isRoot = true;
+  page.renderStoreHealth(main3);
+  await flush();
+  const noted = byClass(main3, "store-health-note").map((n) => n.textContent);
+  neverReset = false;
+  const main4 = new FakeNode("main");
+  main4.isRoot = true;
+  page.renderStoreHealth(main4);
+  await flush();
+  out.neverReset = {
+    note: noted,
+    noteAfterReset: byClass(main4, "store-health-note").map((n) => n.textContent),
+    postmasterCell: page.countedSinceText({ stats_since: "2026-11-01T00:00:00Z", stats_since_source: "postmaster_start" }),
+    resetCell: page.countedSinceText({ stats_since: "2026-11-01T00:00:00Z", stats_since_source: "stats_reset" }),
+  };
 }
 out.neverAll = asks.filter((a) => a.q.section === "all").length;
 console.log(JSON.stringify(out));
