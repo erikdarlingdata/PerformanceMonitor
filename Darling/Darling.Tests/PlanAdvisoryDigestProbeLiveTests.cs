@@ -25,19 +25,19 @@ using Xunit;
 namespace PerformanceMonitor.Darling.Tests;
 
 /// <summary>
-/// #8570: the plan fetch of <c>get_analysis_facts</c> (<see cref="PgFactCollector.PlanAdvisorySql"/>) guards each in-window row with "its own plan column, or a
-/// dimension row with content". That guard was a correlated EXISTS in the rank's WHERE, so it probed <c>query_plan_dim</c> once per snapshot row (85,451
-/// probes for one field window) before the rank kept ten. The statement now probes once per distinct digest. The test seeds many snapshot rows over few
-/// digests and pins two things by what the read does: the ten rows returned are exactly the rows the per-row statement returned (the guard's meaning is
-/// unchanged, including a plan key whose costliest row has no plan but a cheaper row does), and the dimension is probed per digest, never per row and never
-/// scanned whole.
+/// #8570: the plan fetch of <c>get_analysis_facts</c> (<see cref="PgFactCollector.PlanAdvisorySql"/>) keeps an in-window row when its own plan column, or its
+/// digest's dimension row, carries a plan. A probe of <c>query_plan_dim</c> per snapshot row (85,451 for one field window) or per distinct digest (30,000 for
+/// another, 25 s on a cold cache) pays for the whole window before the rank keeps ten. The statement probes the plans' costliest rows in cost order until ten
+/// have a plan, and the rows of the plans whose costliest row has none. The test seeds many snapshot rows over few digests and pins two things by what the read
+/// does: the ten rows returned are exactly the rows the per-row statement returns (including plan keys whose costliest row has no plan but a cheaper row does,
+/// at the head of the walk and in its middle), and the dimension is probed fewer times than there are distinct digests, never per row and never scanned whole.
 /// </summary>
 public sealed class PlanAdvisoryDigestProbeLiveTests
 {
     private const int ServerId = 85701;
     private const int Digests = 200;
 
-    /// <summary>The statement as it was before this change (a correlated EXISTS per snapshot row), kept here only so the new read is held to its results.</summary>
+    /// <summary>The per-row guard (a correlated EXISTS per snapshot row): the reference the plan fetch's results are held to.</summary>
     private const string PerRowGuardSql = @"
 SELECT COALESCE(r.query_plan_xml, d.query_plan_xml) AS query_plan_xml, d.query_plan_gz
 FROM
@@ -67,7 +67,7 @@ LEFT JOIN query_plan_dim AS d ON d.digest = r.query_plan_digest
 ORDER BY r.delta_worker_time DESC";
 
     [Fact]
-    public Task TheFetch_ReturnsThePerRowStatementsRows_AndProbesTheDimensionOncePerDigest() =>
+    public Task TheFetch_ReturnsThePerRowStatementsRows_AndProbesOnlyTheRowsItMayReturn() =>
         WithSeedAsync(async (connection, start, end, ct) =>
         {
             var expected = await RowsAsync(connection, PerRowGuardSql, start, end, ct);
@@ -79,6 +79,8 @@ ORDER BY r.delta_worker_time DESC";
 
             /* A plan key whose costliest row has no plan stands for itself through its cheaper row, which does (key 1001: its plan is plan 3). */
             Assert.Contains("<ShowPlanXML>plan 3</ShowPlanXML>|<null>", actual);
+            /* So does a plan key whose costliest row sits in the middle of the walk (key 1006: its plan is plan 4, which outranks the tenth bulk plan). */
+            Assert.Contains("<ShowPlanXML>plan 4</ShowPlanXML>|<null>", actual);
             /* A gzip-only dimension row counts (key 1003: digest 12). */
             Assert.Contains(actual, row => row.StartsWith("<null>|", StringComparison.Ordinal) && !row.EndsWith("<null>", StringComparison.Ordinal));
             /* A row's own column counts with no digest at all (key 1005). */
@@ -91,20 +93,20 @@ ORDER BY r.delta_worker_time DESC";
 
             /* The seed must have the shape that costs: the per-row guard probes the dimension once per snapshot row that has no plan of its own. */
             Assert.True(oldProbes.Loops > 10_000, $"the seed's per-row statement probed the dimension {oldProbes.Loops} times, so it does not show the defect");
-            /* One probe per distinct digest plus the ten winners' content read; never a row-count multiple. */
-            Assert.True(newProbes.Loops <= Digests + 10 + 6, $"the plan fetch probed query_plan_dim {newProbes.Loops} times for {Digests} distinct digests (the per-row statement probed {oldProbes.Loops} times)");
+            /* Fewer probes than distinct digests: the walk stops at the tenth plan with one, and beyond it only the missed plans' rows are probed. */
+            Assert.True(newProbes.Loops < Digests, $"the plan fetch probed query_plan_dim {newProbes.Loops} times for {Digests} distinct digests (the per-row statement probed {oldProbes.Loops} times)");
             Assert.False(newProbes.WholeScan, "the plan fetch scans query_plan_dim whole instead of probing it by digest");
         });
 
     /// <summary>
-    /// The probe of the window's digests reads the server's own rows. A predicate on <c>query_plan_digest IS NOT NULL</c> there implied the partial index
-    /// <c>ix_query_stats_digest_floor</c> (<c>collection_time</c> only), and the planner walked it: every server's rows in the window, each heap page fetched to test
-    /// <c>server_id</c>. On a store of 18 servers that was 25,400 pages for one server's 86,000-row window, against 5,600 through the server index (#8570).
-    /// The seed puts 40 other servers' rows into the same window. The statement must return the same rows as before and never read query_stats through the
-    /// partial index; the statement with the predicate put back must (so the seed is held to the defect).
+    /// The rank reads the server's own rows. Its filter keeps the own plan column beside <c>query_plan_digest IS NOT NULL</c>: that predicate alone implies the
+    /// partial index <c>ix_query_stats_digest_floor</c> (<c>collection_time</c> only), and the planner walks it: every server's rows in the window, each heap page
+    /// fetched to test <c>server_id</c>. On a store of 18 servers that is 25,400 pages for one server's 86,000-row window, against 5,600 through the server index
+    /// (#8570). The seed puts 40 other servers' rows into the same window. The statement must return the per-row statement's rows and never read query_stats
+    /// through the partial index; the statement with the filter cut to the digest predicate must (so the seed is held to the defect).
     /// </summary>
     [Fact]
-    public Task TheDigestProbe_ReadsTheServersOwnRows_NotEveryServersRowsThroughThePartialIndex() =>
+    public Task TheRank_ReadsTheServersOwnRows_NotEveryServersRowsThroughThePartialIndex() =>
         WithSeedAsync(async (connection, start, end, ct) =>
         {
             /* The collector appends snapshots in time order, so the heap follows collection_time, and the planner prices a walk of the time-only partial index
@@ -118,12 +120,16 @@ ORDER BY r.delta_worker_time DESC";
                on cost alone, as they did on the field store. */
             await ExecAsync(connection, ct, "SET enable_seqscan = off");
             await ExecAsync(connection, ct, "SET enable_bitmapscan = off");
+            /* The choice also turns on random_page_cost: a cluster tuned for SSDs (1.1, as timescaledb-tune sets it) prices the server index's scattered heap reads
+               low enough that the server index wins whatever the filter, so the seed would not hold either statement to the trap. The session takes PostgreSQL's
+               default. */
+            await ExecAsync(connection, ct, "SET random_page_cost = 4");
 
-            const string probedWhere = "AND   f.query_plan_xml IS NULL";
-            Assert.Contains(probedWhere, PgFactCollector.PlanAdvisorySql);
-            var withPredicate = PgFactCollector.PlanAdvisorySql.Replace(probedWhere, probedWhere + " AND f.query_plan_digest IS NOT NULL");
+            const string rankWhere = "AND   (f.query_plan_xml IS NOT NULL OR f.query_plan_digest IS NOT NULL)";
+            Assert.Contains(rankWhere, PgFactCollector.PlanAdvisorySql);
+            var withPredicate = PgFactCollector.PlanAdvisorySql.Replace(rankWhere, "AND   f.query_plan_digest IS NOT NULL");
 
-            var expected = await RowsAsync(connection, withPredicate, start, end, ct);
+            var expected = await RowsAsync(connection, PerRowGuardSql, start, end, ct);
             var actual = await RowsAsync(connection, PgFactCollector.PlanAdvisorySql, start, end, ct);
             Assert.Equal(10, actual.Count);
             Assert.Equal(expected, actual);
@@ -137,6 +143,11 @@ ORDER BY r.delta_worker_time DESC";
         await using var command = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + sql, connection) { CommandTimeout = 120 };
         AddParameters(command, start, end);
         var json = (string)(await command.ExecuteScalarAsync(ct))!;
+        if (Environment.GetEnvironmentVariable("PLAN_EXPLAIN_OUT") is { Length: > 0 } outPath)
+        {
+            await System.IO.File.AppendAllTextAsync(outPath, json + "\n", ct);
+        }
+
         return json.Contains("ix_query_stats_digest_floor", StringComparison.Ordinal);
     }
 
@@ -206,7 +217,8 @@ ORDER BY r.delta_worker_time DESC";
     /// 400 bulk keys of 50 snapshots over 200 digests, so a digest backs two keys and each key's rows share it. A digest by its number: no dimension row (a multiple
     /// of 10), a dimension row with no content (one past), gzip bytes only (two past), else text. Five special keys outrank the bulk and cover the guard's arms:
     /// 1001 has a costliest row whose digest is gone and cheaper rows on a digest with text (it must stand for itself through them), 1002 only gone digests,
-    /// 1003 a gzip-only digest, 1004 a content-less digest, 1005 its own plan column with no digest. 50,000 filler dimension rows give the planner a real primary key to choose against.
+    /// 1003 a gzip-only digest, 1004 a content-less digest, 1005 its own plan column with no digest. Key 1006 sits among the bulk keys: its costliest row's digest is gone
+    /// and its cheaper row's digest has text and outranks the tenth bulk plan. 50,000 filler dimension rows give the planner a real primary key to choose against.
     /// </summary>
     private static async Task WithSeedAsync(Func<NpgsqlConnection, DateTime, DateTime, CancellationToken, Task> body)
     {
@@ -267,6 +279,13 @@ ORDER BY r.delta_worker_time DESC";
                                 END,
                          10, (10000000 - (k - 1001) * 100000) - r * 1000, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
                   FROM generate_series(1001, 1005) k CROSS JOIN generate_series(0, 9) r",
+                id, end.AddMinutes(-10), ServerId);
+            /* Key 1006: row 0 is the costliest (40,700, among the bulk keys' costliest rows) and its digest (10) has no dimension row; row 1 (40,500) carries digest 4 (text). */
+            await ExecAsync(connection, ct,
+                insertHead + @"SELECT $1 + 200000 + 1006 * 100 + r, $2 - (r * interval '4 minutes'), $3, 'a8570', 'PlanDb', '0xH1006', '0xP1006', '0xS1006', '0xL1006',
+                         NULL, NULL, sha256(convert_to('a8570p-d' || CASE WHEN r = 0 THEN 10 ELSE 4 END, 'UTF8')),
+                         10, 40700 - r * 200, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
+                  FROM generate_series(0, 1) r",
                 id, end.AddMinutes(-10), ServerId);
             /* Other servers' rows in the same window (#8570): each has a plan digest and no plan of its own, the rows the partial index covers. */
             await ExecAsync(connection, ct,
