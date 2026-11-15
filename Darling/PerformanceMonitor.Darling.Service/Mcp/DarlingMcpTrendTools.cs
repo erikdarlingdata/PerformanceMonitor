@@ -485,6 +485,8 @@ public sealed class DarlingMcpTrendTools
                    of the two. */
                 hourlyRelation: coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly),
                 bucketMinutes: bucketMinutes,
+                /* #8801: the rollup's measured end. The hours from it to the window's end are summed from the raw rows. */
+                hourlyCeilingUtc: coverage.HourlyEndCeiling(TimescaleSupport.QueryStatsHourlyView, startUtc),
                 cancellationToken: cancellationToken);
             var rows = history.Points;
             if (rows.Count == 0)
@@ -1051,7 +1053,7 @@ public sealed class DarlingMcpTrendTools
             ? "Each point is one hour's summed work divided by 3,600 seconds"
             : $"Each point gathers the rollup's hours in one {TrendBuckets.Adjective(bucket.Minutes)} bucket, stamped at its start: their summed work over 3,600 seconds per hour the rollup holds in it")
         + ", so an hour the collector covered only partly reads LOW, never high; the rollup trails the "
-        + "clock by up to two hours (the current hour is never materialized and the previous one lands on the next refresh). "
+        + "clock by up to three hours (the current hour is never materialized and an hour is added one to two hours after it ends). "
         + "peak_elapsed_ms_per_second is the bucket's busiest HOUR on this tier: the rollup keeps hourly sums, not the collections inside them."
         + (bucket.Requested ? " The width is the bucket_minutes you passed." : string.Empty);
 
@@ -1060,6 +1062,7 @@ public sealed class DarlingMcpTrendTools
     /// are null. The raw tier says <see cref="TrendBuckets.QueryTrendNote"/>, the sentence Lite's twin writes.</summary>
     private static string QueryTrendHourlyNote(int bucketMinutes, bool requested) =>
         $"Served from the hourly rollup because the requested window reaches past the raw tier's {RawRetentionDays}-day retention. "
+        + "The newest hours, which the rollup has not built yet, are summed from the raw rows into the same points. "
         + (bucketMinutes == 60
             ? "Executions, CPU and elapsed time are summed per hour across every sql_handle of the query_hash, one point per hour; "
             : $"Each point gathers the rollup's hours in one {TrendBuckets.Adjective(bucketMinutes)} bucket, stamped at its start (the first point at the window's start), with executions, CPU and elapsed time summed across those hours and every sql_handle of the query_hash; ")
