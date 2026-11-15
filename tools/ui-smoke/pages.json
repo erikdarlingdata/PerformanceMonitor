@@ -427,6 +427,7 @@
     { "name": "proposals", "hash": "#/proposals", "nav": "proposals", "expect": {} },
     { "name": "known-patterns", "hash": "#/known-patterns", "nav": "known-patterns", "expect": {} },
     { "name": "manage-query-tags", "hash": "#/manage-query-tags", "nav": "manage-query-tags", "expect": {} },
-    { "name": "query-tag-usage", "hash": "#/query-tag-usage", "nav": "query-tag-usage", "expect": {} }
+    { "name": "query-tag-usage", "hash": "#/query-tag-usage", "nav": "query-tag-usage", "expect": {} },
+    { "name": "store-health", "hash": "#/store-health", "nav": "store-health", "expect": {} }
   ]
 }
