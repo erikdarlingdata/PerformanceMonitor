@@ -43,6 +43,12 @@ public abstract class WalkBase : IAsyncLifetime
     private Application? _app;
     private UIA3Automation? _automation;
 
+    /// <summary>The running app, for a walk that looks at windows other than the main one.</summary>
+    protected Application App => _app!;
+
+    /// <summary>The UIA automation the walk reads the app through.</summary>
+    protected UIA3Automation Automation => _automation!;
+
     /// <summary>The display name the seed gives the server the walk looks for.</summary>
     protected abstract string ServerName { get; }
 
@@ -110,11 +116,20 @@ public abstract class WalkBase : IAsyncLifetime
 
         Step("Wait Stats tab", () => SelectTab(main, "Wait Stats"));
         Step("wait types", () => WaitForRows(main, "WaitStatsTypeList", ControlType.ListItem));
+        Shot("10-wait-stats-tabs");
 
         Step("Queries tab", () => SelectTab(main, "Queries"));
         Step("Top Queries by Duration", () => SelectTab(main, "Top Queries by Duration"));
         Step("query stats rows", () => WaitForRows(main, "QueryStatsGrid", ControlType.DataItem));
+        Shot("11-queries-subtabs");
+
+        ExtraSteps(main);
         Shot("99-after-walk");
+    }
+
+    /// <summary>Steps one app adds after the shared four checks. The default adds none.</summary>
+    protected virtual void ExtraSteps(AutomationElement main)
+    {
     }
 
     /// <summary>Presses the sidebar's toggle (<c>SidebarToggleButton</c>) when the server picker is not in the automation
@@ -164,7 +179,7 @@ public abstract class WalkBase : IAsyncLifetime
         return true;
     }
 
-    private T Step<T>(string name, Func<T> action)
+    protected T Step<T>(string name, Func<T> action)
     {
         try
         {
@@ -180,7 +195,7 @@ public abstract class WalkBase : IAsyncLifetime
         }
     }
 
-    private void Shot(string name)
+    protected void Shot(string name)
     {
         try
         {
@@ -192,16 +207,16 @@ public abstract class WalkBase : IAsyncLifetime
         }
     }
 
-    private static AutomationElement Find(AutomationElement root, string automationId) =>
+    protected static AutomationElement Find(AutomationElement root, string automationId) =>
         WaitFor(() => root.FindFirstDescendant(cf => cf.ByAutomationId(automationId)), "an element with AutomationId " + automationId);
 
-    private static T WaitFor<T>(Func<T?> find, string what) where T : class
+    protected static T WaitFor<T>(Func<T?> find, string what) where T : class
     {
         var r = Retry.WhileNull(find, s_wait, TimeSpan.FromMilliseconds(500), ignoreException: true);
         return r.Result ?? throw new Xunit.Sdk.XunitException("timed out after " + s_wait + " waiting for " + what);
     }
 
-    private static bool SelectTab(AutomationElement root, string header)
+    protected static bool SelectTab(AutomationElement root, string header)
     {
         // The last match: the server tab's own "Overview" comes after the main window's, and tab headers repeat.
         var tab = WaitFor(() => root.FindAllDescendants(cf => cf.ByControlType(ControlType.TabItem).And(cf.ByName(header)))
