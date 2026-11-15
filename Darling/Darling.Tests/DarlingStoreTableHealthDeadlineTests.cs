@@ -31,6 +31,55 @@ public sealed class DarlingStoreTableHealthDeadlineTests
     private static NpgsqlDataSource TrippingSource(string connectionString) =>
         NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(connectionString) { Options = "-c statement_timeout=1" }.ConnectionString);
 
+    /// <summary>
+    /// A store connection whose statements wait on a lock another connection holds, so the read trips a short server-side limit
+    /// because it is blocked, not because it is slow. The lock is ACCESS EXCLUSIVE on <c>pg_class</c> in the scratch database only,
+    /// taken when the source opens its first physical connection (after the reads that used other sources are done) and held until
+    /// this is disposed. Every statement the store tool runs reads <c>pg_class</c>, so every one of them waits.
+    /// </summary>
+    private sealed class BlockedSource : IAsyncDisposable
+    {
+        private readonly NpgsqlConnection _locker;
+        private NpgsqlTransaction? _transaction;
+
+        public NpgsqlDataSource Source { get; }
+
+        public BlockedSource(string connectionString)
+        {
+            _locker = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(connectionString) { Options = "-c lock_timeout=20000" }.ConnectionString);
+            var builder = new NpgsqlDataSourceBuilder(new NpgsqlConnectionStringBuilder(connectionString) { Options = "-c statement_timeout=400" }.ConnectionString);
+            builder.UsePhysicalConnectionInitializer(
+                connection => HoldTheLockAsync(CancellationToken.None).GetAwaiter().GetResult(),
+                connection => HoldTheLockAsync(CancellationToken.None));
+            Source = builder.Build();
+        }
+
+        private async Task HoldTheLockAsync(CancellationToken cancellationToken)
+        {
+            if (_transaction is not null)
+            {
+                return;
+            }
+
+            await _locker.OpenAsync(cancellationToken);
+            _transaction = await _locker.BeginTransactionAsync(cancellationToken);
+            await using var command = new NpgsqlCommand("LOCK TABLE pg_catalog.pg_class IN ACCESS EXCLUSIVE MODE", _locker, _transaction);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (_transaction is not null)
+            {
+                await _transaction.RollbackAsync();
+                await _transaction.DisposeAsync();
+            }
+
+            await _locker.DisposeAsync();
+            await Source.DisposeAsync();
+        }
+    }
+
     private static void AssertReadsAsATimeout(string message)
     {
         Assert.Contains("-second limit", message, StringComparison.Ordinal);
@@ -96,9 +145,9 @@ public sealed class DarlingStoreTableHealthDeadlineTests
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var healthy = NpgsqlDataSource.Create(scratch.ConnectionString);
-        await using var tripping = TrippingSource(scratch.ConnectionString);
+        await using var blocked = new BlockedSource(scratch.ConnectionString);
 
-        var reply = await DarlingMcpStoreTableHealthTools.GetStoreTableHealth(healthy, 1000, false, section, 0, null, ct, indexSource: healthy, coverageSource: tripping);
+        var reply = await DarlingMcpStoreTableHealthTools.GetStoreTableHealth(healthy, 1000, false, section, 0, null, ct, indexSource: healthy, coverageSource: blocked.Source);
         using var json = JsonDocument.Parse(reply);
         var root = json.RootElement;
 
