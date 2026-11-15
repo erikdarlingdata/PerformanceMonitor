@@ -1117,6 +1117,12 @@ public partial class MainWindow : Window
         {
             JobHistoryContent.BeginFirstOpen();
         }
+        else if (ReferenceEquals(MainTabs.SelectedItem, StoreHealthTabItem))
+        {
+            /* #8819: the cue goes up now, not when the lane gets to the load: another tab's refresh can hold the lane for seconds. */
+            StoreHealthContent.BeginFirstOpen();
+            StoreHealthContent.ShowRefreshPending();
+        }
 
         await RefreshVisibleAsync();
         /* The status bar's collector-health scope flips with the active tab (a per-server tab shows that
@@ -1372,6 +1378,7 @@ public partial class MainWindow : Window
                     await FleetSweepsContent.RefreshAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, StoreHealthTabItem):
+                    StoreHealthContent.FirstOpenRefreshStarted();
                     await StoreHealthContent.RefreshAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, IdentityCapacityTabItem):

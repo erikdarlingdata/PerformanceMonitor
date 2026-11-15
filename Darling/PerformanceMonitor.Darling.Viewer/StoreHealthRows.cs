@@ -103,6 +103,12 @@ internal static class StoreHealthRows
 
     private static string Share(double share) => string.Create(CultureInfo.CurrentCulture, $"{share * 100:N1}%");
 
+    /// <summary>A vacuum or analyze time as fleet-wide text with its zone (#8820). These rows describe the store's own tables, so there is no
+    /// server clock to render them on: the cells read on the clock of the "Last refreshed" stamp beside them ("2026-11-15 15:13 UTC") instead of
+    /// the active server's, which showed a vacuum from a minute ago hours old beside the stamp. Empty when the table has none.</summary>
+    internal static string FleetWideTimestamp(DateTime? utc) =>
+        utc is { } value ? ViewerTimeHelper.FormatFleetWide(value, "yyyy-MM-dd HH:mm") : string.Empty;
+
     private static DateTime? Latest(DateTime? a, DateTime? b) => a is null ? b : b is null ? a : a > b ? a : b;
 
     internal static string QualifiedName(string schema, string table) => $"{schema}.{table}";
@@ -169,9 +175,9 @@ internal static class StoreHealthRows
                 ? growth == 0 ? "flat" : (growth > 0 ? "+" : "-") + PgDisplay.Bytes(Math.Abs(growth))
                 : PgDisplay.NotApplicableText,
             Growth7dSort = r.GrowthBytes7d,
-            LastVacuum = PgDisplay.Timestamp(lastVacuum),
+            LastVacuum = FleetWideTimestamp(lastVacuum),
             LastVacuumUtc = lastVacuum,
-            LastAnalyze = PgDisplay.Timestamp(lastAnalyze),
+            LastAnalyze = FleetWideTimestamp(lastAnalyze),
             LastAnalyzeUtc = lastAnalyze,
             MeasureTarget = r.Kind == KindTable ? QualifiedName(r.SchemaName, r.TableName) : null,
         };

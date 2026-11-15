@@ -7,11 +7,13 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -23,6 +25,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// grid and the header render as soon as the tables read returns (the indexes read takes about as long again), and the index sections
 /// say they are loading until theirs does. Load failures surface on the host status bar via <see cref="StatusChanged"/> and in the
 /// section that failed.
+/// <para>A refresh of a page that already shows rows repaints in place (#8819): the grids and the summary lines stay readable and the
+/// strip beside Refresh says "Refreshing…". The "Loading…" text is for a section with nothing on screen. A refresh that comes right
+/// after a successful one is skipped, so a trigger that queued while a load ran (the refresh timer, a tab pick) does not run the same
+/// slow reads again the moment the first ends.</para>
 /// </summary>
 public partial class StoreHealthTab : UserControl
 {
@@ -36,6 +42,40 @@ public partial class StoreHealthTab : UserControl
     private bool _indexesLoaded;
     private bool _readinessLoaded;
 
+    /// <summary>True while a refresh runs. A second trigger that arrives meanwhile returns at once: the load on its way answers it.</summary>
+    private bool _refreshing;
+
+    /// <summary>The stamp text ("15:14:07 UTC") of the last refresh that loaded all three reads; null before the first.</summary>
+    private string? _lastStamp;
+
+    /// <summary>When that refresh ended, on the monotonic clock; null before the first.</summary>
+    private long? _lastLoadedAt;
+
+    /// <summary>How long after a successful refresh another one that nothing forced is skipped (#8819). The tables read takes seconds on a
+    /// large store, and a trigger queued behind a running load starts the moment it ends. The Refresh button is never skipped.</summary>
+    internal TimeSpan FreshFor { get; set; } = TimeSpan.FromSeconds(5);
+
+    /* #8549, #8819: the first open's clock (see ViewerFirstOpen): the shell starts it when the tab becomes visible and the tab's first load
+       runs on it, so a wait behind another tab's refresh counts. Every later load runs on its own clock. A slow one writes a SlowLoad line. */
+    private readonly ViewerFirstOpen _firstOpen = new();
+
+    /// <summary>Where a slow load's line goes; null is the Viewer log's "SlowLoad" source. A test swaps it to read the line.</summary>
+    internal Action<string>? SlowLoadSink { get; set; }
+
+    /// <summary>The slow-load threshold of every load of this tab. A test lowers it to read a line without waiting three seconds.</summary>
+    internal int SlowLoadThresholdMs { get => _firstOpen.SlowThresholdMs; set => _firstOpen.SlowThresholdMs = value; }
+
+    /// <summary>Test seams for the three reads. Null reads the store through the data service.</summary>
+    internal Func<Task<List<DarlingStoreTableHealthReader.StoreTableHealthRow>>>? TablesRead { get; set; }
+    internal Func<Task<StoreIndexHealth>>? IndexesRead { get; set; }
+    internal Func<Task<DarlingStoreMaintenanceReadinessReader.StoreMaintenanceReadiness>>? ReadinessRead { get; set; }
+
+    /// <summary>The shell calls this when it makes the tab visible, so a wait behind another tab's refresh counts in a slow first open's line.</summary>
+    internal void BeginFirstOpen() => _firstOpen.Begin();
+
+    /// <summary>The shell calls this when the fleet lane starts the tab's refresh.</summary>
+    internal void FirstOpenRefreshStarted() => _firstOpen.RefreshStarted();
+
     /// <summary>Raised with a short status message on load outcomes so the shell can show it.</summary>
     public event Action<string>? StatusChanged;
 
@@ -47,38 +87,99 @@ public partial class StoreHealthTab : UserControl
     /// <summary>Wires the data service.</summary>
     public void Initialize(ViewerDataService dataService) => _dataService = dataService;
 
-    /// <summary>Reruns the tables, indexes and maintenance reads together (the shell calls this when the tab becomes visible, and Refresh calls it).</summary>
-    public async Task RefreshAsync()
+    /// <summary>Reruns the tables, indexes and maintenance reads together (the shell calls this when the tab becomes visible and on its timer).
+    /// Skipped when a refresh is running, or when one succeeded less than <see cref="FreshFor"/> ago.</summary>
+    public Task RefreshAsync() => RefreshAsync(force: false);
+
+    /// <summary>The refresh. <paramref name="force"/> is the Refresh button: it skips the freshness window, but not a refresh already running.</summary>
+    internal async Task RefreshAsync(bool force)
     {
-        if (_dataService == null)
+        if (_dataService == null && (TablesRead is null || IndexesRead is null || ReadinessRead is null))
         {
             return;
         }
 
-        await Task.WhenAll(LoadTablesAsync(), LoadIndexesAsync(), LoadReadinessAsync());
-        StampIfLoaded();
-    }
-
-    /// <summary>Raises "store health: refreshed …" when all three reads last finished. Each read reports its own failure, so the stamp never
-    /// writes over one.</summary>
-    private void StampIfLoaded()
-    {
-        if (_tablesLoaded && _indexesLoaded && _readinessLoaded)
+        if (_refreshing)
         {
-            LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.RefreshedStamp();
-            StatusChanged?.Invoke($"store health: refreshed {ViewerTimeHelper.RefreshedStamp()}");
+            return;
+        }
+
+        if (!force && LastLoadIsRecent())
+        {
+            ShowStamp();
+            return;
+        }
+
+        _refreshing = true;
+        var timer = _firstOpen.Take() ?? new ViewerLoadTimer(_firstOpen.SlowThresholdMs);
+        try
+        {
+            ShowRefreshing();
+            await Task.WhenAll(LoadTablesAsync(timer), LoadIndexesAsync(timer), LoadReadinessAsync(timer));
+            if (!StampIfLoaded())
+            {
+                ShowStamp();
+            }
+        }
+        finally
+        {
+            _refreshing = false;
+            timer.FinishAndLog("Store Health", SlowLoadSink);
         }
     }
 
-    private async Task LoadTablesAsync()
+    /// <summary>True when the last refresh loaded all three reads less than <see cref="FreshFor"/> ago.</summary>
+    private bool LastLoadIsRecent() =>
+        _lastLoadedAt is { } at && _tablesLoaded && _indexesLoaded && _readinessLoaded && Stopwatch.GetElapsedTime(at) < FreshFor;
+
+    /// <summary>The shell calls this the moment the tab is picked, before the fleet lane may have started its load (another tab's load can
+    /// hold the lane for seconds), so the tab says it is refreshing at once. A tab with nothing on screen already says "Loading…".</summary>
+    internal void ShowRefreshPending()
+    {
+        if (!_refreshing && !LastLoadIsRecent())
+        {
+            ShowRefreshing();
+        }
+    }
+
+    /// <summary>The strip beside Refresh while a refresh runs: it keeps the last stamp, so the page is still read against the time it was true.</summary>
+    private void ShowRefreshing() =>
+        LastRefreshedIndicator.Text = _lastStamp is null ? "Loading…" : $"Refreshing… (last refreshed {_lastStamp})";
+
+    /// <summary>The strip beside Refresh when no refresh runs: the last stamp, or nothing before the first.</summary>
+    private void ShowStamp() =>
+        LastRefreshedIndicator.Text = _lastStamp is null ? "" : "Last refreshed " + _lastStamp;
+
+    /// <summary>Raises "store health: refreshed …" when all three reads last finished. Each read reports its own failure, so the stamp never
+    /// writes over one. Returns whether it stamped.</summary>
+    private bool StampIfLoaded()
+    {
+        if (!(_tablesLoaded && _indexesLoaded && _readinessLoaded))
+        {
+            return false;
+        }
+
+        _lastStamp = ViewerTimeHelper.RefreshedStamp();
+        _lastLoadedAt = Stopwatch.GetTimestamp();
+        ShowStamp();
+        StatusChanged?.Invoke($"store health: refreshed {_lastStamp}");
+        return true;
+    }
+
+    private async Task LoadTablesAsync(ViewerLoadTimer timer)
     {
         var gen = _loads.Claim(nameof(LoadTablesAsync));
-        TablesMessage.Text = "Loading store tables…";
-        TablesMessage.Visibility = Visibility.Visible;
-        HeaderText.Text = "Loading store tables…";
+        /* #8819: a refresh over rows already on screen keeps them and the summary line; the loading text is for a grid with nothing in it. */
+        if (TablesDataGrid.Items.Count == 0)
+        {
+            TablesMessage.Text = "Loading store tables…";
+            TablesMessage.Visibility = Visibility.Visible;
+            HeaderText.Text = "Loading store tables…";
+        }
+
         try
         {
-            var read = await _dataService!.GetStoreTableHealthAsync();
+            var read = await ViewerServerTab.Timed(timer, "store tables read", TablesRead?.Invoke() ?? _dataService!.GetStoreTableHealthAsync());
             if (_loads.Superseded(nameof(LoadTablesAsync), gen)) return;
 
             var selected = (TablesDataGrid.SelectedItem as StoreTableRow)?.Table;
@@ -105,17 +206,25 @@ public partial class StoreHealthTab : UserControl
         UpdateMeasureButton();
     }
 
-    private async Task LoadIndexesAsync()
+    private async Task LoadIndexesAsync(ViewerLoadTimer timer)
     {
         var gen = _loads.Claim(nameof(LoadIndexesAsync));
-        IndexesMessage.Text = "Loading store indexes…";
-        IndexesMessage.Visibility = Visibility.Visible;
-        IndexHeaderText.Text = "Loading store indexes…";
-        CoverageMessage.Text = "Loading partition index coverage…";
-        CoverageMessage.Visibility = Visibility.Visible;
+        if (IndexesDataGrid.Items.Count == 0)
+        {
+            IndexesMessage.Text = "Loading store indexes…";
+            IndexesMessage.Visibility = Visibility.Visible;
+            IndexHeaderText.Text = "Loading store indexes…";
+        }
+
+        if (CoverageDataGrid.Items.Count == 0)
+        {
+            CoverageMessage.Text = "Loading partition index coverage…";
+            CoverageMessage.Visibility = Visibility.Visible;
+        }
+
         try
         {
-            var read = await _dataService!.GetStoreIndexHealthAsync();
+            var read = await ViewerServerTab.Timed(timer, "store indexes read", IndexesRead?.Invoke() ?? _dataService!.GetStoreIndexHealthAsync());
             if (_loads.Superseded(nameof(LoadIndexesAsync), gen)) return;
 
             var indexRows = StoreHealthRows.Indexes(read.Indexes);
@@ -148,13 +257,18 @@ public partial class StoreHealthTab : UserControl
         }
     }
 
-    private async Task LoadReadinessAsync()
+    private async Task LoadReadinessAsync(ViewerLoadTimer timer)
     {
         var gen = _loads.Claim(nameof(LoadReadinessAsync));
-        ReadinessTextBlock.Text = "Checking whether now is a safe time for maintenance…";
+        /* A verdict already on screen stays until the new one lands. */
+        if (!_readinessLoaded)
+        {
+            ReadinessTextBlock.Text = "Checking whether now is a safe time for maintenance…";
+        }
+
         try
         {
-            var readiness = await _dataService!.GetStoreMaintenanceReadinessAsync();
+            var readiness = await ViewerServerTab.Timed(timer, "store maintenance check", ReadinessRead?.Invoke() ?? _dataService!.GetStoreMaintenanceReadinessAsync());
             if (_loads.Superseded(nameof(LoadReadinessAsync), gen)) return;
 
             ShowReadiness(StoreHealthRows.ReadinessParts(readiness));
@@ -185,7 +299,7 @@ public partial class StoreHealthTab : UserControl
         }
     }
 
-    private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await RefreshAsync();
+    private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await RefreshAsync(force: true);
 
     private void TablesDataGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateMeasureButton();
 
