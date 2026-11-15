@@ -225,7 +225,7 @@ public abstract class WalkBase : IAsyncLifetime
         return true;
     }
 
-    private static int WaitForRows(AutomationElement root, string automationId, ControlType rowType)
+    protected static int WaitForRows(AutomationElement root, string automationId, ControlType rowType)
     {
         var count = 0;
         var r = Retry.WhileFalse(() =>

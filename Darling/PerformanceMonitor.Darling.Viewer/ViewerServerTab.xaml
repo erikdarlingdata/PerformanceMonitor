@@ -683,7 +683,7 @@
                     <!-- Performance Trends (Lite ServerTab.xaml:259-282): 2x2 grid of per-second trend
                          charts (query / procedure / Query Store duration + execution count). -->
                     <TabItem Header="Performance Trends">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #6652: scrolls when the charts cannot all keep their minimum height -->
+                        <ScrollViewer AutomationProperties.AutomationId="PerformanceTrendsScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #6652: scrolls when the charts cannot all keep their minimum height -->
                         <ui:ChartGridPanel MaxColumns="2">
                             <ui:ChartPanel Title="Query Duration">
                                 <scottplot:WpfPlot x:Name="QueryDurationTrendChart"/>
