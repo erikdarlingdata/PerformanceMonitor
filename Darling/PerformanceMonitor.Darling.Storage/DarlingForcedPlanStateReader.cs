@@ -127,7 +127,7 @@ public sealed record ForcedPlanRead(
 /// <para><b>Access.</b> Both table reads are bounded by <c>server_id</c> and the window on <c>collection_time</c>
 /// (<c>idx_query_store_forced_plans_time</c>). The stats read starts from the forced plans' own queries (an inner join on
 /// database and query_id, so it takes <c>idx_query_store_stats_server_db_query_plan_time</c>) and is bounded below by the
-/// plan's own since time, never the whole table.</para>
+/// plan's own since time and by the earliest of them as one constant, so the plan leaves out the chunks before it; never the whole table.</para>
 ///
 /// <para><b>Variants and plan guides come from the stored plans (#6221).</b> The collector reads no plan XML on the monitored server. When a
 /// force's runs moved to a LATER plan id of the same query, this reads that plan's stored XML (the plan map, then <c>query_plan_dim</c>: two
@@ -333,8 +333,10 @@ ORDER BY database_name";
     /// <summary>
     /// The executions of every plan of each forced plan's query after its since time. $1 server, $2 as_of, then five parallel arrays,
     /// one element per forced plan: database, query_id, forced plan_id, since (the instant a run counts as after the force) and
-    /// read_from (since clamped to the window, the lower bound of the read). The interval dedupe is the history tool's (#1841): the
-    /// collector stores an open interval again every cycle, so only its newest snapshot counts.
+    /// read_from (since clamped to the window, the lower bound of the read), then $8, the earliest read_from. Each target's rows are bounded
+    /// by its own read_from; $8 is the same bound as one constant, so the planner excludes the chunks before it (a join qual alone leaves
+    /// every chunk up to $2 in the scan, compressed ones included). The interval dedupe is the history tool's (#1841): the collector stores
+    /// an open interval again every cycle, so only its newest snapshot counts.
     /// </summary>
     public static readonly string StatsSql = @"
 WITH t AS (
@@ -348,7 +350,7 @@ d AS (
     FROM t
     JOIN query_store_stats AS s
         ON s.server_id = $1 AND s.database_name = t.database_name AND s.query_id = t.query_id
-        AND s.collection_time >= t.read_from AND s.collection_time <= $2)
+        AND s.collection_time >= t.read_from AND s.collection_time >= $8 AND s.collection_time <= $2)
 SELECT target_database, forced_plan_id, plan_id, SUM(execution_count), MAX(last_execution_time),
        " + WeightedAverage("avg_cpu_time_us") + @", " + WeightedAverage("avg_duration_us") + @", MAX(max_duration_us), MIN(first_execution_time)
 FROM d
@@ -651,6 +653,7 @@ LIMIT 50";
         {
             var since = live.Select(SinceOf).ToArray();
             var readFrom = since.Select(s => s < from ? from : s).ToArray();
+            var oldestRead = readFrom.Min();
             await using (var command = postgres.CreateCommand(StatsSql))
             {
                 command.CommandTimeout = commandTimeoutSeconds;
@@ -661,6 +664,7 @@ LIMIT 50";
                 command.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Bigint, live.Select(f => f.PlanId).ToArray());
                 command.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Timestamp, since.Select(s => DateTime.SpecifyKind(s, DateTimeKind.Unspecified)).ToArray());
                 command.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Timestamp, readFrom.Select(s => DateTime.SpecifyKind(s, DateTimeKind.Unspecified)).ToArray());
+                command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(oldestRead, DateTimeKind.Unspecified));
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
                 {
@@ -668,7 +672,6 @@ LIMIT 50";
                 }
             }
 
-            var oldestRead = readFrom.Min();
             floor = await RawWindowFloor.GetAsync(postgres, RawWindowFloor.Table.QueryStoreStats, serverId, oldestRead, to, commandTimeoutSeconds, cancellationToken);
             complete = floor is not null && !RawWindowFloor.IsTruncated(floor, oldestRead);
         }
