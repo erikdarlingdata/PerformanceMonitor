@@ -1,0 +1,134 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Linq;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/* #1776 own-store: each test mints its own scratch store database through ScratchPostgres. */
+
+/// <summary>
+/// #8817: <c>get_store_metrics</c> names the largest relations it does not enumerate (<c>inventory.largest_unenumerated</c>), and
+/// asking for one of them by <c>object_name</c> used to answer <c>empty</c>, because the series has no row for a relation the
+/// sweep sums into the one <c>other</c> row. Every relation the tool names can now be asked for by the name it gives.
+/// </summary>
+public sealed class StoreMetricsUnenumeratedNameLiveTests
+{
+    private const string Backlog = "collect.oversized_plan_backlog";
+
+    private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    private static async Task<NpgsqlDataSource> SeededStoreAsync(ScratchPostgres scratch, CancellationToken ct)
+    {
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        /* One sweep, so the tool has self-metrics to answer from: the store row and the catch-all rows. No row for the backlog table. */
+        await using var insert = new NpgsqlCommand($@"
+INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_bytes, size_estimated) VALUES
+    ($1, 'store',  '{StoreSelfMetrics.StoreObjectKind}',  10000000000, NULL),
+    ($1, '{StoreSelfMetrics.OtherObjectName}', '{StoreSelfMetrics.OtherObjectKind}', 9000000000, NULL),
+    ($1, 'system', '{StoreSelfMetrics.SystemObjectKind}', 1000000000, NULL)", connection);
+        insert.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddHours(-2), DateTimeKind.Unspecified));
+        await insert.ExecuteNonQueryAsync(ct);
+
+        return NpgsqlDataSource.Create(scratch.ConnectionString);
+    }
+
+    [Theory]
+    [InlineData("oversized_plan_backlog")]
+    [InlineData("collect.oversized_plan_backlog")]
+    [InlineData("COLLECT.Oversized_Plan_Backlog")]
+    public async Task AnUnenumeratedRelation_IsFoundByTheNameTheToolGives_AgainstDevPostgres(string objectName)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #8817 test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
+        await using var dataSource = await SeededStoreAsync(scratch, ct);
+
+        using var document = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(dataSource, object_name: objectName));
+        var root = document.RootElement;
+        Assert.False(root.TryGetProperty("status", out var status) && status.GetString() == "empty",
+            $"the tool answered empty for '{objectName}', a relation it names in inventory.largest_unenumerated: {root}");
+        Assert.Equal("unenumerated_relation", root.GetProperty("view").GetString());
+        Assert.Equal("none", root.GetProperty("history").GetString());
+        Assert.Equal(1, root.GetProperty("relations_matched").GetInt32());
+        var relation = root.GetProperty("relations").EnumerateArray().Single();
+        Assert.Equal(Backlog, relation.GetProperty("relation").GetString());
+        Assert.True(relation.GetProperty("total_bytes").GetInt64() > 0);
+        Assert.Contains("no growth history", root.GetProperty("note").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task EveryRelationTheInventoryNames_CanBeAskedForByThatName_AgainstDevPostgres()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #8817 test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
+        await using var dataSource = await SeededStoreAsync(scratch, ct);
+
+        string[] named;
+        using (var summary = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(dataSource)))
+        {
+            named = summary.RootElement.GetProperty("inventory").GetProperty("largest_unenumerated").EnumerateArray()
+                .Select(r => r.GetProperty("relation").GetString()!).ToArray();
+        }
+
+        Assert.Contains(Backlog, named);
+        foreach (var relation in named)
+        {
+            using var asked = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(dataSource, object_name: relation));
+            Assert.Equal("unenumerated_relation", asked.RootElement.GetProperty("view").GetString());
+            Assert.Contains(asked.RootElement.GetProperty("relations").EnumerateArray(),
+                r => string.Equals(r.GetProperty("relation").GetString(), relation, StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
+    public async Task ANameThatMatchesNothing_StillAnswersEmpty_AndSaysTheUnenumeratedRelationsWereChecked_AgainstDevPostgres()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #8817 test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
+        await using var dataSource = await SeededStoreAsync(scratch, ct);
+
+        /* The percent sign is a literal character, not a pattern: the name does not match the backlog table. */
+        foreach (var name in new[] { "no_such_relation_anywhere", "oversized%backlog" })
+        {
+            using var none = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(dataSource, object_name: name));
+            Assert.Equal("empty", none.RootElement.GetProperty("status").GetString());
+            Assert.Contains("no un-enumerated relation's name matches it either", none.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+        }
+
+        /* An object_kind other than 'other' asked for a different kind: the reply does not claim a check it skipped. */
+        using var otherKind = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(
+            dataSource, object_kind: StoreSelfMetrics.TableObjectKind, object_name: "oversized_plan_backlog"));
+        Assert.Equal("empty", otherKind.RootElement.GetProperty("status").GetString());
+        Assert.DoesNotContain("un-enumerated relation", otherKind.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        /* object_kind other is where the relation's bytes live, so the name is looked up there. */
+        using var inOther = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(
+            dataSource, object_kind: StoreSelfMetrics.OtherObjectKind, object_name: "oversized_plan_backlog"));
+        Assert.Equal("unenumerated_relation", inOther.RootElement.GetProperty("view").GetString());
+    }
+}

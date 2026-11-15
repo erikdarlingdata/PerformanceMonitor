@@ -84,7 +84,7 @@ public sealed class DarlingMcpStoreMetricsTools
         NpgsqlDataSource postgres,
         [Description("Days of history the window deltas and series cover. Default 30; max 400 (the series' own retention).")] int days_back = 30,
         [Description("List every object of this kind instead of the summary: hypertable, continuous_aggregate, dimension, table, other, system or background_job.")] string? object_kind = null,
-        [Description("An exact object name returns that object's daily series; otherwise the objects whose names contain it are listed.")] string? object_name = null,
+        [Description("An exact object name returns that object's daily series; otherwise the objects whose names contain it are listed. A relation named in inventory.largest_unenumerated is answered with its current size and no series, because the sweep keeps none for it.")] string? object_name = null,
         [Description("Rows per list. Default 10, max 1000.")] int limit = DefaultLimit,
         CancellationToken cancellationToken = default)
     {
@@ -140,7 +140,23 @@ public sealed class DarlingMcpStoreMetricsTools
             var selection = DarlingStoreMetricsReader.SelectObjects(latest, kind, name);
             if (selection.View != DarlingStoreMetricsReader.StoreMetricsView.Summary && selection.Matched.Count == 0)
             {
-                return McpHelpers.Status("empty", NoMatchMessage(kind, name));
+                /* #8817: the inventory names the largest un-enumerated relations, and the series has no row for any of them, so a name taken
+                   from that list matches nothing above. Ask the live census for it before saying it does not exist. An object_kind other
+                   than 'other' asked for a different kind, which a relation outside every row is not. */
+                var unenumeratedLookup = UnenumeratedLookupState.NotAsked;
+                if (name is not null && (kind is null || kind == StoreSelfMetrics.OtherObjectKind))
+                {
+                    var lookupLogging = await DarlingStoreMetricsReader.GetJobExecutionLoggingAsync(postgres, cancellationToken);
+                    var found = await DarlingStoreMetricsReader.GetUnenumeratedByNameAsync(postgres, lookupLogging, name, limit, cancellationToken);
+                    if (found is { Relations.Count: > 0 })
+                    {
+                        return UnenumeratedRelationAnswer(latest.Max(r => r.MetricTime), days_back, kind, name, found, limit);
+                    }
+
+                    unenumeratedLookup = found is null ? UnenumeratedLookupState.Failed : UnenumeratedLookupState.NoMatch;
+                }
+
+                return McpHelpers.Status("empty", NoMatchMessage(kind, name, unenumeratedLookup));
             }
 
             var nowUtc = DateTime.UtcNow;
@@ -867,19 +883,73 @@ public sealed class DarlingMcpStoreMetricsTools
                 note = QueryTextTrigramIndex.Note(trigramHealth),
             };
 
+    /// <summary>Whether a name that matched no self-metrics row was also looked up among the un-enumerated relations (#8817), and what that found.</summary>
+    internal enum UnenumeratedLookupState
+    {
+        /// <summary>Not looked up: no name, or an object_kind other than 'other'.</summary>
+        NotAsked,
+
+        /// <summary>Looked up, and no un-enumerated relation matches.</summary>
+        NoMatch,
+
+        /// <summary>The live census did not complete, so a match cannot be ruled out.</summary>
+        Failed,
+    }
+
+    /// <summary>
+    /// The answer for an object_name that is an un-enumerated relation (#8817): what the tool knows about it, which is its size now, and
+    /// the plain statement that the series keeps no history for it. Named in the form <c>largest_unenumerated</c> gives, so a name taken from
+    /// the inventory block can be put straight into the next call.
+    /// </summary>
+    internal static string UnenumeratedRelationAnswer(
+        DateTime asOf, int daysBack, string? kind, string name, DarlingStoreMetricsReader.UnenumeratedMatches found, int limit) =>
+        JsonSerializer.Serialize(new
+        {
+            as_of = asOf.ToString("o"),
+            days_back = daysBack,
+            view = "unenumerated_relation",
+            object_kind = kind,
+            object_name = name,
+            relations_matched = found.Matched,
+            relations_returned = found.Relations.Count,
+            truncated = found.Matched > found.Relations.Count,
+            history = "none",
+            relations = found.Relations.Select(r => new
+            {
+                relation = r.Relation,
+                relkind = r.RelKind,
+                total_bytes = r.TotalBytes,
+            }),
+            note = UnenumeratedRelationNote(found, limit),
+        }, McpHelpers.JsonOptions);
+
+    internal static string UnenumeratedRelationNote(DarlingStoreMetricsReader.UnenumeratedMatches found, int limit) =>
+        (found.Matched == 1
+            ? "This is an un-enumerated user-schema relation: the sweep sums it into the one 'other' row and keeps no row or daily series of its own, "
+            : $"{CountText.Plural(found.Matched, "un-enumerated user-schema relation")} match this name: the sweep sums them into the one 'other' row and keeps no row or daily series of their own, ")
+        + "so there is no growth history to return, only the size read from the catalog just now (total_bytes, with its indexes and TOAST). "
+        + "Its bytes are inside inventory.unenumerated, and the same name is listed in inventory.largest_unenumerated while it is among the largest."
+        + (found.Matched > found.Relations.Count ? $" truncated: {Invariant(found.Relations.Count)} of {Invariant(found.Matched)} returned; raise limit (now {Invariant(limit)}) for more." : "");
+
     /// <summary>The <c>empty</c> answer for a filter that matched nothing (#3903): the filters, and where the
     /// names come from, because a name that matched nothing is a caller's question to fix and not a store
     /// with no such objects.</summary>
-    internal static string NoMatchMessage(string? kind, string? name)
+    internal static string NoMatchMessage(string? kind, string? name, UnenumeratedLookupState unenumerated = UnenumeratedLookupState.NotAsked)
     {
         var what = name is null
             ? $"No object of kind '{kind}' is in the store's self-metrics series"
                 + " (a plain-PostgreSQL store records no hypertable, continuous_aggregate or background_job rows)."
             : $"No store object's name matches '{name}'"
                 + (kind is null ? "" : $" among object_kind '{kind}'")
-                + " (exact or partial, case-insensitive).";
+                + " (exact or partial, case-insensitive)"
+                + unenumerated switch
+                {
+                    UnenumeratedLookupState.NoMatch => ", and no un-enumerated relation's name matches it either.",
+                    UnenumeratedLookupState.Failed => ". The live check of the un-enumerated relations did not complete, so a relation under that name may exist.",
+                    _ => ".",
+                };
         return what + " The summary names the largest and fastest-growing objects and the busiest jobs, and "
-            + "object_kind lists a kind whole; any name from those lists is a valid object_name.";
+            + "object_kind lists a kind whole; any name from those lists, or from inventory.largest_unenumerated, is a valid object_name.";
     }
 
     /// <summary>The #3783 TOAST facts for one latest row — null for every kind but <c>dimension</c>, so the
