@@ -532,6 +532,23 @@ public sealed partial class ViewerDataService
             coverIdleHours: true, cancellationToken);
 
     /// <summary>
+    /// The hourly-tier statement a routed trend runs (#3653 A6, #8821). The tier is decided over the LEGACY pair's
+    /// coverage (the deeper of the two on any upgraded store), and the FROM-clause item is then
+    /// <see cref="RollupCoverage.StitchedRelationSql"/>: either "collect.&lt;legacy&gt; AS f" unchanged (byte-equal to
+    /// <paramref name="hourlySql"/>, which stays the MCP reader's pinned constant that a store without successors
+    /// still runs), or the successor view or the stitched form of both. The legacy view is frozen at the upgrade,
+    /// so a read that names it alone has nothing past that date. Every chart that reads this tier goes through here, so
+    /// the Executions chart cannot read a different relation than the Query Duration chart beside it.
+    /// </summary>
+    private static string HourlyTrendSqlFor(RollupCoverage coverage, string hourlyView, string hourlySql, DateTime startUtc, bool coverIdleHours)
+    {
+        var hourlyFromClause = coverage.StitchedRelationSql(hourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+        return string.Equals(hourlyFromClause, $"collect.{hourlyView} AS f", StringComparison.Ordinal)
+            ? hourlySql
+            : DurationTrendRouting.BuildHourlyTrendSql(hourlyFromClause, withDatabaseFilter: true, coverIdleHours);
+    }
+
+    /// <summary>
     /// The shared body of the two routed reads (#3653): probe what the store has and has materialized (the
     /// viewer's cached <see cref="GetRollupAvailabilityAsync"/>), resolve the tier, run that tier's SQL, and
     /// describe what came back. One method so the query and procedure trends cannot drift in how they route,
@@ -566,18 +583,8 @@ public sealed partial class ViewerDataService
         }
         else
         {
-            /* #3653 A6: the tier is decided over the LEGACY pair's coverage above (the deeper of the two on any
-               upgraded store); the hourly FROM-clause item is then RollupCoverage.StitchedRelationSql — either
-               "collect.<legacy> AS f" unchanged (byte-equal to hourlySql, which stays the MCP reader's pinned
-               constant a store without successors still runs), or the stitched form splicing in the successor
-               past its floor. BuildHourlyTrendSql already parameterises its FROM target, so the stitch's aliased
-               relation (bare "f", no schema prefix needed — the stitch already schema-qualifies both sides)
-               slots in exactly where the legacy/successor name used to. */
-            var hourlyFromClause = coverage.StitchedRelationSql(hourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
             points = await ReadDurationTrendAsync(
-                string.Equals(hourlyFromClause, $"collect.{hourlyView} AS f", StringComparison.Ordinal)
-                    ? hourlySql
-                    : DurationTrendRouting.BuildHourlyTrendSql(hourlyFromClause, withDatabaseFilter: true, coverIdleHours),
+                HourlyTrendSqlFor(coverage, hourlyView, hourlySql, startUtc, coverIdleHours),
                 serverId, startUtc, endUtc, databaseNames, cancellationToken);
             firstServedUtc = points.Count > 0 ? points[0].CollectionTime : null;
         }
@@ -889,9 +896,10 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// Execution-count trend over the window (single value column; no ExecutionCount), routed like its
     /// duration sibling (#3653): raw <see cref="ExecutionCountTrendSql"/> (BUCKETED, #4234) for a window raw
-    /// can serve; for an older window the SAME <see cref="QueryDurationTrendHourlySql"/> statement the duration
-    /// trend runs, plotting its <c>executions_per_second</c> column — the two charts are one read's two columns
-    /// drawn apart, and on the hourly tier they literally are.
+    /// can serve; for an older window the SAME hourly statement the duration trend runs (the
+    /// <see cref="QueryDurationTrendHourlySql"/> text over the same stitched relation, #8821), plotting its
+    /// <c>executions_per_second</c> column — the two charts are one read's two columns drawn apart, and on the
+    /// hourly tier they literally are.
     /// </summary>
     public async Task<QueryTrendSeries> GetExecutionCountTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
@@ -913,7 +921,10 @@ public sealed partial class ViewerDataService
         }
         else
         {
-            points = await ReadTrendPointsAsync(QueryDurationTrendHourlySql, serverId, startUtc, endUtc, databaseNames, valueOrdinal: 2, executionsOrdinal: null, cancellationToken);
+            /* #8821: the same relation the Query Duration chart reads (the stitched legacy and successor hourly), not the frozen legacy view alone. */
+            points = await ReadTrendPointsAsync(
+                HourlyTrendSqlFor(coverage, TimescaleSupport.QueryStatsHourlyView, QueryDurationTrendHourlySql, startUtc, coverIdleHours: false),
+                serverId, startUtc, endUtc, databaseNames, valueOrdinal: 2, executionsOrdinal: null, cancellationToken);
             firstServedUtc = points.Count > 0 ? points[0].CollectionTime : null;
         }
         /* A bucket start is not a collection the store held (#4234): "data begins" names the first served
