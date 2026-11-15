@@ -1005,9 +1005,21 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
     /// floors whose tail could not be judged, then estimated empty bytes descending (rows with no estimate last), then total
     /// bytes descending. The probe, the read, and one small read per object past the floors (a window at
     /// the end of the file for each of the emptiest <see cref="TailProbeMaxRelations"/> relations). Each statement is
-    /// bounded by <see cref="StorageCommandDeadlines.McpReadSeconds"/>.
+    /// bounded by <see cref="StorageCommandDeadlines.McpReadSeconds"/>. A statement past it throws <see cref="StoreTableHealthTimeoutException"/>.
     /// </summary>
     public static async Task<List<StoreTableHealthRow>> GetAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await ReadTablesAsync(postgres, cancellationToken);
+        }
+        catch (Exception ex) when (StoreTableHealthTimeoutException.IsDeadlineTrip(ex, cancellationToken))
+        {
+            throw new StoreTableHealthTimeoutException(ex);
+        }
+    }
+
+    private static async Task<List<StoreTableHealthRow>> ReadTablesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
@@ -1175,6 +1187,18 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
     /// the heap, then rarely used, then by size.</summary>
     public static async Task<List<StoreIndexHealthRow>> GetIndexesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
+        try
+        {
+            return await ReadIndexesAsync(postgres, cancellationToken);
+        }
+        catch (Exception ex) when (StoreTableHealthTimeoutException.IsDeadlineTrip(ex, cancellationToken))
+        {
+            throw new StoreTableHealthTimeoutException(ex);
+        }
+    }
+
+    private static async Task<List<StoreIndexHealthRow>> ReadIndexesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(postgres);
 
         var (timescale, _) = await ProbeAsync(postgres, cancellationToken);
@@ -1216,6 +1240,18 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
 
     /// <summary>Reads the leaf index coverage of every partitioned parent's indexes: missing or invalid leaf indexes first.</summary>
     public static async Task<List<StoreIndexCoverageRow>> GetIndexCoverageAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await ReadIndexCoverageAsync(postgres, cancellationToken);
+        }
+        catch (Exception ex) when (StoreTableHealthTimeoutException.IsDeadlineTrip(ex, cancellationToken))
+        {
+            throw new StoreTableHealthTimeoutException(ex);
+        }
+    }
+
+    private static async Task<List<StoreIndexCoverageRow>> ReadIndexCoverageAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
