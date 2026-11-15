@@ -401,22 +401,24 @@ export function bucketWidthText(d) {
  * "summed" for counts, waits and I/O (a bucket the window cuts short holds smaller counts; rates are true rates over the
  * time it covers), "level" for CPU, memory, tempdb and other gauges (each point averages the samples in its bucket), or
  * omitted when only the width is worth saying. One collection per point needs neither fact. Null when the read states no width.
+ * `readsNewestHours` is true for a read that sums the hours the hourly rollup has not built from the raw rows (a query's
+ * history, #8801): its chart reaches the window's end, so it owes no sentence about a trailing edge.
  */
-export function chartNoteText(data, kind) {
+export function chartNoteText(data, kind, readsNewestHours = false) {
   const width = bucketWidthText(data);
   if (!width) return null;
   if (width === "is one collection") return "Each point is one collection.";
   const sentence = (kind === "level" ? "Each point " + width + " and is the average of the samples in it." : "Each point " + width + ".") +
     (kind === "summed" ? " A bucket the window cuts short holds smaller counts; rates are true rates over the time the bucket covers." : "");
-  return data.source === "hourly" ? sentence + " " + HOURLY_TRAIL_TEXT : sentence;
+  return data.source === "hourly" && !readsNewestHours ? sentence + " " + HOURLY_TRAIL_TEXT : sentence;
 }
 
 /**
- * What a read served from the hourly rollup owes its reader: the series trails the clock by up to two hours, because the
- * current hour is never materialized and the one before it lands on the next refresh (DurationTrendRouting, #6359). Said when
+ * What a read served from the hourly rollup alone owes its reader: the series trails the clock by up to three hours, because
+ * the current hour is never materialized and an hour is added one to two hours after it ends (DurationTrendRouting, #6359, #8801). Said when
  * the read's own `source` field is "hourly", never from the note's text; without it the empty right edge reads as missing data.
  */
-const HOURLY_TRAIL_TEXT = "The newest hour or two is not in this chart yet: hourly totals are added after each hour ends.";
+const HOURLY_TRAIL_TEXT = "The newest two or three hours are not in this chart yet: an hour's totals are added one to two hours after it ends.";
 
 /**
  * The notice for a trend read whose first point is later than the window's start (#7416 item 21): where the history begins, then the

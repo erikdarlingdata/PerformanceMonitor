@@ -157,7 +157,7 @@ export async function drawQueryTrend(slot, server, ctx, query, signal) {
      here". */
   const notes = [];
   /* #6359: what a point covers, from the read's own width fields: its `aggregate_note` is written for an MCP caller. */
-  const pointNote = chartNoteText(trend.data, "summed");
+  const pointNote = chartNoteText(trend.data, "summed", true);
   if (pointNote) notes.push(pointNote);
   /* #3653 item 17: the window floor is `window_truncated` — the page dialect's `truncated` (a limit biting,
      which this read has none of) is a different fact with the opposite remedy, and the two used to share a
