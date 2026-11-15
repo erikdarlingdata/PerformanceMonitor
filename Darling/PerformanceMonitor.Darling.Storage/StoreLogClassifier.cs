@@ -125,6 +125,38 @@ public static class StoreLogClassifier
     /// </summary>
     public const string SlowPlanClass = "slow_plan";
 
+    /// <summary>
+    /// An autovacuum PostgreSQL cancelled because another session asked for a conflicting lock (#8814). Retained: the
+    /// entry's CONTEXT names the relation, and a table whose autovacuum is cancelled again and again never finishes.
+    /// </summary>
+    public const string AutovacuumCancelClass = "autovacuum_cancel";
+
+    private static readonly Regex s_toastRelation = new(
+        @"\bpg_toast\.(pg_toast_[0-9]+)\b", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
+    /// <summary>
+    /// The TOAST relation a stored entry's CONTEXT names (<c>pg_toast_17428</c> from <c>automatic vacuum of table
+    /// "darling.pg_toast.pg_toast_17428"</c>), or null when it names none (#8814). PostgreSQL names the relation by
+    /// number only, so the reader resolves it to its owning table from the catalog.
+    /// </summary>
+    public static string? ToastRelationNameOf(string? sample)
+    {
+        if (string.IsNullOrEmpty(sample))
+        {
+            return null;
+        }
+
+        try
+        {
+            var match = s_toastRelation.Match(sample);
+            return match.Success ? match.Groups[1].Value : null;
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>The message a kept plan has when it could not be read whole (text format, cut by the entry cap
     /// or a read boundary, not JSON): every such plan is one row, whatever the statement was.</summary>
     public const string WithheldPlanMessage = "plan withheld";
@@ -265,6 +297,13 @@ public static class StoreLogClassifier
         new("lock_timeout", Error, MatchKind.StartsWith, "canceling statement due to lock timeout", true,
             "a statement hit the store's own lock_timeout waiting for a lock"),
 
+        /* Retained (#8814) - PostgreSQL cancels a plain autovacuum when another session asks for a lock that conflicts
+           with it, which a schema upgrade or a manual VACUUM does. One is routine after a restart, so it is not a
+           shape nobody anticipated. It is retained and not counted alone because the relation its CONTEXT names is the
+           useful part: a table whose autovacuum is cancelled again and again never finishes (#5594). */
+        new("autovacuum_cancel", Error, MatchKind.StartsWith, "canceling autovacuum task", true,
+            "an autovacuum was cancelled because another session wanted a conflicting lock - routine after an upgrade, but a table cancelled again and again never finishes; the CONTEXT names the relation"),
+
         /* Retained (#3899) - a statement that ran past the slow-statement line provisioning sets on the viewer
            and mcp roles (a third of their statement_timeout, DarlingManagedRoles.SlowStatementThresholdMs), or
            past any line an operator sets. PostgreSQL writes it as LOG with the duration first and the statement
@@ -292,6 +331,14 @@ public static class StoreLogClassifier
             "a connection was told to stop - job churn and service restarts, expected"),
         new("admin_termination", Fatal, MatchKind.StartsWith, "terminating autovacuum process due to administrator command", false,
             "an autovacuum worker was told to stop - job churn and service restarts, expected"),
+
+        /* EXCLUDING (#8814) - a client that connects while the store is stopping reads this FATAL. The service stops
+           its own store with a fast shutdown whenever it stops, so every upgrade or restart writes it, and it
+           belongs with the other restart messages above rather than in `unclassified`, which is for shapes nobody
+           anticipated. FATAL-scoped and anchored at the start, like its neighbours. As with every text here it is
+           PostgreSQL's English wording, which the managed store pins with lc_messages = 'C'. */
+        new("shutdown_in_progress", Fatal, MatchKind.StartsWith, "the database system is shutting down", false,
+            "a client reached the store while it was stopping - every service restart writes it, expected"),
 
         /* EXCLUDING - the Windows fork-emulation artifact, ~170-290/day, auto-retried by PostgreSQL itself
            and documented at length behind the 1 GB shared_buffers cap (#1559, pgsql-bugs BUG #14050 /

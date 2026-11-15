@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -167,6 +168,12 @@ ORDER BY sum(g.occurrences) DESC, g.event_class";
     /// <para>The order ends on the grouping key, so it is total: rows that tie on capture and count keep one order
     /// on every read, which is what lets an offset page through them (#8568).</para>
     ///
+    /// <para>Inside one capture a WARNING or worse comes ahead of a LOG row, so a short page carries the errors and
+    /// not only the most repeated slow plans (#8813).</para>
+    ///
+    /// <para><c>total_groups</c> is every row the window holds, counted over the grouped set before the LIMIT cuts it,
+    /// so the page can say how much of the set it is (#8813).</para>
+    ///
     /// <para><c>message_text IS NOT NULL</c> is the whole predicate, and it is a structural test rather than
     /// a class list: the sweep writes text only for the classes the classifier retains, so asking for rows
     /// that HAVE text asks exactly the right population and cannot drift from the classifier's own decision
@@ -180,13 +187,16 @@ SELECT
     sum(e.occurrences)::bigint               AS occurrences,
     min(e.capture_time)                      AS first_capture_at,
     max(e.capture_time)                      AS last_capture_at,
-    (array_agg(e.sample_line ORDER BY e.capture_time DESC))[1] AS sample_line
+    (array_agg(e.sample_line ORDER BY e.capture_time DESC))[1] AS sample_line,
+    count(*) OVER ()::bigint                 AS total_groups
 FROM collect.store_log_events AS e
 WHERE e.capture_time >= $1
 AND   e.capture_time <= $2
 AND   e.message_text IS NOT NULL
 GROUP BY e.event_class, e.severity, e.message_text
-ORDER BY max(e.capture_time) DESC, sum(e.occurrences) DESC, e.event_class, e.severity, e.message_text
+ORDER BY max(e.capture_time) DESC,
+         CASE WHEN e.severity IN ('WARNING', 'ERROR', 'FATAL', 'PANIC') THEN 0 ELSE 1 END,
+         sum(e.occurrences) DESC, e.event_class, e.severity, e.message_text
 LIMIT $3";
 
     /// <summary>The capture denominator for the window.</summary>
@@ -291,6 +301,15 @@ LIMIT $3";
 
         /// <summary>The stored entry's whole length in characters, beside the preview.</summary>
         [JsonPropertyName("sample_line_length")] public int? SampleLineLength { get; init; }
+
+        /// <summary>The TOAST relation an autovacuum cancel's CONTEXT names (<c>pg_toast_17428</c>), when it names
+        /// one (#8814). Null for every other row.</summary>
+        [JsonPropertyName("toast_relation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? ToastRelation { get; init; }
+
+        /// <summary>The table that owns <see cref="ToastRelation"/> (<c>schema.table</c>), read from the store's catalog
+        /// when the answer is built (#8814), so the reader can act on the cancel without a catalog query. Null when
+        /// the row names no TOAST relation or the relation no longer exists.</summary>
+        [JsonPropertyName("toast_owner"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? ToastOwner { get; set; }
     }
 
     /// <summary>A class this build classifies into that had no rows in the window.</summary>
@@ -369,6 +388,22 @@ LIMIT $3";
         /// <summary>How many rows <see cref="RetainedEvents"/> holds.</summary>
         [JsonPropertyName("retained_events_returned")] public int RetainedEventsReturned => RetainedEvents.Count;
 
+        private int _retainedEventsTotal;
+
+        /// <summary>How many distinct retained messages the window holds, whatever the page: the rows this answer
+        /// holds are <see cref="RetainedEventsReturned"/> of them, after the first <c>offset</c> (#8813). Never less
+        /// than the rows the page already reaches.</summary>
+        [JsonPropertyName("retained_events_total")]
+        public int RetainedEventsTotal
+        {
+            get => Math.Max(_retainedEventsTotal, RetainedEventsSkipped + RetainedEvents.Count);
+            init => _retainedEventsTotal = value;
+        }
+
+        /// <summary>True when retained messages follow the last row this answer holds, whether <c>limit</c> or the
+        /// response budget left them off (#8813). The way on is <c>offset</c> at <c>skipped + returned</c>.</summary>
+        [JsonPropertyName("truncated")] public bool Truncated => RetainedEventsSkipped + RetainedEvents.Count < RetainedEventsTotal;
+
         /// <summary>The oldest <c>last_capture_at</c> among <see cref="RetainedEvents"/>, which are newest capture
         /// first: where this answer's rows stop, and the time <c>as_of</c> reads on from (#8568). Null when the answer
         /// holds no row.</summary>
@@ -444,11 +479,19 @@ LIMIT $3";
             note.Append(". ");
         }
 
-        if (report.BudgetTruncated || report.RetainedEventsSkipped > 0)
+        if (report.BudgetTruncated || report.Truncated || report.RetainedEventsSkipped > 0)
         {
-            /* A page of the retained messages: the count is this answer's, not the window's. */
+            /* A page of the retained messages, whatever cut it (a limit, the budget, or an offset): the window's
+               total beside the page's own count, and where the rest starts (#8813). */
             note.Append(CultureInfo.InvariantCulture,
-                $"{report.RetainedEvents.Count:N0} of the distinct messages retained with their text {(report.RetainedEvents.Count == 1 ? "is" : "are")} listed here. ");
+                $"{report.RetainedEvents.Count:N0} of {report.RetainedEventsTotal:N0} distinct messages retained with their text {(report.RetainedEvents.Count == 1 ? "is" : "are")} listed here");
+            if (report.Truncated)
+            {
+                note.Append(CultureInfo.InvariantCulture,
+                    $"; offset {report.RetainedEventsSkipped + report.RetainedEvents.Count:N0} reads on, with as_of at this answer's as_of so the rows do not shift");
+            }
+
+            note.Append(". ");
         }
         else
         {
@@ -567,8 +610,10 @@ LIMIT $3";
 
     /// <summary>Reads the retained messages for the window: up to <paramref name="limit"/> rows after the first
     /// <paramref name="offset"/> of the read's order. <c>Skipped</c> is how many rows the offset passed over, which is
-    /// less than the offset when the window holds fewer.</summary>
-    public static async Task<(List<RetainedEvent> Rows, int Skipped)> GetRetainedEventsAsync(
+    /// less than the offset when the window holds fewer. <c>Total</c> is how many rows the window holds, so a page can say
+    /// it is a page (#8813); a row the read passes that has no text to show is left out of it, so it is exact whenever
+    /// the page reaches the end.</summary>
+    public static async Task<(List<RetainedEvent> Rows, int Skipped, int Total)> GetRetainedEventsAsync(
         NpgsqlDataSource postgres,
         DateTime windowStartUtc,
         DateTime windowEndUtc,
@@ -579,6 +624,9 @@ LIMIT $3";
     {
         var rows = new List<RetainedEvent>();
         var skipped = 0;
+        long total = 0;
+        var emptied = 0;
+        var toastNames = new HashSet<string>(StringComparer.Ordinal);
 
         await using var command = postgres.CreateCommand(RetainedEventsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -586,9 +634,11 @@ LIMIT $3";
         command.Parameters.AddWithValue(DateTime.SpecifyKind(windowEndUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(offset + limit);
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         while (await reader.ReadAsync(cancellationToken))
         {
+            total = reader.GetInt64(7);
+
             /* #3915, #3944: brought to this build's rules again on the way out, with the classifier's own
                function. Rows a newer capture wrote come back unchanged (it is idempotent), and rows an earlier
                build stored with a statement's literals are normalized in storage by the sweep's own pass, a
@@ -601,6 +651,7 @@ LIMIT $3";
             {
                 /* A row the pass will empty (a fragment an older build filed as an entry): its occurrences are in
                    the class census, and it has no text to show. */
+                emptied++;
                 continue;
             }
 
@@ -614,8 +665,15 @@ LIMIT $3";
             /* #8568: the evidence line is a preview when the caller gave a length; the message stays whole, because it is
                what tells one row from another. */
             var line = McpResponseBudget.Preview(sample, sampleLinePreviewLength ?? 0, whole: sampleLinePreviewLength is null);
+            var toastName = eventClass == StoreLogClassifier.AutovacuumCancelClass ? StoreLogClassifier.ToastRelationNameOf(sample) : null;
+            if (toastName is not null)
+            {
+                toastNames.Add(toastName);
+            }
+
             rows.Add(new RetainedEvent
             {
+                ToastRelation = toastName,
                 EventClass = eventClass,
                 Severity = reader.GetString(1),
                 MessageText = StoreLogClassifier.DisplayMessageOf(eventClass, key, sample),
@@ -628,7 +686,51 @@ LIMIT $3";
             });
         }
 
-        return (rows, skipped);
+        if (toastNames.Count > 0)
+        {
+            var owners = await GetToastOwnersAsync(postgres, toastNames, cancellationToken);
+            foreach (var row in rows)
+            {
+                if (row.ToastRelation is { } name && owners.TryGetValue(name, out var owner))
+                {
+                    row.ToastOwner = owner;
+                }
+            }
+        }
+
+        return (rows, skipped, (int)Math.Max(0, Math.Min(int.MaxValue, total - emptied)));
+    }
+
+    /// <summary>The tables that own TOAST relations by name, as <c>schema.table</c> (#8814). An autovacuum cancel's
+    /// CONTEXT names a TOAST relation by number only. This is the catalog read that tells a reader which table it
+    /// belongs to, from the store the answer is read from. A relation dropped since is not in the map.</summary>
+    public const string ToastOwnerSql = @"
+SELECT t.relname,
+       format('%I.%I', n.nspname, o.relname)
+FROM pg_catalog.pg_class AS t
+JOIN pg_catalog.pg_namespace AS tn ON tn.oid = t.relnamespace
+JOIN pg_catalog.pg_class AS o ON o.reltoastrelid = t.oid
+JOIN pg_catalog.pg_namespace AS n ON n.oid = o.relnamespace
+WHERE tn.nspname = 'pg_toast'
+AND   t.relname = ANY($1)";
+
+    private static async Task<Dictionary<string, string>> GetToastOwnersAsync(
+        NpgsqlDataSource postgres,
+        IEnumerable<string> toastNames,
+        CancellationToken cancellationToken)
+    {
+        var owners = new Dictionary<string, string>(StringComparer.Ordinal);
+        await using var command = postgres.CreateCommand(ToastOwnerSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.AddWithValue(toastNames.ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            owners[reader.GetString(0)] = reader.GetString(1);
+        }
+
+        return owners;
     }
 
     /// <summary>
