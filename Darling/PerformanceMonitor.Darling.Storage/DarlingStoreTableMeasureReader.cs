@@ -153,19 +153,21 @@ LIMIT 3";
     ///
     /// <para>Telling an out-of-line value from an inline one, by <c>server_version_num</c>. On PostgreSQL 17 and later a varlena column
     /// that can be toasted is checked with <c>pg_column_toast_chunk_id</c>, which is not NULL exactly for an out-of-line value, so it
-    /// is counted as the pointer. Before 17 there is no such function. For a column whose storage is <c>x</c> (extended) or <c>e</c>
-    /// (external) the toaster never leaves one inline value larger than the table's toast tuple target: it moves values out of line, largest first,
-    /// until the row's data fits under that target less the tuple header (<c>heap_toast_insert_or_update</c>), and a single inline
-    /// value over the target would have been moved. The target is the table's <c>toast_tuple_target</c> option, or else the block size
-    /// less the 40 byte page header and four line pointers, over four, rounded down to 8 (2032 for 8 kB pages), the same as
-    /// <c>TOAST_TUPLE_TARGET</c>. So on 16 a <c>pg_column_size</c> over that target is out of line and is counted as the pointer. That
-    /// test is exact for a large value. A row of several mid-size values can move one under the target out of line as well, and on 16 that
-    /// value is still counted at its stored size, so live bytes read a little high for such a row. A <c>main</c> column is counted at
-    /// its stored size, because the toaster moves it out of line only after everything else.</para></summary>
+    /// is counted as the pointer. Before 17 there is no such function, so a column whose storage is <c>x</c> (extended) or <c>e</c>
+    /// (external) is judged by its stored size against a cutoff. The toaster runs only for a row longer than <c>TOAST_TUPLE_THRESHOLD</c>,
+    /// a compile-time value of 2032 bytes at 8 kB pages (the block size less the 40 byte page header and four line pointers, over four,
+    /// rounded down to 8). Once it runs it moves values out of line, largest first, until the row fits under the table's
+    /// <c>toast_tuple_target</c> option, or under the same 2032 when there is no option. So an inline value can be as large as the
+    /// larger of the two: with a lowered option, a row under the threshold keeps every value inline, up to the threshold, and with a raised
+    /// option, values up to the option stay inline. The cutoff is therefore <c>greatest(option, default)</c>, and a <c>pg_column_size</c> over
+    /// it is out of line and is counted as the pointer. That test is exact for a value over the cutoff. The limit: a row of several
+    /// mid-size values can move one under the cutoff out of line as well, and on 16 that value is still counted at its stored size, so live
+    /// bytes read a little high for such a row. A <c>main</c> column is counted at its stored size, because the toaster moves it out of
+    /// line only after everything else.</para></summary>
     private const string LayoutSqlTemplate = @"
 WITH tgt AS (
-    SELECT coalesce((SELECT split_part(o, '=', 2)::int FROM pg_catalog.pg_class AS c, unnest(c.reloptions) AS o
-                     WHERE c.oid = $1::oid AND o LIKE 'toast_tuple_target=%'),
+    SELECT greatest(coalesce((SELECT split_part(o, '=', 2)::int FROM pg_catalog.pg_class AS c, unnest(c.reloptions) AS o
+                              WHERE c.oid = $1::oid AND o LIKE 'toast_tuple_target=%'), 0),
                     ((current_setting('block_size')::int - 40) / 4) / 8 * 8) AS v
 )
 SELECT

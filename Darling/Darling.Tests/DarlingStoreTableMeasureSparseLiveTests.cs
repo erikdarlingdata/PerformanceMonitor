@@ -160,6 +160,13 @@ FROM generate_series(1, 2000) AS g;";
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 
+        /* Below 17 the chunk id form falls back to the storage form, so the comparison would be the storage form against itself. */
+        await using (var versionCommand = new NpgsqlCommand("SELECT current_setting('server_version_num')::int", connection))
+        {
+            var serverVersion = (int)(await versionCommand.ExecuteScalarAsync(ct))!;
+            Assert.SkipWhen(serverVersion < 170000, "pg_column_toast_chunk_id needs PostgreSQL 17, so below that both forms are the storage form and there is nothing to compare.");
+        }
+
         await ExecAsync(connection, RandomPlanTableSql, ct);
         await ExecAsync(connection, "VACUUM collect.zz_toast_random", ct);
 
@@ -171,13 +178,43 @@ FROM generate_series(1, 2000) AS g;";
 
         /* The same table through both forms of the column-size expression: the one that asks pg_column_toast_chunk_id (PostgreSQL 17 and
            later) and the one for older servers, which a version no server reaches selects here. Both must come to the same bytes. */
-        var chunkIdForm = await DataBytesAsync(connection, oid, DarlingStoreTableMeasureReader.LayoutSqlFor(170000), ct);
-        var storageForm = await DataBytesAsync(connection, oid, DarlingStoreTableMeasureReader.LayoutSqlFor(int.MaxValue), ct);
+        var chunkIdForm = await DataBytesAsync(connection, oid, "collect.zz_toast_random", DarlingStoreTableMeasureReader.LayoutSqlFor(170000), ct);
+        var storageForm = await DataBytesAsync(connection, oid, "collect.zz_toast_random", DarlingStoreTableMeasureReader.LayoutSqlFor(int.MaxValue), ct);
         Assert.True(chunkIdForm < 500_000, $"chunk id form {chunkIdForm} bytes");
         Assert.Equal(chunkIdForm, storageForm);
     }
 
-    private static async Task<long> DataBytesAsync(NpgsqlConnection connection, long oid, string layoutSql, CancellationToken ct)
+    /* A lowered toast_tuple_target. The toaster runs only for a row over 2032 bytes, so a row of about 1,000 bytes keeps its value inline even
+       when the table's target is 128. The before-17 form must count that value at its size and not as a pointer. */
+    [Fact]
+    public async Task TheBeforeSeventeenForm_CountsAnInlineValueUnderTheToasterThresholdAtItsSize_WhenTheTargetIsLowered()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #8807 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        await ExecAsync(connection, @"
+CREATE TABLE collect.zz_toast_lowered (id integer, v text) WITH (toast_tuple_target = 128, autovacuum_enabled = false);
+INSERT INTO collect.zz_toast_lowered
+SELECT g, substr((SELECT string_agg(md5(g::text || ':' || i::text), '') FROM generate_series(1, 32) AS i), 1, 1000)
+FROM generate_series(1, 500) AS g;", ct);
+        await ExecAsync(connection, "VACUUM collect.zz_toast_lowered", ct);
+
+        long oid;
+        await using (var oidCommand = new NpgsqlCommand("SELECT 'collect.zz_toast_lowered'::regclass::oid::bigint", connection))
+        {
+            oid = (long)(await oidCommand.ExecuteScalarAsync(ct))!;
+        }
+
+        var bytes = await DataBytesAsync(connection, oid, "collect.zz_toast_lowered", DarlingStoreTableMeasureReader.LayoutSqlFor(int.MaxValue), ct);
+        Assert.True(bytes >= 500 * 1000, $"data bytes {bytes}: an inline value of about 1,000 bytes was counted as a pointer");
+    }
+
+    private static async Task<long> DataBytesAsync(NpgsqlConnection connection, long oid, string qualifiedName, string layoutSql, CancellationToken ct)
     {
         string expression;
         await using (var layout = new NpgsqlCommand(layoutSql, connection))
@@ -188,7 +225,7 @@ FROM generate_series(1, 2000) AS g;";
             expression = reader.GetString(0);
         }
 
-        await using var measure = new NpgsqlCommand(DarlingStoreTableMeasureReader.MeasureSqlFor(expression, "collect.zz_toast_random"), connection);
+        await using var measure = new NpgsqlCommand(DarlingStoreTableMeasureReader.MeasureSqlFor(expression, qualifiedName), connection);
         measure.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Oid, Value = (uint)oid });
         await using var result = await measure.ExecuteReaderAsync(ct);
         await result.ReadAsync(ct);
