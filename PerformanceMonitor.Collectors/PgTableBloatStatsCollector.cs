@@ -160,7 +160,15 @@ public sealed class PgTableBloatStatsCollector : PostgresCollectorDefinitionBase
 
        pg_relation_size is evaluated in the inner query so it is computed once per table rather than
        re-evaluated by the size filter; the outer WHERE reads the computed column. */
-    internal static readonly string QueryText = @"
+    internal static readonly string QueryText = BuildQueryText(string.Empty);
+
+    /// <summary>
+    /// The collector statement, with <paramref name="tableFilterSql"/> (empty for the collector itself, so its text is unchanged)
+    /// added as one more condition on <c>tbl</c> in the innermost query, before the column and statistics joins and before the
+    /// size functions run. The store table health read (#8806) passes the oids of the relations that reach the size floor, so
+    /// a store with thousands of chunks does the estimate work for the few that matter and not for every one.
+    /// </summary>
+    internal static string BuildQueryText(string tableFilterSql) => @"
 SELECT
     s.schema_name,
     s.table_name,
@@ -296,7 +304,7 @@ FROM
               AND tbl.relkind IN ('r', 'm')
               AND ns.nspname NOT IN ('pg_catalog', 'information_schema')
               AND ns.nspname !~ '^pg_toast'
-              AND ns.nspname !~ '^pg_temp'
+              AND ns.nspname !~ '^pg_temp'" + tableFilterSql + @"
             GROUP BY ns.nspname, tbl.oid, tbl.relname, tbl.relpages, tbl.reltoastrelid, tbl.reloptions
         ) AS b
     ) AS a
