@@ -73,7 +73,7 @@
         </Grid>
 
         <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Left" Margin="0,12,0,0">
-            <Button Content="_Add Route..." Width="110" Height="28" Margin="0,0,8,0"
+            <Button AutomationProperties.AutomationId="AddRouteButton" Content="_Add Route..." Width="110" Height="28" Margin="0,0,8,0"
                     Click="AddRoute_Click" Style="{StaticResource AccentButton}"/>
             <Button Content="_Edit" Width="80" Height="28" Margin="0,0,8,0" Click="EditRoute_Click"/>
             <Button Content="_Toggle" Width="80" Height="28" Margin="0,0,8,0" Click="ToggleRoute_Click"/>

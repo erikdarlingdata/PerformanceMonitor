@@ -79,6 +79,42 @@ public sealed class LiteWalkTests : WalkBase
             window.Close();
             return true;
         });
+
+        MeasureEditDialogs(main);
+    }
+
+    /// <summary>The two auto-sized edit dialogs (#8804): each is opened from Settings, shot with its screen position logged
+    /// ("DIALOG ..." lines), and closed. Both open with every field they can show.</summary>
+    private void MeasureEditDialogs(AutomationElement main)
+    {
+        Safely("lite settings", () =>
+        {
+            var settings = OpenWindow("Settings", () => Find(main, "SettingsButton").AsButton().Invoke(), "SettingsTabs");
+
+            Safely("lite route dialog", () =>
+            {
+                Step("Delivery tab", () => SelectTab(settings, "Delivery"));
+                var routes = OpenWindow("Notification Routes window",
+                    () => Find(settings, "ManageNotificationRoutesButton").AsButton().Invoke(), "RoutesGrid");
+                var dialog = OpenWindow("route dialog", () => Find(routes, "AddRouteButton").AsButton().Invoke(), "ScopeCombo");
+                ShotDialog("30-lite-route-dialog", dialog);
+                CloseWindow("close route dialog", dialog, "ScopeCombo");
+                CloseWindow("close Notification Routes window", routes, "RoutesGrid");
+            });
+
+            Safely("lite mute dialog", () =>
+            {
+                Step("Muting tab", () => SelectTab(settings, "Muting & triage"));
+                var rules = OpenWindow("Mute Rules window", () => Find(settings, "ManageMuteRulesButton").AsButton().Invoke(), "RulesGrid");
+                var dialog = OpenWindow("mute dialog", () => Find(rules, "AddRuleButton").AsButton().Invoke(), "ExpirationCombo");
+                ShotDialog("31-lite-mute-dialog", dialog);
+                CloseWindow("close mute dialog", dialog, "ExpirationCombo");
+                CloseWindow("close Mute Rules window", rules, "RulesGrid");
+            });
+
+            CloseWindow("close Settings", settings, "SettingsTabs");
+        });
+        ThrowDialogFailures();
     }
 
     private static string FindLiteExe()

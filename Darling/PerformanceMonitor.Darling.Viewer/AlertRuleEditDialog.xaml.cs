@@ -13,6 +13,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -45,6 +46,9 @@ public partial class AlertRuleEditDialog : Window
         IReadOnlyList<string> serverNames, IReadOnlyList<DarlingTag> tags, CustomAlertRule? existing = null, CustomAlertTemplate? template = null)
     {
         InitializeComponent();
+        /* The form scrolls above its pinned buttons when it is taller than the work area of the monitor it is on (#8804). */
+        SourceInitialized += (_, _) => WindowWorkArea.Clamp(this);
+        SizeChanged += (_, _) => WindowWorkArea.Clamp(this);
         _existing = existing;
         _tags = tags;
         _baseJson = existing?.DefinitionJson ?? template?.DefinitionJson;
