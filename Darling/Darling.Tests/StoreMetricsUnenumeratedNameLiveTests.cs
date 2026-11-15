@@ -27,7 +27,8 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class StoreMetricsUnenumeratedNameLiveTests
 {
-    private const string Backlog = "collect.oversized_plan_backlog";
+    /* A plain table no named row sizes, created by the test and a couple of MB so it is always among the ten largest un-enumerated relations. (The oversized plan backlog used to be the example here and has its own row since the second part of #8817.) */
+    private const string Backlog = "collect.zz_unenumerated_probe";
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -36,8 +37,12 @@ public sealed class StoreMetricsUnenumeratedNameLiveTests
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
+        await using (var probe = new NpgsqlCommand("CREATE TABLE collect.zz_unenumerated_probe AS SELECT g, repeat('x', 1000) AS filler FROM generate_series(1, 4000) AS g", connection))
+        {
+            await probe.ExecuteNonQueryAsync(ct);
+        }
 
-        /* One sweep, so the tool has self-metrics to answer from: the store row and the catch-all rows. No row for the backlog table. */
+        /* One sweep, so the tool has self-metrics to answer from: the store row and the catch-all rows. No row for the relation under test. */
         await using var insert = new NpgsqlCommand($@"
 INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_bytes, size_estimated) VALUES
     ($1, 'store',  '{StoreSelfMetrics.StoreObjectKind}',  10000000000, NULL),
@@ -50,9 +55,9 @@ INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_
     }
 
     [Theory]
-    [InlineData("oversized_plan_backlog")]
-    [InlineData("collect.oversized_plan_backlog")]
-    [InlineData("COLLECT.Oversized_Plan_Backlog")]
+    [InlineData("zz_unenumerated_probe")]
+    [InlineData("collect.zz_unenumerated_probe")]
+    [InlineData("COLLECT.ZZ_Unenumerated_Probe")]
     public async Task AnUnenumeratedRelation_IsFoundByTheNameTheToolGives_AgainstDevPostgres(string objectName)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
@@ -112,8 +117,8 @@ INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_
         await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         await using var dataSource = await SeededStoreAsync(scratch, ct);
 
-        /* The percent sign is a literal character, not a pattern: the name does not match the backlog table. */
-        foreach (var name in new[] { "no_such_relation_anywhere", "oversized%backlog" })
+        /* The percent sign is a literal character, not a pattern: the name does not match the relation. */
+        foreach (var name in new[] { "no_such_relation_anywhere", "zz%probe" })
         {
             using var none = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(dataSource, object_name: name));
             Assert.Equal("empty", none.RootElement.GetProperty("status").GetString());
@@ -122,13 +127,13 @@ INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_
 
         /* An object_kind other than 'other' asked for a different kind: the reply does not claim a check it skipped. */
         using var otherKind = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(
-            dataSource, object_kind: StoreSelfMetrics.TableObjectKind, object_name: "oversized_plan_backlog"));
+            dataSource, object_kind: StoreSelfMetrics.TableObjectKind, object_name: "zz_unenumerated_probe"));
         Assert.Equal("empty", otherKind.RootElement.GetProperty("status").GetString());
         Assert.DoesNotContain("un-enumerated relation", otherKind.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
 
         /* object_kind other is where the relation's bytes live, so the name is looked up there. */
         using var inOther = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(
-            dataSource, object_kind: StoreSelfMetrics.OtherObjectKind, object_name: "oversized_plan_backlog"));
+            dataSource, object_kind: StoreSelfMetrics.OtherObjectKind, object_name: "zz_unenumerated_probe"));
         Assert.Equal("unenumerated_relation", inOther.RootElement.GetProperty("view").GetString());
     }
 }
