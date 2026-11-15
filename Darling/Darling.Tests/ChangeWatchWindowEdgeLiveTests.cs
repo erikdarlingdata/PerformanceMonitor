@@ -290,9 +290,12 @@ public sealed class ChangeWatchWindowEdgeLiveTests
 
             var result = await ResultAsync(h.Connection, ct);
             var notes = result["notes"]!.AsArray().Select(n => (string)n!).ToArray();
-            Assert.Single(notes, n => n.Contains("no interval for query 77", StringComparison.Ordinal));
+            /* #8815: the reason is in not_measured only, so the notes carry the fallback and nothing that repeats a not-measured line. */
+            Assert.DoesNotContain(notes, n => n.Contains("no interval for query 77", StringComparison.Ordinal));
+            Assert.DoesNotContain(notes, n => n.StartsWith("not measured:", StringComparison.Ordinal));
             Assert.Single(notes, n => n.Contains("measured instead", StringComparison.Ordinal));
-            Assert.Single(result["not_measured"]!.AsArray(), n => ((string)n!["measure"]!).StartsWith("query_avg_duration_ms:Sales:77", StringComparison.Ordinal));
+            var notMeasured = Assert.Single(result["not_measured"]!.AsArray(), n => ((string)n!["measure"]!).StartsWith("query_avg_duration_ms:Sales:77", StringComparison.Ordinal))!;
+            Assert.Contains("no interval for query 77", (string)notMeasured["reason"]!, StringComparison.Ordinal);
         });
     }
 
@@ -410,6 +413,45 @@ public sealed class ChangeWatchWindowEdgeLiveTests
             var failedWatch = Assert.Single(JsonNode.Parse(await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, PgServerName, "failed", 20, cancellationToken: ct))!["watches"]!.AsArray())!;
             Assert.Equal(failed, (string)failedWatch["watch_id"]!);
             Assert.Contains("the read timed out", failedWatch["result_detail"]!.ToJsonString(), StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>#8815: a stored result written before the fix repeats every not-measured reason as a note, and its averages are raw doubles. The
+    /// answer rounds the figures by the one reply rule, drops the repeated lines from the notes and keeps a note that is not one of them.</summary>
+    [Fact]
+    public async Task GetChangeWatches_RoundsStoredAverages_AndDropsNotesThatRepeatNotMeasured()
+    {
+        await RunAsync(false, async (h, ct) =>
+        {
+            var (closed, _, _) = await SeedClosedOtherAndFailedAsync(h, ct);
+            var stored = new JsonObject
+            {
+                ["had_data"] = true,
+                ["notes"] = new JsonArray(
+                    "query_avg_duration_ms:Sales:77: the top 20 queries were measured instead",
+                    "not measured: query_avg_duration_ms:Sales:77: Query Store holds no interval for query 77",
+                    "not measured: cpu_percent: the cpu_utilization_stats collector stored no samples"),
+                ["not_measured"] = new JsonArray(
+                    new JsonObject { ["measure"] = "query_avg_duration_ms:Sales:77", ["reason"] = "Query Store holds no interval for query 77" },
+                    new JsonObject { ["measure"] = "cpu_percent", ["reason"] = "the cpu_utilization_stats collector stored no samples" }),
+                ["measures"] = new JsonArray(new JsonObject
+                {
+                    ["measure"] = "query_avg_duration_ms:Sales:77", ["unit"] = "ms", ["before"] = 109.81369347172361, ["after"] = 24.764770106032586,
+                    ["week_earlier"] = 6.233333333333333, ["moved"] = true,
+                }),
+            };
+            await ExecAsync(h.Connection, "UPDATE config.change_watches SET result_json = $2 WHERE watch_id = $1::uuid", ct, closed, stored.ToJsonString());
+
+            var json = await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, ServerName, "closed", 20, cancellationToken: ct);
+            Assert.Empty(McpReplyFloatNoiseLiveTests.NoisyNumbers(json));
+            var watch = Assert.Single(JsonNode.Parse(json)!["watches"]!.AsArray())!;
+            var measure = Assert.Single(watch["measures"]!.AsArray())!;
+            Assert.Equal(109.81, (double)measure["before"]!, 2);
+            Assert.Equal(6.23, (double)measure["week_earlier"]!, 2);
+
+            var notes = watch["result_detail"]!["notes"]!.AsArray().Select(n => (string)n!).ToArray();
+            Assert.Equal(["query_avg_duration_ms:Sales:77: the top 20 queries were measured instead"], notes);
+            Assert.Equal(2, watch["not_measured"]!.AsArray().Count);
         });
     }
 
