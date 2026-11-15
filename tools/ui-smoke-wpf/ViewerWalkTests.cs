@@ -3,6 +3,7 @@ using System.IO;
 using System.Threading.Tasks;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
+using FlaUI.Core.Tools;
 using Xunit;
 
 namespace UiSmokeWpf;
@@ -93,10 +94,11 @@ public sealed class ViewerWalkTests : WalkBase
     private void PerformanceTrendsPastWeek(AutomationElement main)
     {
         Step("Performance Trends sub-tab", () => SelectTab(main, "Performance Trends"));
+        // On a narrow screen the toolbar row that holds the picker puts it behind its "More controls" button (the overflow), so the
+        // walk looks for the picker where a person sees it and opens that button when it is not there.
         Step("open the time range picker", () =>
         {
-            var picker = WaitFor(() => main.FindAllDescendants(cf => cf.ByControlType(ControlType.Button).And(cf.ByName("Time range")))
-                .FirstOrDefault(b => !b.Properties.IsOffscreen.ValueOrDefault), "an on-screen Button named Time range");
+            var picker = FindRangePicker(main) ?? OpenOverflowForRangePicker(main);
             picker.AsButton().Invoke();
             return true;
         });
@@ -108,14 +110,65 @@ public sealed class ViewerWalkTests : WalkBase
             preset.AsButton().Invoke();
             return true;
         });
-        Step("the range reads Past week", () => WaitFor(() => main.FindAllDescendants(cf => cf.ByControlType(ControlType.Text).And(cf.ByName("Past week")))
-            .FirstOrDefault(), "the picker button reading Past week"));
+        // The picker's button text is in the tree only while its toolbar row shows it, so a closed overflow is opened again to read it.
+        Step("the range reads Past week", () =>
+        {
+            var reopened = false;
+            return WaitFor(() =>
+            {
+                var text = Automation.GetDesktop().FindAllDescendants(cf => cf.ByControlType(ControlType.Text).And(cf.ByName("Past week")))
+                    .FirstOrDefault();
+                if (text is null && !reopened)
+                {
+                    reopened = true;
+                    foreach (var t in OverflowToggles(main).Where(t => t.Patterns.Toggle.Pattern.ToggleState.Value != ToggleState.On))
+                    {
+                        t.Patterns.Toggle.Pattern.Toggle();
+                    }
+                }
+                return text;
+            }, "the picker button reading Past week");
+        });
+        foreach (var t in OverflowToggles(main).Where(t => t.Patterns.Toggle.Pattern.ToggleState.Value == ToggleState.On))
+        {
+            t.Patterns.Toggle.Pattern.Toggle();
+        }
         // The charts are drawn images with nothing in the automation tree to wait on, so this is a fixed settle time for the
         // reads and the redraw. A chart that is still empty after it shows as empty in the shot.
         System.Threading.Thread.Sleep(10000);
         Shot("20-viewer-performance-trends-past-week");
         Step("scroll the charts to the end", () => ScrollTo(Find(main, "PerformanceTrendsScroll"), -1, 100));
         Shot("21-viewer-performance-trends-executions");
+    }
+
+    /// <summary>The "Time range" picker button when a person can see it: some size, inside the main window.</summary>
+    private AutomationElement? FindRangePicker(AutomationElement main)
+    {
+        var window = main.BoundingRectangle;
+        var found = main.FindAllDescendants(cf => cf.ByControlType(ControlType.Button).And(cf.ByName("Time range")))
+            .FirstOrDefault(b => b.BoundingRectangle.Width > 0 && b.BoundingRectangle.Height > 0 && window.Contains(b.BoundingRectangle.Location));
+        Console.WriteLine("time range picker: " + (found is null ? "not in view" : found.BoundingRectangle.ToString()));
+        return found;
+    }
+
+    /// <summary>The visible "More controls" toggles, one per toolbar row that has overflowed.</summary>
+    private static AutomationElement[] OverflowToggles(AutomationElement main) =>
+        main.FindAllDescendants(cf => cf.ByName("More controls"))
+            .Where(t => t.BoundingRectangle.Width > 0 && t.Patterns.Toggle.IsSupported).ToArray();
+
+    /// <summary>Opens each toolbar row's overflow in turn until the picker shows, and returns it.</summary>
+    private AutomationElement OpenOverflowForRangePicker(AutomationElement main)
+    {
+        var toggles = OverflowToggles(main);
+        Console.WriteLine("time range picker: " + toggles.Length + " overflow buttons");
+        foreach (var toggle in toggles)
+        {
+            toggle.Patterns.Toggle.Pattern.Toggle();
+            var picker = Retry.WhileNull(() => FindRangePicker(main), TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(500), ignoreException: true).Result;
+            if (picker is not null) return picker;
+            toggle.Patterns.Toggle.Pattern.Toggle();
+        }
+        throw new Xunit.Sdk.XunitException("the Time range picker is neither in view nor in an overflow");
     }
 
     /// <summary>The Store Health main tab (#8842): waits for both grids and the "Last refreshed" stamp, presses Refresh once,
