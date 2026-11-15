@@ -294,11 +294,14 @@ FROM
               ON ns.oid = tbl.relnamespace
             LEFT JOIN pg_catalog.pg_stat_user_tables AS st
               ON st.relid = tbl.oid
-            LEFT JOIN pg_catalog.pg_stats AS sts
-              ON  sts.schemaname = ns.nspname
-              AND sts.tablename = tbl.relname
-              AND sts.inherited = false
-              AND sts.attname = att.attname
+            LEFT JOIN LATERAL (SELECT s.attname, s.null_frac, s.avg_width
+                               FROM pg_catalog.pg_stats AS s
+                               WHERE s.schemaname = ns.nspname
+                               AND   s.tablename = tbl.relname
+                               AND   s.attname = att.attname
+                               AND   s.inherited = false
+                               OFFSET 0) AS sts
+              ON true
             WHERE att.attnum > 0
               AND NOT att.attisdropped
               AND tbl.relkind IN ('r', 'm')
