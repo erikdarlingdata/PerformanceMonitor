@@ -69,7 +69,7 @@ public sealed class ViewerWalkTests : WalkBase
 
         Safely("viewer route dialog", () =>
         {
-            var settings = OpenWindow("Settings", () => Find(main, "SettingsSidebarButton").AsButton().Invoke(), "ManageNotificationRoutesButton");
+            var settings = OpenWindow("Settings", () => Find(main, "SettingsSidebarButton").AsButton().Invoke(), "SettingsTabs");
             Step("Delivery tab", () => SelectTabInWindow(settings, "Delivery"));
             var routes = OpenWindow("Notification Routes window",
                 () => Find(settings, "ManageNotificationRoutesButton").AsButton().Invoke(), "RoutesGrid");
@@ -77,7 +77,7 @@ public sealed class ViewerWalkTests : WalkBase
             ShotDialog("43-viewer-route-dialog", dialog);
             CloseWindow("close route dialog", dialog, "ScopeCombo");
             CloseWindow("close Notification Routes window", routes, "RoutesGrid");
-            CloseWindow("close Settings", settings, "ManageNotificationRoutesButton");
+            CloseWindow("close Settings", settings, "SettingsTabs");
         });
         ThrowDialogFailures();
     }
