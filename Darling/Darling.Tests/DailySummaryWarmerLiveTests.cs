@@ -149,6 +149,84 @@ public sealed class DailySummaryWarmerLiveTests
         }
     }
 
+    /// <summary>#8824: a visitor who opens a server an hour after the service started read the days before the retention
+    /// horizon from the store, because the block's sub-horizon segment is only good for an hour (#6809) and nothing had
+    /// re-read it since the first pass. The warmer's later passes now refresh that segment before it lapses, so the first
+    /// visit after the hour runs the same statements as the visit after it: the open day's read and nothing more. The
+    /// cache clock is moved by hand: pass one at noon, pass two one refresh interval later, the
+    /// visitor 75 minutes after noon, past the hour the first pass's read was good for.</summary>
+    [Fact]
+    public async Task LaterWarmerPass_RefreshesTheSubHorizonDays_SoTheFirstVisitAfterTheHourRunsNoMoreStatementsThanTheNext()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live daily-summary warmer test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerIdA, ServerA, ct);
+
+            var today = DateTime.UtcNow.Date;
+            var noon = today.AddHours(12);
+            var fakeNow = noon;
+            DarlingHealthReader.UseRangeCacheClockForTests(() => fakeNow);
+
+            /* The Overview's window starts 30 days back. The test means nothing unless the store's retention horizon puts
+               the window's first day under the sub-horizon floor, so it asks the store rather than assume the default. */
+            var probe = await DarlingHealthReader.GetDailySummaryRangeAsync(dataSource, ServerIdA, today.AddDays(-1), today.AddDays(1), cancellationToken: ct);
+            var windowStart = today.AddDays(-(DailySummaryWarmer.DaysBack - 1));
+            Assert.True(DailySummaryRangeCache.TrustFloorFor(probe.RetentionHorizon) > windowStart,
+                $"the store's retention horizon {probe.RetentionHorizon:yyyy-MM-dd} leaves no sub-horizon day in the window starting {windowStart:yyyy-MM-dd}");
+            DarlingHealthReader.UseRangeCacheClockForTests(() => fakeNow);
+
+            await PlantWaitAsync(connection, ServerIdA, ServerA, today.AddDays(-2).AddHours(10), 1000, ct);
+
+            var warmer = Warmers.Create(
+                servers: () => [(ServerIdA, ServerA)],
+                warm: (serverId, name, token) => Warmers.WarmAsync(dataSource, serverId, name, token),
+                enabled: () => true,
+                admission: null);
+            await Warmers.RunPassAsync(warmer, ct);
+
+            fakeNow = noon + DailySummaryWarmer.RefreshInterval;
+            await Warmers.RunPassAsync(warmer, ct);
+
+            fakeNow = noon.AddMinutes(75);
+            var first = await StatementsRunAsync(() => DarlingMcpHealthTools.GetDailySummaryRange(dataSource, ServerA, 31));
+            var second = await StatementsRunAsync(() => DarlingMcpHealthTools.GetDailySummaryRange(dataSource, ServerA, 31));
+
+            Assert.True(first == second,
+                $"the first visit after the hour ran {first} statements and the visit after it ran {second}: the first one re-read the days before the retention horizon");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            DarlingHealthReader.ResetRangeCacheForTests();
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>How many store statements the read ran, counted the way the slow-read log counts them.</summary>
+    private static async Task<int> StatementsRunAsync(Func<Task<string>> read)
+    {
+        ReadStatementCapture.Register();
+        using var opened = ReadScope.Open(null);
+        opened.Scope.CaptureStatements = true;
+        await read();
+        return opened.Scope.StatementTotal;
+    }
+
     /// <summary>The closed day's total wait in ms from the FIRST <c>get_daily_summary_range</c> call this test makes for
     /// the server: the Overview's own read, 31 days ending today with no anchor.</summary>
     private static async Task<decimal> ClosedDayWaitMsAsync(NpgsqlDataSource dataSource, string serverName, DateTime closedDay)

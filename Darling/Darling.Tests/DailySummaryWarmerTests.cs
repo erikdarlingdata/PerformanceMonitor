@@ -38,7 +38,7 @@ public sealed class DailySummaryWarmerTests
         nowUtc.Date.AddDays(1).Add(Warmers.PassMargin);
 
     [Fact]
-    public async Task RunAsync_WarmsEveryServerOnceAfterTheStartDelay_ThenWaitsForTheDayBoundaryPlusGrace()
+    public async Task RunAsync_WarmsEveryServerOnceAfterTheStartDelay_ThenWaitsTheRefreshInterval()
     {
         var harness = new Harness(Start) { StopAfterDelays = 2 };
 
@@ -47,22 +47,24 @@ public sealed class DailySummaryWarmerTests
         var passAt = Start + Warmers.StartDelay;
         Assert.Equal(Warmers.StartDelay, harness.Delays[0]);
         Assert.Equal([(1, "alpha", passAt), (2, "beta", passAt)], harness.Warmed);
-        Assert.Equal(NextBoundary(passAt) - passAt, harness.Delays[1]);
+        Assert.Equal(Warmers.RefreshInterval, harness.Delays[1]); // #8824: not the day boundary 14 hours away
     }
 
     [Fact]
-    public async Task RunAsync_RunsASecondPassAtTheBoundary_AndRebuildsEveryServerThere()
+    public async Task RunAsync_RepeatsEveryRefreshInterval_AndRunsAPassAtTheBoundaryItself()
     {
-        var harness = new Harness(Start) { StopAfterDelays = 3 };
+        /* Start 23:20: the first pass is at 23:22, the next at 23:52, and the one after lands on the boundary (00:01), not
+           a whole interval later, so the new day's key is built the minute it is in use. */
+        var harness = new Harness(new DateTime(2026, 11, 8, 23, 20, 0, DateTimeKind.Utc)) { StopAfterDelays = 4 };
 
         await Warmers.RunAsync(harness.Build(TwoServers), harness.Cts.Token);
 
-        var firstPassAt = Start + Warmers.StartDelay;
-        var secondPassAt = NextBoundary(firstPassAt);
-        Assert.Equal(new DateTime(2026, 11, 9, 0, 1, 0, DateTimeKind.Utc), secondPassAt);
-        Assert.Equal(4, harness.Warmed.Count);
-        Assert.Equal([secondPassAt, secondPassAt], harness.Warmed.Skip(2).Select(w => w.At).ToArray());
-        Assert.Equal(TimeSpan.FromDays(1), harness.Delays[2]); // the pass after that is one whole day later
+        var boundary = new DateTime(2026, 11, 9, 0, 1, 0, DateTimeKind.Utc);
+        Assert.Equal(
+            [new DateTime(2026, 11, 8, 23, 22, 0, DateTimeKind.Utc), new DateTime(2026, 11, 8, 23, 52, 0, DateTimeKind.Utc), boundary],
+            harness.Warmed.Where(w => w.ServerId == 1).Select(w => w.At).ToArray());
+        Assert.Equal(boundary - new DateTime(2026, 11, 8, 23, 52, 0, DateTimeKind.Utc), harness.Delays[2]);
+        Assert.Equal(Warmers.RefreshInterval, harness.Delays[3]);
     }
 
     [Fact]
@@ -113,7 +115,8 @@ public sealed class DailySummaryWarmerTests
         Assert.Equal(Warmers.RetryDelay, harness.Delays[1]);
         Assert.Equal(Warmers.RetryDelay + Warmers.RetryDelay, harness.Delays[2]);
         var thirdPassAt = Start + Warmers.StartDelay + harness.Delays[1] + harness.Delays[2];
-        Assert.Equal(NextBoundary(thirdPassAt) - thirdPassAt, harness.Delays[3]);
+        Assert.True(NextBoundary(thirdPassAt) - thirdPassAt > Warmers.RefreshInterval);
+        Assert.Equal(Warmers.RefreshInterval, harness.Delays[3]);
         Assert.Equal(3, harness.Warmed.Count(w => w.ServerId == 1)); // alpha is warmed on every pass, a cache hit after the first
         Assert.Single(harness.Warmed, w => w.ServerId == 2);
     }
@@ -185,7 +188,7 @@ public sealed class DailySummaryWarmerTests
 
         Assert.Equal([1, 1], runningDuringWarm); // each server's read holds exactly one slot
         Assert.Equal(0, admission.Stats().Running); // and the pass leaves none held
-        Assert.Equal(NextBoundary(Start + Warmers.StartDelay) - (Start + Warmers.StartDelay), harness.Delays[1]);
+        Assert.Equal(Warmers.RefreshInterval, harness.Delays[1]);
     }
 
     [Fact]
@@ -269,7 +272,7 @@ public sealed class DailySummaryWarmerTests
         Assert.True(harness.Delays[1] <= Warmers.PassMargin,
             $"the pass after the straddle waits {harness.Delays[1]}: the servers warmed before midnight sit under the old day's key until then");
         Assert.Equal([midnight.Add(Warmers.PassMargin), midnight.Add(Warmers.PassMargin)], harness.Warmed.Skip(2).Select(w => w.At).ToArray());
-        Assert.Equal(TimeSpan.FromDays(1), harness.Delays[2]);
+        Assert.Equal(Warmers.RefreshInterval, harness.Delays[2]);
     }
 
     /// <summary>A fake clock, a recording delay that advances it, and a warm callback that records each call.</summary>
@@ -327,6 +330,7 @@ internal static class Warmers
     public static TimeSpan StartDelay => DailySummaryWarmer.StartDelay;
     public static TimeSpan PassMargin => DailySummaryWarmer.PassMargin;
     public static TimeSpan RetryDelay => DailySummaryWarmer.RetryDelay;
+    public static TimeSpan RefreshInterval => DailySummaryWarmer.RefreshInterval;
 
     public static DateTime NextPassUtc(DateTime nowUtc) => DailySummaryWarmer.NextPassUtc(nowUtc);
 
