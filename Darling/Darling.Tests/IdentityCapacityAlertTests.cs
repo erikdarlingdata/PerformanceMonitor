@@ -194,6 +194,60 @@ public sealed class IdentityCapacityAlertTests
         Assert.DoesNotContain("Old", fired.DetailText, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #8818: a percent override of 100 is the mute, and it still quiets the database now that days are graded. Archive is set to 100 with a column about
+    /// 3 days from exhaustion: no alert. The same column in a database with no override raises a critical one. A server-wide 100 mutes the same way.
+    /// </summary>
+    [Fact]
+    public async Task APercentOverrideOf100_MutesTheDaysGrade_OfThatDatabase_AndAnotherDatabaseStillAlerts()
+    {
+        var threeDays = Racing("Archive", "Hot", 1_000_000_000, 650_000_000);
+
+        var muted = new DarlingSelfAlertTests.Harness
+        {
+            IdentityCapacityEnabled = true,
+            ResolveThreshold = (wire, _, database, global) => database == "Archive" ? 100 : global,
+        };
+        await muted.Build().ApplyIdentityCapacityAsync(ServerId, Name, Read(threeDays), Ct);
+        Assert.Empty(muted.Deliverer.Outcomes);
+
+        var open = new DarlingSelfAlertTests.Harness { IdentityCapacityEnabled = true };
+        await open.Build().ApplyIdentityCapacityAsync(ServerId, Name, Read(threeDays), Ct);
+        var fired = Assert.Single(open.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Contains("critical on days left", fired.DetailText, StringComparison.Ordinal);
+
+        var serverWide = new DarlingSelfAlertTests.Harness
+        {
+            IdentityCapacityEnabled = true,
+            ResolveThreshold = (wire, _, _, global) => 100,
+        };
+        await serverWide.Build().ApplyIdentityCapacityAsync(ServerId, Name, Read(threeDays), Ct);
+        Assert.Empty(serverWide.Deliverer.Outcomes);
+    }
+
+    /// <summary>#8818: a column at 100 percent is still named under the mute, as it was before days were graded, and a critical bar of 100 alone quiets only the critical days grade.</summary>
+    [Fact]
+    public async Task TheMute_StillNamesAFullColumn_AndACriticalBarOf100_LeavesTheWarningDaysGrade()
+    {
+        var full = new DarlingSelfAlertTests.Harness
+        {
+            IdentityCapacityEnabled = true,
+            ResolveThreshold = (wire, _, _, global) => 100,
+        };
+        await full.Build().ApplyIdentityCapacityAsync(ServerId, Name, Read(Column("Sales", "Full", 100)), Ct);
+        Assert.Equal(AlertSeverityLevel.Critical, Assert.Single(full.Deliverer.Outcomes).Severity);
+
+        var criticalMuted = new DarlingSelfAlertTests.Harness
+        {
+            IdentityCapacityEnabled = true,
+            ResolveThreshold = (wire, _, _, global) => wire == DarlingThresholdKeys.IdentityCapacityCritical ? 100 : global,
+        };
+        await criticalMuted.Build().ApplyIdentityCapacityAsync(ServerId, Name, Read(Racing("Sales", "Hot", 1_000_000_000, 650_000_000)), Ct);
+        var fired = Assert.Single(criticalMuted.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+    }
+
     [Fact]
     public void TheBandWithBars_MatchesTheDefaultBandAtTheDefaultBars_AndMovesWithTheBars()
     {

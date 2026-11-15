@@ -5440,6 +5440,32 @@ internal sealed class DarlingSelfAlertEvaluator
         }
     }
 
+    /// <summary>
+    /// The 100 percent bar is the mute: a user sets a database's (or server's) warning bar to 100 to quiet it, and sets the critical bar to 100 to quiet
+    /// only the critical page. The days-left grade (#8818) honors it the same way, so a muted bar is never raised by days. A days grade that would
+    /// land on a muted bar drops to the next bar that is not muted. The tool and the cards keep the true band: only the alert is quieted.
+    /// </summary>
+    internal static IdentityBand MutedGrade(IdentityBand graded, double percent, int warning, int critical)
+    {
+        if (graded.Reason != IdentityCapacityMath.ReasonDays)
+        {
+            return graded;
+        }
+
+        if (warning >= 100)
+        {
+            return IdentityCapacityMath.Grade(percent, null, warning, critical);
+        }
+
+        if (graded.Band == IdentityCapacityMath.BandCritical && critical >= 100)
+        {
+            var byPercent = IdentityCapacityMath.Grade(percent, null, warning, critical);
+            return byPercent.Band == IdentityCapacityMath.BandWarning ? byPercent : new IdentityBand(IdentityCapacityMath.BandWarning, IdentityCapacityMath.ReasonDays);
+        }
+
+        return graded;
+    }
+
     /// <summary>The scans the Identity Capacity alert judges: seven days, the window <c>get_identity_capacity</c> reads by default, so a database
     /// the pass budget has not reached again keeps the answer of its last scan.</summary>
     internal static readonly TimeSpan IdentityCapacityWindow = TimeSpan.FromHours(168);
@@ -5495,7 +5521,7 @@ internal sealed class DarlingSelfAlertEvaluator
             var warning = Math.Clamp(_resolveThreshold(DarlingThresholdKeys.IdentityCapacityWarning, key, column.DatabaseName, globalWarning), 1, 100);
             var critical = Math.Max(warning, Math.Clamp(_resolveThreshold(DarlingThresholdKeys.IdentityCapacityCritical, key, column.DatabaseName, globalCritical), 1, 100));
             /* #8818: the percent grade against this scope's bars and the days-left grade against the fixed days bars, the worse winning. */
-            var graded = IdentityCapacityMath.Grade(percent, column.Exhaustion?.DaysLeft, warning, critical);
+            var graded = MutedGrade(IdentityCapacityMath.Grade(percent, column.Exhaustion?.DaysLeft, warning, critical), percent, warning, critical);
             if (graded.Band != IdentityCapacityMath.BandOk)
             {
                 hits.Add((column, percent, graded.Band, graded.Reason, warning, critical));

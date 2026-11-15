@@ -560,6 +560,11 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             Assert.Equal("Burning", fleet.WorstTable?.Split('.').Last());
             Assert.Equal("days", fleet.WorstBandReason);
             Assert.InRange(fleet.WorstDaysToExhaustion!.Value, 5, 7);
+            /* By hand: 600,000,000 values in 71 hours is 202,816,901.4 a day, and 1,147,483,647 left at that rate is 5.658 days. The card and the tool read the same oldest sample. */
+            Assert.Equal(5.7, fleet.WorstDaysToExhaustion!.Value);
+            Assert.Equal(5.7, columns["Burning"].GetProperty("days_to_exhaustion").GetDouble());
+            Assert.Equal(202816901.4, columns["Burning"].GetProperty("rate_per_day").GetDouble());
+            Assert.Equal(17.4, columns["Racing"].GetProperty("days_to_exhaustion").GetDouble());
 
             await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(_storeConnectionString);
             var viewerCard = await viewer.GetIdentityCapacityCardAsync(DataId, now, ct);
