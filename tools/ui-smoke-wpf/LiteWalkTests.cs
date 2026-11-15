@@ -44,8 +44,8 @@ public sealed class LiteWalkTests : WalkBase
             item.AsMenuItem().Invoke();
             return true;
         });
-        var window = Step("Store Health window", () => WaitFor(() => App.GetAllTopLevelWindows(Automation)
-            .FirstOrDefault(w => w.Title == "Store Health"), "a top-level window titled Store Health"));
+        var window = Step("Store Health window", () => WaitFor(() => Automation.GetDesktop()
+            .FindFirstChild(cf => cf.ByControlType(ControlType.Window).And(cf.ByName("Store Health")))?.AsWindow(), "a top-level window titled Store Health"));
         Step("Store Health read", () => WaitFor(() =>
             window.FindFirstDescendant(cf => cf.ByAutomationId("StatusText")) is { } status && status.Name.StartsWith("Read at", StringComparison.Ordinal)
                 ? status : null, "StatusText reading 'Read at'"));
