@@ -79,7 +79,6 @@ public sealed class LiteWalkTests : WalkBase
             window.Close();
             return true;
         });
-        Shot("22-after-store-health");
     }
 
     private static string FindLiteExe()
