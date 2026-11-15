@@ -26,6 +26,61 @@ public sealed class LiteWalkTests : WalkBase
 
     protected override string FindExe() => FindLiteExe();
 
+    /// <summary>The Store Health window (#8788): opened from the sidebar's More menu, shown once its read has finished, then
+    /// closed. The theme is Dark (Lite's default), so the shots before and after it show the dimmed sub-tab headers (#8770)
+    /// and the access keys in the tab headers (#8768).</summary>
+    protected override void ExtraSteps(AutomationElement main)
+    {
+        Step("More menu", () =>
+        {
+            Find(main, "MoreButton").AsButton().Invoke();
+            return true;
+        });
+        Step("Store Health menu item", () =>
+        {
+            var item = WaitFor(() => Automation.GetDesktop()
+                .FindFirstDescendant(cf => cf.ByControlType(ControlType.MenuItem).And(cf.ByName("Store Health"))), "a MenuItem named Store Health");
+            Shot("20-more-menu");
+            item.AsMenuItem().Invoke();
+            return true;
+        });
+        // The window is found through its own StoreSentenceText, from the desktop, then walked up to its Window: the
+        // desktop-child lookup by title did not find it on the runner (the shot shows it open).
+        var window = Step("Store Health window", () =>
+        {
+            try
+            {
+                var text = WaitFor(() => Automation.GetDesktop().FindFirstDescendant(cf => cf.ByAutomationId("StoreSentenceText")),
+                    "StoreSentenceText on the desktop");
+                var w = text;
+                while (w is not null && w.ControlType != ControlType.Window) w = w.Parent;
+                return (w ?? throw new Xunit.Sdk.XunitException("StoreSentenceText has no Window ancestor")).AsWindow();
+            }
+            catch
+            {
+                foreach (var c in Automation.GetDesktop().FindAllChildren())
+                    Console.WriteLine("desktop child: " + c.ControlType + " '" + c.Name + "' " + c.Properties.ProcessId.ValueOrDefault);
+                throw;
+            }
+        });
+        Step("Store Health read", () => WaitFor(() =>
+            window.FindFirstDescendant(cf => cf.ByAutomationId("StatusText")) is { } status && status.Name.StartsWith("Read at", StringComparison.Ordinal)
+                ? status : null, "StatusText reading 'Read at'"));
+        Step("Store Health sections", () =>
+        {
+            foreach (var id in new[] { "StoreSentenceText", "StoreFactsText", "ArchiveFactsText", "ArchiveSentenceText", "HistoryGrid", "RefreshButton" })
+                Find(window, id);
+            return true;
+        });
+        window.Focus();
+        Shot("21-store-health-dark");
+        Step("close Store Health", () =>
+        {
+            window.Close();
+            return true;
+        });
+    }
+
     private static string FindLiteExe()
     {
         var fromEnv = Environment.GetEnvironmentVariable("LITE_EXE");
