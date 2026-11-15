@@ -78,6 +78,54 @@ INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_
         Assert.Equal(Backlog, relation.GetProperty("relation").GetString());
         Assert.True(relation.GetProperty("total_bytes").GetInt64() > 0);
         Assert.Contains("no growth history", root.GetProperty("note").GetString(), StringComparison.Ordinal);
+
+        /* as_of is the last sweep's time and total_bytes is read live, so the reply carries the time of that read under its own name. */
+        var asOf = DateTime.Parse(root.GetProperty("as_of").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind);
+        var sizeReadAt = DateTime.Parse(root.GetProperty("size_read_at").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind);
+        Assert.True(sizeReadAt > asOf, $"size_read_at {sizeReadAt:o} is not after the sweep time as_of {asOf:o}");
+        Assert.True(sizeReadAt <= DateTime.UtcNow);
+    }
+
+    [Theory]
+    [InlineData("zz_unenumerated_probe", 1, "collect.zz_unenumerated_probe")]
+    [InlineData("collect.zz_unenumerated_probe", 1, "collect.zz_unenumerated_probe")]
+    [InlineData("zz_unenumerated_pro", 2, null)]
+    [InlineData("zz%probe", 0, null)]
+    public async Task ThePlainStoreLookup_FindsTheSameRowsAsTheTimescaleDbLookup_AgainstDevPostgres(string objectName, int expectedMatched, string? expectedFirst)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #8817 test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
+        await using var dataSource = await SeededStoreAsync(scratch, ct);
+
+        /* A second table whose name contains the first one's: an exact name must still answer with the one table, a partial name with both. */
+        await using (var connection = await dataSource.OpenConnectionAsync(ct))
+        await using (var second = new NpgsqlCommand("CREATE TABLE collect.zz_unenumerated_probe_two AS SELECT g FROM generate_series(1, 10) AS g", connection))
+        {
+            await second.ExecuteNonQueryAsync(ct);
+        }
+
+        var plain = new DarlingStoreMetricsReader.JobExecutionLoggingReading(DarlingStoreMetricsReader.JobExecutionLoggingStatus.NotRegistered, null, null, null);
+        var timescale = new DarlingStoreMetricsReader.JobExecutionLoggingReading(DarlingStoreMetricsReader.JobExecutionLoggingStatus.On, null, null, null);
+
+        var plainFound = await DarlingStoreMetricsReader.GetUnenumeratedByNameAsync(dataSource, plain, objectName, 10, ct);
+        var timescaleFound = await DarlingStoreMetricsReader.GetUnenumeratedByNameAsync(dataSource, timescale, objectName, 10, ct);
+
+        Assert.NotNull(plainFound);
+        Assert.NotNull(timescaleFound);
+        Assert.Equal(expectedMatched, plainFound!.Matched);
+        Assert.Equal(expectedMatched, plainFound.Relations.Count);
+        if (expectedFirst is not null)
+        {
+            Assert.Equal(expectedFirst, plainFound.Relations.Single().Relation);
+        }
+
+        Assert.Equal(
+            timescaleFound!.Relations.Select(r => (r.Relation, r.RelKind)).ToArray(),
+            plainFound.Relations.Select(r => (r.Relation, r.RelKind)).ToArray());
+        Assert.Equal(timescaleFound.Matched, plainFound.Matched);
     }
 
     [Fact]
