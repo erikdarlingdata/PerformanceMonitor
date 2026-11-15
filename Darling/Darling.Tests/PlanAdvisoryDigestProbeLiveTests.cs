@@ -37,6 +37,13 @@ public sealed class PlanAdvisoryDigestProbeLiveTests
     private const int ServerId = 85701;
     private const int Digests = 200;
 
+    private const string InsertHead = @"INSERT INTO query_stats
+                      (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle,
+                       query_text, query_plan_xml, query_plan_digest, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads,
+                       delta_logical_writes, delta_physical_reads, min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time,
+                       min_dop, max_dop, sample_interval_seconds)
+                  ";
+
     /// <summary>The per-row guard (a correlated EXISTS per snapshot row): the reference the plan fetch's results are held to.</summary>
     private const string PerRowGuardSql = @"
 SELECT COALESCE(r.query_plan_xml, d.query_plan_xml) AS query_plan_xml, d.query_plan_gz
@@ -96,6 +103,35 @@ ORDER BY r.delta_worker_time DESC";
             /* Fewer probes than distinct digests: the walk stops at the tenth plan with one, and beyond it only the missed plans' rows are probed. */
             Assert.True(newProbes.Loops < Digests, $"the plan fetch probed query_plan_dim {newProbes.Loops} times for {Digests} distinct digests (the per-row statement probed {oldProbes.Loops} times)");
             Assert.False(newProbes.WholeScan, "the plan fetch scans query_plan_dim whole instead of probing it by digest");
+        });
+
+    /// <summary>
+    /// A NULL cost sorts first, so ten plans whose only row has no cost and has a plan are the ten the per-row statement returns, in an order it leaves to ties.
+    /// The walk finds them first, and no other plan can outrank a tenth hit with no cost, so the fetch probes no other plan's rows.
+    /// </summary>
+    [Fact]
+    public Task TheFetch_ProbesNoOtherPlan_WhenTheTenthHitHasNoCost() =>
+        WithSeedAsync(async (connection, start, end, ct) =>
+        {
+            /* Keys 2001..2010: one row each with no cost, on digests 13, 23, .. 103 (text). */
+            await ExecAsync(connection, ct,
+                InsertHead + @"SELECT $1 + 9000000 + k * 100, $2, $3, 'a8570', 'PlanDb', '0xH' || k, '0xP' || k, '0xS' || k, '0xL' || k,
+                         NULL, NULL, sha256(convert_to('a8570p-d' || ((k - 2000) * 10 + 3), 'UTF8')),
+                         10, NULL, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
+                  FROM generate_series(2001, 2010) k",
+                CollectionIdGenerator.Next(), end.AddMinutes(-15), ServerId);
+            await ExecAsync(connection, ct, "ANALYZE query_stats");
+
+            var expected = await RowsAsync(connection, PerRowGuardSql, start, end, ct);
+            var actual = await RowsAsync(connection, PgFactCollector.PlanAdvisorySql, start, end, ct);
+            var costless = Enumerable.Range(1, 10).Select(n => $"<ShowPlanXML>plan {n * 10 + 3}</ShowPlanXML>|<null>").Order(StringComparer.Ordinal).ToList();
+            Assert.Equal(costless, expected.Order(StringComparer.Ordinal).ToList());
+            Assert.Equal(costless, actual.Order(StringComparer.Ordinal).ToList());
+
+            var probes = await DimensionProbesAsync(connection, PgFactCollector.PlanAdvisorySql, start, end, ct);
+            /* Ten probes find the ten hits and ten read their content; every other plan's rows would be thousands. */
+            Assert.True(probes.Loops <= 30, $"the plan fetch probed query_plan_dim {probes.Loops} times when its ten hits have no cost");
+            Assert.False(probes.WholeScan, "the plan fetch scans query_plan_dim whole instead of probing it by digest");
         });
 
     /// <summary>
@@ -253,23 +289,17 @@ ORDER BY r.delta_worker_time DESC";
 
             var end = LiveClock.Now();
             var start = end.AddHours(-4);
-            const string insertHead = @"INSERT INTO query_stats
-                      (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle,
-                       query_text, query_plan_xml, query_plan_digest, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads,
-                       delta_logical_writes, delta_physical_reads, min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time,
-                       min_dop, max_dop, sample_interval_seconds)
-                  ";
             var id = CollectionIdGenerator.Next();
             /* Bulk: key g (1..400), snapshot r (0..49), digest ((g - 1) % 200) + 1. */
             await ExecAsync(connection, ct,
-                insertHead + @"SELECT $1 + g * 100 + r, $2 - (r * interval '4 minutes'), $3, 'a8570', 'PlanDb', '0xH' || g, '0xP' || g, '0xS' || g, '0xL' || g,
+                InsertHead + @"SELECT $1 + g * 100 + r, $2 - (r * interval '4 minutes'), $3, 'a8570', 'PlanDb', '0xH' || g, '0xP' || g, '0xS' || g, '0xL' || g,
                          NULL, NULL, sha256(convert_to('a8570p-d' || (((g - 1) % 200) + 1), 'UTF8')),
                          10, 1000 + g * 100 + r, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
                   FROM generate_series(1, 400) g CROSS JOIN generate_series(0, 49) r",
                 id, end.AddMinutes(-10), ServerId);
             /* Special keys. Key 1001: row 0 is the costliest and its digest (10) has no dimension row; rows 1+ carry digest 3 (text). */
             await ExecAsync(connection, ct,
-                insertHead + @"SELECT $1 + 200000 + k * 100 + r, $2 - (r * interval '4 minutes'), $3, 'a8570', 'PlanDb', '0xH' || k, '0xP' || k, '0xS' || k, '0xL' || k,
+                InsertHead + @"SELECT $1 + 200000 + k * 100 + r, $2 - (r * interval '4 minutes'), $3, 'a8570', 'PlanDb', '0xH' || k, '0xP' || k, '0xS' || k, '0xL' || k,
                          NULL,
                          CASE WHEN k = 1005 THEN '<ShowPlanXML>own column plan</ShowPlanXML>' END,
                          CASE k WHEN 1001 THEN sha256(convert_to('a8570p-d' || CASE WHEN r = 0 THEN 10 ELSE 3 END, 'UTF8'))
@@ -282,14 +312,14 @@ ORDER BY r.delta_worker_time DESC";
                 id, end.AddMinutes(-10), ServerId);
             /* Key 1006: row 0 is the costliest (40,700, among the bulk keys' costliest rows) and its digest (10) has no dimension row; row 1 (40,500) carries digest 4 (text). */
             await ExecAsync(connection, ct,
-                insertHead + @"SELECT $1 + 200000 + 1006 * 100 + r, $2 - (r * interval '4 minutes'), $3, 'a8570', 'PlanDb', '0xH1006', '0xP1006', '0xS1006', '0xL1006',
+                InsertHead + @"SELECT $1 + 200000 + 1006 * 100 + r, $2 - (r * interval '4 minutes'), $3, 'a8570', 'PlanDb', '0xH1006', '0xP1006', '0xS1006', '0xL1006',
                          NULL, NULL, sha256(convert_to('a8570p-d' || CASE WHEN r = 0 THEN 10 ELSE 4 END, 'UTF8')),
                          10, 40700 - r * 200, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
                   FROM generate_series(0, 1) r",
                 id, end.AddMinutes(-10), ServerId);
             /* Other servers' rows in the same window (#8570): each has a plan digest and no plan of its own, the rows the partial index covers. */
             await ExecAsync(connection, ct,
-                insertHead + @"SELECT $1 + 400000 + (s - 85701)::bigint * 100000 + g * 100 + r, $2 - (r * interval '4 minutes'), s, 'a8570o', 'PlanDb', '0xH' || g, '0xP' || g, '0xS' || g, '0xL' || g,
+                InsertHead + @"SELECT $1 + 400000 + (s - 85701)::bigint * 100000 + g * 100 + r, $2 - (r * interval '4 minutes'), s, 'a8570o', 'PlanDb', '0xH' || g, '0xP' || g, '0xS' || g, '0xL' || g,
                          NULL, NULL, sha256(convert_to('a8570p-d' || (((g - 1) % 200) + 1), 'UTF8')),
                          10, 1000 + g * 100 + r, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
                   FROM generate_series(85702, 85741) s CROSS JOIN generate_series(1, 200) g CROSS JOIN generate_series(0, 24) r",

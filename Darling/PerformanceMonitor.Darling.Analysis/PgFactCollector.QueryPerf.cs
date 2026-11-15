@@ -1545,16 +1545,21 @@ hits AS MATERIALIZED
 ),
 misses AS MATERIALIZED
 (
-    /* The plans that are not hits and whose costliest row costs at least the tenth hit, or every plan that is not
-       a hit when there are fewer than ten. Such a plan may still place through a cheaper row that has a plan, or
-       through a costliest row tied with the tenth hit that the walk did not reach. A plan whose costliest row costs
-       less cannot place: none of its rows costs more. A NULL cost sorts first, so it always qualifies. */
+    /* The plans that are not hits and may still place: every one when there are fewer than ten hits, else those
+       whose costliest row costs at least the tenth hit or has no cost. Such a plan may still place through a cheaper
+       row that has a plan, or through a costliest row tied with the tenth hit that the walk did not reach. A plan
+       whose costliest row costs less cannot place: none of its rows costs more. A NULL cost sorts first, so the
+       tenth hit's cost is the hits' lowest that is not NULL (min skips NULLs), and a plan whose costliest row has no
+       cost was probed before it. When the tenth hit has no cost either, a missed plan can at best tie it, and the
+       per-row order breaks that tie arbitrarily too: none qualifies, so rows with no cost, however many, are not
+       probed again. */
     SELECT c.plan_id
     FROM cand AS c
+    CROSS JOIN (SELECT count(*) AS hit_count, min(h.delta_worker_time) AS floor_cost FROM hits AS h) AS w
     WHERE c.plan_rank = 1
     AND   c.plan_id NOT IN (SELECT h.plan_id FROM hits AS h)
-    AND   (c.delta_worker_time IS NULL
-           OR c.delta_worker_time >= COALESCE((SELECT min(h.delta_worker_time) FROM hits AS h HAVING count(*) = 10), c.delta_worker_time))
+    AND   (w.hit_count < 10
+           OR (w.floor_cost IS NOT NULL AND (c.delta_worker_time IS NULL OR c.delta_worker_time >= w.floor_cost)))
 ),
 demoted AS
 (
