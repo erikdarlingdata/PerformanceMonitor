@@ -3618,23 +3618,30 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     /// <summary>
-    /// A live process whose image is named postgres (a copy of a harmless system tool that idles for a
-    /// minute), which is all the liveness check can see of a real postmaster. Killed on dispose.
+    /// A live process whose image is named postgres (the stand-in program on Windows, a copy of /bin/sleep
+    /// elsewhere, either one idling for a minute), which is all the liveness check can see of a real postmaster. Killed on dispose.
     /// </summary>
     private static ProcessHandle StartProcessNamedPostgres(string directory)
     {
         Directory.CreateDirectory(directory);
         var windows = OperatingSystem.IsWindows();
-        var source = windows ? Path.Combine(Environment.SystemDirectory, "PING.EXE") : "/bin/sleep";
         var image = Path.Combine(directory, windows ? "postgres.exe" : "postgres");
-        File.Copy(source, image, overwrite: true);
+        if (windows)
+        {
+            StandinProcess.CopyTo(directory, "postgres.exe");
+        }
+        else
+        {
+            File.Copy("/bin/sleep", image, overwrite: true);
+        }
+
         if (OperatingSystem.IsMacOS())
         {
             using var sign = System.Diagnostics.Process.Start("codesign", ["-f", "-s", "-", image]);
             sign!.WaitForExit();
         }
 
-        var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(image, windows ? "-n 60 127.0.0.1" : "60")
+        var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(image, windows ? StandinProcess.SleepArguments(60) : "60")
         {
             UseShellExecute = false,
             CreateNoWindow = true,
