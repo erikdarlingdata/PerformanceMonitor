@@ -373,8 +373,9 @@ public partial class ViewerServerTab : UserControl
     /// Loads the ACTIVE inner tab, with the overlap guard mirroring MainWindow's aggregate-tab loop.
     /// If the inner tab switches while a load is in flight, the triggering event bounces off the guard,
     /// so after each load we loop when the selection moved on and load again — leaving no inner tab
-    /// stranded. A trigger that arrives mid-load (the auto-refresh tick, an inner-tab switch) sets
-    /// <see cref="_refreshRequested"/> instead of being dropped, so the running loop reloads once more.
+    /// stranded. A trigger that arrives mid-load (a range pick, an inner-tab switch, a filter change) sets
+    /// <see cref="_refreshRequested"/> instead of being dropped, so the running loop reloads once more. The auto-refresh tick is not
+    /// such a trigger: it is dropped before it gets here while a load runs (<see cref="AutoRefreshTickAsync"/>, #8810).
     /// <para>The load runs through <see cref="Dispatcher.Invoke{TResult}(Func{TResult})"/>, which on this tab's own thread runs it at once
     /// with the dispatcher's synchronization context installed, so the code after each of its awaits resumes on this thread whatever
     /// context the caller's thread had. The app's UI thread has that context already, and the load runs as it would without the call. A
