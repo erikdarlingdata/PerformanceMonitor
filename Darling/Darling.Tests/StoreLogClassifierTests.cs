@@ -1350,11 +1350,38 @@ public class StoreLogClassifierTests
         var group = Assert.Single(census.Groups);
         Assert.Equal("autovacuum_cancel", group.EventClass);
         Assert.True(StoreLogClassifier.IsRetainedClass(group.EventClass));
-        Assert.Equal("canceling autovacuum task", group.MessageText);
-        Assert.Equal("pg_toast_17428", StoreLogClassifier.ToastRelationNameOf(group.SampleLine));
+        Assert.Equal("canceling autovacuum task: darling.pg_toast.pg_toast_17428", group.MessageText);
+        var relation = StoreLogClassifier.ToastRelationOf(group.SampleLine);
+        Assert.Equal(new StoreLogClassifier.ToastRelationRef("darling", "pg_toast_17428"), relation);
+        Assert.Equal("darling.pg_toast.pg_toast_17428", relation!.Value.Qualified);
 
-        Assert.Null(StoreLogClassifier.ToastRelationNameOf(DefaultPrefix + "ERROR:  canceling autovacuum task\n"));
-        Assert.Null(StoreLogClassifier.ToastRelationNameOf(null));
+        Assert.Null(StoreLogClassifier.ToastRelationOf(DefaultPrefix + "ERROR:  canceling autovacuum task\n"));
+        Assert.Null(StoreLogClassifier.ToastRelationOf(null));
+    }
+
+    /// <summary>
+    /// #8822: an autovacuum cancel is keyed on the relation its CONTEXT names, so two relations in one capture are two
+    /// rows with their own counts. A row an older build stored under the bare message keeps that key.
+    /// </summary>
+    [Fact]
+    public void TheAutovacuumCancel_IsOneRowPerRelation_AndAnOlderStoredRowKeepsItsKey()
+    {
+        static string Cancel(string table) =>
+            DefaultPrefix + "ERROR:  canceling autovacuum task\n"
+            + DefaultPrefix + "CONTEXT:  while scanning block 117439 of relation \"pg_toast." + table + "\"\n"
+            + "\tautomatic vacuum of table \"darling.pg_toast." + table + "\"\n";
+
+        var census = StoreLogClassifier.Classify(Cancel("pg_toast_1") + string.Concat(Enumerable.Range(0, 30).Select(_ => Cancel("pg_toast_2"))));
+
+        Assert.Equal(2, census.Groups.Count);
+        Assert.Equal(1, census.Groups.Single(g => g.MessageText == "canceling autovacuum task: darling.pg_toast.pg_toast_1").Occurrences);
+        Assert.Equal(30, census.Groups.Single(g => g.MessageText == "canceling autovacuum task: darling.pg_toast.pg_toast_2").Occurrences);
+
+        var sample = census.Groups[0].SampleLine!;
+        var (key, _) = StoreLogClassifier.MaskStoredEvent("autovacuum_cancel", "canceling autovacuum task", sample);
+        Assert.Equal("canceling autovacuum task", key);
+        (key, _) = StoreLogClassifier.MaskStoredEvent("autovacuum_cancel", census.Groups[0].MessageText, sample);
+        Assert.Equal(census.Groups[0].MessageText, key);
     }
 
     /// <summary>

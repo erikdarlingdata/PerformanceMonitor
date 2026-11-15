@@ -302,13 +302,14 @@ LIMIT $3";
         /// <summary>The stored entry's whole length in characters, beside the preview.</summary>
         [JsonPropertyName("sample_line_length")] public int? SampleLineLength { get; init; }
 
-        /// <summary>The TOAST relation an autovacuum cancel's CONTEXT names (<c>pg_toast_17428</c>), when it names
-        /// one (#8814). Null for every other row.</summary>
+        /// <summary>The TOAST relation an autovacuum cancel's CONTEXT names, as the log writes it with its
+        /// database (<c>darling.pg_toast.pg_toast_17428</c>), when it names one (#8814). Null for every other row.</summary>
         [JsonPropertyName("toast_relation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? ToastRelation { get; init; }
 
         /// <summary>The table that owns <see cref="ToastRelation"/> (<c>schema.table</c>), read from the store's catalog
         /// when the answer is built (#8814), so the reader can act on the cancel without a catalog query. Null when
-        /// the row names no TOAST relation or the relation no longer exists.</summary>
+        /// the row names no TOAST relation, the relation no longer exists, or the log names it under another
+        /// database than this store's (#8822).</summary>
         [JsonPropertyName("toast_owner"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? ToastOwner { get; set; }
     }
 
@@ -626,7 +627,7 @@ LIMIT $3";
         var skipped = 0;
         long total = 0;
         var emptied = 0;
-        var toastNames = new HashSet<string>(StringComparer.Ordinal);
+        var toastRefs = new HashSet<StoreLogClassifier.ToastRelationRef>();
 
         await using var command = postgres.CreateCommand(RetainedEventsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -665,15 +666,15 @@ LIMIT $3";
             /* #8568: the evidence line is a preview when the caller gave a length; the message stays whole, because it is
                what tells one row from another. */
             var line = McpResponseBudget.Preview(sample, sampleLinePreviewLength ?? 0, whole: sampleLinePreviewLength is null);
-            var toastName = eventClass == StoreLogClassifier.AutovacuumCancelClass ? StoreLogClassifier.ToastRelationNameOf(sample) : null;
-            if (toastName is not null)
+            var toastRef = eventClass == StoreLogClassifier.AutovacuumCancelClass ? StoreLogClassifier.ToastRelationOf(sample) : null;
+            if (toastRef is { Database: not null } named)
             {
-                toastNames.Add(toastName);
+                toastRefs.Add(named);
             }
 
             rows.Add(new RetainedEvent
             {
-                ToastRelation = toastName,
+                ToastRelation = toastRef?.Qualified,
                 EventClass = eventClass,
                 Severity = reader.GetString(1),
                 MessageText = StoreLogClassifier.DisplayMessageOf(eventClass, key, sample),
@@ -686,9 +687,9 @@ LIMIT $3";
             });
         }
 
-        if (toastNames.Count > 0)
+        if (toastRefs.Count > 0)
         {
-            var owners = await GetToastOwnersAsync(postgres, toastNames, cancellationToken);
+            var owners = await GetToastOwnersAsync(postgres, toastRefs, cancellationToken);
             foreach (var row in rows)
             {
                 if (row.ToastRelation is { } name && owners.TryGetValue(name, out var owner))
@@ -701,28 +702,31 @@ LIMIT $3";
         return (rows, skipped, (int)Math.Max(0, Math.Min(int.MaxValue, total - emptied)));
     }
 
-    /// <summary>The tables that own TOAST relations by name, as <c>schema.table</c> (#8814). An autovacuum cancel's
-    /// CONTEXT names a TOAST relation by number only. This is the catalog read that tells a reader which table it
-    /// belongs to, from the store the answer is read from. A relation dropped since is not in the map.</summary>
+    /// <summary>The tables that own TOAST relations, as <c>schema.table</c> (#8814). An autovacuum cancel's CONTEXT
+    /// names a TOAST relation by number only, with the database it lives in. This is the catalog read that tells a
+    /// reader which table it belongs to, and it answers only for the database the answer is read from: a relation the
+    /// log names under another database has no entry here, because this catalog cannot say what it is (#8822). A relation
+    /// dropped since is not in the map either. Columns: the relation as the log writes it, then its owner.</summary>
     public const string ToastOwnerSql = @"
-SELECT t.relname,
+SELECT w.db || '.pg_toast.' || t.relname,
        format('%I.%I', n.nspname, o.relname)
-FROM pg_catalog.pg_class AS t
-JOIN pg_catalog.pg_namespace AS tn ON tn.oid = t.relnamespace
+FROM unnest($1::text[], $2::text[]) AS w(db, relname)
+JOIN pg_catalog.pg_class AS t ON t.relname = w.relname
+JOIN pg_catalog.pg_namespace AS tn ON tn.oid = t.relnamespace AND tn.nspname = 'pg_toast'
 JOIN pg_catalog.pg_class AS o ON o.reltoastrelid = t.oid
 JOIN pg_catalog.pg_namespace AS n ON n.oid = o.relnamespace
-WHERE tn.nspname = 'pg_toast'
-AND   t.relname = ANY($1)";
+WHERE w.db = current_database()";
 
     private static async Task<Dictionary<string, string>> GetToastOwnersAsync(
         NpgsqlDataSource postgres,
-        IEnumerable<string> toastNames,
+        IReadOnlyCollection<StoreLogClassifier.ToastRelationRef> toastRelations,
         CancellationToken cancellationToken)
     {
         var owners = new Dictionary<string, string>(StringComparer.Ordinal);
         await using var command = postgres.CreateCommand(ToastOwnerSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        command.Parameters.AddWithValue(toastNames.ToArray());
+        command.Parameters.AddWithValue(toastRelations.Select(r => r.Database!).ToArray());
+        command.Parameters.AddWithValue(toastRelations.Select(r => r.Name).ToArray());
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

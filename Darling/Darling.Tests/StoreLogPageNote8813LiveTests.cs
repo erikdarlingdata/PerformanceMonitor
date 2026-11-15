@@ -111,19 +111,11 @@ public sealed class StoreLogPageNote8813LiveTests
                 await create.ExecuteNonQueryAsync(ct);
             }
 
-            string toast;
-            await using (var find = new NpgsqlCommand(
-                "SELECT t.relname FROM pg_catalog.pg_class AS c JOIN pg_catalog.pg_class AS t ON t.oid = c.reltoastrelid WHERE c.oid = 'public.toasty_8814'::regclass", connection))
-            {
-                toast = (string)(await find.ExecuteScalarAsync(ct))!;
-            }
-
-            Assert.StartsWith("pg_toast_", toast, StringComparison.Ordinal);
+            var toast = await ToastOfAsync(connection, "public.toasty_8814", ct);
+            var database = await CurrentDatabaseAsync(connection, ct);
             var slab =
                 "2026-11-15 14:27:52.639 UTC [5300] FATAL:  the database system is shutting down\n"
-                + "2026-11-15 14:29:57.132 UTC [5302] ERROR:  canceling autovacuum task\n"
-                + $"2026-11-15 14:29:57.132 UTC [5302] CONTEXT:  while scanning block 117439 of relation \"pg_toast.{toast}\"\n"
-                + $"\tautomatic vacuum of table \"darling.pg_toast.{toast}\"\n";
+                + Cancel(database, toast);
             await StoreLogTestCapture.WriteAsync(postgres, DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-5), slab, ct);
 
             var root = await ReadAsync(postgres, limit: 50, offset: 0, ct);
@@ -134,8 +126,99 @@ public sealed class StoreLogPageNote8813LiveTests
 
             var row = Assert.Single(root.GetProperty("retained_events").EnumerateArray());
             Assert.Equal("autovacuum_cancel", row.GetProperty("event_class").GetString());
-            Assert.Equal(toast, row.GetProperty("toast_relation").GetString());
+            Assert.Equal($"{database}.pg_toast.{toast}", row.GetProperty("toast_relation").GetString());
             Assert.Equal("public.toasty_8814", row.GetProperty("toast_owner").GetString());
+        });
+    }
+
+    /// <summary>A row an older build filed as an entry but that is the tail of a statement (its sample opens on a tab) has
+    /// no text to show, so the total leaves it out and a page that reaches the end is not called cut.</summary>
+    [Fact]
+    public async Task StoreLog_AStoredFragmentRow_IsLeftOutOfTheTotal_SoTheLastPageIsNotCalledCut()
+    {
+        await WithStoreAsync(async (_, postgres, ct) =>
+        {
+            var slab = string.Concat(Enumerable.Range(0, 2).Select(Complaint));
+            await StoreLogTestCapture.WriteAsync(postgres, DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-10), slab, ct);
+
+            await using (var connection = await postgres.OpenConnectionAsync(ct))
+            await using (var events = new NpgsqlCommand(StoreLogSweep.EventInsertSql, connection))
+            {
+                events.Parameters.AddWithValue(DateTime.SpecifyKind(DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-5), DateTimeKind.Unspecified));
+                events.Parameters.AddWithValue(new[] { "unclassified" });
+                events.Parameters.AddWithValue(new[] { "ERROR" });
+                events.Parameters.AddWithValue(new[] { 3 });
+                events.Parameters.AddWithValue(new[] { "noted" });
+                events.Parameters.AddWithValue(new[] { "\t-- ERROR:  noted" });
+                await events.ExecuteNonQueryAsync(ct);
+            }
+
+            var root = await ReadAsync(postgres, limit: 50, offset: 0, ct);
+            Assert.Equal(2, root.GetProperty("retained_events_returned").GetInt32());
+            Assert.Equal(2, root.GetProperty("retained_events_total").GetInt32());
+            Assert.False(root.GetProperty("truncated").GetBoolean());
+        });
+    }
+
+    /// <summary>One cancelled autovacuum as PostgreSQL writes it: the message, then the CONTEXT that names the relation
+    /// by number with the database it lives in.</summary>
+    private static string Cancel(string database, string toast) =>
+        "2026-11-15 14:29:57.132 UTC [5302] ERROR:  canceling autovacuum task\n"
+        + $"2026-11-15 14:29:57.132 UTC [5302] CONTEXT:  while scanning block 117439 of relation \"pg_toast.{toast}\"\n"
+        + $"\tautomatic vacuum of table \"{database}.pg_toast.{toast}\"\n";
+
+    private static async Task<string> ToastOfAsync(NpgsqlConnection connection, string table, CancellationToken ct)
+    {
+        await using var find = new NpgsqlCommand(
+            "SELECT t.relname FROM pg_catalog.pg_class AS c JOIN pg_catalog.pg_class AS t ON t.oid = c.reltoastrelid WHERE c.oid = $1::regclass", connection);
+        find.Parameters.AddWithValue(table);
+        var toast = (string)(await find.ExecuteScalarAsync(ct))!;
+        Assert.StartsWith("pg_toast_", toast, StringComparison.Ordinal);
+        return toast;
+    }
+
+    private static async Task<string> CurrentDatabaseAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var find = new NpgsqlCommand("SELECT current_database()", connection);
+        return (string)(await find.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>#8822: cancels on two relations in one capture are two rows, each with its own count and owner, and a
+    /// relation the log names under another database keeps that name and has no owner, because this catalog cannot say
+    /// what it is.</summary>
+    [Fact]
+    public async Task StoreLog_AutovacuumCancels_AreOneRowPerRelation_AndAnOwnerIsOnlyNamedInTheStoresOwnDatabase()
+    {
+        await WithStoreAsync(async (connection, postgres, ct) =>
+        {
+            foreach (var table in new[] { "toasty_a", "toasty_b" })
+            {
+                await using var create = new NpgsqlCommand($"CREATE TABLE public.{table} (id integer, body text)", connection);
+                await create.ExecuteNonQueryAsync(ct);
+            }
+
+            var toastA = await ToastOfAsync(connection, "public.toasty_a", ct);
+            var toastB = await ToastOfAsync(connection, "public.toasty_b", ct);
+            var database = await CurrentDatabaseAsync(connection, ct);
+            var slab = Cancel(database, toastA)
+                + string.Concat(Enumerable.Range(0, 30).Select(_ => Cancel(database, toastB)))
+                + string.Concat(Enumerable.Range(0, 4).Select(_ => Cancel("some_other_database", toastB)));
+            await StoreLogTestCapture.WriteAsync(postgres, DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-5), slab, ct);
+
+            var root = await ReadAsync(postgres, limit: 50, offset: 0, ct);
+            var rows = root.GetProperty("retained_events").EnumerateArray()
+                .Where(r => r.GetProperty("event_class").GetString() == "autovacuum_cancel")
+                .ToDictionary(r => r.GetProperty("toast_relation").GetString()!, r => r);
+
+            Assert.Equal(3, rows.Count);
+            Assert.Equal(1, rows[$"{database}.pg_toast.{toastA}"].GetProperty("occurrences").GetInt64());
+            Assert.Equal("public.toasty_a", rows[$"{database}.pg_toast.{toastA}"].GetProperty("toast_owner").GetString());
+            Assert.Equal(30, rows[$"{database}.pg_toast.{toastB}"].GetProperty("occurrences").GetInt64());
+            Assert.Equal("public.toasty_b", rows[$"{database}.pg_toast.{toastB}"].GetProperty("toast_owner").GetString());
+
+            var elsewhere = rows[$"some_other_database.pg_toast.{toastB}"];
+            Assert.Equal(4, elsewhere.GetProperty("occurrences").GetInt64());
+            Assert.False(elsewhere.TryGetProperty("toast_owner", out _), "a relation under another database has no owner here.");
         });
     }
 }
