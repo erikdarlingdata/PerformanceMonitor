@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A tiny console app the Darling tests start on Windows as a stand-in live process, copied under the name the test needs (postgres.exe, pg_ctl.exe, sleeper.exe): it stays alive for the number of seconds it is given, and exits 1 at once on anything else. Never shipped. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>fake-process</AssemblyName>
+    <RootNamespace>Darling.Tests.FakeProcess</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!-- The stand-in only ever runs on Windows. A build on macOS or Linux would write a launcher for that system, so it asks for the Windows one (fake-process.exe) for the build machine's processor instead. A build on Windows already writes it. -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' == '' and !$([MSBuild]::IsOSPlatform('Windows'))">
+    <DefaultAppHostRuntimeIdentifier>win-$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant())</DefaultAppHostRuntimeIdentifier>
+  </PropertyGroup>
+
+</Project>

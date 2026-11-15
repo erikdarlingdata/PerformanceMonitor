@@ -31,10 +31,11 @@ namespace Darling.Tests;
 /// at all. The outcome, and the Failed alert built from it, claimed a clean revert through all three.
 ///
 /// <para>No PostgreSQL is needed. Runtimes and data directories are planted as marker files. A live
-/// postmaster is Windows' ping running under the name postgres.exe, because a PID and an image name are all
-/// the liveness check can see of a real one. And every failure these tests need is a file held open: an open
-/// file anywhere under a directory stops that directory being renamed, and stops the file being moved. A
-/// RUNNING executable does not, which is exactly why the live-server refusal has to come from looking.</para>
+/// postmaster is <see cref="FakeProcess"/> running under the name postgres.exe, because a PID and an image
+/// name are all the liveness check can see of a real one. And every failure these tests need is a file held
+/// open: an open file anywhere under a directory stops that directory being renamed, and stops the file
+/// being moved. A RUNNING executable does not, which is exactly why the live-server refusal has to come
+/// from looking.</para>
 /// </summary>
 public sealed class DarlingStoreUpgradeRevertTests
 {
@@ -43,8 +44,6 @@ public sealed class DarlingStoreUpgradeRevertTests
     private const string ControlFileContent = "the old cluster's control file";
     private const string PackageHash = "3927392739273927392739273927392739273927392739273927392739273927";
     private const int OldMajor = 17;
-
-    private static readonly string s_ping = Path.Combine(Environment.SystemDirectory, "PING.EXE");
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
@@ -441,7 +440,8 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// <summary>
     /// The cancellation catch clause, the same way: a shutdown before the commit point puts the data directory
     /// back BEFORE the runtime revert, and records no block, because a shutdown is not a bad package. The old
-    /// runtime's pg_ctl.exe is ping, so the upgrade reaches the step that observes the already-cancelled token.
+    /// runtime's pg_ctl.exe is <see cref="FakeProcess"/>, so the upgrade reaches the step that observes the
+    /// already-cancelled token.
     /// </summary>
     [Fact]
     public async Task UpgradeDataDirectory_AShutdownBeforeTheCommitPoint_PutsTheDataDirectoryBackFirst()
@@ -451,7 +451,7 @@ public sealed class DarlingStoreUpgradeRevertTests
         {
             var host = PlantFailedUpgrade(root.FullName);
             Directory.Move(host.DataDirectory, host.RetainedDirectory);
-            File.Copy(s_ping, Path.Combine(host.PreviousPgsql, "bin", "pg_ctl.exe"));
+            FakeProcess.CopyAs(Path.Combine(host.PreviousPgsql, "bin"), "pg_ctl.exe");
 
             using var shutdown = new CancellationTokenSource();
             shutdown.Cancel();
@@ -478,9 +478,9 @@ public sealed class DarlingStoreUpgradeRevertTests
     /// A runner refuses a token that was cancelled before the call, so a stop that runs in a catch or a
     /// finally must not carry its method's own token: it would throw before pg_ctl started and leave the server
     /// running. The quiesced TimescaleDB update shows it. Its start throws the shutdown's cancellation, and its
-    /// finally still has to launch pg_ctl (ping stands in) to stop the private-port cluster. Ping answers every
-    /// command with a failure, so the log carries both stop attempts, and the marker that lets the next start
-    /// find the server is kept.
+    /// finally still has to launch pg_ctl (<see cref="FakeProcess"/> stands in) to stop the private-port
+    /// cluster. The stand-in answers every pg_ctl command with a failure, so the log carries both stop
+    /// attempts, and the marker that lets the next start find the server is kept.
     /// </summary>
     [Fact]
     public async Task UpdateTimescaleQuiesced_AShutdownBeforeTheStart_StillRunsTheStopInItsFinally()
@@ -490,7 +490,7 @@ public sealed class DarlingStoreUpgradeRevertTests
         {
             var bin = Directory.CreateDirectory(Path.Combine(root.FullName, "pgsql", "bin"));
             var data = Directory.CreateDirectory(Path.Combine(root.FullName, "data"));
-            File.Copy(s_ping, Path.Combine(bin.FullName, "pg_ctl.exe"));
+            FakeProcess.CopyAs(bin.FullName, "pg_ctl.exe");
 
             using var shutdown = new CancellationTokenSource();
             shutdown.Cancel();
@@ -943,9 +943,9 @@ public sealed class DarlingStoreUpgradeRevertTests
     }
 
     /// <summary>
-    /// A live process named postgres: Windows' ping, copied under that name, pinging loopback for a minute.
-    /// Harmless, and a PID and an image name are all the liveness check can see of a real postmaster. Killed
-    /// on dispose, whatever the test did.
+    /// A live process named postgres: <see cref="FakeProcess"/>, copied under that name, staying alive for a
+    /// minute. Harmless, and a PID and an image name are all the liveness check can see of a real postmaster.
+    /// Killed on dispose, whatever the test did.
     /// </summary>
     private sealed class FakePostmaster : IDisposable
     {
@@ -960,10 +960,9 @@ public sealed class DarlingStoreUpgradeRevertTests
         public static FakePostmaster StartIn(string directory)
         {
             Directory.CreateDirectory(directory);
-            var image = Path.Combine(directory, "postgres.exe");
-            File.Copy(s_ping, image, overwrite: true);
+            var image = FakeProcess.CopyAs(directory, "postgres.exe");
 
-            var process = Process.Start(new ProcessStartInfo(image, "-n 60 127.0.0.1")
+            var process = Process.Start(new ProcessStartInfo(image, FakeProcess.RunFor(60))
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,

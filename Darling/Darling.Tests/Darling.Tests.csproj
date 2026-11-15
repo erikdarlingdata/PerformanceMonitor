@@ -53,7 +53,24 @@
          only transitively through Darling.Analysis, so dropping that reference would have broken them
          for a reason nothing in this file named. -->
     <ProjectReference Include="..\..\PerformanceMonitor.Analysis\PerformanceMonitor.Analysis.csproj" />
+    <!-- #8847: the stand-in live process the Windows tests start under another image name (Darling/Darling.Tests.FakeProcess).
+         Built first, never referenced as an assembly; CopyFakeProcess puts it in fake-process\ next to the tests and
+         FakeProcess.cs copies it from there. -->
+    <ProjectReference Include="..\Darling.Tests.FakeProcess\Darling.Tests.FakeProcess.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <!-- The Windows launcher and the three files it loads from its own folder. The stand-in project writes fake-process.exe
+       on every build machine, so a build on macOS carries it to a Windows machine that runs these tests; the tests start
+       it on Windows only. A file the stand-in build did not write fails the copy, and so the build. -->
+  <Target Name="CopyFakeProcess" AfterTargets="Build">
+    <ItemGroup>
+      <FakeProcessFile Include="..\Darling.Tests.FakeProcess\bin\$(Configuration)\net10.0\fake-process.exe" />
+      <FakeProcessFile Include="..\Darling.Tests.FakeProcess\bin\$(Configuration)\net10.0\fake-process.dll" />
+      <FakeProcessFile Include="..\Darling.Tests.FakeProcess\bin\$(Configuration)\net10.0\fake-process.runtimeconfig.json" />
+      <FakeProcessFile Include="..\Darling.Tests.FakeProcess\bin\$(Configuration)\net10.0\fake-process.deps.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(FakeProcessFile)" DestinationFolder="$(OutDir)fake-process\" SkipUnchangedFiles="true" />
+  </Target>
 
   <ItemGroup>
     <!-- #3938: the cross-SKU source-scan pins of the get_collection_health parity families, compiled here
