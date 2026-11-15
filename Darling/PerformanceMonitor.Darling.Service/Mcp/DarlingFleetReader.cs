@@ -1686,9 +1686,11 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
 
         if (c.ThreadsSeverity >= HealthSeverity.Warning)
         {
+            /* #8825: the figure that set the band, in the chip's words. Starved requests set Critical, 20 or more
+               runnable tasks set Warning (ServerHealthClassifier.ThreadsSeverity), so a Warning here is the runnable count. */
             parts.Add(c.RequestsWaitingForThreads > 0
                 ? $"Threads {c.RequestsWaitingForThreads} starved"
-                : "Threads low");
+                : $"Threads {c.ThreadsWaitingForCpu ?? 0} runnable");
         }
 
         if (c.MemorySeverity >= HealthSeverity.Warning && c.HasMemoryPressure == true)
