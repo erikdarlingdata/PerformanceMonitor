@@ -816,14 +816,25 @@ public static partial class DarlingCliCommands
 
         await ReportAgentDispatchAsync(config, output, cancellationToken);
 
+        /* #8735: the tokenSignIn lines. An ERROR is a configuration the service refuses to start; only those return 1, and they are
+           all new settings, so an upgrade does not start failing a validation. */
+        var tokenSignInFailed = false;
+        foreach (var finding in TokenSignInFindings(config))
+        {
+            output.WriteLine(finding);
+            tokenSignInFailed |= finding.StartsWith("ERROR:", StringComparison.Ordinal);
+        }
+
         /* #6583: a warning, not an error, so a config that works today still starts: the port is ignored for a SQL Server target. */
         foreach (var warning in SqlServerPortAdvice.Warnings(targets))
         {
             output.WriteLine("WARNING: " + warning);
         }
 
-        /* #6265: a warning, not an error, so a setup that started before still starts; the web refuses that token for sign-in. */
-        if (DarlingAgentDispatchChecks.WebTokenFinding(config) is { } webTokenFinding)
+        /* #6265: a warning, not an error, so a setup that started before still starts; the web refuses that token for sign-in. The service
+           drops it under tokenSignIn off (no token signs in, so the clash is moot), and so does this. */
+        DarlingTokenSignIn.TryParse(config.Web.Network?.Oidc?.TokenSignIn, out var webTokenSignIn);
+        if (webTokenSignIn != TokenSignInMode.Off && DarlingAgentDispatchChecks.WebTokenFinding(config) is { } webTokenFinding)
         {
             output.WriteLine("WARNING: " + webTokenFinding);
         }
@@ -832,7 +843,7 @@ public static partial class DarlingCliCommands
         if (targets.Count == 0)
         {
             output.WriteLine("No monitored servers are configured yet, so there is nothing to test. Add one in the Viewer (Add Server) or with --add-server.");
-            return 0;
+            return tokenSignInFailed ? 1 : 0;
         }
 
         output.WriteLine($"Validating connectivity to {CountText.Plural(targets.Count, "server")}...");
@@ -866,7 +877,64 @@ public static partial class DarlingCliCommands
         output.WriteLine(allReachable
             ? "All servers reachable."
             : "One or more servers failed the connection pre-flight (see above).");
-        return allReachable ? 0 : 1;
+        return allReachable && !tokenSignInFailed ? 0 : 1;
+    }
+
+    /// <summary>
+    /// The <c>web.network.oidc.tokenSignIn</c> lines <c>--validate-config</c> prints (#8735), each starting <c>ERROR:</c>, <c>NOTE:</c>
+    /// or <c>INFO:</c>. An <c>ERROR:</c> is a configuration the service refuses to start: an unknown value, or <c>off</c> with no
+    /// OIDC or no exposed dashboard, worded by the start's own <see cref="DarlingWebHostService.TokenSignInStartProblem"/> so the two
+    /// say the same thing. "Exposed" is the service's own verdict, <see cref="DarlingWebHostService.ResolveWebBind"/> (listen, allowFrom, a
+    /// token or the <c>off</c> + OIDC widening, and a managed store or a container), so a configuration the start would degrade to
+    /// loopback-only is not called exposed here. <paramref name="inContainer"/> is the ambient container marker unless a test passes it. The OIDC client the start refuses (a bad authority, say) needs a live start, so it is not judged here. Empty under <c>on</c> or with no
+    /// <c>web.network.oidc</c> block. With <c>web.enabled</c> false it is one <c>INFO:</c> line and nothing else, because the service never
+    /// evaluates the setting for a dashboard that is not started. Never holds a token.
+    /// </summary>
+    internal static IReadOnlyList<string> TokenSignInFindings(DarlingConfig config, bool? inContainer = null)
+    {
+        var findings = new List<string>();
+        var network = config.Web.Network;
+        if (network?.Oidc is not { } oidc)
+        {
+            return findings;
+        }
+
+        /* The service evaluates tokenSignIn only for a dashboard it starts, so a leftover setting under a disabled dashboard is not a problem.
+           web.enabled here is the file's seed: after the first run the store decides, so the line names that. */
+        if (!config.Web.Enabled)
+        {
+            findings.Add(
+                "INFO: web.enabled is false in darling.json, which only seeds the dashboard's first run, so web.network.oidc.tokenSignIn is not checked here. "
+                + "If the store has the dashboard enabled (--enable-web), set web.enabled to true to check it.");
+            return findings;
+        }
+
+        var exposed = DarlingWebHostService.ResolveWebBind(config.Web, config.Postgres.Managed, inContainer).Mode
+            == DarlingHostBinding.BindMode.NetworkAndLoopback;
+        if (DarlingWebHostService.TokenSignInStartProblem(oidc.TokenSignIn, oidc.IsConfigured, exposed, oidcClientPresent: oidc.IsConfigured) is { } problem)
+        {
+            findings.Add("ERROR: " + problem);
+            return findings;
+        }
+
+        DarlingTokenSignIn.TryParse(oidc.TokenSignIn, out var mode);
+        if (mode == TokenSignInMode.On)
+        {
+            return findings;
+        }
+
+        findings.Add($"INFO: web.network.oidc.tokenSignIn is '{DarlingTokenSignIn.Word(mode)}'.");
+        if (mode == TokenSignInMode.Loopback && exposed)
+        {
+            findings.Add(
+                "NOTE: web.network.oidc.tokenSignIn is 'loopback' and the dashboard is exposed. 'loopback' separates local clients from remote ones "
+                + "only when each remote client reaches this service with its own address. A service-mesh sidecar such as Envoy or Linkerd "
+                + "connects from loopback and usually sends no X-Forwarded-For, and a request from inside the mesh never carries one, so behind a "
+                + "sidecar every client would count as local; use 'off' there. Listing a reverse proxy in web.network.trustedProxies helps only "
+                + "when that proxy sends X-Forwarded-For with the client's address on every request.");
+        }
+
+        return findings;
     }
 
     /// <summary>
@@ -4081,14 +4149,19 @@ public static partial class DarlingCliCommands
     /// <summary>
     /// PURE: the line <c>--enable-mcp</c> / <c>--enable-web</c> prints when darling.json gives that endpoint no token and
     /// its <c>allowTokenlessLoopback</c> is off, because the service then does not start it; null when a token is set, the
-    /// opt-out is on, or (MCP only) <c>mcp.tokens</c> names tokens, which the host honors without a legacy token (#6542).
+    /// opt-out is on, the dashboard's <c>tokenSignIn</c> is <c>off</c> with OIDC configured (#8735), or (MCP only) <c>mcp.tokens</c> names tokens, which the host honors without a legacy token (#6542).
     /// Reads only whether a token value is present, never the token.
     /// </summary>
     internal static string? EnableTokenNote(bool mcp, DarlingConfig config)
     {
         var section = mcp ? "mcp" : "web";
         var optOut = mcp ? config.Mcp.AllowTokenlessLoopback : config.Web.AllowTokenlessLoopback;
-        return HasEndpointToken(mcp, config) || (mcp && config.Mcp.HasNamedTokens) || optOut
+        /* #8735: tokenSignIn "off" with OIDC configured makes OIDC the only way in, so the dashboard needs no token (the start's own rule). */
+        var oidcOnly = !mcp
+            && config.Web.Network?.Oidc is { IsConfigured: true } oidc
+            && DarlingTokenSignIn.TryParse(oidc.TokenSignIn, out var signInMode)
+            && signInMode == TokenSignInMode.Off;
+        return HasEndpointToken(mcp, config) || (mcp && config.Mcp.HasNamedTokens) || optOut || oidcOnly
             ? null
             : $"NOTE: darling.json gives {section} no token, so the service will not start it. Set {section}.network.encryptedToken " +
               $"(from --encrypt-password) or {section}.network.token and restart the service, or set {section}.allowTokenlessLoopback " +

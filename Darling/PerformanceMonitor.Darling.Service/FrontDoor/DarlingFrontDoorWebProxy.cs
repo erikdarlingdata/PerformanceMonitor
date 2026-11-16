@@ -107,7 +107,7 @@ internal sealed class DarlingFrontDoorWebProxy
         Func<CollectorRuntimeState.Snapshot?>? collector = null, bool? oidcRoleMapping = null)
         => new(
             directory,
-            new DarlingFrontDoorWebSession(secrets),
+            new DarlingFrontDoorWebSession(secrets, logger: logger),
             config.EffectivePeerTimeout(),
             logger,
             collector: collector,

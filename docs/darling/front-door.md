@@ -193,6 +193,8 @@ A person with a read-only role gets, through the front door, the answers a store
 
 If the front door uses OpenID Connect with no role mapping (`web.network.oidc.roleClaim`), every person who signs in has the edit seat. The front door logs a warning at start. Set `roleClaim` with `adminRoles` and `viewerRoles` to limit who can edit.
 
+A store behind a front door keeps `web.network.oidc.tokenSignIn` at `on`. The front door signs in to the store with the store's shared token, over the network, and `loopback` or `off` refuses that sign-in. The store then goes on hold, and the front door says: `store '<name>' has web.network.oidc.tokenSignIn set to loopback or off, which refuses the web token sign-in the front door makes over the network (a store behind a front door keeps it on)`. See [Token sign-in mode](configuration-web.md#token-sign-in-mode).
+
 The browser never holds a store's session. For each store, the front door signs in with that store's `webToken` and keeps the store's session cookie in memory. It reuses the cookie for a little less than the store's 12-hour session. If a store answers 401, the front door signs in again once and retries once. If the sign-in fails, the front door holds the store for 60 seconds (or for the store's `Retry-After` when that is longer) and answers 502.
 
 ### The store picker and addresses

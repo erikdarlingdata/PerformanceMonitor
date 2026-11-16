@@ -41,7 +41,7 @@ public sealed class ManagedWebGroupGuardTests
     private const string Token = "group-guard-test-token-0123456789abcdefghij";
     private const string Host = "127.0.0.1";
 
-    private sealed class FakeMetadata : IWebAccessGroupMetadata
+    internal sealed class FakeMetadata : IWebAccessGroupMetadata
     {
         public (WebAccessGroup Group, Guid Epoch)? Group;
         public Guid? Epoch;
@@ -58,7 +58,7 @@ public sealed class ManagedWebGroupGuardTests
         public Task<Guid?> ReadAdvancedSessionEpochAsync(CancellationToken ct) => Task.FromResult(Epoch);
     }
 
-    private sealed class FakeCredentials : IWebAccessGroupCredentials
+    internal sealed class FakeCredentials : IWebAccessGroupCredentials
     {
         public List<WebAccessGroupCredential> Rows = new();
 
@@ -69,7 +69,7 @@ public sealed class ManagedWebGroupGuardTests
             Task.FromResult(true);
     }
 
-    private sealed class Rig : IDisposable
+    internal sealed class Rig : IDisposable
     {
         public readonly PasswordPrivateKey Key = PasswordPrivateKey.Generate();
         public IPasswordKeyRing Ring;
