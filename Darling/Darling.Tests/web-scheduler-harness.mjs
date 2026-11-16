@@ -120,6 +120,7 @@ const sandbox = {
   favoriteStar: () => null,
   alertBadge: () => null,
   initSidebarCollapse() {},
+  initAccountMenu: async () => {},
   initNavCollapse() {},
   initNarrowNav() {},
   initSidebarSearch() {},

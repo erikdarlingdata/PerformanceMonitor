@@ -209,12 +209,13 @@ The top bar has a store picker. The page works inside one store at a time. The p
 
 ### Local routes
 
-The front door answers four routes itself. They need a signed-in browser like every other route.
+The front door answers five routes itself. They need a signed-in browser like every other route.
 
 | Route | Answer |
 |---|---|
 | `GET /api/ping` | `{"status":"ok","front_door":true}`. It answers 503 `stopped` with the problems when the worker refused `darling.json`, and 503 `degraded` when every store has been tried and none can be used. |
 | `GET /api/session` | The front door's own role, with `front_door` `true` and `can_own` `false`. |
+| `GET /api/me` | The calling session's own sign-in method, seat, identity and expiry, from the seat the front door gave the request. No store is asked. |
 | `GET /api/front-door` | Each store's `name`, `health`, `server_count`, `last_ok_utc` and, when the store said so, `admin_writes_off` and `managed_store`. |
 | `GET /api/front-door/locate?server=NAME` | 200 with the `store` and the matched `server_name`. 409 with `ambiguous` and the `stores` that match. 404 with `not_found`. |
 

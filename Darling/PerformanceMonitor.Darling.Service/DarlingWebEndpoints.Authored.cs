@@ -49,7 +49,7 @@ public static partial class DarlingWebEndpoints
     /// duplicate-name conflict detection. Error bodies are always <c>{"error": "..."}</c>, matching the read surface.
     /// </summary>
     internal static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadLatencyRecorder readLatencyRecorder,
-        ReadAdmission? readAdmission, bool managedStore = false, WebAdminArm? adminArm = null, NpgsqlDataSource? composeReadPostgres = null)
+        ReadAdmission? readAdmission, bool managedStore = false, WebAdminArm? adminArm = null, NpgsqlDataSource? composeReadPostgres = null, bool? oidcRoleMapping = null)
     {
         var store = new CustomViewStore(postgres, McpCommandDeadlines.ReadSeconds);
 
@@ -70,6 +70,10 @@ public static partial class DarlingWebEndpoints
             var seat = DarlingWebSeat.FromContext(context);
             return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["scoped"] = seat.AllowedTagIds is not null, ["can_own"] = seat.OwnerKey is not null, ["signed_in_admin"] = DarlingWebSeat.IsSignedInAdmin(context), ["managed_store"] = managedStore, ["admin_writes_off"] = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm) });
         });
+
+        /* #8737: the calling session's own identity, seat and expiry, for the profile menu. It reads no store; /api/session above still
+           carries no name. */
+        app.MapGet("/api/me", (HttpContext context) => JsonNodeResult(DarlingWebMe.Describe(DarlingWebSeat.FromContext(context), oidcRoleMapping)));
 
         /* The read catalog: input truth (read names + their WIRE query keys) the composer binds params from. */
         /* #5562: ?server= makes the collector intervals the SERVER's own (a per-server schedule row wins over the

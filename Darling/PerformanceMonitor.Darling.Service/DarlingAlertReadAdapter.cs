@@ -934,7 +934,8 @@ ORDER BY collection_time DESC
                 r.IsDBNull(2) ? null : r.GetString(2),
                 r.GetInt64(3),
                 r.GetInt64(4),
-                r.GetInt64(5)), cancellationToken);
+                r.GetInt64(5),
+                r.GetInt64(6)), cancellationToken);
         /* Round 2 of #5714 (L6): the card's top lists cover the samples inside the covered span, not the whole lookback (the span is
            a few minutes; the lookback an hour). A span that kept no samples falls back to the lookback and says so. */
         var (topFloor, topsFromLookback) = AttentionEvaluator.TopListFloor(runs, groups, floor);

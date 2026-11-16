@@ -507,6 +507,26 @@ public sealed class ObjectUsageReportTests
     }
 
     [Fact]
+    public void TheServerPair_IsWrittenOnANodeChange_AndNotOnAPlainRestart()
+    {
+        // #8873: a restart whose previous snapshot had no server name (stored before the column existed) must not read like a failover.
+        var restart = new ObjectUsageReset(Now.AddDays(-10), ObjectUsageResetReasons.Restart, null, "NODE1", Now.AddDays(-11));
+        var arrival = new ObjectUsageReset(Now.AddDays(-5), ObjectUsageResetReasons.NodeChanged, "NODE1", "NODE2");
+        var baseline = new ObjectUsageReset(Now.AddDays(-3), ObjectUsageResetReasons.NodeChanged | ObjectUsageResetReasons.NodeBaseline, "NODE2", "NODE3");
+        var tables = new ObjectUsageWindowResult(
+            WindowStart, Now, 91, TimeSpan.FromDays(1), [restart, arrival, baseline], ["NODE1", "NODE2", "NODE3"], [Table("Orders")]);
+
+        var resets = Build(Side("srv", tables)).GetProperty("coverage")[0].GetProperty("tables").GetProperty("resets");
+
+        Assert.False(resets[0].TryGetProperty("from_server", out _));
+        Assert.False(resets[0].TryGetProperty("to_server", out _));
+        Assert.Equal("NODE1", resets[1].GetProperty("from_server").GetString());
+        Assert.Equal("NODE2", resets[1].GetProperty("to_server").GetString());
+        Assert.Equal("NODE2", resets[2].GetProperty("from_server").GetString());
+        Assert.Equal("NODE3", resets[2].GetProperty("to_server").GetString());
+    }
+
+    [Fact]
     public void PairedRows_CarryEachSidesNumbers()
     {
         var root = Build(

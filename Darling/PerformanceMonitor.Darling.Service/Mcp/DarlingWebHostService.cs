@@ -126,6 +126,10 @@ public sealed class DarlingWebHostService : BackgroundService
     /// listener's, exactly like the certificate above.</summary>
     private DarlingWebOidcClient? _oidcClient;
 
+    /// <summary>#8737: for <c>/api/me</c>, whether the configured OIDC sign-in has a role mapping; null when OIDC is not configured.</summary>
+    private static bool? OidcRoleMapping(DarlingWebOidcClient? client)
+        => client is null ? null : DarlingWebOidc.HasRoleMapping(client.Options.AdminRoles, client.Options.ViewerRoles);
+
     private int _runningPort;
 
     /// <summary>True while the running app uses the read-only viewer login because the managed web credential had not appeared by the end of
@@ -1060,7 +1064,7 @@ public sealed class DarlingWebHostService : BackgroundService
                     return false;
                 }
 
-                frontDoorProxy = DarlingFrontDoorWebProxy.Create(frontDoorDirectory, frontDoorSecrets, config.FrontDoor, _logger, _collectorState.Read);
+                frontDoorProxy = DarlingFrontDoorWebProxy.Create(frontDoorDirectory, frontDoorSecrets, config.FrontDoor, _logger, _collectorState.Read, oidcRoleMapping: OidcRoleMapping(oidcClient));
 
                 /* Every user who signs in with no role mapping holds the edit seat, and through the front door a change they make runs on
                    whichever store it is sent to. */
@@ -1730,7 +1734,7 @@ public sealed class DarlingWebHostService : BackgroundService
                    the network auth decision (session cookie / in-CIDR / the sign-in flow). */
                 var remote = context.Connection.RemoteIpAddress;
                 var hasValidCookie = TryValidateSessionCookie(
-                    context.Request.Cookies[SessionCookieName], signingKey, DateTimeOffset.UtcNow, out var cookieSubject);
+                    context.Request.Cookies[SessionCookieName], signingKey, DateTimeOffset.UtcNow, out var cookieSubject, out var cookieExpiresAt);
 
                 /* Resolve WHO holds the cookie (#2550). A cryptographically valid cookie whose subject
                    slot encodes a seat we do not recognize is treated as NO cookie: refusing is
@@ -1822,6 +1826,13 @@ public sealed class DarlingWebHostService : BackgroundService
                            this one request, so every handler below answers the viewer as it answers any reads-only caller. */
                         seat = DarlingWebSeat.ApplyFrontDoorRole(context, seat);
 
+                        /* The seat is final here, so the cookie's signed expiry is set once, on it. The guard is defensive:
+                           only a request with a valid cookie is admitted here. */
+                        if (hasValidCookie)
+                        {
+                            seat = seat with { SessionExpiresAt = cookieExpiresAt };
+                        }
+
                         /* The seat rides HttpContext.Items so EVERY downstream consumer — /api/session,
                            the updated_by stamps, endpoints added on any parallel branch — resolves the
                            same identity without per-endpoint wiring. */
@@ -1863,6 +1874,7 @@ public sealed class DarlingWebHostService : BackgroundService
                             (frontDoorProxy is not null ||
                              !(context.Request.Path.Equals("/api/fleet", StringComparison.OrdinalIgnoreCase) ||
                                context.Request.Path.Equals("/api/session", StringComparison.OrdinalIgnoreCase) ||
+                               context.Request.Path.Equals("/api/me", StringComparison.OrdinalIgnoreCase) ||
                                DarlingWebEndpoints.SupportsScopedRead(context.Request.Path))))
                         {
                             refusals.Report(
@@ -2052,13 +2064,13 @@ public sealed class DarlingWebHostService : BackgroundService
 
         if (frontDoorProxy is not null)
         {
-            /* #6840: a front door answers the four local routes and forwards the rest of /api/* to a store. It sits exactly where MapAll
+            /* #6840: a front door answers the five local routes and forwards the rest of /api/* to a store. It sits exactly where MapAll
                does, behind the gates above, so a request reaches it only after sign-in, the CIDR test and the role gate. */
             frontDoorProxy.AddRoutes(app);
         }
         else
         {
-            DarlingWebEndpoints.MapAll(app, postgres ?? throw new ArgumentNullException(nameof(postgres)), _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls, composeReadPostgres: composeReadPostgres);
+            DarlingWebEndpoints.MapAll(app, postgres ?? throw new ArgumentNullException(nameof(postgres)), _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls, composeReadPostgres: composeReadPostgres, oidcRoleMapping: OidcRoleMapping(oidcClient));
         }
 
         app.UseDefaultFiles();
@@ -2207,14 +2219,16 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <summary>
     /// The longest <paramref name="subject"/> <see cref="BuildSessionCookieValue"/> will mint into a cookie.
     ///
-    /// <para>Generous for an OIDC <c>sub</c> — the identifiers real providers issue are GUIDs, opaque
+    /// <para>600 = the <c>o3</c> seat's longest slot: 5 (prefix) + 43 (owner key) + 1 + 171 + 1 + 171 (the base64url of a 128-byte display name
+    /// and of a 128-byte granting role value, each followed by a separator) + 1 + 207 (<see cref="DarlingWebSeat.MaxSubjectLength"/>).
+    /// A shared-token or token-name subject is far shorter. Generous for an OIDC <c>sub</c> — the identifiers real providers issue are GUIDs, opaque
     /// 40-character strings, or an email — and a hard REFUSAL rather than a truncation, deliberately.
     /// Truncating an identity is the one failure mode that would be worse than not having one: two subjects
     /// sharing a prefix would collapse to the same seat, so the surface would report the wrong person as the
     /// author of a change and every downstream authorization decision would be made about somebody else.
     /// Failing the sign-in loudly is recoverable; silently merging two identities is not.</para>
     /// </summary>
-    internal const int MaxSessionSubjectLength = 256;
+    internal const int MaxSessionSubjectLength = 600;
 
     /// <summary>
     /// Builds a session cookie value. PURE.
@@ -2272,7 +2286,11 @@ public sealed class DarlingWebHostService : BackgroundService
     /// The signature compare is constant-time.
     /// </summary>
     internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now)
-        => TryValidateSessionCookie(cookieValue, signingKey, now, out _);
+        => TryValidateSessionCookie(cookieValue, signingKey, now, out _, out _);
+
+    /// <summary>PURE verify, additionally reporting WHO holds the cookie (#2550); see the overload that also reports the expiry.</summary>
+    internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now, out string? subject)
+        => TryValidateSessionCookie(cookieValue, signingKey, now, out subject, out _);
 
     /// <summary>
     /// PURE verify, additionally reporting WHO the cookie says is holding it (#2550).
@@ -2284,10 +2302,13 @@ public sealed class DarlingWebHostService : BackgroundService
     ///
     /// <para>The subject is decoded only AFTER the HMAC verifies, so nothing derived from an unauthenticated
     /// cookie ever reaches a caller.</para>
+    ///
+    /// <para><paramref name="expiresAt"/> is the signed expiry at whole-second precision, and <c>default</c> when the method returns false.</para>
     /// </summary>
-    internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now, out string? subject)
+    internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now, out string? subject, out DateTimeOffset expiresAt)
     {
         subject = null;
+        expiresAt = default;
 
         if (string.IsNullOrEmpty(cookieValue))
         {
@@ -2358,6 +2379,7 @@ public sealed class DarlingWebHostService : BackgroundService
             }
         }
 
+        expiresAt = DateTimeOffset.FromUnixTimeSeconds(expiryUnix);
         return true;
     }
 
@@ -2661,7 +2683,7 @@ public sealed class DarlingWebHostService : BackgroundService
             return;
         }
 
-        var role = DarlingWebOidc.MapRole(
+        var (role, grantedBy) = DarlingWebOidc.MapRoleWithGrant(
             oidcClient.Options.RoleClaim is null
                 ? Array.Empty<string>()
                 : DarlingWebOidc.ExtractClaimValues(payload!, oidcClient.Options.RoleClaim),
@@ -2681,7 +2703,9 @@ public sealed class DarlingWebHostService : BackgroundService
 
         /* #6214: the owner key (issuer + sub, hashed) rides in the signed cookie, so a personal view follows the person's provider
            identity and not the display name, which can change and can be reissued. */
-        AppendSessionCookie(context, signingKey, DarlingWebSeat.EncodeCookieSubject(subject, role, DarlingWebOidc.ResolveOwnerKey(payload!)));
+        AppendSessionCookie(context, signingKey, DarlingWebSeat.EncodeCookieSubject(
+            subject, role, DarlingWebOidc.ResolveOwnerKey(payload!),
+            DarlingWebSeat.CapDisplayField(DarlingWebOidc.DisplayNameClaim(payload!)), DarlingWebSeat.CapDisplayField(grantedBy)));
 
         /* Per-user identity in the service log — the #2550 counterpart of the updated_by stamp. */
         _logger.LogInformation(

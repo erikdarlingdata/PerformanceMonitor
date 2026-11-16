@@ -2,11 +2,32 @@
 
 A Helm chart for Darling, the collector service of PerformanceMonitor. It runs the service as one pod with a state volume, a Service for the web dashboard (and, when you turn it on, the MCP endpoint), optional Ingresses, and either a single bundled TimescaleDB pod or a connection to a PostgreSQL server you run.
 
-Requires Kubernetes 1.27 or later, Helm 3, and a Darling image newer than 3.12.0: the probes use the health port, which first shipped in the release after 3.12.0, so 3.12.0 and older do not work (the chart refuses a plain release tag of 3.12.0 or older). Nightly tags (`3.12.0-nightly.<date>.<n>`) are not checked, and a nightly built before the health port restarts in a loop: pin a release. `latest` moves with each release; pin `image.tag` to a release you have tested. The chart is not published to a registry yet, so you install it from a checkout of this repository.
+Requires Kubernetes 1.27 or later, Helm 3, and a Darling image newer than 3.12.0: the probes use the health port, which first shipped in the release after 3.12.0, so 3.12.0 and older do not work (the chart refuses a plain release tag of 3.12.0 or older). Nightly tags (`3.12.0-nightly.<date>.<n>`) are not checked, and a nightly built before the health port restarts in a loop: pin a release. `latest` moves with each release; pin `image.tag` to a release you have tested when you install from a checkout.
+
+Each release publishes the chart, starting with the first release that includes the publishing workflow (`.github/workflows/darling-helm-release.yml`): as an OCI chart at `oci://ghcr.io/erikdarlingdata/charts/performancemonitor-darling`, with a keyless cosign signature, and as a `.tgz` with its checksum on the GitHub release. The published chart's version is the release version, and it pins that release's image by tag and digest, so it needs no `image.tag`.
 
 Every value is documented in [`values.yaml`](values.yaml) and checked by [`values.schema.json`](values.schema.json). This page covers what the values do together.
 
+## Install
+
+```
+helm install darling oci://ghcr.io/erikdarlingdata/charts/performancemonitor-darling --version <release>
+```
+
+`<release>` is a release version without the `v`, for example `3.14.0`. To check the chart's signature before installing, see [Verify the chart](../../../docs/darling/kubernetes.md#verify-the-chart).
+
+### Offline install
+
+Download `performancemonitor-darling-<release>.tgz` and `SHA256SUMS-helm.txt` from the release's assets, check the package, and install from the file:
+
+```
+sha256sum -c SHA256SUMS-helm.txt
+helm install darling ./performancemonitor-darling-<release>.tgz
+```
+
 ## Install from a checkout
+
+For a commit that is not released yet, or to work on the chart itself, install from a checkout of this repository:
 
 ```
 helm install darling Darling/helm/performancemonitor-darling --set-string image.tag=<release>
@@ -238,11 +259,34 @@ There is no liveness probe on the dashboard or MCP port, and no probe reads the 
 
 What readiness does not cover: it follows a startup verdict. The service publishes that it is collecting once, when startup finishes, and does not change it back, so a store that becomes unreachable after collection started is not shown as not Ready. Watch collection itself (the dashboard's state, or the service log) for that. See [the health port](../../../docs/darling/network-endpoints.md#the-health-port) for what the port answers.
 
+## Moving from your own manifests
+
+Two things catch a deployment that ran Darling from manifests of its own before it moves to this chart.
+
+**A Deployment with the chart's name must be deleted once.** When the old Deployment has the name the chart renders (for example with `fullnameOverride` set to the old name), the first install or sync fails: Helm will not take over a Deployment it did not create, and a sync cannot change the old Deployment's selector to the chart's (`app.kubernetes.io/name` and `app.kubernetes.io/instance`). Delete the old Deployment once (`kubectl delete deployment <name>`) and the chart's takes its place. That touches neither the state volume nor the Secrets, and with the `Recreate` strategy the gap is the same as any restart. A Service or ConfigMap of your own is only in the way when its name collides with one the chart renders; otherwise delete the old ones after the switch.
+
+**Servers seeded before the chart keep their `file:` password paths.** `servers` in `darling.json` is a first-start seed (see [Which values the store overrides after the first start](#which-values-the-store-overrides-after-the-first-start)), and the store keeps each server's password reference as it was seeded. The chart mounts the Secret at `/run/secrets/darling/`, so a server seeded with a password under another path finds no file there. Mount the old path as well, with `extraVolumes` and `extraVolumeMounts`, and keep it for as long as those servers should read their passwords from the Secret. The Admin page and the MCP tool `edit_server` take only the password itself, not a `file:` reference, so a server edited there stops reading the Secret:
+
+```yaml
+extraVolumes:
+  - name: old-secret-paths
+    secret:
+      secretName: <your-secret>
+      defaultMode: 0440
+      items:
+        - key: sql-password-prod
+          path: sql-password-prod
+extraVolumeMounts:
+  - name: old-secret-paths
+    mountPath: /run/secrets/<old-path>
+    readOnly: true
+```
+
 ## Upgrades
 
 1. **Back up the store first.** The bundled store has no backups of its own. Take a `pg_dump` (or a volume snapshot) before changing the chart or the image. An external store follows your own backup plan.
 2. **`Recreate` means a short outage.** The state volume allows one writer, so the old pod stops before the new one starts. Collection pauses for that time.
-3. Set the new `image.tag` and run `helm upgrade darling Darling/helm/performancemonitor-darling --reuse-values --set-string image.tag=<release>` (or edit your values file). If a new chart version adds values, drop `--reuse-values` and pass your values file.
+3. With the published chart, run `helm upgrade darling oci://ghcr.io/erikdarlingdata/charts/performancemonitor-darling --version <new release> -f <your values>`: the new chart brings its own image pin, so leave both `image.tag` and `image.digest` out of your values. A digest left over from an earlier pin wins over the new chart's: it would render the new tag with the old digest and keep running the old image. To pin another image, set both. From a checkout, set the new `image.tag` and run `helm upgrade darling Darling/helm/performancemonitor-darling --reuse-values --set-string image.tag=<release>` (or edit your values file). If a new chart version adds values, drop `--reuse-values` and pass your values file.
 4. **A volume from a deployment that ran the image as root.** The image runs as user 1654. A state volume left owned by root makes the new pod stop collection and report not Ready, never restarted, with the command to fix it in its log. Run a one-off Job (or initContainer) as root that does `chown -R 1654:1654 /var/lib/darling` and the `chmod`s of the volume root, with the Deployment scaled to 0 for a ReadWriteOnce volume, then scale back. The exact commands and the shapes of volume this covers (a new volume, a root-owned one, one mounted at `credentials/`) are in [Container user](../../../docs/darling/security.md#container-user), which also has the raw-manifest `securityContext` this chart renders. The chart itself never runs as root.
 5. **Resizing the bundled store's volume.** Changing `store.bundled.persistence.size` makes `helm upgrade` fail: a StatefulSet's `volumeClaimTemplates` cannot change. Resize the PVC itself instead: when its StorageClass has `allowVolumeExpansion: true`, raise its request with `kubectl patch pvc data-<fullname>-store-0 -p '{"spec":{"resources":{"requests":{"storage":"20Gi"}}}}'`, and keep the old size in your values.
 6. **The bundled store's PostgreSQL major version.** A chart version that moves `store.bundled.image` to a new PostgreSQL major is a breaking change: PostgreSQL cannot open a data directory from another major. Dump the store with the old image, then restore it into the new one.
@@ -260,4 +304,4 @@ With a long release name the store's names are shortened (`kubectl get pvc,secre
 
 ## Tests
 
-`tests/render-tests.sh` renders the chart and checks it without a cluster (it needs `helm`). `tests/kind-tests.sh` installs both store modes on a kind cluster. Both run in `.github/workflows/darling-helm.yml`.
+`tests/render-tests.sh` renders the chart and checks it without a cluster (it needs `helm`). `tests/kind-tests.sh` installs both store modes on a kind cluster. `tests/release-tests.sh` checks how a release stamps and packages the chart (`.github/scripts/darling-helm-release.sh`), without a cluster or a registry. All of them run in `.github/workflows/darling-helm.yml`.

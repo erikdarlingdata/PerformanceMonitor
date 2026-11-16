@@ -54,6 +54,14 @@ public static class AttentionWindowSql
     /// <see cref="AzdataMetadataPredicate"/>.</summary>
     public const string AzdataClientApp = "azdata";
 
+    /// <summary>The client application the dbatools PowerShell module connects under (#8877). The same name runs people's own scripts and
+    /// queries (<c>Invoke-DbaQuery</c>), so the name alone cannot be left out without hiding a real timeout. The SMO catalog reads are told apart by
+    /// the parameter marker, see <see cref="DbatoolsSmoMetadataPredicate"/>.</summary>
+    public const string DbatoolsClientApp = "dbatools PowerShell module - dbatools.io";
+
+    /// <summary>The parameter marker SMO puts in the statements it generates (<c>@_msparam_0</c>, <c>@_msparam_1</c>, ...) (#8877).</summary>
+    public const string SmoParameterMarker = "@_msparam_";
+
     /// <summary>What an SSMS IntelliSense client application name starts with (#6552, #7061). The C# rule
     /// (<c>AttentionEvaluator.IsSsmsIntelliSense</c>) and the SQL rule (<see cref="ExcludedAppPredicate"/>) both read this, so they cannot drift.</summary>
     public const string SsmsIntelliSensePrefix = "Microsoft SQL Server Management Studio";
@@ -99,6 +107,16 @@ public static class AttentionWindowSql
     /// </summary>
     public static readonly string AzdataMetadataPredicate =
         $"(lower(trim(client_app_name)) = '{AzdataClientApp}' AND (ltrim(statement_text) ILIKE 'create table #sver%' OR statement_text ILIKE '% as clmns%'))";
+
+    /// <summary>
+    /// True for a sample of dbatools' SMO catalog reads (#8877): the client application is <c>dbatools PowerShell module - dbatools.io</c> AND the
+    /// statement text holds SMO's parameter marker (<c>@_msparam_</c>, underscores escaped so they match literally). The same application name runs
+    /// people's own queries, so a statement without the marker still counts. A sample with no statement text (the statement filter withheld it) is
+    /// never matched. NULL when the application or the text is NULL. The application cannot be <c>azdata</c> too, so this and
+    /// <see cref="AzdataMetadataPredicate"/> never overlap.
+    /// </summary>
+    public static readonly string DbatoolsSmoMetadataPredicate =
+        $"(lower(trim(client_app_name)) = '{SqlQuote(DbatoolsClientApp.ToLowerInvariant())}' AND statement_text ILIKE '%{LikeEscape(SmoParameterMarker)}%' ESCAPE '\\')";
 
     /// <summary>
     /// True for a sample whose client application is SSMS IntelliSense or one of the VS Code mssql metadata connections (#6552, #6856), the
@@ -181,7 +199,7 @@ samples AS (
     SELECT
         date_trunc('minute', collection_time) AS minute,
         CAST(COUNT(*) AS BIGINT) AS kept,
-        CAST(COUNT(*) FILTER (WHERE COALESCE({ShortDurationPredicate}, FALSE) OR COALESCE({AzdataMetadataPredicate}, FALSE) OR COALESCE({ExcludedAppPredicate}, FALSE)) AS BIGINT) AS left_out
+        CAST(COUNT(*) FILTER (WHERE COALESCE({ShortDurationPredicate}, FALSE) OR COALESCE({AzdataMetadataPredicate}, FALSE) OR COALESCE({DbatoolsSmoMetadataPredicate}, FALSE) OR COALESCE({ExcludedAppPredicate}, FALSE)) AS BIGINT) AS left_out
     FROM {eventsRelation}
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -219,7 +237,8 @@ ORDER BY collection_time DESC
 
     /// <summary>The sample rows counted per (run, database, application). Columns: collection_time, database_name, client_app_name, samples (bigint),
     /// short_samples (bigint: the part under the duration floor, <see cref="ShortDurationPredicate"/>), azdata_metadata_samples (bigint: the part
-    /// that is Azure Data Studio metadata work and NOT already short, <see cref="AzdataMetadataPredicate"/>; the two parts never overlap).</summary>
+    /// that is Azure Data Studio metadata work and NOT already short, <see cref="AzdataMetadataPredicate"/>), dbatools_metadata_samples (bigint: the part that is
+    /// dbatools SMO metadata work and NOT already short, <see cref="DbatoolsSmoMetadataPredicate"/>; the three parts never overlap).</summary>
     public static string SampleGroups(string eventsRelation, bool bounded = false) => $"""
 SELECT
     collection_time,
@@ -227,7 +246,8 @@ SELECT
     client_app_name,
     CAST(COUNT(*) AS BIGINT) AS samples,
     CAST(COUNT(*) FILTER (WHERE {ShortDurationPredicate}) AS BIGINT) AS short_samples,
-    CAST(COUNT(*) FILTER (WHERE NOT COALESCE({ShortDurationPredicate}, FALSE) AND COALESCE({AzdataMetadataPredicate}, FALSE)) AS BIGINT) AS azdata_metadata_samples
+    CAST(COUNT(*) FILTER (WHERE NOT COALESCE({ShortDurationPredicate}, FALSE) AND COALESCE({AzdataMetadataPredicate}, FALSE)) AS BIGINT) AS azdata_metadata_samples,
+    CAST(COUNT(*) FILTER (WHERE NOT COALESCE({ShortDurationPredicate}, FALSE) AND COALESCE({DbatoolsSmoMetadataPredicate}, FALSE)) AS BIGINT) AS dbatools_metadata_samples
 FROM {eventsRelation}
 WHERE server_id = $1
 AND   collection_time >= $2{Ceiling(bounded)}
@@ -274,7 +294,7 @@ LIMIT {TopCount}
     /// <summary>
     /// The newest kept ring-buffer events, for the read surface only (get_client_timeouts): one row per <c>sample</c>, newest first.
     /// Columns: event_time, collection_time, database_name, client_app_name, client_hostname, session_id, interrupt_duration_us,
-    /// statement_fingerprint, statement_text, below_duration_floor (boolean), azdata_metadata (boolean). Always bounded: <c>$2</c> is the EXCLUSIVE span boundary and <c>$3</c> the inclusive row ceiling (see <see cref="SpanFloor"/>). Newest first, ties broken by the table's unique id so a page edge is stable. <paramref name="limit"/> is a validated integer, never caller text.
+    /// statement_fingerprint, statement_text, below_duration_floor (boolean), azdata_metadata (boolean), dbatools_metadata (boolean). Always bounded: <c>$2</c> is the EXCLUSIVE span boundary and <c>$3</c> the inclusive row ceiling (see <see cref="SpanFloor"/>). Newest first, ties broken by the table's unique id so a page edge is stable. <paramref name="limit"/> is a validated integer, never caller text.
     /// </summary>
     public static string Samples(string eventsRelation, int limit) => $"""
 SELECT
@@ -288,7 +308,8 @@ SELECT
     statement_fingerprint,
     statement_text,
     COALESCE({ShortDurationPredicate}, FALSE) AS below_duration_floor,
-    COALESCE({AzdataMetadataPredicate}, FALSE) AS azdata_metadata
+    COALESCE({AzdataMetadataPredicate}, FALSE) AS azdata_metadata,
+    COALESCE({DbatoolsSmoMetadataPredicate}, FALSE) AS dbatools_metadata
 FROM {eventsRelation}
 WHERE server_id = $1
 AND   collection_time > $2

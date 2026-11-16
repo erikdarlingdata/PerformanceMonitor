@@ -22,6 +22,9 @@ on:
       - 'Darling/Dockerfile'
       - '.github/workflows/darling-linux-store.yml'
       - 'Darling/PerformanceMonitor.Darling.Service/Hosting/DarlingHealth*.cs'
+      # The release publishing (#8017): its script is tested by tests/release-tests.sh in the static job.
+      - '.github/scripts/darling-helm-release.sh'
+      - '.github/workflows/darling-helm-release.yml'
 
 permissions:
   contents: read
@@ -103,6 +106,7 @@ jobs:
           bash "${CHART_DIR}/tests/render-tests.sh"
           sh "${CHART_DIR}/tests/render-config-tests.sh"
           bash "${CHART_DIR}/tests/parity-tests.sh"
+          bash "${CHART_DIR}/tests/release-tests.sh"
 
   # The chart installed on a kind cluster, with the image built from this checkout: both store modes, the password key from a
   # Secret, and the not-Ready-but-never-restarted paths (store down at start, a refused darling.json, a root-owned state volume).
