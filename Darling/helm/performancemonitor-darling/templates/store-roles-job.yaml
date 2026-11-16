@@ -7,7 +7,7 @@
 # The store-roles hook Job (#8779): runs provision-roles.sql against the external store after every install and upgrade.
 # The init container prepares the script, a pgpass file and the libpq settings in a memory volume; the psql container runs
 # them. The login and role-password Secrets are mounted in the init container only, as files: no env variable or argument
-# carries a password. The psql container pulls IfNotPresent, as the bundled store does for the same image; the init container
+# carries a password. The psql container pulls IfNotPresent, as the bundled store does, and the default psqlImage is the bundled store's image; the init container
 # runs the Darling image and follows image.pullPolicy.
 apiVersion: batch/v1
 kind: Job
@@ -49,6 +49,10 @@ spec:
       {{- end }}
       {{- with .Values.priorityClassName }}
       priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
         - name: prepare

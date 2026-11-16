@@ -108,7 +108,9 @@ an empty value name means the chart sets the key itself and nothing overrides it
 {{- range $owned -}}
 {{- $path := index . 0 -}}
 {{- if include "performancemonitor-darling.pathPresent" (dict "cfg" $.Values.config "path" $path) -}}
-{{- if index . 1 -}}
+{{- if eq (index . 1) "store.provisionRoles.wireConnectionStrings" -}}
+{{- fail (printf "config.%s is owned by the chart while store.provisionRoles.wireConnectionStrings is true: the chart writes this key. Set store.provisionRoles.wireConnectionStrings=false to keep your own key" (join "." $path)) -}}
+{{- else if index . 1 -}}
 {{- fail (printf "config.%s is owned by the chart and cannot be set inside config; use the value %s instead" (join "." $path) (index . 1)) -}}
 {{- else -}}
 {{- fail (printf "config.%s is owned by the chart and cannot be set inside config: the chart sets it, and it cannot be overridden" (join "." $path)) -}}
@@ -353,6 +355,9 @@ app.kubernetes.io/component: store
 {{- end -}}
 {{- if and $viaPassword .Values.store.external.connectionStringSecret.name -}}
 {{- fail "store.provisionRoles.login.passwordSecret cannot be used with store.external.connectionStringSecret: there is no host to pair the password with; use store.provisionRoles.login.connectionStringSecret instead" -}}
+{{- end -}}
+{{- if and $viaPassword (has (toString .Values.store.external.sslMode) (list "VerifyCA" "VerifyFull")) (not .Values.store.external.caSecret.name) -}}
+{{- fail (printf "store.external.caSecret.name is required when store.provisionRoles.enabled uses the passwordSecret login and store.external.sslMode is %s: psql (libpq) needs a root certificate file to verify the server, where the service itself would fall back to the OS trust store. Name the Secret holding your CA in store.external.caSecret" .Values.store.external.sslMode) -}}
 {{- end -}}
 {{- if and $p.wireConnectionStrings .Values.store.external.connectionStringSecret.name -}}
 {{- fail "store.provisionRoles.wireConnectionStrings cannot be on while store.external.connectionStringSecret is used: the chart has no host to put in the web and MCP connection strings. Set store.provisionRoles.wireConnectionStrings to false and point config.postgres.webConnectionString and config.postgres.mcpConnectionString at your own connection strings (file: references into a Secret) yourself" -}}

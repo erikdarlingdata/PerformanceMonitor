@@ -576,11 +576,23 @@ assert_fails "exactly one" -f "${CI_EXTERNAL}" --set store.provisionRoles.login.
 assert_fails "store.provisionRoles.login.passwordSecret" -f "${CI_EXTERNAL}" \
   --set store.external.passwordSecret.name= --set store.external.connectionStringSecret.name=svc-conn
 # The connection-string login form works with a connection-string store, once the wiring is off (it needs a host).
-render -f "${CI_EXTERNAL}" --set store.external.passwordSecret.name= --set store.external.connectionStringSecret.name=svc-conn   --set store.provisionRoles.wireConnectionStrings=false \
+render -f "${CI_EXTERNAL}" --set store.external.passwordSecret.name= --set store.external.connectionStringSecret.name=svc-conn --set store.provisionRoles.wireConnectionStrings=false \
   --set store.provisionRoles.login.passwordSecret.name= --set store.provisionRoles.login.connectionStringSecret.name=svc-conn
 assert_eq "$(jq_job '.spec.template.spec.initContainers[0].args | join(" ")' | tr -d '"')" \
   "--prepare-provision-roles --login /run/secrets/darling-login/connection-string --login-kind connection-string --passwords /run/secrets/darling-roles --out /work --wait-seconds 900" \
   "connection-string init args carry no host options"
+
+# libpq's verify-ca and verify-full need a root certificate file; Npgsql falls back to the OS trust store, so only psql fails.
+assert_fails "store.external.caSecret" -f "${CI_EXTERNAL}" --set store.external.caSecret.name=
+assert_fails "store.external.caSecret" -f "${CI_EXTERNAL}" --set store.external.caSecret.name= --set store.external.sslMode=VerifyCA
+render -f "${CI_EXTERNAL}" --set store.external.caSecret.name= --set store.external.sslMode=Require
+render -f "${CI_EXTERNAL}" --set store.external.caSecret.name= --set store.external.sslMode=Prefer
+
+t provision_roles_hostaliases
+render -f "${CI_EXTERNAL}" --set-json 'hostAliases=[{"ip":"10.0.0.9","hostnames":["db.internal"]}]'
+assert_eq "$(jq_job '.spec.template.spec.hostAliases[0].hostnames[0]')" '"db.internal"' "the Job pod carries hostAliases"
+render -f "${CI_EXTERNAL}"
+assert_eq "$(jq_job '.spec.template.spec.hostAliases')" "$(dq '.spec.template.spec.hostAliases')" "the Job pod carries the same hostAliases as the Darling pod"
 
 t provision_roles_job_shape
 render -f "${CI_EXTERNAL}"
@@ -753,6 +765,7 @@ assert_fails "store.provisionRoles.wireConnectionStrings" -f "${CI_EXTERNAL}" \
 assert_fails "store.provisionRoles.wireConnectionStrings" -f "${CI_EXTERNAL}" --set-json 'config={"postgres":{"webConnectionString":"file:/run/secrets/darling/x"}}'
 assert_fails "store.provisionRoles.wireConnectionStrings" -f "${CI_EXTERNAL}" --set-json 'config={"postgres":{"mcpConnectionString":"file:/run/secrets/darling/x"}}'
 assert_fails "config.postgres.mcpConnectionString" -f "${CI_EXTERNAL}" --set-json 'config={"postgres":{"mcpConnectionString":"file:/run/secrets/darling/x"}}'
+assert_fails "Set store.provisionRoles.wireConnectionStrings=false to keep your own key" -f "${CI_EXTERNAL}" --set-json 'config={"postgres":{"webConnectionString":"file:/run/secrets/darling/x"}}'
 # A key spelled in another case is the same key to Darling.
 assert_fails "store.provisionRoles.wireConnectionStrings" -f "${CI_EXTERNAL}" --set-json 'config={"postgres":{"WebConnectionString":"file:/run/secrets/darling/x"}}'
 # Wiring off lifts both refusals.
