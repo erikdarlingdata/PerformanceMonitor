@@ -65,6 +65,9 @@ assert_fails() {
     echo "assert_fails: helm template succeeded, expected failure containing: ${expected}" >&2
     exit 1
   fi
+  # Helm 3.22 names a schema failure by JSON pointer (at '/store/mode'), older Helm by dotted path (store.mode).
+  # Rewrite the pointers to dotted paths so one expected substring fits both.
+  output="$(sed -E ":a;s#(at '[^']*)/([^']*')#\1.\2#;ta;s#at '\.#at '#" <<<"${output}")"
   if ! grep -qF -- "${expected}" <<<"${output}"; then
     echo "assert_fails: the failure does not contain: ${expected}" >&2
     echo "${output}" >&2
