@@ -979,11 +979,13 @@ public sealed class SensitiveStatementsTests
     {
         StatementFilterWarmUp.Ensure();
         var calls = 0;
+        // A clock that never moves (#8852): the test is about what the documents earn and the memo, so a starved runner
+        // must not spend the floor while it walks a megabyte and withhold a document the assertions expect back.
         var budget = new SensitiveStatements.JudgeBudget(TimeSpan.FromSeconds(1.5), _ =>
         {
             calls++;
             return SensitiveStatements.Verdict.Clean;
-        });
+        }, clock: static () => TimeSpan.Zero);
         var doc = PaddedXml(Megabyte);
 
         var first = SensitiveStatements.Xml(doc, budget);
@@ -1062,7 +1064,10 @@ public sealed class SensitiveStatementsTests
     public void AJsonResultEarnsOnceForItsWholeLength_AndTheValuesInsideEarnNothing()
     {
         StatementFilterWarmUp.Ensure();
-        var budget = new SensitiveStatements.JudgeBudget(TimeSpan.FromSeconds(1.5), _ => SensitiveStatements.Verdict.Clean);
+        // A clock that never moves (#8852): the test is about what the result earns, so a starved runner must not spend
+        // the floor while it walks two megabytes and withhold the result the assertions expect back.
+        var budget = new SensitiveStatements.JudgeBudget(
+            TimeSpan.FromSeconds(1.5), _ => SensitiveStatements.Verdict.Clean, clock: static () => TimeSpan.Zero);
         var json = "{\"plan\":\"" + new string('x', Megabyte) + "\",\"other\":\"" + new string('y', Megabyte) + "\"}";
 
         Assert.Same(json, SensitiveStatements.Json(json, budget));
