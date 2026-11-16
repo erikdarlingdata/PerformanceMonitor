@@ -564,9 +564,10 @@ WITH plan_agg AS
 WITH plan_agg AS
 (
     -- #5448: built days from collect.plan_regression_daily (summed totals, so days recombine exactly), every other row
-    -- from the interval table with the daily builder's own aggregate. A row is in exactly one half by its day
-    -- (last_execution_time::date): a day not built is all live, and a built day keeps only its rows at or above its
-    -- watermark ($6) live (#5812: an open day is built partially; a whole day's watermark is its next midnight).
+    -- from the interval table with the daily builder's own aggregate, taken in double precision (#8570). A row is in
+    -- exactly one half by its day (last_execution_time::date): a day not built is all live, and a built day keeps only its
+    -- rows at or above its watermark ($6) live (#5812: an open day is built partially; a whole day's watermark is its next
+    -- midnight).
     SELECT
         database_name,
         query_id,
@@ -574,21 +575,28 @@ WITH plan_agg AS
         replica_role,
         any_value(query_plan_hash) AS query_plan_hash,
         SUM(execs) AS execs,
-        SUM(cpu_us_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0) AS cpu_per_exec,
-        SUM(dur_us_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0) AS dur_per_exec,
+        SUM(cpu_us_sum) / NULLIF(SUM(execs), 0) AS cpu_per_exec,
+        SUM(dur_us_sum) / NULLIF(SUM(execs), 0) AS dur_per_exec,
         -- #5631: rows per call. A day with no rowcount_sum (an interval had none, or the day awaits its rebuild after the
         -- column was added) makes the whole plan's figure NULL, the same rule the other two reads apply.
         CASE WHEN COUNT(*) = COUNT(rowcount_sum)
-             THEN SUM(rowcount_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0)
+             THEN SUM(rowcount_sum) / NULLIF(SUM(execs), 0)
         END AS rows_per_exec,
         MAX(last_exec) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
         MAX(force_failure_count) AS force_failure_count
     FROM
     (
+        -- #8570: both halves hand plan_agg their sums in double precision. A numeric sum keeps a large state for every
+        -- group, and over a busy server's plans those states outgrow the hash limit at PlanRegressionWorkMemSql and spill
+        -- to disk, in plan_agg and in the live half's own GROUP BY. Every sum ends as a double: the totals are divided into
+        -- per-call figures, and the suffix only compares the call count with 25 and multiplies it by a per-call double. A
+        -- call count is a whole number far below 2^53, so its double sum is exact.
         SELECT
             d.database_name, d.query_id, d.plan_id, d.replica_role, d.query_plan_hash,
-            d.execs, d.cpu_us_sum, d.dur_us_sum, d.rowcount_sum, d.last_exec, d.is_forced_plan, d.force_failure_count
+            d.execs::DOUBLE PRECISION AS execs, d.cpu_us_sum::DOUBLE PRECISION AS cpu_us_sum,
+            d.dur_us_sum::DOUBLE PRECISION AS dur_us_sum, d.rowcount_sum::DOUBLE PRECISION AS rowcount_sum,
+            d.last_exec, d.is_forced_plan, d.force_failure_count
         FROM plan_regression_daily AS d
         WHERE d.server_id = $1::integer
         AND   d.day = ANY($3::date[])
@@ -597,10 +605,10 @@ WITH plan_agg AS
 
         SELECT
             l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash,
-            SUM(l.execution_count),
-            SUM(l.avg_cpu_time_us::numeric * l.execution_count),
-            SUM(l.avg_duration_us::numeric * l.execution_count),
-            CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN COALESCE(SUM(l.avg_rowcount::numeric * l.execution_count), 0) END, -- #5631: COALESCE as in BuildDaySql, so a group whose execution counts are all NULL is 0 rows, not NULL.
+            SUM(l.execution_count::DOUBLE PRECISION),
+            SUM(l.avg_cpu_time_us::DOUBLE PRECISION * l.execution_count),
+            SUM(l.avg_duration_us::DOUBLE PRECISION * l.execution_count),
+            CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN COALESCE(SUM(l.avg_rowcount::DOUBLE PRECISION * l.execution_count), 0) END, -- #5631: COALESCE as in BuildDaySql, so a group whose execution counts are all NULL is 0 rows, not NULL.
             MAX(l.last_execution_time),
             bool_or(l.is_forced_plan),
             MAX(l.force_failure_count)
@@ -622,18 +630,20 @@ WITH plan_agg AS
 
     /// <summary>
     /// The work memory for every PLAN_REGRESSION read (#5812, bound 2): the daily read's snapshot transaction and the short
-    /// transaction each exact-bound read (table or raw) now runs in (M2). Set with <c>SET LOCAL</c> so it ends with
-    /// that transaction and touches no other statement on the pooled connection. The daily read groups every built day's
-    /// totals plus the live rows by plan. At the default 4MB the planner sorts them all, and on a planted busy server (15
-    /// built days, about 384,000 rows) that sort went to disk (an external merge of about 15MB). From 32MB up it hashes in
-    /// memory instead: two hash aggregates of about 35MB to 42MB each, under the hash limit of twice work_mem
-    /// (<c>hash_mem_multiplier</c>). 64MB is the bound: 32MB also did not spill, but it is below its own peak (about 35MB)
-    /// and fits only through that multiplier, so 64MB keeps the headroom. A hash or sort takes memory only as it grows, so
-    /// a small server's read uses what it needs (<c>PlanRegressionDailyNoSpillRig</c> measures every bound on one plant).
-    /// The figure is per node, not per read: the daily read has six sort or hash nodes, so one read may take up to 6 x 64MB,
-    /// doubled for a hash through <c>hash_mem_multiplier</c> (768MB at its default of 2), though the plant peaked near 37MB
-    /// in each of two hash aggregates. Across the fleet, scheduled reads run inside each server's sweep, so the ceiling is that
-    /// times <c>MaxConcurrentSweeps</c> (4 by default, at most 16), and on-demand <c>analyze_server</c> and
+    /// transaction each exact-bound read (table or raw) runs in (M2). Set with <c>SET LOCAL</c> so it ends with that
+    /// transaction and touches no other statement on the pooled connection. The daily read groups every built day's totals
+    /// plus the live rows by plan, with every sum in double precision (#8570). It was measured at 64MB on two plants of
+    /// 123,600 plans and 15 built days, with no temp writes on either. Where each plan ran on about three of the days (about
+    /// 408,000 rows, the shape of a busy production server), the hash aggregates for <c>plan_agg</c>, <c>plan_dedup</c> and
+    /// the live half peaked at about 41MB, 33MB and 9MB; where every plan ran every day (about 1,980,000 rows), at about
+    /// 33MB, 29MB and 29MB. At the default 4MB the planner sorts them and the sorts go to disk as external merges, and at
+    /// 32MB the every-day plant still spills a sort, so 64MB is the bound, and it holds every hash under work_mem itself.
+    /// Numeric sums would need about 133MB for the same <c>plan_agg</c> and spill at this bound. A hash or sort takes memory
+    /// only as it grows, so a small server's read uses what it needs (<c>PlanRegressionDailyNoSpillRig</c> measures every
+    /// bound on one plant). The figure is per node, not per read: the daily read has six sort or hash nodes, so one read may
+    /// take up to 6 x 64MB, doubled for a hash through <c>hash_mem_multiplier</c> (768MB at its default of 2), though the
+    /// plants' largest node peaked near 41MB. Across the fleet, scheduled reads run inside each server's sweep, so the
+    /// ceiling is that times <c>MaxConcurrentSweeps</c> (4 by default, at most 16), and on-demand <c>analyze_server</c> and
     /// <c>get_analysis_facts</c> reads that miss the candidate cache run outside the sweep gate and add to it; size
     /// <c>MaxConcurrentSweeps</c> against the store's memory before raising this bound.
     /// </summary>
