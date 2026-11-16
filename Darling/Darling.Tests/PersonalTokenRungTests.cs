@@ -110,16 +110,20 @@ public sealed class PersonalTokenRungTests
         await using var command = new NpgsqlCommand(ViewerDataService.StoreSchemaProbeSql, owner);
         await using var reader = await command.ExecuteReaderAsync(ct);
         Assert.True(await reader.ReadAsync(ct));
+        var probed = new object[parameters.Length];
         var sentinels = new object[parameters.Length];
         for (var i = 0; i < sentinels.Length; i++)
         {
-            sentinels[i] = i > ordinal ? false : reader.GetBoolean(i);
+            probed[i] = reader.GetBoolean(i);
+            sentinels[i] = i > ordinal ? false : probed[i];
         }
+
+        /* The unmodified probed row of the fully migrated store maps to the build's own top, whatever rung that is. */
+        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, probed)!);
 
         Assert.True((bool)sentinels[ordinal]);
         Assert.Equal(PersonalTokenSchema.Version, (int)method.Invoke(null, sentinels)!);
         sentinels[ordinal] = false;
         Assert.Equal(PersonalTokenSchema.Version - 1, (int)method.Invoke(null, sentinels)!);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
     }
 }
