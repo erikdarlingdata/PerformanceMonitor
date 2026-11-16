@@ -2710,7 +2710,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status403Forbidden, remote,
                 $"web.network.oidc.tokenSignIn is '{DarlingTokenSignIn.Word(tokenSignIn)}', which refuses token sign-in from this address; set web.network.oidc.tokenSignIn to change it",
                 now);
-            await WriteTokenSignInDisabledAsync(context);
+            await WriteTokenSignInDisabledAsync(context, StatusCodes.Status403Forbidden);
             return;
         }
 
@@ -3243,9 +3243,9 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <summary>The 403 page a refused token sign-in gets (#8735): a fixed text, identical on every call, whose
     /// head carries <see cref="DarlingTokenSignIn.RefusalMarkerHtml"/> - the element the front door matches, never
     /// the prose. It links to the SSO sign-in and sets no cookie.</summary>
-    internal static Task WriteTokenSignInDisabledAsync(HttpContext context)
+    internal static Task WriteTokenSignInDisabledAsync(HttpContext context, int statusCode)
     {
-        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        context.Response.StatusCode = statusCode;
         context.Response.ContentType = "text/html; charset=utf-8";
         context.Response.Headers.CacheControl = "no-store";
         return context.Response.WriteAsync(TokenSignInDisabledHtml);

@@ -86,7 +86,7 @@ public sealed class DarlingTokenSignInLoginPageTests
         var context = new DefaultHttpContext();
         using var body = new MemoryStream();
         context.Response.Body = body;
-        await DarlingWebHostService.WriteTokenSignInDisabledAsync(context);
+        await DarlingWebHostService.WriteTokenSignInDisabledAsync(context, StatusCodes.Status403Forbidden);
         var text = Encoding.UTF8.GetString(body.ToArray());
         return (context.Response.StatusCode, text, context.Response.Headers.ContainsKey("Set-Cookie"));
     }
