@@ -831,8 +831,10 @@ public static partial class DarlingCliCommands
             output.WriteLine("WARNING: " + warning);
         }
 
-        /* #6265: a warning, not an error, so a setup that started before still starts; the web refuses that token for sign-in. */
-        if (DarlingAgentDispatchChecks.WebTokenFinding(config) is { } webTokenFinding)
+        /* #6265: a warning, not an error, so a setup that started before still starts; the web refuses that token for sign-in. The service
+           drops it under tokenSignIn off (no token signs in, so the clash is moot), and so does this. */
+        DarlingTokenSignIn.TryParse(config.Web.Network?.Oidc?.TokenSignIn, out var webTokenSignIn);
+        if (webTokenSignIn != TokenSignInMode.Off && DarlingAgentDispatchChecks.WebTokenFinding(config) is { } webTokenFinding)
         {
             output.WriteLine("WARNING: " + webTokenFinding);
         }
@@ -882,10 +884,12 @@ public static partial class DarlingCliCommands
     /// The <c>web.network.oidc.tokenSignIn</c> lines <c>--validate-config</c> prints (#8735), each starting <c>ERROR:</c>, <c>NOTE:</c>
     /// or <c>INFO:</c>. An <c>ERROR:</c> is a configuration the service refuses to start: an unknown value, or <c>off</c> with no
     /// OIDC or no exposed dashboard, worded by the start's own <see cref="DarlingWebHostService.TokenSignInStartProblem"/> so the two
-    /// say the same thing. The OIDC client the start refuses (a bad authority, say) needs a live start, so it is not judged here. Empty under <c>on</c> or with no
+    /// say the same thing. "Exposed" is the service's own verdict, <see cref="DarlingWebHostService.ResolveWebBind"/> (listen, allowFrom, a
+    /// token or the <c>off</c> + OIDC widening, and a managed store or a container), so a configuration the start would degrade to
+    /// loopback-only is not called exposed here. <paramref name="inContainer"/> is the ambient container marker unless a test passes it. The OIDC client the start refuses (a bad authority, say) needs a live start, so it is not judged here. Empty under <c>on</c> or with no
     /// <c>web.network.oidc</c> block. Never holds a token.
     /// </summary>
-    internal static IReadOnlyList<string> TokenSignInFindings(DarlingConfig config)
+    internal static IReadOnlyList<string> TokenSignInFindings(DarlingConfig config, bool? inContainer = null)
     {
         var findings = new List<string>();
         var network = config.Web.Network;
@@ -894,7 +898,8 @@ public static partial class DarlingCliCommands
             return findings;
         }
 
-        var exposed = DarlingNetwork.IsExposedListenAddress(network.Listen);
+        var exposed = DarlingWebHostService.ResolveWebBind(config.Web, config.Postgres.Managed, inContainer).Mode
+            == DarlingHostBinding.BindMode.NetworkAndLoopback;
         if (DarlingWebHostService.TokenSignInStartProblem(oidc.TokenSignIn, oidc.IsConfigured, exposed, oidcClientPresent: oidc.IsConfigured) is { } problem)
         {
             findings.Add("ERROR: " + problem);

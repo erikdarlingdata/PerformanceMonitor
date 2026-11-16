@@ -24,8 +24,8 @@ public sealed class DarlingTokenSignInCliTests
 {
     private const string Oidc = "\"authority\":\"https://login.example.com\",\"clientId\":\"cid\",\"clientSecret\":\"secret\"";
 
-    private static DarlingConfig WebConfig(string networkBody) =>
-        DarlingConfig.Parse("{\"web\":{\"network\":{" + networkBody + "}}}");
+    private static DarlingConfig WebConfig(string networkBody, bool managed = true) =>
+        DarlingConfig.Parse("{\"postgres\":{\"managed\":" + (managed ? "true" : "false") + "},\"web\":{\"network\":{" + networkBody + "}}}");
 
     private static DarlingConfig WithOidc(string listen, string signIn, string extra = "") =>
         WebConfig(
@@ -86,8 +86,8 @@ public sealed class DarlingTokenSignInCliTests
     }
 
     [Theory]
-    [InlineData("")]
-    [InlineData(",\"trustedProxies\":[\"10.1.2.3\"]")]
+    [InlineData(",\"token\":\"t\"")]
+    [InlineData(",\"token\":\"t\",\"trustedProxies\":[\"10.1.2.3\"]")]
     public void Findings_LoopbackExposed_HasNoteNamingEnvoyLinkerdAndOff_WhetherOrNotProxiesAreListed(string extra)
     {
         var findings = DarlingCliCommands.TokenSignInFindings(WithOidc("0.0.0.0", "loopback", extra));
@@ -98,6 +98,30 @@ public sealed class DarlingTokenSignInCliTests
         Assert.Contains("Envoy", findings[1], StringComparison.Ordinal);
         Assert.Contains("Linkerd", findings[1], StringComparison.Ordinal);
         Assert.Contains("'off'", findings[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Findings_OffWithOidcAndExposedListen_ButNoAllowFrom_IsError()
+    {
+        var config = WebConfig($"\"listen\":\"0.0.0.0\",\"oidc\":{{{Oidc},\"tokenSignIn\":\"off\"}}");
+
+        var line = Assert.Single(DarlingCliCommands.TokenSignInFindings(config));
+        Assert.StartsWith("ERROR:", line, StringComparison.Ordinal);
+        Assert.Contains("not exposed", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Findings_OffWithOidcAndExposedListen_ButAnUnmanagedStore_IsError()
+    {
+        var config = WebConfig(
+            $"\"listen\":\"0.0.0.0\",\"allowFrom\":\"10.0.0.0/8\",\"oidc\":{{{Oidc},\"tokenSignIn\":\"off\"}}", managed: false);
+
+        var line = Assert.Single(DarlingCliCommands.TokenSignInFindings(config, inContainer: false));
+        Assert.StartsWith("ERROR:", line, StringComparison.Ordinal);
+        Assert.Contains("not exposed", line, StringComparison.Ordinal);
+
+        /* The same configuration in a container is exposure-capable, as the service sees it. */
+        Assert.StartsWith("INFO:", Assert.Single(DarlingCliCommands.TokenSignInFindings(config, inContainer: true)), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -165,6 +189,72 @@ public sealed class DarlingTokenSignInCliTests
     }
 
     [Fact]
+    public async Task ValidateConfig_OffWithExposedListenButNoAllowFrom_ExitsNonZero()
+    {
+        var dir = Directory.CreateTempSubdirectory("token-sign-in-validate-").FullName;
+        try
+        {
+            var path = WriteConfig(dir, "", "off", allowFrom: false);
+
+            using var output = new StringWriter();
+            using var error = new StringWriter();
+            var exit = await DarlingCliCommands.ValidateConfigAsync(path, output, error, _ => null, TestContext.Current.CancellationToken);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("ERROR: web.network.oidc.tokenSignIn is 'off'", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ValidateConfig_ANoteOnlyConfiguration_ExitsZero()
+    {
+        var dir = Directory.CreateTempSubdirectory("token-sign-in-validate-").FullName;
+        try
+        {
+            var path = WriteConfig(dir, "\"token\":\"t\",", "loopback");
+
+            using var output = new StringWriter();
+            using var error = new StringWriter();
+            var exit = await DarlingCliCommands.ValidateConfigAsync(path, output, error, _ => null, TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, exit);
+            Assert.Contains("NOTE: web.network.oidc.tokenSignIn is 'loopback'", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("ERROR:", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("off", false)]
+    [InlineData("on", true)]
+    public async Task ValidateConfig_WebTokenEqualToMcpToken_WarnsExceptUnderOff(string signIn, bool warns)
+    {
+        var dir = Directory.CreateTempSubdirectory("token-sign-in-validate-").FullName;
+        try
+        {
+            var path = WriteConfig(dir, "\"token\":\"" + SharedValue + "\",", signIn, mcpToken: SharedValue);
+
+            using var output = new StringWriter();
+            using var error = new StringWriter();
+            await DarlingCliCommands.ValidateConfigAsync(path, output, error, _ => null, TestContext.Current.CancellationToken);
+
+            Assert.Equal(warns, output.ToString().Contains(DarlingAgentDispatchChecks.WebTokenSameAsMcpMessage, StringComparison.Ordinal));
+            Assert.DoesNotContain(SharedValue, output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ValidateConfig_AValidTokenSignIn_PrintsInfoAndDoesNotFail()
     {
         var dir = Directory.CreateTempSubdirectory("token-sign-in-validate-").FullName;
@@ -186,15 +276,17 @@ public sealed class DarlingTokenSignInCliTests
         }
     }
 
-    /// <summary>A darling.json whose store is a closed local port (the probe fails at once, leaving no servers) and whose web block holds OIDC with the given mode.</summary>
-    private static string WriteConfig(string dir, string tokenMember, string signIn)
+    /// <summary>A darling.json whose managed store has no stored credential under the temp directory (so no store is probed and no servers are listed) and whose web block holds OIDC with the given mode.</summary>
+    private const string SharedValue = "a-shared-token-value-0123456789abcdef";
+
+    private static string WriteConfig(string dir, string tokenMember, string signIn, bool allowFrom = true, string? mcpToken = null)
     {
         var path = Path.Combine(dir, "darling.json");
-        var connectionString = $"Host=127.0.0.1;Port={StoreParseFailureFixtures.GetClosedPort()};Username=u;Password=p;Database=d";
         File.WriteAllText(
             path,
-            "{\"postgres\":{\"connectionString\":" + JsonSerializer.Serialize(connectionString) + "},"
-            + "\"web\":{\"network\":{\"listen\":\"0.0.0.0\",\"allowFrom\":\"10.0.0.0/8\"," + tokenMember
+            "{\"postgres\":{\"managed\":true,\"dataDirectory\":" + JsonSerializer.Serialize(Path.Combine(dir, "pgdata")) + "},"
+            + (mcpToken is null ? "" : "\"mcp\":{\"network\":{\"token\":\"" + mcpToken + "\"}},")
+            + "\"web\":{\"network\":{\"listen\":\"0.0.0.0\"," + (allowFrom ? "\"allowFrom\":\"10.0.0.0/8\"," : "") + tokenMember
             + "\"oidc\":{" + Oidc + ",\"tokenSignIn\":\"" + signIn + "\"}}}}");
         return path;
     }
