@@ -25,7 +25,10 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "performancemonitor-darling.selectorLabels" . | nindent 8 }}
+        # Not the selector labels: the web and MCP Services and the Deployment select on name + instance, and this pod has
+        # no listener and no readiness probe, so it must never match them.
+        app.kubernetes.io/name: {{ include "performancemonitor-darling.name" . | trunc 50 | trimSuffix "-" }}-store-roles
+        app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: store-roles
     spec:
       restartPolicy: Never

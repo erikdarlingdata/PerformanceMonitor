@@ -663,3 +663,20 @@ assert_eq "$(jq_job '.spec.template.spec.containers[0].resources')" '{"limits":{
 t provision_roles_script_in_configmap
 render -f "${CI_EXTERNAL}"
 assert_eq "$(doc ConfigMap "${DEPLOY}" | yq '.data["run-provision-roles.sh"]')" "$(tr -d '\015' < "${CHART_DIR}/files/run-provision-roles.sh")" "the ConfigMap carries the shipped script"
+
+t provision_roles_pod_matches_no_selector
+# No Service and not the Deployment may select the Job pod: it has no listener and no readiness probe.
+render -f "${CI_EXTERNAL}" --set mcp.enabled=true
+podlabels="$(jq_job '.spec.template.metadata.labels')"
+assert_eq "$(printf '%s' "${podlabels}" | yq -p json '.["app.kubernetes.io/component"]')" "store-roles" "pod component label"
+selectors="$(yq -o=json -I=0 'select(.kind == "Service") | .spec.selector' "${OUT}"; doc Deployment "${DEPLOY}" | yq -o=json -I=0 '.spec.selector.matchLabels')"
+count=0
+while IFS= read -r selector; do
+  [ -n "${selector}" ] || continue
+  count=$((count + 1))
+  matches="$(printf '%s' "${podlabels}" | yq -p json "(. as \$p | ${selector} | to_entries | map(\$p[.key] == .value) | all)")"
+  assert_eq "${matches}" "false" "the Job pod matches a selector: ${selector}"
+done <<SELECTORS
+${selectors}
+SELECTORS
+[ "${count}" -ge 3 ] || { echo "expected at least 3 selectors (web, mcp, Deployment), saw ${count}" >&2; exit 1; }
