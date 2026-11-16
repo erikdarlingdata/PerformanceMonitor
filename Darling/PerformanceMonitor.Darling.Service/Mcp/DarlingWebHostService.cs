@@ -146,6 +146,13 @@ public sealed class DarlingWebHostService : BackgroundService
     private bool _oidcRefusedReported;
     private bool _trustedProxiesReported;
 
+    /// <summary>Whether this process has logged the OIDC block's plaintext-clientSecret Warning, its public-client Warning and its
+    /// "OIDC sign-in enabled" Information line (#8735 review, round 2): the block runs before the trustedProxies and TLS degrades, so a
+    /// start those degrades stop under tokenSignIn off would otherwise log all three again on every retry.</summary>
+    private bool _oidcPlaintextSecretReported;
+    private bool _oidcPublicClientReported;
+    private bool _oidcEnabledReported;
+
     /// <summary>How often the supervisor re-reads the live control-plane state (#1562, mirrors the MCP host).</summary>
     internal static readonly TimeSpan SupervisorPollInterval = TimeSpan.FromSeconds(5);
 
@@ -867,8 +874,9 @@ public sealed class DarlingWebHostService : BackgroundService
                     try
                     {
                         clientSecret = oidcConfig.ResolveClientSecret(out var usedPlaintextSecret);
-                        if (usedPlaintextSecret)
+                        if (usedPlaintextSecret && !_oidcPlaintextSecretReported)
                         {
+                            _oidcPlaintextSecretReported = true;
                             _logger.LogWarning(
                                 "web.network.oidc.clientSecret is set in plaintext (dev convenience): prefer encryptedClientSecret (produced by --encrypt-password).");
                         }
@@ -903,24 +911,29 @@ public sealed class DarlingWebHostService : BackgroundService
                         oidcConfig.ViewerRoles ?? Array.Empty<string>()));
                     _oidcClient = oidcClient;
 
-                    if (clientSecret is null)
+                    if (clientSecret is null && !_oidcPublicClientReported)
                     {
+                        _oidcPublicClientReported = true;
                         _logger.LogWarning(
                             "web.network.oidc has no client secret: the code exchange will run as a PUBLIC client on PKCE alone. Some providers refuse this for web apps; register a confidential client and set encryptedClientSecret if sign-ins fail at the exchange.");
                     }
 
                     /* Name the redirect-URI shape at start, because it is the one thing the operator has to
                        register at the IdP and the one thing some IdPs (Okta) refuse for a bare IP. */
-                    _logger.LogInformation(
-                        "OIDC sign-in enabled: authority {Authority}, clientId {ClientId}, role mapping {RoleMapping}. Register the redirect URI(s) your browsers will actually use: {{scheme}}://{{host}}:{Port}/auth/oidc/callback (host = {Hosts})."
-                        + OidcStartLineTokenNote(tokenSignIn),
-                        oidcClient.Options.Authority,
-                        oidcClient.Options.ClientId,
-                        oidcClient.Options.RoleClaim is null
-                            ? "none (every signed-in user gets the edit seat, the shared token's reach)"
-                            : $"claim '{oidcClient.Options.RoleClaim}' -> {oidcClient.Options.AdminRoles.Count} admin / {oidcClient.Options.ViewerRoles.Count} viewer value(s), unmatched users refused",
-                        effectivePort,
-                        DescribeOidcRedirectHosts(network.Listen));
+                    if (!_oidcEnabledReported)
+                    {
+                        _oidcEnabledReported = true;
+                        _logger.LogInformation(
+                            "OIDC sign-in enabled: authority {Authority}, clientId {ClientId}, role mapping {RoleMapping}. Register the redirect URI(s) your browsers will actually use: {{scheme}}://{{host}}:{Port}/auth/oidc/callback (host = {Hosts})."
+                            + OidcStartLineTokenNote(tokenSignIn),
+                            oidcClient.Options.Authority,
+                            oidcClient.Options.ClientId,
+                            oidcClient.Options.RoleClaim is null
+                                ? "none (every signed-in user gets the edit seat, the shared token's reach)"
+                                : $"claim '{oidcClient.Options.RoleClaim}' -> {oidcClient.Options.AdminRoles.Count} admin / {oidcClient.Options.ViewerRoles.Count} viewer value(s), unmatched users refused",
+                            effectivePort,
+                            DescribeOidcRedirectHosts(network.Listen));
+                    }
                 }
             }
 

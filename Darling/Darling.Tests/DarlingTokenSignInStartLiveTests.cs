@@ -185,6 +185,8 @@ public sealed class DarlingTokenSignInStartLiveTests
         Assert.False(result.SecondStarted);
         Assert.Equal(1, LinesContaining(result.Log, "Critical:", "web.network.trustedProxies is misconfigured"));
         Assert.Equal(1, LinesContaining(result.Log, "Warning:", "web.network.token is set in plaintext"));
+        Assert.Equal(1, LinesContaining(result.Log, "Warning:", "web.network.oidc.clientSecret is set in plaintext"));
+        Assert.Equal(1, LinesContaining(result.Log, "Information:", "OIDC sign-in enabled"));
         Assert.Equal(1, LinesContaining(result.Log, "Critical:", NotStartedText));
     }
 }
