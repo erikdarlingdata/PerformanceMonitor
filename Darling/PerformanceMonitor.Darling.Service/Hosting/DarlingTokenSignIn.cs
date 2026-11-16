@@ -25,7 +25,7 @@ internal static class DarlingTokenSignIn
     internal const string RefusalCode = "token_sign_in_disabled";
 
     /// <summary>The exact element that carries <see cref="RefusalCode"/> in a refused sign-in's body.</summary>
-    internal const string RefusalMarkerHtml = "<meta name='darling-refusal' content='token_sign_in_disabled'>";
+    internal const string RefusalMarkerHtml = "<meta name='darling-refusal' content='" + RefusalCode + "'>";
 
     /// <summary>
     /// Parses the setting, compared case-insensitively after trimming. Null, empty or blank is <see cref="TokenSignInMode.On"/>.
@@ -66,7 +66,10 @@ internal static class DarlingTokenSignIn
 
     /// <summary>
     /// Whether the token sign-in form may be used from this connection. <c>Loopback</c> asks the one loopback test,
-    /// <see cref="DarlingWebHostService.IsLoopbackConnection"/>, so a forwarded <c>127.0.0.1</c> is not loopback.
+    /// <see cref="DarlingWebHostService.IsLoopbackConnection"/>, so a forwarded <c>127.0.0.1</c> arriving through a remote trusted proxy is not
+    /// loopback. Through a trusted proxy on the same host it is: the connection is loopback and the forwarded address is too. A proxy
+    /// listed in <c>trustedProxies</c> helps only when it sends <c>X-Forwarded-For</c> on every request; a service-mesh sidecar usually
+    /// does not, and behind one <c>Loopback</c> cannot tell local clients from remote ones.
     /// </summary>
     internal static bool IsAllowed(TokenSignInMode mode, IPAddress? remoteIp, IPAddress? connectionIp) => mode switch
     {

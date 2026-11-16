@@ -128,33 +128,48 @@ public sealed class DarlingTokenSignInStartTests
     [Fact]
     public void StartLines_On_IsEmpty()
     {
-        Assert.Empty(DarlingWebHostService.TokenSignInStartLines(TokenSignInMode.On, hasTrustedProxies: false));
+        Assert.Empty(DarlingWebHostService.TokenSignInStartLines(TokenSignInMode.On, networkMode: true, hasTrustedProxies: false, oidcClientPresent: true));
     }
 
-    [Fact]
-    public void StartLines_Loopback_WithoutTrustedProxies_WarnsNamingEnvoyAndLinkerd()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void StartLines_Loopback_Exposed_WarnsNamingEnvoyLinkerdAndOff_WhetherOrNotProxiesAreListed(bool hasTrustedProxies)
     {
-        var lines = DarlingWebHostService.TokenSignInStartLines(TokenSignInMode.Loopback, hasTrustedProxies: false);
+        var lines = DarlingWebHostService.TokenSignInStartLines(TokenSignInMode.Loopback, networkMode: true, hasTrustedProxies, oidcClientPresent: true);
 
         var warning = Assert.Single(lines, l => l.Level == LogLevel.Warning);
         Assert.Contains("Envoy", warning.Message, StringComparison.Ordinal);
         Assert.Contains("Linkerd", warning.Message, StringComparison.Ordinal);
+        Assert.Contains("'off'", warning.Message, StringComparison.Ordinal);
+        Assert.Contains("X-Forwarded-For", warning.Message, StringComparison.Ordinal);
         Assert.Single(lines, l => l.Level == LogLevel.Information);
     }
 
     [Fact]
-    public void StartLines_Loopback_WithTrustedProxies_HasNoWarning()
+    public void StartLines_Loopback_LoopbackOnlyMode_HasNoWarning()
     {
-        var lines = DarlingWebHostService.TokenSignInStartLines(TokenSignInMode.Loopback, hasTrustedProxies: true);
+        var lines = DarlingWebHostService.TokenSignInStartLines(TokenSignInMode.Loopback, networkMode: false, hasTrustedProxies: false, oidcClientPresent: true);
 
         Assert.DoesNotContain(lines, l => l.Level == LogLevel.Warning);
         Assert.Single(lines);
     }
 
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    public void StartLines_Loopback_InformationLine_MentionsOidcOnlyWhenThereIsAClient(bool oidcClientPresent, bool mentionsOidc)
+    {
+        var lines = DarlingWebHostService.TokenSignInStartLines(TokenSignInMode.Loopback, networkMode: false, hasTrustedProxies: false, oidcClientPresent);
+
+        var info = Assert.Single(lines, l => l.Level == LogLevel.Information);
+        Assert.Equal(mentionsOidc, info.Message.Contains("OIDC", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void StartLines_Off_IsOneInformationLine()
     {
-        var lines = DarlingWebHostService.TokenSignInStartLines(TokenSignInMode.Off, hasTrustedProxies: false);
+        var lines = DarlingWebHostService.TokenSignInStartLines(TokenSignInMode.Off, networkMode: true, hasTrustedProxies: false, oidcClientPresent: true);
 
         var line = Assert.Single(lines);
         Assert.Equal(LogLevel.Information, line.Level);

@@ -908,12 +908,14 @@ public static partial class DarlingCliCommands
         }
 
         findings.Add($"INFO: web.network.oidc.tokenSignIn is '{DarlingTokenSignIn.Word(mode)}'.");
-        if (mode == TokenSignInMode.Loopback && exposed && (network.TrustedProxies?.Length ?? 0) == 0)
+        if (mode == TokenSignInMode.Loopback && exposed)
         {
             findings.Add(
-                "NOTE: web.network.oidc.tokenSignIn is 'loopback' and the dashboard is exposed, but web.network.trustedProxies is not set. "
-                + "A sidecar proxy such as Envoy or Linkerd connects from loopback and would make every client look local, so set "
-                + "web.network.trustedProxies to the proxy's address.");
+                "NOTE: web.network.oidc.tokenSignIn is 'loopback' and the dashboard is exposed. 'loopback' separates local clients from remote ones "
+                + "only when each remote client reaches this service with its own address. A service-mesh sidecar such as Envoy or Linkerd "
+                + "connects from loopback and usually sends no X-Forwarded-For, and a request from inside the mesh never carries one, so behind a "
+                + "sidecar every client would count as local; use 'off' there. Listing a reverse proxy in web.network.trustedProxies helps only "
+                + "when that proxy sends X-Forwarded-For with the client's address on every request.");
         }
 
         return findings;

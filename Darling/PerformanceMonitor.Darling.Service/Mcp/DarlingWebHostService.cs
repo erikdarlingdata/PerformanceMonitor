@@ -541,23 +541,29 @@ public sealed class DarlingWebHostService : BackgroundService
 
     /// <summary>
     /// The lines a start logs for <c>web.network.oidc.tokenSignIn</c> (#8735): nothing under <c>on</c>; under <c>loopback</c> an
-    /// Information line, plus a Warning when no <c>web.network.trustedProxies</c> is set, because an Envoy or Linkerd sidecar
-    /// connects from loopback and would make every client look local; under <c>off</c> an Information line. PURE.
+    /// Information line, plus, on an exposed start (<paramref name="networkMode"/>), a Warning that <c>loopback</c> cannot tell a
+    /// client behind a sidecar proxy from a local one (the trustedProxies advice only holds for a proxy that sends
+    /// <c>X-Forwarded-For</c>); under <c>off</c> an Information line. In loopback-only mode <c>trustedProxies</c> is never parsed, so no
+    /// warning is given there. PURE.
     /// </summary>
-    internal static IReadOnlyList<(LogLevel Level, string Message)> TokenSignInStartLines(TokenSignInMode mode, bool hasTrustedProxies)
+    internal static IReadOnlyList<(LogLevel Level, string Message)> TokenSignInStartLines(TokenSignInMode mode, bool networkMode, bool hasTrustedProxies, bool oidcClientPresent)
     {
         var lines = new List<(LogLevel Level, string Message)>();
         if (mode == TokenSignInMode.Loopback)
         {
             lines.Add((LogLevel.Information,
                 "web.network.oidc.tokenSignIn is 'loopback': the shared token, the web.network.tokens entries and the managed group tokens "
-                + "sign in only from this machine; other clients sign in with OIDC."));
-            if (!hasTrustedProxies)
+                + "sign in only from this machine"
+                + (oidcClientPresent ? "; other clients sign in with OIDC." : ".")));
+            if (networkMode)
             {
                 lines.Add((LogLevel.Warning,
-                    "web.network.oidc.tokenSignIn is 'loopback' and web.network.trustedProxies is empty: a sidecar proxy such as Envoy or Linkerd "
-                    + "on this machine connects from loopback, so every client behind it would count as local. List the proxy in "
-                    + "web.network.trustedProxies, or use 'off'."));
+                    "web.network.oidc.tokenSignIn is 'loopback' and this dashboard is exposed to the network"
+                    + (hasTrustedProxies ? "" : " with web.network.trustedProxies empty")
+                    + ": 'loopback' separates local clients from remote ones only when each remote client reaches this service with its own address. "
+                    + "A service-mesh sidecar such as Envoy or Linkerd connects from loopback and usually sends no X-Forwarded-For, and a request "
+                    + "from inside the mesh never carries one, so behind a sidecar every client would count as local; use 'off' there. "
+                    + "Listing a reverse proxy in web.network.trustedProxies helps only when that proxy sends X-Forwarded-For with the client's address on every request."));
             }
         }
         else if (mode == TokenSignInMode.Off)
@@ -769,7 +775,10 @@ public sealed class DarlingWebHostService : BackgroundService
                         {
                             _logger.LogWarning(
                                 "web.network.token is set in plaintext (dev convenience): prefer web.network.encryptedToken " +
-                                "(produced by --encrypt-password). This token gates web dashboard network access.");
+                                "(produced by --encrypt-password). " +
+                                (tokenSignIn == TokenSignInMode.Off
+                                    ? "web.network.oidc.tokenSignIn is 'off', so this token signs nobody in."
+                                    : "This token gates web dashboard network access."));
                         }
                     }
                 }
@@ -844,7 +853,10 @@ public sealed class DarlingWebHostService : BackgroundService
                 if (problem is not null)
                 {
                     _logger.LogCritical(
-                        "web.network.oidc is misconfigured ({Problem}): OIDC sign-in is DISABLED this start; the shared token remains the only web credential.",
+                        "web.network.oidc is misconfigured ({Problem}): OIDC sign-in is DISABLED this start; "
+                        + (tokenSignIn == TokenSignInMode.Off
+                            ? "web.network.oidc.tokenSignIn is 'off', so no token signs in and the dashboard is not started."
+                            : "the shared token remains the only web credential."),
                         problem);
                 }
                 else
@@ -869,7 +881,13 @@ public sealed class DarlingWebHostService : BackgroundService
                     /* Name the redirect-URI shape at start, because it is the one thing the operator has to
                        register at the IdP and the one thing some IdPs (Okta) refuse for a bare IP. */
                     _logger.LogInformation(
-                        "OIDC sign-in enabled: authority {Authority}, clientId {ClientId}, role mapping {RoleMapping}. Register the redirect URI(s) your browsers will actually use: {{scheme}}://{{host}}:{Port}/auth/oidc/callback (host = {Hosts}). The shared token keeps working beside OIDC as the scripted-caller/break-glass path.",
+                        "OIDC sign-in enabled: authority {Authority}, clientId {ClientId}, role mapping {RoleMapping}. Register the redirect URI(s) your browsers will actually use: {{scheme}}://{{host}}:{Port}/auth/oidc/callback (host = {Hosts})."
+                        + tokenSignIn switch
+                        {
+                            TokenSignInMode.Loopback => " The shared token signs in from this machine only.",
+                            TokenSignInMode.Off => "",
+                            _ => " The shared token keeps working beside OIDC as the scripted-caller/break-glass path.",
+                        },
                         oidcClient.Options.Authority,
                         oidcClient.Options.ClientId,
                         oidcClient.Options.RoleClaim is null
@@ -1236,7 +1254,7 @@ public sealed class DarlingWebHostService : BackgroundService
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
                ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
                loopback-only admits loopback names only, whatever it parsed. */
-            foreach (var (level, message) in TokenSignInStartLines(tokenSignIn, trustedProxies is { Count: > 0 }))
+            foreach (var (level, message) in TokenSignInStartLines(tokenSignIn, networkMode, trustedProxies is { Count: > 0 }, oidcClient is not null))
             {
                 _logger.Log(level, "{Message}", message);
             }
@@ -1707,8 +1725,9 @@ public sealed class DarlingWebHostService : BackgroundService
                     hasValidCookie = false;
                     seat = DarlingWebSeat.SharedToken;
                     refusals.Report(
-                        _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized, remote,
-                        "a token session was ended because web.network.oidc.tokenSignIn does not allow token sign-in from this connection",
+                        _logger, "Web dashboard", DarlingRefusalGate.Token,
+                        IsApiPath(context.Request.Path.Value ?? "/") ? StatusCodes.Status401Unauthorized : StatusCodes.Status200OK, remote,
+                        $"a token session is not accepted from this connection because web.network.oidc.tokenSignIn is '{DarlingTokenSignIn.Word(tokenSignIn)}'",
                         DateTime.UtcNow);
                 }
 
@@ -2689,7 +2708,7 @@ public sealed class DarlingWebHostService : BackgroundService
         {
             refusals.Report(
                 _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status403Forbidden, remote,
-                "the web.network.oidc.tokenSignIn mode refuses token sign-in from this address; set web.network.oidc.tokenSignIn to change it",
+                $"web.network.oidc.tokenSignIn is '{DarlingTokenSignIn.Word(tokenSignIn)}', which refuses token sign-in from this address; set web.network.oidc.tokenSignIn to change it",
                 now);
             await WriteTokenSignInDisabledAsync(context);
             return;

@@ -85,22 +85,25 @@ public sealed class DarlingTokenSignInCliTests
         Assert.Contains("'off'", line, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void Findings_LoopbackNoProxies_HasNoteNamingEnvoy()
+    [Theory]
+    [InlineData("")]
+    [InlineData(",\"trustedProxies\":[\"10.1.2.3\"]")]
+    public void Findings_LoopbackExposed_HasNoteNamingEnvoyLinkerdAndOff_WhetherOrNotProxiesAreListed(string extra)
     {
-        var findings = DarlingCliCommands.TokenSignInFindings(WithOidc("0.0.0.0", "loopback"));
+        var findings = DarlingCliCommands.TokenSignInFindings(WithOidc("0.0.0.0", "loopback", extra));
 
         Assert.Equal(2, findings.Count);
         Assert.StartsWith("INFO:", findings[0], StringComparison.Ordinal);
         Assert.StartsWith("NOTE:", findings[1], StringComparison.Ordinal);
         Assert.Contains("Envoy", findings[1], StringComparison.Ordinal);
         Assert.Contains("Linkerd", findings[1], StringComparison.Ordinal);
+        Assert.Contains("'off'", findings[1], StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Findings_LoopbackWithProxies_IsInfoOnly()
+    public void Findings_LoopbackNotExposed_IsInfoOnly()
     {
-        var findings = DarlingCliCommands.TokenSignInFindings(WithOidc("0.0.0.0", "loopback", ",\"trustedProxies\":[\"10.1.2.3\"]"));
+        var findings = DarlingCliCommands.TokenSignInFindings(WithOidc("127.0.0.1", "loopback"));
 
         var line = Assert.Single(findings);
         Assert.StartsWith("INFO:", line, StringComparison.Ordinal);

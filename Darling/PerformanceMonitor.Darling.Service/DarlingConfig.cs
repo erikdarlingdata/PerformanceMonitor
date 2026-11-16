@@ -2516,7 +2516,7 @@ public sealed class WebOidcConfig
     /// <summary>
     /// Whether the web token sign-in form (<c>POST /auth/login</c>) is open (#8735): <c>on</c> (the default, also for a missing or
     /// blank value) accepts it from every connection; <c>loopback</c> accepts it only on a loopback connection (a forwarded
-    /// <c>127.0.0.1</c> is not one); <c>off</c> refuses it everywhere, leaving OIDC the only way in. It covers all three token kinds
+    /// <c>127.0.0.1</c> through a remote trusted proxy is not one; a sidecar proxy that sends no <c>X-Forwarded-For</c> hides the client, so use <c>off</c> behind one); <c>off</c> refuses it everywhere, leaving OIDC the only way in. It covers all three token kinds
     /// (the shared token, the <c>web.network.tokens</c> entries and the Viewer's managed group tokens) and none of the MCP tokens.
     /// An unknown value fails closed, as <c>off</c>. File-only and restart-only: no API or store writes it, and a running service
     /// does not re-read it. It does not count toward <see cref="IsConfigured"/>.
