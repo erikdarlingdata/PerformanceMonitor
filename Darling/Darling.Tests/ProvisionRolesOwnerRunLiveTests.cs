@@ -139,7 +139,9 @@ public sealed class ProvisionRolesOwnerRunLiveTests
     /// (the owner may not switch it off itself), so the run reaches the settings; the guard test sets it back on.</summary>
     internal static async Task RunInOwnStoreAsync(
         bool createRole,
-        Func<string, string, string, string, CancellationToken, Task> body)
+        Func<string, string, string, string, CancellationToken, Task> body,
+        string ownerName = "prov_owner",
+        string databaseName = "prov_store")
     {
         var runtimeRoot = ComposeStoreRolesLiveTests.RequireRuntime();
         var root = Directory.CreateTempSubdirectory("darling-8779-owner-");
@@ -153,16 +155,16 @@ public sealed class ProvisionRolesOwnerRunLiveTests
             var bootstrap = await ComposeStoreRolesLiveTests.BootMigratedAsync(cluster, ct);
 
             await ComposeStoreRolesLiveTests.ExecAsync(
-                bootstrap, $"CREATE ROLE prov_owner LOGIN NOSUPERUSER {(createRole ? "CREATEROLE" : "NOCREATEROLE")} PASSWORD '{OwnerPassword}'", ct);
-            await ComposeStoreRolesLiveTests.ExecAsync(bootstrap, "CREATE DATABASE prov_store OWNER prov_owner", ct);
-            var superuser = new NpgsqlConnectionStringBuilder(bootstrap) { Database = "prov_store", Pooling = false }.ConnectionString;
+                bootstrap, $"CREATE ROLE {ownerName} LOGIN NOSUPERUSER {(createRole ? "CREATEROLE" : "NOCREATEROLE")} PASSWORD '{OwnerPassword}'", ct);
+            await ComposeStoreRolesLiveTests.ExecAsync(bootstrap, $"CREATE DATABASE {databaseName} OWNER {ownerName}", ct);
+            var superuser = new NpgsqlConnectionStringBuilder(bootstrap) { Database = databaseName, Pooling = false }.ConnectionString;
             await using (var connection = await ComposeStoreRolesLiveTests.OpenAsync(superuser, ct))
             {
                 await PgMigrations.MigrateAsync(connection, ct);
             }
 
             await ComposeStoreRolesLiveTests.ExecAsync(superuser,
-                "ALTER SCHEMA collect OWNER TO prov_owner; ALTER SCHEMA config OWNER TO prov_owner;"
+                ("ALTER SCHEMA collect OWNER TO prov_owner; ALTER SCHEMA config OWNER TO prov_owner;"
                 + @" DO $$
 DECLARE r record;
 BEGIN
@@ -183,14 +185,14 @@ BEGIN
          RAISE NOTICE 'could not hand % to prov_owner: %', r.signature, SQLERRM;
       END;
    END LOOP;
-END $$;", ct);
+END $$;").Replace("prov_owner", ownerName, StringComparison.Ordinal), ct);
             if (await ComposeStoreRolesLiveTests.OwnerScalarAsync<long>(
                     superuser, "SELECT count(*) FROM pg_catalog.pg_settings WHERE name = 'pg_stat_statements.track_utility'", ct) == 1)
             {
-                await ComposeStoreRolesLiveTests.ExecAsync(superuser, "ALTER ROLE prov_owner SET pg_stat_statements.track_utility = off", ct);
+                await ComposeStoreRolesLiveTests.ExecAsync(superuser, $"ALTER ROLE {ownerName} SET pg_stat_statements.track_utility = off", ct);
             }
 
-            var ownerLogin = ComposeStoreRolesLiveTests.Login(superuser, "prov_owner", OwnerPassword);
+            var ownerLogin = ComposeStoreRolesLiveTests.Login(superuser, ownerName, OwnerPassword);
             await body(runtimeRoot, root.FullName, superuser, ownerLogin, ct);
         }
         finally
