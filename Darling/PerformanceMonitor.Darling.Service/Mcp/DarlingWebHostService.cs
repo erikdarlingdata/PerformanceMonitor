@@ -548,7 +548,7 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <summary>
     /// The lines a start logs for <c>web.network.oidc.tokenSignIn</c> (#8735): nothing under <c>on</c>; under <c>loopback</c> an
     /// Information line, plus, on an exposed start (<paramref name="networkMode"/>), a Warning that <c>loopback</c> cannot tell a
-    /// client behind a sidecar proxy from a local one (the trustedProxies advice only holds for a proxy that sends
+    /// client behind a sidecar proxy from a local one, whatever <c>trustedProxies</c> holds: only its wording changes (the trustedProxies advice only holds for a proxy that sends
     /// <c>X-Forwarded-For</c>); under <c>off</c> an Information line. In loopback-only mode <c>trustedProxies</c> is never parsed, so no
     /// warning is given there. PURE.
     /// </summary>
