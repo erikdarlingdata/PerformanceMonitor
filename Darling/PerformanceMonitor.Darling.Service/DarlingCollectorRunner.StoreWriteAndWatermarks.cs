@@ -424,7 +424,7 @@ public sealed partial class DarlingCollectorRunner
             return;
         }
 
-        await OversizedPlanBacklog.RecordSightingsAsync(
+        await OversizedPlanBacklogIntake.RecordAsync(
             _postgres, server.ServerId, definition.Name, observations, collectionTime, _logger, cancellationToken);
     }
 

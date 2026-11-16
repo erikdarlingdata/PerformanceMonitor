@@ -17,6 +17,7 @@ using System.Windows;
 using System.Windows.Controls;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 
@@ -59,6 +60,10 @@ public partial class AddMultipleServersDialog : Window
     public AddMultipleServersDialog(ServerManager serverManager, ProfileManager profileManager)
     {
         InitializeComponent();
+        /* Opens taller than a 768 screen's work area, so cap it to the work area of the monitor it is on the way the Add Server
+           dialog does, once there is an HWND to ask which monitor, and again when the window is dragged to another. */
+        SourceInitialized += (_, _) => WindowWorkArea.Clamp(this);
+        LocationChanged += (_, _) => WindowWorkArea.Clamp(this);
         _serverManager = serverManager;
         _profileManager = profileManager;
         PreviewGrid.ItemsSource = _rows;

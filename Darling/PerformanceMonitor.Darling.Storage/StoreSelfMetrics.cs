@@ -46,7 +46,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// none of it;</item>
 /// <item>one row per product-owned plain table the walk would otherwise lump (<c>object_kind = 'table'</c>,
 /// #3582): <c>collect.query_store_text</c> (V74 stores statement text INLINE by design — 15 GiB on that
-/// store), <c>collect.query_store_plan_map</c> and <c>config.config_alert_log</c>. Every store shape;</item>
+/// store), <c>collect.query_store_plan_map</c>, <c>config.config_alert_log</c> and, since #8817,
+/// <c>collect.oversized_plan_backlog</c> (the over-cap plan XML it holds reached 15.6 GiB on one store with
+/// no growth history anywhere in the inventory). Every store shape;</item>
 /// <item>two catch-all rows that make the inventory RECONCILABLE against <c>pg_database_size</c> (#3582):
 /// <c>object_kind = 'other'</c> sums every user-schema relation none of the rows above accounts for, with
 /// the relation count, and <c>object_kind = 'system'</c> does the same for the system catalogs and
@@ -938,7 +940,9 @@ FROM pg_stat_bgwriter AS b";
     /// design (Query Store already de-duplicates statement text one row per statement per database, so
     /// there was nothing for a digest dimension to squeeze) and which was 15 GiB on the largest production
     /// store; <c>collect.query_store_plan_map</c>, the V72 plan-id-to-digest map; <c>config.config_alert_log</c>,
-    /// the alert history and dismissals; and the four V143/V145 per-interval Query Store tables (#3953,
+    /// the alert history and dismissals; <c>collect.oversized_plan_backlog</c> (#8817), the over-cap plan XML
+    /// backlog, a plain table that reached 15.6 GiB on one store while only the un-enumerated census could see
+    /// it, with no growth history; and the four V143/V145 per-interval Query Store tables (#3953,
     /// #4382) — <c>collect.query_store_interval_latest</c>, <c>collect.query_store_interval_latest_pending</c>,
     /// <c>collect.query_store_interval_wide</c> and <c>collect.query_store_interval_wide_pending</c>. Those
     /// four accounted for most of a +19.4 GB rise in <see cref="OtherObjectKind"/> on one production store
@@ -1017,7 +1021,14 @@ SELECT
     'collect.{QueryStoreIntervalWide.PendingTableName}',
     '{TableObjectKind}',
     pg_total_relation_size('collect.{QueryStoreIntervalWide.PendingTableName}'),
-    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = 'collect.{QueryStoreIntervalWide.PendingTableName}'::regclass)";
+    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = 'collect.{QueryStoreIntervalWide.PendingTableName}'::regclass)
+UNION ALL
+SELECT
+    $1,
+    '{OversizedPlanBacklog.TableName}',
+    '{TableObjectKind}',
+    pg_total_relation_size('{OversizedPlanBacklog.TableName}'),
+    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = '{OversizedPlanBacklog.TableName}'::regclass)";
 
     /// <summary>The <c>object_kind</c> of the user-schema catch-all row (#3582): every relation in a
     /// non-system schema that no named row accounts for. See <see cref="HypertableObjectKind"/> for why
@@ -1080,7 +1091,7 @@ AND   NOT (c.relispartition AND EXISTS (
 
     /// <summary>
     /// The relations some NAMED row already sizes, every store shape (#3582, extended #4609): the two
-    /// payload dimensions and the seven named plain tables. A relation matched here is never in a catch-all row, or the
+    /// payload dimensions and the eight named plain tables. A relation matched here is never in a catch-all row, or the
     /// reconciliation would count it twice. Every name is the SAME compile-time constant the INSERT arm
     /// interpolates — the dims through <see cref="PayloadDimensions"/>, the tables through their
     /// schema-qualified owners' constants — so the census and the rows it excludes cannot drift apart. That
@@ -1100,7 +1111,8 @@ AND   NOT (c.relispartition AND EXISTS (
         'collect.{QueryStoreIntervalLatest.TableName}',
         'collect.{QueryStoreIntervalLatest.PendingTableName}',
         'collect.{QueryStoreIntervalWide.TableName}',
-        'collect.{QueryStoreIntervalWide.PendingTableName}')";
+        'collect.{QueryStoreIntervalWide.PendingTableName}',
+        '{OversizedPlanBacklog.TableName}')";
 
     /// <summary>
     /// The relations the TimescaleDB rows already size, as a fragment (#3582, reshaped by #3918): every

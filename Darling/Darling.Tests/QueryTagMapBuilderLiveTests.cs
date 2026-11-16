@@ -166,18 +166,53 @@ public sealed class QueryTagMapBuilderLiveTests
         });
     }
 
+    /* The writer's backdate as a SQL interval, so a test can place a stored last_seen against it. */
+    private static readonly string Backdate = string.Create(
+        CultureInfo.InvariantCulture, $"interval '{(long)QueryTagSightingWriter.ReSightingBackdate.TotalSeconds} seconds'");
+
     [Fact]
-    public async Task AReSightingOfARowOverAnHourOld_MovesLastSeenToNow()
+    public async Task AReSightingOfARowOverAnHourPastTheBackdatedStamp_MovesLastSeenToTheBackdatedStamp_AndOneWithinTheHourDoesNot()
     {
         await WithStoreAsync(async env =>
         {
             await SightAsync(env, HashSightings("0xAA", "App"));
-            await ExecAsync(env, "UPDATE collect.query_tag_sightings SET last_seen = now() - interval '2 hours'");
+            await ExecAsync(env, $"UPDATE collect.query_tag_sightings SET last_seen = now() - {Backdate} - interval '59 minutes'");
+            var stored = await ScalarAsync(env, "SELECT last_seen::text FROM collect.query_tag_sightings WHERE key = '0xAA'");
 
             await SightAsync(env, HashSightings("0xAA", "App"));
+            Assert.Equal(stored, await ScalarAsync(env, "SELECT last_seen::text FROM collect.query_tag_sightings WHERE key = '0xAA'"));
 
-            Assert.Equal("2", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
-            Assert.Equal("True", await ScalarAsync(env, "SELECT last_seen > now() - interval '1 minute' FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            await ExecAsync(env, $"UPDATE collect.query_tag_sightings SET last_seen = now() - {Backdate} - interval '61 minutes'");
+            await SightAsync(env, HashSightings("0xAA", "App"));
+
+            Assert.Equal("3", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            Assert.Equal("True", await ScalarAsync(
+                env, $"SELECT last_seen <= now() - {Backdate} AND last_seen > now() - {Backdate} - interval '1 minute' FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+        });
+    }
+
+    [Fact]
+    public async Task APlainReSighting_IsBehindTheNextExtendsCursor_WhileAnInsertAndAFillAreInsideIt_AndTheMapStaysRight()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int apps = await NewTagAsync(env, "Apps");
+            await NewRuleAsync(env, apps, "application", "App*");
+            var builder = new QueryTagMapBuilder(env.Source);
+            await SightAsync(env, HashSightings("0xAA", "App", text: ""), HashSightings("0xBB", "App"));
+            Assert.True(await PassAsync(env, builder));
+            await ExecAsync(env, "UPDATE collect.query_tag_sightings SET last_seen = now() - interval '2 hours'");
+
+            /* The next extend reads from the previous pass's clock less the overlap. */
+            DateTime clock = await QueryTagMapStore.ClockAsync(env.Store, env.Ct);
+            await SightAsync(env, HashSightings("0xAA", "App", text: "SELECT 2;"), HashSightings("0xBB", "App"), HashSightings("0xCC", "App"));
+
+            var changed = await QueryTagMapStore.ReadChangedKeysAsync(env.Store, Server, clock - QueryTagMapBuilder.ExtendOverlap, "", "", 100, env.Ct);
+            Assert.Equal(new[] { "0xAA", "0xCC" }, changed.Select(c => c.Key).Order(StringComparer.Ordinal));
+            Assert.Equal("2", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xBB'"));
+
+            Assert.True(await PassAsync(env, builder));
+            Assert.Equal(new[] { $"hash|0xAA|{apps}|rule", $"hash|0xBB|{apps}|rule", $"hash|0xCC|{apps}|rule" }, await MapAsync(env));
         });
     }
 

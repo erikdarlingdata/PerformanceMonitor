@@ -283,8 +283,9 @@ LIMIT 1";
             _dataSource, serverId, DatabaseFilter.All, nowUtc.AddHours(-168), nowUtc,
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, ViewerStoreLogger.Instance, cancellationToken);
         var bands = read.Columns.Select(c => c.Band).Where(b => b is IdentityCapacityMath.BandWarning or IdentityCapacityMath.BandCritical).ToList();
+        /* #8818: a column at the critical band outranks a fuller one at warning, so the tile names the column that bands the server. */
         var worst = read.Columns.Where(c => c.Band is IdentityCapacityMath.BandWarning or IdentityCapacityMath.BandCritical)
-            .OrderByDescending(c => c.PercentUsed ?? 0).FirstOrDefault();
+            .OrderByDescending(c => IdentityCapacityMath.Rank(c.Band)).ThenByDescending(c => c.PercentUsed ?? 0).FirstOrDefault();
         return bands.Count == 0
             ? null
             : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count, bands.Count(b => b == IdentityCapacityMath.BandCritical), worst);
@@ -1030,9 +1031,11 @@ public sealed class ServerSummaryItem
     /// <summary>Requests starved of a worker thread (total_work_queue_count) — thread-pool starvation.</summary>
     public long RequestsWaitingForThreads { get; set; }
 
-    /// <summary>Available worker threads = ceiling − in-use, or NULL when there is no scheduler snapshot.</summary>
+    /// <summary>Worker threads the ceiling leaves after the current workers, never below 0, or NULL when there is no
+    /// scheduler snapshot. Current workers include idle pooled workers and the workers of system tasks, which the
+    /// ceiling leaves out, so the count can pass it on a server where nothing waits (#8778).</summary>
     public int? AvailableThreads =>
-        TotalThreads.HasValue ? TotalThreads.Value - (CurrentWorkers ?? 0) : null;
+        TotalThreads.HasValue ? Math.Max(0, TotalThreads.Value - (CurrentWorkers ?? 0)) : null;
 
     /// <summary>Collectors whose 7-day band is HEALTHY (mirrors report.collection_health).</summary>
     public int HealthyCollectorCount { get; set; }
@@ -1281,14 +1284,14 @@ public sealed class ServerSummaryItem
             if (!TotalThreads.HasValue || IsOffline) return "--";
             if (RequestsWaitingForThreads > 0) return $"{RequestsWaitingForThreads} starved";
             if (ThreadsWaitingForCpu >= 20) return $"{ThreadsWaitingForCpu} runnable";
-            if (TotalThreads.Value > 0 && AvailableThreads < TotalThreads.Value * 0.10) return "Low";
             return "OK";
         }
     }
 
-    /// <summary>Threads detail — "Available: in/ceiling" (Dashboard's ThreadsDetailText); blank with no snapshot.</summary>
+    /// <summary>Threads detail: "N workers / M max", blank with no snapshot. It names the worker count, not threads in
+    /// use, because idle pooled workers are counted (#8778).</summary>
     public string ThreadsDetail =>
-        IsOffline ? "" : TotalThreads is > 0 ? $"Available: {AvailableThreads}/{TotalThreads}" : "";
+        IsOffline ? "" : TotalThreads is > 0 ? $"{CurrentWorkers ?? 0:N0} workers / {TotalThreads:N0} max" : "";
 
     /// <summary>
     /// Collectors value — "Stale" when the server is offline, else "N failed" / "OK" (Dashboard's
@@ -1545,9 +1548,9 @@ public sealed class ServerSummaryItem
         DeadlockWindow,
         DeadlockRateThresholds ?? PerformanceMonitor.Common.DeadlockRateThresholds.Default);
 
-    /// <summary>Threads band — work-queue starvation Critical; >= 20 runnable-waiting or under 10% available Warning; no snapshot Unknown.</summary>
+    /// <summary>Threads band: a task waiting for a worker Critical; >= 20 runnable-waiting Warning; no snapshot Unknown.</summary>
     public HealthSeverity ThreadsSeverity =>
-        ServerHealthClassifier.ThreadsSeverity(TotalThreads, AvailableThreads, ThreadsWaitingForCpu, RequestsWaitingForThreads);
+        ServerHealthClassifier.ThreadsSeverity(TotalThreads, ThreadsWaitingForCpu, RequestsWaitingForThreads);
 
     /// <summary>
     /// Collectors band — neutral Unknown when the server is offline (its collectors are unmeasured, not
@@ -1791,14 +1794,18 @@ public sealed record IdentityCapacityCard(string WorstBand, int ColumnsAtBar, in
         get
         {
             if (Worst is null)
-                return $"At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is {WorstBand}.";
+                return $"At or past 70% used, or under 30 days left (the shipped bars, the alert's own percent bars may differ). The worst is {WorstBand}.";
             var name = string.Join(".", new[] { Worst.DatabaseName, Worst.SchemaName, Worst.TableName, Worst.ColumnName }.Where(p => !string.IsNullOrEmpty(p)));
             var percent = Worst.PercentUsed is { } p
                 ? string.Create(CultureInfo.InvariantCulture, $": {(p >= 99.95 || p == 0 ? p.ToString("0", CultureInfo.InvariantCulture) : p.ToString("0.0", CultureInfo.InvariantCulture))}% used")
                 : "";
             var left = Worst.ValuesRemaining is { } r ? ", " + r.ToString("N0", CultureInfo.InvariantCulture) + " left" : "";
-            return name + percent + left + (ColumnsAtBar > 1
-                ? string.Create(CultureInfo.InvariantCulture, $". The fullest of {ColumnsAtBar} columns at 70% or more. The Identity Capacity tab lists them.")
+            /* #8818: a column banded on its days left says so, so a column at 67% used reads as intended. */
+            var days = Worst.BandReason == IdentityCapacityMath.ReasonDays && Worst.Exhaustion is { } e
+                ? string.Create(CultureInfo.InvariantCulture, $", about {(e.DaysLeft >= 10 ? e.DaysLeft.ToString("0", CultureInfo.InvariantCulture) : e.DaysLeft.ToString("0.0", CultureInfo.InvariantCulture))} days to exhaustion at the current rate")
+                : "";
+            return name + percent + left + days + (ColumnsAtBar > 1
+                ? string.Create(CultureInfo.InvariantCulture, $". The worst of {ColumnsAtBar} columns at 70% or more used, or under 30 days left. The Identity Capacity tab lists them.")
                 : ". The Identity Capacity tab lists it.");
         }
     }

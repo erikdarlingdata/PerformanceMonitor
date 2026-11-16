@@ -68,6 +68,7 @@ public static class CollectorCatalog
         DatabaseProtectionCollector.Instance,
         AgentAlertsCollector.Instance,
         IdentityCapacityCollector.Instance,
+        ObjectInventoryCollector.Instance,
         SchemaObjectsCollector.Instance,
         PvsStatsCollector.Instance,
         /* PostgreSQL definitions. They live in the same catalog as the T-SQL ones on purpose: the

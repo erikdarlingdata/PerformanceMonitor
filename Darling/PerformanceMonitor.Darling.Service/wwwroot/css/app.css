@@ -1019,6 +1019,7 @@ table.data td .disclosure { margin-top: 0; }
   border-radius: var(--radius-sm);
   font-size: 0.85rem;
 }
+.strip.ok { background: rgba(129, 199, 132, 0.12); border: 1px solid rgba(129, 199, 132, 0.4); color: var(--ok); }
 .strip.error { background: rgba(229, 115, 115, 0.14); border: 1px solid rgba(229, 115, 115, 0.4); color: var(--err); }
 .strip.empty { background: var(--bg-dark); border: 1px solid var(--border); color: var(--muted); }
 .strip.notice { background: rgba(255, 213, 79, 0.10); border: 1px solid rgba(255, 213, 79, 0.35); color: var(--warn); }
@@ -1829,3 +1830,13 @@ table.data tr[aria-pressed]:focus-visible { outline: 2px solid var(--accent); ou
 .metric-chip.clickable { cursor: pointer; }
 .metric-chip.clickable:hover { filter: brightness(1.15); }
 .metric-chip.clickable:focus-visible { outline: 2px solid var(--accent, #4fc3f7); outline-offset: 1px; }
+
+/* Store Health (#8787): the Measure result under the tables grid, and the lists in the header strips. */
+.store-health .strip ul { margin: 0.25rem 0 0; padding-left: 1.2rem; }
+.store-health ul.meta { margin: 0.1rem 0 0.75rem; padding-left: 1.2rem; }
+.store-health-note { margin: 0.5rem 0 1rem; }
+.store-health-measure { margin: 0.75rem 0 1.25rem; }
+.store-health-measure h4 { margin: 0 0 0.4rem; }
+.store-health-measure table.kv { margin: 0.5rem 0; border-collapse: collapse; }
+.store-health-measure table.kv th { text-align: left; font-weight: 600; padding: 0.15rem 1rem 0.15rem 0; vertical-align: top; }
+.store-health-measure table.kv td { padding: 0.15rem 0; }

@@ -601,6 +601,19 @@ public static class PgIndexBloatCoverage
         IReadOnlyList<PgIndexBloatSuppressionBucket> buckets,
         int returnedRows)
     {
+        /* No figure has a value (no evidence, or the evidence read failed): say so ONCE. The full census below
+           would print the same unmeasured word beside every figure, about eight times, which reads as eight
+           findings when it is one. Still a word rather than a zero, and the row count the caller's read really
+           returned is kept when there is one to report. */
+        if (candidates is null && estimated is null && exactlyMeasured is null)
+        {
+            return "Index coverage was " + NotMeasured + " in this window, so there are no candidate, trusted or withheld index counts to report."
+                + (returnedRows > 0
+                    ? " Rows returned (over the window you asked for, and capped by your row limit): "
+                      + Count(returnedRows) + "."
+                    : string.Empty);
+        }
+
         var trusted = candidates is null || estimated is null || exactlyMeasured is null
             ? (PgIndexBloatTally?)null
             : estimated.Value + exactlyMeasured.Value;

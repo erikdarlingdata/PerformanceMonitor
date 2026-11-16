@@ -782,7 +782,7 @@ public sealed class OversizedPlanBacklogPins
     {
         /* The DDL and the DML live in one file so they cannot drift — this checks that they in fact agree,
            column by column, rather than resting on their proximity. */
-        var insertList = Between(OversizedPlanBacklog.UpsertSightingSql, "AS b\r\n(", ")\r\nVALUES");
+        var insertList = Between(OversizedPlanBacklog.RecordSightingsSql, "AS b\r\n    (", ")\r\n    SELECT\r\n        $1");
         var columns = insertList.Split(',').Select(c => c.Trim()).Where(c => c.Length > 0).ToArray();
 
         Assert.Equal(11, columns.Length);
@@ -795,7 +795,7 @@ public sealed class OversizedPlanBacklogPins
     [Fact]
     public void ASightingClearsAStandingExpiry_AndNeverTouchesCapturedContent()
     {
-        var upsert = OversizedPlanBacklog.UpsertSightingSql;
+        var upsert = OversizedPlanBacklog.RecordSightingsSql;
 
         /* A collector only sees a row while its plan is in cache, so a fresh sighting is positive evidence
            the handle resolves — which retires whatever made the previous fetch come back empty. Without the

@@ -140,7 +140,7 @@ const chips = (node) => all(node, (n) => String(n.className).startsWith("metric-
 const iso = (msAgo) => new Date(Date.now() - msAgo).toISOString().slice(0, 19);
 const card = (over) => ({
   is_online: true, band: "Healthy", cpu_percent: 0, total_cpu_percent: 0, cpu_severity: "Healthy",
-  available_threads: 77, total_threads: 100, threads_severity: "Healthy", has_memory_pressure: false, memory_severity: "Healthy",
+  available_threads: 77, total_threads: 100, current_workers: 23, threads_severity: "Healthy", has_memory_pressure: false, memory_severity: "Healthy",
   memory_mb: 908, buffer_pool_mb: 400, blocking_count: 0, blocking_severity: "Healthy", deadlock_count: 0, deadlock_severity: "Healthy",
   collector_count: 5, healthy_collector_count: 5, failed_collector_count: 0, collector_severity: "Healthy",
   last_collection: iso(12 * 86400000), ...over,

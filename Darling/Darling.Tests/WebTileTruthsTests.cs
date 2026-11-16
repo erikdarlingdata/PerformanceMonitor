@@ -83,13 +83,13 @@ public sealed class WebTileTruthsTests
         var r = Run();
         var chip = r.GetProperty("identityChip").GetString()!;
         Assert.Contains("Sales.dbo.Orders.OrderId: 100% used, 0 left", chip, StringComparison.Ordinal);
-        Assert.Contains("fullest of 3 columns", chip, StringComparison.Ordinal);
+        Assert.Contains("worst of 3 columns", chip, StringComparison.Ordinal);
         Assert.True(r.GetProperty("identityClickStopped").GetBoolean(), "the tile keeps its click, so the card around it does not also open the server");
         Assert.Equal("#/server/srv-a/config", r.GetProperty("hashAfterClick").GetString());
         Assert.Contains("[data-title=\"Identity Capacity\"]", Strings(r.GetProperty("scrolledTo")));
 
         /* A service that sends no column keeps the generic sentence. */
-        Assert.Contains("The fullest is warning", r.GetProperty("legacyIdentityChip").GetString()!, StringComparison.Ordinal);
+        Assert.Contains("The worst is warning", r.GetProperty("legacyIdentityChip").GetString()!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -174,6 +174,17 @@ public sealed class WebTileTruthsTests
         Assert.Equal("", ViewerAgentAlertsText.GapWhich(new AgentAlertGap("missing_severity_alerts", "No alert for severity 21.", [], [21])));
         Assert.Equal("Sev 20, Sev 19", ViewerAgentAlertsText.GapWhich(new AgentAlertGap("alert_disabled", "An alert is disabled, so it cannot fire.", ["Sev 20", "Sev 19"], [])));
     }
+
+    // #8778: a server holding more workers than max worker threads with nothing waiting for one reads OK, with the worker
+    // count over the ceiling under it, not a negative free count.
+    [Fact]
+    public void TheThreadsChip_OnAServerPastTheWorkerCeilingWithNothingWaiting_ReadsOkWithTheWorkerCount() =>
+        Assert.Equal("ThreadsOK1,782 workers / 1,472 max", Run().GetProperty("workersPastCeiling").GetString());
+
+    // #8778: a Warning band from 20 or more runnable tasks names them, as the Viewer's Threads value does, not OK on a yellow chip.
+    [Fact]
+    public void TheThreadsChip_OnAWarningFromRunnableTasks_ReadsTheRunnableCount() =>
+        Assert.Equal("ThreadsWARN25 runnable100 workers / 512 max", Run().GetProperty("runnableWarning").GetString());
 
     // #7560: PostgreSQL has no memory-grant reading and no blocking count behind the fleet card, so those two tiles
     // say n/a (as CPU and Threads do) instead of an OK and a 0 that read as measured. A SQL Server card keeps both.

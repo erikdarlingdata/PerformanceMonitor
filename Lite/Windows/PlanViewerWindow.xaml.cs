@@ -9,6 +9,7 @@
 using System;
 using System.Threading.Tasks;
 using System.Windows;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Windows;
 
@@ -22,6 +23,10 @@ public partial class PlanViewerWindow : Window
     public PlanViewerWindow()
     {
         InitializeComponent();
+        /* Opens taller than a 768 screen's work area, so cap it to the work area of the monitor it is on the way the Add Server
+           dialog does, once there is an HWND to ask which monitor, and again when the window is dragged to another. */
+        SourceInitialized += (_, _) => WindowWorkArea.Clamp(this);
+        LocationChanged += (_, _) => WindowWorkArea.Clamp(this);
         Viewer.AccuracyRatioDivergenceLimit = App.AccuracyRatioDivergenceLimit;
         // The shared PlanViewerControl needs an explicit Cleanup() to unsubscribe ThemeManager.
         Closed += (_, _) => Viewer.Cleanup();

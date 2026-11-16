@@ -564,9 +564,10 @@ WITH plan_agg AS
 WITH plan_agg AS
 (
     -- #5448: built days from collect.plan_regression_daily (summed totals, so days recombine exactly), every other row
-    -- from the interval table with the daily builder's own aggregate. A row is in exactly one half by its day
-    -- (last_execution_time::date): a day not built is all live, and a built day keeps only its rows at or above its
-    -- watermark ($6) live (#5812: an open day is built partially; a whole day's watermark is its next midnight).
+    -- from the interval table with the daily builder's own aggregate, taken in double precision (#8570). A row is in
+    -- exactly one half by its day (last_execution_time::date): a day not built is all live, and a built day keeps only its
+    -- rows at or above its watermark ($6) live (#5812: an open day is built partially; a whole day's watermark is its next
+    -- midnight).
     SELECT
         database_name,
         query_id,
@@ -574,21 +575,28 @@ WITH plan_agg AS
         replica_role,
         any_value(query_plan_hash) AS query_plan_hash,
         SUM(execs) AS execs,
-        SUM(cpu_us_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0) AS cpu_per_exec,
-        SUM(dur_us_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0) AS dur_per_exec,
+        SUM(cpu_us_sum) / NULLIF(SUM(execs), 0) AS cpu_per_exec,
+        SUM(dur_us_sum) / NULLIF(SUM(execs), 0) AS dur_per_exec,
         -- #5631: rows per call. A day with no rowcount_sum (an interval had none, or the day awaits its rebuild after the
         -- column was added) makes the whole plan's figure NULL, the same rule the other two reads apply.
         CASE WHEN COUNT(*) = COUNT(rowcount_sum)
-             THEN SUM(rowcount_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0)
+             THEN SUM(rowcount_sum) / NULLIF(SUM(execs), 0)
         END AS rows_per_exec,
         MAX(last_exec) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
         MAX(force_failure_count) AS force_failure_count
     FROM
     (
+        -- #8570: both halves hand plan_agg their sums in double precision. A numeric sum keeps a large state for every
+        -- group, and over a busy server's plans those states outgrow the hash limit at PlanRegressionWorkMemSql and spill
+        -- to disk, in plan_agg and in the live half's own GROUP BY. Every sum ends as a double: the totals are divided into
+        -- per-call figures, and the suffix only compares the call count with 25 and multiplies it by a per-call double. A
+        -- call count is a whole number far below 2^53, so its double sum is exact.
         SELECT
             d.database_name, d.query_id, d.plan_id, d.replica_role, d.query_plan_hash,
-            d.execs, d.cpu_us_sum, d.dur_us_sum, d.rowcount_sum, d.last_exec, d.is_forced_plan, d.force_failure_count
+            d.execs::DOUBLE PRECISION AS execs, d.cpu_us_sum::DOUBLE PRECISION AS cpu_us_sum,
+            d.dur_us_sum::DOUBLE PRECISION AS dur_us_sum, d.rowcount_sum::DOUBLE PRECISION AS rowcount_sum,
+            d.last_exec, d.is_forced_plan, d.force_failure_count
         FROM plan_regression_daily AS d
         WHERE d.server_id = $1::integer
         AND   d.day = ANY($3::date[])
@@ -597,10 +605,10 @@ WITH plan_agg AS
 
         SELECT
             l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash,
-            SUM(l.execution_count),
-            SUM(l.avg_cpu_time_us::numeric * l.execution_count),
-            SUM(l.avg_duration_us::numeric * l.execution_count),
-            CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN COALESCE(SUM(l.avg_rowcount::numeric * l.execution_count), 0) END, -- #5631: COALESCE as in BuildDaySql, so a group whose execution counts are all NULL is 0 rows, not NULL.
+            SUM(l.execution_count::DOUBLE PRECISION),
+            SUM(l.avg_cpu_time_us::DOUBLE PRECISION * l.execution_count),
+            SUM(l.avg_duration_us::DOUBLE PRECISION * l.execution_count),
+            CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN COALESCE(SUM(l.avg_rowcount::DOUBLE PRECISION * l.execution_count), 0) END, -- #5631: COALESCE as in BuildDaySql, so a group whose execution counts are all NULL is 0 rows, not NULL.
             MAX(l.last_execution_time),
             bool_or(l.is_forced_plan),
             MAX(l.force_failure_count)
@@ -622,18 +630,20 @@ WITH plan_agg AS
 
     /// <summary>
     /// The work memory for every PLAN_REGRESSION read (#5812, bound 2): the daily read's snapshot transaction and the short
-    /// transaction each exact-bound read (table or raw) now runs in (M2). Set with <c>SET LOCAL</c> so it ends with
-    /// that transaction and touches no other statement on the pooled connection. The daily read groups every built day's
-    /// totals plus the live rows by plan. At the default 4MB the planner sorts them all, and on a planted busy server (15
-    /// built days, about 384,000 rows) that sort went to disk (an external merge of about 15MB). From 32MB up it hashes in
-    /// memory instead: two hash aggregates of about 35MB to 42MB each, under the hash limit of twice work_mem
-    /// (<c>hash_mem_multiplier</c>). 64MB is the bound: 32MB also did not spill, but it is below its own peak (about 35MB)
-    /// and fits only through that multiplier, so 64MB keeps the headroom. A hash or sort takes memory only as it grows, so
-    /// a small server's read uses what it needs (<c>PlanRegressionDailyNoSpillRig</c> measures every bound on one plant).
-    /// The figure is per node, not per read: the daily read has six sort or hash nodes, so one read may take up to 6 x 64MB,
-    /// doubled for a hash through <c>hash_mem_multiplier</c> (768MB at its default of 2), though the plant peaked near 37MB
-    /// in each of two hash aggregates. Across the fleet, scheduled reads run inside each server's sweep, so the ceiling is that
-    /// times <c>MaxConcurrentSweeps</c> (4 by default, at most 16), and on-demand <c>analyze_server</c> and
+    /// transaction each exact-bound read (table or raw) runs in (M2). Set with <c>SET LOCAL</c> so it ends with that
+    /// transaction and touches no other statement on the pooled connection. The daily read groups every built day's totals
+    /// plus the live rows by plan, with every sum in double precision (#8570). It was measured at 64MB on two plants of
+    /// 123,600 plans and 15 built days, with no temp writes on either. Where each plan ran on about three of the days (about
+    /// 408,000 rows, the shape of a busy production server), the hash aggregates for <c>plan_agg</c>, <c>plan_dedup</c> and
+    /// the live half peaked at about 41MB, 33MB and 9MB; where every plan ran every day (about 1,980,000 rows), at about
+    /// 33MB, 29MB and 29MB. At the default 4MB the planner sorts them and the sorts go to disk as external merges, and at
+    /// 32MB the every-day plant still spills a sort, so 64MB is the bound, and it holds every hash under work_mem itself.
+    /// Numeric sums would need about 133MB for the same <c>plan_agg</c> and spill at this bound. A hash or sort takes memory
+    /// only as it grows, so a small server's read uses what it needs (<c>PlanRegressionDailyNoSpillRig</c> measures every
+    /// bound on one plant). The figure is per node, not per read: the daily read has six sort or hash nodes, so one read may
+    /// take up to 6 x 64MB, doubled for a hash through <c>hash_mem_multiplier</c> (768MB at its default of 2), though the
+    /// plants' largest node peaked near 41MB. Across the fleet, scheduled reads run inside each server's sweep, so the
+    /// ceiling is that times <c>MaxConcurrentSweeps</c> (4 by default, at most 16), and on-demand <c>analyze_server</c> and
     /// <c>get_analysis_facts</c> reads that miss the candidate cache run outside the sweep gate and add to it; size
     /// <c>MaxConcurrentSweeps</c> against the store's memory before raising this bound.
     /// </summary>
@@ -1477,81 +1487,129 @@ AND   delta_execution_count > 0";
     }
 
     public const string PlanAdvisorySql = @"
-/* #8570: the presence guard is answered once per distinct digest, not once per snapshot row. query_stats holds one
-   row per query per snapshot, so a window of 85,000 rows carries a few hundred distinct digests, and a correlated
-   EXISTS in the rank's WHERE probed query_plan_dim's primary key once per row (85,451 index probes, 375,000 buffer
-   hits and 0.3 to 1.4 s on a 52-million-row dimension) before the rank kept ten. The digests of rows with no plan
-   of their own are probed here, one primary-key lookup each. The LIMIT 1 in the lateral lookup is what keeps it
-   a lookup: without it the planner may turn the EXISTS into a hash of the whole dimension or a join that reads
-   it. The rank below joins the answer back by digest. The guard's meaning is unchanged: a row has a plan when
-   its own column or its dimension row carries one (the dimension's text column or, since #2069, its gzip bytes),
-   and a digest whose dimension row is gone has none. The rank still picks each plan's costliest row among the
-   rows that have a plan. */
-WITH probed AS
+/* #8570: the dimension is read only for the rows the fetch may return. query_stats holds one row per query per
+   snapshot, so a four-hour window carries tens of thousands of rows and as many distinct plan digests, and a probe
+   of query_plan_dim's primary key per row or per digest is that many random reads of a table of tens of millions of
+   rows on a cold cache (30,000 probes and 25 s of a 26 s read). The rank orders each plan's rows without the
+   dimension; the probes then walk the plans' costliest rows in cost order and stop at the tenth that has a plan.
+   A row has a plan when its own column or its dimension row carries one (the dimension's text column or its gzip
+   bytes, #2069), and a digest whose dimension row is gone has none. Each plan is represented by its costliest row
+   that has a plan, so a plan whose costliest row has none is ranked again over all its rows (misses, demoted). */
+WITH cand AS MATERIALIZED
 (
-    SELECT w.digest
+    SELECT
+        f.query_plan_xml,
+        f.query_plan_digest,
+        f.delta_worker_time,
+        /* #7886: one row per plan. query_stats holds one row per query per snapshot, and every snapshot row of a
+           cached plan resolves to the same plan XML. Without this rank the hottest plan fills all ten slots and is
+           parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count multiply by its snapshot
+           count and the two facts cover one to three plans instead of ten. The plan's costliest row with a plan
+           stands for it, and the limit counts distinct plans. A plan is a statement's plan in one database:
+           query_plan_hash is a shape hash that two statements with one shape share, as does one statement in two
+           databases, and a hashless row's plan_handle is shared by every statement in its batch, so database_name
+           and query_hash stay in the key. plan_id numbers the key so the steps below can match on it: the key's
+           columns can be NULL, and an equality join on them would not match a NULL to a NULL. */
+        DENSE_RANK() OVER (ORDER BY f.database_name, f.query_hash, COALESCE(f.query_plan_hash, f.plan_handle)) AS plan_id,
+        ROW_NUMBER() OVER (PARTITION BY f.database_name, f.query_hash, COALESCE(f.query_plan_hash, f.plan_handle) ORDER BY f.delta_worker_time DESC) AS plan_rank
+    /* #8570: the rank sorts the table's own thin columns and the plan's digest, not the plan. A plan under the 2 KB
+       TOAST limit sits inline in the dimension row, so a join to the dimension here would sort every snapshot row
+       with its whole plan (on 67,200 rows of 1.4 KB plans, 26 MB and 21 MB written to disk against 4.5 MB). */
+    FROM query_stats AS f
+    WHERE f.server_id = $1
+    AND   f.collection_time >= $2
+    AND   f.collection_time <= $3
+    AND   (f.query_plan_xml IS NOT NULL OR f.query_plan_digest IS NOT NULL)
+    /* #8570: the own column stays in this filter. 'query_plan_digest IS NOT NULL' alone implies the partial index
+       ix_query_stats_digest_floor (collection_time only, rows with a digest), and the planner takes it over
+       idx_query_stats_time (server_id, collection_time): it walks the window's rows of every server and fetches
+       each one's heap page to test server_id (25,400 pages on a store of 18 servers, against 5,600 through the
+       server index, for one server's 86,000-row window). */
+),
+hits AS MATERIALIZED
+(
+    /* Each plan's costliest row, in cost order, probed one at a time until ten have a plan. The sorted, fenced
+       subquery feeds the lateral lookup row by row, so the limit stops the probes at the tenth hit. The LIMIT 1
+       keeps each probe a primary-key lookup: without it the planner may hash the whole dimension. */
+    SELECT t.plan_id, t.query_plan_xml, t.query_plan_digest, t.delta_worker_time
     FROM
     (
-        SELECT DISTINCT f.query_plan_digest AS digest
-        FROM query_stats AS f
-        WHERE f.server_id = $1
-        AND   f.collection_time >= $2
-        AND   f.collection_time <= $3
-        AND   f.query_plan_xml IS NULL
-        /* #8570: no 'query_plan_digest IS NOT NULL' here. That predicate implies the partial index
-           ix_query_stats_digest_floor (collection_time only, rows with a digest), and the planner took it over
-           idx_query_stats_time (server_id, collection_time): it walks the window's rows of EVERY server and
-           fetches each one's heap page just to test server_id. On a store of 18 servers that was 25,400 pages read
-           for one server's 86,000-row window, against 5,600 through the server index. A NULL digest needs no test
-           here: the lateral lookup below matches no dimension row for it, so it never reaches the rank. */
-    ) AS w,
-    LATERAL
+        SELECT c.plan_id, c.query_plan_xml, c.query_plan_digest, c.delta_worker_time
+        FROM cand AS c
+        WHERE c.plan_rank = 1
+        ORDER BY c.delta_worker_time DESC
+        OFFSET 0
+    ) AS t
+    LEFT JOIN LATERAL
     (
-        SELECT 1
+        SELECT 1 AS found
         FROM query_plan_dim AS p
-        WHERE p.digest = w.digest
+        WHERE t.query_plan_xml IS NULL
+        AND   p.digest = t.query_plan_digest
         AND   (p.query_plan_xml IS NOT NULL OR p.query_plan_gz IS NOT NULL)
         LIMIT 1
-    ) AS has_plan
+    ) AS has_plan ON true
+    WHERE t.query_plan_xml IS NOT NULL OR has_plan.found IS NOT NULL
+    ORDER BY t.delta_worker_time DESC
+    LIMIT 10
+),
+misses AS MATERIALIZED
+(
+    /* The plans that are not hits and may still place: every one when there are fewer than ten hits, else those
+       whose costliest row costs at least the tenth hit or has no cost. Such a plan may still place through a cheaper
+       row that has a plan, or through a costliest row tied with the tenth hit that the walk did not reach. A plan
+       whose costliest row costs less cannot place: none of its rows costs more. A NULL cost sorts first, so the
+       tenth hit's cost is the hits' lowest that is not NULL (min skips NULLs), and a plan whose costliest row has no
+       cost was probed before it. When the tenth hit has no cost either, a missed plan can at best tie it, and the
+       per-row order breaks that tie arbitrarily too: none qualifies, so rows with no cost, however many, are not
+       probed again. */
+    SELECT c.plan_id
+    FROM cand AS c
+    CROSS JOIN (SELECT count(*) AS hit_count, min(h.delta_worker_time) AS floor_cost FROM hits AS h) AS w
+    WHERE c.plan_rank = 1
+    AND   c.plan_id NOT IN (SELECT h.plan_id FROM hits AS h)
+    AND   (w.hit_count < 10
+           OR (w.floor_cost IS NOT NULL AND (c.delta_worker_time IS NULL OR c.delta_worker_time >= w.floor_cost)))
+),
+demoted AS
+(
+    /* Each missed plan's costliest row that has a plan, over all its rows. */
+    SELECT DISTINCT ON (c.plan_id) c.query_plan_xml, c.query_plan_digest, c.delta_worker_time
+    FROM
+    (
+        SELECT c.plan_id, c.query_plan_xml, c.query_plan_digest, c.delta_worker_time
+        FROM cand AS c
+        WHERE c.plan_id IN (SELECT m.plan_id FROM misses AS m)
+        OFFSET 0
+    ) AS c
+    LEFT JOIN LATERAL
+    (
+        SELECT 1 AS found
+        FROM query_plan_dim AS p
+        WHERE c.query_plan_xml IS NULL
+        AND   p.digest = c.query_plan_digest
+        AND   (p.query_plan_xml IS NOT NULL OR p.query_plan_gz IS NOT NULL)
+        LIMIT 1
+    ) AS has_plan ON true
+    WHERE c.query_plan_xml IS NOT NULL OR has_plan.found IS NOT NULL
+    ORDER BY c.plan_id, c.delta_worker_time DESC
 )
 SELECT COALESCE(r.query_plan_xml, d.query_plan_xml) AS query_plan_xml, d.query_plan_gz
 FROM
 (
-    SELECT query_plan_xml, query_plan_digest, delta_worker_time
+    SELECT u.query_plan_xml, u.query_plan_digest, u.delta_worker_time
     FROM
     (
-        SELECT
-            f.query_plan_xml,
-            f.query_plan_digest,
-            f.delta_worker_time,
-            /* #7886: one row per plan. query_stats holds one row per query per snapshot, and every snapshot
-               row of a cached plan resolves to the same plan XML. Without this rank the hottest plan fills all
-               ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
-               multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
-               plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A plan is
-               a statement's plan in one database: query_plan_hash is a shape hash that two statements with one
-               shape share, as does one statement in two databases, and a hashless row's plan_handle is shared by
-               every statement in its batch, so database_name and query_hash stay in the key. */
-            ROW_NUMBER() OVER (PARTITION BY f.database_name, f.query_hash, COALESCE(f.query_plan_hash, f.plan_handle) ORDER BY f.delta_worker_time DESC) AS plan_rank
-        FROM query_stats AS f
-        /* #8570: the window ranks every in-window row, so it ranks the table's own thin columns and carries
-           the plan's digest, not the plan. This read went through v_query_stats, which looked up query_plan_dim and
-           put each row's plan content into the rank's sort: a plan under the 2 KB TOAST limit sits inline in the
-           dimension row, so every snapshot row of every plan was sorted with its whole plan (on 67,200 rows of
-           1.4 KB plans the sort wrote 26 MB and 21 MB to disk, against 4.5 MB). The ten winners' content is read
-           by their digest after the limit. */
-        LEFT JOIN probed AS pr ON pr.digest = f.query_plan_digest
-        WHERE f.server_id = $1
-        AND   f.collection_time >= $2
-        AND   f.collection_time <= $3
-        AND   (f.query_plan_xml IS NOT NULL OR pr.digest IS NOT NULL)
-    ) AS ranked
-    WHERE plan_rank = 1
-    ORDER BY delta_worker_time DESC
+        SELECT h.query_plan_xml, h.query_plan_digest, h.delta_worker_time FROM hits AS h
+        UNION ALL
+        SELECT m.query_plan_xml, m.query_plan_digest, m.delta_worker_time FROM demoted AS m
+    ) AS u
+    ORDER BY u.delta_worker_time DESC
     LIMIT 10
 ) AS r
-/* #2069: a plan written since V54 lives as gzip bytes (query_plan_gz) with the text column NULL, so the
-   projection carries BOTH forms and the C# side resolves text-else-gz (PayloadDimensions.ResolveContent). */
+/* #2069: a plan in gzip bytes (query_plan_gz) has the text column NULL, so the projection carries BOTH forms and
+   the C# side resolves text-else-gz (PayloadDimensions.ResolveContent). The ten winners' content is read here, by
+   their digest, after the limit. */
 LEFT JOIN query_plan_dim AS d ON d.digest = r.query_plan_digest
 ORDER BY r.delta_worker_time DESC";
 

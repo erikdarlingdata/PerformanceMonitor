@@ -127,7 +127,7 @@ public sealed class CollectionSweepCommandTimeoutTests
     private static readonly (string File, string Member)[] s_sweepMembers =
     {
         ("DarlingCollectorRunner.cs", "GetCollectorStateAsync"),
-        ("DarlingCollectorRunner.cs", "SaveCollectorStateAsync"),
+        ("DarlingCollectorRunner.cs", "SaveCollectorStateRowsAsync"),
         ("DarlingCollectorRunner.cs", "DeleteCollectorStateKeyAsync"),
         ("DarlingCollectorRunner.cs", "PruneOrphanedQueryStoreDatabaseStateAsync"),
         ("DarlingCollectorRunner.cs", "PruneForeignQueryStoreDatabaseStateAsync"),

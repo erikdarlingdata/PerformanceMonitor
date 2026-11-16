@@ -926,7 +926,7 @@ internal static class DarlingTrendReader
     /// view, by alias (#3897), which at a 60-minute width is the viewer's hourly statement's figures hour for
     /// hour and wider gathers whole hours into one point. The mechanism (why the denominator is the bucket width
     /// and not a LAG, why an hour the collector covered only partly reads LOW and never high, why the series
-    /// trails the clock by up to two hours) is documented once, on
+    /// trails the clock by up to three hours) is documented once, on
     /// <see cref="DurationTrendRouting.BuildHourlyTrendSql"/>. What is this reader's to add: the payload STATES
     /// that trade (<c>aggregate_note</c>) rather than hiding it. The routed read builds this text from the
     /// route's resolved relation; the constant is the builder over the legacy view, which every store has.
@@ -1685,8 +1685,10 @@ internal static class DarlingTrendReader
     /// <para><b>Tier by the age of the window's oldest point, not by its width</b> — the same rule
     /// <c>ComposeSourceRouter</c> applies, and for the same reason: retention drops chunks by wall-clock age, so
     /// the oldest point is the only thing that decides whether raw can answer. A window that reaches past the
-    /// raw horizon is served ENTIRELY from the hourly aggregate rather than stitched, because a series whose
-    /// bucket width changes partway is a worse answer than a coarser consistent one.</para>
+    /// raw horizon is served at the hourly aggregate's width throughout, because a series whose bucket width
+    /// changes partway is a worse answer than a coarser consistent one. #8801: the hours past
+    /// <paramref name="hourlyCeilingUtc"/>, the rollup's measured end, are summed from the raw rows into the same
+    /// buckets, so the series reaches the window's end.</para>
     ///
     /// <para><paramref name="nowUtc"/> defaults to the real clock and exists so a test can pin the boundary.
     /// It is deliberately NOT defaulted to <paramref name="endUtc"/>: a caller asking for a historical window
@@ -1703,9 +1705,17 @@ internal static class DarlingTrendReader
     public static async Task<QueryHistoryResult> GetQueryHistoryAsync(
         NpgsqlDataSource postgres, int serverId, string databaseName, string queryHash, DateTime startUtc, DateTime endUtc,
         DateTime? nowUtc = null, bool hourlyAvailable = true, TierCoverage coverage = default, string? hourlyRelation = null,
-        int bucketMinutes = 1, CancellationToken cancellationToken = default)
+        int bucketMinutes = 1, DateTime? hourlyCeilingUtc = null, CancellationToken cancellationToken = default)
     {
         var tier = ResolveTier(startUtc, nowUtc ?? DateTime.UtcNow, hourlyAvailable, coverage);
+
+        /* #8801: the rollup holds no hour past its measured end (RollupCoverage.HourlyEndCeiling), so the hourly tier reads
+           the rest of the window from the raw rows and sums both into the same buckets. A caller that measured no end reads
+           the rollup alone: no measured end is no bound on the rollup, so raw adds nothing. */
+        var hourlySource = hourlyRelation ?? TimescaleSupport.QueryStatsHourlyView;
+        DateTime? rawTailFromUtc = tier != RetentionTier.Raw && hourlyCeilingUtc is { } ceiling && ceiling <= endUtc
+            ? (ceiling > startUtc ? ceiling : startUtc)
+            : null;
 
         /* #3653 (Q12): the caller that probed the store passes the hourly relation it resolved
            (RollupCoverage.HourlyRelationFor — the interval-honest successor where it reaches as far as the
@@ -1714,8 +1724,10 @@ internal static class DarlingTrendReader
            raised to the rollup's hour on the hourly tier), and the default of one minute leaves each collection, or each
            rollup hour, its own point. */
         var items = tier == RetentionTier.Raw
-            ? await ReadQueryHistoryAsync(postgres, QueryHistorySql, serverId, databaseName, queryHash, startUtc, endUtc, bucketMinutes, cancellationToken)
-            : await ReadQueryHistoryAsync(postgres, QueryHistoryHourlySqlFor(hourlyRelation ?? TimescaleSupport.QueryStatsHourlyView), serverId, databaseName, queryHash, startUtc, endUtc, bucketMinutes, cancellationToken);
+            ? await ReadQueryHistoryAsync(postgres, QueryHistorySql, serverId, databaseName, queryHash, startUtc, endUtc, bucketMinutes, null, cancellationToken)
+            : rawTailFromUtc is null
+                ? await ReadQueryHistoryAsync(postgres, QueryHistoryHourlySqlFor(hourlySource), serverId, databaseName, queryHash, startUtc, endUtc, bucketMinutes, null, cancellationToken)
+                : await ReadQueryHistoryAsync(postgres, DurationTrendRouting.BuildQueryHistoryHourlyWithRawTailSql(hourlySource), serverId, databaseName, queryHash, startUtc, endUtc, bucketMinutes, rawTailFromUtc, cancellationToken);
 
         /* #7416 item 21: the aged-out reason only when the start is older than what the answering tier keeps. The coverage
            begins at the first collection the store held (#8063), not at the first bucket's stamp, which is clamped to the
@@ -1735,7 +1747,7 @@ internal static class DarlingTrendReader
 
     private static async Task<List<QueryHistoryPoint>> ReadQueryHistoryAsync(
         NpgsqlDataSource postgres, string sql, int serverId, string databaseName, string queryHash,
-        DateTime startUtc, DateTime endUtc, int bucketMinutes, CancellationToken cancellationToken)
+        DateTime startUtc, DateTime endUtc, int bucketMinutes, DateTime? rawTailFromUtc, CancellationToken cancellationToken)
     {
         var items = new List<QueryHistoryPoint>();
         await using var command = postgres.CreateCommand(sql);
@@ -1746,6 +1758,11 @@ internal static class DarlingTrendReader
         DarlingMcpReadParameters.AddTimestamp(command, startUtc);
         DarlingMcpReadParameters.AddTimestamp(command, endUtc);
         DarlingMcpReadParameters.AddInt(command, bucketMinutes);
+        if (rawTailFromUtc is { } rawTailFrom)
+        {
+            DarlingMcpReadParameters.AddTimestamp(command, rawTailFrom);
+        }
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

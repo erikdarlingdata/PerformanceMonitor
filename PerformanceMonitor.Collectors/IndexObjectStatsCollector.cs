@@ -24,7 +24,8 @@ namespace PerformanceMonitor.Collectors;
 /// (RunsPerDatabase). Within each database the three DMVs stage into #temps with single scans
 /// then join — the sp_IndexCleanup technique that fixed the #1135 monolithic-join timeouts —
 /// under a dedicated 300 s per-database budget (CommandTimeoutSecondsOverride; the enumeration
-/// keeps the default). sqlserver_start_time flags restart-class counter resets for the read layer.
+/// keeps the default). sqlserver_start_time flags restart-class counter resets for the read layer, and
+/// answering_server_name (#8784, the answering instance's @@SERVERNAME) flags a change of node behind a listener.
 ///
 /// <para>Also captures the per-index DEFINITION metadata that monitor-side UNUSED/DUPLICATE index
 /// analysis needs (FinOps Index Analysis, Stage 1): the ordered KEY column list (with sort
@@ -107,6 +108,20 @@ public sealed class IndexObjectStatsCollector : CollectorDefinitionBase<IndexObj
         public bool? AllowPageLocks { get; set; }
         public bool? AllowRowLocks { get; set; }
         public bool? IsIndexedView { get; set; }
+
+        /// <summary>
+        /// The <c>@@SERVERNAME</c> of the instance that answered (#8784). Through an availability group listener with read-only routing the
+        /// node behind one registration can change between collections, and usage counters are per instance, so a reader that subtracts one
+        /// snapshot from the next has to know when the two came from different instances. NULL on a row stored before this column existed.
+        /// </summary>
+        public string? AnsweringServerName { get; set; }
+
+        /// <summary>
+        /// A memory-optimized table (#8784). <c>sys.dm_db_index_usage_stats</c> holds no rows for one, so its usage counters here are always
+        /// zero and say nothing about whether it is used: a reader has to know not to call it unused. NULL on a row stored before this
+        /// column existed, on an indexed view, and on a version that has no In-Memory OLTP.
+        /// </summary>
+        public bool? IsMemoryOptimized { get; set; }
     }
 
     /// <summary>
@@ -419,7 +434,16 @@ SELECT /* PerformanceMonitorLite */
                 THEN 1
                 ELSE 0
             END
-        )
+        ),
+    /* #8784: the instance that answered. Usage counters are per instance, and through a listener with read-only routing the node behind
+       one registration can change between collections, so the window read treats a change of node as a counter reset. Last, so every
+       ordinal above stays where ParseRowsAsync reads it. */
+    answering_server_name = @@SERVERNAME,
+    /* #8784: a memory-optimized table has no rows in sys.dm_db_index_usage_stats, so the counters above are zero for it whatever its use.
+       OBJECTPROPERTY rather than sys.tables.is_memory_optimized: an unknown property reads NULL where a missing column fails the SELECT.
+       That NULL (a version with no such tables, or an indexed view) is stored as 0, so a collected row always says: NULL in the store
+       is left to mean a row from before this column was collected, which the usage read treats as not known. */
+    is_memory_optimized = CONVERT(bit, ISNULL(OBJECTPROPERTY(o.object_id, N'TableIsMemoryOptimized'), 0))
 FROM sys.indexes AS i
 JOIN sys.objects AS o
   ON o.object_id = i.object_id
@@ -594,6 +618,8 @@ ORDER BY
                 AllowPageLocks = B(55),
                 AllowRowLocks = B(56),
                 IsIndexedView = B(57),
+                AnsweringServerName = S(58),
+                IsMemoryOptimized = B(59),
             });
         }
     }
@@ -658,6 +684,10 @@ ORDER BY
         new CollectorColumn("allow_page_locks", CollectorColumnType.Boolean),
         new CollectorColumn("allow_row_locks", CollectorColumnType.Boolean),
         new CollectorColumn("is_indexed_view", CollectorColumnType.Boolean),
+        /* #8784: LAST, so a store that predates it comes up to shape with one ADD COLUMN (Darling's V268, Lite's v82). */
+        new CollectorColumn("answering_server_name", CollectorColumnType.Varchar),
+        /* #8784: after it, in the same rungs. */
+        new CollectorColumn("is_memory_optimized", CollectorColumnType.Boolean),
     };
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
@@ -720,6 +750,8 @@ ORDER BY
             .Value(row.IsPadded)
             .Value(row.AllowPageLocks)
             .Value(row.AllowRowLocks)
-            .Value(row.IsIndexedView);
+            .Value(row.IsIndexedView)
+            .Value(row.AnsweringServerName)
+            .Value(row.IsMemoryOptimized);
     }
 }

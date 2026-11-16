@@ -113,6 +113,9 @@ public sealed class DailySummaryRangeCache<TRow>
     /// Returns the rows for the half-open <paramref name="fromDate"/>/<paramref name="toDate"/> UTC-day range,
     /// using the closed-day cache when <paramref name="asOfNow"/> is true (#4232 ruling item 5 -- an explicit
     /// end time is not "as of now" and always runs <paramref name="runRange"/> over the whole range, unmemoized).
+    /// #8824: the longer overload's <c>refreshSubHorizon</c> re-reads a block's sub-horizon segment on this call instead of when its
+    /// hour is up. The warmer passes true on every pass, so the hour never lapses under a visitor (the first visit to a server an hour
+    /// after its block was built otherwise paid the read of those days). A visitor's read leaves it false.
     /// </summary>
     /// <param name="storeKey">Distinguishes stores sharing one cache instance (the service keeps ONE cache for every
     /// store it serves). Compared by value: the service passes <see cref="DailySummaryRangeCache.StoreKeyFor"/>, which
@@ -158,7 +161,8 @@ public sealed class DailySummaryRangeCache<TRow>
         Func<DateTime, DateTime, CancellationToken, Task<List<TRow>>> runRange,
         string scopeKey,
         CancellationToken cancellationToken,
-        DateTime? trustFromUtc = null)
+        DateTime? trustFromUtc = null,
+        bool refreshSubHorizon = false)
     {
         ArgumentNullException.ThrowIfNull(day);
         ArgumentNullException.ThrowIfNull(runRange);
@@ -196,7 +200,7 @@ public sealed class DailySummaryRangeCache<TRow>
                nothing: the block holds every closed day. */
             var trustUtc = floorUtc > block.TrustFromUtc ? floorUtc : block.TrustFromUtc;
             var subEndUtc = trustUtc < block.ClosedEndUtc ? trustUtc : block.ClosedEndUtc;
-            if (subEndUtc > fromDate && (nowUtc >= block.SubHorizonExpiresAtUtc || trustUtc > block.TrustFromUtc))
+            if (subEndUtc > fromDate && (refreshSubHorizon || nowUtc >= block.SubHorizonExpiresAtUtc || trustUtc > block.TrustFromUtc))
             {
                 var subRows = await runRange(fromDate, subEndUtc, cancellationToken).ConfigureAwait(false);
                 var refreshed = new List<TRow>(subRows.Count + block.ClosedRows.Count);
@@ -246,7 +250,7 @@ public sealed class DailySummaryRangeCache<TRow>
                 var sliced = found.Value with { ClosedRows = found.Value.ClosedRows.Where(row => day(row) >= fromDate).ToList() };
                 if (_blocks.TryAdd(key, sliced))
                 {
-                    return await GetRangeAsync(storeKey, serverId, fromDate, toDate, routedSql, asOfNow, day, runRange, scopeKey ?? "", cancellationToken, trustFromUtc).ConfigureAwait(false);
+                    return await GetRangeAsync(storeKey, serverId, fromDate, toDate, routedSql, asOfNow, day, runRange, scopeKey ?? "", cancellationToken, trustFromUtc, refreshSubHorizon).ConfigureAwait(false);
                 }
             }
         }

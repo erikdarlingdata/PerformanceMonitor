@@ -68,7 +68,6 @@ public sealed class CpuSchedulerCollectionSqlTests
         }
 
         /* The two flags built from the summed counts are recomputed for a split collection. */
-        Assert.Contains("SUM(total_current_workers_count) >= MAX(max_workers_count) * 0.90", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(total_runnable_tasks_count) >= MAX(cpu_count)", sql, StringComparison.Ordinal);
 
         /* #5712 review: correlated columns come from ONE stored row. The request triple is one dm_exec_requests reading: the row

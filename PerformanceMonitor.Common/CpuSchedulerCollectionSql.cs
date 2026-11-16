@@ -24,8 +24,11 @@ namespace PerformanceMonitor.Common;
 /// divisor is explained below). Every other column comes from a single-row DMV piece the old
 /// collector read once per scheduler row, so its value can differ between the pieces of one collection: the read
 /// takes the MAX, or, for the request and memory groups that must agree with each other, one stored row's values (below). The two warning flags that are computed from the summed
-/// counts (<c>worker_thread_exhaustion_warning</c>, <c>runnable_tasks_warning</c>) are recomputed from the combined
-/// counts when a collection was split (a flag stored on a partial row says nothing about the whole server), and so is
+/// counts are recomputed from the combined counts: <c>worker_thread_exhaustion_warning</c> always, from the summed work
+/// queue (a task waiting for a worker), so the stored flag is never read (#8778: rows can carry a flag raised by current
+/// workers at 90 % of max worker threads, which an idle server with pooled workers passes);
+/// <c>runnable_tasks_warning</c> when a collection was split (a flag stored on a partial row says nothing about the
+/// whole server). So is
 /// <c>physical_memory_pressure_warning</c>: it is recomputed from the available and total memory shown (one row's pair),
 /// by the collector's own rule (available below 10 % of total, and not while the engine's high-memory signal is set; the signal is read
 /// from the shown row's <c>system_memory_state_desc</c>, the only form the store keeps). The other flags (<c>blocked_tasks_warning</c>,
@@ -105,11 +108,7 @@ public static class CpuSchedulerCollectionSql
         (ARRAY_AGG(runnable_request_count {RequestRowOrder}))[1] AS runnable_request_count,
         (ARRAY_AGG(total_request_count {RequestRowOrder}))[1] AS total_request_count,
         (ARRAY_AGG(runnable_percent {RequestRowOrder}))[1] AS runnable_percent,
-        CASE
-            WHEN COUNT(*) = 1
-            THEN BOOL_OR(worker_thread_exhaustion_warning)
-            ELSE SUM(total_current_workers_count) >= MAX(max_workers_count) * 0.90
-        END AS worker_thread_exhaustion_warning,
+        COALESCE(SUM(total_work_queue_count), 0) > 0 AS worker_thread_exhaustion_warning,
         CASE
             WHEN COUNT(*) = 1
             THEN BOOL_OR(runnable_tasks_warning)
