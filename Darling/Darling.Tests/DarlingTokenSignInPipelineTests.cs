@@ -46,7 +46,7 @@ public sealed class DarlingTokenSignInPipelineTests
 
     private static async Task<TestServer> Build(
         string mode, IReadOnlyList<IPNetwork>? trustedProxies = null, bool oidc = false, string allowFrom = AllowedCidr,
-        IReadOnlyList<string>? mcpTokens = null)
+        IReadOnlyList<string>? mcpTokens = null, ILogger<DarlingWebHostService>? logger = null)
     {
         Assert.True(DarlingTokenSignIn.TryParse(mode, out var parsed));
 
@@ -58,7 +58,7 @@ public sealed class DarlingTokenSignInPipelineTests
         DarlingWebHostService.ConfigureResponseCompression(builder.Services);
         var app = builder.Build();
         var host = new DarlingWebHostService(
-            NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), new CollectorRuntimeState(),
+            logger ?? NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), new CollectorRuntimeState(),
             new WebTlsCertificateState(), new BaselineCache());
 
         DarlingWebOidcClient? client = oidc
@@ -120,7 +120,8 @@ public sealed class DarlingTokenSignInPipelineTests
     }
 
     private static async Task<(HttpContext Ctx, string Body)> Get(
-        TestServer server, IPAddress remote, string path, string? cookie = null, string host = ListenIp)
+        TestServer server, IPAddress remote, string path, string? cookie = null, string host = ListenIp,
+        Action<HttpContext>? configure = null)
     {
         using var sink = new MemoryStream();
         var ctx = await server.SendAsync(c =>
@@ -136,6 +137,7 @@ public sealed class DarlingTokenSignInPipelineTests
 
             c.Connection.RemoteIpAddress = remote;
             c.Response.Body = sink;
+            configure?.Invoke(c);
         });
         return (ctx, Encoding.UTF8.GetString(sink.ToArray()));
     }
@@ -270,6 +272,61 @@ public sealed class DarlingTokenSignInPipelineTests
         });
 
         AssertRefused(answer);
+    }
+
+    [Fact]
+    public async Task Loopback_RemoteProxyForwardingLoopbackAddress_SharedCookie_IsSignedOut()
+    {
+        /* The twin of the test above for the per-request gate: the forwarded 127.0.0.1 passes allowFrom, but the connection came from
+           the proxy, so a token session is not accepted. A gate that judged the forwarded address would serve this cookie. */
+        Assert.True(DarlingHostBinding.TryParseTrustedProxies(new[] { "192.168.1.10" }, out var proxies, out _));
+        using var server = await Build("loopback", oidc: true, trustedProxies: proxies, allowFrom: "0.0.0.0/0");
+
+        AssertSignedOut(await Get(server, IPAddress.Parse("192.168.1.10"), UnmappedPath, SharedCookie(), configure: c =>
+        {
+            c.Request.Headers["X-Forwarded-For"] = "127.0.0.1";
+        }));
+    }
+
+    /// <summary>Forwards each line to a <see cref="CapturingTestLogger"/>.</summary>
+    private sealed class CapturedHostLogger(CapturingTestLogger inner) : ILogger<DarlingWebHostService>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => inner.BeginScope(state);
+
+        public bool IsEnabled(LogLevel logLevel) => inner.IsEnabled(logLevel);
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => inner.Log(logLevel, eventId, state, exception, formatter);
+    }
+
+    [Theory]
+    [InlineData(UnmappedPath, "HTTP 200")]
+    [InlineData("/api/session", "HTTP 401")]
+    public async Task Gate_RefusedTokenSession_LogsTheModeAndTheStatusTheClientGets(string path, string expectedStatus)
+    {
+        var log = new CapturingTestLogger();
+        using var server = await Build("loopback", oidc: true, logger: new CapturedHostLogger(log));
+
+        await Get(server, Lan, path, SharedCookie());
+
+        var line = Assert.Single(log.Lines, l => l.Contains("tokenSignIn", StringComparison.Ordinal));
+        Assert.Contains("'loopback'", line, StringComparison.Ordinal);
+        Assert.Contains("not accepted from this connection", line, StringComparison.Ordinal);
+        Assert.Contains(expectedStatus, line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Handler_RefusedSignIn_LogsTheModeAndNeverTheToken()
+    {
+        var log = new CapturingTestLogger();
+        using var server = await Build("off", logger: new CapturedHostLogger(log));
+
+        await Post(server, Lan, Token);
+
+        var line = Assert.Single(log.Lines, l => l.Contains("tokenSignIn", StringComparison.Ordinal));
+        Assert.Contains("'off'", line, StringComparison.Ordinal);
+        Assert.Contains("HTTP 403", line, StringComparison.Ordinal);
+        Assert.DoesNotContain(log.Lines, l => l.Contains(Token, StringComparison.Ordinal));
     }
 
     [Fact]
