@@ -201,4 +201,13 @@ public sealed class DarlingTokenSignInStartTests
         Assert.StartsWith("web.network.token is set in plaintext (dev convenience): prefer web.network.encryptedToken (produced by --encrypt-password). ", text, StringComparison.Ordinal);
         Assert.EndsWith(expectedTail, text, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [InlineData("on", "the shared token remains the only web credential.")]
+    [InlineData("loopback", "the shared token remains the only web credential, from this machine.")]
+    [InlineData("off", "web.network.oidc.tokenSignIn is 'off', so no token signs in and the dashboard is not started.")]
+    public void OidcRefusedConsequence_FollowsTheMode(string rawMode, string expected)
+    {
+        Assert.Equal(expected, DarlingWebHostService.OidcRefusedConsequence(Mode(rawMode)));
+    }
 }

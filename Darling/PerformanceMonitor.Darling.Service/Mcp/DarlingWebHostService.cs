@@ -591,6 +591,15 @@ public sealed class DarlingWebHostService : BackgroundService
         _ => " The shared token keeps working beside OIDC as the scripted-caller/break-glass path.",
     };
 
+    /// <summary>The end of the Critical a start logs when OIDC is refused: what the shared token is left as, by
+    /// <c>web.network.oidc.tokenSignIn</c> mode (#8735). Under <c>on</c> it is the text the line always had. PURE.</summary>
+    internal static string OidcRefusedConsequence(TokenSignInMode mode) => mode switch
+    {
+        TokenSignInMode.Off => "web.network.oidc.tokenSignIn is 'off', so no token signs in and the dashboard is not started.",
+        TokenSignInMode.Loopback => "the shared token remains the only web credential, from this machine.",
+        _ => "the shared token remains the only web credential.",
+    };
+
     /// <summary>The Warning a start logs for a plaintext <c>web.network.token</c>; its last sentence depends on
     /// <c>web.network.oidc.tokenSignIn</c> (#8735): under <c>off</c> the token signs nobody in. Never holds the token. PURE.</summary>
     internal static string PlaintextTokenWarning(TokenSignInMode mode) =>
@@ -877,9 +886,7 @@ public sealed class DarlingWebHostService : BackgroundService
                         _oidcRefusedReported = true;
                         _logger.LogCritical(
                             "web.network.oidc is misconfigured ({Problem}): OIDC sign-in is DISABLED this start; "
-                            + (tokenSignIn == TokenSignInMode.Off
-                                ? "web.network.oidc.tokenSignIn is 'off', so no token signs in and the dashboard is not started."
-                                : "the shared token remains the only web credential."),
+                            + OidcRefusedConsequence(tokenSignIn),
                             problem);
                     }
                 }
@@ -1951,7 +1958,7 @@ public sealed class DarlingWebHostService : BackgroundService
                             return;
                         }
 
-                        await WriteLoginPageAsync(context, oidcClient is not null, tokenField: oidcClient is null || DarlingTokenSignIn.IsAllowed(tokenSignIn, remote, connectionIp));
+                        await WriteLoginPageAsync(context, oidcClient is not null, tokenField: DarlingTokenSignIn.IsAllowed(tokenSignIn, remote, connectionIp));
                         return;
                 }
             });
@@ -2720,8 +2727,8 @@ public sealed class DarlingWebHostService : BackgroundService
                     now);
             }
 
-            /* Without an OIDC client there is no SSO-only page to fall back to; the POST refusal below still applies. */
-            await WriteLoginPageAsync(context, oidcEnabled, tokenField: !oidcEnabled || tokenSignInAllowed);
+            /* A client the setting refuses gets the SSO-only page, or, with no OIDC client to offer, the page that names where token sign-in works. */
+            await WriteLoginPageAsync(context, oidcEnabled, tokenField: tokenSignInAllowed);
             return;
         }
 
@@ -2734,7 +2741,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status403Forbidden, remote,
                 $"web.network.oidc.tokenSignIn is '{DarlingTokenSignIn.Word(tokenSignIn)}', which refuses token sign-in from this address; set web.network.oidc.tokenSignIn to change it",
                 now);
-            await WriteTokenSignInDisabledAsync(context, StatusCodes.Status403Forbidden);
+            await WriteTokenSignInDisabledAsync(context, StatusCodes.Status403Forbidden, oidcEnabled);
             return;
         }
 
@@ -3192,9 +3199,10 @@ public sealed class DarlingWebHostService : BackgroundService
     /// page the form was covering, carried back in the form's hidden <c>return</c> field when this page answers a
     /// POST to <see cref="LoginPath"/> (a wrong token), where the address bar no longer names that page. A hidden
     /// field's value is not a script or style block, so the page's policy does not change with it.
-    /// <paramref name="tokenField"/> false (valid only with OIDC) serves the SSO-only page for a client the
-    /// token sign-in is refused to (#8735): no token input and no submit button, the hidden <c>return</c> field
-    /// kept because the SSO link's script reads it.
+    /// <paramref name="tokenField"/> false serves a page for a client the token sign-in is refused to (#8735): no token
+    /// input and no submit button, the hidden <c>return</c> field kept because the SSO link's script reads it. With OIDC
+    /// that is the SSO-only page; with no OIDC client it is a page with neither a token field nor an SSO link, which says
+    /// that token sign-in works only from this machine.
     /// </summary>
     internal static Task WriteLoginPageAsync(HttpContext context, bool oidcEnabled, string? returnPath = null, bool tokenField = true)
     {
@@ -3227,22 +3235,14 @@ public sealed class DarlingWebHostService : BackgroundService
        cannot post to /auth/login. The two existing pages keep the default 'self'. */
     private static readonly string s_loginPolicySsoOnly = DarlingWebSecurityHeaders.PolicyForInlinePage(s_loginPageHtmlSsoOnly)
         .Replace("form-action 'self'", "form-action 'none'", StringComparison.Ordinal);
+    private static readonly string s_loginPageHtmlLocalOnly = ComposeLoginPage(oidcEnabled: false, tokenField: false);
+    private static readonly string s_loginPolicyLocalOnly = DarlingWebSecurityHeaders.PolicyForInlinePage(s_loginPageHtmlLocalOnly)
+        .Replace("form-action 'self'", "form-action 'none'", StringComparison.Ordinal);
 
     /// <summary>The Content-Security-Policy of the login page, fixed per rendering (SSO link or not, token
-    /// form or not). The SSO-only page (<paramref name="tokenField"/> false) needs OIDC.</summary>
+    /// form or not). The two pages without the token form allow no form-action (#8735).</summary>
     internal static string LoginPagePolicy(bool oidcEnabled, bool tokenField = true)
-    {
-        RequireOidcForSsoOnly(oidcEnabled, tokenField);
-        return !tokenField ? s_loginPolicySsoOnly : oidcEnabled ? s_loginPolicySso : s_loginPolicyPlain;
-    }
-
-    private static void RequireOidcForSsoOnly(bool oidcEnabled, bool tokenField)
-    {
-        if (!tokenField && !oidcEnabled)
-        {
-            throw new ArgumentException("A login page without the token form needs OIDC enabled; it would have no way to sign in.", nameof(tokenField));
-        }
-    }
+        => !tokenField ? (oidcEnabled ? s_loginPolicySsoOnly : s_loginPolicyLocalOnly) : oidcEnabled ? s_loginPolicySso : s_loginPolicyPlain;
 
     /* The source file is checked out with CRLF, and a browser hashes the LF text, so the page is served in LF.
        The token fragments are spliced over their placeholder lines (the line break included) so the page with
@@ -3252,28 +3252,34 @@ public sealed class DarlingWebHostService : BackgroundService
             DarlingWebSecurityHeaders.NormalizeLineEndings(LoginPageHtml)
                 .Replace("<!--TOKENFIELD-->\n", tokenField ? DarlingWebSecurityHeaders.NormalizeLineEndings(TokenFieldHtml) : string.Empty, StringComparison.Ordinal)
                 .Replace("<!--TOKENBUTTON-->\n", tokenField ? DarlingWebSecurityHeaders.NormalizeLineEndings(TokenButtonHtml) : string.Empty, StringComparison.Ordinal)
-                .Replace("<!--SSO-->", oidcEnabled ? SsoFragmentHtml : string.Empty, StringComparison.Ordinal)
+                .Replace("<!--SSO-->", oidcEnabled ? SsoFragmentHtml : tokenField ? string.Empty : LocalOnlyFragmentHtml, StringComparison.Ordinal)
                 .Replace("<!--ICON-->", IconLinkHtml, StringComparison.Ordinal));
 
     /// <summary>The login page, with the SSO affordance included exactly when OIDC is enabled, and the token
     /// form included unless <paramref name="tokenField"/> is false (#8735: the SSO-only page for a client the
-    /// token sign-in is refused to; #2550 otherwise keeps the shared token as the scripted-caller/break-glass path).</summary>
+    /// token sign-in is refused to; #2550 otherwise keeps the shared token as the scripted-caller/break-glass path). With
+    /// no token form and no OIDC, the page names where token sign-in works instead of offering a form that cannot work.</summary>
     internal static string BuildLoginPageHtml(bool oidcEnabled, bool tokenField = true)
-    {
-        RequireOidcForSsoOnly(oidcEnabled, tokenField);
-        return !tokenField ? s_loginPageHtmlSsoOnly : oidcEnabled ? s_loginPageHtmlSso : s_loginPageHtmlPlain;
-    }
+        => !tokenField ? (oidcEnabled ? s_loginPageHtmlSsoOnly : s_loginPageHtmlLocalOnly) : oidcEnabled ? s_loginPageHtmlSso : s_loginPageHtmlPlain;
 
     /// <summary>The 403 page a refused token sign-in gets (#8735): a fixed text, identical on every call, whose
     /// head carries <see cref="DarlingTokenSignIn.RefusalMarkerHtml"/> - the element the front door matches, never
-    /// the prose. It links to the SSO sign-in and sets no cookie.</summary>
-    internal static Task WriteTokenSignInDisabledAsync(HttpContext context, int statusCode)
+    /// the prose. With an OIDC client it links to the SSO sign-in; without one that link would land on the token form
+    /// again, so the page says token sign-in works only from this machine. One of two fixed texts, never a function of the
+    /// posted token. It sets no cookie.</summary>
+    internal static Task WriteTokenSignInDisabledAsync(HttpContext context, int statusCode, bool oidcEnabled)
     {
         context.Response.StatusCode = statusCode;
         context.Response.ContentType = "text/html; charset=utf-8";
         context.Response.Headers.CacheControl = "no-store";
-        return context.Response.WriteAsync(TokenSignInDisabledHtml);
+        return context.Response.WriteAsync(oidcEnabled ? TokenSignInDisabledHtml : TokenSignInDisabledNoSsoHtml);
     }
+
+    private static readonly string TokenSignInDisabledNoSsoHtml =
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>" + DarlingTokenSignIn.RefusalMarkerHtml + "<title>Darling Web</title>" + IconLinkHtml + "</head>"
+        + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
+        + "<p>Token sign-in is not available from this address. It works only from the machine that runs this service.</p>"
+        + "</body></html>";
 
     private static readonly string TokenSignInDisabledHtml =
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>" + DarlingTokenSignIn.RefusalMarkerHtml + "<title>Darling Web</title>" + IconLinkHtml + "</head>"
@@ -3357,6 +3363,11 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
        only — it is an anchor, not a submit. */
     private const string SsoFragmentHtml = @"  <div class='sso'><a id='sso' href='/auth/oidc/login'>Sign in with SSO</a></div>
   <script>document.getElementById('sso').href = '/auth/oidc/login?return=' + encodeURIComponent(location.pathname.toLowerCase() === '/auth/login' ? document.getElementById('return').value : location.pathname + location.search + location.hash);</script>";
+
+    /* Spliced over the <!--SSO--> placeholder when there is neither a token form nor OIDC (#8735 review): a client that
+       tokenSignIn refuses and that has no OIDC client to use instead. It names where token sign-in works and offers nothing to post. */
+    private const string LocalOnlyFragmentHtml = @"  <p class='host'>Token sign-in works only from the machine that runs this service.</p>
+";
 
     /* The form's hidden return field exactly as the page carries it: the text WriteLoginPageAsync fills in. */
     private const string ReturnFieldHtml = "<input type='hidden' name='return' id='return' value=''>";

@@ -490,6 +490,29 @@ public sealed class DarlingTokenSignInPipelineTests
         Assert.DoesNotContain("name='token'", answer.Body, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Loopback_WithoutAnOidcClient_LanGetsTheLocalOnlyPage_AndTheNoLinkRefusal_WhileLoopbackKeepsTheTokenField()
+    {
+        using var server = await Build("loopback", oidc: false);
+
+        foreach (var path in new[] { DarlingWebHostService.LoginPath, "/" })
+        {
+            var lanGet = await Get(server, Lan, path);
+            Assert.Equal(StatusCodes.Status200OK, lanGet.Ctx.Response.StatusCode);
+            Assert.DoesNotContain("name='token'", lanGet.Body, StringComparison.Ordinal);
+            Assert.DoesNotContain("/auth/oidc/login", lanGet.Body, StringComparison.Ordinal);
+            Assert.Contains("only from the machine that runs this service", lanGet.Body, StringComparison.Ordinal);
+            Assert.Contains("form-action 'none'", lanGet.Ctx.Response.Headers.ContentSecurityPolicy.ToString(), StringComparison.Ordinal);
+        }
+
+        var lanPost = await Post(server, Lan, Token);
+        AssertRefused(lanPost);
+        Assert.DoesNotContain("/auth/oidc/login", lanPost.Body, StringComparison.Ordinal);
+
+        var loopbackGet = await Get(server, IPAddress.Loopback, DarlingWebHostService.LoginPath);
+        Assert.Contains("name='token'", loopbackGet.Body, StringComparison.Ordinal);
+    }
+
     /// <summary>Answers the discovery document the OIDC login leg fetches, with nothing else.</summary>
     private sealed class StubDiscoveryHandler : HttpMessageHandler
     {

@@ -62,31 +62,61 @@ public sealed class DarlingTokenSignInLoginPageTests
     }
 
     [Fact]
-    public void TokenFieldFalse_WithoutOidc_Throws()
+    public void NoTokenField_WithoutOidc_IsTheLocalOnlyPage_WithNeitherTokenFieldNorSsoLink()
     {
-        Assert.Throws<ArgumentException>(() => DarlingWebHostService.BuildLoginPageHtml(false, tokenField: false));
-        Assert.Throws<ArgumentException>(() => DarlingWebHostService.LoginPagePolicy(false, false));
+        var html = DarlingWebHostService.BuildLoginPageHtml(false, tokenField: false);
+
+        Assert.DoesNotContain("name='token'", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("type='submit'", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("id='sso'", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("/auth/oidc/login", html, StringComparison.Ordinal);
+        Assert.Contains("id='return'", html, StringComparison.Ordinal);
+        Assert.Contains("only from the machine that runs this service", html, StringComparison.Ordinal);
+        Assert.NotEqual(DarlingWebHostService.BuildLoginPageHtml(true, tokenField: false), html);
     }
 
     [Fact]
-    public async Task DisabledPage_CarriesTheCode_AndIsFixed()
+    public void NoTokenField_WithoutOidc_PolicyIsComputedFromItsOwnTextAndAllowsNoFormAction()
     {
-        var first = await RenderDisabledAsync();
-        var second = await RenderDisabledAsync();
+        var policy = DarlingWebHostService.LoginPagePolicy(false, false);
+        var hashed = DarlingWebSecurityHeaders.PolicyForInlinePage(DarlingWebHostService.BuildLoginPageHtml(false, false));
+
+        Assert.Equal(hashed.Replace("form-action 'self'", "form-action 'none'", StringComparison.Ordinal), policy);
+        Assert.Contains("form-action 'none'", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("form-action 'self'", policy, StringComparison.Ordinal);
+        Assert.NotEqual(DarlingWebHostService.LoginPagePolicy(true, false), policy);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task DisabledPage_CarriesTheCode_AndIsFixed(bool oidcEnabled)
+    {
+        var first = await RenderDisabledAsync(oidcEnabled);
+        var second = await RenderDisabledAsync(oidcEnabled);
 
         Assert.Equal(StatusCodes.Status403Forbidden, first.Status);
         Assert.Contains(DarlingTokenSignIn.RefusalMarkerHtml, first.Body, StringComparison.Ordinal);
-        Assert.Contains("href='/auth/oidc/login'", first.Body, StringComparison.Ordinal);
+        Assert.Equal(oidcEnabled, first.Body.Contains("href='/auth/oidc/login'", StringComparison.Ordinal));
         Assert.Equal(first.Body, second.Body);
         Assert.False(first.HasCookie);
     }
 
-    private static async Task<(int Status, string Body, bool HasCookie)> RenderDisabledAsync()
+    [Fact]
+    public async Task DisabledPage_WithoutOidc_SaysTokenSignInWorksOnlyOnThisMachine()
+    {
+        var page = await RenderDisabledAsync(oidcEnabled: false);
+
+        Assert.Contains("only from the machine that runs this service", page.Body, StringComparison.Ordinal);
+        Assert.DoesNotContain("<a ", page.Body, StringComparison.Ordinal);
+    }
+
+    private static async Task<(int Status, string Body, bool HasCookie)> RenderDisabledAsync(bool oidcEnabled)
     {
         var context = new DefaultHttpContext();
         using var body = new MemoryStream();
         context.Response.Body = body;
-        await DarlingWebHostService.WriteTokenSignInDisabledAsync(context, StatusCodes.Status403Forbidden);
+        await DarlingWebHostService.WriteTokenSignInDisabledAsync(context, StatusCodes.Status403Forbidden, oidcEnabled);
         var text = Encoding.UTF8.GetString(body.ToArray());
         return (context.Response.StatusCode, text, context.Response.Headers.ContainsKey("Set-Cookie"));
     }
