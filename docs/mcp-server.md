@@ -134,7 +134,7 @@ Give each Copilot user an entry under `mcp.tokens` in `darling.json`, for exampl
 
 Lite listens on port `5151` and has no `/core` URL. Point Copilot at its only URL, `http://localhost:5151/`. Use the same entry with that URL and a `lite-token` input. Paste the token from Lite's Settings, Access, **Copy Token**.
 
-Lite does not need `/core`. Its code defines 114 tools in all. The default list leaves out the twelve write tools and the two tools that claim and report on investigation requests. That leaves 100 by default, well under 128. Even all 114 are under the cap. The cap still counts every other MCP server in the same chat.
+Lite does not need `/core`. Its code defines 115 tools in all. The default list leaves out the twelve write tools and the two tools that claim and report on investigation requests. That leaves 101 by default, well under 128. Even all 115 are under the cap. The cap still counts every other MCP server in the same chat.
 
 These steps were checked with VS Code and Copilot Free against a Darling service, where the server loaded its 75 `/core` tools and answered `list_servers`. Lite was not checked in Copilot, and the Lite steps follow the same entry with Lite's URL.
 
@@ -219,7 +219,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Jobs | `get_running_jobs` |
 | Configuration | `get_server_config`, `get_database_config`, `get_database_scoped_config`, `get_query_store_health`, `get_trace_flags` |
 | Server Info | `get_server_properties`, `get_database_sizes` |
-| Object/Index Stats | `get_table_index_sizes`, `get_index_usage`, `get_object_locking` |
+| Object/Index Stats | `get_table_index_sizes`, `get_index_usage`, `get_object_locking`, `get_object_usage` |
 | Sessions | `get_session_stats` |
 | System Events | `get_memory_pressure_events` |
 | Latches & Spinlocks | `get_latch_stats`, `get_spinlock_stats` |

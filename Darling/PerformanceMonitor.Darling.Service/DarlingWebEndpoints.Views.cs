@@ -1082,6 +1082,7 @@ public static partial class DarlingWebEndpoints
             ["get_index_usage"] = R(CatObjects, "Index usage (seeks/scans/updates) per index. Unused-first, so pass database_name unless you want a server-wide sweep; the answer carries matching_index_count and truncated.", PServer(), PDatabases(), PLimit(200)),
             ["get_object_locking"] = R(CatObjects, "Per-object locking/contention stats.", PServer(), PLimit(200), PDatabases(), PText("detail_database"), PText("detail_schema"), PText("detail_table"), PText("detail_index")),
             ["get_table_index_sizes"] = R(CatObjects, "Per-table/index size breakdown.", PServer(), PDatabases()),
+            ["get_object_usage"] = R(CatObjects, "Table, indexed view, procedure and function usage in one database over a long window, counted across counter resets; decommission candidates first.", PServer(), PInt("days_back", 90), PBool("include_paired_replica", true), PLimit(100), PInt("offset", 0), PText("database_name")),
 
             /* ── plan cache / scheduler (DarlingMcpPlanCacheSchedulerTools) ── */
             ["get_cpu_scheduler_pressure"] = R(CatPlanCache, "CPU scheduler pressure indicators from the newest snapshot within the window.", PServer(), PHours(24), PAsOf()),

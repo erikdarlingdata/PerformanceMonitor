@@ -446,6 +446,11 @@ public static partial class DarlingWebEndpoints
             ["get_table_index_sizes"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpObjectStatsTools.GetTableIndexSizes(pg, Server(c), databases, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
+            /* #8784: one database per call (the window read is per database), so database_name is a single name, not the list filter. The
+               ReadOnlyIntent partner is resolved through the same web scope guard as the server, so a token scoped to one server never reads it. */
+            ["get_object_usage"] = (c, pg, an) => DarlingMcpObjectUsageTools.GetObjectUsage(
+                pg, Server(c), QueryInt(c, "days_back", null, DarlingMcpObjectUsageTools.DefaultDaysBack), QueryBool(c, "include_paired_replica", true),
+                Rows(c, "limit", DarlingMcpObjectUsageTools.DefaultLimit), QueryInt(c, "offset", null, 0), Str(c, "database_name"), c.RequestAborted),
 
             /* ── plan cache / scheduler ── */
             ["get_cpu_scheduler_pressure"] = (c, pg, an) => DarlingMcpPlanCacheSchedulerTools.GetCpuSchedulerPressure(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -1089,7 +1094,7 @@ public static partial class DarlingWebEndpoints
     internal static readonly string[] IntegerQueryKeys =
     [
         "hours", "hours_back", "days_back", "trend_hours_back", "baseline_hours_back", "limit", "top",
-        "bucket_minutes", "min_dop", "worst_count", "statements", "min_sessions"
+        "bucket_minutes", "min_dop", "worst_count", "statements", "min_sessions", "offset"
     ];
 
     /// <summary>

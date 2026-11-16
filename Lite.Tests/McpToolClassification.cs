@@ -37,7 +37,7 @@ internal static class McpToolClassification
         "get_health_parser_significant_waits", "get_health_parser_system_health", "get_index_usage",
         "get_investigation_reports", "get_latch_stats", "get_load_by_caller", "get_lock_wait_trend", "get_long_query_completions", "get_memory_clerks",
         "get_memory_grants", "get_memory_pressure_events", "get_memory_stats", "get_memory_trend", "get_mute_rules",
-        "get_notification_routes", "get_object_locking", "get_perfmon_stats", "get_perfmon_trend",
+        "get_notification_routes", "get_object_locking", "get_object_usage", "get_perfmon_stats", "get_perfmon_trend",
         "get_plan_cache_bloat", "get_plan_corrections", "get_plan_xml", "get_procedure_duration_trend",
         "get_pvs_stats", "get_query_duration_trend", "get_query_heatmap", "get_query_pileups", "get_query_store_duration_trend",
         "get_query_store_health", "get_query_store_regressions", "get_query_store_top", "get_query_trend",

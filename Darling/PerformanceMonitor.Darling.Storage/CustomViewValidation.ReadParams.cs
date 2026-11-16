@@ -166,6 +166,7 @@ public static partial class CustomViewValidation
             ["get_pvs_stats"] = new ReadPanelParam[] { new("server", false), new("trend_hours_back", false), new("database_name", false) },
             ["get_index_usage"] = new ReadPanelParam[] { new("server", false), new("database_name", false), new("limit", false) },
             ["get_object_locking"] = new ReadPanelParam[] { new("server", false), new("limit", false), new("database_name", false), new("detail_database", false), new("detail_schema", false), new("detail_table", false), new("detail_index", false) },
+            ["get_object_usage"] = new ReadPanelParam[] { new("server", false), new("days_back", false), new("include_paired_replica", false), new("limit", false), new("offset", false), new("database_name", false) },
             ["get_table_index_sizes"] = new ReadPanelParam[] { new("server", false), new("database_name", false) },
             ["get_cpu_scheduler_pressure"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false) },
             ["get_plan_cache_bloat"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false) },

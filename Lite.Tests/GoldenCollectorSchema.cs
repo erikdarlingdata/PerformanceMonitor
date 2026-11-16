@@ -574,7 +574,9 @@ internal static class GoldenCollectorSchema
     is_padded BOOLEAN,
     allow_page_locks BOOLEAN,
     allow_row_locks BOOLEAN,
-    is_indexed_view BOOLEAN
+    is_indexed_view BOOLEAN,
+    answering_server_name VARCHAR,
+    is_memory_optimized BOOLEAN
 )",
         ["query_stats"] = @"CREATE TABLE IF NOT EXISTS query_stats (
     collection_id BIGINT PRIMARY KEY,

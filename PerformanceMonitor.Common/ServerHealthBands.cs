@@ -2157,6 +2157,7 @@ namespace PerformanceMonitor.Common
             "query_store_forced_plans",
             "query_store_hints",
             "identity_capacity",
+            "object_inventory",
         };
 
         /// <summary>
