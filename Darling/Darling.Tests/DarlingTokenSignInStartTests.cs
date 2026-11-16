@@ -174,4 +174,31 @@ public sealed class DarlingTokenSignInStartTests
         var line = Assert.Single(lines);
         Assert.Equal(LogLevel.Information, line.Level);
     }
+
+    private static TokenSignInMode Mode(string raw)
+    {
+        Assert.True(DarlingTokenSignIn.TryParse(raw, out var mode));
+        return mode;
+    }
+
+    [Theory]
+    [InlineData("on", " The shared token keeps working beside OIDC as the scripted-caller/break-glass path.")]
+    [InlineData("loopback", " The shared token signs in from this machine only.")]
+    [InlineData("off", "")]
+    public void OidcStartLineTokenNote_FollowsTheMode(string rawMode, string expected)
+    {
+        Assert.Equal(expected, DarlingWebHostService.OidcStartLineTokenNote(Mode(rawMode)));
+    }
+
+    [Theory]
+    [InlineData("on", "This token gates web dashboard network access.")]
+    [InlineData("loopback", "This token gates web dashboard network access.")]
+    [InlineData("off", "web.network.oidc.tokenSignIn is 'off', so this token signs nobody in.")]
+    public void PlaintextTokenWarning_FollowsTheMode(string rawMode, string expectedTail)
+    {
+        var text = DarlingWebHostService.PlaintextTokenWarning(Mode(rawMode));
+
+        Assert.StartsWith("web.network.token is set in plaintext (dev convenience): prefer web.network.encryptedToken (produced by --encrypt-password). ", text, StringComparison.Ordinal);
+        Assert.EndsWith(expectedTail, text, StringComparison.Ordinal);
+    }
 }

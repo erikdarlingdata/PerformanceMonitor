@@ -582,6 +582,24 @@ public sealed class DarlingWebHostService : BackgroundService
         return lines;
     }
 
+    /// <summary>The tail of the "OIDC sign-in enabled" start line that says what the shared token does beside OIDC under each
+    /// <c>web.network.oidc.tokenSignIn</c> mode (#8735). Under <c>on</c> it is the text the line always had. PURE.</summary>
+    internal static string OidcStartLineTokenNote(TokenSignInMode mode) => mode switch
+    {
+        TokenSignInMode.Loopback => " The shared token signs in from this machine only.",
+        TokenSignInMode.Off => "",
+        _ => " The shared token keeps working beside OIDC as the scripted-caller/break-glass path.",
+    };
+
+    /// <summary>The Warning a start logs for a plaintext <c>web.network.token</c>; its last sentence depends on
+    /// <c>web.network.oidc.tokenSignIn</c> (#8735): under <c>off</c> the token signs nobody in. Never holds the token. PURE.</summary>
+    internal static string PlaintextTokenWarning(TokenSignInMode mode) =>
+        "web.network.token is set in plaintext (dev convenience): prefer web.network.encryptedToken "
+        + "(produced by --encrypt-password). "
+        + (mode == TokenSignInMode.Off
+            ? "web.network.oidc.tokenSignIn is 'off', so this token signs nobody in."
+            : "This token gates web dashboard network access.");
+
     /// <summary>The answer of <see cref="ResolveLoopbackOnlyToken"/>: the token the loopback-only dashboard's
     /// token-to-cookie gate compares against (empty only when none is configured and <c>web.allowTokenlessLoopback</c>
     /// is on, which leaves the dashboard open to local browsers for reads only), whether the start must stop, whether it
@@ -780,12 +798,7 @@ public sealed class DarlingWebHostService : BackgroundService
                         if (usedPlaintext && !_plaintextTokenReported)
                         {
                             _plaintextTokenReported = true;
-                            _logger.LogWarning(
-                                "web.network.token is set in plaintext (dev convenience): prefer web.network.encryptedToken " +
-                                "(produced by --encrypt-password). " +
-                                (tokenSignIn == TokenSignInMode.Off
-                                    ? "web.network.oidc.tokenSignIn is 'off', so this token signs nobody in."
-                                    : "This token gates web dashboard network access."));
+                            _logger.LogWarning("{Message}", PlaintextTokenWarning(tokenSignIn));
                         }
                     }
                 }
@@ -893,12 +906,7 @@ public sealed class DarlingWebHostService : BackgroundService
                        register at the IdP and the one thing some IdPs (Okta) refuse for a bare IP. */
                     _logger.LogInformation(
                         "OIDC sign-in enabled: authority {Authority}, clientId {ClientId}, role mapping {RoleMapping}. Register the redirect URI(s) your browsers will actually use: {{scheme}}://{{host}}:{Port}/auth/oidc/callback (host = {Hosts})."
-                        + tokenSignIn switch
-                        {
-                            TokenSignInMode.Loopback => " The shared token signs in from this machine only.",
-                            TokenSignInMode.Off => "",
-                            _ => " The shared token keeps working beside OIDC as the scripted-caller/break-glass path.",
-                        },
+                        + OidcStartLineTokenNote(tokenSignIn),
                         oidcClient.Options.Authority,
                         oidcClient.Options.ClientId,
                         oidcClient.Options.RoleClaim is null

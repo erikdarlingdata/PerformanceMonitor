@@ -22,12 +22,12 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #8735: the not-started rule and the mode-dependent start lines, driven through the real <c>TryStartServerAsync</c> in process, on a
-/// network-mode start with the managed store and no credential (the same shape as <c>DarlingWebHostGateLiveTests</c>). A start that
-/// passes the tokenSignIn check goes on to wait for the store credential, so each start here carries a short cancellation: a start the
-/// check must stop returns false at once with its Critical line, one that is wrongly let through returns false only at the cancellation
-/// and without that line, so the line is what these tests assert. The positive half (the mode reaching <c>ConfigurePipeline</c>) needs
-/// the managed store credential and is covered by a live smoke.
+/// #8735: the not-started rule, and the once-per-process start lines, driven through the real <c>TryStartServerAsync</c> in process, on a
+/// network-mode start with the managed store and no credential (the same shape as <c>DarlingWebHostGateLiveTests</c>). Every start here
+/// returns false at the tokenSignIn check, before the port probe and the credential wait, so nothing binds and no timer decides the
+/// result; the short cancellation on each start is only a guard. The mode-dependent text of the OIDC and plaintext-token lines is
+/// pinned through the pure methods in <c>DarlingTokenSignInStartTests</c>, and the positive half (the mode reaching
+/// <c>ConfigurePipeline</c>) needs the managed store credential and is covered by a live smoke.
 /// </summary>
 public sealed class DarlingTokenSignInStartLiveTests
 {
@@ -66,9 +66,9 @@ public sealed class DarlingTokenSignInStartLiveTests
             + port + ", 'network': { 'listen': '" + ListenIp + "', 'allowFrom': '" + AllowedCidr + "', " + networkExtra + " } } }")
             .Replace('\'', '"'));
 
-    private sealed record StartResult(bool Started, bool SecondStarted, bool Answered, CapturingTestLogger Log);
+    private sealed record StartResult(bool Started, bool SecondStarted, CapturingTestLogger Log);
 
-    /// <summary>Starts the host <paramref name="attempts"/> times on one instance, as the supervisor's retry does, then probes the port.</summary>
+    /// <summary>Starts the host <paramref name="attempts"/> times on one instance, as the supervisor's retry does.</summary>
     private static async Task<StartResult> StartAsync(DarlingConfig config, int port, int attempts = 1)
     {
         var log = new CapturingTestLogger();
@@ -78,7 +78,6 @@ public sealed class DarlingTokenSignInStartLiveTests
         var tryStart = typeof(DarlingWebHostService).GetMethod("TryStartServerAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var started = true;
         var secondStarted = true;
-        var answered = false;
         try
         {
             for (var attempt = 0; attempt < attempts; attempt++)
@@ -94,25 +93,13 @@ public sealed class DarlingTokenSignInStartLiveTests
                     secondStarted = result;
                 }
             }
-
-            try
-            {
-                using var client = new System.Net.Sockets.TcpClient();
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                await client.ConnectAsync(IPAddress.Loopback, port, cts.Token);
-                answered = true;
-            }
-            catch (System.Net.Sockets.SocketException)
-            {
-                answered = false;
-            }
         }
         finally
         {
             await host.DisposeFailedStartAsync();
         }
 
-        return new StartResult(started, secondStarted, answered, log);
+        return new StartResult(started, secondStarted, log);
     }
 
     private static int CriticalLinesAbout(CapturingTestLogger log) =>
@@ -129,7 +116,6 @@ public sealed class DarlingTokenSignInStartLiveTests
 
         Assert.False(result.Started);
         Assert.False(result.SecondStarted);
-        Assert.False(result.Answered, "nothing may answer on the port");
         Assert.Equal(1, CriticalLinesAbout(result.Log));
         Assert.Contains(result.Log.Lines, l => l.Contains("OIDC is not configured", StringComparison.Ordinal));
         Assert.DoesNotContain(result.Log.Lines, l => l.Contains(PlainToken, StringComparison.Ordinal));
@@ -144,7 +130,6 @@ public sealed class DarlingTokenSignInStartLiveTests
         var result = await StartAsync(config, port);
 
         Assert.False(result.Started);
-        Assert.False(result.Answered);
         Assert.Contains(result.Log.Lines, l => l.StartsWith("Critical:", StringComparison.Ordinal)
             && l.Contains("web.network.trustedProxies is misconfigured", StringComparison.Ordinal));
         var line = Assert.Single(result.Log.Lines, l => l.StartsWith("Critical:", StringComparison.Ordinal)
@@ -161,7 +146,6 @@ public sealed class DarlingTokenSignInStartLiveTests
         var result = await StartAsync(config, port);
 
         Assert.False(result.Started);
-        Assert.False(result.Answered);
         var line = Assert.Single(result.Log.Lines, l => l.StartsWith("Critical:", StringComparison.Ordinal)
             && l.Contains("web.network.oidc.tokenSignIn", StringComparison.Ordinal));
         Assert.Contains("'bogus'", line, StringComparison.Ordinal);
@@ -202,37 +186,5 @@ public sealed class DarlingTokenSignInStartLiveTests
         Assert.Equal(1, LinesContaining(result.Log, "Critical:", "web.network.trustedProxies is misconfigured"));
         Assert.Equal(1, LinesContaining(result.Log, "Warning:", "web.network.token is set in plaintext"));
         Assert.Equal(1, LinesContaining(result.Log, "Critical:", NotStartedText));
-    }
-
-    [Theory]
-    [InlineData("on", true, "break-glass")]
-    [InlineData("loopback", true, "from this machine only")]
-    [InlineData("off", false, "")]
-    public async Task OidcStartLine_FollowsTheMode(string mode, bool mentionsTheSharedToken, string expectedPhrase)
-    {
-        var port = FreeTcpPort();
-        var config = Config(port, "'token': '" + PlainToken + "', 'oidc': { " + ValidOidc + ", 'tokenSignIn': '" + mode + "' }");
-
-        var result = await StartAsync(config, port);
-
-        var line = Assert.Single(result.Log.Lines, l => l.Contains("OIDC sign-in enabled", StringComparison.Ordinal));
-        Assert.Equal(mentionsTheSharedToken, line.Contains("The shared token", StringComparison.Ordinal));
-        Assert.Contains(expectedPhrase, line, StringComparison.Ordinal);
-        Assert.DoesNotContain(result.Log.Lines, l => l.Contains(PlainToken, StringComparison.Ordinal));
-    }
-
-    [Theory]
-    [InlineData("on", "gates web dashboard network access")]
-    [InlineData("loopback", "gates web dashboard network access")]
-    [InlineData("off", "signs nobody in")]
-    public async Task PlaintextTokenWarning_FollowsTheMode(string mode, string expectedPhrase)
-    {
-        var port = FreeTcpPort();
-        var config = Config(port, "'token': '" + PlainToken + "', 'oidc': { " + ValidOidc + ", 'tokenSignIn': '" + mode + "' }");
-
-        var result = await StartAsync(config, port);
-
-        var line = Assert.Single(result.Log.Lines, l => l.Contains("web.network.token is set in plaintext", StringComparison.Ordinal));
-        Assert.Contains(expectedPhrase, line, StringComparison.Ordinal);
     }
 }
