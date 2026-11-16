@@ -604,7 +604,7 @@ assert_eq "$(jq_job '.spec.template.spec.initContainers[] | select(.name == "pre
 t provision_roles_images
 render -f "${CI_EXTERNAL}"
 assert_eq "$(jq_job '.spec.template.spec.initContainers[0].image')" "$(dq '.spec.template.spec.containers[0].image')" "init container image equals the Deployment's"
-assert_eq "$(jq_job '.spec.template.spec.containers[0].image')" '"timescale/timescaledb:2.31.0-pg17"' "psql image defaults to store.bundled.image"
+assert_eq "$(jq_job '.spec.template.spec.containers[0].image')" "\"$(yq '.store.bundled.image' "${CHART_DIR}/values.yaml")\"" "psql image defaults to store.bundled.image"
 render -f "${CI_EXTERNAL}" --set store.bundled.image=example/store:1
 assert_eq "$(jq_job '.spec.template.spec.containers[0].image')" '"example/store:1"' "psql image follows store.bundled.image"
 render -f "${CI_EXTERNAL}" --set store.provisionRoles.psqlImage=example/psql:17
