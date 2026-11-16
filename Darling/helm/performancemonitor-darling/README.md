@@ -94,15 +94,21 @@ The Job runs without a service account token. The login Secret and the role-pass
 ```yaml
 store:
   mode: external
-  external: { host: db.example.internal, database: darling, username: darling, sslMode: VerifyFull }
+  external:
+    host: db.example.internal
+    database: darling
+    username: darling
+    sslMode: VerifyFull
+    passwordSecret: { name: darling-secrets, key: sql-password }
+    caSecret: { name: darling-store-ca, key: ca.crt }   # psql needs a root certificate file for VerifyCA and VerifyFull
   provisionRoles:
     enabled: true
     login:
-      passwordSecret: { name: darling-secrets, key: sql-password }   # the service's own Secret and key is fine
+      passwordSecret: { name: darling-secrets, key: sql-password }   # the service's own Secret and key, so the owner password has one copy
     rolePasswordsSecret: darling-store-roles
 ```
 
-`login` takes exactly one of `passwordSecret` (the owner's password; host, port, database, username, `sslMode` and `caSecret` come from `store.external`) or `connectionStringSecret` (a whole Npgsql connection string for the owner, with no client certificate and, if it names a `Root Certificate`, only `/etc/darling/store-ca/ca.crt`, where the Job mounts `store.external.caSecret`). Either may name the Secret and key the service's own connection uses, so the owner password has one copy. `passwordSecret` cannot be combined with `store.external.connectionStringSecret`, because there is no host to pair it with.
+`login` takes exactly one of `passwordSecret` (the owner's password; host, port, database, username, `sslMode` and `caSecret` come from `store.external`) or `connectionStringSecret` (a whole Npgsql connection string for the owner, with no client certificate and, if it names a `Root Certificate`, only `/etc/darling/store-ca/ca.crt`, where the Job mounts `store.external.caSecret`). Either may name the Secret and key the service's own connection uses, so the owner password has one copy. `passwordSecret` cannot be combined with `store.external.connectionStringSecret`, because there is no host to pair it with, and `store.external.host` must be one host (a comma-separated list is refused). With `sslMode` `VerifyCA` or `VerifyFull`, psql (libpq) needs a root certificate file, where the service itself falls back to the operating system's trust store: set `store.external.caSecret` (the render fails without it), or put a `Root Certificate` in the connection string of a `connectionStringSecret` login (the verb refuses it without one).
 
 `rolePasswordsSecret` names a Secret you manage with the keys `admin`, `viewer`, `web` and `mcp`. The chart generates no passwords. Each one needs 16 or more characters from `A-Z a-z 0-9 . _ ~ + / = -`; the Job refuses anything else (exit code 2), naming the role and never the value.
 
@@ -139,7 +145,7 @@ spec:
           name: darling-owner
 ```
 
-**One WARNING is expected.** Nine `ALTER ROLE ... SET` lines of the script (`temp_file_limit`, `log_min_duration_statement` and `log_parameter_max_length` for `viewer`, `web` and `mcp`) need a superuser. An owner run skips them and prints exactly one WARNING containing `superuser-only settings`, which names each role still missing a setting and gives the `ALTER ROLE ... SET` statements to run. Run those once as a superuser and the WARNING is gone from every later run. The owner may also print non-fatal WARNINGs that it is a member of `darling_alert_sources`; they need no action.
+**One WARNING is expected.** Nine `ALTER ROLE ... SET` lines of the script (`temp_file_limit`, `log_min_duration_statement` and `log_parameter_max_length` for `viewer`, `web` and `mcp`) need a superuser. An owner run skips them and prints exactly one WARNING containing `superuser-only settings`, which names each role still missing a setting and gives the `ALTER ROLE ... SET` statements to run. Run those once as a superuser and the WARNING is gone from every later run. The owner may also print non-fatal WARNINGs that it is a member of `darling_alert_sources`; they need no action, unless your `pg_hba.conf` has a `+darling_alert_sources` line (the WARNING says what to add).
 
 **When it fails.** `kubectl logs job/<fullname>-store-roles -c prepare` is the verb, `-c provision-roles` is psql. Exit codes:
 
@@ -150,8 +156,16 @@ spec:
 | 3 | `provision-roles` | psql stopped: the script's own guard (with its message and the statements to run), or any other error, because `ON_ERROR_STOP` is on. |
 | 4 | `prepare` | The store did not reach this release's schema within `waitSeconds`. The usual cause is that the new pod has not finished migrating. The message names the version it last saw and the one it waited for. |
 | 5 | `prepare` | The login does not own every object in the `collect` and `config` schemas (a superuser ran the script by hand once). The message lists each object with its owner and the `ALTER ... OWNER TO` statements a superuser runs once. |
+| 1 or 2 | `provision-roles` | psql's own exit code: it could not read a file or connect. libpq's message in the log says why (a missing root certificate file, a refused login, an unreachable host). |
 
 The verb sends no DDL, so a failure in `prepare` leaves the store untouched.
+
+**Around the Job.**
+
+- The Job pod's labels differ from the Darling pod's on purpose (it must never match the web or MCP Service), and `podLabels` and `podAnnotations` are not passed to it. A NetworkPolicy written for the Darling pod does not cover it: the Job needs its own egress to the store. An Istio sidecar injected into the Job would keep it from completing, so annotate or exclude the Job pod.
+- With wiring on, a missing `web` or `mcp` key, or a password the store refuses, stops the Darling pod itself from starting. Under the `Recreate` strategy the old pod is already gone by then.
+- `helm uninstall` leaves the hook Job in place, as Helm does for hooks; delete it with `kubectl delete job <fullname>-store-roles`.
+- The script revokes `PUBLIC`'s `CONNECT` on the database on every run, so any other login that connects to the store needs its own `GRANT CONNECT ON DATABASE`.
 
 **Timing.** Helm waits for a hook Job inside `--timeout` (5 minutes by default), and the Job's `activeDeadlineSeconds` is `waitSeconds + 300`. A release that migrates for a long time needs `helm upgrade --timeout` to cover `waitSeconds` (default 900). Without `--wait`, the Job starts as soon as the manifests are applied and waits for the new pod to migrate the store.
 
