@@ -1250,6 +1250,13 @@ BEGIN
         IF pg_catalog.to_regprocedure('config.harden_web_access_advanced()') IS NOT NULL THEN PERFORM config.harden_web_access_advanced(); END IF;
     END IF;
 END $web_groups$;
+-- V269 (#8737): the personal MCP token table. No role but the store owner reads or writes it, so nothing is granted back.
+DO $personal_token$
+BEGIN
+    IF pg_catalog.to_regclass('config.mcp_personal_token') IS NOT NULL THEN
+        REVOKE ALL ON config.mcp_personal_token FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+    END IF;
+END $personal_token$;
 
 COMMIT;
 
@@ -4113,3 +4120,10 @@ BEGIN
         IF pg_catalog.to_regprocedure('config.harden_web_access_advanced()') IS NOT NULL THEN PERFORM config.harden_web_access_advanced(); END IF;
     END IF;
 END $web_groups$;
+-- V269 (#8737): the personal MCP token table. No role but the store owner reads or writes it, so nothing is granted back.
+DO $personal_token$
+BEGIN
+    IF pg_catalog.to_regclass('config.mcp_personal_token') IS NOT NULL THEN
+        REVOKE ALL ON config.mcp_personal_token FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+    END IF;
+END $personal_token$;

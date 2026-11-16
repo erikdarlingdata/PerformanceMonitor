@@ -2287,6 +2287,9 @@ END $do$;
 
 -- Managed web credentials have their own protected-table carve, after every blanket grant.
 {WebAccessGroupSchema.ReassertPermissionsSql}
+
+-- V269 (#8737): the personal MCP token table. No role but the store owner reads or writes it, so nothing is granted back.
+{PersonalTokenSchema.ReassertPermissionsSql(config, admin, viewer, web, mcp)}
 ";
     }
 

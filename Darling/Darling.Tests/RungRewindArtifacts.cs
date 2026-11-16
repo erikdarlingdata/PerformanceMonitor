@@ -808,6 +808,8 @@ DROP TABLE IF EXISTS collect.object_executions_daily_built;
 DROP TABLE IF EXISTS collect.object_executions_daily_databases;
 DROP TABLE IF EXISTS collect.object_executions_daily_retention;
 DROP TABLE IF EXISTS collect.object_inventory;"),
+        // V269 (#8737): the personal MCP token table. The rewind drops it (its triggers go with it); a re-run of V269 creates it again.
+        new(269, "hasPersonalTokens", "DROP TABLE IF EXISTS config.mcp_personal_token;"),
     ];
 
     /// <summary>

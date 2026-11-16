@@ -3482,6 +3482,8 @@ $rung$;";
            summary with its build record. A catalog-only column and new tables created empty: nothing is backfilled here, so the upgrade stays
            fast and the housekeeping tick fills the summary from the daily Query Store summary the store already holds. */
         new Migration(268, "object-usage", V268Sql),
+        /* V269 (#8737): the personal MCP token store. A new table created empty, owner-only: nothing is backfilled and no existing row moves. */
+        new Migration(PersonalTokenSchema.Version, "mcp-personal-tokens", PersonalTokenSchema.CreateSql),
     };
 
     /// <summary>
