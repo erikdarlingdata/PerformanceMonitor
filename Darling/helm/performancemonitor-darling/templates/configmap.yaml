@@ -9,3 +9,11 @@ data:
     {{- include "performancemonitor-darling.darlingJson" . | nindent 4 }}
   render-config.sh: |
     {{- .Files.Get "files/render-config.sh" | nindent 4 }}
+  {{- if .Values.store.provisionRoles.enabled }}
+  run-provision-roles.sh: |
+    {{- .Files.Get "files/run-provision-roles.sh" | nindent 4 }}
+  {{- end }}
+  {{- if include "performancemonitor-darling.wireStoreLogins" . }}
+  write-store-logins.sh: |
+    {{- .Files.Get "files/write-store-logins.sh" | nindent 4 }}
+  {{- end }}

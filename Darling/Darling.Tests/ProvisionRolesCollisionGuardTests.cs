@@ -60,11 +60,11 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.True(on.Index < firstPasswordReset.Index && off.Index < firstPasswordReset.Index,
             "the stop must be on and put back before the first ALTER ROLE ... PASSWORD, or the guard no longer stops that reset.");
 
-        /* Only the guard stops the run: step 0's SET (superuser-only once pg_stat_statements is loaded) sits before
-           the stop, and the temp_file_limit line (superuser-only) after it, so an owner who is not a superuser
-           still gets every grant it can make. */
-        var stepZero = sql.IndexOf("SET pg_stat_statements.track_utility = off;", StringComparison.Ordinal);
-        Assert.True(stepZero >= 0 && stepZero < on.Index, "step 0's SET must stay outside the stop.");
+        /* Only the guard stops the run: step 0's switch (superuser-only once pg_stat_statements is loaded) sits before
+           the stop, and the temp_file_limit line (superuser-only) after it. Each catches insufficient_privilege itself
+           (#8779), so an owner who is not a superuser still gets every grant it can make. */
+        var stepZero = sql.IndexOf("set_config('pg_stat_statements.track_utility', 'off', false)", StringComparison.Ordinal);
+        Assert.True(stepZero >= 0 && stepZero < on.Index, "step 0's switch must stay outside the stop.");
         var tempFileLimit = sql.IndexOf("ALTER ROLE viewer SET temp_file_limit", StringComparison.Ordinal);
         Assert.True(tempFileLimit > off.Index, "the temp_file_limit lines must stay outside the stop.");
     }
@@ -105,14 +105,16 @@ public sealed class ProvisionRolesCollisionGuardTests
     }
 
     /// <summary>The comment above the <c>temp_file_limit</c> lines used to say a failure there stops the script. It
-    /// does not: psql carries on, so the roles, the grants and the secret-column carve still land.</summary>
+    /// does not: each superuser-only statement catches insufficient_privilege (#8779), so the roles, the grants and the
+    /// secret-column carve still land, and only the role-collision guard stops the run.</summary>
     [Fact]
     public void TheTempFileLimitComment_DoesNotClaimAFailureStopsTheScript()
     {
         var sql = Script();
 
         Assert.DoesNotContain("rest of the script does not run", sql, StringComparison.Ordinal);
-        Assert.Contains("psql carries on", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("psql carries on", sql, StringComparison.Ordinal);
+        Assert.Contains("Only the role-collision guard in step 1 stops the run.", sql, StringComparison.Ordinal);
     }
 
     /// <summary>The live script test feeds the file to Npgsql, which cannot run psql's meta-commands, so it drops the
@@ -398,29 +400,40 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.Contains("as a superuser", line, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>A role that is not a superuser and has no <c>CREATEROLE</c> cannot change another role at all, so each
-    /// <c>ALTER ROLE ... LOGIN PASSWORD</c> line would fail, and the server would write the statement, password included,
-    /// to its log. The guard stops such a run first. The branch is one that a superuser never enters, it comes after the
-    /// marker and ADMIN OPTION checks, and it looks at the running role's own attribute, as PostgreSQL does.</summary>
+    /// <summary>A role that is not a superuser and has no <c>CREATEROLE</c> cannot create or change a role at all. Its
+    /// attribute check needs no role to exist, so it is the first thing after the two tracking checks, before step 1's
+    /// <c>CREATE ROLE</c>: a fresh store would otherwise stop at PostgreSQL's own refusal, which on PostgreSQL 15 and
+    /// earlier offers no remedy. It looks at the running role's own attribute, as PostgreSQL does, and a superuser never
+    /// enters it. This stop offers no GRANT, so it needs no marker check before it.</summary>
     [Fact]
-    public void TheGuard_StopsARunnerWithoutCreaterole_BeforeAnyPasswordIsSent()
+    public void TheGuard_StopsARunnerWithoutCreaterole_BeforeAnyRoleIsCreatedOrPasswordSent()
     {
         var sql = Script();
         var guard = GuardBlock(sql);
-        var checks = NonSuperuserChecks(sql);
+
+        var early = Regex.Match(guard, @"IF NOT \(SELECT rolsuper FROM pg_roles WHERE rolname = current_user\)\s+AND NOT \(SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user\) THEN");
+        Assert.True(early.Success, "the guard has no attribute check for a runner that is not a superuser and lacks CREATEROLE.");
+        Assert.Single(Regex.Matches(guard, @"SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user"));
+        Assert.True(early.Index > guard.IndexOf("current_setting('pg_stat_monitor.pgsm_track_utility', true)", StringComparison.Ordinal),
+            "the CREATEROLE check must come after both tracking checks.");
+        Assert.True(early.Index < guard.IndexOf("CREATE ROLE admin LOGIN NOSUPERUSER;", StringComparison.Ordinal),
+            "the CREATEROLE check must come before step 1 creates a role, so a fresh store gets this message and not PostgreSQL's.");
+
+        var line = RaiseLine(guard[early.Index..], "The role running this script, %, is not a superuser and does not have CREATEROLE");
+        AssertStopExplainsItself(line);
+        Assert.Contains("Run this script again as a superuser, or as a role that has CREATEROLE.", line, StringComparison.Ordinal);
+        Assert.True(sql.IndexOf("CREATE ROLE admin LOGIN NOSUPERUSER;", StringComparison.Ordinal) > early.Index + sql.IndexOf(guard, StringComparison.Ordinal),
+            "the stop must come before the first CREATE ROLE.");
+        Assert.True(early.Index + sql.IndexOf(guard, StringComparison.Ordinal) < Regex.Match(sql, @"(?m)^ALTER ROLE \w+\s+LOGIN PASSWORD").Index,
+            "the stop must come before the first ALTER ROLE ... PASSWORD.");
+        Assert.DoesNotContain("GRANT", line, StringComparison.Ordinal);
 
         Assert.True(guard.IndexOf(NonSuperuserBranch, StringComparison.Ordinal) > guard.IndexOf("membership.admin_option", StringComparison.Ordinal),
             "the checks for a role that is not a superuser must come after the check for another login that administers a role.");
         Assert.True(guard.IndexOf(NonSuperuserBranch, StringComparison.Ordinal) > guard.LastIndexOf("IS DISTINCT FROM 'darling-managed'", StringComparison.Ordinal),
             "the checks for a role that is not a superuser must come after the marker checks, so an unrelated role is never offered a GRANT.");
-
-        Assert.StartsWith("IF NOT (SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user) THEN", checks[(NonSuperuserBranch.Length)..].TrimStart(), StringComparison.Ordinal);
-
-        var line = RaiseLine(checks, "The role running this script, %, is not a superuser and does not have CREATEROLE");
-        AssertStopExplainsItself(line);
-        Assert.Contains("Run this script again as a superuser, or as a role that has CREATEROLE.", line, StringComparison.Ordinal);
-        Assert.True(sql.IndexOf(NonSuperuserBranch, StringComparison.Ordinal) < Regex.Match(sql, @"(?m)^ALTER ROLE \w+\s+LOGIN PASSWORD").Index,
-            "the stop must come before the first ALTER ROLE ... PASSWORD.");
+        /* What stays after the roles exist: the branch for a runner that is not a superuser starts with the superuser-role check. */
+        Assert.StartsWith("SELECT string_agg(quote_ident(rolname), ', ' ORDER BY rolname) INTO unchangeable", NonSuperuserChecks(sql)[NonSuperuserBranch.Length..].TrimStart(), StringComparison.Ordinal);
     }
 
     /// <summary>Only a superuser can change a superuser role, on every version, so a marked role that has
@@ -532,9 +545,9 @@ public sealed class ProvisionRolesCollisionGuardTests
     {
         var sql = Script();
 
-        var utilityOff = sql.IndexOf("\nSET pg_stat_statements.track_utility = off;", StringComparison.Ordinal);
-        Assert.True(utilityOff >= 0);
-        var block = sql[sql.IndexOf("DO $$", utilityOff, StringComparison.Ordinal)..];
+        var monitorOff = sql.IndexOf("set_config('pg_stat_monitor.pgsm_track_utility', 'off', false)", StringComparison.Ordinal);
+        Assert.True(monitorOff >= 0);
+        var block = sql[sql.IndexOf("DO $$", monitorOff, StringComparison.Ordinal)..];
         block = block[..(block.IndexOf("END $$;", StringComparison.Ordinal) + "END $$;".Length)];
 
         foreach (var (name, value) in new[]
@@ -589,8 +602,8 @@ public sealed class ProvisionRolesCollisionGuardTests
         var sql = Script();
         var guard = GuardBlock(sql);
 
-        var setOff = sql.IndexOf("\nSET pg_stat_monitor.pgsm_track_utility = off;", StringComparison.Ordinal);
-        Assert.True(setOff > sql.IndexOf("\nSET pg_stat_statements.track_utility = off;", StringComparison.Ordinal), "step 0 must switch pg_stat_monitor's tracking off after pg_stat_statements'.");
+        var setOff = sql.IndexOf("set_config('pg_stat_monitor.pgsm_track_utility', 'off', false)", StringComparison.Ordinal);
+        Assert.True(setOff > sql.IndexOf("set_config('pg_stat_statements.track_utility', 'off', false)", StringComparison.Ordinal), "step 0 must switch pg_stat_monitor's tracking off after pg_stat_statements'.");
         Assert.True(setOff < sql.IndexOf(guard, StringComparison.Ordinal), "step 0's SET must come before the guard.");
 
         var check = guard.IndexOf("current_setting('pg_stat_monitor.pgsm_track_utility', true)", StringComparison.Ordinal);

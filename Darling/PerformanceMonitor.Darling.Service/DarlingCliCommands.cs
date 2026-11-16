@@ -635,6 +635,7 @@ public static partial class DarlingCliCommands
         || IsSetCollectorRetentionVerb(arg)
         || IsDropXeSessionsVerb(arg)
         || IsGrantScriptVerb(arg)
+        || IsPrepareProvisionRolesVerb(arg)
         || IsResetPasswordKeyVerb(arg)
         || IsNewPasswordKeyVerb(arg)
         || IsSelfCheckPasswordKeyVerb(arg)
@@ -735,6 +736,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for the shared sessions, and a query that lists every install's sessions with their DROP statements, in both scopes. It connects to nothing, so use it for a server that is no longer configured or that a removal could not reach." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --grant-script <server-name> [--finops] [--azure] [--config <path>]   Print the T-SQL that creates the monitoring login and grants what Darling needs on a monitored server (the SQL login the entry uses, or the service account for Windows authentication). Safe to run twice. Connects to no monitored server." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure]   The same for a host not yet added." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --prepare-provision-roles --login <file> --login-kind password|connection-string --passwords <dir> --out <dir> --wait-seconds <n> [--host <h> --port <p> --database <d> --username <u> --ssl-mode <mode> [--root-certificate <path>]]   Used by the chart's store-roles Job: wait for the store schema, check ownership and write the rendered provision-roles.sql, a pgpass and a libpq env file into --out. Prints no password." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>

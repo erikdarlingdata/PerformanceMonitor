@@ -160,6 +160,37 @@ store:
     caSecret:
       name: ""
       key: ca.crt
+  provisionRoles:
+    # Run provision-roles.sql against the external store after every install and upgrade. Off by default. Only for
+    # store.mode external. The bundled store provisions its own roles, so the render fails there.
+    enabled: false
+    # How the Job connects: the store OWNER role (the role the service collects as), which must hold CREATEROLE, and
+    # from PostgreSQL 16 ADMIN OPTION on the four roles once they exist. Exactly one of the two. Either may name the
+    # same Secret and key the service's own connection uses, so the owner password has one copy. The Secret is mounted
+    # only into the Job pod, as a file.
+    login:
+      # A Secret key holding the owner's password. Host, port, database, username, sslMode and caSecret come from
+      # store.external. Needs the host-based store.external settings.
+      passwordSecret:
+        name: ""
+        key: password
+      # A Secret key holding a whole Npgsql connection string for the owner, in the same format as
+      # store.external.connectionStringSecret. A Root Certificate in it must be /etc/darling/store-ca/ca.crt
+      # (store.external.caSecret, which the Job mounts there).
+      connectionStringSecret:
+        name: ""
+        key: connection-string
+    # Required: a Secret you manage with the keys admin, viewer, web and mcp. Each password needs 16 or more
+    # characters from A-Z a-z 0-9 . _ ~ + / = -
+    rolePasswordsSecret: ""
+    # Point postgres.webConnectionString and postgres.mcpConnectionString at the web and mcp logins.
+    # Needs the host-based store.external settings.
+    wireConnectionStrings: true
+    # How long the Job waits for the store to reach this release's schema before it fails.
+    waitSeconds: 900
+    # The image that provides psql. Empty = store.bundled.image (the image CI pins and tests against).
+    psqlImage: ""
+    resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 256Mi } }
 
 # Network settings shared by the web dashboard and the MCP endpoint. Both listen on 0.0.0.0 inside the pod (IPv4: IPv6-only
 # clusters are not supported), and allowFrom decides who is served (Darling refuses clients outside the list; a loopback

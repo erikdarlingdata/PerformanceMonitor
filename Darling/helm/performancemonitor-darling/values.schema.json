@@ -171,6 +171,24 @@
             },
             "required": ["passwordSecret", "connectionStringSecret"]
           }
+        },
+        "provisionRoles": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "login": {
+              "type": "object",
+              "properties": {
+                "passwordSecret": { "$ref": "#/definitions/secretRef" },
+                "connectionStringSecret": { "$ref": "#/definitions/secretRef" }
+              }
+            },
+            "rolePasswordsSecret": { "type": "string" },
+            "wireConnectionStrings": { "type": "boolean" },
+            "waitSeconds": { "type": "integer", "minimum": 1 },
+            "psqlImage": { "type": "string" },
+            "resources": { "type": "object" }
+          }
         }
       },
       "if": { "properties": { "mode": { "const": "external" } }, "required": ["mode"] },

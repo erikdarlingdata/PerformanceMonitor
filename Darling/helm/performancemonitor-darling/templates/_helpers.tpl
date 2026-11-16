@@ -99,10 +99,18 @@ an empty value name means the chart sets the key itself and nothing overrides it
   (list (list "health") "")
   (list (list "passwordKey") "passwordKey.*")
 -}}
+{{- /* While the chart wires the web and MCP logins (store.provisionRoles.wireConnectionStrings), it owns those two keys too. */ -}}
+{{- if include "performancemonitor-darling.wireStoreLogins" . -}}
+{{- $owned = concat $owned (list
+  (list (list "postgres" "webConnectionString") "store.provisionRoles.wireConnectionStrings")
+  (list (list "postgres" "mcpConnectionString") "store.provisionRoles.wireConnectionStrings")) -}}
+{{- end -}}
 {{- range $owned -}}
 {{- $path := index . 0 -}}
 {{- if include "performancemonitor-darling.pathPresent" (dict "cfg" $.Values.config "path" $path) -}}
-{{- if index . 1 -}}
+{{- if eq (index . 1) "store.provisionRoles.wireConnectionStrings" -}}
+{{- fail (printf "config.%s is owned by the chart while store.provisionRoles.wireConnectionStrings is true: the chart writes this key. Set store.provisionRoles.wireConnectionStrings=false to keep your own key" (join "." $path)) -}}
+{{- else if index . 1 -}}
 {{- fail (printf "config.%s is owned by the chart and cannot be set inside config; use the value %s instead" (join "." $path) (index . 1)) -}}
 {{- else -}}
 {{- fail (printf "config.%s is owned by the chart and cannot be set inside config: the chart sets it, and it cannot be overridden" (join "." $path)) -}}
@@ -238,6 +246,10 @@ Arguments: dict "ctx" <root> "surface" "web"|"mcp" "field" "allowFrom"|"trustedP
 {{- $_ := set $postgres "connectionString" $cs -}}
 {{- end -}}
 {{- end -}}
+{{- if include "performancemonitor-darling.wireStoreLogins" . -}}
+{{- $_ := set $postgres "webConnectionString" "file:/run/darling-store-logins/web" -}}
+{{- $_ := set $postgres "mcpConnectionString" "file:/run/darling-store-logins/mcp" -}}
+{{- end -}}
 {{- range $surface := list "web" "mcp" -}}
 {{- if eq (int (get (get $.Values $surface) "port")) 5154 -}}
 {{- fail (printf "%s.port must not be 5154: that port is fixed for the health endpoint the probes use, and Darling refuses a health port that clashes with the web or MCP port" $surface) -}}
@@ -309,4 +321,67 @@ app.kubernetes.io/component: store
 {{- else if and .Values.store.external.passwordSecret.name (not .Values.store.external.connectionStringSecret.name) -}}
 {{- printf "%s|%s" .Values.store.external.passwordSecret.name .Values.store.external.passwordSecret.key -}}
 {{- end -}}
+{{- end -}}
+
+
+{{/* Name of the store-roles hook Job, at most 63 characters. */}}
+{{- define "performancemonitor-darling.storeRolesJobName" -}}
+{{- printf "%s-store-roles" (include "performancemonitor-darling.fullname" . | trunc 49 | trimSuffix "-") -}}
+{{- end -}}
+
+{{/* The image of the store-roles Job's psql container: store.provisionRoles.psqlImage, else store.bundled.image. */}}
+{{- define "performancemonitor-darling.psqlImage" -}}
+{{- default .Values.store.bundled.image .Values.store.provisionRoles.psqlImage -}}
+{{- end -}}
+
+{{/* The SSL mode handed to the verb: the Npgsql word of store.external.sslMode, as it is. The verb maps it to the libpq word. */}}
+{{- define "performancemonitor-darling.provisionRolesSslMode" -}}
+{{- .Values.store.external.sslMode -}}
+{{- end -}}
+
+{{/* Fails the render when store.provisionRoles is on without what makes it work. Call it only when the option is enabled. */}}
+{{- define "performancemonitor-darling.checkProvisionRoles" -}}
+{{- $p := .Values.store.provisionRoles -}}
+{{- if ne .Values.store.mode "external" -}}
+{{- fail "store.provisionRoles.enabled needs store.mode=external: the bundled store provisions its own roles, so set store.provisionRoles.enabled to false" -}}
+{{- end -}}
+{{- if not $p.rolePasswordsSecret -}}
+{{- fail "store.provisionRoles.rolePasswordsSecret is required when store.provisionRoles.enabled is true: name a Secret you manage with the keys admin, viewer, web and mcp" -}}
+{{- end -}}
+{{- $viaPassword := ne (toString $p.login.passwordSecret.name) "" -}}
+{{- $viaString := ne (toString $p.login.connectionStringSecret.name) "" -}}
+{{- if eq $viaPassword $viaString -}}
+{{- fail "store.provisionRoles.login needs exactly one of passwordSecret.name and connectionStringSecret.name: the Secret holding the store owner's password, or a whole Npgsql connection string for the owner" -}}
+{{- end -}}
+{{- if and $viaPassword .Values.store.external.connectionStringSecret.name -}}
+{{- fail "store.provisionRoles.login.passwordSecret cannot be used with store.external.connectionStringSecret: there is no host to pair the password with; use store.provisionRoles.login.connectionStringSecret instead" -}}
+{{- end -}}
+{{- if and $viaPassword (has (toString .Values.store.external.sslMode) (list "VerifyCA" "VerifyFull")) (not .Values.store.external.caSecret.name) -}}
+{{- fail (printf "store.external.caSecret.name is required when store.provisionRoles.enabled uses the passwordSecret login and store.external.sslMode is %s: psql (libpq) needs a root certificate file to verify the server, where the service itself would fall back to the OS trust store. Name the Secret holding your CA in store.external.caSecret" .Values.store.external.sslMode) -}}
+{{- end -}}
+{{- if and $p.wireConnectionStrings .Values.store.external.connectionStringSecret.name -}}
+{{- fail "store.provisionRoles.wireConnectionStrings cannot be on while store.external.connectionStringSecret is used: the chart has no host to put in the web and MCP connection strings. Set store.provisionRoles.wireConnectionStrings to false and point config.postgres.webConnectionString and config.postgres.mcpConnectionString at your own connection strings (file: references into a Secret) yourself" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Prints "true" while the chart wires the web and MCP logins: store.provisionRoles is on and wireConnectionStrings is on. */}}
+{{- define "performancemonitor-darling.wireStoreLogins" -}}
+{{- if and .Values.store.provisionRoles.enabled .Values.store.provisionRoles.wireConnectionStrings -}}true{{- end -}}
+{{- end -}}
+
+{{/* The non-secret Npgsql prefix of the web and MCP connection strings, from the host-based store.external settings, the way
+the owner connection string is built in darlingJson (without Username). The store-logins init container appends the role's
+Username and Password. Host, Database and SSL Mode must not contain ';' or '='. */}}
+{{- define "performancemonitor-darling.storeLoginsBase" -}}
+{{- $ext := .Values.store.external -}}
+{{- range $field := list "host" "database" "sslMode" -}}
+{{- if regexMatch "[;=]" (toString (get $ext $field)) -}}
+{{- fail (printf "store.external.%s must not contain ';' or '='" $field) -}}
+{{- end -}}
+{{- end -}}
+{{- $base := printf "Host=%s;Port=%v;Database=%s;SSL Mode=%s" $ext.host $ext.port $ext.database $ext.sslMode -}}
+{{- if $ext.caSecret.name -}}
+{{- $base = printf "%s;Root Certificate=/etc/darling/store-ca/ca.crt" $base -}}
+{{- end -}}
+{{- $base -}}
 {{- end -}}
