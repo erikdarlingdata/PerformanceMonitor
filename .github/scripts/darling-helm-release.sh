@@ -24,6 +24,12 @@
 #     A published version is never replaced unless --overwrite true: a re-run only adds what is missing. Release assets
 #     with no chart in the registry are refused unless --overwrite true, because they would not match a new push.
 #
+#   darling-helm-release.sh same-chart <published .tgz> <packaged .tgz> <digest>
+#     Exits 0 only when the chart already in the registry is this release's chart: Chart.yaml and values.yaml equal this
+#     run's package once parsed (so formatting cannot differ them), the published values pin <digest>, and every other
+#     file is byte-identical. Run before a published chart is signed or attached to the release, so a chart pushed
+#     under X.Y.Z by anything else is never vouched for.
+#
 # Every refusal is one stderr line starting "darling-helm-release: " and exit 1. Needs helm, yq (mikefarah, v4),
 # sha256sum and tar. The version is read from Directory.Build.props by the workflow, not here: the version-read tests
 # scan the workflows.
@@ -199,9 +205,40 @@ decide() {
     "$([ "${complete_assets}" = 1 ] && echo none || echo pulled)"
 }
 
+same_chart() {
+  [ "$#" -eq 3 ] || die "usage: same-chart <published .tgz> <packaged .tgz> <digest>"
+  local published="$1" packaged="$2" digest="$3" work pub ours file
+  local replace="the registry holds a different ${CHART_NAME} under this version; a hand run with overwrite: true replaces it"
+  [ -f "${published}" ] || die "${published} does not exist"
+  [ -f "${packaged}" ] || die "${packaged} does not exist"
+  work="$(mktemp -d)"
+  trap 'rm -rf "${work}"' RETURN
+  mkdir -p "${work}/published" "${work}/packaged"
+  tar -m -xzf "${published}" -C "${work}/published"
+  tar -m -xzf "${packaged}" -C "${work}/packaged"
+  pub="${work}/published/${CHART_NAME}"
+  ours="${work}/packaged/${CHART_NAME}"
+  [ -d "${pub}" ] && [ -d "${ours}" ] || die "a package does not hold a ${CHART_NAME} chart directory"
+
+  [ "$(show_json values "${pub}" | yq -p=json '.image.digest')" = "${digest}" ] \
+    || die "the published chart does not pin image digest ${digest}: ${replace}"
+  [ "$(show_json chart "${pub}")" = "$(show_json chart "${ours}")" ] || die "Chart.yaml differs: ${replace}"
+  [ "$(show_json values "${pub}")" = "$(show_json values "${ours}")" ] || die "values.yaml differs: ${replace}"
+
+  # Every other file, both ways, byte for byte.
+  while IFS= read -r file; do
+    [ "${file}" = "Chart.yaml" ] || [ "${file}" = "values.yaml" ] && continue
+    cmp -s "${pub}/${file}" "${ours}/${file}" || die "${file} differs: ${replace}"
+  done < <(cd "${pub}" && find . -type f | sed 's|^\./||' | sort)
+  while IFS= read -r file; do
+    [ -f "${pub}/${file}" ] || die "${file} is missing from the published chart: ${replace}"
+  done < <(cd "${ours}" && find . -type f | sed 's|^\./||' | sort)
+}
+
 case "${1:-}" in
   package) shift; package "$@" ;;
   verify-stamp) shift; verify_stamp "$@" ;;
   decide) shift; decide "$@" ;;
-  *) die "usage: darling-helm-release.sh package ... | verify-stamp ... | decide ... (see the header of this script)" ;;
+  same-chart) shift; same_chart "$@" ;;
+  *) die "usage: darling-helm-release.sh package ... | verify-stamp ... | decide ... | same-chart ... (see the header of this script)" ;;
 esac

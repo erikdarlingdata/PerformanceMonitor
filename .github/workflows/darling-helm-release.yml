@@ -17,9 +17,10 @@ name: Darling Helm release
 # Triggers. `workflow_run` after `Build` completes: only a successful run of a `release` event publishes; any other
 # completion (a failed build, a non-release event) skips. `workflow_dispatch` with the release tag publishes a release by
 # hand (a redo, or a release published before this workflow existed); `dry_run: true` runs only `package` and keeps the
-# package as a workflow artifact. GitHub runs both triggers from the default branch's copy of this file: it reaches `main`
+# package as a workflow artifact. `workflow_run` always runs the default branch's copy of this file: it reaches `main`
 # with the dev to main merge, before that release is published, so that release's own `Build` triggers the first
-# automatic publish. `publish` runs only from refs/heads/main, the ref the signing identity names.
+# automatic publish. A dispatch runs the copy on the ref chosen for it, but `publish` runs only from refs/heads/main, the
+# ref the signing identity names, so a dispatch from any other ref can at most package (a dry run in effect).
 #
 # A published version is never replaced. A run for a version already in the registry pushes nothing: it only signs the
 # published digest if no signature is there, and attaches the published chart to the release if the release lacks it.
@@ -89,6 +90,7 @@ jobs:
       tag: ${{ steps.tag.outputs.tag }}
       owner: ${{ steps.tag.outputs.owner }}
       version: ${{ steps.version.outputs.VERSION }}
+      image_digest: ${{ steps.image.outputs.digest }}
 
     steps:
       # A release run's head branch is its tag. A tag that is not vMAJOR.MINOR.PATCH ends the run here: quietly on the
@@ -248,6 +250,7 @@ jobs:
       TAG: ${{ needs.package.outputs.tag }}
       OWNER: ${{ needs.package.outputs.owner }}
       VERSION: ${{ needs.package.outputs.version }}
+      IMAGE_DIGEST: ${{ needs.package.outputs.image_digest }}
 
     steps:
       - uses: actions/checkout@v7
@@ -257,7 +260,8 @@ jobs:
           sparse-checkout: .github/scripts
           persist-credentials: false
 
-      - name: Install helm
+      # The script (decide, same-chart) needs both, and helm pushes and pulls.
+      - name: Install helm and yq
         shell: bash
         run: |
           set -euo pipefail
@@ -267,8 +271,12 @@ jobs:
           echo "${HELM_SHA256}  ${RUNNER_TEMP}/helm.tar.gz" | sha256sum -c -
           tar -xzf "${RUNNER_TEMP}/helm.tar.gz" -C "${RUNNER_TEMP}" linux-amd64/helm
           mv "${RUNNER_TEMP}/linux-amd64/helm" "${bin}/helm"
+          curl -fsSL -o "${bin}/yq" "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  ${bin}/yq" | sha256sum -c -
+          chmod +x "${bin}/yq"
           echo "${bin}" >> "$GITHUB_PATH"
           "${bin}/helm" version --short
+          "${bin}/yq" --version
 
       - uses: actions/download-artifact@v8
         with:
@@ -308,6 +316,11 @@ jobs:
             exists=true
             digest="$(sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p' <<<"${pulled}" | head -n 1)"
             [ -n "${digest}" ] || { echo "${pulled}"; echo "::error::helm pull printed no digest for ${ref}:${VERSION}."; exit 1; }
+            # Only this release's chart is ever signed or attached: anything else under this version stops the run.
+            bash "${TOOLS}/.github/scripts/darling-helm-release.sh" same-chart \
+              "${pulled_dir}/performancemonitor-darling-${VERSION}.tgz" \
+              "${RUNNER_TEMP}/packaged/performancemonitor-darling-${VERSION}.tgz" "${IMAGE_DIGEST}" \
+              || { echo "::error::${ref}:${VERSION} in the registry is not the chart this release builds. A hand run with overwrite: true replaces it."; exit 1; }
             if cosign verify "${ref}@${digest}" --certificate-identity "${identity}" \
                  --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null 2>&1; then
               signed=true

@@ -107,3 +107,21 @@ done
 t release_workflow_follows_build
 # workflow_run names the triggering workflow by its name: a renamed build.yml would silently stop the chart publishing.
 assert_eq "$(yq '.on.workflow_run.workflows[0]' "${release_wf}")" "$(yq '.name' "${REPO_ROOT}/.github/workflows/build.yml")" "workflow_run target vs build.yml name"
+
+t release_workflow_checks_a_published_chart_before_deciding
+# A chart already in the registry is compared with this run's package before anything signs or attaches it (#8870 review).
+yq '.jobs.publish.steps[].run // ""' "${release_wf}" > "${OUT}"
+same_at="$(grep -n -F -m1 -- 'same-chart' "${OUT}" | cut -d: -f1)"
+decide_at="$(grep -n -F -m1 -- ' decide ' "${OUT}" | cut -d: -f1)"
+[ -n "${same_at}" ] || { echo "the publish job never runs same-chart" >&2; exit 1; }
+[ -n "${decide_at}" ] || { echo "the publish job never runs decide" >&2; exit 1; }
+[ "${same_at}" -lt "${decide_at}" ] || { echo "same-chart runs after decide" >&2; exit 1; }
+
+t release_workflow_jobs_install_what_the_script_needs
+# The script refuses to run without helm and yq; every job that calls it installs the pinned ones.
+for job in $(yq '.jobs | keys | .[]' "${release_wf}"); do
+  runs="$(yq ".jobs.${job}.steps[].run // \"\"" "${release_wf}")"
+  grep -q -F 'darling-helm-release.sh' <<<"${runs}" || continue
+  grep -q -F 'get.helm.sh' <<<"${runs}" || { echo "job ${job} runs the script but does not install helm" >&2; exit 1; }
+  grep -q -F 'mikefarah/yq' <<<"${runs}" || { echo "job ${job} runs the script but does not install yq" >&2; exit 1; }
+done

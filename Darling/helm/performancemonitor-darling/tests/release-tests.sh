@@ -161,3 +161,30 @@ assert_release_fails "overwrite" decide --version "${VERSION}" --exists false --
 
 t decide_refuses_bad_flags
 assert_release_fails "--exists" decide --version "${VERSION}" --exists maybe --signed false --assets "" --overwrite false
+
+# same-chart: a chart already in the registry is only signed or attached when it is this release's chart (#8870 review).
+t same_chart_accepts_the_same_chart
+package
+ours="${OUTDIR}/performancemonitor-darling-${VERSION}.tgz"
+published="$(mktemp -d -p "${WORK}")/performancemonitor-darling-${VERSION}.tgz"
+cp "${ours}" "${published}"
+bash "${SCRIPT}" same-chart "${published}" "${ours}" "${DIGEST}"
+
+t same_chart_refuses_another_digest
+other_digest="sha256:$(printf 'b%.0s' $(seq 1 64))"
+package
+ours="${OUTDIR}/performancemonitor-darling-${VERSION}.tgz"
+DIGEST_SAVED="${DIGEST}"; DIGEST="${other_digest}"; package; DIGEST="${DIGEST_SAVED}"
+published="${OUTDIR}/performancemonitor-darling-${VERSION}.tgz"
+assert_release_fails "overwrite: true" same-chart "${published}" "${ours}" "${DIGEST}"
+assert_release_fails "digest" same-chart "${published}" "${ours}" "${DIGEST}"
+
+t same_chart_refuses_another_template
+package
+ours="${OUTDIR}/performancemonitor-darling-${VERSION}.tgz"
+changed="$(mktemp -d -p "${WORK}")/performancemonitor-darling"
+cp -r "${CHART_DIR}" "${changed}"
+printf '\n# not this release\n' >> "${changed}/templates/deployment.yaml"
+package "${changed}"
+published="${OUTDIR}/performancemonitor-darling-${VERSION}.tgz"
+assert_release_fails "templates/deployment.yaml" same-chart "${published}" "${ours}" "${DIGEST}"
