@@ -314,4 +314,47 @@ public sealed class ObjectUsageToolTests : IClassFixture<SharedDuckDbFixture>, I
         var tooLong = await CallAsync(daysBack: 365);
         Assert.Contains("days_back", tooLong.ToString(), StringComparison.Ordinal);
     }
+
+    private async Task InsertHealthAsync(DateTime capture, string database, string? mode)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, query_capture_mode)
+            VALUES ($1,$2,$3,$4,$5,$6)";
+        void P(object? v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        P(_nextId--); P(capture); P(_serverId); P(ServerName); P(database); P(mode);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    [Fact]
+    public async Task TheExecutionRead_CarriesTheCaptureMode_ANonAllModeInTheWindowWins_AndOneBeforeTheWindowDoesNot()
+    {
+        /* Review of #8855, the same rule as Darling's read: AUTO inside the window wins over a later ALL, and a mode before the window is
+           not looked at. */
+        await InsertHealthAsync(Day(40), Database, "AUTO");
+        await InsertHealthAsync(Day(2), Database, "ALL");
+        await InsertHealthAsync(Day(1), Database, null);
+        await InsertHealthAsync(Day(200), "Steady", "CUSTOM");
+        await InsertHealthAsync(Day(10), "Steady", "ALL");
+
+        var windowStart = Day(60);
+        Assert.Equal("AUTO", (await _dataService.GetObjectExecutionsAsync(_serverId, Database, windowStart)).QueryCaptureMode);
+        Assert.Equal("ALL", (await _dataService.GetObjectExecutionsAsync(_serverId, "Steady", windowStart)).QueryCaptureMode);
+        Assert.Null((await _dataService.GetObjectExecutionsAsync(_serverId, "NoHealth", windowStart)).QueryCaptureMode);
+    }
+
+    [Fact]
+    public async Task TheReplysExecutionCoverage_NamesTheCaptureMode()
+    {
+        await InsertIndexAsync(Day(62), StartA, "NODE1", 100, "Orders", 1_000, 0);
+        await InsertIndexAsync(Day(1), StartA, "NODE1", 100, "Orders", 1_100, 0);
+        await InsertQueryStoreAsync(Day(1), "dbo.usp_Daily", 1, 1, 5, Day(1));
+        await InsertHealthAsync(Day(3), Database, "AUTO");
+
+        var root = await CallAsync();
+
+        Assert.Equal("AUTO", root.GetProperty("coverage")[0].GetProperty("executions").GetProperty("query_capture_mode").GetString());
+        Assert.Equal("Executed", Obj(root, "usp_Daily").GetProperty("classification").GetString());
+    }
 }

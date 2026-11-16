@@ -74,6 +74,23 @@ AND   database_name = $2
 AND   COALESCE(interval_start_time_utc, collection_time) >= $3
 AND   collection_time >= $3 - INTERVAL '1 day'";
 
+    /// <summary>
+    /// The database's Query Store capture mode in the window, from the stored health snapshots (v64's <c>query_capture_mode</c>): the newest
+    /// one that is not <c>ALL</c> where there is one, otherwise the newest, the same rule as Darling's read. No row when none was stored.
+    /// $1 server_id, $2 database_name, $3 the window start.
+    /// </summary>
+    internal const string ObjectUsageCaptureModeSql = @"
+SELECT query_capture_mode
+FROM v_query_store_health
+WHERE server_id = $1
+AND   database_name = $2
+AND   capture_time >= $3 - INTERVAL '1 day'
+AND   query_capture_mode IS NOT NULL
+ORDER BY
+    upper(trim(query_capture_mode)) = 'ALL',
+    capture_time DESC
+LIMIT 1";
+
     /// <summary>Reads the window for one database and runs it through <see cref="ObjectUsageWindow"/>.</summary>
     public async Task<ObjectUsageWindowResult> GetObjectUsageWindowAsync(int serverId, string databaseName, DateTime windowStartUtc)
     {
@@ -137,11 +154,26 @@ AND   collection_time >= $3 - INTERVAL '1 day'";
             }
         }
 
+        string? captureMode = null;
+        using (var mode = connection.CreateCommand())
+        {
+            mode.CommandText = ObjectUsageCaptureModeSql;
+            mode.Parameters.Add(new DuckDBParameter { Value = serverId });
+            mode.Parameters.Add(new DuckDBParameter { Value = databaseName });
+            mode.Parameters.Add(new DuckDBParameter { Value = start });
+            using var reader = await mode.ExecuteReaderAsync();
+            if (await reader.ReadAsync() && !reader.IsDBNull(0))
+            {
+                captureMode = reader.GetString(0);
+            }
+        }
+
         return new ObjectExecutionWindow(
             from,
             to,
             "Lite's stored Query Store rows, the newest snapshot of each interval summed.",
             modules,
-            daysWithData);
+            daysWithData,
+            captureMode);
     }
 }

@@ -54,6 +54,25 @@ internal static class DarlingObjectUsageReader
         AND   d.day >= $3
         """;
 
+    /// <summary>
+    /// The database's Query Store capture mode in the window, from the stored health snapshots (V137's <c>query_capture_mode</c>): the newest
+    /// one that is not <c>ALL</c> where there is one, otherwise the newest. A mode other than <c>ALL</c> at any point in the window means rare
+    /// or cheap statements may have gone unrecorded, so it wins over a later <c>ALL</c>. No row when none was stored. A day of slack before
+    /// the window start keeps a snapshot just before it. $1 server_id, $2 database_name, $3 the window start.
+    /// </summary>
+    internal const string CaptureModeSql = """
+        SELECT h.query_capture_mode
+        FROM collect.query_store_health AS h
+        WHERE h.server_id = $1
+        AND   h.database_name = $2
+        AND   h.capture_time >= $3 - interval '1 day'
+        AND   h.query_capture_mode IS NOT NULL
+        ORDER BY
+            upper(btrim(h.query_capture_mode)) = 'ALL',
+            h.capture_time DESC
+        LIMIT 1
+        """;
+
     /// <summary>The database's newest object list capture. $1 server_id, $2 database_name.</summary>
     internal const string InventorySql = """
         SELECT
@@ -135,6 +154,20 @@ internal static class DarlingObjectUsageReader
             }
         }
 
+        string? captureMode = null;
+        await using (var mode = postgres.CreateCommand(CaptureModeSql))
+        {
+            mode.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(mode, serverId);
+            DarlingMcpReadParameters.AddText(mode, databaseName);
+            DarlingMcpReadParameters.AddTimestamp(mode, windowStartUtc);
+            await using var reader = await mode.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0))
+            {
+                captureMode = reader.GetString(0);
+            }
+        }
+
         return new ObjectExecutionWindow(
             from,
             to,
@@ -142,7 +175,8 @@ internal static class DarlingObjectUsageReader
             + "summarised after it ends, so the newest day or two are not in it yet, and a day changed after it was summarised can be off. "
             + "Covered days are the days Query Store held anything for this database.",
             modules,
-            daysWithData);
+            daysWithData,
+            captureMode);
     }
 
     /// <summary>Reads the database's newest object list, or null when the store has no capture of it (the collector is off, or has not run).</summary>

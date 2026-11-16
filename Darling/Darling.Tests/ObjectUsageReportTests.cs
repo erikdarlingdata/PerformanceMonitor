@@ -578,4 +578,117 @@ public sealed class ObjectUsageReportTests
         Assert.Equal(new[] { "Sales" }, StoreConfigProvider.ResolveDatabaseScope("object_inventory", 123, overrides));
         Assert.Equal("query_store", DatabaseScopeFilter.ScopeOwner("query_store"));
     }
+
+    [Theory]
+    [InlineData("AUTO")]
+    [InlineData("CUSTOM")]
+    [InlineData("NONE")]
+    [InlineData(" auto ")]
+    public void UnderACaptureModeOtherThanAll_AModuleThatDidNotRun_IsNotTracked_AndTheCaveatNamesTheMode(string mode)
+    {
+        /* Review of #8855: AUTO (the default from SQL Server 2019) and CUSTOM skip rare, cheap statements, so a module that runs once a quarter
+           can have no rows at all. Full coverage does not change that. */
+        var inventory = new ObjectInventory(Now, [
+            new ObjectInventoryEntry("dbo", "usp_Quarterly", "SQL_STORED_PROCEDURE", null, null),
+            new ObjectInventoryEntry("dbo", "usp_Daily", "SQL_STORED_PROCEDURE", null, null),
+        ]);
+        var executions = new ObjectExecutionWindow(
+            WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.usp_Daily", 90, Now)], 90, QueryCaptureMode: mode);
+
+        var root = Build(Side("srv", Tables(WindowStart, Now), executions, inventory));
+
+        var quarterly = Obj(root, "usp_Quarterly");
+        Assert.Equal(ObjectUsageReport.NotTracked, quarterly.GetProperty("classification").GetString());
+        Assert.Equal(ObjectUsageReport.CaptureModeCaveat(mode.Trim().ToUpperInvariant()), quarterly.GetProperty("caveat").GetString());
+        Assert.Contains(mode.Trim().ToUpperInvariant(), quarterly.GetProperty("caveat").GetString(), StringComparison.Ordinal);
+        /* A module Query Store did see is still Executed. */
+        Assert.Equal(ObjectUsageReport.Executed, Obj(root, "usp_Daily").GetProperty("classification").GetString());
+        Assert.Equal(0, root.GetProperty("summary").GetProperty("not_executed").GetInt32());
+        Assert.Equal(mode, root.GetProperty("coverage")[0].GetProperty("executions").GetProperty("query_capture_mode").GetString());
+    }
+
+    [Theory]
+    [InlineData("ALL")]
+    [InlineData(null)]
+    public void UnderCaptureModeAll_OrWithNoStoredMode_AModuleThatDidNotRun_StaysACandidate(string? mode)
+    {
+        var inventory = new ObjectInventory(Now, [new ObjectInventoryEntry("dbo", "fn_Multi", "SQL_TABLE_VALUED_FUNCTION", null, null)]);
+        var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [], 90, QueryCaptureMode: mode);
+
+        var row = Obj(Build(Side("srv", Tables(WindowStart, Now), executions, inventory)), "fn_Multi");
+
+        Assert.Equal(ObjectUsageReport.NotExecuted, row.GetProperty("classification").GetString());
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("caveat").ValueKind);
+    }
+
+    [Fact]
+    public void ACaptureModeOtherThanAll_OnEitherPairedSide_StopsTheCandidate()
+    {
+        /* One Query Store, read twice: the side that saw AUTO is enough. */
+        var inventory = new ObjectInventory(Now, [new ObjectInventoryEntry("dbo", "fn_Multi", "SQL_TABLE_VALUED_FUNCTION", null, null)]);
+        var root = Build(
+            Side("srv", TablesOn("NODE1"), new ObjectExecutionWindow(WindowStart, Now, "test", [], 90, QueryCaptureMode: "ALL"), inventory),
+            Side("srv:RO", TablesOn("NODE2"), new ObjectExecutionWindow(WindowStart, Now, "test", [], 90, QueryCaptureMode: "AUTO")));
+
+        var row = Obj(root, "fn_Multi");
+        Assert.Equal(ObjectUsageReport.NotTracked, row.GetProperty("classification").GetString());
+        Assert.Equal(ObjectUsageReport.CaptureModeCaveat("AUTO"), row.GetProperty("caveat").GetString());
+    }
+
+    [Fact]
+    public void AHoleInTheQueryStoreData_CountsAgainstCoverage_EvenWhenTheSpanIsWhole()
+    {
+        /* Review of #8855: data near each end of the window and Query Store off in between. The span is the whole window, the days with data
+           are 10, so a module that did not run says only 10 of the 90 days were looked at. */
+        var inventory = new ObjectInventory(Now, [new ObjectInventoryEntry("dbo", "fn_Multi", "SQL_TABLE_VALUED_FUNCTION", null, null)]);
+        var holed = new ObjectExecutionWindow(WindowStart, Now, "test", [], DaysWithData: 10);
+
+        var root = Build(Side("srv", Tables(WindowStart, Now), holed, inventory));
+
+        var row = Obj(root, "fn_Multi");
+        Assert.Equal(ObjectUsageReport.NotExecuted, row.GetProperty("classification").GetString());
+        Assert.Equal(ObjectUsageReport.PartialExecutionEvidenceCaveat(10, 90), row.GetProperty("caveat").GetString());
+        var coverage = root.GetProperty("coverage")[0].GetProperty("executions");
+        Assert.True(coverage.GetProperty("short_of_window").GetBoolean());
+        Assert.Equal(90, coverage.GetProperty("covered_days").GetDouble());
+    }
+
+    [Fact]
+    public void TheEvidenceDays_AreTheDaysWithData_WhereKnown_NeverMoreThanTheSpan_AndTheSpanOtherwise()
+    {
+        Assert.Equal(10, ObjectUsageReport.ExecutionDays(new ObjectExecutionWindow(WindowStart, Now, "t", [], DaysWithData: 10)));
+        /* A count of days includes both ends, one more than the span: the span caps it. */
+        Assert.Equal(20, ObjectUsageReport.ExecutionDays(new ObjectExecutionWindow(Now.AddDays(-20), Now, "t", [], DaysWithData: 21)));
+        Assert.Equal(90, ObjectUsageReport.ExecutionDays(new ObjectExecutionWindow(WindowStart, Now, "t", [])));
+        Assert.Equal(0, ObjectUsageReport.ExecutionDays(new ObjectExecutionWindow(null, null, "t", [], DaysWithData: 0)));
+        Assert.Equal(0, ObjectUsageReport.ExecutionDays(null));
+    }
+
+    [Fact]
+    public void AModuleCreatedInsideTheWindow_ThatDidNotRun_SaysHowManyDaysItExisted()
+    {
+        /* Review of #8855: created yesterday, so "not executed in a quarter" would be a day's evidence presented as ninety. */
+        var created = Now.AddDays(-1);
+        var inventory = new ObjectInventory(Now, [
+            new ObjectInventoryEntry("dbo", "fn_New", "SQL_TABLE_VALUED_FUNCTION", created, created),
+            new ObjectInventoryEntry("dbo", "fn_Old", "SQL_TABLE_VALUED_FUNCTION", WindowStart.AddDays(-30), WindowStart.AddDays(-30)),
+            new ObjectInventoryEntry("dbo", "usp_New", "SQL_STORED_PROCEDURE", Now.AddDays(-12.5), null),
+        ]);
+        var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [], 90, QueryCaptureMode: "ALL");
+
+        var root = Build(Side("srv", Tables(WindowStart, Now), executions, inventory));
+
+        var fresh = Obj(root, "fn_New");
+        Assert.Equal(ObjectUsageReport.NotExecuted, fresh.GetProperty("classification").GetString());
+        Assert.Equal(ObjectUsageReport.CreatedInWindowCaveat(created, 1, 90), fresh.GetProperty("caveat").GetString());
+        Assert.Contains("1 of the 90 days", fresh.GetProperty("caveat").GetString(), StringComparison.Ordinal);
+
+        /* Created before the window: no such caveat. */
+        Assert.Equal(JsonValueKind.Null, Obj(root, "fn_Old").GetProperty("caveat").ValueKind);
+
+        /* It sits beside the procedure caveat, not in place of it. */
+        var proc = Obj(root, "usp_New").GetProperty("caveat").GetString();
+        Assert.StartsWith(ObjectUsageReport.CreatedInWindowCaveat(Now.AddDays(-12.5), 12.5, 90), proc, StringComparison.Ordinal);
+        Assert.EndsWith(ObjectUsageReport.ProcedureCaveat, proc, StringComparison.Ordinal);
+    }
 }

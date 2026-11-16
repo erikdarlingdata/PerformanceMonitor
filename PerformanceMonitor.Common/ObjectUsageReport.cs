@@ -26,9 +26,18 @@ public sealed record ObjectExecutionTotals(string ModuleName, long Executions, D
 /// <param name="Source">Where the counts came from, a sentence the reply carries.</param>
 /// <param name="Modules">One row per module that ran.</param>
 /// <param name="DaysWithData">How many days of the window hold Query Store data for THIS database, or null where the read cannot say. The
-/// covered range is the oldest and newest such day, so a hole between them shows here and not there.</param>
+/// covered range is the oldest and newest such day, so a hole between them shows here and not there, and the classification goes by this
+/// count where it is known.</param>
+/// <param name="QueryCaptureMode">The database's Query Store capture mode (<c>query_capture_mode_desc</c> verbatim: <c>ALL</c>, <c>AUTO</c>,
+/// <c>CUSTOM</c> or <c>NONE</c>) from the stored health snapshots in the window: the newest one that is not <c>ALL</c> where there is one,
+/// otherwise the newest. Null where none was stored.</param>
 public sealed record ObjectExecutionWindow(
-    DateTime? CoveredFromUtc, DateTime? CoveredToUtc, string Source, IReadOnlyList<ObjectExecutionTotals> Modules, int? DaysWithData = null);
+    DateTime? CoveredFromUtc,
+    DateTime? CoveredToUtc,
+    string Source,
+    IReadOnlyList<ObjectExecutionTotals> Modules,
+    int? DaysWithData = null,
+    string? QueryCaptureMode = null);
 
 /// <summary>One procedure, function or view in the stored object list (Darling's <c>object_inventory</c>, #8784).</summary>
 /// <param name="SchemaName">The schema.</param>
@@ -82,7 +91,17 @@ public sealed record ObjectUsageSide(
 /// <para><b>No executions is only evidence where Query Store was looked at.</b> A module is <c>Not executed in window</c> because Query
 /// Store held data for the database and the module was not in it. With no Query Store data for the database in the window (Query Store
 /// off, or the summary not built yet) there is nothing to conclude, and every module that did not run is <c>Not tracked</c>. With data for
-/// only part of the window the module stays <c>Not executed in window</c> and its caveat says how much of the window was covered.</para>
+/// only part of the window the module stays <c>Not executed in window</c> and its caveat says how much of the window was covered. How much
+/// is the count of days that hold data where the read knows it, so a database whose Query Store was off for weeks in the middle of the
+/// window says so, and the span from the oldest to the newest day otherwise.</para>
+///
+/// <para><b>Capture mode.</b> Under a capture mode other than <c>ALL</c> (<c>AUTO</c>, the default from SQL Server 2019, <c>CUSTOM</c> or
+/// <c>NONE</c>) Query Store leaves out statements it judges infrequent or cheap, or every new one, so a procedure that runs once a quarter can
+/// have no rows while it is plainly in use. A module that did not run where any side's stored mode in the window is not <c>ALL</c> is
+/// therefore <c>Not tracked</c>, with a caveat that names the mode.</para>
+///
+/// <para><b>Created inside the window.</b> A module created after the window start could only have run since then, so a <c>Not executed in
+/// window</c> one says how many of the days asked for it existed.</para>
 ///
 /// <para><b>More than one side.</b> Darling stores a ReadOnlyIntent connection as its own registration (<c>X:RO</c>). Index usage counters are
 /// per instance, so a table read only by read-only reporting looks unused from the primary: each table's counts are summed across the sides
@@ -166,6 +185,17 @@ public static class ObjectUsageReport
     internal const string NoExecutionEvidenceCaveat =
         "Query Store held no data for this database in the window, so there is no evidence either way about whether this module ran.";
 
+    /// <summary>The caveat of a module that did not run where Query Store captures only some statements.</summary>
+    internal static string CaptureModeCaveat(string mode) =>
+        $"Query Store's capture mode for this database is {mode}, not ALL, so it leaves out statements it judges infrequent or cheap (or, "
+        + "under NONE, every new one): a module that runs rarely can have no executions here while it is in use. No executions here is not "
+        + "evidence that it is unused.";
+
+    /// <summary>The caveat of a module that did not run and was created after the window start.</summary>
+    internal static string CreatedInWindowCaveat(DateTime createdUtc, double existedDays, int daysBack) =>
+        string.Create(CultureInfo.InvariantCulture,
+            $"This module was created on {createdUtc:yyyy-MM-dd}, so it existed for only {existedDays:0.#} of the {daysBack} days asked for and may not have been due to run yet.");
+
     /// <summary>The caveat of a module that did not run where Query Store covered only part of the window.</summary>
     internal static string PartialExecutionEvidenceCaveat(double coveredDays, int daysBack) =>
         string.Create(CultureInfo.InvariantCulture,
@@ -227,11 +257,15 @@ public static class ObjectUsageReport
             AddExecutions(rows, modules, side);
         }
 
-        /* The registrations read one Query Store, so the best-covered side is how much of the window was looked at. */
+        /* The registrations read one Query Store, so the best-covered side is how much of the window was looked at. Any side seeing a mode
+           other than ALL is enough to stop calling a module that did not run a candidate. */
         var executionDays = sides.Max(ExecutionDays);
+        var partialCaptureMode = sides
+            .Select(s => s.Executions?.QueryCaptureMode)
+            .FirstOrDefault(m => m is not null && IsPartialCaptureMode(m));
         foreach (var row in rows.Values)
         {
-            (row.Classification, row.Caveat) = Classify(row, windowStartUtc, executionDays, daysBack);
+            (row.Classification, row.Caveat) = Classify(row, windowStartUtc, nowUtc, executionDays, daysBack, partialCaptureMode);
         }
 
         var ordered = rows.Values
@@ -404,11 +438,27 @@ public static class ObjectUsageReport
         return row;
     }
 
-    /// <summary>How many days of the window one side's Query Store data spans: zero with no executions read or no data in the window.</summary>
-    private static double ExecutionDays(ObjectUsageSide side) =>
-        side.Executions is { CoveredFromUtc: { } from, CoveredToUtc: { } to } && to > from ? (to - from).TotalDays : 0;
+    /// <summary>How many days of the window one side's Query Store data covers: zero with no executions read or no data in the window. The
+    /// count of days that hold data where the read knows it (never more than the span), so a hole in the middle counts against coverage, and
+    /// the span from the oldest to the newest day otherwise.</summary>
+    internal static double ExecutionDays(ObjectExecutionWindow? executions)
+    {
+        if (executions is not { CoveredFromUtc: { } from, CoveredToUtc: { } to } || to <= from)
+        {
+            return 0;
+        }
 
-    private static (string Classification, string? Caveat) Classify(Row row, DateTime windowStartUtc, double executionDays, int daysBack)
+        var span = (to - from).TotalDays;
+        return executions.DaysWithData is { } days ? Math.Min(days, span) : span;
+    }
+
+    private static double ExecutionDays(ObjectUsageSide side) => ExecutionDays(side.Executions);
+
+    /// <summary>Whether a stored capture mode leaves statements out: anything but <c>ALL</c>.</summary>
+    internal static bool IsPartialCaptureMode(string mode) => !string.Equals(mode.Trim(), "ALL", StringComparison.OrdinalIgnoreCase);
+
+    private static (string Classification, string? Caveat) Classify(
+        Row row, DateTime windowStartUtc, DateTime nowUtc, double executionDays, int daysBack, string? partialCaptureMode)
     {
         if (row.IsTable)
         {
@@ -452,10 +502,21 @@ public static class ObjectUsageReport
             return (NotTracked, NoExecutionEvidenceCaveat);
         }
 
-        var caveats = new List<string>(2);
+        /* Query Store leaves out what it judges rare or cheap, which is exactly the module this read is asked about. */
+        if (partialCaptureMode is not null)
+        {
+            return (NotTracked, CaptureModeCaveat(partialCaptureMode.Trim().ToUpperInvariant()));
+        }
+
+        var caveats = new List<string>(3);
         if (executionDays < daysBack - ExecutionCoverageSlackDays)
         {
             caveats.Add(PartialExecutionEvidenceCaveat(Math.Round(executionDays, 1), daysBack));
+        }
+
+        if (row.CreatedUtc is { } created && created > windowStartUtc)
+        {
+            caveats.Add(CreatedInWindowCaveat(created, Math.Round(Math.Max(0, (nowUtc - created).TotalDays), 1), daysBack));
         }
 
         if (string.Equals(row.ObjectType, "SQL_SCALAR_FUNCTION", StringComparison.OrdinalIgnoreCase))
@@ -508,6 +569,7 @@ public static class ObjectUsageReport
         /* The time before each clear of the counters is taken off: use in it was wiped before any snapshot read it, so it is not covered. */
         var tablesDays = t.CoveredFrom is { } from && t.CoveredTo is { } to ? Math.Round(Math.Max(0, (to - from - t.BlindTime).TotalDays), 1) : 0;
         var executionDays = side.Executions is { CoveredFromUtc: { } ef, CoveredToUtc: { } et } ? Math.Round((et - ef).TotalDays, 1) : 0;
+        var evidenceDays = Math.Round(ExecutionDays(side.Executions), 1);
         return new JsonObject
         {
             ["server"] = side.ServerDisplayName,
@@ -540,7 +602,8 @@ public static class ObjectUsageReport
                     ["covered_to_utc"] = Iso(e.CoveredToUtc),
                     ["covered_days"] = executionDays,
                     ["days_with_data"] = e.DaysWithData,
-                    ["short_of_window"] = executionDays < daysBack - 1,
+                    ["short_of_window"] = evidenceDays < daysBack - 1,
+                    ["query_capture_mode"] = e.QueryCaptureMode,
                     ["source"] = e.Source,
                 }
                 : null,
@@ -562,8 +625,10 @@ public static class ObjectUsageReport
             + "serves it.",
             "Procedures and functions: executions come from Query Store, so they only cover what Query Store captured (its capture mode, its "
             + "own retention and the databases where it is on). coverage.executions is for THIS database: with no covered days there, a "
-            + "module that did not run is 'Not tracked', not a candidate, and with only part of the window covered its caveat says how "
-            + "much. A procedure whose body only calls other modules has no statements of its own for Query Store to record, so it shows "
+            + "module that did not run is 'Not tracked', not a candidate, and with only part of the window covered (counting the days that "
+            + "hold data, so a gap in the middle counts) its caveat says how much. Where the capture mode is not ALL, Query Store leaves "
+            + "out statements it judges infrequent or cheap, so a module that did not run is 'Not tracked' too. A module created inside "
+            + "the window says how many of the days asked for it existed. A procedure whose body only calls other modules has no statements of its own for Query Store to record, so it shows "
             + "no executions however often it runs: check what references a procedure before dropping it.",
             hasInventory
                 ? "Modules in the stored object list that Query Store never saw run are listed as 'Not executed in window'."

@@ -321,6 +321,41 @@ public sealed class ObjectUsageLiveTests
         Assert.Equal("Not used in window", reportOnlyAlone.GetProperty("classification").GetString());
     }
 
+    [Fact]
+    public async Task TheExecutionRead_CarriesTheCaptureMode_ANonAllModeInTheWindowWins_AndOneBeforeTheWindowDoesNot()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await DarlingMcpTestData.RegisterServerAsync(connection, PrimaryId, Primary, ct);
+
+        var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+        var windowStart = now.AddDays(-60);
+
+        Task PlantHealthAsync(string database, DateTime at, string? mode) =>
+            DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, query_capture_mode) VALUES ($1,$2,$3,$4,$5,$6)",
+                1L, DarlingMcpTestData.Naive(at), PrimaryId, Primary, database, (object?)mode ?? DBNull.Value);
+
+        /* Sales: AUTO for a while inside the window, ALL since. The AUTO stretch is enough for rare modules to have gone unrecorded. */
+        await PlantHealthAsync(Db, now.AddDays(-40), "AUTO");
+        await PlantHealthAsync(Db, now.AddDays(-2), "ALL");
+        await PlantHealthAsync(Db, now.AddDays(-1), null);
+
+        /* Steady: CUSTOM long before the window, ALL inside it. */
+        await PlantHealthAsync("Steady", now.AddDays(-200), "CUSTOM");
+        await PlantHealthAsync("Steady", now.AddDays(-10), "ALL");
+
+        Assert.Equal("AUTO", (await DarlingObjectUsageReader.ReadExecutionsAsync(dataSource, PrimaryId, Db, windowStart, ct)).QueryCaptureMode);
+        Assert.Equal("ALL", (await DarlingObjectUsageReader.ReadExecutionsAsync(dataSource, PrimaryId, "Steady", windowStart, ct)).QueryCaptureMode);
+        Assert.Null((await DarlingObjectUsageReader.ReadExecutionsAsync(dataSource, PrimaryId, "NoHealth", windowStart, ct)).QueryCaptureMode);
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────────────────────
 
     private static Task PlantIndexAsync(
