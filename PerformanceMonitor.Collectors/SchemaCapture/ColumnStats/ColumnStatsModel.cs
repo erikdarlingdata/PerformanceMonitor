@@ -69,7 +69,7 @@ public static class ColumnStatsModel
     /// <summary>Upper bound on statistics objects read per database, so one huge database cannot stall a collection run.</summary>
     public const int MaxStatisticsPerDatabase = 20_000;
 
-    /// <summary>A single column averaging at least this many rows per value is flagged as low selectivity.</summary>
+    /// <summary>A single column averaging more than this many rows per value is flagged as low selectivity.</summary>
     public const long LowSelectivityRowsPerValue = 100_000;
 
     /// <summary>
@@ -127,7 +127,7 @@ public static class ColumnStatsModel
             return "unique";
         }
 
-        if (columnCount == 1 && s.RowsPerValue >= LowSelectivityRowsPerValue)
+        if (columnCount == 1 && s.RowsPerValue > LowSelectivityRowsPerValue)
         {
             return "low selectivity";
         }
@@ -135,7 +135,7 @@ public static class ColumnStatsModel
         return null;
     }
 
-    /// <summary>Of several statistics describing the same column list, the one built from the most rows, then the most recently updated.</summary>
+    /// <summary>Requires a non-empty sequence. Of several statistics describing the same column list, the one built from the most rows, then the most recently updated.</summary>
     public static StoredPrefix PickBest(IEnumerable<StoredPrefix> sameColumnList)
     {
         return sameColumnList

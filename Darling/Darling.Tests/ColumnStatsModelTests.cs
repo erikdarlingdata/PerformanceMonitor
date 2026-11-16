@@ -44,6 +44,13 @@ public class ColumnStatsModelTests
     }
 
     [Fact]
+    public void LowSelectivity_BoundaryIsStrictlyMoreThanOneHundredThousandRowsPerValue()
+    {
+        Assert.Null(ColumnStatsModel.Label(ColumnStatsModel.Compute(0.1, 1_000_000)!, 1, false));
+        Assert.Equal("low selectivity", ColumnStatsModel.Label(ColumnStatsModel.Compute(0.1, 1_000_010)!, 1, false));
+    }
+
+    [Fact]
     public void UniqueLabel_OnlyComesFromTheSchemaNeverFromTheDensity()
     {
         var s = ColumnStatsModel.Compute(1.0 / 100, 100)!;
