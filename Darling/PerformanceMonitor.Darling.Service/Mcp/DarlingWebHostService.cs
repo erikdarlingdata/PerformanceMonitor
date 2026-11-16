@@ -140,6 +140,12 @@ public sealed class DarlingWebHostService : BackgroundService
     /// the process lifetime, so the supervisor's 30s retries would only repeat it.</summary>
     private bool _tokenSignInProblemReported;
 
+    /// <summary>Whether this process has logged the plaintext-token Warning, the OIDC-refused Critical and the trustedProxies Critical
+    /// (#8735 review): each names file-only configuration that only a restart changes, so a supervisor retry would only repeat it.</summary>
+    private bool _plaintextTokenReported;
+    private bool _oidcRefusedReported;
+    private bool _trustedProxiesReported;
+
     /// <summary>How often the supervisor re-reads the live control-plane state (#1562, mirrors the MCP host).</summary>
     internal static readonly TimeSpan SupervisorPollInterval = TimeSpan.FromSeconds(5);
 
@@ -771,8 +777,9 @@ public sealed class DarlingWebHostService : BackgroundService
                     else
                     {
                         accessToken = token;
-                        if (usedPlaintext)
+                        if (usedPlaintext && !_plaintextTokenReported)
                         {
+                            _plaintextTokenReported = true;
                             _logger.LogWarning(
                                 "web.network.token is set in plaintext (dev convenience): prefer web.network.encryptedToken " +
                                 "(produced by --encrypt-password). " +
@@ -852,12 +859,16 @@ public sealed class DarlingWebHostService : BackgroundService
 
                 if (problem is not null)
                 {
-                    _logger.LogCritical(
-                        "web.network.oidc is misconfigured ({Problem}): OIDC sign-in is DISABLED this start; "
-                        + (tokenSignIn == TokenSignInMode.Off
-                            ? "web.network.oidc.tokenSignIn is 'off', so no token signs in and the dashboard is not started."
-                            : "the shared token remains the only web credential."),
-                        problem);
+                    if (!_oidcRefusedReported)
+                    {
+                        _oidcRefusedReported = true;
+                        _logger.LogCritical(
+                            "web.network.oidc is misconfigured ({Problem}): OIDC sign-in is DISABLED this start; "
+                            + (tokenSignIn == TokenSignInMode.Off
+                                ? "web.network.oidc.tokenSignIn is 'off', so no token signs in and the dashboard is not started."
+                                : "the shared token remains the only web credential."),
+                            problem);
+                    }
                 }
                 else
                 {
@@ -906,9 +917,14 @@ public sealed class DarlingWebHostService : BackgroundService
             if (networkMode
                 && !DarlingHostBinding.TryParseTrustedProxies(network!.TrustedProxies, out trustedProxies, out var proxyProblem))
             {
-                _logger.LogCritical(
-                    "web.network.trustedProxies is misconfigured ({Problem}): refusing to expose; binding loopback-only.",
-                    proxyProblem);
+                if (!_trustedProxiesReported)
+                {
+                    _trustedProxiesReported = true;
+                    _logger.LogCritical(
+                        "web.network.trustedProxies is misconfigured ({Problem}): refusing to expose; binding loopback-only.",
+                        proxyProblem);
+                }
+
                 networkMode = false;
                 trustedProxies = null;
             }

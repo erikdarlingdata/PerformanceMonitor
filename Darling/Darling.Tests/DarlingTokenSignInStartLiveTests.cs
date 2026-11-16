@@ -167,6 +167,43 @@ public sealed class DarlingTokenSignInStartLiveTests
         Assert.Contains("'bogus'", line, StringComparison.Ordinal);
     }
 
+    private static int LinesContaining(CapturingTestLogger log, string level, string text) =>
+        log.Lines.Count(l => l.StartsWith(level, StringComparison.Ordinal) && l.Contains(text, StringComparison.Ordinal));
+
+    private const string NotStartedText = "leaves OIDC as the only way to sign in";
+
+    [Fact]
+    public async Task Off_WithOidcRefusedAtValidation_LogsEachStartLineOnce_OverTwoAttempts()
+    {
+        var port = FreeTcpPort();
+        var config = Config(port, "'token': '" + PlainToken
+            + "', 'oidc': { 'authority': 'http://login.example.com', 'clientId': 'client-1', 'clientSecret': 'secret-1', 'tokenSignIn': 'off' }");
+
+        var result = await StartAsync(config, port, attempts: 2);
+
+        Assert.False(result.Started);
+        Assert.False(result.SecondStarted);
+        Assert.Equal(1, LinesContaining(result.Log, "Critical:", "web.network.oidc is misconfigured"));
+        Assert.Equal(1, LinesContaining(result.Log, "Warning:", "web.network.token is set in plaintext"));
+        Assert.Equal(1, LinesContaining(result.Log, "Critical:", NotStartedText));
+        Assert.Contains("OIDC was refused at start", result.Log.Lines.Single(l => l.Contains(NotStartedText, StringComparison.Ordinal)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Off_WithABadTrustedProxy_LogsEachStartLineOnce_OverTwoAttempts()
+    {
+        var port = FreeTcpPort();
+        var config = Config(port, "'token': '" + PlainToken + "', 'trustedProxies': ['not-an-ip'], 'oidc': { " + ValidOidc + ", 'tokenSignIn': 'off' }");
+
+        var result = await StartAsync(config, port, attempts: 2);
+
+        Assert.False(result.Started);
+        Assert.False(result.SecondStarted);
+        Assert.Equal(1, LinesContaining(result.Log, "Critical:", "web.network.trustedProxies is misconfigured"));
+        Assert.Equal(1, LinesContaining(result.Log, "Warning:", "web.network.token is set in plaintext"));
+        Assert.Equal(1, LinesContaining(result.Log, "Critical:", NotStartedText));
+    }
+
     [Theory]
     [InlineData("on", true, "break-glass")]
     [InlineData("loopback", true, "from this machine only")]
