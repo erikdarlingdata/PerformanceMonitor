@@ -1,0 +1,420 @@
+name: Darling Helm release
+
+# #8017: publishes the Darling Helm chart (Darling/helm/performancemonitor-darling) for each release, after the release's
+# image exists:
+#   - oci://ghcr.io/<owner>/charts/performancemonitor-darling, chart version = appVersion = the release version, with
+#     image.tag and image.digest pinned to the image build.yml pushed for that release;
+#   - a keyless cosign signature on the pushed chart's digest;
+#   - performancemonitor-darling-<version>.tgz and SHA256SUMS-helm.txt on the GitHub release, for offline installs.
+# The stamping, the checks, the packaging and the publish decision are .github/scripts/darling-helm-release.sh (tested
+# by the chart's tests/release-tests.sh in darling-helm.yml); this file resolves the inputs and does the publishing.
+#
+# Two jobs. `package` (read-only) installs the tools, stamps, checks and packages, and hands the package over as an
+# artifact. `publish` holds the write rights (the release upload, the push, the signing identity) and only pushes, signs
+# and uploads. The script is always taken from this workflow's own commit (a sparse checkout of .github/scripts), and
+# only the chart and Directory.Build.props from the tag, so a fix to the script reaches a re-run of an existing tag.
+#
+# Triggers. `workflow_run` after `Build` completes: only a successful run of a `release` event publishes; any other
+# completion (a failed build, a non-release event) skips. `workflow_dispatch` with the release tag publishes a release by
+# hand (a redo, or a release published before this workflow existed); `dry_run: true` runs only `package` and keeps the
+# package as a workflow artifact. `workflow_run` always runs the default branch's copy of this file: it reaches `main`
+# with the dev to main merge, before that release is published, so that release's own `Build` triggers the first
+# automatic publish. A dispatch runs the copy on the ref chosen for it, but `publish` runs only from refs/heads/main, the
+# ref the signing identity names, so a dispatch from any other ref can at most package (a dry run in effect).
+#
+# A published version is never replaced. A run for a version already in the registry pushes nothing: it only signs the
+# published digest if no signature is there, and attaches the published chart to the release if the release lacks it.
+# `overwrite: true` (by hand only) pushes and replaces everything.
+#
+# Once, after the first publish: the new package charts/performancemonitor-darling may be created private. Set it public
+# (the package's settings, Change visibility) and check it is linked to this repository. If the registry check fails on
+# that first run (a package that does not exist yet answers differently than a missing version), run by hand with
+# `overwrite: true`, which skips it.
+#
+# Verify a published chart:
+#   cosign verify ghcr.io/erikdarlingdata/charts/performancemonitor-darling:<version> \
+#     --certificate-identity 'https://github.com/erikdarlingdata/PerformanceMonitor/.github/workflows/darling-helm-release.yml@refs/heads/main' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+#
+# Event fields (the run's head branch, the dispatch inputs) reach `run:` lines only through env, never as ${{ }} text.
+on:
+  workflow_run:
+    workflows: [Build]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag to publish (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+      dry_run:
+        description: Stamp, check and package only; push, sign and upload nothing
+        required: false
+        type: boolean
+        default: false
+      overwrite:
+        description: Replace a version already in the registry and its release assets
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CHART_DIR: Darling/helm/performancemonitor-darling
+  # The same versions as darling-helm.yml, so lint and package behave as they do on pull requests (a parity test holds
+  # them equal). The sha256 values are the published ones: get.helm.sh's .sha256sum file and the SHA-256 column of yq's
+  # release checksums. Raise them with the versions.
+  HELM_VERSION: v3.22.1
+  HELM_SHA256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
+  YQ_VERSION: v4.54.3
+  YQ_SHA256: 129534601871538efe0ba4c5e62a34fb1d5f469bcb975c4fddeb467d82974973
+  # Where the sparse checkout of this workflow's own .github/scripts lands.
+  TOOLS: _release-tools
+
+concurrency:
+  group: darling-helm-release-${{ github.event.workflow_run.head_branch || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Stamp and package the chart
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'release')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      skip: ${{ steps.tag.outputs.skip }}
+      tag: ${{ steps.tag.outputs.tag }}
+      owner: ${{ steps.tag.outputs.owner }}
+      version: ${{ steps.version.outputs.VERSION }}
+      image_digest: ${{ steps.image.outputs.digest }}
+
+    steps:
+      # A release run's head branch is its tag. A tag that is not vMAJOR.MINOR.PATCH ends the run here: quietly on the
+      # automatic path (nothing to publish), as an error on a hand run (a mistyped tag).
+      - name: Resolve the tag
+        id: tag
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT}" = "workflow_dispatch" ]; then tag="${INPUT_TAG}"; else tag="${RUN_TAG}"; fi
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            if [ "${EVENT}" = "workflow_dispatch" ]; then
+              echo "::error::'${tag}' is not a release tag (expected vMAJOR.MINOR.PATCH)."
+              exit 1
+            fi
+            echo "::notice::'${tag}' is not a release tag; no chart to publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "skip=false"
+            echo "tag=${tag}"
+            echo "owner=${GITHUB_REPOSITORY_OWNER,,}"
+          } >> "$GITHUB_OUTPUT"
+
+      # The chart and Directory.Build.props come from the tag.
+      - uses: actions/checkout@v7
+        if: steps.tag.outputs.skip != 'true'
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          persist-credentials: false
+
+      # The script comes from this workflow's own commit, never from the tag.
+      - uses: actions/checkout@v7
+        if: steps.tag.outputs.skip != 'true'
+        with:
+          ref: ${{ github.sha }}
+          path: ${{ env.TOOLS }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Install helm and yq
+        if: steps.tag.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="${RUNNER_TEMP}/bin"
+          mkdir -p "${bin}"
+          curl -fsSL -o "${RUNNER_TEMP}/helm.tar.gz" "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${RUNNER_TEMP}/helm.tar.gz" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/helm.tar.gz" -C "${RUNNER_TEMP}" linux-amd64/helm
+          mv "${RUNNER_TEMP}/linux-amd64/helm" "${bin}/helm"
+          curl -fsSL -o "${bin}/yq" "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  ${bin}/yq" | sha256sum -c -
+          chmod +x "${bin}/yq"
+          echo "${bin}" >> "$GITHUB_PATH"
+          "${bin}/helm" version --short
+          "${bin}/yq" --version
+
+      # The version the release declares, which must be the tag's.
+      - name: Get version
+        id: version
+        if: steps.tag.outputs.skip != 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          version="$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)"
+          [ -n "${version}" ] || { echo "::error::Read no version from Directory.Build.props."; exit 1; }
+          [ "v${version}" = "${TAG}" ] || { echo "::error::Tag ${TAG} does not match version ${version} in Directory.Build.props."; exit 1; }
+          echo "VERSION=${version}" >> "$GITHUB_OUTPUT"
+
+      # The image build.yml pushed for this release. Public, so no login is needed to read its digest.
+      - name: Resolve the image digest
+        id: image
+        if: steps.tag.outputs.skip != 'true'
+        shell: bash
+        env:
+          OWNER: ${{ steps.tag.outputs.owner }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${OWNER}/performancemonitor-darling:${VERSION}"
+          manifest="$(docker buildx imagetools inspect "${image}" --format '{{json .Manifest}}')" \
+            || { echo "::error::Could not read ${image}: it must exist before the chart is published."; exit 1; }
+          digest="$(jq -r '.digest // empty' <<<"${manifest}")"
+          [ -n "${digest}" ] || { echo "::error::No digest for ${image}."; exit 1; }
+          echo "Image ${image}@${digest}"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp, check and package the chart
+        id: package
+        if: steps.tag.outputs.skip != 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          OWNER: ${{ steps.tag.outputs.owner }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/chart-out"
+          result="$(bash "${TOOLS}/.github/scripts/darling-helm-release.sh" package --chart "${CHART_DIR}" --tag "${TAG}" \
+            --version "${VERSION}" --owner "${OWNER}" --digest "${DIGEST}" --out "${out}")"
+          echo "${result}"
+          package="$(tail -n 1 <<<"${result}" | sed -n 's/^package=//p')"
+          [ -f "${package}" ] || { echo "::error::The script reported no package."; exit 1; }
+          {
+            echo "package=${package}"
+            echo "out=${out}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Hand the package to the publish job
+        if: steps.tag.outputs.skip != 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: helm-chart
+          path: |
+            ${{ steps.package.outputs.package }}
+            ${{ steps.package.outputs.out }}/SHA256SUMS-helm.txt
+          if-no-files-found: error
+
+      - name: Summary (dry run)
+        if: steps.tag.outputs.skip != 'true' && inputs.dry_run
+        shell: bash
+        env:
+          OUT: ${{ steps.package.outputs.out }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Dry run: nothing was pushed, signed or uploaded"
+            echo
+            echo '```yaml'
+            cat "${OUT}/chart/Chart.yaml"
+            echo
+            yq '{"image": .image}' "${OUT}/chart/values.yaml"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish the Helm chart
+    needs: package
+    # Never on a dry run, and only from main: the signing identity names refs/heads/main.
+    if: needs.package.outputs.skip == 'false' && !inputs.dry_run && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # the release upload
+      packages: write # the OCI push
+      id-token: write # keyless signing (the OIDC identity Fulcio certifies)
+    env:
+      TAG: ${{ needs.package.outputs.tag }}
+      OWNER: ${{ needs.package.outputs.owner }}
+      VERSION: ${{ needs.package.outputs.version }}
+      IMAGE_DIGEST: ${{ needs.package.outputs.image_digest }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: ${{ env.TOOLS }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      # The script (decide, same-chart) needs both, and helm pushes and pulls.
+      - name: Install helm and yq
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="${RUNNER_TEMP}/bin"
+          mkdir -p "${bin}"
+          curl -fsSL -o "${RUNNER_TEMP}/helm.tar.gz" "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${RUNNER_TEMP}/helm.tar.gz" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/helm.tar.gz" -C "${RUNNER_TEMP}" linux-amd64/helm
+          mv "${RUNNER_TEMP}/linux-amd64/helm" "${bin}/helm"
+          curl -fsSL -o "${bin}/yq" "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  ${bin}/yq" | sha256sum -c -
+          chmod +x "${bin}/yq"
+          echo "${bin}" >> "$GITHUB_PATH"
+          "${bin}/helm" version --short
+          "${bin}/yq" --version
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: helm-chart
+          path: ${{ runner.temp }}/packaged
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.3
+
+      # Docker's config as well as Helm's: cosign reads registry credentials from Docker's config only, and
+      # `helm registry login` writes Helm's own file (build.yml logs Docker in before it signs the image, too).
+      - name: Log in to ghcr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          echo "${GH_TOKEN}" | docker login ghcr.io -u "${ACTOR}" --password-stdin
+          echo "${GH_TOKEN}" | helm registry login ghcr.io -u "${ACTOR}" --password-stdin
+
+      # What the registry and the release already hold. Skipped on an overwrite, which replaces whatever is there.
+      - name: Read what is already published
+        id: published
+        if: ${{ !inputs.overwrite }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/${OWNER}/charts/performancemonitor-darling"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/darling-helm-release.yml@refs/heads/main"
+          pulled_dir="${RUNNER_TEMP}/published"
+          mkdir -p "${pulled_dir}"
+          exists=false; signed=false; digest=""
+          if pulled="$(helm pull "oci://${ref}" --version "${VERSION}" --destination "${pulled_dir}" 2>&1)"; then
+            exists=true
+            digest="$(sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p' <<<"${pulled}" | head -n 1)"
+            [ -n "${digest}" ] || { echo "${pulled}"; echo "::error::helm pull printed no digest for ${ref}:${VERSION}."; exit 1; }
+            # Only this release's chart is ever signed or attached: anything else under this version stops the run.
+            bash "${TOOLS}/.github/scripts/darling-helm-release.sh" same-chart \
+              "${pulled_dir}/performancemonitor-darling-${VERSION}.tgz" \
+              "${RUNNER_TEMP}/packaged/performancemonitor-darling-${VERSION}.tgz" "${IMAGE_DIGEST}" \
+              || { echo "::error::${ref}:${VERSION} in the registry is not the chart this release builds. A hand run with overwrite: true replaces it."; exit 1; }
+            if cosign verify "${ref}@${digest}" --certificate-identity "${identity}" \
+                 --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null 2>&1; then
+              signed=true
+            fi
+          elif grep -qi "not found" <<<"${pulled}"; then
+            exists=false
+          else
+            echo "${pulled}"
+            echo "::error::Could not tell whether ${ref}:${VERSION} is published. To publish anyway, run by hand with overwrite: true."
+            exit 1
+          fi
+          assets="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '[.assets[].name] | join(" ")')"
+          echo "exists=${exists} digest=${digest:-none} signed=${signed} assets=[${assets}]"
+          {
+            echo "exists=${exists}"
+            echo "signed=${signed}"
+            echo "digest=${digest}"
+            echo "assets=${assets}"
+            echo "pulled_dir=${pulled_dir}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Decide
+        id: decide
+        shell: bash
+        env:
+          OVERWRITE: ${{ inputs.overwrite == true }}
+          EXISTS: ${{ steps.published.outputs.exists || 'false' }}
+          SIGNED: ${{ steps.published.outputs.signed || 'false' }}
+          ASSETS: ${{ steps.published.outputs.assets }}
+        run: |
+          set -euo pipefail
+          bash "${TOOLS}/.github/scripts/darling-helm-release.sh" decide --version "${VERSION}" --exists "${EXISTS}" \
+            --signed "${SIGNED}" --assets "${ASSETS}" --overwrite "${OVERWRITE}" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Push the chart
+        id: push
+        if: steps.decide.outputs.push == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="${RUNNER_TEMP}/packaged/performancemonitor-darling-${VERSION}.tgz"
+          pushed="$(helm push "${package}" "oci://ghcr.io/${OWNER}/charts" 2>&1)" || { echo "${pushed}"; exit 1; }
+          echo "${pushed}"
+          digest="$(sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p' <<<"${pushed}" | head -n 1)"
+          [ -n "${digest}" ] || { echo "::error::helm push printed no digest."; exit 1; }
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      # Signed by digest, never by tag: a tag can move, the digest is what was pushed (or is already published).
+      - name: Sign the chart (keyless, Sigstore)
+        if: steps.decide.outputs.sign == 'true'
+        shell: bash
+        env:
+          DIGEST: ${{ steps.push.outputs.digest || steps.published.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [ -n "${DIGEST}" ] || { echo "::error::No digest to sign."; exit 1; }
+          cosign sign --yes "ghcr.io/${OWNER}/charts/performancemonitor-darling@${DIGEST}"
+
+      # The assets always match the registry: this run's package when it pushed, the published chart otherwise.
+      - name: Attach the package to the release
+        if: steps.decide.outputs.upload != 'none'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPLOAD: ${{ steps.decide.outputs.upload }}
+          PULLED_DIR: ${{ steps.published.outputs.pulled_dir }}
+        run: |
+          set -euo pipefail
+          tgz="performancemonitor-darling-${VERSION}.tgz"
+          if [ "${UPLOAD}" = pulled ]; then
+            dir="${PULLED_DIR}"
+            (cd "${dir}" && sha256sum "${tgz}" > SHA256SUMS-helm.txt)
+          else
+            dir="${RUNNER_TEMP}/packaged"
+          fi
+          gh release upload "${TAG}" "${dir}/${tgz}" "${dir}/SHA256SUMS-helm.txt" --clobber --repo "${GITHUB_REPOSITORY}"
+
+      - name: Summary
+        shell: bash
+        env:
+          PUSH: ${{ steps.decide.outputs.push }}
+          SIGN: ${{ steps.decide.outputs.sign }}
+          UPLOAD: ${{ steps.decide.outputs.upload }}
+          DIGEST: ${{ steps.push.outputs.digest || steps.published.outputs.digest }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### oci://ghcr.io/${OWNER}/charts/performancemonitor-darling:${VERSION}"
+            echo
+            echo "Pushed: ${PUSH}. Signed: ${SIGN}. Release assets: ${UPLOAD}. Digest: \`${DIGEST:-unknown}\`"
+            echo
+            echo '```'
+            echo "cosign verify ghcr.io/${OWNER}/charts/performancemonitor-darling:${VERSION} \\"
+            echo "  --certificate-identity 'https://github.com/${GITHUB_REPOSITORY}/.github/workflows/darling-helm-release.yml@refs/heads/main' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
