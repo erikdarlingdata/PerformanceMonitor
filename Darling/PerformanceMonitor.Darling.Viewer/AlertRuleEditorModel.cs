@@ -80,6 +80,21 @@ public static class AlertRuleEditorModel
         return MeasureCatalog.Family(m.UnitFamily)?.Units.Select(u => u.Name).ToList() ?? (IReadOnlyList<string>)new[] { m.DefaultUnit };
     }
 
+    /// <summary>What a dropdown shows in place of its choices when the picked metric has none for it (a ratio has no aggregate).</summary>
+    public const string NotUsedText = "Not used for this metric";
+
+    /// <summary>The aggregate dropdown's items: the metric's aggregates, or the one line <see cref="NotUsedText"/> when it has none, never an empty list.</summary>
+    public static IReadOnlyList<string> AggregateChoicesFor(ComposeMeasure m) => OrNotUsed(AggregatesFor(m));
+
+    /// <summary>The unit dropdown's items: the metric's units for the aggregate, or the one line <see cref="NotUsedText"/> when it has none.</summary>
+    public static IReadOnlyList<string> UnitChoicesFor(ComposeMeasure m, string? aggregate) =>
+        OrNotUsed(UnitsFor(m, aggregate).Where(u => !string.IsNullOrWhiteSpace(u)).ToList());
+
+    /// <summary>True when the dropdown item is a real choice the form should send, not the <see cref="NotUsedText"/> line.</summary>
+    public static bool IsChoice(string? item) => !string.IsNullOrWhiteSpace(item) && !string.Equals(item, NotUsedText, StringComparison.Ordinal);
+
+    private static IReadOnlyList<string> OrNotUsed(IReadOnlyList<string> choices) => choices.Count > 0 ? choices : new[] { NotUsedText };
+
     public static string DefaultAggregateFor(ComposeMeasure m) =>
         m.Kind == MeasureKind.Ratio ? string.Empty : MeasureCatalog.WireName(m.DefaultTimeAgg);
 

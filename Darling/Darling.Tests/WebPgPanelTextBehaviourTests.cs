@@ -125,6 +125,16 @@ public sealed class WebPgPanelTextBehaviourTests
     }
 
     [Fact]
+    public void BothIndexBloatPanelsEmptyForOneReason_TheSecondPointsAtTheFirst()
+    {
+        var r = Run();
+        var first = r.GetProperty("bloatEmptyFirst").GetProperty("line").GetString()!;
+        var second = r.GetProperty("bloatEmptySecond").GetProperty("line").GetString()!;
+        Assert.Contains("Index coverage was not measured in this window", first, StringComparison.Ordinal);
+        Assert.Equal("Empty for the same reason as Index Bloat (estimated).", second);
+    }
+
+    [Fact]
     public void IndexBloatRankingEmptyForAnotherCause_PointsAtTheTableThatListsTheReasons()
     {
         var p = Run().GetProperty("bloatOther");

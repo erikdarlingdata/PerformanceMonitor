@@ -1078,11 +1078,13 @@ function groupDigits(v) {
    sends no column (an older one) keeps the generic sentence. */
 export function identityCapacityDetail(ic) {
   const n = ic.columns_at_bar;
-  if (!ic.worst_column) return "At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is " + ic.worst_band + ".";
+  if (!ic.worst_column) return "At or past 70% used, or under 30 days left (the shipped bars, the alert's own percent bars may differ). The worst is " + ic.worst_band + ".";
   const name = [ic.worst_database, ic.worst_table, ic.worst_column].filter(Boolean).join(".");
   const pct = ic.worst_percent_used == null ? "" : ": " + fmtNum(ic.worst_percent_used, ic.worst_percent_used >= 99.95 || ic.worst_percent_used === 0 ? 0 : 1) + "% used";
   const left = ic.worst_values_remaining == null ? "" : ", " + groupDigits(ic.worst_values_remaining) + " left";
-  return name + pct + left + (n > 1 ? ". The fullest of " + fmtInt(n) + " columns at 70% or more." : ".");
+  /* #8818: a column banded on its days left says so, so a column at 67% used reads as intended. */
+  const days = ic.worst_band_reason === "days" && ic.worst_days_to_exhaustion != null ? ", about " + fmtNum(ic.worst_days_to_exhaustion, ic.worst_days_to_exhaustion >= 10 ? 0 : 1) + " days to exhaustion at the current rate" : "";
+  return name + pct + left + days + (n > 1 ? ". The worst of " + fmtInt(n) + " columns at 70% or more used, or under 30 days left." : ".");
 }
 
 function identityCapacityChip(c, store) {

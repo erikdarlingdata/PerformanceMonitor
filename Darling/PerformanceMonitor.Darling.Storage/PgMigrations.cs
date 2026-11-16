@@ -3476,7 +3476,66 @@ $rung$;";
            update can be HOT. It applies to pages written from now on: an existing page keeps its fill until the table is rewritten, and this rung
            rewrites nothing. A metadata-only change, so the upgrade stays fast. Re-running it is a no-op. */
         new Migration(266, "query-tag-sightings-fillfactor", "ALTER TABLE collect.query_tag_sightings SET (fillfactor = 80);"),
+        /* V267 (#8570): the (server_id, day) index on the per-day plan totals. One read of the table builds it: no row moves. */
+        new Migration(267, "plan-regression-daily-server-day-index", V267Sql),
+        /* V268 (#8784): object usage over a long window. The answering instance on index_object_stats, and the per-day module execution
+           summary with its build record. A catalog-only column and new tables created empty: nothing is backfilled here, so the upgrade stays
+           fast and the housekeeping tick fills the summary from the daily Query Store summary the store already holds. */
+        new Migration(268, "object-usage", V268Sql),
     };
+
+    /// <summary>
+    /// V268 (#8784): object usage over a long window, for <c>get_object_usage</c>.
+    ///
+    /// <para><c>collect.index_object_stats.answering_server_name</c> is the <c>@@SERVERNAME</c> of the instance that answered the collection.
+    /// Usage counters are per instance, and through an availability group listener with read-only routing the node behind one registration can
+    /// change between collections, so the window read treats a change of node as a counter reset. One nullable <c>text</c>, no DEFAULT, no
+    /// backfill, no scan (V250's shape): a row stored before this rung never read the node, so NULL is the honest value. Catalog-only, accepted
+    /// on a compressed hypertable. <b>Appended LAST</b> after <c>is_indexed_view</c>, because the writer is a positional binary COPY with an
+    /// explicit column list: a fresh store (the generated V1 table carries the column from the collector's payload, and this ALTER no-ops
+    /// there) and an upgraded one share one physical column order. The <c>CREATE OR REPLACE VIEW</c> re-expands
+    /// <c>v_index_object_stats</c>' pinned <c>SELECT *</c>. An older build writes its own column list, so the column stays NULL for the rows it
+    /// writes, and its reads name their columns, so the extra one changes nothing for it.</para>
+    ///
+    /// <para><c>collect.index_object_stats.is_memory_optimized</c> follows it, the same way (nullable <c>boolean</c>, catalog-only, appended
+    /// after <c>answering_server_name</c>). <c>sys.dm_db_index_usage_stats</c> holds no rows for a memory-optimized table, so the usage read
+    /// has to know which tables its counters say nothing about.</para>
+    ///
+    /// <para><c>collect.object_inventory</c> is <c>ObjectInventoryCollector</c>'s table, the daily list of procedures, functions and views per
+    /// database (Darling only). A PLAIN table on every store (<c>StaysPlainTable</c>), 30-day time-sliced DELETE. Columns and the (server_id,
+    /// collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a fresh store (V1's catalog walk) and an upgraded one agree; the
+    /// (server_id, database_name, collection_time) index finds a database's newest capture by one seek.</para>
+    ///
+    /// <para><c>collect.object_executions_daily</c>, <c>collect.object_executions_daily_built</c>,
+    /// <c>collect.object_executions_daily_databases</c> and <c>collect.object_executions_daily_retention</c> are the per-day module execution
+    /// summary, its build record, the days each database was looked at and the retention its cleanup is applying
+    /// (<see cref="ObjectExecutionsDaily"/>), created empty. New tables, no data moves, no grant (the <c>collect</c> schema carries blanket
+    /// SELECT). Every statement is idempotent.</para>
+    /// </summary>
+    private const string V268Sql = @"
+ALTER TABLE collect.index_object_stats ADD COLUMN IF NOT EXISTS answering_server_name text;
+ALTER TABLE collect.index_object_stats ADD COLUMN IF NOT EXISTS is_memory_optimized boolean;
+CREATE OR REPLACE VIEW collect.v_index_object_stats AS SELECT * FROM collect.index_object_stats;
+
+CREATE TABLE IF NOT EXISTS collect.object_inventory (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    object_name text,
+    object_id integer,
+    type_desc text,
+    create_date timestamp,
+    modify_date timestamp,
+    is_natively_compiled boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_object_inventory_time ON collect.object_inventory(server_id, collection_time);
+
+CREATE INDEX IF NOT EXISTS idx_object_inventory_database ON collect.object_inventory (server_id, database_name, collection_time);
+" + ObjectExecutionsDaily.CreateSql;
 
     /* V256 (#7643): schema tracking. Versioned table and view definitions, kept by the schema_objects collector (Darling only).
        collect.schema_objects holds one row per version of an object: valid_from to valid_to, what changed it and who detected it, the
@@ -3684,6 +3743,18 @@ CREATE INDEX IF NOT EXISTS idx_oversized_plan_backlog_collector_bytes ON collect
     private const string V258Sql = @"
 CREATE INDEX IF NOT EXISTS idx_oversized_plan_backlog_dropped ON collect.oversized_plan_backlog (server_id, expired_at)
 WHERE captured_at IS NULL AND last_attempt_at IS NULL AND expired_at IS NOT NULL;";
+
+    /* V267 (#8570): ix_plan_regression_daily_server_day, a B-tree on collect.plan_regression_daily (server_id, day). The regression read's
+       baseline arm, the builder's day delete and its built-day probe each name one server and a set of days and no query. The unique key leads
+       with the same two columns, but its entries carry all seven key columns, the plan hash among them, so a day-driven read through it walks
+       an index about 25 times the size of this one. Measured on 3,072,000 rows over eight servers and fifteen days: the regression read's
+       buffers fall from 34,800 to 26,800 when a server's rows are scattered through the table and from 18,100 to 10,000 when they are
+       clustered, the day delete's from 26,600 to 26,100, and a read that names a database and a query keeps its nested loop into the unique
+       key. The totals are written by delete and insert and never updated, so the index adds one entry per inserted row and nothing else. The
+       build reads the table once: 0.4 s for a 462 MB heap, a 20 MB index. Not CONCURRENTLY: the rung runs inside the ladder's own
+       transaction. Idempotent. */
+    private const string V267Sql = @"
+CREATE INDEX IF NOT EXISTS ix_plan_regression_daily_server_day ON collect.plan_regression_daily (server_id, day);";
 
 
     /// <summary>

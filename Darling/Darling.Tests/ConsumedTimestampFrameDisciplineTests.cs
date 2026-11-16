@@ -128,6 +128,8 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             ["last_user_seek", "last_user_scan", "last_user_lookup", "last_user_update"],
             ClockFrame.ServerLocal, "a DMV shipped verbatim"),
         ("sys.dm_os_sys_info", ["sqlserver_start_time"], ClockFrame.ServerLocal, "a DMV shipped verbatim"),
+        ("sys.objects", ["create_date", "modify_date"], ClockFrame.ServerLocal,
+            "a catalog view shipped verbatim: sys.objects stamps the server's local clock (#8784, object_inventory)"),
         ("sys.dm_exec_query_stats", ["creation_time", "last_execution_time"], ClockFrame.ServerLocal,
             "QueryStatsCollector states it outright: \"creation_time is in the monitored server's local time "
             + "while collection times are UTC\"; #2991/#2992"),

@@ -188,7 +188,7 @@ internal static class DarlingMcpInstructions
 
         return opening + $" {shared} are the same names Lite exposes. The remaining {count - shared} are unique to Darling: " +
                $"thirty-five are the PostgreSQL reads (`get_pg_*`), plus {families}, and central-store-only reads " +
-               "(`get_fleet_overview`, `get_ag_health` (Availability Groups), `get_sweep_reports`, `get_store_metrics`, " +
+               "(`get_fleet_overview`, `get_ag_health` (Availability Groups), `get_sweep_reports`, `get_store_metrics`, `get_store_table_health`, `measure_store_table`, `get_store_maintenance_readiness`, " +
                "`get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
     }
 
@@ -198,10 +198,10 @@ internal static class DarlingMcpInstructions
     /// are identical, so a new tool moves this or fails there.
     /// </summary>
     private const string CatalogCensus =
-        "This server exposes 286 tools. 112 are the same names Lite exposes. The remaining 174 are unique to Darling: " +
+        "This server exposes 290 tools. 113 are the same names Lite exposes. The remaining 177 are unique to Darling: " +
         "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server/query-tag, " +
         "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` (Availability Groups), " +
-        "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
+        "`get_sweep_reports`, `get_store_metrics`, `get_store_table_health`, `measure_store_table`, `get_store_maintenance_readiness`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
 
     /// <summary>
     /// Every tool name Performance Monitor Lite registers, so the census counts the overlap of what THIS server
@@ -225,13 +225,13 @@ internal static class DarlingMcpInstructions
         "get_health_parser_significant_waits", "get_health_parser_system_health", "get_index_usage",
         "get_investigation_reports", "get_latch_stats", "get_lock_wait_trend", "get_long_query_completions", "get_memory_clerks",
         "get_memory_grants", "get_memory_pressure_events", "get_memory_stats", "get_memory_trend", "get_mute_rules",
-        "get_notification_routes", "get_object_locking", "get_perfmon_stats", "get_perfmon_trend",
+        "get_notification_routes", "get_object_locking", "get_object_usage", "get_perfmon_stats", "get_perfmon_trend",
         "get_plan_cache_bloat", "get_plan_corrections", "get_plan_xml", "get_procedure_duration_trend",
         "get_pvs_stats", "get_query_duration_trend", "get_query_heatmap", "get_query_store_duration_trend",
         "get_query_store_health", "get_query_store_regressions", "get_query_store_top", "get_query_trend",
         "get_resource_semaphore", "get_resource_use_by_tag", "get_running_jobs", "get_server_config", "get_server_config_changes",
         "get_server_properties", "get_server_summary", "get_session_stats", "get_spinlock_stats",
-        "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide", "get_top_procedures_by_cpu",
+        "get_store_health", "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide", "get_top_procedures_by_cpu",
         "get_top_queries_by_cpu", "get_trace_flag_changes", "get_trace_flags", "get_wait_stats", "get_wait_trend",
         "get_wait_types", "get_waiting_tasks", "list_investigation_requests", "list_servers",
         "mute_analysis_finding", "set_notification_route_enabled", "submit_investigation_report", "unmute_analysis_finding",

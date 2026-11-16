@@ -107,7 +107,7 @@ internal static class McpGateParityMatrix
         "get_health_parser_scheduler_issues", "get_health_parser_severe_errors", "get_health_parser_significant_waits",
         "get_health_parser_system_health", "get_index_usage", "get_investigation_reports", "get_latch_stats", "get_load_by_caller",
         "get_lock_wait_trend", "get_long_query_completions", "get_memory_clerks", "get_memory_grants", "get_memory_pressure_events",
-        "get_memory_stats", "get_memory_trend", "get_mute_rules", "get_notification_routes", "get_object_locking", "get_perfmon_stats",
+        "get_memory_stats", "get_memory_trend", "get_mute_rules", "get_notification_routes", "get_object_locking", "get_object_usage", "get_perfmon_stats",
         "get_perfmon_trend", "get_plan_cache_bloat", "get_plan_corrections", "get_plan_xml", "get_procedure_duration_trend",
         "get_pvs_stats", "get_query_duration_trend", "get_query_heatmap", "get_query_pileups", "get_query_store_duration_trend",
         "get_query_store_health", "get_query_store_regressions", "get_query_store_top", "get_query_trend", "get_resource_semaphore",
@@ -151,8 +151,8 @@ internal static class McpGateParityMatrix
     internal static readonly string[] DarlingInvestigationArmTools =
         DarlingAgentActionTools.Append(DarlingInvestigationMessageTool).ToArray();
 
-    /// <summary>Lite's one tool with no Darling tool of the same name (Darling's is <c>get_blocking</c>): a read.</summary>
-    internal static readonly string[] LiteOnlyReads = { "get_blocked_process_reports" };
+    /// <summary>Lite's tools with no Darling tool of the same name: a read each. Darling's twin of get_blocked_process_reports is <c>get_blocking</c>; get_store_health (#8788) has none, Darling's store page being #8787.</summary>
+    internal static readonly string[] LiteOnlyReads = { "get_blocked_process_reports", "get_store_health" };
 
     /// <summary>Every tool name a row calls, in both apps: the 112 shared names and the names one app alone answers.</summary>
     internal static readonly string[] Tools = SharedReads

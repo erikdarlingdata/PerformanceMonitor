@@ -484,8 +484,9 @@ ANALYZE collect.plan_regression_daily;
 ANALYZE collect.plan_regression_daily_built;", ct);
 
             /* The plan of the statement that removes one due key: executed inside a transaction that is rolled back, so the
-               next case starts from the same rows. Every access to the totals table is an index probe, on the unique index,
-               and it reads only that day's ten rows of the 90,010. */
+               next case starts from the same rows. Every access to the totals table is an index probe, on an index led by
+               (server_id, day) (the unique index or ix_plan_regression_daily_server_day), and it reads only that day's ten rows
+               of the 90,010. */
             var due = await TotalsScansOfGcAsync(connection, 9, new DateOnly(2026, 3, 10), ct);
             Assert.NotEmpty(due);
 
@@ -493,7 +494,8 @@ ANALYZE collect.plan_regression_daily_built;", ct);
                on the server alone and read every day of it, which a small due day of a small server would hide. */
             Assert.All(due, node => Assert.True(node.IndexCond is not null && node.IndexCond.Contains("server_id", StringComparison.Ordinal)
                 && node.IndexCond.Contains("day", StringComparison.Ordinal), $"index condition: {node.IndexCond ?? "none"}"));
-            Assert.All(due, node => Assert.True(node.Index == "ux_plan_regression_daily", $"{node.NodeType} on {node.Index ?? "no index"}"));
+            Assert.All(due, node => Assert.True(node.Index is "ux_plan_regression_daily" or "ix_plan_regression_daily_server_day",
+                $"{node.NodeType} on {node.Index ?? "no index"}"));
             Assert.True(due.Sum(node => node.RowsRead) <= 10, $"the cleanup read {due.Sum(node => node.RowsRead)} totals rows for ten due ones");
 
             /* Nothing is read when nothing is due: the built-row delete returns no key, so no totals statement runs and the

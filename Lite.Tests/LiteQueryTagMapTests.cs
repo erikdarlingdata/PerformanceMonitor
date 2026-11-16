@@ -501,17 +501,56 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(2L, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashA}'"));
     }
 
-    [Fact]
-    public async Task AReSightingOfARowOverAnHourOld_MovesLastSeen()
+    private async Task<DateTime> LastSeenAsync(string key)
     {
-        Sight(Snapshot(HashA));
-        await SetLastSeenAsync(HashA, DateTime.UtcNow.AddHours(-2));
-        var before = await CountAsync($"SELECT epoch_us(last_seen) FROM query_tag_sightings WHERE key = '{HashA}'");
+        using var connection = _fixture.DuckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT last_seen FROM query_tag_sightings WHERE key = $1";
+        cmd.Parameters.Add(new DuckDBParameter { Value = key });
+        return (DateTime)(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken))!;
+    }
 
-        Sight(Snapshot(HashA));
+    [Fact]
+    public async Task AReSightingOfARowOverAnHourPastTheBackdatedStamp_MovesLastSeenToTheBackdatedStamp_AndOneWithinTheHourDoesNot()
+    {
+        var backdate = QueryTagSightingBuffer.ReSightingBackdate;
+        Sight(Snapshot(HashA), Snapshot(HashB));
+        var within = DateTime.UtcNow - backdate - TimeSpan.FromMinutes(59);
+        await SetLastSeenAsync(HashA, within);
+        await SetLastSeenAsync(HashB, DateTime.UtcNow - backdate - TimeSpan.FromMinutes(61));
+        var withinStored = await LastSeenAsync(HashA);
+        var beforeFlush = DateTime.UtcNow;
 
-        Assert.True(await CountAsync($"SELECT epoch_us(last_seen) FROM query_tag_sightings WHERE key = '{HashA}'") > before + 3_600_000_000L);
+        Sight(Snapshot(HashA), Snapshot(HashB));
+
+        var afterFlush = DateTime.UtcNow;
+        Assert.Equal(withinStored, await LastSeenAsync(HashA));
+        var moved = await LastSeenAsync(HashB);
+        Assert.InRange(moved, beforeFlush - backdate - TimeSpan.FromMilliseconds(1), afterFlush - backdate);
+        Assert.Equal(2L, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashB}'"));
+    }
+
+    [Fact]
+    public async Task APlainReSighting_IsBehindTheNextExtendsCursor_WhileAnInsertIsInsideIt_AndTheMapStaysRight()
+    {
+        const string HashC = "0x00000000000000CC";
+        var tag = await _service.CreateQueryTagAsync("Reports", null);
+        await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Application, "Reports", tag));
+        Sight(Snapshot(HashA), Snapshot(HashB));
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        Assert.True((await _service.BuildQueryTagMapAsync(cursors)).Rebuilt);
+        var aged = DateTime.UtcNow.AddHours(-2);
+        await SetLastSeenAsync(HashA, aged);
+        await SetLastSeenAsync(HashB, aged);
+
+        Sight(Snapshot(HashA), Snapshot(HashC));
+        var pass = await _service.BuildQueryTagMapAsync(cursors);
+
+        Assert.False(pass.Rebuilt);
+        Assert.Equal(1, pass.KeysResolved);
         Assert.Equal(2L, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashA}'"));
+        Assert.Equal(new[] { HashA, HashB, HashC }, (await MapAsync()).Where(r => r.TagId == tag).Select(r => r.Key));
     }
 
     [Fact]

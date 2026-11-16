@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
@@ -143,7 +144,8 @@ public sealed class DarlingMcpChangeWatchTools
                 watch_count = watches.Count,
                 watches = watches.Select(w =>
                 {
-                    var detail = ParseDetail(w.ResultJson);
+                    /* #8815: the stored averages are doubles (109.81369347172361); the reply writes them by the one reply rounding rule. */
+                    var detail = McpHelpers.RoundFloatNoise(ParseDetail(w.ResultJson));
                     return new
                     {
                         watch_id = w.WatchId,
@@ -187,16 +189,52 @@ public sealed class DarlingMcpChangeWatchTools
             var rest = new JsonObject();
             foreach (var (key, value) in stored)
             {
-                if (key is not ("measures" or "not_measured" or "changes"))
+                if (key is "measures" or "not_measured" or "changes")
                 {
-                    rest[key] = value?.DeepClone();
+                    continue;
                 }
+
+                rest[key] = key == "notes" ? WithoutNotMeasuredLines(value, stored["not_measured"]) : value?.DeepClone();
             }
 
             return rest;
         }
 
         return detail;
+    }
+
+    /// <summary>
+    /// #8815: the stored notes minus the "not measured: {measure}: {reason}" lines that older results folded in from <c>not_measured</c>, which the
+    /// watch already carries at its top. A note that is not one of those lines stays.
+    /// </summary>
+    private static JsonNode? WithoutNotMeasuredLines(JsonNode? notes, JsonNode? notMeasured)
+    {
+        if (notes is not JsonArray stored)
+        {
+            return notes?.DeepClone();
+        }
+
+        var repeated = new HashSet<string>(StringComparer.Ordinal);
+        if (notMeasured is JsonArray entries)
+        {
+            foreach (var entry in entries)
+            {
+                repeated.Add($"not measured: {(string?)entry?["measure"]}: {(string?)entry?["reason"]}");
+            }
+        }
+
+        var kept = new JsonArray();
+        foreach (var note in stored)
+        {
+            if (note is JsonValue value && value.TryGetValue<string>(out var text) && repeated.Contains(text))
+            {
+                continue;
+            }
+
+            kept.Add(note?.DeepClone());
+        }
+
+        return kept;
     }
 
     /// <summary>The stored result as a JSON node, or null when the watch is still open or its text is not JSON.</summary>

@@ -123,7 +123,11 @@ ORDER BY collector_name;";
         await using var connection = await MigratedConnectionAsync(scratch, ct);
         await ExecuteAsync(connection, SeedSql, ct);
         await ExecuteAsync(connection, "ANALYZE collect.oversized_plan_backlog", ct);
-        await using var postgres = NpgsqlDataSource.Create(connection.ConnectionString);
+        // An open connection's ConnectionString no longer carries the password, so the data source is built from the scratch database's own.
+        await using var postgres = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+        {
+            SearchPath = PgSchemaGenerator.SearchPath,
+        }.ConnectionString);
 
         for (var pass = 0; pass < 2; pass++)
         {

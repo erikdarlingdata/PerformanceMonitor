@@ -55,6 +55,13 @@ public class RetentionService
     private readonly string _archivePath;
     private readonly ILogger<RetentionService>? _logger;
 
+    /// <summary>#8788: where each retention cleanup is recorded for the Store Health window. Null records nothing.</summary>
+    internal StoreHousekeepingHistory? History { get; set; }
+
+    /// <summary>#8788: the first file the last <see cref="CleanupOldArchives"/> could not evaluate or delete, with its error, or null
+    /// when every file was handled.</summary>
+    internal string? LastCleanupError { get; private set; }
+
     public RetentionService(string archivePath, ILogger<RetentionService>? logger = null)
     {
         _archivePath = archivePath;
@@ -79,57 +86,13 @@ public class RetentionService
 
         var cutoffDate = DateTime.UtcNow.AddMonths(-retentionMonths);
         var deleted = 0;
+        string? firstError = null;
 
         foreach (var file in Directory.GetFiles(_archivePath, "*.parquet"))
         {
             try
             {
-                var fileName = Path.GetFileNameWithoutExtension(file);
-
-                /* A file copied in from a previous install carries an imported_ prefix in front of one of the
-                   date forms below. Unstripped, none of the parses matched and such files never expired;
-                   imported query_snapshots, the largest table, stayed on disk for good. */
-                if (fileName.StartsWith("imported_", StringComparison.OrdinalIgnoreCase))
-                {
-                    fileName = fileName["imported_".Length..];
-                }
-
-                DateTime? fileDate = null;
-
-                /* Monthly compacted format: "202602_wait_stats" -> "202602" */
-                if (fileName.Length >= 6 &&
-                    DateTime.TryParseExact(
-                        fileName[..6],
-                        "yyyyMM",
-                        CultureInfo.InvariantCulture,
-                        DateTimeStyles.None,
-                        out var monthDate) &&
-                    fileName.Length > 6 && fileName[6] == '_')
-                {
-                    fileDate = monthDate;
-                }
-                /* Timestamped or daily format: "20260221..." -> "20260221" */
-                else if (fileName.Length >= 8 &&
-                    DateTime.TryParseExact(
-                        fileName[..8],
-                        "yyyyMMdd",
-                        CultureInfo.InvariantCulture,
-                        DateTimeStyles.None,
-                        out var dayDate))
-                {
-                    fileDate = dayDate;
-                }
-                /* Legacy monthly format: "2026-02_wait_stats" -> "2026-02" */
-                else if (fileName.Length >= 7 &&
-                    DateTime.TryParseExact(
-                        fileName[..7],
-                        "yyyy-MM",
-                        CultureInfo.InvariantCulture,
-                        DateTimeStyles.None,
-                        out var legacyMonth))
-                {
-                    fileDate = legacyMonth;
-                }
+                var fileDate = TryParseArchiveFileDate(file);
 
                 if (fileDate.HasValue && fileDate.Value < cutoffDate)
                 {
@@ -141,10 +104,69 @@ public class RetentionService
             catch (Exception ex)
             {
                 _logger?.LogError(ex, "Failed to evaluate/delete archive file: {File}", file);
+                firstError ??= $"{Path.GetFileName(file)}: {ex.Message}";
             }
         }
 
+        LastCleanupError = firstError;
         return deleted;
+    }
+
+    /// <summary>
+    /// The date an archive file's name carries (#8788: shared by the cleanup and the Store Health read, so both read a name the same
+    /// way), or null when the name has none of the forms listed on <see cref="CleanupOldArchives"/>. A month form gives the first of the
+    /// month.
+    /// </summary>
+    internal static DateTime? TryParseArchiveFileDate(string path)
+    {
+        var fileName = Path.GetFileNameWithoutExtension(path);
+
+        /* A file copied in from a previous install carries an imported_ prefix in front of one of the
+           date forms below. Unstripped, none of the parses matched and such files never expired;
+           imported query_snapshots, the largest table, stayed on disk for good. */
+        if (fileName.StartsWith("imported_", StringComparison.OrdinalIgnoreCase))
+        {
+            fileName = fileName["imported_".Length..];
+        }
+
+        DateTime? fileDate = null;
+
+        /* Monthly compacted format: "202602_wait_stats" -> "202602" */
+        if (fileName.Length >= 6 &&
+            DateTime.TryParseExact(
+                fileName[..6],
+                "yyyyMM",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var monthDate) &&
+            fileName.Length > 6 && fileName[6] == '_')
+        {
+            fileDate = monthDate;
+        }
+        /* Timestamped or daily format: "20260221..." -> "20260221" */
+        else if (fileName.Length >= 8 &&
+            DateTime.TryParseExact(
+                fileName[..8],
+                "yyyyMMdd",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var dayDate))
+        {
+            fileDate = dayDate;
+        }
+        /* Legacy monthly format: "2026-02_wait_stats" -> "2026-02" */
+        else if (fileName.Length >= 7 &&
+            DateTime.TryParseExact(
+                fileName[..7],
+                "yyyy-MM",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var legacyMonth))
+        {
+            fileDate = legacyMonth;
+        }
+
+        return fileDate;
     }
 
     /// <summary>
@@ -161,6 +183,8 @@ public class RetentionService
     /// </summary>
     public async Task<int?> CleanupOldArchivesAndRefreshViewsAsync(DuckDbInitializer duckDb, int retentionMonths = ArchiveRetentionMonths)
     {
+        /* Read before the write lock: the read takes the store's read lock, and the lock does not nest. */
+        var usedMb = History is null ? null : duckDb.GetUsedDataSizeMb();
         IDisposable writeLock;
         try
         {
@@ -175,12 +199,17 @@ public class RetentionService
         using (writeLock)
         {
             var deleted = CleanupOldArchives(retentionMonths);
+            var error = LastCleanupError;
             if (deleted > 0)
             {
                 /* Core, not CreateArchiveViewsAsync: this thread holds the write lock, and the lock does not nest. */
                 await duckDb.CreateArchiveViewsCoreAsync();
             }
 
+            History?.Record(new StoreHousekeepingEvent(
+                DateTime.UtcNow, StoreHousekeepingHistory.KindRetention,
+                error is null ? StoreHousekeepingHistory.OutcomeOk : StoreHousekeepingHistory.OutcomeFailed,
+                Files: deleted, UsedMb: usedMb, Message: error));
             return deleted;
         }
     }

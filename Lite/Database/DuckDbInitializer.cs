@@ -577,7 +577,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 81;
+    internal const int CurrentSchemaVersion = 82;
 
     private readonly string _archivePath;
 
@@ -3391,6 +3391,17 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Running migration to v81: adding memory_pressure_events.memory_node_id");
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(81));
         }
+
+        if (fromVersion < 82)
+        {
+            /* v82 (#8784, twinning Darling's V268 column): index_object_stats.answering_server_name, the @@SERVERNAME of the instance that answered,
+               so the object usage window read can tell a change of node behind a listener from a counter that merely moved. VARCHAR, nullable, the
+               LAST column (the shared added-columns list). NULL on a row stored before v82; the archive views union parquet by name, so a parquet
+               file written before v82 reads NULL for it. Darling's module execution summary in the same rung has no twin: Lite keeps every
+               collector for its one retention horizon, so its object usage read sums the stored Query Store rows directly. */
+            _logger?.LogInformation("Running migration to v82: adding index_object_stats.answering_server_name and is_memory_optimized");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(82));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3477,6 +3488,10 @@ public partial class DuckDbInitializer : IDisposable
         (80, "waiting_tasks", "program_name", "VARCHAR"),
         /* #7691: the memory node a resource monitor ring buffer record came from (Darling's V250 column). NULL on a row stored before v81 and on a record that has none. */
         (81, "memory_pressure_events", "memory_node_id", "INTEGER"),
+        /* #8784: the @@SERVERNAME of the instance that answered the index and object stats collection (Darling's V268 column). NULL on a row stored before v82. */
+        (82, "index_object_stats", "answering_server_name", "VARCHAR"),
+        /* #8784: a memory-optimized table, whose usage counters are always zero (the same V268 rung). NULL on a row stored before v82. */
+        (82, "index_object_stats", "is_memory_optimized", "BOOLEAN"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>

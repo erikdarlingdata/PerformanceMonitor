@@ -214,7 +214,7 @@ public class PgIndexBloatCollectorDefinitionTests
     {
         var sql = Sql();
 
-        Assert.Matches(new Regex(@"se\.tablename\s*=\s*i\.index_name"), sql);
+        Assert.Matches(new Regex(@"s\.tablename\s*=\s*i\.index_name"), sql);
         Assert.Matches(new Regex(@"i\.indkey\[ia\.attnum\s*-\s*1\]\s*=\s*0"), sql);
     }
 
