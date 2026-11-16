@@ -13,3 +13,7 @@ data:
   run-provision-roles.sh: |
     {{- .Files.Get "files/run-provision-roles.sh" | nindent 4 }}
   {{- end }}
+  {{- if include "performancemonitor-darling.wireStoreLogins" . }}
+  write-store-logins.sh: |
+    {{- .Files.Get "files/write-store-logins.sh" | nindent 4 }}
+  {{- end }}

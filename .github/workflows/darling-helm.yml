@@ -104,6 +104,7 @@ jobs:
           bash "${CHART_DIR}/tests/render-tests.sh"
           sh "${CHART_DIR}/tests/render-config-tests.sh"
           sh "${CHART_DIR}/tests/run-provision-roles-tests.sh"
+          sh "${CHART_DIR}/tests/write-store-logins-tests.sh"
           bash "${CHART_DIR}/tests/parity-tests.sh"
 
   # The chart installed on a kind cluster, with the image built from this checkout: both store modes, the password key from a

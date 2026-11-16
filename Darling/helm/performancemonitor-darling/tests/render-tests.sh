@@ -575,8 +575,8 @@ assert_fails "exactly one" -f "${CI_EXTERNAL}" --set store.provisionRoles.login.
 assert_fails "exactly one" -f "${CI_EXTERNAL}" --set store.provisionRoles.login.connectionStringSecret.name=other
 assert_fails "store.provisionRoles.login.passwordSecret" -f "${CI_EXTERNAL}" \
   --set store.external.passwordSecret.name= --set store.external.connectionStringSecret.name=svc-conn
-# The connection-string login form works with a connection-string store.
-render -f "${CI_EXTERNAL}" --set store.external.passwordSecret.name= --set store.external.connectionStringSecret.name=svc-conn \
+# The connection-string login form works with a connection-string store, once the wiring is off (it needs a host).
+render -f "${CI_EXTERNAL}" --set store.external.passwordSecret.name= --set store.external.connectionStringSecret.name=svc-conn   --set store.provisionRoles.wireConnectionStrings=false \
   --set store.provisionRoles.login.passwordSecret.name= --set store.provisionRoles.login.connectionStringSecret.name=svc-conn
 assert_eq "$(jq_job '.spec.template.spec.initContainers[0].args | join(" ")' | tr -d '"')" \
   "--prepare-provision-roles --login /run/secrets/darling-login/connection-string --login-kind connection-string --passwords /run/secrets/darling-roles --out /work --wait-seconds 900" \
@@ -680,3 +680,102 @@ done <<SELECTORS
 ${selectors}
 SELECTORS
 [ "${count}" -ge 3 ] || { echo "expected at least 3 selectors (web, mcp, Deployment), saw ${count}" >&2; exit 1; }
+
+# --- store.provisionRoles.wireConnectionStrings (#8779): the web and MCP logins reach the service as file: references ---
+
+# Evaluates a yq expression on the rendered darling.json (a JSON string in the ConfigMap).
+dj() {
+  doc ConfigMap "${DEPLOY}" | yq '.data["darling.json"]' | yq -p json -o=json -I=0 "$1"
+}
+
+# Evaluates a yq expression on the init container store-logins of the Deployment.
+sl() {
+  dq ".spec.template.spec.initContainers[] | select(.name == \"store-logins\") | $1"
+}
+
+t store_logins_wiring_on_darling_json
+render -f "${CI_EXTERNAL}"
+assert_eq "$(dj '.postgres.webConnectionString')" '"file:/run/darling-store-logins/web"' "web connection string reference"
+assert_eq "$(dj '.postgres.mcpConnectionString')" '"file:/run/darling-store-logins/mcp"' "mcp connection string reference"
+assert_eq "$(dj '.postgres.connectionString')" '"Host=sql.example.internal;Port=5432;Database=darling;Username=darling;SSL Mode=VerifyFull;Root Certificate=/etc/darling/store-ca/ca.crt"' "owner connection string unchanged"
+# The two files are not keys of the chart Secret: the secrets volume does not gain them.
+assert_eq "$(dq '.spec.template.spec.volumes[] | select(.name == "secrets") | .secret.items | map(.key) | sort | join(",")' | tr -d '"')" \
+  "mcp-operator-token,mcp-reader-token,mcp-token,sql-a-password,sql-b-password,web-token" "secrets volume keys unchanged by the wiring"
+
+t store_logins_init_container
+render -f "${CI_EXTERNAL}"
+assert_eq "$(dq '.spec.template.spec.initContainers | map(.name) | join(",")' | tr -d '"')" "render-config,store-logins" "init containers"
+assert_eq "$(sl '.image')" "$(dq '.spec.template.spec.containers[0].image')" "store-logins image equals the Darling image"
+assert_eq "$(sl '.command')" \
+  '["/bin/sh","/scripts/write-store-logins.sh","Host=sql.example.internal;Port=5432;Database=darling;SSL Mode=VerifyFull;Root Certificate=/etc/darling/store-ca/ca.crt","/run/secrets/darling-roles","/run/darling-store-logins"]' \
+  "store-logins command"
+assert_eq "$(sl '[.securityContext] | map(select(.allowPrivilegeEscalation != false or .readOnlyRootFilesystem != true or (.capabilities.drop | join(",")) != "ALL")) | length')" "0" "store-logins security context"
+assert_eq "$(sl 'has("env") or has("envFrom")')" "false" "store-logins has no env"
+assert_eq "$(sl '.volumeMounts | map(.name + "=" + .mountPath + "|" + (.readOnly | tostring)) | sort | join(",")' | tr -d '"')" \
+  "config-template=/scripts|true,role-passwords=/run/secrets/darling-roles|true,store-logins=/run/darling-store-logins|" "store-logins mounts (the logins mount is writable)"
+# Without a CA Secret the base has no Root Certificate.
+render -f "${CI_EXTERNAL}" --set store.external.caSecret.name= --set store.external.sslMode=Require
+assert_eq "$(sl '.command[2]')" '"Host=sql.example.internal;Port=5432;Database=darling;SSL Mode=Require"' "base without a CA"
+assert_eq "$(dj '.postgres.webConnectionString')" '"file:/run/darling-store-logins/web"' "web reference without a CA"
+
+t store_logins_volumes
+render -f "${CI_EXTERNAL}"
+assert_eq "$(dq '.spec.template.spec.volumes[] | select(.name == "store-logins") | .emptyDir')" '{"medium":"Memory","sizeLimit":"1Mi"}' "store-logins volume"
+assert_eq "$(dq '.spec.template.spec.volumes[] | select(.name == "role-passwords") | .secret | .secretName + "|" + (.defaultMode | tostring) + "|" + (.items | map(.key + "=" + .path) | join(","))' | tr -d '"')" \
+  "darling-store-roles|288|web=web,mcp=mcp" "role-passwords volume carries only web and mcp"
+assert_eq "$(dq '.spec.template.spec.containers[0].volumeMounts[] | select(.name == "store-logins") | .mountPath + "|" + (.readOnly | tostring)' | tr -d '"')" \
+  "/run/darling-store-logins|true" "darling mounts the logins read-only"
+
+t store_logins_darling_container_never_sees_the_passwords
+render -f "${CI_EXTERNAL}"
+assert_eq "$(dq '[.spec.template.spec.containers[0].volumeMounts[] | select(.name == "role-passwords")] | length')" "0" "darling does not mount role-passwords"
+assert_eq "$(dq '[.spec.template.spec.initContainers[] | select(.name == "render-config") | .volumeMounts[] | select(.name == "role-passwords")] | length')" "0" "render-config does not mount role-passwords"
+assert_eq "$(dq '[.spec.template.spec.containers[0].env[] | select(.valueFrom.secretKeyRef.name == "darling-store-roles")] | length')" "0" "no env of the darling container names rolePasswordsSecret"
+assert_eq "$(dq '.spec.template.spec.containers[0] | has("envFrom")')" "false" "no envFrom"
+# The name of the Secret appears once in the Deployment: the role-passwords volume.
+assert_eq "$(doc Deployment "${DEPLOY}" | grep -c 'darling-store-roles' || true)" "1" "rolePasswordsSecret appears once in the Deployment"
+assert_eq "$(doc Deployment "${DEPLOY}" | grep -c 'Password=' || true)" "0" "no password in the Deployment"
+assert_eq "$(dq '[.spec.template.spec.initContainers[] | select(.volumeMounts[]?.name == "role-passwords")] | map(.name) | join(",")' | tr -d '"')" "store-logins" "only store-logins mounts the role passwords"
+
+t store_logins_script_in_configmap
+render -f "${CI_EXTERNAL}"
+assert_eq "$(doc ConfigMap "${DEPLOY}" | yq '.data["write-store-logins.sh"]')" "$(tr -d '\015' < "${CHART_DIR}/files/write-store-logins.sh")" "the ConfigMap carries the shipped script"
+
+t store_logins_wiring_refusals
+assert_fails "store.provisionRoles.wireConnectionStrings" -f "${CI_EXTERNAL}" \
+  --set store.external.passwordSecret.name= --set store.external.connectionStringSecret.name=svc-conn \
+  --set store.provisionRoles.login.passwordSecret.name= --set store.provisionRoles.login.connectionStringSecret.name=svc-conn
+assert_fails "store.provisionRoles.wireConnectionStrings" -f "${CI_EXTERNAL}" --set-json 'config={"postgres":{"webConnectionString":"file:/run/secrets/darling/x"}}'
+assert_fails "store.provisionRoles.wireConnectionStrings" -f "${CI_EXTERNAL}" --set-json 'config={"postgres":{"mcpConnectionString":"file:/run/secrets/darling/x"}}'
+assert_fails "config.postgres.mcpConnectionString" -f "${CI_EXTERNAL}" --set-json 'config={"postgres":{"mcpConnectionString":"file:/run/secrets/darling/x"}}'
+# A key spelled in another case is the same key to Darling.
+assert_fails "store.provisionRoles.wireConnectionStrings" -f "${CI_EXTERNAL}" --set-json 'config={"postgres":{"WebConnectionString":"file:/run/secrets/darling/x"}}'
+# Wiring off lifts both refusals.
+render -f "${CI_EXTERNAL}" --set store.provisionRoles.wireConnectionStrings=false \
+  --set store.external.passwordSecret.name= --set store.external.connectionStringSecret.name=svc-conn \
+  --set store.provisionRoles.login.passwordSecret.name= --set store.provisionRoles.login.connectionStringSecret.name=svc-conn
+render -f "${CI_EXTERNAL}" --set store.provisionRoles.wireConnectionStrings=false \
+  --set-json 'config={"postgres":{"webConnectionString":"file:/run/secrets/darling/x"}}'
+
+t store_logins_wiring_off
+render -f "${CI_EXTERNAL}" --set store.provisionRoles.wireConnectionStrings=false
+assert_eq "$(dj '.postgres | has("webConnectionString") or has("mcpConnectionString")')" "false" "neither key is set"
+assert_eq "$(dq '.spec.template.spec.initContainers | map(.name) | join(",")' | tr -d '"')" "render-config" "no store-logins init container"
+assert_eq "$(dq '[.spec.template.spec.volumes[] | select(.name == "store-logins" or .name == "role-passwords")] | length')" "0" "no store-logins or role-passwords volume"
+assert_eq "$(dq '[.spec.template.spec.containers[0].volumeMounts[] | select(.name == "store-logins")] | length')" "0" "no store-logins mount"
+assert_eq "$(doc ConfigMap "${DEPLOY}" | yq '.data | has("write-store-logins.sh")')" "false" "no write-store-logins.sh key"
+# The pass-through of the two keys still works, and a file: reference in them is mounted from the chart Secret.
+render -f "${CI_EXTERNAL}" --set store.provisionRoles.wireConnectionStrings=false \
+  --set-json 'config={"postgres":{"webConnectionString":"file:/run/secrets/darling/web-cs","mcpConnectionString":"file:/run/secrets/darling/mcp-cs"}}'
+assert_eq "$(dj '.postgres.webConnectionString')" '"file:/run/secrets/darling/web-cs"' "pass-through web"
+assert_eq "$(dj '.postgres.mcpConnectionString')" '"file:/run/secrets/darling/mcp-cs"' "pass-through mcp"
+assert_eq "$(secret_items)" "mcp-cs=mcp-cs,mcp-token=mcp-token,web-cs=web-cs,web-token=web-token" "pass-through keys are mounted"
+
+t store_logins_absent_when_the_job_is_off
+render
+assert_eq "$(dq '.spec.template.spec.initContainers | map(.name) | join(",")' | tr -d '"')" "render-config" "default: one init container"
+assert_eq "$(dj '.postgres | has("webConnectionString") or has("mcpConnectionString")')" "false" "default: neither key"
+assert_eq "$(doc ConfigMap "${DEPLOY}" | yq '.data | has("write-store-logins.sh")')" "false" "default: no write-store-logins.sh key"
+render -f "${CI_EXTERNAL}" --set store.provisionRoles.enabled=false
+assert_eq "$(dq '.spec.template.spec.initContainers | map(.name) | join(",")' | tr -d '"')" "render-config" "external, Job off: one init container"
+assert_eq "$(dq '[.spec.template.spec.volumes[] | select(.name == "store-logins" or .name == "role-passwords")] | length')" "0" "external, Job off: no wiring volumes"

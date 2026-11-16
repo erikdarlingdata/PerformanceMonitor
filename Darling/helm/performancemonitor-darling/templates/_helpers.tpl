@@ -99,6 +99,12 @@ an empty value name means the chart sets the key itself and nothing overrides it
   (list (list "health") "")
   (list (list "passwordKey") "passwordKey.*")
 -}}
+{{- /* While the chart wires the web and MCP logins (store.provisionRoles.wireConnectionStrings), it owns those two keys too. */ -}}
+{{- if include "performancemonitor-darling.wireStoreLogins" . -}}
+{{- $owned = concat $owned (list
+  (list (list "postgres" "webConnectionString") "store.provisionRoles.wireConnectionStrings")
+  (list (list "postgres" "mcpConnectionString") "store.provisionRoles.wireConnectionStrings")) -}}
+{{- end -}}
 {{- range $owned -}}
 {{- $path := index . 0 -}}
 {{- if include "performancemonitor-darling.pathPresent" (dict "cfg" $.Values.config "path" $path) -}}
@@ -238,6 +244,10 @@ Arguments: dict "ctx" <root> "surface" "web"|"mcp" "field" "allowFrom"|"trustedP
 {{- $_ := set $postgres "connectionString" $cs -}}
 {{- end -}}
 {{- end -}}
+{{- if include "performancemonitor-darling.wireStoreLogins" . -}}
+{{- $_ := set $postgres "webConnectionString" "file:/run/darling-store-logins/web" -}}
+{{- $_ := set $postgres "mcpConnectionString" "file:/run/darling-store-logins/mcp" -}}
+{{- end -}}
 {{- range $surface := list "web" "mcp" -}}
 {{- if eq (int (get (get $.Values $surface) "port")) 5154 -}}
 {{- fail (printf "%s.port must not be 5154: that port is fixed for the health endpoint the probes use, and Darling refuses a health port that clashes with the web or MCP port" $surface) -}}
@@ -344,4 +354,29 @@ app.kubernetes.io/component: store
 {{- if and $viaPassword .Values.store.external.connectionStringSecret.name -}}
 {{- fail "store.provisionRoles.login.passwordSecret cannot be used with store.external.connectionStringSecret: there is no host to pair the password with; use store.provisionRoles.login.connectionStringSecret instead" -}}
 {{- end -}}
+{{- if and $p.wireConnectionStrings .Values.store.external.connectionStringSecret.name -}}
+{{- fail "store.provisionRoles.wireConnectionStrings cannot be on while store.external.connectionStringSecret is used: the chart has no host to put in the web and MCP connection strings. Set store.provisionRoles.wireConnectionStrings to false and point config.postgres.webConnectionString and config.postgres.mcpConnectionString at your own connection strings (file: references into a Secret) yourself" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Prints "true" while the chart wires the web and MCP logins: store.provisionRoles is on and wireConnectionStrings is on. */}}
+{{- define "performancemonitor-darling.wireStoreLogins" -}}
+{{- if and .Values.store.provisionRoles.enabled .Values.store.provisionRoles.wireConnectionStrings -}}true{{- end -}}
+{{- end -}}
+
+{{/* The non-secret Npgsql prefix of the web and MCP connection strings, from the host-based store.external settings, the way
+the owner connection string is built in darlingJson (without Username). The store-logins init container appends the role's
+Username and Password. Host, Database and SSL Mode must not contain ';' or '='. */}}
+{{- define "performancemonitor-darling.storeLoginsBase" -}}
+{{- $ext := .Values.store.external -}}
+{{- range $field := list "host" "database" "sslMode" -}}
+{{- if regexMatch "[;=]" (toString (get $ext $field)) -}}
+{{- fail (printf "store.external.%s must not contain ';' or '='" $field) -}}
+{{- end -}}
+{{- end -}}
+{{- $base := printf "Host=%s;Port=%v;Database=%s;SSL Mode=%s" $ext.host $ext.port $ext.database $ext.sslMode -}}
+{{- if $ext.caSecret.name -}}
+{{- $base = printf "%s;Root Certificate=/etc/darling/store-ca/ca.crt" $base -}}
+{{- end -}}
+{{- $base -}}
 {{- end -}}
