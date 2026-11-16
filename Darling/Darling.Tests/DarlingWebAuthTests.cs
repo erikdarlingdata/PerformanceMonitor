@@ -264,7 +264,7 @@ public sealed class DarlingWebAuthTests
         var expiry = DateTimeOffset.UtcNow.AddHours(3).AddMilliseconds(777);
         var subject = kind switch
         {
-            "o3" => DarlingWebSeat.EncodeCookieSubject("viewer@example.test", WebOidcRole.Viewer),
+            "o3" => DarlingWebSeat.EncodeCookieSubject("viewer@example.test", WebOidcRole.Viewer, new string('k', DarlingWebSeat.OwnerKeyLength), "Vera Viewer", "Analysts"),
             "t1" => DarlingWebSeat.EncodeTokenCookieSubject(tokenName),
             _ => null,
         };
