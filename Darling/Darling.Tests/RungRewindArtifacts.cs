@@ -808,6 +808,12 @@ DROP TABLE IF EXISTS collect.object_executions_daily_built;
 DROP TABLE IF EXISTS collect.object_executions_daily_databases;
 DROP TABLE IF EXISTS collect.object_executions_daily_retention;
 DROP TABLE IF EXISTS collect.object_inventory;"),
+        // V270 (#8882): tempdb's autogrow-all-files flag on collect.database_size_stats. The rewind drops the view, drops the column and creates the
+        // view again over the older shape; a re-run of V270 adds the column back and re-expands the view. Safe on a store that never had it.
+        new(270, "hasDatabaseSizeAutogrowAllFiles",
+            @"DROP VIEW IF EXISTS collect.v_database_size_stats;
+ALTER TABLE IF EXISTS collect.database_size_stats DROP COLUMN IF EXISTS is_autogrow_all_files;
+CREATE OR REPLACE VIEW collect.v_database_size_stats AS SELECT * FROM collect.database_size_stats;"),
     ];
 
     /// <summary>

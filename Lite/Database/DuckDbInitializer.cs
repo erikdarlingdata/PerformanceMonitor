@@ -577,7 +577,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 82;
+    internal const int CurrentSchemaVersion = 84;
 
     private readonly string _archivePath;
 
@@ -3402,6 +3402,15 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Running migration to v82: adding index_object_stats.answering_server_name and is_memory_optimized");
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(82));
         }
+
+        if (fromVersion < 84)
+        {
+            /* v84 (#8882, twinning Darling's V270): database_size_stats.is_autogrow_all_files, whether tempdb's data-file filegroup grows all its files
+               together. BOOLEAN, nullable, the LAST column (the shared added-columns list). NULL on a row stored before v84, on tempdb's log file and on
+               every other database; the archive views union parquet by name, so a parquet file written before v84 reads NULL for it. */
+            _logger?.LogInformation("Running migration to v84: adding database_size_stats.is_autogrow_all_files");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(84));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3492,6 +3501,8 @@ public partial class DuckDbInitializer : IDisposable
         (82, "index_object_stats", "answering_server_name", "VARCHAR"),
         /* #8784: a memory-optimized table, whose usage counters are always zero (the same V268 rung). NULL on a row stored before v82. */
         (82, "index_object_stats", "is_memory_optimized", "BOOLEAN"),
+        /* #8882: tempdb's autogrow-all-files flag on a data-file row (Darling's V270 column). NULL on a row stored before v84. */
+        (84, "database_size_stats", "is_autogrow_all_files", "BOOLEAN"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>
