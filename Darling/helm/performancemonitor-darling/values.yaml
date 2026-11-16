@@ -115,7 +115,7 @@ store:
   mode: bundled
   bundled:
     # The store image. Keep it equal to STORE_IMAGE in .github/workflows/darling-linux-store.yml, the image CI tests Darling against.
-    image: timescale/timescaledb:2.31.0-pg17
+    image: timescale/timescaledb:2.32.0-pg17
     persistence:
       # Size of the store's data volume. Changing it later makes helm upgrade fail (a StatefulSet's volumeClaimTemplates
       # cannot change): resize the PVC itself (see the README's Upgrades).
