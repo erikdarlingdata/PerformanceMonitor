@@ -135,8 +135,8 @@ public sealed class DarlingTokenSignInCliTests
 
         var line = Assert.Single(findings);
         Assert.StartsWith("INFO:", line, StringComparison.Ordinal);
-        Assert.Contains("disabled", line, StringComparison.Ordinal);
-        Assert.Contains("not evaluated", line, StringComparison.Ordinal);
+        Assert.Contains("not checked here", line, StringComparison.Ordinal);
+        Assert.Contains("--enable-web", line, StringComparison.Ordinal);
     }
 
     [Fact]

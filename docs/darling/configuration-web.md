@@ -107,7 +107,7 @@ A refused sign-in POST to `/auth/login` answers 403 before the form is read, wit
 
 **A store behind a front door keeps `on`.** The front door signs in to the store with its shared token, over the network. Under `loopback` or `off` the front door reports that the store has `tokenSignIn` set to `loopback` or `off`. See [The front door](front-door.md#the-web-dashboard).
 
-`--validate-config` prints the mode when it is not `on`, fails on an unknown value and on `off` without OIDC configured or without an exposed dashboard, and notes `loopback` with an exposed dashboard, whether or not `trustedProxies` is set. With `web.enabled` false in `darling.json` it prints one INFO line instead, because the setting is not evaluated for a dashboard that is not started.
+`--validate-config` prints the mode when it is not `on`, fails on an unknown value and on `off` without OIDC configured or without an exposed dashboard, and notes `loopback` with an exposed dashboard, whether or not `trustedProxies` is set. With `web.enabled` false in `darling.json` it prints one INFO line instead, because `web.enabled` only seeds the dashboard's first run and the setting is not checked then. Set `web.enabled` to true to check it when the store has the dashboard enabled.
 
 ### Viewer-managed team access groups
 

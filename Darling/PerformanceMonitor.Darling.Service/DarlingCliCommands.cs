@@ -904,8 +904,8 @@ public static partial class DarlingCliCommands
         if (!config.Web.Enabled)
         {
             findings.Add(
-                "INFO: web.enabled is false in darling.json, so the web dashboard is disabled and web.network.oidc.tokenSignIn is not evaluated. "
-                + "If the dashboard is enabled in the store (--enable-web), set web.enabled to true to check it here.");
+                "INFO: web.enabled is false in darling.json, which only seeds the dashboard's first run, so web.network.oidc.tokenSignIn is not checked here. "
+                + "If the store has the dashboard enabled (--enable-web), set web.enabled to true to check it.");
             return findings;
         }
 
