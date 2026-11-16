@@ -387,7 +387,7 @@ case_provision_roles_fails_the_release() {
   fi
   k -n "${NS}" logs "job/${JOB}" --all-containers --prefix >"${log}"
   grep -F "provision-roles.sql exit code: 3" "${log}" >/dev/null || fail "no exit code 3 after the marker error"
-  grep -F "was not created by Darling" "${log}" >/dev/null || fail "no 'was not created by Darling' in the Job log"
+  grep -F 'The group role "darling_alert_sources" already exists and was not created by Darling' "${log}" >/dev/null || fail "no darling_alert_sources marker error in the Job log"
   echo "  marker error outside the guards: upgrade failed, exit 3"
 }
 

@@ -161,3 +161,13 @@ jobs:
         timeout-minutes: 25
         shell: bash
         run: bash "${CHART_DIR}/tests/kind-tests.sh" performancemonitor-darling:pr
+
+      # The store-roles Job on PostgreSQL 15 as well: before 16, CREATEROLE can grant membership in any role, and the guard's
+      # ADMIN OPTION checks differ. The same cluster and image; only the store image and the two cases change.
+      - name: Run the store-roles kind cases on PostgreSQL 15
+        timeout-minutes: 15
+        shell: bash
+        env:
+          KIND_PG_IMAGE: postgres:15
+          KIND_CASES: external_provision_roles provision_roles_fails_the_release
+        run: bash "${CHART_DIR}/tests/kind-tests.sh" performancemonitor-darling:pr
