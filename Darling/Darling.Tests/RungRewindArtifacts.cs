@@ -795,6 +795,19 @@ DROP TABLE IF EXISTS collect.schema_capture_passes;"),
         new(266, "hasQueryTagSightingsFillfactor", "ALTER TABLE collect.query_tag_sightings RESET (fillfactor);"),
         // V267 (#8570): the (server_id, day) index on collect.plan_regression_daily. The rewind drops it and a re-run of V267 builds it again.
         new(267, "hasPlanRegressionDailyServerDayIndex", "DROP INDEX IF EXISTS collect.ix_plan_regression_daily_server_day;"),
+        // V268 (#8784): the answering instance on index_object_stats and the module execution summary. The probe's sentinel is the column and
+        // the build table together, so the rewind drops the view, drops the column, creates the view again over the older shape and drops both
+        // summary tables; a re-run of V268 adds them all back. Safe on a store that never had them.
+        new(268, "hasObjectUsage",
+            @"DROP VIEW IF EXISTS collect.v_index_object_stats;
+ALTER TABLE IF EXISTS collect.index_object_stats DROP COLUMN IF EXISTS is_memory_optimized;
+ALTER TABLE IF EXISTS collect.index_object_stats DROP COLUMN IF EXISTS answering_server_name;
+CREATE OR REPLACE VIEW collect.v_index_object_stats AS SELECT * FROM collect.index_object_stats;
+DROP TABLE IF EXISTS collect.object_executions_daily;
+DROP TABLE IF EXISTS collect.object_executions_daily_built;
+DROP TABLE IF EXISTS collect.object_executions_daily_databases;
+DROP TABLE IF EXISTS collect.object_executions_daily_retention;
+DROP TABLE IF EXISTS collect.object_inventory;"),
     ];
 
     /// <summary>

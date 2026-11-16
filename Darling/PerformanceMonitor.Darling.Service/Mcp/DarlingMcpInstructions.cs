@@ -198,7 +198,7 @@ internal static class DarlingMcpInstructions
     /// are identical, so a new tool moves this or fails there.
     /// </summary>
     private const string CatalogCensus =
-        "This server exposes 289 tools. 112 are the same names Lite exposes. The remaining 177 are unique to Darling: " +
+        "This server exposes 290 tools. 113 are the same names Lite exposes. The remaining 177 are unique to Darling: " +
         "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server/query-tag, " +
         "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` (Availability Groups), " +
         "`get_sweep_reports`, `get_store_metrics`, `get_store_table_health`, `measure_store_table`, `get_store_maintenance_readiness`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
@@ -225,7 +225,7 @@ internal static class DarlingMcpInstructions
         "get_health_parser_significant_waits", "get_health_parser_system_health", "get_index_usage",
         "get_investigation_reports", "get_latch_stats", "get_lock_wait_trend", "get_long_query_completions", "get_memory_clerks",
         "get_memory_grants", "get_memory_pressure_events", "get_memory_stats", "get_memory_trend", "get_mute_rules",
-        "get_notification_routes", "get_object_locking", "get_perfmon_stats", "get_perfmon_trend",
+        "get_notification_routes", "get_object_locking", "get_object_usage", "get_perfmon_stats", "get_perfmon_trend",
         "get_plan_cache_bloat", "get_plan_corrections", "get_plan_xml", "get_procedure_duration_trend",
         "get_pvs_stats", "get_query_duration_trend", "get_query_heatmap", "get_query_store_duration_trend",
         "get_query_store_health", "get_query_store_regressions", "get_query_store_top", "get_query_trend",

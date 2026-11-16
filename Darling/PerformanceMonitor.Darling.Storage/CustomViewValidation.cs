@@ -174,6 +174,7 @@ public static partial class CustomViewValidation
         "get_pvs_stats",
         "get_index_usage",
         "get_object_locking",
+        "get_object_usage",
         "get_table_index_sizes",
         "get_cpu_scheduler_pressure",
         "get_plan_cache_bloat",

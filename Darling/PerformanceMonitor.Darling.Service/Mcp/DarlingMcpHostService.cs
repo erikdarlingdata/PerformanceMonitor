@@ -1662,6 +1662,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpSessionTools>()
             .WithGeminiCompatibleTools<DarlingMcpConfigHistoryTools>()
             .WithGeminiCompatibleTools<DarlingMcpObjectStatsTools>()
+            /* #8784: get_object_usage, table/view/module usage over a long window for decommissioning, read with the ReadOnlyIntent partner. */
+            .WithGeminiCompatibleTools<DarlingMcpObjectUsageTools>()
             /* The resource-contention + jobs data-read tools — get_latch_stats / get_spinlock_stats,
                get_resource_semaphore / get_memory_grants, get_plan_cache_bloat / get_cpu_scheduler_pressure,
                get_running_jobs — the same names Lite and the Dashboard expose, over Darling's Postgres store

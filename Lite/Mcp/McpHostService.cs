@@ -325,6 +325,8 @@ public sealed class McpHostService : BackgroundService
             .WithGeminiCompatibleTools<McpServerInfoTools>()
             .WithGeminiCompatibleTools<McpSessionTools>()
             .WithGeminiCompatibleTools<McpObjectStatsTools>()
+            /* #8784: get_object_usage, table and module usage over a window for decommissioning decisions. */
+            .WithGeminiCompatibleTools<McpObjectUsageTools>()
             .WithGeminiCompatibleTools<McpLatchSpinlockTools>()
             .WithGeminiCompatibleTools<McpPlanCacheSchedulerTools>()
             .WithGeminiCompatibleTools<McpConfigHistoryTools>()
