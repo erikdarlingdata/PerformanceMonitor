@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
@@ -74,6 +75,31 @@ public sealed class ProvisionRolesStoreChecksLiveTests
             Assert.Equal(signature.StartsWith("config.", StringComparison.Ordinal) ? signature["config.".Length..] : signature, item.Name);
             var text = ProvisionRolesStoreChecks.DescribeOwnership("prov_owner", foreign)!;
             Assert.Contains("OWNER TO \"prov_owner\";", text, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task ReadForeignOwnedObjects_SkipsLinkedSequences_AndTheListedFixRuns()
+    {
+        await ProvisionRolesOwnerRunLiveTests.RunInOwnStoreAsync(createRole: true, async (_, _, superuser, ownerLogin, ct) =>
+        {
+            await ComposeStoreRolesLiveTests.ExecAsync(superuser, "CREATE TABLE config.prov_identity_8779 (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, note text)", ct);
+            await using var connection = await ComposeStoreRolesLiveTests.OpenAsync(ownerLogin, ct);
+
+            var foreign = await ProvisionRolesStoreChecks.ReadForeignOwnedObjectsAsync(connection, ct);
+
+            var item = Assert.Single(foreign);
+            Assert.Equal("table", item.Kind);
+            Assert.Equal("prov_identity_8779", item.Name);
+            var text = ProvisionRolesStoreChecks.DescribeOwnership("prov_owner", foreign)!;
+            var alters = text.Split((char)10, StringSplitOptions.RemoveEmptyEntries).Where(line => line.StartsWith("ALTER ", StringComparison.Ordinal)).ToList();
+            Assert.Single(alters);
+            foreach (var alter in alters)
+            {
+                await ComposeStoreRolesLiveTests.ExecAsync(superuser, alter, ct);
+            }
+
+            Assert.Empty(await ProvisionRolesStoreChecks.ReadForeignOwnedObjectsAsync(connection, ct));
         });
     }
 }

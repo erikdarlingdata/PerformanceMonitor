@@ -65,6 +65,8 @@ SELECT CASE cl.relkind WHEN 'r' THEN 'table' WHEN 'p' THEN 'table' WHEN 'v' THEN
        n.nspname::text, cl.relname::text, r.rolname::text
 FROM pg_class cl JOIN pg_namespace n ON n.oid = cl.relnamespace JOIN pg_roles r ON r.oid = cl.relowner
 WHERE n.nspname IN ('collect', 'config') AND cl.relkind IN ('r', 'p', 'v', 'm', 'S') AND r.rolname <> current_user
+  AND NOT (cl.relkind = 'S' AND EXISTS (SELECT 1 FROM pg_depend d
+           WHERE d.classid = 'pg_class'::regclass AND d.objid = cl.oid AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')))
 UNION ALL
 SELECT CASE p.prokind WHEN 'p' THEN 'procedure' ELSE 'function' END,
        n.nspname::text, p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', r.rolname::text
