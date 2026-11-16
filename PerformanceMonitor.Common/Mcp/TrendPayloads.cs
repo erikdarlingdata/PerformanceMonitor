@@ -65,7 +65,7 @@ internal sealed record TempDbBucketPoint(
     double UnallocatedMb, double PeakTotalReservedMb, double PeakVersionStoreMb, long SessionsUsingTempDb,
     int TopConsumerSessionId, double TopConsumerMb,
     double? PeakLogUsedPercent = null, double? LogTotalMb = null, string? LogReuseWaitDesc = null, string? LogTruncationHoldupReason = null,
-    int? LogHolderSessionId = null, string? LogHolderLoginName = null);
+    int? LogHolderSessionId = null, string? LogHolderLoginName = null, double? PeakLogUsedMb = null);
 
 /// <summary>One bucket of memory samples (#3960): each level averaged over the samples in the bucket.</summary>
 internal sealed record MemoryBucketPoint(DateTime BucketStart, double TotalServerMemoryMb, double TargetServerMemoryMb, double BufferPoolMb, double PlanCacheMb);
@@ -421,12 +421,42 @@ internal static class TrendPayloads
     /// say for them, because they are the bucket's busiest collection, not averages.</summary>
     public const string TempDbFiguresNote =
         "sessions_using_tempdb is the most sessions any collection in the bucket saw, and top_consumer_* the single largest consumer. "
-        + "peak_log_used_percent is the fullest the tempdb LOG was in the bucket, and log_total_mb, log_reuse_wait_desc, log_truncation_holdup_reason and the log_holder_* fields describe that fullest collection. "
-        + "The log fields are null where the engine could not report them or the row predates them, and the holder is captured only while the log is 50 percent used or more.";
+        + "peak_log_used_percent and peak_log_used_mb are the fullest the tempdb LOG was in the bucket, and log_total_mb, log_reuse_wait_desc, log_truncation_holdup_reason and the log_holder_* fields describe that fullest collection. "
+        + "The log fields are left out of a point where the engine could not report them or the row predates them, and the holder is captured only while the log is 50 percent used or more. "
+        + "log_holder_note is one sentence on the oldest open tempdb log transaction as of the newest collection in the window, and null when that collection has no holder.";
+
+    /// <summary>One tempdb point. The log fields (#8881) are written only where the bucket has a value: a store with no log reading, or rows stored before the log
+    /// columns, would otherwise spend about 190 bytes of nulls on every point against the response budget.</summary>
+    private static Dictionary<string, object?> TempDbPoint(TempDbBucketPoint p)
+    {
+        var point = new Dictionary<string, object?>
+        {
+            ["time"] = Stamp(p.BucketStart),
+            ["user_objects_mb"] = Math.Round(p.UserObjectsMb, 1),
+            ["internal_objects_mb"] = Math.Round(p.InternalObjectsMb, 1),
+            ["version_store_mb"] = Math.Round(p.VersionStoreMb, 1),
+            ["total_reserved_mb"] = Math.Round(p.TotalReservedMb, 1),
+            ["unallocated_mb"] = Math.Round(p.UnallocatedMb, 1),
+            ["peak_total_reserved_mb"] = Math.Round(p.PeakTotalReservedMb, 1),
+            ["peak_version_store_mb"] = Math.Round(p.PeakVersionStoreMb, 1),
+            ["sessions_using_tempdb"] = p.SessionsUsingTempDb,
+            ["top_consumer_session_id"] = p.TopConsumerSessionId,
+            ["top_consumer_mb"] = Math.Round(p.TopConsumerMb, 1),
+        };
+        if (p.PeakLogUsedPercent is { } lp) point["peak_log_used_percent"] = Math.Round(lp, 1);
+        if (p.PeakLogUsedMb is { } lm) point["peak_log_used_mb"] = Math.Round(lm, 1);
+        if (p.LogTotalMb is { } lt) point["log_total_mb"] = Math.Round(lt, 1);
+        if (p.LogReuseWaitDesc is { } reuse) point["log_reuse_wait_desc"] = reuse;
+        if (p.LogTruncationHoldupReason is { } holdup) point["log_truncation_holdup_reason"] = holdup;
+        if (p.LogHolderSessionId is { } session) point["log_holder_session_id"] = session;
+        if (p.LogHolderLoginName is { } login) point["log_holder_login_name"] = login;
+        return point;
+    }
 
     /// <summary><c>get_tempdb_trend</c>'s data envelope (#3960), both SKUs.</summary>
     public static string TempDbTrend(
-        string serverName, int hoursBack, IReadOnlyList<TempDbBucketPoint> points, int bucketMinutes, bool requested, int autoBudget)
+        string serverName, int hoursBack, IReadOnlyList<TempDbBucketPoint> points, int bucketMinutes, bool requested, int autoBudget,
+        TempDbLogHolder? newestHolder = null)
     {
         var envelope = new Dictionary<string, object?>
         {
@@ -436,26 +466,9 @@ internal static class TrendPayloads
             ["bucket_minutes"] = bucketMinutes,
             ["aggregate_note"] = TrendBuckets.LevelNote(bucketMinutes, requested, autoBudget),
             ["note"] = TempDbFiguresNote,
-            ["trend"] = points.Select(p => new
-            {
-                time = Stamp(p.BucketStart),
-                user_objects_mb = Math.Round(p.UserObjectsMb, 1),
-                internal_objects_mb = Math.Round(p.InternalObjectsMb, 1),
-                version_store_mb = Math.Round(p.VersionStoreMb, 1),
-                total_reserved_mb = Math.Round(p.TotalReservedMb, 1),
-                unallocated_mb = Math.Round(p.UnallocatedMb, 1),
-                peak_total_reserved_mb = Math.Round(p.PeakTotalReservedMb, 1),
-                peak_version_store_mb = Math.Round(p.PeakVersionStoreMb, 1),
-                sessions_using_tempdb = p.SessionsUsingTempDb,
-                top_consumer_session_id = p.TopConsumerSessionId,
-                top_consumer_mb = Math.Round(p.TopConsumerMb, 1),
-                peak_log_used_percent = p.PeakLogUsedPercent is { } lp ? Math.Round(lp, 1) : (double?)null,
-                log_total_mb = p.LogTotalMb is { } lt ? Math.Round(lt, 1) : (double?)null,
-                log_reuse_wait_desc = p.LogReuseWaitDesc,
-                log_truncation_holdup_reason = p.LogTruncationHoldupReason,
-                log_holder_session_id = p.LogHolderSessionId,
-                log_holder_login_name = p.LogHolderLoginName,
-            }),
+            /* #8881: the one line the web page draws under the tempdb chart, null (so the page draws nothing) when the newest collection in the window has no holder. */
+            ["log_holder_note"] = TempDbLogHolderLine.Build(newestHolder),
+            ["trend"] = points.Select(TempDbPoint),
         };
 
         return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);

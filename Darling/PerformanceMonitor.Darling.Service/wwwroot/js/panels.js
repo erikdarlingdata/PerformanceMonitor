@@ -1761,6 +1761,9 @@ function vizLine(data, desc) {
   const under = [];
   if (typeof footNote === "string" && footNote) under.push(noticeStrip(footNote));
   if (typeof seamCaption === "string" && seamCaption) under.push(captionStrip(seamCaption));
+  /* #8881: `captionKey` names a text field of the reply drawn as a plain line under the chart when it has text, and nothing when it is null or empty. */
+  const lineCaption = desc.captionKey ? getPath(data, desc.captionKey) : null;
+  if (typeof lineCaption === "string" && lineCaption) under.push(captionStrip(lineCaption));
   return under.length ? el("div", {}, [chart, ...under]) : chart;
 }
 

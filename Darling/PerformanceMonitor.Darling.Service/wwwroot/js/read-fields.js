@@ -497,6 +497,8 @@ export const READ_FIELDS = {
         { key: "user_objects_mb", label: "User objects" },
         { key: "internal_objects_mb", label: "Internal objects" },
         { key: "version_store_mb", label: "Version store" },
+        /* #8881: the tempdb log's used space (the fullest it was in the bucket), null where the engine could not report the log or the row predates it. */
+        { key: "peak_log_used_mb", label: "Log used" },
       ],
     },
   },

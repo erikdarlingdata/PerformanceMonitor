@@ -1092,10 +1092,13 @@ public partial class ServerTab : UserControl
         {
             var tempDbTask = Helpers.MethodProfiler.TimeAsync("TempDb.Trend", () => Task.Run(() => _dataService.GetTempDbTrendAsync(_serverId, hoursBack, fromDate, toDate)));
             var tempDbFileIoTask = Helpers.MethodProfiler.TimeAsync("TempDb.FileIoTrend", () => Task.Run(() => _dataService.GetTempDbFileIoTrendAsync(_serverId, hoursBack, fromDate, toDate)));
+            /* #8881: who holds the oldest open tempdb log transaction as of the chart's newest collection. */
+            var tempDbHolderTask = Helpers.MethodProfiler.TimeAsync("TempDb.LogHolder", () => Task.Run(() => _dataService.GetNewestTempDbLogHolderAsync(_serverId, hoursBack, fromDate, toDate)));
 
-            await System.Threading.Tasks.Task.WhenAll(tempDbTask, tempDbFileIoTask);
+            await System.Threading.Tasks.Task.WhenAll(tempDbTask, tempDbFileIoTask, tempDbHolderTask);
 
             UpdateTempDbChart(tempDbTask.Result, hoursBack, fromDate, toDate);
+            SetCardNote(TempDbChart, TempDbLogHolderLine.Build(tempDbHolderTask.Result));
             UpdateTempDbSizeChart(tempDbTask.Result, hoursBack, fromDate, toDate);
             UpdateTempDbFileIoChart(tempDbFileIoTask.Result, hoursBack, fromDate, toDate);
             await ShowTempDbOutcomeAsync(tempDbTask.Result.Count);

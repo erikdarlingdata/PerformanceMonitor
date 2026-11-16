@@ -675,7 +675,8 @@ SELECT
     (array_agg(log_reuse_wait_desc ORDER BY log_used_percent DESC NULLS LAST, collection_time))[1] AS bucket_log_reuse_wait_desc,
     (array_agg(log_truncation_holdup_reason ORDER BY log_used_percent DESC NULLS LAST, collection_time))[1] AS bucket_log_holdup_reason,
     (array_agg(holder_session_id ORDER BY log_used_percent DESC NULLS LAST, collection_time))[1] AS bucket_holder_session_id,
-    (array_agg(holder_login_name ORDER BY log_used_percent DESC NULLS LAST, collection_time))[1] AS bucket_holder_login_name
+    (array_agg(holder_login_name ORDER BY log_used_percent DESC NULLS LAST, collection_time))[1] AS bucket_holder_login_name,
+    MAX(log_used_mb) AS peak_log_used_mb
 FROM v_tempdb_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -709,7 +710,8 @@ ORDER BY 1";
                 reader.IsDBNull(13) ? null : reader.GetString(13),
                 reader.IsDBNull(14) ? null : reader.GetString(14),
                 reader.IsDBNull(15) ? null : (int)ToInt64(reader.GetValue(15)),
-                reader.IsDBNull(16) ? null : reader.GetString(16)));
+                reader.IsDBNull(16) ? null : reader.GetString(16),
+                reader.IsDBNull(17) ? null : ToDouble(reader.GetValue(17))));
         }
 
         return items;

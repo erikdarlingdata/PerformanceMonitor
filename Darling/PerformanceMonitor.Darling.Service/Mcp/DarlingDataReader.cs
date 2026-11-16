@@ -937,7 +937,8 @@ internal static class DarlingDataReader
             log_reuse_wait_desc,
             log_truncation_holdup_reason,
             holder_session_id,
-            holder_login_name
+            holder_login_name,
+            CAST(log_used_mb AS double precision) AS log_used_mb
         FROM v_tempdb_stats
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -997,7 +998,8 @@ internal static class DarlingDataReader
             (array_agg(log_reuse_wait_desc ORDER BY log_used_percent DESC NULLS LAST, collection_time))[1] AS bucket_log_reuse_wait_desc,
             (array_agg(log_truncation_holdup_reason ORDER BY log_used_percent DESC NULLS LAST, collection_time))[1] AS bucket_log_holdup_reason,
             (array_agg(holder_session_id ORDER BY log_used_percent DESC NULLS LAST, collection_time))[1] AS bucket_holder_session_id,
-            (array_agg(holder_login_name ORDER BY log_used_percent DESC NULLS LAST, collection_time))[1] AS bucket_holder_login_name
+            (array_agg(holder_login_name ORDER BY log_used_percent DESC NULLS LAST, collection_time))[1] AS bucket_holder_login_name,
+            MAX(log_used_mb) AS peak_log_used_mb
         FROM (
         {TempDbTrendSql}
         ) AS samples
@@ -1036,10 +1038,58 @@ internal static class DarlingDataReader
                 reader.IsDBNull(13) ? null : reader.GetString(13),
                 reader.IsDBNull(14) ? null : reader.GetString(14),
                 reader.IsDBNull(15) ? null : Convert.ToInt32(reader.GetValue(15)),
-                reader.IsDBNull(16) ? null : reader.GetString(16)));
+                reader.IsDBNull(16) ? null : reader.GetString(16),
+                reader.IsDBNull(17) ? null : Convert.ToDouble(reader.GetValue(17))));
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// The newest tempdb collection in the window, as far as the log's holder goes (#8881): the row the chart's last point comes from, so the
+    /// web page can say who holds the oldest open tempdb transaction. The holder columns are NULL below 50 percent of the log used. $1 server_id,
+    /// $2/$3 the window (naive UTC).
+    /// </summary>
+    public const string TempDbLogHolderSql = """
+        SELECT
+            collection_time,
+            holder_session_id,
+            holder_login_name,
+            holder_program_name,
+            holder_begin_time,
+            holder_log_bytes_used,
+            log_truncation_holdup_reason
+        FROM v_tempdb_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        ORDER BY collection_time DESC
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="TempDbLogHolderSql"/>; null when the window has no collection.</summary>
+    public static async Task<TempDbLogHolder?> GetNewestTempDbLogHolderAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(TempDbLogHolderSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new TempDbLogHolder(
+            DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+            reader.IsDBNull(1) ? null : reader.GetInt32(1),
+            reader.IsDBNull(2) ? null : reader.GetString(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            reader.IsDBNull(4) ? null : DateTime.SpecifyKind(reader.GetDateTime(4), DateTimeKind.Utc),
+            reader.IsDBNull(5) ? null : reader.GetInt64(5),
+            reader.IsDBNull(6) ? null : reader.GetString(6));
     }
 
     /* ─────────────────────────── perfmon ─────────────────────────── */

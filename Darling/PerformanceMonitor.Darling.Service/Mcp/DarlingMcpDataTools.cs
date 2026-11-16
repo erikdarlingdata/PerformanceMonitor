@@ -646,7 +646,7 @@ public sealed class DarlingMcpDataTools
         avg_write_latency_ms = r.IsUnknowable ? (double?)null : Math.Round(r.DeltaWrites > 0 ? (double)r.DeltaStallWriteMs / r.DeltaWrites : 0, 2)
     };
 
-    [McpServerTool(Name = "get_tempdb_trend"), Description("Gets TempDB space usage over time in time buckets: user objects, internal objects, version store, total reserved and unallocated space, and the top consumer session, plus the tempdb log: the peak percent used (peak_log_used_percent), its size, the log reuse wait and truncation holdup reason, and when the log is 50 percent used or more the session, login and program holding it (log_holder_*). High version store can indicate long-running transactions under RCSI/SNAPSHOT isolation." + McpHelpers.UtcStampsDescription)]
+    [McpServerTool(Name = "get_tempdb_trend"), Description("Gets TempDB space usage over time in time buckets: user objects, internal objects, version store, total reserved and unallocated space, and the top consumer session, plus the tempdb log: the peak used (peak_log_used_percent and peak_log_used_mb), its size, the log reuse wait and truncation holdup reason, and when the log is 50 percent used or more the session and login holding it (log_holder_*) and log_holder_note, one sentence naming the oldest open log transaction (session, login, program, age, log used) as of the newest collection. High version store can indicate long-running transactions under RCSI/SNAPSHOT isolation." + McpHelpers.UtcStampsDescription)]
     public static Task<string> GetTempDbTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -688,7 +688,9 @@ public sealed class DarlingMcpDataTools
             }
 
             var notice = await TableNoticeAsync(postgres, "tempdb_stats", resolved.ServerName, tempDbStart, windowEnd, emptyAnswer: false, cancellationToken);
-            return WithWindowNotice(TrendPayloads.TempDbTrend(resolved.DisplayName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints), notice);
+            /* #8881: the holder as of the window's newest collection, the one line the web page draws under the chart. */
+            var newestHolder = await DarlingDataReader.GetNewestTempDbLogHolderAsync(postgres, resolved.ServerId, tempDbStart, windowEnd, cancellationToken);
+            return WithWindowNotice(TrendPayloads.TempDbTrend(resolved.DisplayName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints, newestHolder), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
