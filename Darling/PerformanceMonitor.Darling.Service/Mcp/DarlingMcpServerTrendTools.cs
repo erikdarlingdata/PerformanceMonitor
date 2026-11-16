@@ -245,7 +245,7 @@ public sealed class DarlingMcpServerTrendTools
     /// <summary>The note that tells a reader how each point was rolled up. It names only fields the metric emits.</summary>
     internal static string Note(string metric, int bucketMinutes, bool requested, int budgetPoints)
     {
-        var stamp = $"is stamped at the bucket's start (the first point at the window's start). ";
+        var stamp = $"is stamped at the bucket's start (a point in the window's first bucket at the window's start). ";
         if (metric == "total_waits")
         {
             return $"Each point summarizes the collections in one {TrendBuckets.Adjective(bucketMinutes)} bucket and {stamp}"

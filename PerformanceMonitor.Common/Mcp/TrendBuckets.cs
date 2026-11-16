@@ -434,7 +434,7 @@ internal static class TrendBuckets
     /// <see cref="LevelNote"/> instead.
     /// </summary>
     public static string AggregateNote(int bucketMinutes, bool requested, int budgetPoints) =>
-        $"Each point summarizes the collections in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start (the first point at the window's start). "
+        $"Each point summarizes the collections in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start (a point in the window's first bucket at the window's start). "
         + "Counts are summed across the bucket, and rates and ratios are recomputed from those sums over the seconds the collections covered, never averaged from per-collection values, so a bucket the window cuts short holds smaller counts but a true rate. "
         + "peak_* and worst_* are the single most extreme collection inside the bucket, so a spike survives the rollup. "
         + Sizing(requested, budgetPoints);
@@ -446,7 +446,7 @@ internal static class TrendBuckets
     /// sit on each sample's own instant and a collection can report a sample from before the window's start.
     /// </summary>
     public static string LevelNote(int bucketMinutes, bool requested, int budgetPoints, bool firstAtWindowStart = true) =>
-        $"Each point averages the samples in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start{(firstAtWindowStart ? " (the first point at the window's start)" : string.Empty)}. "
+        $"Each point averages the samples in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start{(firstAtWindowStart ? " (a point in the window's first bucket at the window's start)" : string.Empty)}. "
         + "A level is averaged, never summed, and peak_* is the highest single sample inside the bucket, so a spike survives the rollup. "
         + Sizing(requested, budgetPoints);
 
@@ -457,7 +457,7 @@ internal static class TrendBuckets
     /// averages, not rates over seconds, and it has no peak fields.
     /// </summary>
     public static string QueryTrendNote(int bucketMinutes, bool requested, int budgetPoints) =>
-        $"Each point holds the collections in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start (the first point at the window's start); collection_count says how many. "
+        $"Each point holds the collections in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start (a point in the window's first bucket at the window's start); collection_count says how many. "
         + "execution_count, cpu_ms, elapsed_ms, logical_reads, logical_writes, physical_reads, rows and spills are summed across those collections, and avg_cpu_ms and avg_elapsed_ms are those sums divided by the summed executions, so a busy collection weighs more than a quiet one. "
         + "min_dop and max_dop are the extremes across the plans that ran in the bucket, query_plan_hash is null when more than one plan ran in it, and plan_count counts its distinct plans. "
         + Sizing(requested, budgetPoints);

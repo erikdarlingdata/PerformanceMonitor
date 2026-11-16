@@ -1087,7 +1087,7 @@ public sealed class DarlingMcpTrendTools
         + "The newest hours, which the rollup has not built yet, are summed from the raw rows into the same points. "
         + (bucketMinutes == 60
             ? "Executions, CPU and elapsed time are summed per hour across every sql_handle of the query_hash, one point per hour; "
-            : $"Each point gathers the rollup's hours in one {TrendBuckets.Adjective(bucketMinutes)} bucket, stamped at its start (the first point at the window's start), with executions, CPU and elapsed time summed across those hours and every sql_handle of the query_hash; ")
+            : $"Each point gathers the rollup's hours in one {TrendBuckets.Adjective(bucketMinutes)} bucket, stamped at its start (a point in the window's first bucket at the window's start), with executions, CPU and elapsed time summed across those hours and every sql_handle of the query_hash; ")
         + "logical_reads, logical_writes, physical_reads, rows, spills, min_dop, max_dop, query_plan_hash, plan_count and collection_count are "
         + "null because the rollup does not carry them - null means not measured, not zero."
         + (requested ? " The width is the bucket_minutes you passed." : string.Empty);
