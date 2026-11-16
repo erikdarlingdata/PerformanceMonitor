@@ -515,7 +515,7 @@ assert_eq "$(config_json '.web.network.token')" '"file:/run/secrets/darling/web-
 t placeholder_must_be_at_tokens
 # A placeholder such as "darling" or "token" would rewrite chart-owned values (file:/run/secrets/darling/web-token).
 for p in darling token '@@a-b@@' '@@@@' 'x@@A@@'; do
-  assert_fails "Does not match pattern" --set "configSubstitutions[0].placeholder=${p}" --set 'configSubstitutions[0].secretKey=k'
+  assert_fails "match pattern" --set "configSubstitutions[0].placeholder=${p}" --set 'configSubstitutions[0].secretKey=k'
 done
 render --set 'configSubstitutions[0].placeholder=@@Hook_1@@' --set 'configSubstitutions[0].secretKey=k'
 

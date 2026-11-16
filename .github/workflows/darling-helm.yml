@@ -28,9 +28,9 @@ permissions:
 
 env:
   CHART_DIR: Darling/helm/performancemonitor-darling
-  HELM_VERSION: v3.17.0
-  YQ_VERSION: v4.53.2
-  KUBECONFORM_VERSION: v0.6.7
+  HELM_VERSION: v3.22.1
+  YQ_VERSION: v4.54.3
+  KUBECONFORM_VERSION: v0.8.0
   # The oldest version the chart's kubeVersion allows, and the newest one kubeconform's schemas cover.
   KUBE_VERSION_OLDEST: 1.27.0
   KUBE_VERSION_NEWEST: 1.37.0
